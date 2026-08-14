@@ -3518,7 +3518,11 @@ async def _drive_disconnect(engine: AssistantEngine, reference: str) -> int:
         _render_connection_unread(reference)
         raise
     except ResidualCredentialError as exc:
-        _render_residual_credential("disconnection", exc, reference=reference)
+        _render_residual_credential(
+            "Disconnected. No live record names any credential for that reference any more.",
+            exc,
+            reference=reference,
+        )
         return _EXIT_ERROR
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
@@ -5827,7 +5831,10 @@ def _reference_hint(reference: str, command: str, *, subject: str = "That refere
     """
     if not _is_pasteable(reference):
         return _uncopyable(subject, "The command still takes it, given the exact bytes.")
-    return f"'{command} {_argument(reference)}'"
+    # The trailing period is inside the hint rather than at each call site, so the two
+    # branches are interchangeable in a sentence: ``_uncopyable`` returns a finished
+    # sentence, and a caller appending its own punctuation would double it there.
+    return f"'{command} {_argument(reference)}'."
 
 
 def _connection_state_phrase(state: ProvisioningState) -> str:
@@ -5903,9 +5910,9 @@ def _render_connected(verb: str, record: ConnectedAccount) -> None:
     )
     console.print(f"  Its reference is [bold]{_safe(record.reference)}[/]")
     console.print(
-        f"  [dim]Replace its credential later with 'assistant reconnect' — see "
-        f"{_reference_hint(record.reference, 'assistant connections', subject='Its reference')}"
-        f" for it. End it with {_reference_hint(record.reference, 'assistant disconnect')}[/]"
+        "  [dim]Read it back any time with 'assistant connections'. Replace its "
+        "credential with 'assistant reconnect', or end it with "
+        f"{_reference_hint(record.reference, 'assistant disconnect')}[/]"
     )
     console.print(
         "\n[dim]This is a connection, not a permission: it authorises nothing on its "
@@ -6003,7 +6010,7 @@ def _render_provisioning_outcome(act: str, exc: Exception, *, reference: str | N
         case IncompleteProvisioningError():
             console.print(
                 f"[yellow]The {act} did not complete.[/] The reference {named} "
-                "**exists** — I wrote its record — and the credential you gave me "
+                "[bold]exists[/] — I wrote its record — and the credential you gave me "
                 "was never put into use, so it will not become the live one. This "
                 "call did not leave things as they were. Run the act again on that "
                 "reference, or disconnect it; both are safe."
@@ -6011,10 +6018,10 @@ def _render_provisioning_outcome(act: str, exc: Exception, *, reference: str | N
         case ProvisioningOutcomeUnknownError():
             console.print(
                 f"[yellow]The outcome of the {act} is not known.[/] The reference "
-                f"{named} **exists**; whether the credential you gave me is now in "
-                "use I cannot say, because the store may have committed and failed "
-                "before telling me. **Do not run it again on the assumption it "
-                "failed** — that would replace a credential that may already be "
+                f"{named} [bold]exists[/]; whether the credential you gave me is now "
+                "in use I cannot say, because the store may have committed and failed "
+                "before telling me. [bold]Do not run it again on the assumption it "
+                "failed[/] — that would replace a credential that may already be "
                 "working."
             )
         case ResidualCredentialError():
@@ -6107,7 +6114,7 @@ def _render_connection_state(reference: str, state: ConnectedAccount | None | _U
         return
     console.print(
         f"I read the store: [bold]{_safe(reference)}[/] holds "
-        f"[bold cyan]{_safe(state.identity)}[/] at revision {state.revision} — "
+        f"[bold cyan]{_safe(state.identity)}[/] at revision {state.revision}, "
         f"{_connection_state_phrase(state.state)}."
     )
 
@@ -6148,8 +6155,7 @@ def _render_connections(connected: tuple[ConnectedAccount, ...]) -> None:
             console.print(f"    [yellow]{_connection_state_phrase(record.state)}[/]")
             console.print(
                 "    [yellow]Nothing is in progress and nothing will finish it.[/] "
-                "Run the act again with 'assistant reconnect', or end it with "
-                "'assistant disconnect'."
+                "Run the act again with 'assistant reconnect', or end it below."
             )
         console.print(
             f"    [dim]end it with {_reference_hint(record.reference, 'assistant disconnect')}[/]"
@@ -6187,11 +6193,19 @@ def _render_connection_acts(acts: tuple[ConnectionAct, ...], *, limit: int) -> N
     for act in acts:
         if act.account is None:
             console.print(f"  [bold]disconnected[/] [dim]{_safe(act.reference)}[/]")
-        else:
+        elif act.account.state is ProvisioningState.ACTIVE:
             console.print(
                 f"  [bold]connected[/] [bold cyan]{_safe(act.account.identity)}[/] "
-                f"[dim]{_safe(act.reference)}[/] — reached "
-                f"{_connection_state_phrase(act.account.state)}"
+                f"[dim]{_safe(act.reference)}[/]"
+            )
+        else:
+            # A row is what an act *reached*, never what a reference is now
+            # (ADR-0151 §9), and "connected" over an act that never activated would
+            # be that claim in one word. What the state says here is how far this
+            # act got, which is the whole of what the row carries.
+            console.print(
+                f"  [bold]tried to connect[/] [bold cyan]{_safe(act.account.identity)}[/] "
+                f"[dim]{_safe(act.reference)}[/] — [yellow]the act never completed[/]"
             )
         console.print(f"    [dim]revision {act.revision}[/]")
     if len(acts) == limit:
@@ -6200,8 +6214,8 @@ def _render_connection_acts(acts: tuple[ConnectionAct, ...], *, limit: int) -> N
         )
     console.print(
         "\n[dim]There are no times here: a position is where I recorded the act and "
-        "nothing else. What is connected *now* is 'assistant connections' — a row "
-        "here says an act happened, not that it still stands.[/]"
+        "nothing else. What is connected [bold]now[/] is 'assistant connections' — a "
+        "row here says an act happened, not that it still stands.[/]"
     )
 
 
