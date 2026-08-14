@@ -442,10 +442,17 @@ its length (ADR-0125 §6). The others are a blank or unwritable `reference` and 
 
 > **Normative.** ADR-0148 §6's **activation is a connection-store write, not a
 > keyring one**, and raises no keyring failure. An activation whose
-> compare-and-swap does not land is `DisplacedProvisioningError` (§7); an
-> activation that fails as a store failure is `IncompleteProvisioningError`,
-> because this act's first write had already landed, which is what that class
-> asserts. No lane reads the conversion clause above as reaching the activation.
+> compare-and-swap does not land is `DisplacedProvisioningError`; one that fails as
+> a store failure is `IncompleteProvisioningError`, by §7's first-write rule. No
+> lane reads the conversion clause above as reaching the activation.
+
+**The conversion clause is not the whole classification, and §7 is where the rest
+of it lives.** This clause says what a *keyring* failure becomes; §7's first-write
+rule says what a *store* failure becomes, and the two together cover every point a
+provisioning act can fail. Keeping them apart is deliberate: the conversion is
+about not re-making ADR-0125 §7's classification, and the first-write rule is about
+what the act can honestly assert, and an ADR that stated one rule over both would
+have had to leave one of those reasons out.
 
 **Converting is the opposite of what this ADR does everywhere else, and the reason
 is that the raw class answers the wrong question.** `SecretStoreError` says the
@@ -749,12 +756,23 @@ that performs the act". §17 records that no sentence of ADR-0124 §6 becomes fa
 > compare-and-swap and the second by being idempotent (ADR-0149 §5). No client
 > reports the call as having changed nothing.
 
+> **Normative.** Which of the two a provisioning act raises turns on **one fact
+> the act itself knows: whether its own first write has returned.** Every failure
+> after that return — a keyring failure at the credential write, a store failure at
+> either of ADR-0148 §6's two re-reads, a store failure at the activation — is
+> `IncompleteProvisioningError` carrying the reference, because the reference is
+> then known to exist and the act is known not to have completed. Every failure
+> **before** that return is `ConnectionStoreError`. No implementation classifies by
+> which call raised, by the exception's own type, or by a phase it infers after the
+> fact.
+
 > **Normative.** A `ConnectionStoreError` raised by `connect_account` or
-> `reprovision_account` leaves the act's outcome **not known**: the store failed,
-> so whether this act's first write landed cannot be asserted, and a reference may
+> `reprovision_account` therefore leaves the act's outcome **not known**: the first
+> write did not return, so whether it landed cannot be asserted and a reference may
 > or may not exist. The client reports it as not known — never as landed and never
 > as not landed — and resolves it by reading `connected_accounts` once the store is
-> readable (ADR-0139 §4). It carries no reference, because there may be none.
+> readable (ADR-0139 §4). It carries no reference, because there may be none to
+> carry.
 
 > **Normative.** A `ResidualCredentialError` means the act it was raised by
 > **completed**: after `reprovision_account` the reference is connected at the new
@@ -1369,12 +1387,17 @@ anything this ADR adds.
    > — raises `DisplacedProvisioningError` at all three, with the displacing act's
    > record live in every case.
 
-   > **Normative.** The suite pins the two cases the activation separates, since
-   > the activation is a store write and not a keyring one (§2a): an activation
-   > whose compare-and-swap does not land raises `DisplacedProvisioningError`, and
-   > an activation that fails as a **store** failure raises
-   > `IncompleteProvisioningError` whose `reference` the store then holds. A suite
-   > that exercises only a keyring failure reaches neither.
+   > **Normative.** The suite pins §7's first-write rule at **every** point a
+   > provisioning act can fail after its own first write has returned, one
+   > deterministic case each: a store failure at the re-read before the credential
+   > write, a store failure at the re-read before the activation, and a store
+   > failure at the activation itself. All three raise
+   > `IncompleteProvisioningError` whose `reference` the store then holds. It also
+   > pins the two the activation separates, since the activation is a store write
+   > and not a keyring one (§2a): an activation whose compare-and-swap does not
+   > land raises `DisplacedProvisioningError` instead. And it pins the one case on
+   > the other side of the rule — a store failure at the **first** write raises
+   > `ConnectionStoreError` and carries no reference.
 
    > **Normative.** The suite pins both `connect_account` outcomes at the frame
    > floor, against the **wire** implementation: with `hub_max_frame_bytes` at
