@@ -1239,14 +1239,18 @@ forbidden_modules = ["jsonschema"]
 # and has it import the seam, so without this flag the contract would forbid the one
 # composition it exists to make the only available one.
 #
-# Two entries of §3's enumeration are not here and cannot be. `asyncio.subprocess` is
-# a subpackage of an external package, which import-linter rejects outright, and the
-# graph squashes it to `asyncio` — which `ai_assistant.tools.invocation` legitimately
-# imports for its deadline, so forbidding the root would forbid ADR-0029 §4's timeout
-# rather than a transport. `os.system` and its neighbours are not a module at all.
-# Both are covered by the source-reading check in `tests/tools/test_egress_seam.py`,
-# which sees the dotted name the graph does not keep; neither is covered by this net,
-# and this comment is where that is written down rather than implied.
+# Two of the routes §3 names are outside this net and cannot be brought inside it.
+# `asyncio.subprocess` is a subpackage of an external package, which import-linter
+# rejects outright, and the graph squashes it into `asyncio` — which
+# `ai_assistant.tools.invocation` legitimately imports for its deadline, so forbidding
+# the root would forbid ADR-0029 §4's timeout rather than a transport. `os.system` and
+# its neighbours are not modules at all: `import os` is unremarkable and the launch is
+# a *call*. The source-reading check in `tests/tools/test_egress_seam.py` carries both
+# — it reads the dotted name the graph squashes, and it reads attribute access on `os`
+# as well as imports — but it is a second net and not a proof either: a `getattr`, a
+# local wrapper, or a dependency nobody listed walks past both checks. What holds there
+# is ADR-0147 §3's first clause, which binds an author and a reviewer and is stated
+# separately from this contract for exactly that reason.
 name = "network transports are confined to the tools egress seam"
 type = "forbidden"
 as_packages = "false"
@@ -1266,18 +1270,37 @@ forbidden_modules = [
     "http",
     "urllib",
     "subprocess",
-    # Third-party transport in this repository's resolved dependency set. Where a
-    # package's transport is doubtful it is listed rather than omitted: a wrong entry
-    # costs a review conversation, a missing one costs the property. `h11` and
-    # `certifi` are the deliberate omissions — a sans-I/O protocol state machine and
-    # a certificate bundle open nothing.
+    # Third-party transport, taken over this repository's **runtime** dependency
+    # closure — what an install of the wheel actually makes importable. A package is
+    # listed when moving bytes over a connection is part of what it is *for*; where
+    # that is doubtful it is listed rather than omitted, because a wrong entry costs a
+    # review conversation and a missing one costs the property.
+    #
+    # `h11` and `certifi` are deliberate omissions on that test — a sans-I/O protocol
+    # state machine and a certificate bundle open nothing — and so are `truststore`,
+    # `jeepney` and `secretstorage`, which configure TLS trust and talk to D-Bus over a
+    # local socket rather than off the device. So is the residue the same scan turns up
+    # in packages whose *purpose* is something else entirely: `numpy`'s URL-fetching
+    # `DataSource`, `jsonschema`'s legacy remote-`$ref` resolver, `pygments`, `tqdm`,
+    # `opentelemetry-api`, `onnxruntime`. Forbidding those to `tools/` would be a rule
+    # about arithmetic and progress bars, and the day a `tools/` module wanted one it
+    # would be worked around rather than obeyed. That residue is precisely what
+    # ADR-0017 §4 means by "a net, not a proof", and it rests on §3's first clause.
+    #
+    # `aiohttp` and `websockets` are not in the closure today. They are listed because
+    # `openai` and `huggingface_hub` both reach for them under optional extras, and an
+    # extra flipping on is not an occasion anyone would think to revisit this list.
+    "aiohttp",
     "anyio",
+    "fsspec",
+    "hf_xet",
     "httpcore",
     "httpcore2",
     "httpx",
     "httpx2",
     "requests",
     "urllib3",
+    "websockets",
     # The vendor stacks, which carry their own transport. The provider-SDK contract
     # above already forbids these to `ai_assistant.tools` under golden rule 4, and
     # they are repeated here on purpose: that contract states where a *vendor SDK*
