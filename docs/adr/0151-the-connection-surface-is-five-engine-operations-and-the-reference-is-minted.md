@@ -431,13 +431,20 @@ its length (ADR-0125 §6). The others are a blank or unwritable `reference` and 
 
 > **Normative.** No operation on this surface declares or propagates
 > `SecretStoreError`. A keyring failure is **converted**, at each of the three
-> points ADR-0148 §6 and ADR-0149 §5 let one arise, into the class that states what
-> the act did: a failed credential write or activation becomes
-> `IncompleteProvisioningError`, a failed predecessor-slot deletion or
-> disconnection deletion pass becomes `ResidualCredentialError`, and the underlying
-> `SecretStoreError` is chained as the cause. No implementation converts one into
-> `ConnectionStoreError`, suppresses one, or treats one as an absent credential
-> (ADR-0125 §7, ADR-0149 §6).
+> points ADR-0148 §6 and ADR-0149 §5 let one arise — and there are exactly three,
+> all of them keyring calls — into the class that states what the act did: a failed
+> **credential write** becomes `IncompleteProvisioningError`, and a failed
+> **predecessor-slot deletion** or **disconnection deletion pass** becomes
+> `ResidualCredentialError`, with the underlying `SecretStoreError` chained as the
+> cause. No implementation converts one into `ConnectionStoreError`, suppresses
+> one, or treats one as an absent credential (ADR-0125 §7, ADR-0149 §6).
+
+> **Normative.** ADR-0148 §6's **activation is a connection-store write, not a
+> keyring one**, and raises no keyring failure. An activation whose
+> compare-and-swap does not land is `DisplacedProvisioningError` (§7); an
+> activation that fails as a store failure is `IncompleteProvisioningError`,
+> because this act's first write had already landed, which is what that class
+> asserts. No lane reads the conversion clause above as reaching the activation.
 
 **Converting is the opposite of what this ADR does everywhere else, and the reason
 is that the raw class answers the wrong question.** `SecretStoreError` says the
@@ -462,9 +469,22 @@ outside it.
 > `connect_account` accepts no reference and mints exactly one per call that
 > writes a record.
 
-> **Normative.** A reference is minted once per reference and is **never reused,
-> re-minted or recycled** — not after a disconnection, not after a purge, and not
-> for a second account. A reference the store has ever held is never minted again.
+> **Normative.** A reference is **never reused while the connection store holds
+> any entry naming it** — not after a disconnection, and not for a second account.
+> The store refuses an append that would introduce a reference it already holds,
+> which is the half of the guarantee it can establish by itself; the factory mints
+> from a source no fresh process resumes — a version 4 UUID or an equivalent draw,
+> never a counter, a clock or a hash of a supplied value — which is the half it
+> cannot.
+
+> **Normative.** The guarantee is bounded by the store's own history, and
+> ADR-0149 §8's purge is what ends it. After a successful purge a repeated
+> reference collides with nothing: the entries are gone (ADR-0149 §8), the
+> credentials with them, and the registry is rebuilt each run holding no binding
+> (ADR-0016 §6). **No lane retains a ledger of spent references across a purge**,
+> which would be exactly the Tier 1 data ADR-0004 §6 requires the purge to
+> destroy — a durable record of what the owner once connected, kept in order to
+> avoid a collision with nothing.
 
 > **Normative.** The reference a caller supplies to `reprovision_account` or
 > `disconnect_account` is one the hub previously returned. It is compared exactly
@@ -715,14 +735,25 @@ that performs the act". §17 records that no sentence of ADR-0124 §6 becomes fa
 > that act took. An implementation that returns after the first or second write,
 > or that returns a `PENDING` record from either operation, does not conform.
 
-> **Normative.** An `IncompleteProvisioningError` means the reference it carries
-> **exists**, its live record is this act's, and that record is **pending** — so
-> the reference is not connectable and no call transmits under it (ADR-0148 §6).
-> It says nothing about whether a credential reached the slot, because ADR-0148 §6
-> refuses a pending record either way and the remedy is the same. A client reports
-> the reference as left pending, names it, and offers exactly two next acts:
-> `reprovision_account` on that reference, or `disconnect_account` on it. No client
+> **Normative.** An `IncompleteProvisioningError` asserts exactly two things: the
+> reference it carries **exists** in the connection store, because this act's own
+> first write landed and ADR-0149 §3's store is append-only; and **this act did not
+> complete**, because no activation of it landed, so nothing it wrote is or ever
+> becomes the live credential. It asserts **nothing** about the reference's live
+> record at the moment it is caught — this act's record may still be live and
+> pending, or a later act may have displaced it, and the store is what says which.
+> A client names the reference, says the act did not complete, says the reference's
+> state is unread, and offers `reprovision_account` or `disconnect_account` on it —
+> both of which are safe whoever now owns the record, the first by its own
+> compare-and-swap and the second by being idempotent (ADR-0149 §5). No client
 > reports the call as having changed nothing.
+
+> **Normative.** A `ConnectionStoreError` raised by `connect_account` or
+> `reprovision_account` leaves the act's outcome **not known**: the store failed,
+> so whether this act's first write landed cannot be asserted, and a reference may
+> or may not exist. The client reports it as not known — never as landed and never
+> as not landed — and resolves it by reading `connected_accounts` once the store is
+> readable (ADR-0139 §4). It carries no reference, because there may be none.
 
 > **Normative.** A `ResidualCredentialError` means the act it was raised by
 > **completed**: after `reprovision_account` the reference is connected at the new
@@ -1304,6 +1335,20 @@ anything this ADR adds.
    > — raises `DisplacedProvisioningError` at all three, with the displacing act's
    > record live in every case.
 
+   > **Normative.** The suite pins the two cases the activation separates, since
+   > the activation is a store write and not a keyring one (§2a): an activation
+   > whose compare-and-swap does not land raises `DisplacedProvisioningError`, and
+   > an activation that fails as a **store** failure raises
+   > `IncompleteProvisioningError` whose `reference` the store then holds. A suite
+   > that exercises only a keyring failure reaches neither.
+
+   > **Normative.** The suite pins the mint's uniqueness where the store can
+   > establish it: an append introducing a reference the store already holds is
+   > refused, exercised with a factory scripted to repeat a value. §3's factory
+   > clause is what covers the half a store cannot see, and no case is written for
+   > a collision after ADR-0149 §8's purge, because §3 states that the guarantee
+   > ends there and a test asserting otherwise would pin a ledger §3 forbids.
+
    > **Normative.** The suite pins what a displacement leaves behind, against the
    > two later points: after a displacement at the re-read or at the activation,
    > `recent_connection_acts` still returns the displaced act's own row, at its own
@@ -1427,14 +1472,22 @@ is a stacked addition under ADR-0082 §1 — an obligation contradicting no sent
 §4 wrote — and it is recorded here and nowhere else.
 
 **ADR-0148 §6 — no record owed.** Its clauses are consumed and not restated. §7
-above states what a caller may conclude from two failures, and both conclusions are
-*derived from* §6's fixed write order rather than added to it: because the record
-write is first and reaches no keyring, a keyring failure implies the record write
-landed; because a failed compare-and-swap "never held it and writes nothing", a
-displacement implies nothing landed. Neither sentence of §6 becomes false or
-over-wide, and no state, field or ordering is added. §4's two-member
-`ProvisioningState` is §6's two states and §4's clause forbidding a third member is
-§6's own rule expressed in a type.
+above states what a caller may conclude from each outcome, and every conclusion is
+*read off* §6 rather than added to it. Because the record write is first and
+reaches no keyring, a keyring failure at the credential write implies the record
+write landed. Because §6's three displacement points differ in how far the
+displaced act had got, §7 claims only what all three share — that no record this
+act wrote is live — and expressly declines the stronger claim: §6's "never held it
+and writes nothing" is scoped by §6's own words to an act **whose taking
+compare-and-swap fails**, and §6's re-read and activation clauses displace an act
+that has already appended its pending entry and may already have written its
+credential, which §6 then rules lands "in that act's own slot". A reader holding
+only §6 concludes exactly this; a reader who concluded "a displacement means
+nothing was written" would be reading §6's first-point sentence over the other two,
+which is the misreading an earlier draft of §7 made and adversarial review caught.
+Neither sentence of §6 becomes false or over-wide, and no state, field or ordering
+is added. §4's two-member `ProvisioningState` is §6's two states, and §4's clause
+forbidding a third member is §6's own rule expressed in a type.
 
 **ADR-0085 §1's "and nothing else" — not owed, and the corpus has adjudicated it
 twice.** ADR-0102 §13 sets out the showing in full — what the exclusion excludes is
