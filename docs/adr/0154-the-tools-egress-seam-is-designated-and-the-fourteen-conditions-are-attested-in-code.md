@@ -1,7 +1,19 @@
 # 154. The `tools/` egress seam is designated, and the fourteen conditions are attested in code
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
+- **Note (2026-08-14): ratified.** `Proposed` → `Accepted`, after **both** required
+  reviews came back green on one tree — adversarial **APPROVE with no findings** and
+  architecture **APPROVE with no findings**, both at tree `4d3d68f974a2`, printed
+  round 7, churn ratio 1.1 — and with both re-run on the flipped tree for coverage.
+  That is the outcome ADR-0070 §1 requires the ratifying edit to record, and the
+  route `CONTRIBUTING.md` → "Finishing an ADR PR" fixes (ADR-0130 §12, ADR-0136 §7
+  and ADR-0146, ADR-0147 and ADR-0148's own notes are the worked precedents).
+  **What the ratifying commit edits:** the `Status` line, this note, and §8's
+  unmarked record of the route and the rounds — nothing else, and **no normative
+  clause acquires, loses or alters an obligation**, which is ADR-0070 §1's own test
+  applied to the ratifying edit itself. Both lenses were required because this is
+  the ADR deciding an egress boundary's status (§8).
 - **This is the ADR ADR-0017 §2 has required since 2026-07-19.** That section
   leaves the `tools/` egress boundary **approved and undesignated** and reserves
   designation to "a later ADR" that does three things and no fewer: **names the
@@ -1274,5 +1286,28 @@ change in `CONTRIBUTING.md`'s sense — not because it touches `core/protocols.p
 boundary's status, which is the surface ADR-0017 §1 and ADR-0124 §1 state. It was
 drafted, reviewed and revised as `Proposed`, and the route is `CONTRIBUTING.md` →
 "Finishing an ADR PR", with ADR-0130 §12, ADR-0136 §7 and ADR-0146, ADR-0147 and
-ADR-0148's own notes as the worked precedents. The ratification note in this ADR's
-header records the set that ran and the outcome it got.
+ADR-0148's own notes as the worked precedents. The status flipped only once both
+required reviews returned clean on **one** tree, and both were re-run on the flipped
+tree for coverage. The ratification note in this ADR's header records the set that
+ran and the outcome it got.
+
+**The rounds, because an attestation ADR's review history is part of its evidence.**
+Seven printed rounds, churn ratio 1.1 — the loop converged rather than reworking
+itself, and four of the five findings changed the document in ways worth recording:
+
+| Round | Lens | Finding | Disposition |
+|---|---|---|---|
+| 1 | adversarial | `blocker`: designating while ADR-0146 §9's required test is absent | **Contested** — §9's own list assigns that test to the lane implementing §5 for a payload description and names three *different* things the designating lane owes. Checking it surfaced that those three were unaddressed, so §4 gained the subsection discharging them. Issue **#1150** filed for the missing test. |
+| 2 | adversarial | `blocker`: the `;`-joined qualifier added to ADR-0017's `Status` line | **Fixed.** ADR-0082 §2 forbids a qualifier on a line carrying the leading `Partially superseded by` token, and ADR-0070 §4's extraction invariant would have made a consumer read ADR-0154 as a supersession target. Status line left untouched; §5 records why. |
+| 3 | adversarial | none | APPROVE. |
+| 3 | architecture | `blocker` ×2: ADR-0098 §3's last clause undecided; ADR-0004's residency clause unresolved | **One fixed, one contested.** §4 gained the ADR-0098 §3 subsection and decided the standing-authorisation question; the residency blocker is contested on ADR-0017 §1 and §5 — settling #95 here would narrow a clause this ADR does not supersede — but its *timing* half was right, so §6 gained the clauses binding a registering lane to face it. |
+| 4 | architecture | `major`: one clause stating three separable obligations | **Fixed.** Split, per ADR-0089 §2. |
+| 5 | architecture | `major`: §7's "designation and nothing else" contradicted the new policy clauses | **Fixed.** §7 now names the three decisions and bounds the two new ones. |
+| 6 | adversarial | `blocker`: the standing-authorisation floor stated over an unrecoverable relation | **Fixed, and it is the finding that most improved the document.** ADR-0098 §5 holds "produced from external content" unrecoverable and §12 requires an answer "decidable from recorded origin"; the floor was restated over the absence of the authorisation itself, with the recorded-origin surface named as the condition for revisiting. |
+| 7 | both | none | APPROVE, APPROVE — terminal, on one tree. |
+
+**No `blocker` or `major` was waived.** Two `blocker`s were contested with grounds
+stated in the document rather than only in the pull request — round 1's on ADR-0146
+§8 and §9's own assignment of obligations, and round 3's residency half on ADR-0017
+§1 and §5 — and each still changed the ADR where the finding had located a real
+absence beside its stated claim.
