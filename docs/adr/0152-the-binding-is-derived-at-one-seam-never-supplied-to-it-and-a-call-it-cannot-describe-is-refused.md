@@ -140,6 +140,7 @@ no reader can mistake for a denial.**
 > `ActionPolicy.decide` is reached. It carries exactly two members and no others:
 
 ```python
+@runtime_checkable
 class EgressBinder(Protocol):
     async def bind(
         self,
@@ -201,8 +202,50 @@ convention.
 > no-default reasoning applied at the seam that would otherwise inherit the
 > permissive answer for free.
 
-> **Normative.** Both members are `async`, and that is not permission to await
-> anything. §10's no-I/O clause binds them whole.
+> **Normative.** `EgressBinder` is decorated `@runtime_checkable`, as every
+> Protocol in `core/protocols.py` is. `tests/core/test_protocol_triad.py` reaches a
+> Protocol's implementations through `isinstance`, so an undecorated Protocol raises
+> `TypeError` there and the triad §13 requires cannot pass — the convention is a
+> mechanism rather than a style, and a lane that omits the decorator fails the gate.
+
+> **Normative.** Both members are `async`. That is not permission to await
+> anything: §10 fixes exactly what may be read, and everything else is closed.
+
+> **Normative.** `EgressSpanLocator` is a frozen pydantic model in `core/types.py`
+> with `extra="forbid"`, `frozen=True` and `hide_input_in_errors=True`, hashable, and
+> carrying exactly **two** fields and no others: `argument` and `index`. Each field
+> has the **same type and the same validation** as the field of the same name on
+> ADR-0150 §4's `EgressSpan`, and `index` is optional and absent by default in the
+> same way. This ADR fixes no type for either field beyond that identity: `EgressSpan`
+> owns them, ADR-0150 §2's authorisation list is not extended, and a locator that
+> could be well-formed where the span it names could not would be a second answer to
+> one question.
+
+> **Normative.** Two locators are equal exactly when both fields are equal, and a
+> locator names the span of an `EgressBinding` whose `argument` and `index` equal its
+> own. It carries **no** provenance, extent, tier or destination, holds no reference
+> to a binding or a span, and is not a span: it is a mapping key, it is durable
+> nowhere, and it enters no `ActionRequest` and no `PermissionDecision`.
+
+> **Normative.** No lane adds a field to `EgressSpanLocator`, and no lane adds a
+> locator field to `EgressSpan` or replaces that model's `argument` and `index` with
+> one. ADR-0150 §2 fixes `EgressSpan`'s shape and this ADR authorises no change to it
+> (§2).
+
+**A key type rather than a bare tuple, and the duplication objection is answered
+rather than dodged.** The obvious alternative is `Mapping[tuple[str, int | None],
+DiscloserProvenance]`, which mints nothing — and it hands the one seam this corpus
+built validating models for (ADR-0150 §8, PR #1120's tenth observation) an argument
+whose keys validate nothing, on a surface where a malformed key is ADR-0146 §2's
+fail-closed default arriving by a different door. That is the exact hazard PR #1120's
+`_checked_provenance` was written for on round 4, and answering it with `isinstance`
+calls at the seam is what §8 of ADR-0150 exists to stop doing. The objection that the
+locator restates `EgressSpan`'s first two fields is real and is why the clauses above
+bind it to them rather than re-specifying them: there is one definition of what an
+argument name and an index are, in `EgressSpan`, and the locator is a projection used
+as a key on a seam. It is durable nowhere, so no record can hold a locator that
+disagrees with the span it names — which is the property that makes this unlike the
+duplications ADR-0150 is named against, every one of which was two *stored* shapes.
 
 **Two members rather than one, because one member with two modes is the partial
 state this family refuses.** The alternative considered was a single `bind` with
@@ -228,7 +271,7 @@ This section is a classification of the change being made and is not normative
 | Name | Where | What |
 |---|---|---|
 | `EgressBinder` | `core/protocols.py`, new | The seam, with exactly the two members §1 lists. |
-| `EgressSpanLocator` | `core/types.py`, new | A span's key on this seam: the `(argument, index)` pair ADR-0150 §4 identifies a span by (§8). |
+| `EgressSpanLocator` | `core/types.py`, new | A span's key on this seam: a frozen, hashable model carrying the `argument` and `index` ADR-0150 §4 identifies a span by, with those fields' types and validation taken from `EgressSpan` (§1). |
 | `EgressBindingError` | `core/errors.py`, new | The one refusal class both members raise (§9). |
 | `Disposition.EGRESS_UNBINDABLE` | `core/types.py`, changed | One new member of an existing enum, returned when the seam refused (§9). |
 | `EgressBinding`, `EgressSpan`, `EgressDestination`, `CanonicalDestination`, `BoundAccount`, `DestinationProtocol`, `DiscloserProvenance` | — | **Not this ADR's.** ADR-0150 §2 adds them. This ADR consumes each unchanged, adds no field to any, and authorises no change to any. |
@@ -241,8 +284,9 @@ This section is a classification of the change being made and is not normative
 
 > **Normative.** The `core` names this ADR authorises a lane to add or change are
 > exactly these and no others: one new Protocol `EgressBinder` in
-> `core/protocols.py` with exactly the two members §1 states; one new type
-> `EgressSpanLocator` in `core/types.py`; one new class `EgressBindingError` in
+> `core/protocols.py`, `@runtime_checkable`, with exactly the two members §1 states;
+> one new type `EgressSpanLocator` in `core/types.py` with exactly the two fields §1
+> states; one new class `EgressBindingError` in
 > `core/errors.py`; and one new member `EGRESS_UNBINDABLE` on the existing
 > `Disposition` enum in `core/types.py`. No other `core` name changes: no field is
 > added to `ToolDefinition`, `ActionRequest`, `PermissionDecision`, `ToolCall`,
@@ -1214,6 +1258,14 @@ rather than a gap discovered late.
 > the `CONFIRM` was parked; and a binding derived for an `ACTIVE` reference whose
 > identity has changed since registration carries the **currently recorded**
 > identity. A test that only exercises an `ACTIVE` reference satisfies none of these.
+
+> **Normative.** That lane ships the **locator** cases §1 is stated for: an
+> `EgressSpanLocator` is hashable and usable as a mapping key; two locators with
+> equal fields are equal and hash equally; one carrying an `argument` or an `index`
+> that `EgressSpan` would refuse is itself refused at construction, exercised for
+> each field; and a locator matches the span of a binding whose `argument` and
+> `index` equal its own and no other. A test that only constructs a well-formed
+> locator satisfies none of these.
 
 > **Normative.** That lane ships the **read-budget** pin: binding one egress call
 > reads the one connection record its registration names and no other store, and
