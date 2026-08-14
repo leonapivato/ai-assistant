@@ -1134,6 +1134,15 @@ supplying a mechanism is not that.
 > (§6's fifth clause), and the description it carries states provenance and no
 > tier for a user-authored free-text span (ADR-0146 §5, §6).
 
+> **Normative.** Neither surface is the **provisioning act's owner**, and this ADR
+> gives no component a keyring face. Who holds an `INTEGRATION`-scoped
+> `SecretStore` (ADR-0125 §1, §2) to perform §6's credential write and its
+> predecessor deletion, and where a connection record lives, are ADR-0125 §12's
+> undecided provisioning surface and are not decided here (§13). No lane reads §6
+> as authorising a component to hold a face ADR-0125 §8 does not give it, and no
+> lane implements a provisioning act before the ADR that names its owner has
+> merged.
+
 **(a) cannot be avoided, and it is worth saying exactly why, because an earlier
 draft of §6 tried three cheaper routes and each failed.** The binding cannot ride
 in `parameters`: `ActionRequest` is `extra="forbid"` and ADR-0145 validates
@@ -1315,7 +1324,17 @@ could take. §7 above takes one of those branches for `tools/`; a deferral namin
 its own landing shapes is not narrowed by something landing in one of them. §8's
 clause that `tools/` holds `Secrets` "at the tool that needs one" is relied on
 unchanged, and §7's fourth clause restates its no-second-path rule rather than
-extending it.
+extending it. **§6's provisioning act adds no holder and no path either**, which is
+the reading architecture review tested: the act needs a component holding an
+`INTEGRATION`-scoped `SecretStore` to write its own slot and delete its
+predecessor's, §8 gives that to nobody, and §12 there already records why — it
+scopes out "a provisioning surface", saying in terms that nothing in that ADR
+"mints a command that sets a provider key **or an integration credential**" and
+naming `SecretStore` as the seam such a command would use. A reader holding only §8
+therefore finds the same holders as before and finds no new one here: §6 fixes what
+such an act must do **if one is performed**, §11's fourth clause refuses to name its
+owner, and a lane that lands one takes up ADR-0125 §12's deferral rather than
+reading §8 more widely.
 
 **ADR-0146 §4, §5, §6 and §8 — no record owed.** §4's third clause says
 authorisation is owed on every call at this seam and §4's fourth routes the
@@ -1453,6 +1472,17 @@ form).
   runs on, to close gaps that stay open if this ADR is rejected". Unchanged here.
 - **The shape of the two `core` surfaces §11 names.** Each is a contract ADR of
   its own, decided with a producer in hand (ADR-0073 §4).
+- **Who performs a provisioning act, and where a connection record lives.** §6
+  fixes the act's *shape* — three writes in a fixed order, a compare-and-swap on
+  the record, a slot per act — because that shape is precisely what the
+  authorisation-time checks read, and an act performed any other way makes those
+  checks unsound. It names no owner. ADR-0125 §12 already scopes out "a
+  provisioning surface" for exactly this, in terms that reach an integration
+  credential and not only a provider key, and granting any component a keyring face
+  is that ADR's to do rather than this one's — §11's fourth clause says so
+  normatively. The owner also wants the producer §11 defers for: what writes a
+  connection record depends on where an integration is connected from, which is a
+  question no component in the tree currently answers.
 - **ADR-0004 §7's minimisation rule**, which stays scoped to the model provider
   exactly as ADR-0017 §9 and ADR-0146 §8 left it. §6's description is what makes
   minimisation *checkable* for a tool call; it does not extend §7's own sentence.
