@@ -903,6 +903,15 @@ is the one with both halves in hand.
 > slot name from a reference — both are strings — so this is a rule checked where
 > the connection record is read (ADR-0148 §6's four-way refusal), not a type.
 
+> **Normative.** That prohibition reaches `EgressSpan.argument` like every other field,
+> and this ADR does not pretend `core` enforces it there. A caller-authored key is text
+> `core` cannot tell from an author's, so the clause is discharged at the seam by §11's
+> refusal — the same shape as the sentence above, which routes the slot case to where
+> the connection record is read. Until (b) lands, a credential written into a key is a
+> **breach of this clause that nothing detects**, which §13 states as a residue rather
+> than leaving to be discovered; no lane reads the gap as permission, and no lane
+> records that this surface has been checked for it.
+
 **`identity` is required to be visible text for ADR-0021 §1's `reason` reason.**
 ADR-0148 §8's fourth clause requires the confirmation to name the account's identity,
 and §6 there says why the reference and the slot are not shown: "neither is something
@@ -1128,14 +1137,22 @@ Scoping something out is a decision, so each carries its reason (ADR-0029 §7's 
 > ADR-0146 §2 and PR #1120's ninth observation impose on a component that runs
 > **before** ADR-0145 has refused anything outside the schema.
 
-> **Normative.** (b)'s ADR also owes the **live failure-path test** for §13's
-> undescribed-key residue: a call whose `parameters` carry a key the bound tool's
-> schema never described — the `X-Secret` shape — built against a seam that supplies a
-> binding, asserting what the recorded decision then holds. It is a test rather than a
-> refusal here because refusing needs the keyword vocabulary §6 leaves to that same
-> ADR, and the two land together or the refusal is a bound with no mechanism behind
-> it. Issue #1127 carries the fail-closed alternative. No lane closes this by adding a
-> key check to `core` ahead of that ADR.
+> **Normative.** (b)'s ADR **owes a refusal**, not only a test, for §13's
+> undescribed-key residue: the seam **refuses to produce a binding** for a call
+> carrying a top-level key its declaration vocabulary cannot attribute to the tool's
+> own declaration, rather than producing one whose locator is caller-authored text.
+> This is stated here and discharged there because the seam is where the vocabulary
+> §6 defers is read, so it is the first component with the mechanism — an obligation
+> on the lane that can carry it, which is why it is a refusal rather than a bound with
+> nothing behind it. No lane implements (b) without it, and no lane closes it early by
+> adding a key check to `core`, which cannot tell an author's key from a caller's.
+
+> **Normative.** (b)'s ADR also owes the **live failure-path test** for that shape: a
+> call whose `parameters` carry a key the bound tool's schema never described — the
+> `X-Secret` shape, and the credential-in-a-key shape §7's prohibition reaches — built
+> against a seam that supplies a binding, asserting the refusal above fires and
+> asserting what the recorded decision holds when it does not. Issue #1127 carries the
+> fail-closed alternative and why it rides with that ADR.
 
 > **Normative.** This ADR designates nothing, attests no ADR-0017 §3 condition, and
 > discharges none. It supplies the `core` value conditions 8 and 10 need and no lane
@@ -1409,9 +1426,20 @@ into a value — so the shape this residue leaves open is a caller writing sensi
 content into a key **in breach of that exclusion**, which is a detection gap, not a
 permission. It is not closed here because closing it means refusing keys a schema does
 not describe, and *which* keys a schema describes is the keyword-vocabulary question §6
-routes to (b)'s ADR in terms. §11 gives (b) the live test; issue #1127 tracks the
-fail-closed alternative and records why it must ride with (b)'s ADR or an amendment
-to §6 rather than arriving as a validator.
+routes to (b)'s ADR in terms. **§11 obliges (b) to refuse it**, not merely to test it,
+and issue #1127 records why that refusal must ride with (b)'s ADR or an amendment to
+§6 rather than arriving as a validator.
+
+**§7's credential prohibition is the sharpest case, and it is stated as a breach
+nothing detects rather than as a guarantee.** A caller writing a credential into a key
+— `{"sk_live_…": "x"}` — violates §7 and ADR-0021 §1's Tier 0 exclusion alike, and
+§4's coverage invariant would carry that key into the record as a locator. `core`
+cannot detect it, and §7's own last clause already routes its enforcement to a seam
+rather than to a type, so this ADR claims no protection it does not have. What it does
+is name the gap, forbid reading it as licence, and put the refusal that closes it on
+the first component with the vocabulary to see it. A `core` check written ahead of that
+vocabulary would refuse well-formed calls and miss malformed ones, which is the bound
+with no mechanism this ADR declines twice elsewhere.
 
 **ADR-0021 §3, §4 and §5 — no record owed.** §3's rule that a policy returns a
 `PermissionRuling` and never a `PermissionDecision` is relied on unchanged: the binding
