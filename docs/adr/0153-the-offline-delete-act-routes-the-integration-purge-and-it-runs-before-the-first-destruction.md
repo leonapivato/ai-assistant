@@ -544,10 +544,14 @@ remedy the owner would choose if the flag's help text were honest about it.
 > re-reads nothing; the store it would read is gone.
 
 > **Normative.** No `SecretName`, credential slot or credential value appears in
-> either statement, and neither statement is a log line: ADR-0004 §5's logging rule
-> and ADR-0149 §3's rule that no log, error or operator diagnostic carries an account
-> identity are untouched, and no implementation routes these statements through
-> `structlog`.
+> either statement.
+
+> **Normative.** The two statements are the **only** place an account identity
+> appears. No implementation routes either through `structlog`, and nothing this
+> act emits as a log line, an error message or an operator diagnostic — including
+> every diagnostic §4 requires on a failed purge, and every refusal ADR-0126 §1
+> produces — carries an account identity. A failure is reported by reference and by
+> condition, never by account.
 
 **Stating the scopes one by one is what makes ADR-0125 §5's second clause
 checkable.** That clause — "No lane may present a purge that skips a scope as
@@ -582,6 +586,32 @@ account the owner already disconnected is one they have already dealt with, and
 listing it back at them under "accounts you must still revoke" would restate a
 completed decision as an outstanding obligation. The list answers "what is still
 connected", which is the question the owner is about to lose the ability to ask.
+
+**ADR-0149 §3's identity rule is scoped by emitter, and this act is neither
+emitter — which is why naming an identity here needs no supersession.** Its clause
+reads "no log line, error message or operator diagnostic **emitted by the
+provisioner or by a callable** carries an account identity". The provisioner is
+ADR-0149 §1's component in `tools/`; a *callable* is the thing reached by
+`ToolInvoker.invoke` that ADR-0148 §7 governs. This act is neither, and the two
+statements above are not among the three kinds of output that clause names in any
+case: they are the act's own report to the owner's terminal, which ADR-0126 §7
+already rules is "text the act writes to its own output". What the clause protects
+— that an identity never leaks into the machine's logs, into an error a process
+surfaces, or into a diagnostic an operator reads about someone else's
+installation — is protected here by the clause above, which confines the identity
+to the two statements and keeps it out of every diagnostic this act emits. §10
+records that no sentence of ADR-0149 §3 becomes false or over-wide.
+
+**The corpus has already settled that this act's report names identifying data,
+and it settled it for a harder case.** ADR-0126 §7 requires the statement to list
+"every device holding a live enrolment at that instant, **by its overlay identity as
+the record holds it**", completely and with no omission count. An overlay identity
+is at least as identifying as an account name, and the reasons it is printed are
+exactly the reasons an account name is: the reader is the owner, standing at their
+own machine, having just typed the resolved path of the directory they are
+destroying; and the record that holds it is about to cease to exist. A rule that let
+the act name devices but not accounts would be drawing a line the owner's situation
+does not have.
 
 **The non-revocation sentence is the honesty obligation this section adds, and it
 is the one an implementation would most naturally omit.** Deleting an OAuth refresh
@@ -1001,6 +1031,25 @@ holds neither face, and it stays true word for word — the act names neither Pr
 and cannot name a keyring method (§6 above). This is the same treatment ADR-0126 §12
 records for these two sections and ADR-0149 §12 records again, and it is unchanged
 here.
+
+**ADR-0149 §3 — no record owed, and it is checked rather than assumed because §5
+names an account identity in the act's output.** The clause is "no log line, error
+message or operator diagnostic **emitted by the provisioner or by a callable**
+carries an account identity". Two independent things keep it true. Its subject is
+what the provisioner or a callable emits, and this act is neither — so nothing it
+prints is within the clause's reach at all. And its object is a log line, an error
+message or a diagnostic, none of which the two statements are: ADR-0126 §7 rules
+that this act's report is "text the act writes to its own output" and that this ADR
+"adds no type for it … and no report of this act crosses a subsystem or process
+boundary". §5's second clause then holds the line the sentence exists to hold, for
+this act rather than merely near it: the identity appears in the two statements and
+nowhere else, and every diagnostic the act does emit — §4's failure reports and
+ADR-0126 §1's refusals included — carries a reference and a condition instead. A
+reader holding only ADR-0149 §3 wires and writes exactly what they wrote before.
+Stacked addition. §3's other clauses — the store's placement under
+`Settings.data_dir`, its append-only rule, the live-record projection §2's
+`connected` answers over, and the non-secrecy of the reference and the slot — are
+consumed exactly as ratified.
 
 **ADR-0149 §8 — no record owed.** Every clause is consumed exactly as ratified. Its
 first, second, third, fourth and seventh clauses are the purge's mechanism and are
