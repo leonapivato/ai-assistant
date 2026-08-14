@@ -451,7 +451,7 @@ checkable direction and the one a reviewer can test a change against.
 
 > **Normative.** The one exception available is an ADR deciding in its own text that
 > the owner may export the accumulated model into a service the owner names, which
-> may permit what the first clause above and §1's first clause forbid, only to the
+> may permit what the second clause above and §1's first clause forbid, only to the
 > extent it decides, and which decides the reach of ADR-0004 §6's export right for
 > that act rather than inheriting one.
 
@@ -1073,7 +1073,7 @@ retro-marked. What binds is **twenty-one clauses**: §1's three, §2's two, §3'
 §4's one, §5's three, §6's four and §7's two. Every one is a block quote at column 0
 preceded by a blank line, which ADR-0089 §2 requires, and each states one obligation
 with its own scope — two passages were split in drafting for that reason, §3's
-export reservation and §6's registering-lane statement, and §3's **second clause** was
+export reservation and §6's registering-lane statement, and §3's **third clause** was
 added in review to reserve the model-context boundary to an owner ruling rather than
 decide it, after twelve rounds established that no formulation of it held. The
 ordinals of §3's clauses in this document were corrected in the same review: the
