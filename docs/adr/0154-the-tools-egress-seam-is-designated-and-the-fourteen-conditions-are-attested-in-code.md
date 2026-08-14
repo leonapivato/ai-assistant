@@ -1159,10 +1159,14 @@ and none is closed by designation.
 > **Normative.** A lane registering an integration at this seam states in its own
 > change whether that integration's ordinary operation places the owner's data into
 > a third-party service in the sense ADR-0004 §2's residency clause is about, and
-> why. Where the answer is yes, or is unclear on that clause's text, the lane does
-> not register the integration until an ADR has answered #95. No lane infers an
-> answer from this ADR, from ADR-0017 §1's deferral, or from the seam being
-> designated.
+> on what reading of that clause.
+
+> **Normative.** Where that statement is yes, or is unclear on the residency
+> clause's text, the lane does not register the integration until an ADR has
+> answered #95.
+
+> **Normative.** No lane reads an answer to #95 out of this ADR, out of ADR-0017
+> §1's deferral of it, or out of the seam having been designated.
 
 This binds the question to the moment it acquires a subject rather than settling it
 here — settling it is what ADR-0017 §5 forbids, and a design fork the corpus has not
@@ -1215,8 +1219,8 @@ This ADR is **marked** under ADR-0089: every obligation it imposes is a marked
 clause, and unmarked text supplies none. §3, §4's table and every *Mechanism*,
 *Code*, *Evidence* and *stated limit* paragraph are unmarked deliberately — they are
 an attestation and an argument, which ADR-0089 §1 classifies as non-normative
-however load-bearing they are. What binds is sixteen clauses: §1's three, §2's five,
-§4's attestation clause plus the three ADR-0098 §3 decides, §5's one, §6's two, and
+however load-bearing they are. What binds is eighteen clauses: §1's three, §2's five,
+§4's attestation clause plus the three ADR-0098 §3 decides, §5's one, §6's four, and
 §7's one. Every one of them is a block quote at column 0 preceded by a blank line,
 which ADR-0089 §2 requires — an indented one is not a mark, and one clause was moved
 out of a list item in review for exactly that reason.
