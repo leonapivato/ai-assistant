@@ -1361,8 +1361,9 @@ form).
 > superseded ADR-0126 in doing so; that changes nothing above, because this ADR
 > decided no part of that territory before and decides none of it now.
 
-> **Normative.** A **`RecursionError`** raised by `_deep_freeze` in
-> `core/types.py` while §1's revalidation rebuilds a `FrozenJsonMapping` argument is
+> **Normative.** A **`RecursionError`** raised by `_deep_freeze` in `core/types.py`
+> while §1's revalidation freezes an argument annotated `FrozenJsonMapping` — whether
+> the caller passed an already-frozen mapping or a raw one — is
 > **not** converted by this seam into an `EgressBindingError`, into
 > `Disposition.EGRESS_UNBINDABLE`, or into any other refusal or disposition. It
 > propagates unconverted, exactly as §9's `ConnectionStoreError` does, and §1's
@@ -1377,11 +1378,20 @@ form).
 ADR-0145 §6 records that a deep mapping "exhausts the stack on the way in, today,
 with no schema evaluation anywhere in the picture", because `_deep_freeze` runs for
 every `FrozenJsonMapping` — `PlanStep.parameters` and `ToolResult.output` as much as
-`ActionRequest.parameters`. The `parameters` this seam is handed is already such a
-mapping, so a payload deep enough to raise during revalidation raised once already
-at the ingress that built it, and would raise again at the `ActionRequest` this seam
-does not build, with or without the revalidation §1 requires. The exposure is neither
-widened nor narrowed here, which is why the clause routes rather than answers.
+`ActionRequest.parameters`. Two callers reach this seam and neither makes the
+exposure its own. **On the runner's path** the mapping is already frozen, so a
+payload deep enough to raise during revalidation raised once already at the ingress
+that built it. **A direct caller may pass a raw mapping** — `FrozenJsonMapping` is an
+`Annotated` alias and Python enforces no annotation at runtime, which is the whole
+reason §1 revalidates rather than trusting the signature — and then this seam's
+revalidation is the first `_deep_freeze` over that structure. The exposure is
+identical either way, because the same value goes on to `ActionRequest`
+construction, which runs the same unbounded `_deep_freeze` over the same structure:
+a call that exhausts the stack here exhausts it there instead, one stage later, with
+or without the revalidation §1 requires. What the seam changes is which frame the
+stack runs out in, and #1107 is what closes that for every holder at once. The
+exposure is therefore neither widened nor narrowed here, which is why the clause
+routes rather than answers.
 Answering it is a `core`-wide instance bound that ADR-0145 §14 already ruled is its
 own decision — "Changing it reaches `PlanStep`, `ToolResult` and every other holder"
 — and it reaches types §2's authorisation list does not claim and this ADR is
