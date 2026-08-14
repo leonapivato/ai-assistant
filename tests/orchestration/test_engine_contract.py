@@ -336,6 +336,17 @@ class TestEngineContract(AssistantEngineContract):
             await built.aclose()
 
     @pytest.fixture
+    async def tiny_connections(self) -> AsyncIterator[ConnectionSubject]:
+        """The same wiring at the limit the suite can reach."""
+        provisioner = FakeConnectionProvisioner()
+        built = _wire(provisioner=provisioner, max_payload_bytes=_TINY_LIMIT)
+        await built.start()
+        try:
+            yield ConnectionSubject(engine=built, provisioner=provisioner)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
     async def granting_engine(self) -> AsyncIterator[AssistantEngine]:
         """One wired engine holding a single grantable source with a location.
 

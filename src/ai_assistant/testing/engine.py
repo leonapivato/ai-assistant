@@ -85,6 +85,7 @@ from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
     check_payload,
+    check_provisioning_arguments,
     grant_scope,
     identifier,
     non_blank_text,
@@ -805,7 +806,12 @@ class FakeAssistantEngine:
         # The credential is deliberately not a member of the measured object: it
         # has no canonical projection at all (ADR-0151 §6), which is the property
         # that stops a redaction being sent in its place.
-        check_arguments("connect_account", max_bytes=self._max_payload_bytes, identity=named)
+        check_provisioning_arguments(
+            "connect_account",
+            max_bytes=self._max_payload_bytes,
+            credential=secret,
+            identity=named,
+        )
         self.calls.append(("connect_account", {"identity": named}))
         return self._checked(
             await self.connections.provision(identity=named, credential=secret), "connect_account"
@@ -823,9 +829,10 @@ class FakeAssistantEngine:
         handle = identifier(reference, name="reference")
         named = non_blank_text(identity, name="identity")
         usable_identity(named, credential=secret)
-        check_arguments(
+        check_provisioning_arguments(
             "reprovision_account",
             max_bytes=self._max_payload_bytes,
+            credential=secret,
             reference=handle,
             identity=named,
         )

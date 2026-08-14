@@ -645,3 +645,56 @@ def usable_identity(identity: str, *, credential: SecretValue) -> str:
         )
         raise UnusableIdentityError(msg)
     return identity
+
+
+def check_provisioning_arguments(
+    method: str, *, max_bytes: int, credential: SecretValue, **arguments: object
+) -> None:
+    """Measure a provisioning call's **whole** argument payload (ADR-0151 §11).
+
+    :func:`check_arguments` cannot be handed the credential directly:
+    :func:`project` is a total dispatch that ends in ``TypeError`` for a type it
+    has no canonical form for, and ``SecretStr`` is not a ``str`` subclass, so it
+    lands there (ADR-0151 §6). **That refusal is deliberate and stays** — it is what
+    stops pydantic's ``"**********"`` being encoded as a secret — so the credential's
+    contribution is measured by substituting the plaintext for the measurement and
+    for nothing else.
+
+    **Reading the plaintext here is authorised by the clause this function
+    implements, on §5's precedent.** ADR-0151 §11 requires that "where a
+    provisioning call's arguments do not fit the configured frame, the call raises
+    ``OversizedValueError`` and nothing is written", and ADR-0085 §9 makes a local
+    refusal every implementation's — the in-process engine included, which is the
+    only way ADR-0084 §4's substitutability survives a credential-carrying call. §5
+    already requires the same layer to read the same plaintext, for the exact
+    comparison against the identity. ADR-0151 §6's relay clause forbids
+    `orchestration` to **unwrap, log, retain beyond the call, copy into any other
+    value, retry with, or read back** the credential, and a measurement does none of
+    those: the plaintext is passed to the encoder, its byte length is compared, and
+    nothing derived from it is returned, stored or reported.
+
+    **The refusal names no length of the credential**, which is ADR-0125 §6 and is
+    why the size is not simply asserted here: :func:`check_payload` reports the
+    *whole payload's* size and names its largest member, and ``credential`` is a
+    member name rather than a value (ADR-0151 §6 requires that spelling anyway, so
+    ``core/logging.py``'s redaction covers it wherever a payload mapping is logged).
+
+    Args:
+        method: The method being called, for the message.
+        max_bytes: The contract limit in bytes.
+        credential: The secret this call carries, still wrapped.
+        **arguments: The call's other arguments, named as the parameters are.
+
+    Raises:
+        OversizedValueError: If the argument object's canonical encoding exceeds
+            ``max_bytes``. Nothing is written; no implementation truncates a
+            credential or an identity, splits the act across frames, or falls back
+            to another route, and raising ``hub_max_frame_bytes`` is the operator's
+            remedy and the only one offered (ADR-0151 §11).
+    """
+    check_arguments(
+        method,
+        max_bytes=max_bytes,
+        credential=credential.get_secret_value(),
+        **arguments,
+    )

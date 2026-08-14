@@ -127,6 +127,7 @@ from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
     check_payload,
+    check_provisioning_arguments,
     grant_scope,
     identifier,
     non_blank_text,
@@ -3499,7 +3500,12 @@ class Engine:
         # docstring. Naming it here would put a ``SecretStr`` in front of
         # ``project``, which refuses it (ADR-0151 §6), turning every well-formed
         # call into a ``TypeError``.
-        check_arguments("connect_account", max_bytes=self._max_payload_bytes, identity=named)
+        check_provisioning_arguments(
+            "connect_account",
+            max_bytes=self._max_payload_bytes,
+            credential=secret,
+            identity=named,
+        )
         return await self._tracked(
             self._connections.connect(identity=named, credential=secret),
             "connect_account",
@@ -3542,9 +3548,10 @@ class Engine:
         handle = identifier(reference, name="reference")
         named = non_blank_text(identity, name="identity")
         usable_identity(named, credential=secret)
-        check_arguments(
+        check_provisioning_arguments(
             "reprovision_account",
             max_bytes=self._max_payload_bytes,
+            credential=secret,
             reference=handle,
             identity=named,
         )
