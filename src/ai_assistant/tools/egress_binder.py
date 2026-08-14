@@ -141,6 +141,76 @@ class EgressRegistration:
     transport_endpoint: str
 
 
+class EgressRegistrations(Protocol):
+    """Which tools are bound to which connected account (ADR-0148 §6, ADR-0152 §10).
+
+    Structural and `tools/`-internal, like :class:`RegisteredDefinitions`: **how a
+    tool comes to be registered against a connected account is not contracted
+    anywhere**, and ADR-0152 §10 leaves it inside this subsystem in terms. A lookup
+    rather than a snapshot taken at construction, so the table this seam reads and
+    the table a provisioning act updates are one object rather than two that must
+    agree.
+    """
+
+    def registration(self, tool_id: str, /) -> EgressRegistration | None:
+        """The egress registration for ``tool_id``, or ``None`` where there is none."""
+        ...
+
+
+class RegistrationTable:
+    """The in-memory :class:`EgressRegistrations` this subsystem wires by default.
+
+    One entry per tool, and it refuses a second for one id at the moment it is
+    added: two would make "the connected account this tool is bound to" ambiguous
+    and defeat ADR-0148 §6's one-account clause at the seam that relies on it —
+    the clause that is also why the seam reads exactly one connection record per
+    egress call.
+    """
+
+    __slots__ = ("_bound",)
+
+    def __init__(self, registrations: Iterable[EgressRegistration] = ()) -> None:
+        """Build the table, refusing a duplicate id.
+
+        Args:
+            registrations: The registrations to hold.
+
+        Raises:
+            ValueError: If two of them name one tool id.
+        """
+        self._bound: dict[str, EgressRegistration] = {}
+        for registration in registrations:
+            self.register(registration)
+
+    def register(self, registration: EgressRegistration, /) -> None:
+        """Bind one tool to one connected account.
+
+        Args:
+            registration: The tool, its connection reference and its endpoint.
+
+        Raises:
+            ValueError: If the tool is already bound to an account.
+        """
+        if registration.tool_id in self._bound:
+            msg = (
+                f"tool {registration.tool_id!r} is registered against two connected "
+                f"accounts; ADR-0148 §6 binds a registered tool to at most one"
+            )
+            raise ValueError(msg)
+        self._bound[registration.tool_id] = registration
+
+    def registration(self, tool_id: str, /) -> EgressRegistration | None:
+        """The registration for ``tool_id``, or ``None``.
+
+        Args:
+            tool_id: The tool to look up.
+
+        Returns:
+            Its registration, or ``None`` where it is bound to no account.
+        """
+        return self._bound.get(tool_id)
+
+
 class RegisteredDefinitions(Protocol):
     """A synchronous view of the definitions a registry holds (ADR-0152 §1).
 
@@ -298,7 +368,7 @@ class EgressBindingSeam:
         self,
         *,
         definitions: RegisteredDefinitions,
-        registrations: Iterable[EgressRegistration] = (),
+        registrations: EgressRegistrations,
         records: ConnectionRecords,
         canonicalises: Collection[DestinationProtocol] | None = None,
     ) -> None:
@@ -311,10 +381,11 @@ class EgressBindingSeam:
                 same object it injects as ``ToolRegistry``, so the original this
                 compares against and the original ``invoke`` compares against are
                 one table rather than two that must agree (ADR-0029 §1).
-            registrations: Which tools are bound to which connected account. A
-                tool absent from this is not an egress tool (ADR-0152 §8), whatever
-                its schema declares — except that a tool declaring either keyword
-                while absent here is **refused** rather than answered ``None``.
+            registrations: Which tools are bound to which connected account,
+                consulted per call rather than snapshotted here. A tool absent from
+                it is not an egress tool (ADR-0152 §8), whatever its schema
+                declares — except that a tool declaring either keyword while absent
+                is **refused** rather than answered ``None``.
             records: Where the connection record is read. One read per egress
                 call, for the connectability and the identity and nothing else.
             canonicalises: Which protocols this seam canonicalises. Defaults to
@@ -327,22 +398,9 @@ class EgressBindingSeam:
                 reachable in a tree that defines one protocol, which ADR-0152 §13
                 obliges this lane to ship a case for.
 
-        Raises:
-            ValueError: If two registrations name one tool id, which would make
-                "the connected account this tool is bound to" ambiguous and defeat
-                ADR-0148 §6's one-account clause at the seam that relies on it.
         """
-        bound: dict[str, EgressRegistration] = {}
-        for registration in registrations:
-            if registration.tool_id in bound:
-                msg = (
-                    f"tool {registration.tool_id!r} is registered against two connected "
-                    f"accounts; ADR-0148 §6 binds a registered tool to at most one"
-                )
-                raise ValueError(msg)
-            bound[registration.tool_id] = registration
         self._definitions = definitions
-        self._registrations: Mapping[str, EgressRegistration] = bound
+        self._registrations = registrations
         self._records = records
         self._canonicalises: frozenset[DestinationProtocol] = frozenset(
             _CANONICALISERS if canonicalises is None else canonicalises
@@ -464,7 +522,7 @@ class EgressBindingSeam:
                 f"describe a call nobody registered (ADR-0029 §1)"
             )
             raise _refuse(msg)
-        registration = self._registrations.get(tool.id)
+        registration = self._registrations.registration(tool.id)
         if registration is not None:
             return registration
         if resuming:
@@ -854,5 +912,7 @@ __all__ = [
     "ConnectionRecords",
     "EgressBindingSeam",
     "EgressRegistration",
+    "EgressRegistrations",
     "RegisteredDefinitions",
+    "RegistrationTable",
 ]
