@@ -1,6 +1,6 @@
 # 151. The connection surface is five engine operations, and the reference is minted rather than typed
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
 - **Decides the surface ADR-0149 §9 names as owed**, on the firing condition §9's
   second clause states — "Its firing condition is this ADR merging" — which
