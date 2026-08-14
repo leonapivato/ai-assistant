@@ -42,9 +42,13 @@
   boundary twelve review rounds could not state a *permissive* rule for, so the clause
   states the restrictive one and makes it decidable at the supply site: the component
   assembling a model call's context knows what it put there, and does not emit that
-  call's output into an egress span. What an owner ruling decides is whether to relax
-  it or ratify it as permanent; both candidate rules and their costs are set out
-  beside the clause. Earlier drafts reached the case by derivation, by a
+  call's output into an egress span, and the clause defines "supplied values" itself
+  rather than borrowing a word the codebase already uses for a narrower thing. What an
+  owner ruling decides is whether to ratify it as permanent or to commission a later
+  ADR designing a content-bearing approval surface compatible with ADR-0150 §10, under
+  which a relaxation could then be considered — so **relaxation needs its own decision
+  and its own mechanism**, and neither exists today. Earlier drafts reached the case
+  by derivation, by a
   carve-out with its own antecedent, by an exception for the call's own recorded
   arguments, by a store partition and by a read-relation pair; all five were
   defeated in review, and §3 records how rather than quietly repairing it, because
@@ -415,18 +419,22 @@ checkable direction and the one a reviewer can test a change against.
 > obtained and what it introduced, never over what a span contains, and no lane reads
 > it as requiring or licensing an inspection of content.
 
-> **Normative.** Until an owner ruling relaxes this clause, an egress span may not
-> carry content produced by a model call whose context carried a value obtained from
-> any store this system keeps under `Settings.data_dir` — whether or not any component
-> routed an extractable value into the span. This is decidable at the supply site: the
-> component that assembles a model call's context knows whether it placed such content
-> there, and such a component does not emit that call's output into an egress step's
-> parameters or into any egress span. What is reserved to an owner ruling is solely
-> the **relaxation** — whether such influence, disposed of by the owner reading the
-> payload at confirmation and by ADR-0146's provenance marking, may instead be
-> permitted as residue — together with the alternative of ratifying this clause as
-> permanent. No lane, reviewer or later ADR makes that choice without an owner ruling.
-> Until ruled, this clause governs, and it is deliberately the more restrictive
+> **Normative.** Until an owner ruling under this clause provides otherwise, an egress
+> span may not carry content produced by a model call **any** of whose supplied values
+> carried a value obtained from a store this system keeps under `Settings.data_dir` —
+> whether or not any component routed an extractable value into the span. For this
+> clause a model call's supplied values are **every value rendered into or otherwise
+> supplied to that call, whatever the parameter is named**, explicitly including
+> `Planner.plan`'s `memories` argument and conversation history, and not only a value
+> passed under a parameter called `context`. This is decidable at the supply site: the
+> component that assembles a model call knows what it supplied to it, and such a
+> component does not emit that call's output into an egress step's parameters or into
+> any egress span. What is reserved to an owner ruling is whether to **(a)** ratify
+> this clause as permanent, or **(b)** commission a later ADR that designs a
+> content-bearing approval surface compatible with ADR-0150 §10 and states its privacy
+> consequences, under which a relaxation could then be considered. No lane, reviewer or
+> later ADR makes that choice, or relaxes this clause, without an owner ruling. Until
+> one is made, this clause governs, and it is deliberately the more restrictive
 > reading.
 
 > **Normative.** No authorisation makes a transmission the first clause forbids
@@ -524,18 +532,43 @@ open is only whether the owner relaxes it. A reader who wants to know what a lan
 do today does not need the fork resolved; they need the clause above, which is
 unconditional.
 
-**Both candidate rules were reachable and neither is obviously right, which is why
-neither is taken here.** (a) is decidable from recorded origin — whether store content
-was in a model's context is a fact about the request, not an inference about the
-output — so nothing in ADR-0098 §5's unrecoverability bars it; what bars it from being
-adopted quietly is its cost, which is that the assistant may not draft outbound content
-from what it knows, the "false on the day it is written" shape ADR-0146's Context
-refuses. (b) is the reading the corpus has drifted toward, and its cost is that the
-`CONFIRM` is doing work ADR-0150 §10 says it cannot do well: the description holds no
-content, so an owner approving a payload description is not reading the body for their
-own memory in it. Both costs are real and they fall on different things — one on the
-product, one on the protection — which is exactly the trade an owner makes and a lane
-does not.
+**Why the clause defines its own scope for a word the codebase already uses.**
+"Context" is a parameter name in this tree: `ModelBackedPlanner.plan` takes `context:
+CurrentContext` *and* `memories: Sequence[MemoryRecord]` as separate arguments, and
+`ConversationLoop` passes recalled records under the second. A clause saying "whose
+context carried store content" could therefore be read as reaching only the first
+argument, and an email body drafted from records passed as `memories` would slip the
+rule entirely. Adversarial review found exactly that on round 17. ADR-0089 §3 requires
+a marked clause to state its own scope rather than borrow one, and this is the case
+that shows why: the borrowed word had a narrower meaning waiting for it in the code.
+The clause therefore reaches every value supplied to the call and says so.
+
+**What the reservation now costs, which is more than the first draft of it did.** An
+earlier draft of this clause offered relaxation as a live option, premised on the owner
+reading the payload at confirmation. Architecture review found on round 17 that the
+premise contradicts the corpus: ADR-0150 §10 makes the payload description hold no
+content, so the confirmation carries spans, extents, provenance and destinations and
+never the body. An owner cannot recognise their own memory in a body they are not
+shown, and a reservation resting on that mechanism would have reserved something
+unreachable. So relaxation is no longer an arm the owner can simply take. Arm (b)
+commissions a *mechanism* — a content-bearing approval surface that does not exist,
+compatible with a clause that currently forbids one, with its own privacy consequences
+to state — and only then could a relaxation be considered on top of it. **The
+relaxation arm now requires its own decision and its own mechanism, neither of which
+exists today**, which makes the interim clause considerably harder to displace than
+the draft that merely called it interim.
+
+**Both arms were reachable and neither is obviously right, which is why the choice is
+the owner's.** Ratifying the interim is decidable from recorded origin — whether store
+content was supplied to a model call is a fact about the request, not an inference
+about the output, so nothing in ADR-0098 §5's unrecoverability bars it; its cost is
+that the assistant may not draft outbound content from what it knows about its owner,
+which is the "false on the day it is written" shape ADR-0146's Context refuses.
+Commissioning the surface keeps that capability available but buys it with a new
+content-bearing approval path, and content in an approval surface is itself a privacy
+decision with its own blast radius. Both costs are real and they fall on different
+things — one on the product, one on the protection — which is exactly the trade an
+owner makes and a lane does not.
 
 **Gating registration until the fork resolves was considered and refused.** ADR-0154
 §6's bar is "until an ADR has answered #95", #95's question is the residency scope
@@ -597,13 +630,17 @@ This section is otherwise an account of the tree and is **not normative**
 (ADR-0089 §1). It was verified by reading `origin/main` at `9a401306`, not by
 transcribing a prior ADR's summary.
 
-**Two different absences, and they are not the same kind.** §3's first clause is
-**statable and unenforced**: it is decidable at the component, a reviewer can test a
-change against it, and what is missing is a mechanism. §3's second clause records
-something else — a case that is **not statable at all** today, because the relation
-it would be stated over is unrecoverable (ADR-0098 §5, §12). Issue #1154 is what
-would change the second into the first, which is why its trigger is written where it
-is rather than at the first externalisation.
+**Two absences, and both clauses are statable — what neither has is a mechanism.**
+§3's first clause is **statable and unenforced**: it is decidable at the component, a
+reviewer can test a change against it, and what is missing is enforcement. §3's second
+clause is **also statable**, and that is the change round 17 forced into the open: it
+is stated at the *supply site*, over what a component supplied to a model call, which
+is a fact about the request. What remains unrecoverable is the different relation
+ADR-0098 §5 and §12 name — whether a particular span's content was *produced from* a
+particular input — and no clause here is stated over that. So the two clauses differ
+in what they reach, not in whether they can be said. Issue #1154 carries the
+payload-origin mechanism that would let code enforce either, which is why its trigger
+is written where it is rather than at the first externalisation.
 
 **What holds today, and it is a fact rather than a control.** No tool is registered
 at the seam: `build_default_registry` in `ai_assistant.tools.builtin` returns
@@ -651,9 +688,11 @@ to the turn as JSON.
   and the model writes the argument.** No component routed an extractable value into a
   span — the influence ran through the model, so §3's first clause does not reach it.
   §3's **second clause forbids it directly**: the span carries content produced by a
-  model call whose context held store content, and `orchestration`, which assembled
-  that context, is the component the clause binds. What an owner ruling may later do
-  is relax that; a lane may not read the reservation as a permission now.
+  model call that was supplied store content — as `memories`, one of the supplied
+  values the clause names — and `ConversationLoop`, which assembled that call, is the
+  component the clause binds. An owner ruling may later ratify that, or commission the
+  approval surface under which relaxing it could be considered; a lane may not read
+  the reservation as a permission now.
 - **A component that reads a store and introduces the value, or the output of
   something it commissioned on it, into a span** — any store, at any moment, whether
   during that step, an earlier step of the same plan, or before any plan existed.
@@ -833,8 +872,8 @@ one.
 > request's own `parameters`, which ADR-0150 §4 makes the spans themselves, and the
 > binder's connection read reaches the binding and the destination set rather than a
 > span. This statement is about §3's first clause only and does not reach §3's second:
-> whether a particular call's arguments were drafted by a model whose context carried
-> store content is a fact about that call, and the registering lane's statement under
+> whether a particular call's arguments were produced by a model call supplied store
+> content is a fact about that call, and the registering lane's statement under
 > the clause above addresses it call by call rather than once for the tool. The
 > statement is about the tool's ordinary operation and its declared arguments; it is
 > not a statement about the payload of any particular call, which §3 governs call by
