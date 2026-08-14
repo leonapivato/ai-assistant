@@ -1190,13 +1190,19 @@ class _SmtpSession:
         if code != _START_MAIL_INPUT:
             msg = f"{self._tool_id}: the endpoint refused DATA with {code}; nothing was sent"
             raise _refuse_changed(msg)
-        await self._channel.write(_dot_stuffed(payload))
+        # The write is **inside** the window, not before it. A stream writer hands
+        # octets to the transport and only then awaits the flush, so a failure
+        # raised by that flush does not establish that nothing was sent — and no
+        # channel this seam could be handed is able to establish it either, which
+        # is why the answer is the conservative one rather than a narrower test.
         try:
+            await self._channel.write(_dot_stuffed(payload))
             code, _ = await self._reply()
         except (EgressTransportError, OSError) as exc:
             msg = (
-                f"{self._tool_id}: the message was written and the endpoint's verdict "
-                f"could not be read, so whether it was accepted is unknown"
+                f"{self._tool_id}: the message reached the transport and the "
+                f"endpoint's verdict could not be read, so whether it was accepted "
+                f"is unknown"
             )
             raise IndeterminateTransmissionError(msg) from exc
         if code != _COMPLETED:
