@@ -150,9 +150,10 @@
 
   **And a prohibition this clause never carried is added beside it.** ADR-0155 §3
   forbids any component introducing into an egress span a value it obtained from any
-  store under the data directory, or the output of an operation it supplied such a
-  value to, and no authorisation cures it — not a per-call user decision, not a
-  standing policy, not a configuration or a connected account. It is deliberately the
+  store under the data directory, or the output of an operation *any* component
+  supplied such a value to, and no authorisation cures it — not a per-call user
+  decision, not a standing policy, not a configuration or a connected account. It is
+  deliberately the
   maximally restrictive reading and carries no time predicate and no exception: any
   store under the data directory, at any moment, by any route. The ordinary send path
   is untouched because nothing on it *introduces* such a value — ADR-0150 §4 makes a
@@ -163,8 +164,9 @@
   decidable at the component that assembled the call — and reserves to an owner ruling
   only whether to ratify it as permanent or to commission a later ADR designing a
   content-bearing approval surface compatible with ADR-0150 §10, under which a
-  relaxation could then be considered. Both arms and their costs are named there;
-  until the owner rules, the restrictive reading governs.
+  relaxation could then be considered. An owner ruling alone does not relax it —
+  relaxation requires that commissioned ADR and its approval surface, ratified. Both
+  arms and their costs are named there; until then, the restrictive reading governs.
   That closes the hole adversarial review of PR #72 identified in
   the reading ADR-0017 declined to adopt: assistant-derived memory written into a
   calendar and excused because "the data now lives in the user's account". ADR-0155
