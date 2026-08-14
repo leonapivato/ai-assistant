@@ -465,7 +465,8 @@ exists; the other three travel together in one value the request carries.
 > **Normative.** Before transmitting, the callable refuses unless **all four**
 > hold: the bound reference is **connectable** (below); the transport endpoint the
 > binding carries is the one it is configured to use; the credential reference the
-> binding carries is the one it reads under; and
+> binding carries names the connection record it consults, and it reads under the
+> slot that record names (below); and
 > the account identity **currently recorded for that reference** equals the
 > identity the binding carries. A registry rebuilt under a different configuration
 > — across a restart, which is exactly when a parked `CONFIRM` is answered —
@@ -477,13 +478,31 @@ exists; the other three travel together in one value the request carries.
 > leaves the identity unchanged. A revision is never reused and never decreases.
 
 > **Normative.** A connection record carries a **provisioning state**, which is
-> **pending** or **active**. Provisioning or re-provisioning a connected account is
-> **three writes in a fixed order**: the connection record **first**, as *pending*,
-> carrying the identity and the incremented revision; the **credential second**;
-> and the record marked **active third**. No other order is permitted. The
-> activation is part of the same provisioning act and changes neither the identity
-> nor the revision, so a completed act increments the revision exactly once. No
-> transaction spans the keyring and the connection record, and none is required.
+> **pending** or **active**, and the **credential slot** — a `SecretName`
+> (ADR-0125 §2) — that the act which wrote the record wrote its credential to. A
+> provisioning act writes **its own slot**, never a slot an earlier act wrote, and
+> a slot is never written by two acts.
+
+> **Normative.** Provisioning or re-provisioning a connected account is **three
+> writes in a fixed order**: the connection record **first**, as *pending*,
+> carrying the identity, the incremented revision and this act's slot; the
+> **credential second**, into that slot; and the record marked **active third**.
+> No other order is permitted. The activation is part of the same provisioning act
+> and changes neither the identity, the revision nor the slot, so a completed act
+> increments the revision exactly once. No transaction spans the keyring and the
+> connection record, and none is required.
+
+> **Normative.** The **credential reference** the binding carries names the
+> connection record; the **slot** is what the callable reads under, and it is
+> obtained from that record in the same step as the identity and the revision.
+> The reference is therefore stable across a rotation, which is what keeps a
+> parked `CONFIRM` answerable after one (ADR-0125 §4), while the slot moves with
+> every act. No binding carries a slot and no lane compares one against a binding.
+
+> **Normative.** A slot no live connection record names holds nothing any call
+> reads. A provisioning act deletes the slot its predecessor named once its own
+> activation has landed, and a deletion that fails leaves an unreferenced slot
+> rather than an incorrect one — the failure is reported and never suppressed.
 
 > **Normative.** **At most one provisioning act is in flight per credential
 > reference**, and the connection record is what enforces it. An act *begins* by a
@@ -501,16 +520,12 @@ exists; the other three travel together in one value the request carries.
 > the sense the clause below gives. An abandoned act rolls nothing back: the record
 > it found belongs to the act that displaced it.
 
-> **Normative.** What those two clauses do **not** close is a credential write
-> already in flight when its act is displaced. `Secrets.set` never refuses and the
-> keyring offers no compare-and-swap (ADR-0125 §4), so a displaced act's `set` can
-> land after the displacing act has activated, leaving the keyring holding a
-> credential the record does not describe. That is the same state, and the same
-> limit, as the operator writing a credential into a slot directly (below). It is
-> stated here rather than closed, and no lane presents these clauses as closing it.
-> Fully linearising provisioning belongs to the ADR that decides the provisioning
-> surface, which does not exist yet; this section fixes what the checks require of
-> that surface and nothing about its shape.
+> **Normative.** A displaced act's credential write, already in flight when it is
+> displaced, lands in **that act's own slot** — which no live record then names, so
+> no call reads it. `Secrets.set` never refuses and the keyring offers no
+> compare-and-swap (ADR-0125 §4), and neither is needed: the write that decides
+> which credential is live is the **activation**, a single write to the connection
+> record, and the record is the store the compare-and-swap above already governs.
 
 > **Normative.** A reference is **connectable** only while its connection record
 > exists and is **active**. A reference that is not connectable takes no part in an
@@ -529,8 +544,9 @@ exists; the other three travel together in one value the request carries.
 > write it did not itself perform, or by inferring an identity from the credential.
 
 > **Normative.** The check and the credential read are **one step**: no `await`
-> occurs between reading the identity, revision and provisioning state recorded
-> for the bound reference and calling `Secrets.get` for it. This is ADR-0097 §5a's rule for a
+> occurs between reading the identity, revision, provisioning state and slot
+> recorded for the bound reference and calling `Secrets.get` for **that slot**.
+> This is ADR-0097 §5a's rule for a
 > grant and a read, transposed onto the pair this section binds.
 
 > **Normative.** After the credential is in hand and **before any byte is
@@ -710,16 +726,34 @@ abandonment, and taking over is deliberately **permitted** rather than forbidden
 because forbidding it would strand a reference left pending by an act that died,
 while the remedy this section names is to run the provisioning act again.
 
-**The sliver that survives is worth naming precisely, because a clause implying
-otherwise would be the overclaim this ADR keeps refusing.** If B's `Secrets.set`
-is already in flight when C activates, no re-check either of them can perform sees
-it: the write lands in a store that cannot refuse it and cannot be asked what it
-now holds. Closing it wants a credential slot **per provisioning act**, with the
-record resolving the stable reference to that act's slot — buildable, and a
-decision about the provisioning surface rather than about the checks, so it is not
-taken here (ADR-0073 §4's test, applied as §11 applies it). What the clause does
-instead is state the residue and say where its answer belongs, which is the
-posture §5a's residue and round 5's boundary already take in this section.
+**A sliver survived that, and round 10 is why it is closed here rather than
+named and deferred.** If B's `Secrets.set` is already in flight when C activates,
+no re-check either of them can perform sees it: the write lands in a store that
+cannot refuse it and cannot be asked what it now holds. An earlier draft stated
+that as an accepted residue and routed the mechanism that closes it — a credential
+slot **per provisioning act**, with the record resolving the stable reference to
+the current slot — to the ADR that decides the provisioning surface. Adversarial
+found on round 10 that the residue is not one this ADR is entitled to accept: it
+leaves an *active* record naming C over a keyring holding B's token, reached
+through a **conforming** path rather than by an operator writing to the keyring
+directly, and a call bound to C then passes every check and sends as B. That
+contradicts this section's own guarantee clause in terms. A document whose
+guarantee and whose residue disagree has not decided anything, and the honest
+repair is not a softer guarantee — it is the mechanism.
+
+**Per-act slots cost nothing this section was relying on, which is what makes
+them the right size of answer.** The reference in the binding stays stable, so
+ADR-0125 §4's rotation case survives exactly as it was ratified — a parked
+`CONFIRM` is still answerable after a rotation, because what the binding names is
+the record and not the slot. Nothing is asked of the keyring that ADR-0125 §4
+declines to provide: no compare-and-swap, no refusal, no transaction. The write
+that decides which credential is live becomes the **activation** — one write, to
+the one store the compare-and-swap above already governs — and a displaced act's
+late `set` lands where nothing points. This is the standing shape for exactly this
+problem: write the new thing somewhere of its own, then move the pointer, so that
+the only ordering that matters happens inside a single store. It is also what
+ADR-0037 §2's argument recommends one more time, since the crash window it leaves
+is an unreferenced slot rather than a live credential nobody described.
 
 **Not connectable is stated over the whole call, not only over the send, because
 §1 is where a refusal is cheapest.** A pending reference could have been refused
@@ -1229,6 +1263,15 @@ as ratified. No legal move is added or removed, and no
 trigger column becomes wrong — ADR-0029 §9 already recorded the second trigger for
 `RUNNING → INDETERMINATE` as a note on ADR-0014, and this ADR adds no third.
 
+**ADR-0125 §2 and §4 — no record owed.** §2's `SecretName` is used for what it
+is, and §6 above adds a second one per provisioning act rather than changing what
+one means. §4's replace-in-place rule is neither relied on for the account case
+nor contradicted by declining to rely on it: `set` still creates or replaces and
+still never refuses, and a reader holding only §4 finds the same behaviour and the
+same rotation argument. What §6 does with §4 is stop *depending* on a replacement
+being safe, which §4 never claimed — its own sentence is about what `set` does,
+not about what a caller may conclude from it.
+
 **ADR-0125 §8 and §9 — no record owed.** §9 there states the seam "does not gate"
 and is "shaped so that #74 can land into it", and names both branches the answer
 could take. §7 above takes one of those branches for `tools/`; a deferral naming
@@ -1423,9 +1466,15 @@ form).
 > the first, resuming afterwards, writes neither its credential nor its activation.
 > A provisioning implementation whose act begins without a compare-and-swap on the
 > connection record, or which writes its credential or activates without re-reading
-> that record first, fails that test. What the test does **not** assert is that a
-> `set` already in flight is stopped: §6 states that residue, and a test claiming
-> to close it would assert more than the mechanism provides.
+> that record first, fails that test.
+
+> **Normative.** That lane also ships the **late-`set`** case, which is the one the
+> per-act slot exists for: a displaced act whose `Secrets.set` was already in
+> flight completes that write *after* the displacing act has activated, and a call
+> made afterwards still reads the displacing act's credential and transmits under
+> the identity the record names. An implementation in which two provisioning acts
+> can write one slot fails this test, and a test that exercises the interleaving
+> without asserting which credential the following call reads does not satisfy it.
 
 > **Normative.** A test asserting only that the happy path transmits satisfies no
 > clause of this section.
@@ -1480,10 +1529,16 @@ family — two *provisioning acts* on one reference rather than an act against a
 call — and the repair keeps the arbitration in the one store that can offer it: an
 act begins by a **compare-and-swap** on the connection record and re-reads it
 before each of its two remaining writes, so a displaced act abandons instead of
-writing a credential the record no longer describes. The sliver that survives, a
-`Secrets.set` already in flight when another act activates, is **stated rather
-than closed**, with the slot-per-act mechanism that would close it named and
-routed to the ADR that decides the provisioning surface.
+writing a credential the record no longer describes. Round 10 then refused the
+sliver that repair left — a `Secrets.set` already in flight when another act
+activates — on the ground that it is reached by a **conforming** path and leaves
+an active record over another account's token, contradicting this section's own
+guarantee clause. The draft had named the mechanism that closes it and routed it
+away; the repair is to take it: each act writes **its own credential slot** and
+the record names the live one, so the write that decides which credential is live
+is the activation, a single write to the store the compare-and-swap already
+governs. The binding still carries the stable reference, so ADR-0125 §4's rotation
+case is untouched.
 
 **Round 8's second finding was assessed as resting on a misreading and was
 answered by tightening a definition rather than a decision.** It read §1's refusal
@@ -1522,9 +1577,11 @@ endpoint alongside both, the callable's four-way refusal behind all of them, and
 ADR-0097 §5a's one-step/re-check/fail-closed discipline over the read, a
 monotonic revision on the connection record so the re-check answers "unchanged"
 rather than "equal", and a pending/active provisioning state — begun and held by a
-compare-and-swap — so that "finished" is recorded rather than inferred, and so that
-two provisioning acts on one reference are ordered by the store that can order them
-— with each residue stated in §5a's own honest form rather than papered over. §11 states the
+compare-and-swap — so that "finished" is recorded rather than inferred, and a
+credential slot per provisioning act so that two acts on one reference are ordered
+by the one store that can order them and a late write lands where nothing points
+— with each surviving residue stated in §5a's own honest form rather than papered
+over. §11 states the
 surface that costs, and §6's own prose says what each draft got wrong and why.
 **That is the one worth remembering**: the defect is ADR-0147 §13's — stating a
 hazard and then admitting the thing anyway — reproduced in a draft that quotes
