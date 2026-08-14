@@ -203,7 +203,8 @@ This section is a classification of the change being made and is not normative
 | `DiscloserProvenance` | `core/types.py`, new | `StrEnum`, two members, ADR-0146 §1's two answers (§5). |
 | `EgressDestination` | `core/types.py`, new | The two forms of one recipient and the protocol that relates them (§3). |
 | `EgressSpan` | `core/types.py`, new | One described span of the payload: where it came from, who disclosed it, how much of it there is, its tier if its field establishes one, and its destination if it is one (§4, §5, §6). |
-| `ConnectedAccount` | `core/types.py`, new | The account's identity and its connection reference (§7). |
+| `BoundAccount` | `core/types.py`, new | The account's identity and its connection reference, as the ruling fixed them (§7). |
+| `ConnectedAccount` | — | **Not this ADR's.** ADR-0151 §4 promotes it as the hub's live connection record. This ADR neither adds it, changes it, nor reuses it — §7 and §13 say why the snapshot is a separate type. |
 | `CanonicalDestination` | `core/types.py`, new | One member of ADR-0148 §2's canonical destination set, in one of two validated shapes: a protocol-qualified recipient, or the connected account whole (§3). |
 | `EgressBinding` | `core/types.py`, new | The whole binding: spans, account, transport endpoint; ADR-0148 §2's canonical destination set as a derived property (§1, §3, §7). |
 | `ActionRequest` | `core/types.py`, changed | Gains `egress_binding`, an optional `EgressBinding` defaulting to `None`, detached at validation; gains one model validator for the invariants §4 states against `parameters`. |
@@ -216,15 +217,17 @@ This section is a classification of the change being made and is not normative
 > **Normative.** The `core` names this ADR authorises a lane to add or change are
 > exactly these and no others: the new types `DestinationProtocol`,
 > `DiscloserProvenance`, `EgressDestination`, `CanonicalDestination`, `EgressSpan`,
-> `ConnectedAccount` and `EgressBinding`, all in `core/types.py`; one new optional field named
+> `BoundAccount` and `EgressBinding`, all in `core/types.py`; one new optional field named
 > `egress_binding` on `ActionRequest` and one on `PermissionDecision`, each holding
 > an `EgressBinding` or nothing; that field's transcription in
 > `PermissionDecision.from_request`; the conjunct §9 adds to
 > `PermissionDecision.authorises`; and the model validator §4 requires on
 > `ActionRequest`. No other `core` name changes: no field is added to
 > `ToolDefinition`, `PermissionRuling` or `ToolCall`, and `core/protocols.py` is
-> unchanged. A change beyond this list is a change to this decision and needs its
-> own ADR (golden rule 5).
+> unchanged. This ADR further authorises **no** change to ADR-0151 §4's
+> `ConnectedAccount`, and a lane that reuses that type where §7 names `BoundAccount`
+> has departed from this list as surely as one adding a name to it. A change beyond
+> this list is a change to this decision and needs its own ADR (golden rule 5).
 
 ### 3. A destination is an occurrence; what it selects is derived, never supplied
 
@@ -264,7 +267,7 @@ This is PR #1120's first observation, and it is stated there exactly:
 > **refuses at construction** to depart from: a **selected recipient**, carrying a
 > `DestinationProtocol` and a canonical form of non-blank visible text and no
 > account; or the **connected account** the call is made to, carrying a
-> `ConnectedAccount` (§7) and neither of the other two. No member carries all three,
+> `BoundAccount` (§7) and neither of the other two. No member carries all three,
 > none carries neither shape, and there is no third kind.
 
 > **Normative.** An account member carries the account **whole** — its identity and
@@ -341,7 +344,7 @@ a destination two different accounts satisfy.
 **What a policy compares and what a user reads are deliberately different fields.**
 The set member holds the reference, which is not something a user can recognise an
 account by — ADR-0148 §6 says so and §8's fourth clause bars it from the confirmation.
-The confirmation names `ConnectedAccount.identity`, from the binding's own account
+The confirmation names `BoundAccount.identity`, from the binding's own account
 field (§7, §10). Neither substitutes for the other, and the reason they are not one
 field is that they answer different questions: "is this the same connection" and "whose
 account is this".
@@ -846,10 +849,21 @@ is the one with both halves in hand.
 ### 7. The connected account, its reference, and the transport endpoint
 
 > **Normative.** `EgressBinding` carries the connected account as one
-> `ConnectedAccount` with exactly two fields, both required and both non-blank
-> visible text: `identity`, the durable, user-recognisable name of the account
-> recorded when it was connected, and `reference`, which names that account's
-> connection record (ADR-0148 §6, ADR-0149).
+> `BoundAccount` with exactly two fields, both required: `identity`, non-blank
+> visible text, the durable, user-recognisable name of the account recorded when it
+> was connected; and `reference`, a `DurableIdentifier`, which names that account's
+> connection record (ADR-0148 §6, ADR-0149 §3, ADR-0151 §3).
+
+> **Normative.** `BoundAccount` is **not** ADR-0151 §4's `ConnectedAccount`, and no
+> lane substitutes one for the other, widens this one toward it, or implements this
+> surface by importing it. They answer different questions. ADR-0151 §4's model is the
+> **live connection record**, carrying `revision` and `state` and reporting the record
+> "as the store holds it" — both of which move while a parked ruling stands. This one
+> is the **snapshot the ruling was taken over**, which ADR-0148 §1 requires not to move
+> after the ruling at all. Carrying the live record here would put a `revision` inside
+> the value §9 compares, so a re-provisioning between the confirmation and the answer
+> would make a parked `CONFIRM` unanswerable — which is the failure the clause below
+> exists to prevent, arriving by the exact route it was closed against.
 
 > **Normative.** `EgressBinding` carries `transport_endpoint` as required non-blank
 > visible text. This ADR constrains its scheme, host, port and path **not at all**,
@@ -903,7 +917,7 @@ This is PR #1120's tenth observation and it is the one the producer paid the mos
 > (b) inherits the class instead.
 
 > **Normative.** `EgressBinding`, `EgressSpan`, `EgressDestination`,
-> `CanonicalDestination` and `ConnectedAccount` are pydantic models in
+> `CanonicalDestination` and `BoundAccount` are pydantic models in
 > `core/types.py`, each with `extra="forbid"` and `frozen=True`, and each validating
 > every field it declares — `CanonicalDestination` included, and its two-shape
 > invariant (§3) is one of the things it validates. None is a dataclass, a
@@ -1320,7 +1334,7 @@ destinations rather than content". Every field this ADR adds is inside that sent
 - `EgressDestination.supplied` and `.canonical` — named verbatim.
 - `EgressDestination.protocol` — not an argument value; it names which canonicaliser
   related the two forms.
-- `ConnectedAccount.identity` and `.reference`, `transport_endpoint` — named verbatim.
+- `BoundAccount.identity` and `.reference`, `transport_endpoint` — named verbatim.
 - `EgressSpan.provenance`, `.tier`, `.extent` — "extent, provenance, tiers" verbatim.
 - `EgressSpan.argument` and `.index` — an argument **name** is part of
   `parameters_schema` and is therefore already stored verbatim in every decision
@@ -1400,6 +1414,27 @@ which is the point of transcription.
 
 **ADR-0137 §2 — no record owed.** §11 above records that (a) adds no Protocol, so
 §2's widening has no triad to carry here; it is neither invoked nor narrowed.
+
+**ADR-0151 §4 — no record owed, and the shared word is the whole of the overlap.**
+§4 there promotes `ConnectedAccount` into `core/types.py` as the hub's live connection
+record — `reference`, `identity`, `revision`, `state` — and states that it "carries no
+other field". This ADR adds no field to it, removes none, and changes nothing about
+what it means: §7 above introduces a **separate** `core` type, `BoundAccount`, and §2's
+normative list names that type and explicitly declines to authorise any change to
+ADR-0151's. A reader holding only ADR-0151 §4 still finds the same four fields, still
+reads them as the record the store holds now, and acts no differently for this ADR
+existing. What they additionally find, here, is a second and smaller value that a
+ruling fixes and nothing afterwards moves. That is ADR-0082 §1's stacked addition — an
+obligation contradicting no sentence the earlier ADR wrote — "recorded in the ADR that
+makes it, and nowhere else".
+
+**Why the two are not one type, stated here because the alternative was live for one
+round.** Reusing ADR-0151 §4's model and narrowing this surface's equality to
+`(identity, reference)` would read as the smaller change and is the worse one twice
+over: it puts `revision` and `state` — fields whose whole purpose is to move — inside a
+value ADR-0148 §1 fixes at the ruling, and the narrowing would itself amend how §4's
+model is compared, which is a record owed against ADR-0151 rather than avoided. A
+separate type owes nothing and hides nothing.
 
 **Nothing is superseded and nothing is amended, so `docs/adr/0150-…md` is the only
 file this change touches.** No accepted text is rewritten anywhere (ADR-0070 §1).
