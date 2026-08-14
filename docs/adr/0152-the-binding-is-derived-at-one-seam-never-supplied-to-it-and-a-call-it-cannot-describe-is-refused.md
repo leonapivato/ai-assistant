@@ -1514,13 +1514,27 @@ rather than a gap discovered late.
 > alone leaves `rebind`'s untested.
 
 > **Normative.** That lane ships the **pairing** pin §1's return clauses are stated
-> for, over **all three** returned fields: the `ActionRequest` the runner builds
-> carries `parameters` **equal** to the returned `BoundEgressCall`'s `parameters`, a
-> `tool` equal to its `tool`, **and an `egress_binding` equal to its `binding`** —
-> asserted on a call where the runner's own retained objects were **mutated across
-> §10's awaited read** so that they are *unequal* to the returned ones. The divergence
-> is what makes the first two discriminating: without it, equality holds whichever
-> object the runner used and the test pins nothing.
+> for, over **all three** returned fields and for **both** members: the
+> `ActionRequest` the runner builds carries `parameters` **equal** to the returned
+> `BoundEgressCall`'s `parameters`, a `tool` equal to its `tool`, **and an
+> `egress_binding` equal to its `binding`** — asserted on a call where the runner's own
+> retained objects were **mutated across §10's awaited read** so that they are
+> *unequal* to the returned ones. The divergence is what makes the first two
+> discriminating: without it, equality holds whichever object the runner used and the
+> test pins nothing.
+
+> **Normative.** The `rebind` limb of that pin is exercised **separately and on the
+> resuming path**: a parked `CONFIRM` resumed while the retained confirmation `tool`
+> and step `parameters` are mutated across `rebind`'s own connection-record await, with
+> the same three assertions over the **rebuilt** request ADR-0037 §4 constructs. A
+> lane satisfies this only by rebuilding that request from the returned
+> `BoundEgressCall` rather than from what it had retained. §7's equality cases do
+> **not** reach it: they compare the derived binding against `approved` inside the
+> seam, and say nothing about which objects the request built after the seam returned
+> was built from — so a lane passing every one of them can still hand
+> `ActionPolicy.resolve` a request the seam never described. A pin covering `bind`
+> alone leaves the resuming path untested, which is the path a second ruling is taken
+> on.
 
 > **Normative.** The binding limb is asserted with a **distinguishable** binding — one
 > whose spans, destinations or account differ from any other binding reachable in the
