@@ -153,10 +153,13 @@
   directory, and the output of any operation, model call or otherwise, supplied
   covered content, propagating through every operation and decided at each supply site
   from recorded origin rather than by inspecting content — and then forbids it
-  reaching an egress span under two clauses that partition it: one for derivation
-  chains with no model call in them, one for chains that have one. Every chain is in
-  exactly one, so nothing escapes both, and no authorisation cures either — not a
-  per-call user decision, not a standing policy, not a configuration or a connected
+  reaching an egress span under two clauses that partition it by quantifying over
+  every path the content derives from a store by: one governs content **any** of whose
+  covered paths carries no model call, the other content **all** of whose paths do.
+  The two are exclusive and exhaustive, so nothing escapes both, content merging a raw
+  record with model output falls to the absolute clause, and no authorisation cures
+  either — not a per-call user decision, not a standing policy, not a configuration or a
+  connected
   account. It is deliberately the maximally restrictive reading and carries no time
   predicate and no exception. The ordinary send path is untouched because nothing on
   it *introduces* covered content — ADR-0150 §4 makes a span a key of the request's
