@@ -1225,7 +1225,8 @@ def test_a_purge_raising_outside_the_named_families_still_destroys_nothing(
     assert (data_dir / ENROLMENTS_FILENAME).exists()
     assert purger.events == ["open", "connected", "purge", "close"]
     printed = capsys.readouterr().err
-    assert str(fault) in printed
+    assert type(fault).__name__ in printed
+    assert str(fault) not in printed
     assert "Nothing was destroyed." in printed
 
 
@@ -1241,7 +1242,9 @@ def test_a_connected_raising_outside_the_named_families_still_destroys_nothing(
     assert _run(data_dir) == EXIT_RESTART
     assert _remaining(data_dir) == before
     assert purger.events == ["open", "connected", "close"]
-    assert "the store answered something unreadable" in capsys.readouterr().err
+    printed = capsys.readouterr().err
+    assert "RuntimeError" in printed
+    assert "the store answered something unreadable" not in printed
 
 
 @pytest.mark.usefixtures("settings")
@@ -1548,6 +1551,52 @@ def test_no_diagnostic_carries_an_account_identity(
     printed = capsys.readouterr()
     assert reference in printed.err
     assert accounts[0].identity not in printed.err
+
+
+@pytest.mark.usefixtures("settings")
+def test_an_identity_in_an_unexpected_failures_text_never_reaches_the_operator(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §5's last clause is an obligation on the **act**, not on the exception.
+
+    §4 obliges the act to catch any exception, so the text it is handed can come
+    from code that never read ADR-0149 §3's prohibition. An act that interpolated
+    ``str(exc)`` would have delegated §5's promise to whoever raised it — which is
+    not a promise the act can make on someone else's behalf. So an unvetted class
+    is named by its class and its message is not repeated.
+    """
+    accounts = purger.connect("someone@example.com")
+    identity = accounts[0].identity
+    purger.purge_fault = RuntimeError(f"deletion failed for {identity}")
+
+    assert _run(data_dir) != EXIT_OK
+    printed = capsys.readouterr()
+    assert identity not in printed.err
+    assert "deletion failed for" not in printed.err
+    assert "RuntimeError" in printed.err
+    # The identity is still in the *statement*, which is one of the two places §5
+    # puts it. What the clause forbids is a diagnostic carrying one.
+    assert identity in printed.out
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_contract_defined_condition_is_still_reported_as_the_condition_it_is(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §4's fifth clause survives the reduction, which is the other half.
+
+    A reduction that named every failure by its class alone would satisfy §5 and
+    breach §4 — an unreachable keyring has to be "reported as the deployment
+    condition it is", and its class name is not that. ADR-0153 §7's own list of the
+    classes §4 governs is what the act is entitled to repeat.
+    """
+    purger.connect("someone@example.com")
+    purger.purge_fault = SecretStoreUnavailableError(
+        "no keyring backend is available on this machine"
+    )
+
+    assert _run(data_dir) != EXIT_OK
+    assert "no keyring backend is available on this machine" in capsys.readouterr().err
 
 
 @pytest.mark.usefixtures("settings")

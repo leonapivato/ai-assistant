@@ -72,7 +72,15 @@ from typing import TYPE_CHECKING, Final, assert_never
 
 from ai_assistant.app import build_connection_purger
 from ai_assistant.core.config import load_settings
-from ai_assistant.core.errors import AssistantError, ConfigurationError
+from ai_assistant.core.errors import (
+    AssistantError,
+    ConfigurationError,
+    ConnectionStoreError,
+    IncompleteProvisioningError,
+    ProvisioningOutcomeUnknownError,
+    ResidualCredentialError,
+    SecretStoreError,
+)
 from ai_assistant.core.types import SecretScope
 from ai_assistant.service import datadir
 from ai_assistant.service.backup import SIDECAR_SUFFIXES
@@ -94,6 +102,29 @@ if TYPE_CHECKING:
 #: owner nothing and leave the keyring exactly as it was" (ADR-0153 §3) — and so
 #: that a test drives the act against a purger it scripts (ADR-0153 §8).
 type _Opener = Callable[[], OpenedConnections]
+
+#: The failure classes whose message this act repeats verbatim in a diagnostic.
+#:
+#: **ADR-0153 §7's own enumeration**, which names "the failures §4 governs" as
+#: ``SecretStoreError``, ``SecretStoreUnavailableError`` (ADR-0125 §6) and
+#: ``ConnectionStoreError`` (ADR-0151 §2a) — the second being a subclass of the
+#: first, so two names carry all three. Each is raised inside this system by code
+#: ADR-0149 §3 forbids to put an account identity in an error message, which is
+#: what entitles the act to repeat the text rather than reduce it (§5).
+#:
+#: ``OSError`` is here on a different ground and it is worth separating: its text
+#: is the operating system's, an errno and a path inside ``data_dir``, produced by
+#: the kernel rather than by anything holding a connection record.
+_PURGE_CONDITIONS: Final = (SecretStoreError, ConnectionStoreError, OSError)
+
+#: ADR-0151 §7's three failures that name the connection they were on. The
+#: reference is a non-secret handle chosen by code (ADR-0149 §3), so it is what
+#: ADR-0153 §5's "by reference and by condition" offers in an identity's place.
+_REFERENCE_CARRYING: Final = (
+    IncompleteProvisioningError,
+    ProvisioningOutcomeUnknownError,
+    ResidualCredentialError,
+)
 
 #: The act at an enrolled device that removes the credential this one cannot reach
 #: (ADR-0124 §8, shipped in ``interfaces/cli.py`` as ``device unenrol``). §7
@@ -547,12 +578,12 @@ def _report_purge_failure(exc: Exception) -> int:
     question rather than flattened into a single number here.
 
     **No account identity appears**, which is ADR-0153 §5's last clause reaching
-    every diagnostic §4 requires: a failure is reported by reference and by
-    condition, never by account. Nothing is interpolated but the exception, whose
-    own text is bound by ADR-0149 §3 to carry none.
+    every diagnostic §4 requires: a failure is reported "by reference and by
+    condition, never by account". :func:`_condition_of` is what makes that a
+    property of *this act* rather than a hope about the text it was handed.
     """
     code, action = classify(exc)
-    print(f"the integration credentials could not be purged: {exc}", file=sys.stderr)
+    print(f"the integration credentials could not be purged: {_condition_of(exc)}", file=sys.stderr)
     print(
         "Nothing was destroyed. The connection store is the only record of which credentials "
         "this installation holds, so destroying the data directory now would leave them in "
@@ -563,6 +594,47 @@ def _report_purge_failure(exc: Exception) -> int:
     if action:
         print(f"what to do: {action}", file=sys.stderr)
     return code
+
+
+def _condition_of(exc: Exception) -> str:
+    """Name a purge failure in text this act is entitled to repeat (ADR-0153 §5).
+
+    **The obligation is on the act, not on the exception**, and that is the whole
+    reason this function exists. §5's last clause says nothing this act emits —
+    "including every diagnostic §4 requires on a failed purge" — carries an
+    account identity, and an act that interpolated an arbitrary ``str(exc)`` would
+    have delegated that promise to whoever raised it. §4's breadth makes the gap
+    real rather than theoretical: it obliges the act to catch **any** exception, so
+    the text can come from code that never read ADR-0149 §3.
+
+    So the rule is the clause's own two halves, and nothing else is printed.
+
+    **Condition.** The message is repeated verbatim only for
+    :data:`_PURGE_CONDITIONS` — which is ADR-0153 §7's own enumeration of the
+    classes §4 governs, every one of them raised inside this system under
+    ADR-0149 §3's prohibition — and for ``OSError``, whose text is the kernel's own
+    errno and a path in ``data_dir``. Repeating those is what keeps §4's fifth
+    clause true, where an unreachable keyring "is reported as the deployment
+    condition it is" rather than as a bare class name. Anything else is named by
+    its class alone: an exception from outside the contract's vocabulary is text
+    nobody vetted, and the class is the condition.
+
+    **Reference.** ADR-0151 §7's three reference-carrying classes have theirs
+    printed explicitly, because the reference is a non-secret handle chosen by code
+    (ADR-0149 §3) and is what the clause offers in an identity's place. Naming it
+    is what stops the class-only path from reducing a failure to something the
+    owner cannot act on.
+
+    Args:
+        exc: What stopped the purge.
+
+    Returns:
+        The condition, and the reference where the failure carries one.
+    """
+    named = str(exc) if isinstance(exc, _PURGE_CONDITIONS) else type(exc).__name__
+    if isinstance(exc, _REFERENCE_CARRYING) and exc.reference:
+        return f"{named} (connection {exc.reference})"
+    return named
 
 
 def _live_enrolments(data_dir: Path) -> _Devices:
