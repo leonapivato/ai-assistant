@@ -1527,6 +1527,16 @@ form).
 > this test, so a case carrying one omission alone does not satisfy it, and neither
 > does a test that exercises only descriptions which happen to be complete.
 
+> **Normative.** That lane also ships the **carried-provenance** pair, which is
+> what §6's determinism clause names its second input for: two requests with
+> byte-identical arguments and the same registry definition, differing only in the
+> provenance the request carries for one span, produce **different** descriptions,
+> each stating that request's own carried provenance. An implementation that
+> decides a span's provenance by reading its value, its field or its shape derives
+> one description for both and fails this pair — the inference ADR-0146 §2 forbids
+> — and so does one that labels every covered span with a single provenance. A case
+> built from one request alone distinguishes neither.
+
 > **Normative.** A test asserting only that the happy path transmits satisfies no
 > clause of this section.
 
