@@ -27,13 +27,14 @@
   marker the corpus has (ADR-0146's discloser provenance) records *who disclosed* a
   span, not *where it came from*, and the two questions come apart exactly on this
   line.
-- **§3's second clause names what the prohibition cannot reach, rather than covering
-  it with a form of words.** A span produced by a model that saw store content in its
-  turn context is the relation ADR-0098 §5 holds **unrecoverable** and §12 forbids
-  stating a bound over. An earlier draft reached it with "an artifact derived from
-  one"; architecture review found the defect and it is recorded in §3 rather than
-  quietly repaired, because ADR-0098, ADR-0146 and ADR-0154 each made and corrected
-  the same one.
+- **§3's second clause names what the prohibition cannot reach and gives it one
+  disposition.** A span produced by a model that saw store content in its turn
+  context is the relation ADR-0098 §5 holds **unrecoverable** and §12 forbids stating
+  a bound over, so it is governed by §2's conditions alone — an accepted residue with
+  a revisit trigger, neither barred nor licensed here. An earlier draft reached it
+  with "an artifact derived from one"; architecture review found the defect and it is
+  recorded in §3 rather than quietly repaired, because ADR-0098, ADR-0146 and
+  ADR-0154 each made and corrected the same one.
 - **Adds no `core` surface.** No Protocol, no type, no field, no enum member. The
   recorded origin §4 finds missing is `core` surface and owes its own ADR (golden
   rule 5, ADR-0015 §5); §4 defers it with its trigger rather than specifying it.
@@ -395,13 +396,16 @@ checkable direction and the one a reviewer can test a change against.
 > it is not stated over what a span contains, and no lane reads it as requiring or
 > licensing an inspection of content.
 
-> **Normative.** The clause above does not reach a span whose only relation to the
-> assistant's own store runs through a model's context — a model given store content
-> by one path and producing an egress argument by another. Whether such an argument
-> derives from what the model read is the relation ADR-0098 §5 holds is **not
-> recoverable** once the output has been recorded truthfully, and ADR-0098 §12
-> forbids stating a bound over it. No lane reads this ADR as ruling that case, as
-> permitting it, or as having a mechanism for it.
+> **Normative.** Where a span's only relation to the assistant's own store runs
+> through a model's context — store content reaching a model by one path, and the
+> model producing an egress argument by another — the clause above does not reach it,
+> and such a send is **permitted or refused by §2's conditions alone**: this ADR adds
+> no bar to it and no licence for it. That disposition is an accepted residue rather
+> than a judgement that the send is desirable, and it is the only disposition
+> available: whether such an argument derives from what the model read is the
+> relation ADR-0098 §5 holds is **not recoverable** once the output has been recorded
+> truthfully, and ADR-0098 §12 forbids stating a bound over it. It is revisited when
+> a recorded origin makes a rule over the case statable (§4, #1154), and not before.
 
 > **Normative.** No authorisation makes a transmission the first clause forbids
 > lawful. A per-call user
@@ -443,6 +447,25 @@ the value as the input. What the first clause cannot reach is a model that saw s
 content in its turn context and later wrote an argument. That is named in the second
 clause rather than covered by a form of words, on ADR-0146 §7's discipline: state the
 bound the system can actually hold, and name what it does not.
+
+**The second clause gives that case one disposition, and it took a second round to
+get there.** A first attempt said no lane may read this ADR "as ruling that case, as
+permitting it, or as having a mechanism for it" — and architecture review found on
+round 3 that the sentence contradicted §2, which does admit content composed for the
+send, so the same call was permitted by one section and denied any permissible
+reading by another. An implementation cannot act on that. The disposition is
+therefore stated outright: **the case is governed by §2's conditions alone**, and
+this ADR adds neither a bar nor a licence. Naming it an accepted residue is the
+difference between deciding it and leaving it undecided, and it is what makes the
+revisit trigger meaningful rather than decorative.
+
+**The deliberate route into the residue is already forbidden, and it is worth saying
+where.** A component that hands a store value to a model *in order to* take the
+output as an egress span has supplied the value as an input to the operation that
+produced the span, which is the first clause's own words — "a summary or translation
+it computed or **commissioned**". So the residue is what remains when store content
+reached the model by an unrelated path, a turn that recalled and then sent; it is not
+a door a component can walk through on purpose.
 
 **Two wider rules were considered for the residue and both were refused.** Forbidding
 an egress call whose arguments a model produced while store content was in its
@@ -825,8 +848,9 @@ absorbed:
   *unenforceable as stated* (the flat reading), a rule that is *statable and
   unenforced* (§3's first clause, with #1154 as its mechanism), and a case that is
   *not statable* because the relation is unrecoverable (§3's second clause, ADR-0098
-  §5 and §12). Naming the third rather than covering it with a form of words is what
-  architecture review's round-2 blocker bought.
+  §5 and §12), which is therefore disposed of by §2's conditions alone. Naming the
+  third and giving it a disposition, rather than covering it with a form of words, is
+  what architecture review's round-2 and round-3 blockers bought.
 - **A rule that was unenforceable and a rule that is unenforced are now distinct,
   and the second is written down.** §3 binds authors and reviewers today; §4 says in
   a marked clause that nothing in code enforces it, and the issue it files carries
