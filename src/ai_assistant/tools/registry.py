@@ -264,10 +264,34 @@ class InMemoryToolRegistry:
             (binding.definition for binding in self._live.values()), key=lambda tool: tool.id
         )
 
-    async def get(self, tool_id: str) -> ToolDefinition | None:
-        """Return the definition registered as ``tool_id``, or ``None``."""
+    def original(self, tool_id: str, /) -> ToolDefinition | None:
+        """Return the untampered definition registered as ``tool_id``, synchronously.
+
+        The same answer :meth:`get` gives, from the same table, without an await —
+        which is what ADR-0152 §1 needs of it: the egress binding seam performs its
+        registry-original comparison **before** the one suspension point ADR-0152
+        §10 permits it, so it cannot reach for an ``async`` member. Its own copy of
+        the definitions would be a second table that has to agree with this one,
+        which is the divergence ADR-0029 §1 already names for a registry and an
+        invoker wired separately.
+
+        A **detached** snapshot, for :meth:`all_tools`' reason: handing back this
+        object's own definition would let a holder of a *query* rewrite what the
+        registry considers registered.
+
+        Args:
+            tool_id: The id to look up. Positional-only, because this is a lookup
+                by key and a keyword would invite it to grow options.
+
+        Returns:
+            A copy of the registered definition, or ``None`` if none is live.
+        """
         stored = self._live.get(tool_id)
         return None if stored is None else stored.definition.model_copy(deep=True)
+
+    async def get(self, tool_id: str) -> ToolDefinition | None:
+        """Return the definition registered as ``tool_id``, or ``None``."""
+        return self.original(tool_id)
 
     async def find(self, capability: str) -> list[ToolDefinition]:
         """Return every live tool advertising ``capability``, ordered by id."""

@@ -1262,6 +1262,8 @@ source_modules = [
     "ai_assistant.tools.connection_store",
     "ai_assistant.tools.destination_arguments",
     "ai_assistant.tools.destinations",
+    "ai_assistant.tools.egress_binder",
+    "ai_assistant.tools.egress_declaration",
     "ai_assistant.tools.invocation",
     "ai_assistant.tools.payload_description",
     "ai_assistant.tools.provisioning",
