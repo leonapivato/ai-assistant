@@ -22,11 +22,14 @@ count, and a cancellation delivered mid-act.
 from __future__ import annotations
 
 import asyncio
+import inspect
+import pathlib
 from typing import TYPE_CHECKING, Any
 
 import pytest
 from pydantic import SecretStr
 
+import ai_assistant.orchestration
 from ai_assistant.core.errors import ConnectionStoreError, IncompleteProvisioningError
 from ai_assistant.core.protocols import ConnectionProvisioner
 from ai_assistant.core.types import ProvisioningState, secret_value
@@ -276,3 +279,38 @@ async def test_the_two_listings_are_not_derived_from_one_another() -> None:
     assert [one.reference for one in live] == [record.reference]
     assert live[0].state is ProvisioningState.ACTIVE
     assert [act.revision for act in acts] == [1]
+
+
+def test_orchestration_materialises_a_credential_at_exactly_one_site() -> None:
+    """ADR-0151 §6, held as a property of the package rather than of a review.
+
+    §6's relay clause is what keeps a Tier 0 value crossing this surface from
+    becoming a second path to the keyring, and the way it degrades is by
+    accumulation: each new site looks locally justified, and nothing counts them.
+    ADR-0151 §5 obliges **one** — the exact comparison of the identity against the
+    plaintext, which every implementation makes before the first write — and
+    ADR-0151 §11's frame measurement needs the same value, so it is folded into the
+    same call rather than given a site of its own.
+
+    An earlier revision of this lane had two, and adversarial review reported it as
+    a widening of §6 rather than an application of §11. This is that report turned
+    into a check, so the next lane to reach for ``get_secret_value()`` in
+    `orchestration` meets a failing test rather than a reviewer's memory.
+
+    ``wire`` is deliberately not covered: the client's unwrap is authorised by §6
+    in as many words, at one site in each of its two provisioning methods, and it
+    is `wire`'s own tests that pin it.
+    """
+    package = pathlib.Path(inspect.getfile(ai_assistant.orchestration)).parent
+    sites = {
+        module.relative_to(package).as_posix(): module.read_text().count("get_secret_value()")
+        for module in sorted(package.glob("*.py"))
+        if "get_secret_value()" in module.read_text()
+    }
+
+    # Counted rather than located: a line number would fail on the next edit above
+    # it and say nothing about the property, which is *how many* there are.
+    assert sites == {"payloads.py": 1}, (
+        f"orchestration materialises a credential's plaintext at {sites}; ADR-0151 §5 "
+        f"obliges exactly one site — check_provisioning_call — and §6 forbids the rest"
+    )

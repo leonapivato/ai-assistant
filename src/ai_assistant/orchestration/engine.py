@@ -127,13 +127,12 @@ from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
     check_payload,
-    check_provisioning_arguments,
+    check_provisioning_call,
     grant_scope,
     identifier,
     non_blank_text,
     page_argument,
     positive_page_argument,
-    usable_identity,
 )
 from ai_assistant.orchestration.questions import question_state
 from ai_assistant.orchestration.traces import Observation, OperationTraces
@@ -3495,16 +3494,15 @@ class Engine:
         self._reject_if_closing()
         secret = secret_value(credential)
         named = non_blank_text(identity, name="identity")
-        usable_identity(named, credential=secret)
-        # **The credential is not a member of the measured object** — see the
-        # docstring. Naming it here would put a ``SecretStr`` in front of
-        # ``project``, which refuses it (ADR-0151 §6), turning every well-formed
-        # call into a ``TypeError``.
-        check_provisioning_arguments(
+        # **One call, one read of the plaintext** (ADR-0151 §5, §11). §5's exact
+        # comparison against the identity and §11's frame measurement need the same
+        # value, and `orchestration` holds it once: a second helper would give this
+        # package two plaintext-handling sites where §5 obliges one.
+        check_provisioning_call(
             "connect_account",
             max_bytes=self._max_payload_bytes,
-            credential=secret,
             identity=named,
+            credential=secret,
         )
         return await self._tracked(
             self._connections.connect(identity=named, credential=secret),
@@ -3547,13 +3545,12 @@ class Engine:
         secret = secret_value(credential)
         handle = identifier(reference, name="reference")
         named = non_blank_text(identity, name="identity")
-        usable_identity(named, credential=secret)
-        check_provisioning_arguments(
+        check_provisioning_call(
             "reprovision_account",
             max_bytes=self._max_payload_bytes,
+            identity=named,
             credential=secret,
             reference=handle,
-            identity=named,
         )
         return await self._tracked(
             self._connections.reprovision(handle, identity=named, credential=secret),

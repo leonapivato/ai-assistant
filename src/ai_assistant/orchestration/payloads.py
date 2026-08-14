@@ -572,52 +572,40 @@ def grant_scope(value: Sequence[GrantScope], *, name: str) -> tuple[GrantScope, 
 _UNPRINTABLE_CATEGORIES: Final = frozenset({"Cc", "Zl", "Zp"})
 
 
-def usable_identity(identity: str, *, credential: SecretValue) -> str:
-    """Refuse an account identity ADR-0149 §4 does not admit (ADR-0151 §5).
+def _refuse_unusable_identity(identity: str, *, plaintext: str) -> None:
+    """ADR-0151 §5's three refusals, over a plaintext the caller already holds.
 
-    **Raised locally, before any I/O, by every implementation of
-    ``connect_account`` and ``reprovision_account``** — the wire client
-    included — "so both implementations refuse the same values without a round
-    trip and neither is silently more permissive" (ADR-0085 §9). No such call
-    reaches the hub, and **no credential is sent for one**, which is the property
-    that makes this worth duplicating rather than deferring to the store.
+    **Private, and takes the plaintext rather than the holder**, so that the one
+    site in this package materialising a credential is
+    :func:`check_provisioning_call` and nothing else. `wire/codec.py` carries its
+    own public ``usable_identity`` for the client, which unwraps under ADR-0151
+    §6's explicit authorisation and measures in ``_call`` against the limit the hub
+    published — a different shape for a different layer, and the duplication
+    ``pyproject.toml`` explains for every other validator in these two modules.
 
-    **It is an ``AssistantError`` rather than ADR-0085 §9's ``ValueError``, and
-    the distinction is §9's own** (ADR-0151 §2a). A ``ValueError`` there is "a
-    caller programming error rather than a condition of the system"; an identity
-    is a value the **user typed**, and a person pasting a token into the wrong
-    field has not made a programming error. ``wire/server.py`` converts an
-    ``AssistantError`` into an error frame and lets anything else close the
-    connection — and a dropped socket is the worst available outcome on the one
-    call that carries a credential, because the natural client response to a
-    dropped socket is to retry it.
+    **It is an ``AssistantError`` rather than ADR-0085 §9's ``ValueError``, and the
+    distinction is §9's own** (ADR-0151 §2a). §9's ``ValueError`` is "a caller
+    programming error rather than a condition of the system"; an identity is a
+    value the **user typed**, and a person pasting a token into the wrong field has
+    not made a programming error. ``wire/server.py`` converts an ``AssistantError``
+    into an error frame and lets anything else close the connection — and a dropped
+    socket is the worst available outcome on a call that carries a credential,
+    because the natural response to one is to retry it.
 
-    **One class for all three refusals, on ADR-0151 §2a's test**: in every case
-    the recourse is to supply a different identity, so one class is right and
-    three would be surface with no consumer.
-
-    **Nothing is normalised.** ADR-0149 §4 forbids stripping, case-folding,
-    case-normalising or Unicode-normalising a caller-supplied identity "at the
-    surface", and this is the surface; the value is returned byte-for-byte.
+    **One class for all three refusals**, on ADR-0151 §2a's test: in every case the
+    recourse is to supply a different identity, so one class is right and three
+    would be surface with no consumer. **Nothing is normalised** — ADR-0149 §4
+    forbids stripping, case-folding, case-normalising or Unicode-normalising a
+    caller-supplied identity "at the surface", and this is the surface.
 
     Args:
-        identity: The account identity as the caller passed it, already refused
-            blank or unencodable by :func:`non_blank_text`.
-        credential: The secret supplied in the **same call**, still wrapped. It is
-            read here and nowhere else in this module, and its plaintext reaches
-            no message, no log and no return value.
-
-    Returns:
-        The identity, unchanged — never stripped, never case-folded.
+        identity: The account identity as the caller passed it.
+        plaintext: The credential supplied in the same call, already unwrapped by
+            whoever is entitled to. It is compared and discarded; no branch below
+            names it, any part of it, or its length.
 
     Raises:
-        UnusableIdentityError: If the identity carries a Unicode control character
-            or a line break; if it is **equal**, as exact string comparison, to
-            the credential's plaintext; or if its UTF-8 encoding exceeds
-            :data:`~ai_assistant.core.types.ACCOUNT_IDENTITY_MAX_BYTES`. **The
-            message names neither value, no part of either, and no length of
-            either** (ADR-0151 §5, ADR-0125 §6) — the bound is a constant and may
-            be named; the rejected value's measurement may not.
+        UnusableIdentityError: On :func:`usable_identity`'s terms.
     """
     if any(unicodedata.category(char) in _UNPRINTABLE_CATEGORIES for char in identity):
         msg = (
@@ -630,7 +618,7 @@ def usable_identity(identity: str, *, credential: SecretValue) -> str:
     # and never after a write. Reading the plaintext here is the comparison ADR-0149
     # §4 requires; it is compared and discarded, and the branch below names neither
     # side of it.
-    if identity == credential.get_secret_value():
+    if identity == plaintext:
         msg = (
             "the account identity is the same value as the credential, so the "
             "credential was very likely pasted into the identity field. Nothing was "
@@ -644,57 +632,64 @@ def usable_identity(identity: str, *, credential: SecretValue) -> str:
             f"credential was sent"
         )
         raise UnusableIdentityError(msg)
-    return identity
 
 
-def check_provisioning_arguments(
-    method: str, *, max_bytes: int, credential: SecretValue, **arguments: object
+def check_provisioning_call(
+    method: str, *, max_bytes: int, identity: str, credential: SecretValue, **arguments: object
 ) -> None:
-    """Measure a provisioning call's **whole** argument payload (ADR-0151 §11).
+    """Every local refusal a provisioning call owes, over **one** read of the secret.
 
-    :func:`check_arguments` cannot be handed the credential directly:
-    :func:`project` is a total dispatch that ends in ``TypeError`` for a type it
-    has no canonical form for, and ``SecretStr`` is not a ``str`` subclass, so it
-    lands there (ADR-0151 §6). **That refusal is deliberate and stays** — it is what
-    stops pydantic's ``"**********"`` being encoded as a secret — so the credential's
-    contribution is measured by substituting the plaintext for the measurement and
-    for nothing else.
+    ADR-0151 §5's three identity refusals and §11's frame measurement, in one
+    function because they need the same value and `orchestration` may hold it once.
 
-    **Reading the plaintext here is authorised by the clause this function
-    implements, on §5's precedent.** ADR-0151 §11 requires that "where a
-    provisioning call's arguments do not fit the configured frame, the call raises
-    ``OversizedValueError`` and nothing is written", and ADR-0085 §9 makes a local
-    refusal every implementation's — the in-process engine included, which is the
-    only way ADR-0084 §4's substitutability survives a credential-carrying call. §5
-    already requires the same layer to read the same plaintext, for the exact
-    comparison against the identity. ADR-0151 §6's relay clause forbids
-    `orchestration` to **unwrap, log, retain beyond the call, copy into any other
-    value, retry with, or read back** the credential, and a measurement does none of
-    those: the plaintext is passed to the encoder, its byte length is compared, and
-    nothing derived from it is returned, stored or reported.
+    **One plaintext site in this package, and it is the one ADR-0151 §5
+    mandates.** §5 requires the identity to be compared "as an exact string
+    comparison, to the plaintext of the ``credential`` supplied in the same call",
+    "before the first of ADR-0148 §6's three writes", "in every implementation" —
+    so the in-process engine reads the plaintext whether or not anything else
+    does. §11 then requires that "where a provisioning call's arguments do not fit
+    the configured frame, the call raises ``OversizedValueError`` and nothing is
+    written", and ADR-0085 §9 makes a local refusal every implementation's, which
+    is the only way ADR-0084 §4's substitutability survives a credential-carrying
+    call: measured any other way, the in-process engine carries out a request the
+    wire client refuses, having written a credential into the keyring.
 
-    **The refusal names no length of the credential**, which is ADR-0125 §6 and is
-    why the size is not simply asserted here: :func:`check_payload` reports the
-    *whole payload's* size and names its largest member, and ``credential`` is a
-    member name rather than a value (ADR-0151 §6 requires that spelling anyway, so
-    ``core/logging.py``'s redaction covers it wherever a payload mapping is logged).
+    Doing both here is what keeps the count at one. An earlier shape measured in a
+    second function and gave `orchestration` two plaintext-handling sites where §5
+    obliges one — which adversarial review reported, correctly, as a widening of
+    ADR-0151 §6's relay clause rather than an application of §11.
+
+    **§6's relay clause stays true of everything else.** The plaintext is a local
+    that is compared, encoded for its length, and dropped: it is not logged, not
+    retained beyond the call, not copied into any other value, not returned, and
+    never read back. ``project`` stays closed to ``SecretStr`` (ADR-0151 §6), so
+    nothing here gives the codec, a pydantic serialiser or any other general
+    mechanism an automatic unwrap.
+
+    **No message names the credential or its length** (ADR-0125 §6).
+    :func:`check_payload` reports the whole payload's size and names its largest
+    *member*, and the member is spelled ``credential`` — which ADR-0151 §6 requires
+    anyway, so ``core/logging.py``'s key-name redaction covers it wherever a
+    payload mapping is logged.
 
     Args:
         method: The method being called, for the message.
         max_bytes: The contract limit in bytes.
+        identity: The account identity, already refused blank or unwritable by
+            :func:`non_blank_text`.
         credential: The secret this call carries, still wrapped.
         **arguments: The call's other arguments, named as the parameters are.
 
     Raises:
+        UnusableIdentityError: If the identity is one ADR-0149 §4 does not admit.
+            Raised **before** the measurement, so an unusable identity is refused
+            on its own terms rather than reported as an oversized payload.
         OversizedValueError: If the argument object's canonical encoding exceeds
-            ``max_bytes``. Nothing is written; no implementation truncates a
-            credential or an identity, splits the act across frames, or falls back
-            to another route, and raising ``hub_max_frame_bytes`` is the operator's
-            remedy and the only one offered (ADR-0151 §11).
+            ``max_bytes``. Nothing is written, nothing is truncated, and raising
+            ``hub_max_frame_bytes`` is the operator's only remedy (ADR-0151 §11).
     """
+    plaintext = credential.get_secret_value()
+    _refuse_unusable_identity(identity, plaintext=plaintext)
     check_arguments(
-        method,
-        max_bytes=max_bytes,
-        credential=credential.get_secret_value(),
-        **arguments,
+        method, max_bytes=max_bytes, credential=plaintext, identity=identity, **arguments
     )
