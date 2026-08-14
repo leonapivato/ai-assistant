@@ -758,10 +758,10 @@ class SqliteConnectionStore:
                 "ORDER BY sequence DESC LIMIT 1",
                 (entry.reference,),
             ).fetchone()
-            current = None if row is None else int(row[0])
+            current = None if row is None else _sequence(row[0])
             if current != expected_latest:
                 return None
-            if row is not None and entry.revision < _decoded(row[1:]).revision:
+            if row is not None and entry.revision < _decoded(_projection(row, at=1)).revision:
                 # Not a displacement — a caller that computed a revision below one
                 # the reference already holds. ADR-0148 §6 makes monotonicity the
                 # property a credential read's "unchanged since I looked" rests on,
@@ -776,7 +776,7 @@ class SqliteConnectionStore:
                 "INSERT INTO entries(reference, revision, data) VALUES (?, ?, ?)",
                 (entry.reference, entry.revision, entry.model_dump_json()),
             )
-            sequence = int(cursor.lastrowid or 0)
+            sequence = _sequence(cursor.lastrowid or 0)
         return StoredEntry(sequence, entry)
 
     async def remove(self, reference: str) -> Removal | None:
@@ -877,10 +877,12 @@ class SqliteConnectionStore:
         """
         async with self._lock:
             row = await _run_to_completion(self._latest_sync, reference)
-        return None if row is None else StoredEntry(row[0], _decoded(row[1:]))
+        if row is None:
+            return None
+        return StoredEntry(_sequence(row[0]), _decoded(_projection(row, at=1)))
 
-    def _latest_sync(self, reference: str) -> tuple[int, str, int, str] | None:
-        """Read the reference's newest row."""
+    def _latest_sync(self, reference: str) -> Sequence[object] | None:
+        """Read the reference's newest row, uncoerced."""
         try:
             row = self._conn.execute(
                 "SELECT sequence, reference, revision, data FROM entries WHERE reference = ? "
@@ -890,7 +892,7 @@ class SqliteConnectionStore:
         except sqlite3.Error as exc:
             msg = f"failed to read connection {reference!r}: {exc}"
             raise ConnectionStoreError(msg) from exc
-        return None if row is None else (int(row[0]), str(row[1]), int(row[2]), str(row[3]))
+        return None if row is None else tuple(row)
 
     async def live(self) -> tuple[ConnectedAccount, ...]:
         """Every reference's live record (ADR-0149 §3, ADR-0151 §9).
@@ -1037,7 +1039,7 @@ class SqliteConnectionStore:
         except sqlite3.Error as exc:
             msg = f"failed to {what}: {exc}"
             raise ConnectionStoreError(msg) from exc
-        return [(str(row[0]), int(row[1]), str(row[2])) for row in rows]
+        return [_projection(row, at=0) for row in rows]
 
     def close(self) -> None:
         """Close the underlying database connection."""
@@ -1099,6 +1101,61 @@ def _revalidated(entry: ConnectionEntry) -> ConnectionEntry:
     if rebuilt.identity is not None:
         printable_identity(rebuilt.identity)
     return rebuilt
+
+
+def _sequence(value: object) -> int:
+    """Coerce a row's ``sequence`` column, which is the compare-and-swap's token.
+
+    Separate from :func:`_projection` because the swap reads it without the rest
+    of the row, and a token this code cannot read is a store it cannot swap on.
+
+    Raises:
+        ConnectionStoreError: If the value is not an integer this code wrote.
+    """
+    try:
+        coerced = int(value)  # type: ignore[call-overload]  # sqlite3 hands back Any
+    except (ValueError, TypeError, OverflowError) as exc:
+        msg = f"the connection store holds a row whose position this code cannot read: {exc}"
+        raise ConnectionStoreError(msg) from exc
+    if not isinstance(coerced, int):  # pragma: no cover -- int() answers an int
+        msg = "the connection store holds a row whose position this code cannot read"
+        raise ConnectionStoreError(msg)
+    return coerced
+
+
+def _projection(row: Sequence[object], *, at: int) -> tuple[str, int, str]:
+    """Read a row's ``(reference, revision, data)`` projection, coercing safely.
+
+    ``sqlite3`` hands back whatever the file holds, and this store's columns carry
+    no type affinity strong enough to promise otherwise: a hand-built or corrupted
+    database can put a string, a NULL or a float in ``revision``, where a bare
+    ``int(...)`` raises ``ValueError``, ``TypeError`` or ``OverflowError``. None of
+    those is an :class:`~ai_assistant.core.errors.AssistantError`, so each would
+    leave this layer's error boundary through a hole — the same hole #238 records
+    on the audit trail — and reach a caller that was promised
+    :class:`~ai_assistant.core.errors.ConnectionStoreError` for a store it cannot
+    read.
+
+    Args:
+        row: The selected row, projected columns first.
+        at: Where ``reference`` starts, so the one caller that also selects
+            ``sequence`` can share this.
+
+    Returns:
+        The coerced projection.
+
+    Raises:
+        ConnectionStoreError: If the row's columns are not the shape this store
+            wrote — a corrupt database, reported rather than coerced past. The
+            revision goes through :func:`_sequence`, which is the same coercion
+            the swap token takes and for the same reason.
+    """
+    try:
+        reference, revision, data = row[at], row[at + 1], row[at + 2]
+    except IndexError as exc:
+        msg = f"the connection store holds a row this code did not write: {exc}"
+        raise ConnectionStoreError(msg) from exc
+    return str(reference), _sequence(revision), str(data)
 
 
 def _decoded(row: tuple[str, int, str]) -> ConnectionEntry:
