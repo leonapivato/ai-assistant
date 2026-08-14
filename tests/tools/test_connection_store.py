@@ -192,8 +192,16 @@ async def test_a_persisted_identity_outside_the_shape_is_reported_on_the_way_out
         await store.live()
 
 
+@pytest.mark.parametrize(
+    "corrupted",
+    [
+        pytest.param("'not-a-number'", id="text"),
+        pytest.param("1.5", id="fractional"),
+        pytest.param("X'00'", id="blob"),
+    ],
+)
 async def test_a_projection_this_code_cannot_read_is_reported_not_coerced(
-    store: SqliteConnectionStore,
+    store: SqliteConnectionStore, corrupted: str
 ) -> None:
     """Every read raises from the ``AssistantError`` hierarchy, corruption included.
 
@@ -203,18 +211,24 @@ async def test_a_projection_this_code_cannot_read_is_reported_not_coerced(
     :class:`~ai_assistant.core.errors.AssistantError` and would leave this layer's
     error boundary through the hole #238 records on the audit trail.
 
-    ``sequence`` is not parametrised beside it because SQLite refuses the same
-    edit outright: it is the table's ``INTEGER PRIMARY KEY``, so the rowid rule
-    rejects a non-integer with a datatype mismatch. Its coercion is kept anyway,
-    on the same footing as every other read of a value this code did not just
-    write.
+    **The fractional case is why this refuses rather than converts.** ``int(1.5)``
+    is ``1``, which decodes against a JSON revision of 1 and passes the projection
+    check — while ``recent``'s ``GROUP BY revision`` has already split that one act
+    into two groups reported at the same revision. A conversion hides it; a type
+    test does not.
+
+    ``sequence`` is not parametrised beside ``revision`` because SQLite refuses
+    the same edit outright: it is the table's ``INTEGER PRIMARY KEY``, so the
+    rowid rule rejects a non-integer with a datatype mismatch. Its check is kept
+    anyway, on the same footing as every other read of a value this code did not
+    just write.
     """
     await store.append(entry(), expected_latest=None)
     conn: sqlite3.Connection = store._conn
     with conn:
-        conn.execute("UPDATE entries SET revision = 'not-a-number'")
+        conn.execute(f"UPDATE entries SET revision = {corrupted}")  # noqa: S608
 
-    with pytest.raises(ConnectionStoreError, match="this code"):
+    with pytest.raises(ConnectionStoreError, match="the store is corrupt"):
         await store.latest("ref-1")
 
 
