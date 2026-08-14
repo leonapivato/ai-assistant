@@ -5,11 +5,17 @@ ADR-0016 §1's "declared, not inferred", with every safety field stating what a
 send actually risks — and the integration is **inert**: unregistered, and paired
 with a callable that refuses. A lane that later designates the seam changes the
 second and should not need to change the first.
+
+The declaration is now the schema's, in ADR-0152 §3's two keywords, so the cases
+below read it where the binding seam reads it — and one of them reads it *through*
+``read_declaration``, because a schema that looks right to a reviewer and a schema
+the reader accepts are two different claims.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
+from typing import TYPE_CHECKING
 
 import pytest
 from pydantic import ValidationError
@@ -18,26 +24,46 @@ from ai_assistant.core.errors import ToolError
 from ai_assistant.core.types import (
     CostBasis,
     DataTier,
+    DestinationProtocol,
     Idempotency,
     Reversibility,
     RiskLevel,
     ToolDefinition,
+    parameter_violations,
 )
 from ai_assistant.testing import FakeMemoryStore
 from ai_assistant.tools.builtin import build_default_registry
-from ai_assistant.tools.destination_arguments import DestinationSelectionError
-from ai_assistant.tools.destinations import canonical_destination_set
-from ai_assistant.tools.payload_description import DiscloserProvenance, SpanRef
+from ai_assistant.tools.egress_declaration import (
+    DESTINATION_KEYWORD,
+    TIER_KEYWORD,
+    read_declaration,
+)
 from ai_assistant.tools.send_email import (
     SEND_EMAIL,
-    SEND_EMAIL_DECLARATION,
-    SEND_EMAIL_DESTINATIONS,
     SEND_EMAIL_ID,
-    SEND_EMAIL_PAYLOAD,
     SendEmail,
     UndesignatedSeamError,
-    describe_send_email,
 )
+
+if TYPE_CHECKING:
+    from ai_assistant.core.types import FrozenJson
+
+_RECIPIENT_ARGUMENTS = ("to", "cc", "bcc")
+
+
+def _properties() -> Mapping[str, FrozenJson]:
+    """The schema's top-level ``properties`` object, checked to be one."""
+    properties = SEND_EMAIL.parameters_schema["properties"]
+    assert isinstance(properties, Mapping)
+    return properties
+
+
+def _subschema(name: str) -> Mapping[str, FrozenJson]:
+    """One top-level property's own subschema, checked to be one."""
+    subschema = _properties()[name]
+    assert isinstance(subschema, Mapping)
+    return subschema
+
 
 _ARGUMENTS = {
     "to": ("bob@example.com",),
@@ -112,115 +138,146 @@ def test_the_definition_declares_the_one_schema_dialect_that_is_read() -> None:
     assert SEND_EMAIL.parameters_schema["additionalProperties"] is False
 
 
-def test_every_argument_the_schema_admits_is_covered_by_the_payload_declaration() -> None:
-    """ADR-0148 §6: the description covers **every span the call transmits**.
+def test_every_recipient_argument_declares_both_keywords_and_no_other_does() -> None:
+    """ADR-0152 §3: two keywords, on the immediate subschema of a top-level property.
 
-    With ``additionalProperties: false`` the schema's properties are exactly the
-    arguments a call can carry, so this join is what makes coverage a property of
-    the declaration rather than of the arguments any particular call happens to
-    bring.
+    Asserted over the whole ``properties`` object rather than over the three
+    recipient names, so an argument added later without a declaration fails here
+    instead of reaching the seam as a silently undeclared span.
+
+    ``subject`` and ``body`` carrying **neither** keyword is the statement, not an
+    omission. ADR-0152 §3 puts ``x-egress-tier`` "exactly where the argument's
+    field **establishes** that tier", and ADR-0146 §5 rules that a subject line and
+    a body do not — they carry "arbitrary text the user supplied", so stating a
+    tier for them would assert a fact nobody established.
     """
-    properties = SEND_EMAIL.parameters_schema["properties"]
-    assert isinstance(properties, Mapping)
-
-    assert set(properties) == {argument.name for argument in SEND_EMAIL_PAYLOAD.arguments}
-
-
-def test_every_destination_bearing_argument_is_one_the_schema_declares() -> None:
-    """A declaration naming a field the schema does not admit selects nobody."""
-    properties = SEND_EMAIL.parameters_schema["properties"]
-    assert isinstance(properties, Mapping)
-
-    assert {argument.name for argument in SEND_EMAIL_DESTINATIONS.arguments} <= set(properties)
-
-
-def test_the_recipient_fields_are_the_destination_bearing_ones() -> None:
-    """``bcc`` is a recipient, and omitting it would be a mis-declaration.
-
-    ADR-0148 §2's third clause: an integration that "believed its operation selects
-    nothing while an argument in fact names a recipient has mis-declared its
-    destination-bearing arguments, which is a defect in the same class as a
-    mis-declared ``discloses``."
-    """
-    assert [argument.name for argument in SEND_EMAIL_DESTINATIONS.arguments] == [
-        "to",
-        "cc",
-        "bcc",
-    ]
-
-
-def test_the_recipient_fields_establish_a_tier_and_the_free_text_fields_do_not() -> None:
-    """ADR-0146 §5's test applied field by field, which is where §5's round 4 bit.
-
-    "a message body, a note, a subject line" carry "arbitrary text the user
-    supplied … however well the implementation knows what that field is for", so
-    they establish no tier; a recipient list passes the test and establishes
-    ``PERSONAL``.
-    """
-    established = {
-        argument.name: argument.establishes_tier for argument in SEND_EMAIL_PAYLOAD.arguments
+    declared = {
+        name: {keyword for keyword in (DESTINATION_KEYWORD, TIER_KEYWORD) if keyword in subschema}
+        for name, subschema in _properties().items()
+        if isinstance(subschema, Mapping)
     }
 
-    assert established == {
-        "to": DataTier.PERSONAL,
-        "cc": DataTier.PERSONAL,
-        "bcc": DataTier.PERSONAL,
-        "subject": None,
-        "body": None,
+    assert declared == {
+        "to": {DESTINATION_KEYWORD, TIER_KEYWORD},
+        "cc": {DESTINATION_KEYWORD, TIER_KEYWORD},
+        "bcc": {DESTINATION_KEYWORD, TIER_KEYWORD},
+        "subject": set(),
+        "body": set(),
     }
 
 
-def test_the_declaration_binds_both_halves_to_this_tool() -> None:
-    """Built at import, so a tool whose halves disagree does not load.
+def test_each_keyword_carries_its_enum_members_own_string_value() -> None:
+    """ADR-0152 §3: the value is the member's own ``value``, and nothing else.
 
-    ADR-0016 §1's posture — "a tool that does not declare its reach does not load"
-    — applied to the pair rather than to one declaration.
+    A value naming no member of its enum is refused rather than read as "no
+    declaration", so a near-miss here — ``"SMTP"``, ``"email"``, ``"Personal"`` —
+    would make the tool unbindable rather than under-declared. Asserted against the
+    enums rather than against string literals, so a member renamed in ``core``
+    fails here rather than at the seam.
     """
-    assert SEND_EMAIL_DECLARATION.tool_id == SEND_EMAIL.id
-    assert SEND_EMAIL_DECLARATION.payload is SEND_EMAIL_PAYLOAD
-    assert SEND_EMAIL_DECLARATION.recipients is SEND_EMAIL_DESTINATIONS
+    for name in _RECIPIENT_ARGUMENTS:
+        assert _subschema(name)[DESTINATION_KEYWORD] == DestinationProtocol.SMTP.value
+        assert _subschema(name)[TIER_KEYWORD] == DataTier.PERSONAL.value
 
 
-def test_describing_a_send_yields_both_forms_and_one_canonical_member() -> None:
-    """ADR-0148 §14's alias case end to end, through the tool's own declarations."""
-    description = describe_send_email(
-        {**_ARGUMENTS, "to": ("Bob@Example.com",), "cc": ("bob@example.com",)},
-        provenance={SpanRef(argument="body"): DiscloserProvenance.USER_AUTHORED},
+def test_every_recipient_argument_is_declared_flat() -> None:
+    """ADR-0152 §4: a string, or an array whose ``items`` is a string, and no other.
+
+    What the constraint buys is structural rather than stylistic: a supplied form
+    is never extracted from inside a structured value, so ADR-0150 §4's
+    supplied-form invariant is total. A recipient argument declared any other way
+    is refused when the declaration is read, before any call is made — so this is
+    the shape that keeps the tool bindable at all.
+    """
+    for name in _RECIPIENT_ARGUMENTS:
+        assert _subschema(name)["type"] == "array"
+        assert _subschema(name)["items"] == {"type": "string"}
+
+
+def test_the_required_arguments_bound_is_not_shared_with_the_optional_two() -> None:
+    """``to``'s ``minItems`` is ``to``'s, and a shared literal would leak it.
+
+    Asserted over the values rather than over object identity, because the values
+    are what a call is evaluated against: ``core`` freezes what a
+    ``ToolDefinition`` holds, so the aliasing hazard lives in the literal the
+    module hands it, and its only observable effect is a ``minItems`` stated for
+    the required argument silently applying to the optional two — which would
+    refuse a call that omits ``cc``.
+    """
+    assert _subschema("to") == {**_subschema("cc"), "minItems": 1}
+    assert "minItems" not in _subschema("cc")
+    assert "minItems" not in _subschema("bcc")
+
+
+def test_the_declaration_the_seam_reads_is_the_one_this_tool_intends() -> None:
+    """The join between what the tool declares and what ADR-0152 §3's reader makes of it.
+
+    Read through ``read_declaration`` rather than by inspecting the schema, because
+    the schema passing an eye test says nothing about whether the reader accepts
+    it: a keyword one level too deep, a value naming no enum member, or a
+    destination-bearing argument stating no tier are each refusals rather than
+    quiet omissions, and this is what pins that none of them is present.
+    """
+    declaration = read_declaration(
+        SEND_EMAIL.parameters_schema,
+        tool_id=SEND_EMAIL.id,
+        canonicalises=frozenset(DestinationProtocol),
     )
 
-    assert [(one.supplied, one.canonical) for one in description.destinations] == [
-        ("Bob@Example.com", "Bob@example.com"),
-        ("bob@example.com", "bob@example.com"),
-    ]
-    assert canonical_destination_set(description.destinations) == (
-        "Bob@example.com",
-        "bob@example.com",
-    )
+    assert declaration.named == ("to", "cc", "bcc", "subject", "body")
+    assert {
+        name: (argument.protocol, argument.tier) for name, argument in declaration.arguments.items()
+    } == {
+        "to": (DestinationProtocol.SMTP, DataTier.PERSONAL),
+        "cc": (DestinationProtocol.SMTP, DataTier.PERSONAL),
+        "bcc": (DestinationProtocol.SMTP, DataTier.PERSONAL),
+        "subject": (None, None),
+        "body": (None, None),
+    }
 
 
-def test_describing_a_send_states_no_tier_for_the_body_the_user_wrote() -> None:
-    """The description ADR-0146 §5 calls honest, produced by the tool that owes it."""
-    description = describe_send_email(
-        _ARGUMENTS, provenance={SpanRef(argument="body"): DiscloserProvenance.USER_AUTHORED}
-    )
+def test_the_keywords_leave_the_schema_validating_identically() -> None:
+    """ADR-0152 §3: an unknown keyword is an annotation, so validation is unchanged.
 
-    body = next(span for span in description.spans if span.span.argument == "body")
-    assert body.tier is None
-    assert body.provenance is DiscloserProvenance.USER_AUTHORED
-    assert body.characters == len("see you at one")
+    Draft 2020-12 ignores a keyword it does not know, which is what lets the
+    declaration ride in ``parameters_schema`` without touching ADR-0145 §5's
+    one-dialect rule. Demonstrated against the repository's own evaluator rather
+    than against the specification, over an accepted call and a rejected one — a
+    schema that accepted everything would pass the first limb alone.
+    """
+    stripped: Mapping[str, FrozenJson] = {
+        **SEND_EMAIL.parameters_schema,
+        "properties": {
+            name: (
+                {
+                    key: value
+                    for key, value in subschema.items()
+                    if key not in (DESTINATION_KEYWORD, TIER_KEYWORD)
+                }
+                if isinstance(subschema, Mapping)
+                else subschema
+            )
+            for name, subschema in _properties().items()
+        },
+    }
+    accepted: Mapping[str, FrozenJson] = {
+        "to": ("bob@example.com",),
+        "subject": "lunch",
+        "body": "one o'clock",
+    }
+    rejected: Mapping[str, FrozenJson] = {
+        "to": (),
+        "subject": "lunch",
+        "body": "one o'clock",
+        "attachment": "x",
+    }
 
-
-def test_describing_a_send_is_deterministic() -> None:
-    """§6's determinism clause, at the surface a request builder would call."""
-    assert describe_send_email(_ARGUMENTS, provenance={}) == describe_send_email(
-        _ARGUMENTS, provenance={}
-    )
-
-
-def test_a_send_with_an_uncanonicalisable_recipient_is_refused_before_any_ruling() -> None:
-    """ADR-0148 §1's third clause: no ruling is sought for a request like this."""
-    with pytest.raises(DestinationSelectionError):
-        describe_send_email({**_ARGUMENTS, "to": ("bob@[192.0.2.1]",)}, provenance={})
+    for parameters in (accepted, rejected):
+        assert parameter_violations(SEND_EMAIL.parameters_schema, parameters) == (
+            parameter_violations(stripped, parameters)
+        )
+    assert parameter_violations(SEND_EMAIL.parameters_schema, accepted) == ()
+    assert parameter_violations(SEND_EMAIL.parameters_schema, rejected) != ()
 
 
 def test_the_definition_is_frozen() -> None:

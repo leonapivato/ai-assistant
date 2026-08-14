@@ -12,14 +12,15 @@ than on a new :class:`~ai_assistant.core.types.ToolDefinition` field:
   exactly where the argument's field **establishes** that tier (ADR-0146 §5).
 
 **Two rather than the producer's four is a result rather than a simplification.**
-:mod:`ai_assistant.tools.destination_arguments` carries ``protocol``, ``multiple``
-and ``required`` per recipient argument and
-:mod:`ai_assistant.tools.payload_description` carries ``establishes_tier`` and
-``multiple`` per transmitted one. ADR-0150 §4 has since removed three of the five:
-the decomposition is the *value's*, the coverage is total over the arguments, and
-requiredness is JSON Schema's own ``required``. What is left is exactly the two
-facts the schema cannot state, and neither is derivable from anything — ADR-0016
-§1's "declared, not inferred" holding at the two places it still bites.
+PR #1120's producer carried ``protocol``, ``multiple`` and ``required`` per
+recipient argument across one declaration and ``establishes_tier`` and
+``multiple`` per transmitted one across another. ADR-0150 §4 has since removed
+three of the five: the decomposition is the *value's*, the coverage is total over
+the arguments, and requiredness is JSON Schema's own ``required``. What is left is
+exactly the two facts the schema cannot state, and neither is derivable from
+anything — ADR-0016 §1's "declared, not inferred" holding at the two places it
+still bites. :mod:`ai_assistant.tools.send_email` is that producer migrated onto
+the result, and carries no declaration outside its own schema.
 
 **Read only on the immediate subschema of a top-level property, and refused
 anywhere else** (ADR-0152 §3). A keyword nested inside ``items``, inside a
