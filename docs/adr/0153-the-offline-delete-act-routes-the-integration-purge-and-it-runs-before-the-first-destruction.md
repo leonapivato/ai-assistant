@@ -775,7 +775,12 @@ on the **`service`→`tools`** boundary, which no other in-flight decision reach
 > a store naming no slot completes and touches no keyring; `purge` deletes every
 > distinct slot the store names including a superseded one and a removed one, then
 > removes the entries; a `purge` whose slot deletion raises leaves **every** entry
-> in place and re-raises; `purge` is idempotent, so a second call after a failure
+> in place and re-raises; a `purge` cancelled while a deletion is in flight leaves
+> **every** entry in place, has released or completed whatever it acquired by the
+> moment the `CancelledError` leaves it — ADR-0060's resource half, which only a
+> subject the suite drives can be held still long enough to observe — and lets that
+> `CancelledError` propagate rather than converting it; `purge` is idempotent, so a
+> second call after a failure
 > completes and a second call after a success does nothing and raises nothing; the
 > subject satisfies `ConnectionPurger` by `isinstance`; and no credential value,
 > `SecretName` or slot appears in any return value or in any error the subject
@@ -799,7 +804,9 @@ on the **`service`→`tools`** boundary, which no other in-flight decision reach
 > every live connection's reference and identity; and an externally delivered
 > cancellation during the purge destroys no entry in `data_dir`, leaves the
 > connection store closed rather than orphaned and every one of its entries in place,
-> and propagates the `CancelledError` rather than exiting through `classify`.
+> is followed by the act closing the store only **after** `purge` has returned
+> control to it, and propagates the `CancelledError` rather than exiting through
+> `classify`.
 
 **The second clause exists because the first cannot reach the failure that
 matters.** §4's obligations are on the act, not on the seam, and a conformance
@@ -810,6 +817,17 @@ this ADR exists to prevent — which is the gap ADR-0149 §8 found in its own ea
 draft, where "slots before the store" was satisfied by a purge that destroyed the
 store after a deletion raised. The repair is the same instrument: name the failure
 path as a test obligation on the lane that owns the code the failure lives in.
+
+**The cancellation obligations are split across the two clauses by the same test,
+and the split is what makes each of them observable.** Whether a cancelled `purge`
+left a worker still using the store is a fact about the purger — if it awaits a
+`to_thread` deletion, the thread can outlive the `CancelledError` — and only a suite
+driving a subject it can block long enough to look is in a position to assert it, so
+ADR-0060's resource half is pinned there. What the act can be held to is the
+ordering: it closes the store only after `purge` has returned control to it, so its
+own close cannot race work the purge still holds. An act-side test that observed a
+propagated cancellation and a closed store and nothing else would pass straight over
+that race, which is why neither clause carries the pair alone.
 
 **Discharging the precondition by ratification is what ADR-0149 §8's clause
 literally says, and the implementation precondition is what makes it honest.**
@@ -1111,7 +1129,9 @@ acquired safe under cancellation and that a cancellation delivered from outside 
 delivered onward rather than converted into a return value or a report. §4 applies
 it rather than narrowing it, and states both halves for this act: the connection
 store and everything opened to reach it are closed, and the `CancelledError`
-propagates unclassified. ADR-0151 §7 made the identical carve-out for a provisioning
+propagates unclassified — and §8 puts that resource half on the purger too, in the
+conformance suite, which is the only place a subject can be held still long enough to
+observe it. ADR-0151 §7 made the identical carve-out for a provisioning
 act one ADR earlier — "`CancelledError` is not one … propagates unconverted" — and is
 followed rather than extended, since its own clause is about that ADR's provisioning
 classification and reaches no purge. A reader holding only either one acts
