@@ -168,10 +168,11 @@
   ADR-0155 §5's third clause states in terms that §6's rights reach this system's own
   store and have never reached a message the owner sent, and §5's second clause
   states that ADR-0119 §12's absolute no-egress clause on evaluation traces is
-  stricter and untouched. ADR-0155 adds no `core` surface, attests, relaxes and adds
-  no condition of ADR-0017 §3, registers no tool and authorises no destination.
+  stricter and untouched. ADR-0155 adds no `core` surface, attests no condition of
+  ADR-0017 §3 and relaxes and adds none, registers no tool and authorises no
+  destination.
   **#95 is answered**; #57, #74, #83, #89 and the residues ADR-0154 §6 carries stay
-  open on their own terms.
+  open on their own terms. The enforcement gap ADR-0155 §4 names is **#1154**.
 - Note (2026-07-20): **§2's egress clause is superseded by ADR-0017.** That
   clause named `models/` the only component permitted to send user data
   off-device; ADR-0017 §1 replaces it with `models/` plus a designated

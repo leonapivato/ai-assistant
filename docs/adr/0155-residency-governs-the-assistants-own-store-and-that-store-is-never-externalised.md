@@ -493,12 +493,12 @@ ADR-0015 §5 put it in its own ADR, and ADR-0073 §4's standing test — decided
 producer in hand" — is unmet while no tool is registered, which is the ground
 ADR-0146 §8 used to defer the marker itself.
 
-**Filed as an issue rather than left in prose**, so it is tracked where a lane will
-meet it: the gap is recorded with §3 as its rule, ADR-0152 §5's provenance residue
-and ADR-0146 §5's third clause as its neighbours, and **its trigger is the first
-lane that registers an integration whose declared arguments admit free text**. That
-is a strictly earlier trigger than "the first externalisation", which is the point
-of stating it.
+**Filed as issue #1154 rather than left in prose**, so it is tracked where a lane
+will meet it: the gap is recorded there with §3 as its rule, ADR-0152 §5's
+provenance residue and ADR-0146 §5's third clause as its neighbours, and **its
+trigger is the first lane that registers an integration whose declared arguments
+admit free text**. That is a strictly earlier trigger than "the first
+externalisation", which is the point of stating it.
 
 **Why §3 is worth ratifying with no mechanism behind it.** ADR-0017 §4's honest
 accounting is the precedent — "an import contract is a net, not a proof" — and so is
