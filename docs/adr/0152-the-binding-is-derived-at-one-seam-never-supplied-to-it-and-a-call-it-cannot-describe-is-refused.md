@@ -186,7 +186,8 @@ convention.
 > reason — the seam is the only place the caller's definition and an untampered
 > original meet — and it is not a substitute for that one, which still runs at
 > `invoke`. Where the implementation holds **no** registration for that id, this
-> clause is not reached and §8 governs the answer whole.
+> clause is not reached and §8 governs the answer, subject to the revalidation clause
+> below, which runs ahead of it.
 
 > **Normative.** `parameters` is the `FrozenJsonMapping` the `ActionRequest` will
 > carry, unaltered. Neither member returns parameters, amends them, defaults a
@@ -780,9 +781,11 @@ carries.
 > a refusal, not the weaker of the two readings.
 
 > **Normative.** `rebind` called with `approved` of `None` returns `None` on
-> exactly the condition §8 states for `bind` — no egress registration for `tool.id`
-> **and** neither §3 keyword on its schema — and refuses on §8's other limb. The
-> two members answer the no-registration case identically; §8's partition governs
+> exactly the condition §8 states for `bind` — §1's revalidation of its arguments
+> succeeded, no egress registration for `tool.id` **and** neither §3 keyword on its
+> schema — and refuses on §8's other limb. The gloss restates §8's condition and does
+> not narrow it: where the two differ, §8's clause governs. The two members answer the
+> no-registration case identically; §8's partition and its revalidation ordering govern
 > both, and nothing in this section states a second condition for it.
 
 **Re-deriving and comparing is ADR-0148 §6's determinism clause being used, not
@@ -837,12 +840,21 @@ the ruling and the transmission.
 
 ### 8. A tool with no connected account is not an egress call, and the non-egress path is untouched
 
-> **Normative.** `bind` returns `None` **exactly when** the seam holds no egress
-> registration for `tool.id` — that is, no connected account bound to it — **and**
-> `tool.parameters_schema` carries neither §3 keyword. `None` is the whole answer
-> for such a call: it is not an egress call, it carries no binding, and every
-> refusal in §6 is inapplicable to it. `None` never signals a failure, and no lane
-> reads it as one.
+> **Normative.** `bind` returns `None` **exactly when** §1's revalidation of its
+> arguments **succeeded**, the seam holds no egress registration for `tool.id` — that
+> is, no connected account bound to it — **and** `tool.parameters_schema` carries
+> neither §3 keyword. `None` is the whole answer for such a call: it is not an egress
+> call, it carries no binding, and every refusal in §6 is inapplicable to it. `None`
+> never signals a failure, and no lane reads it as one.
+
+> **Normative.** §1's revalidation runs **ahead of** the condition above, and the
+> ordering is forced rather than chosen: evaluating that condition reads `tool.id` and
+> `tool.parameters_schema`, which are fields of an argument §1 revalidates before any
+> field of it is read. A call whose arguments fail revalidation is therefore
+> **refused**, on this branch exactly as on every other, and never reaches the
+> condition at all. `None` is an answer about a **non-egress tool** and never an answer
+> about a malformed argument, and no lane reads §1's revalidation as inapplicable to a
+> tool this seam holds no registration for.
 
 > **Normative.** What makes a tool an egress tool is the **connected account it is
 > registered against** (ADR-0148 §6's one-account clause), and not the presence of a
@@ -856,8 +868,11 @@ the ruling and the transmission.
 > declaring destinations or tiers to this seam while registered against no account
 > is mis-registered, and returning `None` would silently discard a declaration its
 > author wrote. This clause and the `None` clause above **partition** the
-> no-egress-registration case: exactly one of the two applies to any such tool, and
-> no tool is both returned `None` for and refused.
+> no-egress-registration case **for a call whose arguments revalidated**: exactly one
+> of the two applies to any such tool, and no tool is both returned `None` for and
+> refused **under this section**. A revalidation refusal (§1) is neither limb of that
+> partition and precedes both, so it neither widens the refusing limb nor narrows the
+> `None` one.
 
 > **Normative.** A caller receiving `None` builds its `ActionRequest` with
 > `egress_binding=None`, which is ADR-0150 §1's default and its stated `None`
@@ -1065,10 +1080,12 @@ implementing lane's obligation.
 > **Normative.** The seam's read budget is **at most one** read per call, and it is
 > the connection record §8 names: the record for the reference the tool's egress
 > registration carries, for its connectability and its account identity and for
-> nothing else. Where the seam holds an egress registration for `tool.id` it reads
-> **exactly** that one record; where it holds none — §8's `None` path and §8's
-> keyword refusal alike — it reads **none**, because there is no reference to name
-> one. It reads no keyring, no memory store, no plan store, no audit trail, no grant
+> nothing else. Where the seam holds an egress registration for `tool.id` and the
+> call's arguments revalidated (§1) it reads **exactly** that one record; where it
+> holds none — §8's `None` path and §8's keyword refusal alike — it reads **none**,
+> because there is no reference to name one. A call refused by §1's revalidation
+> reads **none** either way, since that refusal precedes the registration lookup;
+> the budget is a ceiling and no refusal raises it. It reads no keyring, no memory store, no plan store, no audit trail, no grant
 > store, no notification store and no second connection record, and it performs no
 > write of any kind anywhere. A lane that finds it needs a second read is changing
 > this decision.
@@ -1364,9 +1381,13 @@ rather than a gap discovered late.
 > whose field was replaced by `object.__setattr__` after construction. Each is
 > refused with an `EgressBindingError` **chained from** the underlying
 > `ValidationError`, and never with an `AttributeError`, a `TypeError`, a bare
-> `ValidationError` or a binding. A test that constructs its inputs ordinarily
-> reaches none of these, and one covering `bind`'s arguments alone leaves `rebind`'s
-> untested.
+> `ValidationError` or a binding. Each is exercised against a tool this seam holds
+> **no** egress registration for and whose schema carries neither §3 keyword, as well
+> as against a registered one: that is the branch §8 would otherwise answer with
+> `None`, so it is where the revalidation ordering §8 states is actually pinned, and a
+> suite exercising only the egress branch leaves it unpinned. A test that constructs
+> its inputs ordinarily reaches none of these, and one covering `bind`'s arguments
+> alone leaves `rebind`'s untested.
 
 > **Normative.** That lane ships the **detachment** case §1's `approved` clause is
 > stated for: an `object.__setattr__` performed on the caller's `approved` binding
