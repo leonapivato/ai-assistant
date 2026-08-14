@@ -246,6 +246,27 @@ def test_a_declaration_naming_no_tool_is_refused_without_rendering_it() -> None:
     assert needle not in str(raised.value)
 
 
+@pytest.mark.parametrize("truthy", [[], ["yes"], 0, 1, None])
+def test_a_declaration_whose_flags_are_not_stated_is_refused(truthy: object) -> None:
+    """Adversarial round 12: both flags decide behaviour rather than describe it.
+
+    `required` decides whether an absent recipient argument refuses the call and
+    `multiple` decides whether a value is one destination or many, so reading
+    either for truthiness changes the recipient set a call selects instead of
+    refusing the declaration. Truthy and falsy cases both, since a wrong answer
+    in either direction is a different selection.
+    """
+    forged = DestinationArgument(
+        name="to",
+        protocol=DestinationProtocol.SMTP,
+        multiple=True,
+        required=truthy,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(DestinationSelectionError, match="is not stated"):
+        DestinationDeclaration(tool_id="send_email", arguments=(forged,))
+
+
 def test_a_declaration_naming_a_nameless_argument_is_refused() -> None:
     """An argument with no name selects from no field and describes no span."""
     nameless = DestinationArgument(
