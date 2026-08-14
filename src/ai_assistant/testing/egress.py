@@ -102,6 +102,13 @@ def _refuse(message: str) -> EgressBindingError:
 _ATEXT: Final = frozenset(string.ascii_letters + string.digits + "!#$%&'*+-/=?^_`{|}~")
 _LDH: Final = frozenset(string.ascii_letters + string.digits + "-")
 
+#: RFC 5321 §4.5.3.1.1, §4.5.3.1.2 and RFC 1035 §2.3.4's ceilings, in octets. Here
+#: because a form longer than these has no canonical form at the seam either, and a
+#: fake that accepted one would certify a seam that does not exist.
+_MAX_LOCAL_PART_OCTETS: Final = 64
+_MAX_DOMAIN_OCTETS: Final = 255
+_MAX_LABEL_OCTETS: Final = 63
+
 
 def _canonical_smtp(supplied: str) -> str:
     """This implementation's SMTP canonicaliser: lower the domain, keep the local part.
@@ -148,6 +155,9 @@ def _check_local_part(local_part: str) -> None:
     if not local_part:
         msg = "an email address has a non-empty local part (RFC 5321 §4.1.2)"
         raise ValueError(msg)
+    if len(local_part.encode()) > _MAX_LOCAL_PART_OCTETS:
+        msg = f"a local part is at most {_MAX_LOCAL_PART_OCTETS} octets (RFC 5321 §4.5.3.1.1)"
+        raise ValueError(msg)
     if '"' in local_part or "\\" in local_part:
         msg = "a quoted local part's equivalence to any other form is not established"
         raise ValueError(msg)
@@ -168,10 +178,16 @@ def _check_domain(domain: str) -> None:
     if not domain:
         msg = "an email address has a non-empty domain (RFC 5321 §4.1.2)"
         raise ValueError(msg)
+    if len(domain.encode()) > _MAX_DOMAIN_OCTETS:
+        msg = f"a domain is at most {_MAX_DOMAIN_OCTETS} octets (RFC 5321 §4.5.3.1.2)"
+        raise ValueError(msg)
     if domain.startswith("["):
         msg = "an address literal's equivalence class belongs to the IP stack"
         raise ValueError(msg)
     for label in domain.split("."):
+        if len(label) > _MAX_LABEL_OCTETS:
+            msg = f"a domain label is at most {_MAX_LABEL_OCTETS} octets (RFC 1035 §2.3.4)"
+            raise ValueError(msg)
         if not label or not (label[0].isalnum() and label[-1].isalnum()):
             msg = "a domain is non-empty labels beginning and ending alphanumeric"
             raise ValueError(msg)

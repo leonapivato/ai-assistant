@@ -36,8 +36,16 @@ from ai_assistant.core.types import (
     parameter_violations,
 )
 from ai_assistant.testing.cancellation import LoopSuspension
+from ai_assistant.testing.egress import _canonical_smtp as fake_canonical
 from ai_assistant.tools import egress_binder as seam_module
 from ai_assistant.tools.connection_store import ConnectionEntry, StoredEntry
+from ai_assistant.tools.destinations import (
+    DestinationCanonicalisationError,
+    canonicalise,
+)
+from ai_assistant.tools.destinations import (
+    DestinationProtocol as SeamProtocol,
+)
 from ai_assistant.tools.egress_binder import (
     EgressBindingSeam,
     EgressRegistration,
@@ -408,3 +416,114 @@ def test_the_seam_holds_no_keyring_face_and_no_collaborator_beyond_its_three() -
         "_records",
         "_registrations",
     }
+
+
+# --- the fake never certifies a seam production would refuse ------------------
+
+#: Local parts a hostile caller might supply, spanning every rule either
+#: canonicaliser states: dot placement, quoting, atext, whitespace, the 64-octet
+#: ceiling either side, and non-ASCII.
+_LOCAL_PARTS: Final = (
+    "a",
+    "a.b",
+    "a..b",
+    ".a",
+    "a.",
+    'q"x"',
+    "a\\b",
+    "a b",
+    "a+b",
+    "a@b",
+    "",
+    "a" * 64,
+    "a" * 65,
+    "\u00fc\u00f1",
+)
+
+#: Domains likewise: label shape, the LDH set, address literals, trailing dots,
+#: the 63-octet label and 255-octet domain ceilings either side, and non-ASCII.
+_DOMAINS: Final = (
+    "example.com",
+    "EXAMPLE.COM",
+    "exa_mple.com",
+    "b..c.com",
+    "-lead.com",
+    "trail-.com",
+    "[192.0.2.1]",
+    "example.com.",
+    "x.io",
+    "",
+    "b" * 63 + ".com",
+    "b" * 64 + ".com",
+    ("b" * 61 + ".") * 4 + "bbbbbbbbb.com",
+    "\u00fc\u00f1.com",
+)
+
+
+def _hostile_forms() -> tuple[str, ...]:
+    """Every combination of the fragments above, plus the degenerate spellings.
+
+    Deterministic and generated rather than listed: what the property below needs
+    is breadth across the *rules*, and a hand-written list is exactly what leaves
+    the boundary nobody thought of uncovered — which is the pattern this test
+    exists to end.
+    """
+    combined = tuple(f"{local}@{domain}" for local in _LOCAL_PARTS for domain in _DOMAINS)
+    return (*combined, "", "no-at-sign", "@", "a@b@c", " ", "\n", "a@b\u0000c.com")
+
+
+def test_the_fake_never_accepts_a_destination_production_refuses() -> None:
+    """The canonical fake may be stricter than the seam, and may never be laxer.
+
+    **This is the one-directional property, and it is the complete formalisation
+    of the only hazard in play.** ADR-0152 §13 requires the fake and requires the
+    shared conformance suite; it requires nowhere that the fake *equal*
+    production, and ADR-0148 §2's one-canonicaliser clause is stated over
+    integrations at the seam — so porting the production rules into
+    ``ai_assistant.testing`` would create the second copy that clause exists to
+    prevent, across a boundary ``lint-imports`` forbids. What actually harms
+    anything is a double that certifies a **weaker** seam than the one it stands
+    in for: a consumer's test that parks and approves a call production would
+    never make. That is precisely ``fake_accepts ⊆ production_accepts``, and the
+    safe direction — the fake refusing something production would take — cannot
+    mislead a consumer's test in any way, because the call simply does not bind.
+
+    Degeneration in the safe direction is not a hole either: ``CANONICALISES`` in
+    the shared suite pins the forms **both** implementations must accept and the
+    canonical form each must produce, so a fake that refused everything fails
+    there. The two together bound the fake from both sides without either one
+    copying the other's rules.
+
+    This module is the only place the property can be stated: the conformance
+    suite is shared and each subject runs it alone, whereas this test may import
+    ``ai_assistant.testing`` and ``ai_assistant.tools`` together.
+    """
+    laxer: list[str] = []
+    disagreed: list[str] = []
+    accepted = 0
+
+    for form in _hostile_forms():
+        try:
+            by_fake = fake_canonical(form)
+        except ValueError:
+            continue
+        accepted += 1
+        try:
+            by_seam = canonicalise(SeamProtocol.SMTP, form).canonical
+        except DestinationCanonicalisationError:
+            laxer.append(form)
+            continue
+        if by_fake != by_seam:
+            disagreed.append(form)
+
+    assert not laxer, (
+        f"{len(laxer)} form(s) the canonical fake accepts and the production "
+        f"canonicaliser refuses. A fake that binds what the seam would not lets a "
+        f"consumer's test park and approve a call production cannot make."
+    )
+    assert not disagreed, (
+        f"{len(disagreed)} form(s) both accept and canonicalise differently, so one "
+        f"supplied form has two canonical forms across the Protocol's implementations "
+        f"(ADR-0148 §2)."
+    )
+    assert accepted >= 5, "the corpus must actually reach the accepting path"
