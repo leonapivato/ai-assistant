@@ -408,10 +408,14 @@ checkable direction and the one a reviewer can test a change against.
 > it, and those arguments were admitted or refused by §2 and by this clause when they
 > were composed. That exclusion reaches that step's own recorded arguments and
 > nothing else the store holds — not another step, not another plan, and no other
-> record — and it is an exclusion from this clause's **direct-obtaining limb alone**.
-> It says nothing about how those arguments came to hold what they hold, neither
-> permitting nor excusing it; that question is the clause below's, and §4's first
-> concrete path is the worked case. The prohibition is stated
+> record. It is an exclusion of the **value**, so both of this clause's limbs are read
+> with it excluded: a component does not obtain a store value by reading back the
+> arguments of the step it is executing, and the output of an operation supplied with
+> those arguments in the ordinary course of executing that step — their binding, their
+> rendering and their transmission — is not an output this clause reaches. What the
+> exclusion is not is a disposition of how those arguments came to hold what they
+> hold; it neither permits nor excuses that, which is the clause below's question, and
+> §4's first concrete path is the worked case. The prohibition is stated
 > over what a component obtained, what it supplied, and when it supplied it, that
 > moment being a recorded persistence and never a construction, an intention or a
 > purpose. It is not stated over what a span contains, and no lane reads it as
@@ -870,8 +874,9 @@ one.
 > causes — the sent-mail copy in the owner's own connected account, and each
 > recipient's mailbox — fall under §1's third clause as the ordinary consequence of
 > an owner-directed send under §2. Its ordinary execution path does not engage §3
-> either: the runner reading back the `parameters` of the step it is executing is the
-> case §3's first clause excludes, and no other store read stands between that step
+> either: the runner reading back the `parameters` of the step it is executing, and
+> the binding, rendering and transmission of those arguments, are the case §3's first
+> clause excludes on both its limbs, and no other store read stands between that step
 > and the payload. The statement is about the tool's ordinary
 > operation and its declared arguments; it is not a statement about the payload of
 > any particular call, which §3 governs call by call.
