@@ -3435,6 +3435,13 @@ def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
     reaching for this, and "Done." is printed only for a step that really is done
     (ADR-0084 §8).
 
+    **``EGRESS_UNBINDABLE`` says the call could not be described and names nothing
+    about it** (ADR-0152 §9, §11). It is not ``DENIED`` — no policy refused, because
+    the seam runs before a decision exists — and a line that read as a refusal would
+    be a falsehood about the user's own policy. It names no tool, no argument, no
+    recipient and no reference: ADR-0152 §11 binds the *seam's* message, and this
+    adapter is handed a bare verdict with no field carrying any of them anyway.
+
     **``AWAITING_CONFIRMATION`` is the one member deliberately absent**, and after
     ADR-0145 §4's addition it is the only one: the confirm flow renders the parked
     action itself (:func:`_render_confirmation`), from the content a bare verdict
@@ -3476,6 +3483,10 @@ def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
         Disposition.INVALID_PARAMETERS: (
             "[dim]This step's arguments were not established as acceptable to any tool that "
             "could have done it; nothing was run.[/]"
+        ),
+        Disposition.EGRESS_UNBINDABLE: (
+            "[dim]This step's outbound call could not be described, so nobody was asked "
+            "and nothing was sent.[/]"
         ),
     }
     message = messages.get(disposition)

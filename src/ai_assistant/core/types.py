@@ -6675,6 +6675,268 @@ def _span_defect(value: FrozenJson, span: EgressSpan) -> str | None:
     return None
 
 
+class EgressSpanLocator(BaseModel):
+    """A span's key on the binding seam (ADR-0152 §1).
+
+    ADR-0150 §4 identifies a span by the pair ``(argument, index)``. Where that
+    pair has to be a **mapping key** — the carried provenance
+    :class:`CarriedProvenance` holds — it needs a hashable value that validates
+    its own fields, and this is it.
+
+    **Each field has the same type and the same validation as the field of the
+    same name on** :class:`EgressSpan`, and this ADR fixes no type for either
+    beyond that identity: ``EgressSpan`` owns them, and a locator that could be
+    well-formed where the span it names could not would be a second answer to one
+    question. ``index`` is optional and absent by default in the same way.
+
+    **Two locators are equal exactly when both fields are equal**, and a locator
+    names the span of an :class:`EgressBinding` whose ``argument`` and ``index``
+    equal its own.
+
+    **It is not a span, and it is durable nowhere.** It carries no provenance, no
+    extent, no tier and no destination, holds no reference to a binding or a span,
+    and enters no :class:`ActionRequest` and no :class:`PermissionDecision`. That
+    is what answers the objection that it restates ``EgressSpan``'s first two
+    fields: no record can hold a locator that disagrees with the span it names, so
+    this is unlike the duplications ADR-0150 is named against, every one of which
+    was two *stored* shapes.
+
+    ``revalidate_instances="always"`` for :class:`SecretName`'s reason:
+    ``model_construct`` builds an instance without running validators, and it is
+    public (ADR-0152 §1).
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        hide_input_in_errors=True,
+        revalidate_instances="always",
+    )
+
+    argument: EncodableText = Field(
+        description="The top-level parameters key the span it names came from."
+    )
+    index: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Zero-based position within the argument's decomposition; absent "
+            "exactly where the named span's value is the argument's whole value."
+        ),
+    )
+
+
+class _FrozenProvenance(Mapping[EgressSpanLocator, DiscloserProvenance]):
+    """An immutable, hashable mapping from a span locator to its provenance.
+
+    :class:`FrozenDict`'s idiom for the one other key type this module needs.
+    The contents are a **tuple of pairs** and attribute assignment is refused, so
+    there is no mutable object reachable through an instance — which is what
+    ADR-0152 §1's detachment clause needs of the carrier: the value it holds
+    cannot be rewritten after validation, whatever the caller kept.
+
+    ``MappingProxyType`` is refused for :class:`FrozenDict`'s reason: it can be
+    neither pickled nor deep-copied, so any model holding one would fail
+    ``model_copy(deep=True)``.
+    """
+
+    __slots__ = ("_items",)
+
+    _items: tuple[tuple[EgressSpanLocator, DiscloserProvenance], ...]
+
+    def __init__(
+        self, data: Mapping[EgressSpanLocator, DiscloserProvenance] | None = None, /
+    ) -> None:
+        """Store ``data``'s pairs, detached from whatever the caller keeps."""
+        object.__setattr__(self, "_items", tuple((data or {}).items()))
+
+    def __setattr__(self, name: str, value: object) -> None:
+        """Refuse attribute assignment, including rebinding the backing tuple."""
+        msg = f"{type(self).__name__} is immutable"
+        raise AttributeError(msg)
+
+    def __delattr__(self, name: str) -> None:
+        """Refuse attribute deletion, for the same reason as assignment."""
+        msg = f"{type(self).__name__} is immutable"
+        raise AttributeError(msg)
+
+    def __getitem__(self, key: EgressSpanLocator) -> DiscloserProvenance:
+        """Return the provenance recorded for ``key``, raising ``KeyError`` if absent."""
+        for candidate, value in self._items:
+            if candidate == key:
+                return value
+        raise KeyError(key)
+
+    def __iter__(self) -> Iterator[EgressSpanLocator]:
+        """Iterate over the locators, in insertion order."""
+        return (key for key, _ in self._items)
+
+    def __len__(self) -> int:
+        """Return the number of locators."""
+        return len(self._items)
+
+    def __repr__(self) -> str:
+        """Return a dict-like representation of the contents."""
+        return f"_FrozenProvenance({dict(self._items)!r})"
+
+    def __eq__(self, other: object) -> bool:
+        """Compare equal to any mapping with the same contents."""
+        if isinstance(other, Mapping):
+            return dict(self._items) == dict(other)
+        return NotImplemented
+
+    def __hash__(self) -> int:
+        """Hash by contents; possible because both the keys and the values are frozen."""
+        return hash(frozenset(self._items))
+
+    def __reduce__(
+        self,
+    ) -> tuple[type[_FrozenProvenance], tuple[dict[EgressSpanLocator, DiscloserProvenance]]]:
+        """Support pickling (and, via it, ``copy.deepcopy``)."""
+        return (_FrozenProvenance, (dict(self._items),))
+
+
+def _detached_provenance(
+    value: Mapping[EgressSpanLocator, DiscloserProvenance],
+) -> Mapping[EgressSpanLocator, DiscloserProvenance]:
+    """Take the carrier's own copy of the caller's mapping (ADR-0152 §1).
+
+    ``frozen=True`` protects the field, not the object the field points at
+    (ADR-0018 §3), so a carrier validated over a caller's ``dict`` would leave the
+    caller able to rewrite what the seam then reads. Detaching at validation is
+    what makes the carrier's contents fixed at construction.
+    """
+    return _FrozenProvenance(value)
+
+
+def _thaw_provenance(
+    value: Mapping[EgressSpanLocator, DiscloserProvenance],
+) -> list[dict[str, object]]:
+    """Render the carrier's mapping as a list of pairs, for serialisation.
+
+    A pydantic model is not a JSON object key, so the mapping is dumped as an
+    ordered list of ``{"span": …, "provenance": …}`` entries. Nothing durable
+    holds a :class:`CarriedProvenance` — ADR-0152 §1 makes it an argument and
+    nothing else — so this exists to keep ``model_dump`` total rather than to
+    define a storage form.
+    """
+    return [
+        {"span": locator.model_dump(), "provenance": provenance.value}
+        for locator, provenance in value.items()
+    ]
+
+
+class CarriedProvenance(BaseModel):
+    """The recorded origins crossing the binding seam, as one validating value.
+
+    ADR-0152 §1's carrier. ADR-0146 §2 makes a span's provenance **carried, never
+    derived**, so it is the one thing the seam cannot compute — and the one thing
+    a caller therefore hands over. What it hands over is this, not a bare mapping.
+
+    **An annotation is not a constructor, and that is why this type exists.** An
+    earlier draft of ADR-0152 annotated the argument
+    ``Mapping[EgressSpanLocator, DiscloserProvenance]`` and architecture review
+    found on round 2 that Python builds no locator for a mapping key: ``{object():
+    object()}`` crosses the boundary exactly as before, and the seam must either
+    re-check by hand or raise something it never declared. ADR-0150 §8 settles it
+    in terms — the shape that ends the class "is making these values pydantic
+    models in ``core/types.py``, which validate their own fields on construction".
+    A mapping cannot be such a model; a model holding the mapping can.
+
+    **It validates every key and every value on construction**, refusing a key
+    that is not a well-formed locator and a value that is not one of ADR-0146 §1's
+    two members, and it **detaches** the caller's mapping so the value it holds
+    cannot be rewritten afterwards (ADR-0018 §3).
+
+    **``spans`` has no default**, and neither has the ``provenance`` argument on
+    :meth:`~ai_assistant.core.protocols.EgressBinder.bind`: a caller holding no
+    recorded origin constructs one over an empty mapping and passes it
+    deliberately. This is ADR-0150 §5's no-default reasoning applied at the seam
+    that would otherwise inherit the permissive answer for free.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        hide_input_in_errors=True,
+        revalidate_instances="always",
+    )
+
+    spans: Annotated[
+        Mapping[EgressSpanLocator, DiscloserProvenance],
+        AfterValidator(_detached_provenance),
+        PlainSerializer(_thaw_provenance),
+    ] = Field(
+        description=(
+            "The recorded origin of each span the caller holds one for. A span "
+            "absent from it is SYSTEM_SELECTED, written by the seam that builds "
+            "the span rather than defaulted by a field (ADR-0146 §2). Required "
+            "with no default."
+        )
+    )
+
+
+class BoundEgressCall(BaseModel):
+    """The binding and the call it describes, returned together (ADR-0152 §1).
+
+    What both members of :class:`~ai_assistant.core.protocols.EgressBinder`
+    return. The caller builds its :class:`ActionRequest` from **these three
+    fields** and never from objects it retained across the call.
+
+    **Why the pair rather than a bare binding.** Adversarial review of ADR-0152
+    found that a seam which detaches its arguments derives from its own copies
+    while the caller builds the request from *its* objects — so a mutation across
+    the seam's one await produces exactly the mismatched pair ADR-0152 §1 says
+    must not exist. Three shapes answer it and only one is sound. Passing a
+    pre-detached call snapshot *in* is unsound: a snapshot the caller constructs
+    stays caller-reachable across the await, reproducing the divergence one level
+    up. Obliging the caller by rule is a rule where a type will do — the objection
+    ADR-0150 §1's fifteen partial states are the corpus's worked instance of. What
+    makes this shape sound is that the seam's detached copies are created **before**
+    the await and are unreachable from outside the seam until they are returned: a
+    mutation bypass needs a reference, and during the suspension nothing outside
+    holds one.
+
+    **Exactly three fields and no others.** There is **no** provenance field: a
+    span's provenance is already inside :attr:`binding`, and a second copy beside
+    it would be two shapes of one fact — the duplication ADR-0150 is named
+    against. ``rebind`` has no ``provenance`` argument at all, so such a field
+    would also be filled from a different source per member, for no consumer.
+
+    **It carries an** :class:`EgressBinding` **without touching one**: no field is
+    added to that model, none is reinterpreted, no second copy of one is stored
+    and no alternative to it is minted (ADR-0152 §15). A type that *holds* another
+    is not a change to the held one.
+    """
+
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        hide_input_in_errors=True,
+        revalidate_instances="always",
+    )
+
+    binding: EgressBinding = Field(
+        description="The binding the seam derived, whole and accepted from nobody."
+    )
+    tool: Annotated[ToolDefinition, AfterValidator(_detached_tool)] = Field(
+        description=(
+            "The detached declaration the derivation read. Detached for "
+            "ActionRequest's own reason (ADR-0018 §3): a caller's definition "
+            "rewritten through ``object.__setattr__`` would otherwise change what "
+            "the returned pair says the binding was derived under."
+        )
+    )
+    parameters: FrozenJsonMapping = Field(
+        description=(
+            "The detached arguments the derivation read — the same mapping the "
+            "binding was derived under, carried here rather than left for the "
+            "caller to supply again. Required with no default: a defaulted empty "
+            "mapping would let a producer return a binding beside no payload."
+        )
+    )
+
+
 # --- permissions: the request, the ruling, their binding (ADR-0021) ----------
 # Three types rather than one (§3): a policy authors only the ruling, so it has
 # no field with which to name a tool it was not handed. `authorises` lives in
@@ -7751,7 +8013,7 @@ class Confirmation(BaseModel):
 class Disposition(StrEnum):
     """What became of one plan step at the runner stage (ADR-0037 §1, §4, §5).
 
-    Six members, and the three that commit nothing are as much a result as the
+    Seven members, and the four that commit nothing are as much a result as the
     three that do: a step the stage declines to act on is a fact its caller has to
     be told, not an error.
 
@@ -7760,11 +8022,11 @@ class Disposition(StrEnum):
     ``FAILED`` member, and the ``StrEnum`` base is unchanged so every existing
     value string is byte-identical on the wire.
 
-    ``INVALID_PARAMETERS`` is ADR-0145 §4's addition, and adding a member is
-    additive on the wire for the same reason (ADR-0084 §4): the values are
-    ``StrEnum`` strings a client reads, and the exposure is bounded by deployment
-    rather than by a compatibility rule, since the hub is loopback-only and ships
-    with its client from one install.
+    ``INVALID_PARAMETERS`` is ADR-0145 §4's addition and ``EGRESS_UNBINDABLE`` is
+    ADR-0152 §9's, and adding a member is additive on the wire for the same reason
+    (ADR-0084 §4): the values are ``StrEnum`` strings a client reads, and the
+    exposure is bounded by deployment rather than by a compatibility rule, since
+    the hub is loopback-only and ships with its client from one install.
     """
 
     EXECUTED = "executed"
@@ -7811,6 +8073,44 @@ class Disposition(StrEnum):
     value is what ADR-0014 §4's legal-skip table exists to prevent. It is likewise
     not the ``FAILED`` member ADR-0037 refused: it asserts nothing about the step's
     status and writes nothing."""
+
+    EGRESS_UNBINDABLE = "egress_unbindable"
+    """The egress binding seam refused this call, so no ruling was sought for it
+    (ADR-0152 §9).
+
+    Returned when :class:`~ai_assistant.core.protocols.EgressBinder` raised
+    :class:`~ai_assistant.core.errors.EgressBindingError` — a declaration that
+    cannot describe the call, a destination with no canonical form, a top-level
+    argument the schema never statically named, a reference that is not
+    connectable, a definition unequal to its registered original, or a resumed
+    binding unequal to the one that was approved (ADR-0152 §6, §7, §8).
+
+    **It commits nothing:** no ruling is requested, no audit record is written, no
+    claim is made, and the step stays ``PENDING`` at its stored version. It is
+    terminal for the turn that met it and for nothing beyond it —
+    ``AMBIGUOUS_CAPABILITY``'s and ``INVALID_PARAMETERS``' shape, and ADR-0037 §1's
+    argument for the third time.
+
+    **Not ``INVALID_PARAMETERS``, and this is the choice most worth arguing.**
+    That member has one definition and two causes (ADR-0145 §4), both of them
+    about a schema evaluation over capable candidates — and most of ADR-0152 §6's
+    refusals are not about the parameters at all. Reporting a keyword in the wrong
+    place, a tool registered against no account, or a tampered definition as "the
+    step's parameters were not established as acceptable" writes a falsehood into a
+    returned value, and widening ``INVALID_PARAMETERS`` to a third cause would
+    amend ADR-0145 §4.
+
+    **Not ``DENIED``, and the distinction is the point of minting it.** A ``DENY``
+    means the policy refused, is recorded in the trail, and moves the step to
+    ``SKIPPED``/``APPROVAL_DENIED`` naming a decision. This refusal has no decision
+    to name, because it happens before one exists — so a client that could not tell
+    them apart would report "the assistant declined to send this" for a tool whose
+    declaration is malformed, which is a falsehood about the user's own policy.
+
+    **A store outage is not this.** A :class:`~ai_assistant.core.errors.ConnectionStoreError`
+    is never translated into this member: it asserts nothing about the call, which
+    may be perfectly bindable a second later, and it propagates out of the runner
+    stage instead (ADR-0152 §9)."""
 
 
 class StepOutcome(BaseModel):
