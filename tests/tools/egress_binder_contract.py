@@ -133,12 +133,24 @@ NOT_EGRESS: Final = tool_declaring({"query": {"type": "string"}}, tool_id="recal
 #: The single transformation is RFC 5321 §2.4's: the domain is case-insensitive
 #: and is lowered, the local part's semantics belong to the receiving host and it
 #: is copied byte for byte.
+#: RFC 5321 §4.5.3.1.1, §4.5.3.1.2 and RFC 1035 §2.3.4's ceilings. A boundary is
+#: exactly what an enumerated corpus is for: the pair either side of each limit is
+#: where two implementations most easily part company, and neither is reachable by
+#: reading a rule off the other's source.
+_MAX_LOCAL_PART: Final = "a" * 64 + "@example.com"
+_OVER_LOCAL_PART: Final = "a" * 65 + "@example.com"
+_MAX_LABEL: Final = "a@" + "b" * 63 + ".com"
+_OVER_LABEL: Final = "a@" + "b" * 64 + ".com"
+_OVER_DOMAIN: Final = "a@" + ("b" * 61 + ".") * 4 + "bbbbbbbbb.com"
+
 CANONICALISES: Final = (
     ("bob@x.io", "bob@x.io"),
     ("Alice@Example.COM", "Alice@example.com"),
     ("a.b@sub.example.com", "a.b@sub.example.com"),
     ("first+tag@EXAMPLE.org", "first+tag@example.org"),
     ("UPPER@lower.EXAMPLE.com", "UPPER@lower.example.com"),
+    (_MAX_LOCAL_PART, _MAX_LOCAL_PART),
+    (_MAX_LABEL, _MAX_LABEL),
 )
 
 #: Supplied forms **every** implementation must refuse, so none is described by a
@@ -170,6 +182,9 @@ REFUSES: Final = (
     "a@",
     "",
     "not an address",
+    _OVER_LOCAL_PART,
+    _OVER_LABEL,
+    _OVER_DOMAIN,
 )
 
 
