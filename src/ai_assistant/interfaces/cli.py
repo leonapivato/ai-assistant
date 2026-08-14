@@ -3434,6 +3434,27 @@ def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
     that downward — so :func:`_render_step` consults the step's record before
     reaching for this, and "Done." is printed only for a step that really is done
     (ADR-0084 §8).
+
+    **``AWAITING_CONFIRMATION`` is the one member deliberately absent**, and after
+    ADR-0145 §4's addition it is the only one: the confirm flow renders the parked
+    action itself (:func:`_render_confirmation`), from the content a bare verdict
+    does not carry, so a line here would either duplicate it or contradict it. The
+    mapping is read with ``.get`` rather than indexed for that member alone — a
+    miss prints nothing, which is what a step whose rendering lives elsewhere
+    wants.
+
+    **``INVALID_PARAMETERS`` says only that the arguments did not fit** (#1113).
+    Two constraints shape the wording. ADR-0145 §8 forbids any rendering from
+    carrying an argument value *or key*, so nothing about the parameters is echoed;
+    and the violations that would say which constraint was missed stop at
+    ``orchestration``'s ``StepDisposition`` — :class:`StepOutcome`, the only thing
+    this adapter is handed, has no field for them, and giving it one is the wire
+    change ADR-0145 §14 parks as #1106. So the line is a fixed phrase rather than a
+    report, and it names no tool: the disposition is reached with the candidate set
+    emptied by ADR-0144 §7's eligibility filter, so ``tool_id`` is ``None`` and
+    there is no "selected tool" to name. It reads like ``AMBIGUOUS_CAPABILITY``
+    because ADR-0145 §4 gives it that shape — nothing was committed, nothing was
+    asked, and the step stays ``PENDING`` for a re-plan with corrected arguments.
     """
     tool = _safe(tool_id) if tool_id is not None else "the selected tool"
     messages = {
@@ -3441,6 +3462,10 @@ def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
         Disposition.DENIED: "[red]Declined.[/] The policy did not permit this action.",
         Disposition.NO_CAPABLE_TOOL: "[dim]No tool is available for this step yet.[/]",
         Disposition.AMBIGUOUS_CAPABILITY: "[dim]Several tools could do this; none was chosen.[/]",
+        Disposition.INVALID_PARAMETERS: (
+            "[dim]This step's arguments did not fit the declared schema of any tool that "
+            "could have done it; nothing was run.[/]"
+        ),
     }
     message = messages.get(disposition)
     if message is not None:

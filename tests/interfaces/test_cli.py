@@ -323,6 +323,62 @@ def test_disposition_render_names_the_executed_tool(output: StringIO) -> None:
     assert "smtp" in output.getvalue()
 
 
+def test_invalid_parameters_renders_a_line_of_its_own(output: StringIO) -> None:
+    """A step refused for its arguments says so rather than printing nothing (#1113).
+
+    The defect was silence: ``_render_disposition`` reads its mapping with ``.get``,
+    so ADR-0145 §4's new member ended a turn with the CLI saying nothing at all
+    about why nothing ran.
+    """
+    cli._render_disposition(Disposition.INVALID_PARAMETERS, None)
+    rendered = output.getvalue()
+
+    assert rendered.strip()  # something was printed at all — the whole of #1113
+    assert "argument" in rendered.lower()  # and it names what did not fit
+    # No tool is named: the eligibility filter emptied the candidate set, so there
+    # is no "selected tool" and ``tool_id`` is ``None`` (ADR-0144 §7).
+    assert "the selected tool" not in rendered
+
+
+def test_invalid_parameters_render_carries_no_argument_of_its_own(output: StringIO) -> None:
+    """The line is a fixed phrase, never a report of the parameters (ADR-0145 §8).
+
+    §8 forbids a rendering from carrying an argument value *or* key, and the
+    violations that would name the missed constraint stop at ``orchestration``
+    anyway — ``StepOutcome`` has no field for them (#1106). So the same text comes
+    out whatever the step's arguments were, which is what this pins.
+    """
+    cli._render_disposition(Disposition.INVALID_PARAMETERS, None)
+    without_tool = output.getvalue()
+    output.truncate(0)
+    output.seek(0)
+
+    # Even handed a tool id, the line must not start reporting particulars: a
+    # rendering that varies with the call is one that can be made to leak.
+    cli._render_disposition(Disposition.INVALID_PARAMETERS, "smtp")
+    with_tool = output.getvalue()
+
+    assert with_tool == without_tool
+    assert "smtp" not in with_tool
+
+
+def test_every_disposition_but_the_parked_one_renders(output: StringIO) -> None:
+    """Only ``AWAITING_CONFIRMATION`` prints nothing, and that one by design.
+
+    The silent fallback is deliberate for the parked step — the confirm flow renders
+    it from content the verdict does not carry — but #1113 showed that a fallback
+    kept for one member silently absorbs the next one added. This holds the rest of
+    the enum to printing something, so a future member fails here instead of in
+    front of a user.
+    """
+    for disposition in Disposition:
+        output.truncate(0)
+        output.seek(0)
+        cli._render_disposition(disposition, "smtp")
+        expected_silent = disposition is Disposition.AWAITING_CONFIRMATION
+        assert bool(output.getvalue().strip()) is not expected_silent, disposition
+
+
 def test_error_render_shows_no_traceback(output: StringIO) -> None:
     """An error is a one-line message, not a stack trace."""
     cli._render_error(PlanningError("a turn needs a non-empty utterance"))
