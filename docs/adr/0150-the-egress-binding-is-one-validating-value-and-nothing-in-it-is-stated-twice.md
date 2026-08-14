@@ -685,6 +685,33 @@ request carry the binding and §2's validator runs on the request.
 > third clause. No lane satisfies ADR-0146 §1 for that case by labelling the whole
 > span with either answer.
 
+> **Normative.** A builder holding **two or more destinations** inside one
+> undecomposable span — inside a JSON object, or inside a nested array — likewise
+> cannot describe them and **refuses**, rather than carrying one and omitting the rest,
+> which is ADR-0148 §1's third clause. A span carries at most one `EgressDestination`
+> (§2), so no lane satisfies ADR-0148 §2's first clause for that case by carrying one
+> occurrence, and no lane reads a structured span's single carried occurrence as
+> evidence that the value selected one recipient.
+
+**That clause, §11's first refusal and §11's structured-value check close one family,
+and they are three faces of ADR-0148 §2's first clause rather than three patches.** That
+clause makes the canonical destination set "the set of canonical forms of **every
+semantic recipient** its arguments select", and applying it to arbitrary JSON admits
+exactly three ways a binding can under-represent what the arguments selected. **Total
+omission**: a declared destination-bearing argument whose span carries no destination at
+all — §11 obliges (b) to refuse it, because only the declaration says which arguments
+are destination-bearing. **Partial omission**: an undecomposable span holding more
+recipients than its one destination can carry — the clause above has the **builder**
+refuse it, because the builder holds the values and needs no declaration to count them.
+**Mis-representation**: a supplied form extracted from inside a structured value that is
+not the form the value holds — §11 routes it to (b), because `core` cannot see inside
+the value. Each lands on the first component that can see the fact triggering it, which
+is the only reason they are stated in three places; what they are is one rule. A
+description narrower than the payload is what ADR-0148 §6 forbids in terms, and a
+recipient the approver is never shown is the narrowest form of it. The three arrived
+over three separate review rounds, and the family is named here so that a later lane
+reads them as one obligation instead of discovering it a fourth time.
+
 **The empty array carries no span because there is nothing to describe, and stating
 it costs a clause rather than an exception.** An argument whose value is `[]`
 transmits no value, so a span for it would have to state an extent and a discloser
@@ -1234,6 +1261,26 @@ Scoping something out is a decision, so each carries its reason (ADR-0029 §7's 
 > those §4's locator clause forbids outright. Naming the refusal decides no part of that
 > vocabulary: it fixes only what (b)'s answer must be able to express.
 
+> **Normative.** Whether (b)'s declaration vocabulary closes §4's family
+> **structurally** — by constraining a destination-bearing declaration to a
+> **decomposable** shape, a JSON string or an array of JSON strings, so that no
+> destination can sit inside a span unable to carry it — is **not decided here**. This
+> ADR neither requires that constraint nor forbids it, and no lane reads §4's refusals
+> as having settled the question: they refuse the shapes, and a vocabulary that could
+> not express those shapes would make the refusals unreachable rather than wrong. The
+> judgement belongs to the lane holding the declaration vocabulary and a producer, which
+> is (b)'s.
+
+**The structural option costs nothing against the producer in hand, and that is worth
+recording while it is still true.** PR #1120's `send_email` declares exactly the flat
+shapes — a recipient argument is a string or an array of strings — so every destination
+it can name already sits in a span that can carry it, and the constraint would refuse
+none of its calls. That is evidence about one producer rather than a decision (ADR-0073
+§4): the case that makes the choice cost something is a later egress tool with a
+structured recipient — `{"email": …, "name": …}`, the same shape §4's supplied-form
+residue is written for — and that is the case (b) will have in front of it and this ADR
+does not.
+
 > **Normative.** This ADR designates nothing, attests no ADR-0017 §3 condition, and
 > discharges none. It supplies the `core` value conditions 8 and 10 need and no lane
 > cites it further.
@@ -1363,6 +1410,16 @@ lands there whole.
 > whose declaration marks no argument destination-bearing does not reach the check at
 > all.
 
+> **Normative.** That same lane also ships the **multi-recipient structured span** case
+> §4's cardinality clause is stated for: a call whose destination-bearing argument holds
+> an **undecomposable** value naming two recipients — the
+> `{"recipients": {"to": ["alice@example.com", "mallory@example.com"]}}` shape — is
+> **refused** rather than described by a binding carrying one of them, and the test
+> asserts that refusal fires rather than asserting that a structured value naming
+> **one** recipient is accepted. A case whose two recipients sit in a JSON **array at
+> the top level** of the argument demonstrates nothing: §4 decomposes that into two
+> spans, each of which can carry its own occurrence.
+
 > **Normative.** The lane that builds an egress `CONFIRM` ships the
 > **duplicate-across-arguments** case §10's third clause is stated for: one recipient
 > selected by two arguments produces a confirmation naming **both** arguments beside
@@ -1412,7 +1469,12 @@ omits an occurrence of a recipient the arguments **did** select was never inside
 saying so states which calls the clause reaches rather than narrowing what it says about
 them; §11's second refusal then enforces the first clause — a canonical form for every
 destination-bearing argument, computed before the request is built — on the component
-that can see which arguments those are. A reader holding only ADR-0148 §2 finds both
+that can see which arguments those are. §4's cardinality clause is that same first
+clause enforced one component earlier and on a different fact — a builder that cannot
+describe the recipients it is holding refuses rather than carrying some of them — which
+is §1's third clause **used** for a third time in this ADR rather than qualified, and
+§4's family paragraph is why the three refusals are one obligation rather than three
+additions. A reader holding only ADR-0148 §2 finds all three
 sentences doing exactly what they say, and acts no differently. §2's **sixth** clause
 (one canonical form per protocol, computed in one place at the seam) is likewise relied
 on unchanged, and is both the reason the member's assertion is stated once, here,
