@@ -972,6 +972,37 @@ class EgressBinderContract(ABC):
 
         assert raised.value.__cause__ is not None
 
+    async def test_an_approved_binding_rewritten_after_construction_is_refused(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0152 §1, §13: the second ``approved`` bypass, which the first does not reach.
+
+        §13 names **two** hostile shapes for ``rebind``'s ``approved``: one built
+        by ``EgressBinding.model_construct``, and one "whose field was replaced by
+        ``object.__setattr__`` after construction". They are different holes —
+        the first skips every validator on the way in, the second passes them all
+        and is corrupted afterwards, which is what ``frozen=True`` does not stop
+        (ADR-0018 §3). An implementation that revalidated only what looked
+        unconstructed would pass the first and read the second's forged field as
+        the binding a user approved.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+        parameters: dict[str, FrozenJson] = {
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body": "b",
+        }
+        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        assert first is not None
+        corrupted = EgressBinding.model_validate(first.binding.model_dump())
+        object.__setattr__(corrupted, "account", None)
+
+        with pytest.raises(EgressBindingError) as raised:
+            await binder.rebind(SEND_EMAIL, parameters=parameters, approved=corrupted)
+
+        assert raised.value.__cause__ is not None
+        assert type(raised.value.__cause__).__name__ == "ValidationError"
+
     # --- ADR-0152 §7: the resuming path -------------------------------------
 
     async def test_rebind_returns_the_derived_binding_when_it_equals_the_approved_one(
