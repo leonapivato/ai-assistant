@@ -328,6 +328,20 @@ anyone to". They are declared here rather than left to the lane, with
 > carries structured state, and none names the supplied identity, the supplied
 > credential, any part or derivation of either, or a filesystem path.
 
+> **Normative.** A refusal raised by any operation on this surface **names the
+> reference where the call carries one**, and **never** names the identity or the
+> credential — ADR-0149 §9's refusal rule, applied at both of its limbs, and
+> ADR-0149 §3's split between a loggable handle and a Tier 1 value.
+> `reprovision_account` and `disconnect_account` therefore name the reference they
+> were given, in the message and in what the hub logs.
+
+> **Normative.** `connect_account`'s refusals name **no** reference, because there
+> is none to name: §3 mints one only as the reference's first record is written,
+> and every refusal above writes nothing. This is a consequence of the mint rather
+> than a narrowing of ADR-0149 §9 — its prohibition on naming the identity binds
+> `connect_account` exactly as it binds the other four — and §17 shows the test
+> rather than asserting it.
+
 **A per-store error class is this corpus's settled convention rather than a new
 one.** `MemoryStoreError`, `ConversationStoreError`, `DeferralStoreError`,
 `NotificationStoreError`, `TraceStoreError`, `GrantError` and `SecretStoreError`
@@ -823,14 +837,49 @@ configuration edit may never make a user's own act unwithdrawable.
 > constructs no `SecretStore`, no `Secrets` and no connection store, and names
 > neither keyring face (ADR-0125 §8, ADR-0149 §9).
 
-> **Normative.** `core/protocols.py` gains **one** Protocol, the seam by which
-> `orchestration` reaches the provisioner in `tools/` (ADR-0149 §10). It carries
-> exactly five members, one per operation in §2, taking and returning the same
-> `core` types those operations take and return — with two differences, both
-> forced: it takes the reference `connect_account` does not (because the mint is
-> the provisioner's, so the engine passes none and the provisioner returns the one
-> it minted), and it performs no argument validation the engine has already
-> performed.
+> **Normative.** `core/protocols.py` gains **one** Protocol,
+> `ConnectionProvisioner`, the seam by which `orchestration` reaches the
+> provisioner in `tools/` (ADR-0149 §10). It carries exactly five members, one per
+> operation in §2, with these signatures:
+
+```python
+class ConnectionProvisioner(Protocol):
+    async def provision(
+        self, *, identity: NonBlankEncodableText, credential: SecretValue
+    ) -> ConnectedAccount: ...
+
+    async def reprovision(
+        self,
+        reference: Identifier,
+        *,
+        identity: NonBlankEncodableText,
+        credential: SecretValue,
+    ) -> ConnectedAccount: ...
+
+    async def disconnect(self, reference: Identifier) -> ConnectedAccount | None: ...
+
+    async def connected(self) -> tuple[ConnectedAccount, ...]: ...
+
+    async def recent_acts(self, *, limit: int) -> tuple[ConnectionAct, ...]: ...
+```
+
+> **Normative.** `provision` takes **no** reference argument and accepts none
+> under any other name: §3 makes the mint the provisioner's, so the engine passes
+> nothing and `provision` returns the `ConnectedAccount` carrying the reference it
+> minted. The other four members take the reference the engine received from its
+> caller, unaltered.
+
+> **Normative.** `recent_acts` takes `limit` with **no default**. The default is
+> `AssistantEngine`'s (§2), and a seam repeating it would be a second place for one
+> number to drift.
+
+> **Normative.** Each member declares the failures §2a declares for the operation
+> it serves, less the two the engine refuses **before** the seam is reached:
+> no member declares `UnusableIdentityError` (§5 refuses locally and before any
+> I/O, so no such call arrives) and none declares `ValueError` for an argument the
+> engine has already validated. `OversizedValueError` is likewise not a seam
+> failure: ADR-0085 §8c bounds a serialised payload, and nothing is serialised
+> here.
 
 > **Normative.** That Protocol's members return no credential value and no value
 > derived from one, carry no `SecretName` in any argument or return type, and
@@ -871,13 +920,22 @@ cannot name `set`, `delete` or `get`, and no annotation on it mentions `Secrets`
 or `SecretStore`. ADR-0125 §8's fourth clause therefore stays true of
 `orchestration` word for word, which §17 checks.
 
-**Five members rather than four, and the asymmetry is the mint.** `connect_account`
-takes no reference and the provisioner's corresponding member returns the one it
-minted, because ADR-0149 §1 puts the act — and §3 the store — inside `tools/`, so
-the only component that can mint a reference into that store is the provisioner.
-An engine-side factory would put the mint on the far side of the boundary from the
-compare-and-swap it has to be atomic with, which is the placement ADR-0149 §1
-refused for the record's readers and refuses here for the same reason.
+**The mint is on the provisioner's side of the seam, which is why `provision`
+takes nothing the engine could have supplied.** ADR-0149 §1 puts the act, and §3
+the store, inside `tools/`, so the only component that can mint a reference into
+that store is the provisioner. An engine-side factory would put the mint on the far
+side of the boundary from the compare-and-swap it has to be atomic with, which is
+the placement ADR-0149 §1 refused for the record's readers and refuses here for the
+same reason.
+
+**The members are named shorter than the operations they serve, deliberately.**
+`AssistantEngine` needs `connect_account` because its namespace holds twenty-six
+unrelated methods and a bare `connect` would sit beside ADR-0084 §2's connect
+handshake, which also has a credential member — the near-neighbour collision
+ADR-0102 §2 warns about. `ConnectionProvisioner`'s whole subject is connections, so
+its members need no disambiguator; and members named identically to the engine's
+would invite a reader to assume one forwards to the other unchanged, which the
+mint asymmetry and §2a's declared-failure difference both say it does not.
 
 ### 11. The frame, the reserve, and the paging convention
 
@@ -1080,13 +1138,15 @@ repeating it would be doing exactly that by silence one document later.
 > three types and one constant in `core/types.py` (§4, §5); and four classes in
 > `core/errors.py` (§2a).
 
-> **Normative.** The `AssistantEngine` change is a Protocol **change** and lands as
-> one change with its conformance-suite additions and its canonical fake's new
-> methods (`CONTRIBUTING.md` → "Adding a Protocol", read as the change it is). The
-> new Protocol of §10 is a **new** Protocol and lands as a triad — Protocol,
-> shared conformance suite, canonical fake in `ai_assistant.testing` with the
-> concrete `Test…Contract` subclass — riding with its **primary production
-> implementation**, the provisioner, as one lane (ADR-0137 §2, ADR-0149 §10).
+> **Normative.** All of it lands in **one lane and one PR**: the `AssistantEngine`
+> change with its conformance-suite additions, its canonical fake's new methods and
+> `HubEngineClient`'s; `ConnectionProvisioner`'s full triad — Protocol, shared
+> conformance suite, canonical fake in `ai_assistant.testing` with the concrete
+> `Test…Contract` subclass; and that Protocol's **primary production
+> implementation**, the provisioner in `tools/` with its store and its wiring. No
+> lane splits the triad from the provisioner, and none lands the `AssistantEngine`
+> change ahead of the seam (ADR-0137 §2 and §3, ADR-0149 §10, `CLAUDE.md` → "One
+> subsystem per change" and its stated exception).
 
 > **Normative.** This ADR adds **no** member to `SecretScope`, changes **no**
 > signature on `Secrets` or `SecretStore`, adds no field to `ActionRequest`,
@@ -1101,14 +1161,33 @@ said it was "not the whole of the contract surface this decision's neighbourhood
 will need", and pointed at #909's routing seam for the rest. §10 above places
 exactly the one, and §14 leaves the other where §10 left it.
 
+**The single lane is forced rather than preferred, and the cut a lane would reach
+for first does not exist.** The tempting split is a contract lane carrying the
+`AssistantEngine` change and a later lane carrying the provisioner. It is
+unavailable: `orchestration`'s concrete `Engine` structurally satisfies
+`AssistantEngine`, so a change adding five methods to that Protocol is a change
+that must implement five methods on `Engine`, and `Engine` can implement them only
+through `ConnectionProvisioner` (§10). So the seam has to be in that same change —
+and ADR-0149 §10 and ADR-0137 §2 then put its triad with the provisioner, which is
+the third thing in the same lane. That is `CLAUDE.md`'s stated exception exactly:
+the slice is cut at a contract seam because its implementation would otherwise put
+new machinery into two subsystems, so the triad rides with its primary production
+implementation as one unit of work rather than as three changes.
+
+**What is genuinely separable is separated**, and it is the client: a CLI has no
+Protocol obligation, `tests/wire/test_client_contract.py` binds `HubEngineClient`
+rather than an adapter, and nothing in `interfaces/` is a second implementation of
+anything this ADR adds.
+
 ### 16. What the implementing lanes owe
 
-**The contract lane**, as one change:
+**The contract-and-provisioner lane**, as one change (§15):
 
 1. The five methods on `AssistantEngine` with §2a's declared failures in their
-   docstrings; §10's Protocol; `ProvisioningState`, `ConnectedAccount`,
-   `ConnectionAct` and `ACCOUNT_IDENTITY_MAX_BYTES` in `core/types.py`; and the
-   four classes in `core/errors.py`.
+   docstrings; `ConnectionProvisioner` in `core/protocols.py` with §10's five
+   signatures; `ProvisioningState`, `ConnectedAccount`, `ConnectionAct` and
+   `ACCOUNT_IDENTITY_MAX_BYTES` in `core/types.py`; and the four classes in
+   `core/errors.py`.
 2. **The `AssistantEngine` conformance suite gains a clause per ruling above that a
    store cannot exhibit**, which is the whole of §2a's local refusals, §5, §7, §8
    and §9's shape clauses:
@@ -1139,28 +1218,37 @@ exactly the one, and §14 leaves the other where §10 left it.
 
    Each is written as a required case rather than left to the prose for ADR-0102
    §12's reason: a clause a test cannot reach is worse than no test.
-3. **The canonical fake gains the five methods**, scriptable to hold live records
-   in both states, references with history and no live record, a store that raises,
-   and a keyring deletion that raises — so a client's own refusal paths are
-   reachable from a test.
-4. **Five methods on `HubEngineClient`, in the same change**, each a `_call` plus
+3. **`ConnectionProvisioner`'s triad in full** — the Protocol, a shared
+   `ConnectionProvisionerContract` encoding §7's and §8's ownership and ordering
+   rulings, and a canonical fake in `ai_assistant.testing` with the concrete
+   `Test…Contract` subclass that runs it (`tests/core/test_protocol_triad.py`
+   enforces the last part, and no exemption is available to a new Protocol).
+4. **The `AssistantEngine` canonical fake gains the five methods**, scriptable to
+   hold live records in both states, references with history and no live record, a
+   store that raises, and a keyring deletion that raises — so a client's own
+   refusal paths are reachable from a test.
+5. **Five methods on `HubEngineClient`, in the same change**, each a `_call` plus
    the local refusals ADR-0085 §9 requires — §2a's `ValueError` cases, §2a's
    `UnusableIdentityError` clause and §11's `limit` rule — and, on the two
    provisioning methods, §6's single unwrap.
-5. **A test that the wire client sends the credential's plaintext and not its
+6. **A test that the wire client sends the credential's plaintext and not its
    redaction**, written against the encoded frame rather than against the client's
    arguments. This is the one failure §6 exists to prevent and the one an
    in-process test cannot see.
-6. **A test that no operation's arguments reach a log**, exercised with a
+7. **A test that no operation's arguments reach a log**, exercised with a
    deliberately failing call, against `core/logging.py`'s redaction as well as
    against the absence of any payload logging in `wire/server.py`.
-7. **Nothing else in `wire/` changes** — `METHODS`, the argument and result
+8. **The provisioner in `tools/` with its store and its wiring** — everything
+   ADR-0149 §14 already requires of it, plus the reference mint (§3) with its
+   bounded encoded form, and the engine-side object of §10 that delegates to it.
+9. **Nothing else in `wire/` changes** — `METHODS`, the argument and result
    adapters and the error code are all derived from the contract (ADR-0102 §12
    item 5).
 
-**The provisioner lane** owes everything ADR-0149 §14 already requires of it, plus
-the reference mint (§3) with its bounded encoded form, and it may not provision a
-connection in an installation until §14's precondition is met.
+> **Normative.** That lane builds and tests the provisioner; it does **not**
+> provision a connection in an installation, which §14's precondition forbids until
+> #909 is ruled. A test fixture's temporary keyring is not an installation, and no
+> lane cites this item as satisfying that precondition.
 
 **The client lane**: the CLI commands behind the five operations — illustratively
 `assistant connect`, `assistant reconnect`, `assistant disconnect`,
@@ -1171,7 +1259,7 @@ two report clauses and §4's `PENDING` clause each as a client-side test.
 > **Normative.** The count claims in `core/types.py`'s promoted-surface comment and
 > `wire/surface.py`'s module docstring are already wrong at `origin/main` —
 > "nineteen methods" against a Protocol carrying twenty-six — and this ADR does not
-> make them wrong. The contract lane corrects them to the figure the tree then
+> make them wrong. The lane above corrects them to the figure the tree then
 > holds, and files nothing; the pre-existing drift is tracked separately and is not
 > this lane's to investigate.
 
@@ -1196,6 +1284,34 @@ to rest only in the keyring (§6); no operation is bound by a `ToolDefinition` o
 reachable by a plan step (§13); a refusal names the reference and not the identity
 (§2a, §5); and the three writes stay the provisioner's, in order, with
 `orchestration` neither reordering, splitting nor retrying them (§6, §7).
+
+**The refusal clause is the one property of the five that needs the test shown
+rather than ticked**, because §3's mint makes one of its two limbs inapplicable to
+one operation. §9's sentence is "a refusal names the reference and not the
+identity (§3)", and its "(§3)" is ADR-0149 §3's split: the reference is a
+non-secret handle that may be logged, the identity is Tier 1 and may not. So the
+clause has a **prohibitive** limb — never the identity — and a **permissive** limb
+— the reference is the thing it is safe to name instead. §2a binds the prohibitive
+limb across all five operations without exception, and honours the permissive limb
+on the four calls that carry a reference. On `connect_account` the permissive limb
+has no subject: the call carries no reference, and §3 mints one only as the first
+record is written, so a refused act has none to name.
+
+Would a reader holding only ADR-0149 §9 now act differently, or read the clause
+more widely than it now holds? **No, in both directions.** Nothing they must do
+becomes optional — the identity stays out of every refusal — and nothing they must
+not do becomes permitted. What they find is that one operation's refusals have no
+reference, which is a fact about the operation §9 deferred the shape of rather
+than a sentence of §9 becoming false; §9's second clause hands that shape here in
+as many words, and its third clause's own list is written as properties the shape
+must have, not as a guarantee that every shape supplies a subject for each of
+them. A reviewer who reads it the other way is invited to name the sentence of
+ADR-0149 §9 that becomes false or over-wide, which is the showing ADR-0082 §1
+requires — and to weigh, against it, that the alternative reading forces a
+caller-authored reference, which ADR-0149 §3's loggability clause forecloses (§3
+above). The two clauses cannot both be read at maximum strength, and this ADR
+reads §3 at its strength because §3 is a marked clause about a durable value while
+§9's is a marked clause about a message.
 
 **ADR-0149 §3 and §4 — no record owed, and §3 is the one that needs the
 argument.** §3's clause that a reference is a non-secret handle "chosen by code"
