@@ -303,7 +303,7 @@ source. The corpus has already ruled the two apart — ADR-0097 §7 says a
 ADR-0021 §5's floor "is neither relaxed nor satisfied by anything in this ADR",
 naming the hazard precisely: "a calendar-read grant silently authorising an
 off-device transmission — the floor satisfied by a consent the user gave about
-something else entirely." The fifth clause above is that ruling read forward onto
+something else entirely." The fourth clause above is that ruling read forward onto
 this seam. But the prohibition is a conclusion, and the reasons behind it are
 what a standing-grant ADR will need. Two properties make the grant shape work
 there and neither holds here.
@@ -430,35 +430,41 @@ alternate path.
 ADR-0017 §3 requires that "what is transmitted is bound to what was authorised,
 immutably, and consumed unchanged — covering at minimum the connected account,
 the canonical destination set, the approved payload description and the decision",
-with credential *values* excluded. Each has a named holder below, and three of the
-four are held by machinery that already exists.
+with credential *values* excluded. The decision is bound by machinery that already
+exists; the other three travel together in one value the request carries.
 
 > **Normative.** The **decision** is bound by its id: `ToolCall.decision` carries
 > the decision the trail returned (ADR-0037 §3) and the committed `approval_ref`
 > equals `call.decision.id` (ADR-0029 §8). No egress call is performed under a
 > decision the executor did not read back out of the trail.
 
-> **Normative.** The **canonical destination set** and the **payload description**
-> are fields of the `ActionRequest` the policy ruled on, so `parameters_digest`
-> binds them and ADR-0029 §2's three checks re-verify them at the seam on a
-> revalidated, detached copy.
+> **Normative.** The remaining three facts travel together as one value, the
+> **egress binding**: the canonical destination set with the supplied form each
+> member came from (§2), a reference to the **connected account**, the
+> **transport endpoint**, and the **payload description**. It is fixed in the
+> `ActionRequest` before the ruling, is compared by
+> `PermissionDecision.authorises` alongside the tool, the parameters digest and
+> the step, and is transcribed verbatim into the recorded decision. Nothing in it
+> is derived after the ruling and nothing in it is re-derived at the seam.
 
 > **Normative.** A tool registered at the seam is bound to **at most one connected
-> account**. An integration serving several registers one tool per account. The
-> account is therefore fixed by the registry's own binding from id to definition
-> and callable, and is bound by ADR-0029 §1's two checks — the id is bound, and
-> the definition carried by the call equals the registry's original.
+> account**. An integration serving several registers one tool per account.
+
+> **Normative.** Before transmitting, the callable refuses unless the account
+> reference and the transport endpoint the binding carries are the ones it is in
+> fact configured to use. A registry rebuilt under a different configuration —
+> across a restart, which is exactly when a parked `CONFIRM` is answered — refuses
+> the call rather than performing it against another account or another endpoint.
 
 > **Normative.** No credential value enters an `ActionRequest`, a
-> `PermissionDecision`, a payload description, an audit record or any value
-> derived from one. What is bound is a **reference**: the `SecretName`
-> (ADR-0125 §2) the callable reads under, which ADR-0125 §2 rules is not a secret
-> and may be held in a Tier 1 store.
+> `PermissionDecision`, an egress binding, a payload description, an audit record
+> or any value derived from one. The account is bound by a **reference**: the
+> `SecretName` (ADR-0125 §2) the callable reads under, which ADR-0125 §2 rules is
+> not a secret and may be held in a Tier 1 store.
 
-> **Normative.** The **transport endpoint** the seam connects to is recorded
-> beside the canonical destination set, and may not change between the ruling and
-> transmission. What pins it to the connected service, and what a redirect may do,
-> is #83's and is not decided here (§13).
+> **Normative.** This section **binds** the transport endpoint; it does not
+> **pin** it. What the endpoint must be, and what a redirect may do, is #83's and
+> is not decided here (§13).
 
 > **Normative.** The payload description is **deterministic**: it is a function of
 > the request's own arguments and the registry's definition for the bound tool,
@@ -472,30 +478,63 @@ four are held by machinery that already exists.
 > granularity at which records and fields are named — is #57's and is not decided
 > here (§13).
 
-**The one-account clause is the only new constraint on registration, and it is
-what makes the account bindable without a field.** ADR-0016 §5 already argues for
-declaring one tool per operation rather than merging operations into one
-conservative declaration, and this extends the same granularity to the account
-axis for one reason: a tool serving two accounts has an account chosen at call
-time from an argument, and an account chosen from an argument is a destination in
-everything but name — canonicalisable, authorisable, and bindable only by being
-in the request. Making it a registration fact instead puts it under ADR-0029 §1's
-biconditional, where "an id is invocable if and only if it is registered" and the
-definition-equality check refuses a substitution. That is a stronger binding than
-a field would give, and it costs an integration one registration per account.
-This binds tools registered at the designated seam and no others.
+**The one-account clause keeps an account from becoming a destination by the back
+door.** ADR-0016 §5 already argues for declaring one tool per operation rather
+than merging operations into one conservative declaration, and this extends the
+same granularity to the account axis for one reason: a tool serving two accounts
+has an account chosen at call time from an argument, and an account chosen from an
+argument is a destination in everything but name — canonicalisable, authorisable,
+and answerable only by the user. One registration per account costs an integration
+a line of configuration and removes the case entirely. This binds tools registered
+at the designated seam and no others.
 
-**Determinism is what allows the description to be bound without a field of its
-own — and this ADR still asks for a field, for a different reason.** A
-deterministic function of values that are already bound is itself bound: nothing
-can change the description without changing the request, and a changed request
-fails `authorises`. So *binding* the description needs nothing new. What needs
-something new is **reading** it: ADR-0021 §1 stores the digest and none of the
-arguments, deliberately, because "a durable record holding them verbatim would
-make the trail a second copy of the user's most sensitive material". An auditor
-holding only a digest can verify a description they cannot see, which is exactly
-the failure #57's second comment names — "a hash defeats the purpose". §11 carries
-that surface and flags it.
+**An earlier draft claimed the account was bound by the registry alone, and it was
+wrong in the way this whole ADR is written to prevent.** That draft said the
+account "is therefore fixed by the registry's own binding from id to definition
+and callable, and is bound by ADR-0029 §1's two checks". Adversarial review found
+on round 1 that ADR-0029 §1's two checks are that the id is bound and that the
+*definition* matches, and a definition carries no account: ADR-0016 §6 makes the
+registry in-memory and rebuilt each run from configuration, so a `CONFIRM`
+answered after a restart — which is the ordinary case, since ADR-0037 §4 parks the
+step and ADR-0029 §5 makes recoverability across a restart the property that
+"makes it worth anything" — can resume against an id rebound to a second account
+with a byte-identical declaration. `authorises` succeeds, the seam's checks
+succeed, and the user's approval executes against an account they never saw. That
+is ADR-0021 §1's own #54 argument one field further down, and the draft had
+asserted a binding out of machinery that does not provide it — the shape ADR-0147
+§13 records about its own §4, arrived at in a document that quotes it. The repair
+is not a stronger claim about the registry; it is putting the reference where
+every other bound fact already is, and adding the callable's own refusal so the
+binding is checked by the party that holds the truth.
+
+**The endpoint moved into the binding for the same reason, and the earlier
+draft's version of it was a bound with nothing behind it.** That draft required
+the endpoint to be "recorded beside the canonical destination set" and to not
+change between ruling and transmission — while leaving it outside the request, so
+nothing compared it and no refusal could fire. §1's own argument condemns it:
+what is placed in the request is bound end to end, and "everything placed in it
+afterwards is bound by nothing at all". Adversarial review found it on round 1.
+Stating an immutability nothing enforces is precisely what ADR-0098 §3 records
+itself doing twice and what §13 below quotes against a different clause; a
+document that cites that lesson and then repeats it has learned nothing from it.
+
+**Determinism is what lets the description be checked rather than merely
+trusted.** The description is now bound directly, so nothing rests on deriving it
+twice — but a description that is a function of the request and the registry's
+definition alone is one the approver, the seam and a later auditor can each
+re-derive and compare, which is what turns an inspectable record into a
+verifiable one. It is also what stops the description becoming a second,
+divergent account of the call: a builder free to consult a clock, a store or the
+network could describe one payload and transmit another.
+
+**Storing the description is a departure from ADR-0021 §1's posture, and it is
+the right one here.** §1 stores the digest and none of the arguments, deliberately,
+because "a durable record holding them verbatim would make the trail a second copy
+of the user's most sensitive material". A description is not the arguments: it
+states extent, provenance, tiers and destinations rather than content, which is
+exactly the artifact that is safe to keep where the content is not. Without it an
+auditor holds a digest and can verify a description they cannot see, which is the
+failure #57's second comment names in one sentence — "a hash defeats the purpose".
 
 **Excluding credential values is not a precaution here; it is already the
 strongest available position.** ADR-0029 §6 rules that "no credential value
@@ -697,10 +736,10 @@ This section is a classification of the change being made and is not normative
 | 2 | Per-call gating that runs before transmission | **Mechanism.** §1's first two clauses and §7's first: the only route to the seam is `invoke` on a `ToolCall`, which a `DENY` cannot construct. |
 | 3 | Recipient authorisation tracing to a user decision or standing user policy, bound to the resolved destination (#68) | **Mechanism.** §3, with limb (b) written and closed until ADR-0021 §6's successor opens it. |
 | 4 | Credential access gated, not just transmission (#74) | **Mechanism.** §7, for `tools/` only. `models/` is untouched debt. |
-| 5 | Transport pinned to the connected service; redirects (#83) | **Leaves the mechanism; fixes the record.** §6's fifth clause requires the endpoint recorded and unchanged between ruling and transmission. What pins it is #83's (§13). |
-| 6 | The payload bound before transmission and described inspectably after it (#57) | **Mechanism for the authorisation-time face** — §6's determinism, provenance and no-tier clauses, and §8's fourth. The artifact's granularity stays #57's (§13). |
+| 5 | Transport pinned to the connected service; redirects (#83) | **Leaves the pin; binds the endpoint.** §6 puts the endpoint in the binding, so a change between ruling and transmission is refused by the callable. What the endpoint must *be*, and what a redirect may do, is #83's (§13). |
+| 6 | The payload bound before transmission and described inspectably after it (#57) | **Mechanism for the authorisation-time face** — §6's binding, determinism, provenance and no-tier clauses, and §8's fourth. The artifact's granularity stays #57's (§13). |
 | 7 | A named approver able to refuse | **Mechanism.** §8, including the two floors and the universal `CONFIRM` that ADR-0021 §5's floor produces. |
-| 8 | What is transmitted bound to what was authorised, immutably, credential values excluded | **Mechanism.** §6, four facts with four holders, three of them already-ratified machinery. |
+| 8 | What is transmitted bound to what was authorised, immutably, credential values excluded | **Mechanism.** §6: the decision by id, and the other three facts as one egress binding compared by `authorises` and transcribed into the record. Needs surface (a) of §11. |
 | 9 | Multi-recipient calls authorised as one set | **Mechanism.** §4. |
 | 10 | Destinations canonicalised per protocol, exact where equivalence unproven, both forms audited | **Mechanism.** §2. |
 | 11 | Name-to-identifier resolution is a gated audited call, or forbidden | **Mechanism.** §5, taking the first branch and saying why the second is not the conservative one. |
@@ -720,11 +759,11 @@ supplying a mechanism is not that.
 
 > **Normative.** This decision cannot be implemented without contract surface that
 > `core` does not have. Two things are needed, both flagged here under golden rule
-> 5 and neither added by this ADR: **(a)** a durable, inspectable copy of the
-> approved payload description, reachable from the recorded permission decision;
-> and **(b)** a seam by which the pre-ruling request — canonical destination set
-> and payload description — is obtained from `tools/` before `ActionPolicy.decide`
-> is reached.
+> 5 and neither added by this ADR: **(a)** the **egress binding** of §6 — a value
+> carried as a field of `ActionRequest`, compared by `PermissionDecision.
+> authorises`, and transcribed verbatim into `PermissionDecision` by
+> `from_request`; and **(b)** a seam by which that binding is obtained from
+> `tools/` before `ActionPolicy.decide` is reached.
 
 > **Normative.** Each is decided in a contract ADR of its own, ratified and merged
 > before anything implements against it (golden rule 5, ADR-0015 §5), and the
@@ -732,43 +771,53 @@ supplying a mechanism is not that.
 > (ADR-0137 §2). No lane adds either surface on the strength of this ADR alone.
 
 > **Normative.** Whatever shape either takes, no credential value appears in it
-> (§6's fourth clause), and the description it carries states provenance and no
+> (§6's fifth clause), and the description it carries states provenance and no
 > tier for a user-authored free-text span (ADR-0146 §5, §6).
 
-**(a) is forced by inspectability, and the alternative placements are named rather
-than chosen.** §6 establishes that the description is *bound* for free, because it
-is a deterministic function of values `parameters_digest` already covers. What is
-not free is reading it: ADR-0021 §1 stores the digest and none of the arguments,
-so an auditor holding a trail entry can verify a description they cannot see —
-"a hash defeats the purpose" (#57's second comment). The natural placements are a
-field on `PermissionDecision`, copied by `from_request` under ADR-0021 §1's
-transcription discipline; a field beside `StepExecution.output` under ADR-0014;
-or a store of its own. Each is a different blast radius and a different answer to
-ADR-0004 §6's deletion rules, which #57 already names as an open question. Choosing
-between them wants a producer in hand — ADR-0073 §4's standing test, applied here
-for the reason ADR-0146 §8 and ADR-0125 §9 each applied it — and nothing at this
-seam transmits, so there is no producer.
+**(a) cannot be avoided, and it is worth saying exactly why, because an earlier
+draft of §6 tried three cheaper routes and each failed.** The binding cannot ride
+in `parameters`: `ActionRequest` is `extra="forbid"` and ADR-0145 validates
+`parameters` against the tool's declared `parameters_schema`, so an account
+reference or an endpoint placed among the arguments is refused at construction and
+a canonical form placed *over* the supplied one destroys the second form §2
+requires. It cannot ride on the registry, because a definition carries no account
+and the registry is rebuilt each run (§6). And it cannot be left derived-but-unstored,
+because ADR-0021 §1 stores the digest and none of the arguments, so an auditor
+would hold a hash of a description nobody can read — "a hash defeats the purpose"
+(#57's second comment). So the value is a field, and being a field of
+`ActionRequest` is what makes `authorises` able to compare it, which is what makes
+every immutability clause in §4 and §6 enforced rather than exhorted.
+
+**What (a)'s own ADR still has to choose.** Whether the binding is one nested
+model or several fields; whether the payload description inside it is that ADR's
+or a projection of #57's richer artifact; how `authorises` expresses the new
+conjunct; and how ADR-0004 §6's deletion rules reach a description that names
+memory records, which #57 already carries as an open question. Those want a
+producer in hand — ADR-0073 §4's standing test, applied here for the reason
+ADR-0146 §8 and ADR-0125 §9 each applied it — and nothing at this seam transmits,
+so there is no producer.
 
 **(b) is forced by §1's earliness, and it is the surface a reader is most likely
 to miss.** ADR-0037 §2 has `StepRunner`, in `orchestration`, build the
 `ActionRequest` from "the tool, the step's parameters and the step id". Under §1
-that request must already carry the canonical destination set and the payload
-description, and both are integration-specific knowledge that lives in `tools/` —
-which `orchestration` may reach only through a Protocol (golden rule 1). Neither
-`ToolRegistry` nor `ToolInvoker` answers that question, and ADR-0029 §1 is
-explicit that how the callable is reached "is `tools/`-internal, and this ADR does
-not contract it". So a seam is genuinely missing, and the shape it wants depends on
-what a real integration's canonicaliser and description-builder need — again a
-producer question.
+that request must already carry the whole binding, every part of which is
+integration-specific knowledge living in `tools/` — which `orchestration` may
+reach only through a Protocol (golden rule 1). Neither `ToolRegistry` nor
+`ToolInvoker` answers that question, and ADR-0029 §1 is explicit that how the
+callable is reached "is `tools/`-internal, and this ADR does not contract it". So
+a seam is genuinely missing, and the shape it wants depends on what a real
+integration's canonicaliser and description-builder need — again a producer
+question.
 
 **What is fixed here rather than deferred is every property either surface must
 have**, which is what keeps this from being a deferral wearing a decision's
 clothes: (b) is consulted **before** the ruling and never after; it performs no
 I/O (§2's fifth clause), so it cannot become the resolution path §5 governs; it
 **refuses** rather than guessing (§1's third clause); its description is
-deterministic (§6's sixth clause); and (a) holds no credential value and states no
-tier for a user-authored free-text span. A contract ADR that satisfies those is
-free to choose the signature; one that does not is changing this decision.
+deterministic (§6); and (a) is compared by `authorises`, is transcribed into the
+recorded decision, holds no credential value, and states no tier for a
+user-authored free-text span. A contract ADR that satisfies those is free to
+choose the signature; one that does not is changing this decision.
 
 **Note what is deliberately *not* on this list.** ADR-0146 §8 defers "the marker
 that carries a span's discloser provenance to an egress boundary" and names its
@@ -812,13 +861,18 @@ seam and changes no sentence of §5. §6's **standing grants** bullet is untouch
 that nothing here pre-shapes it, so a reader holding only ADR-0021 §6 finds the
 same deferral, with the same relief-valve role, and acts identically.
 
-**ADR-0021 §1 and §4 — no record owed.** §1's "the decision binds the payload and
-holds none of it" is about the *arguments*, and this ADR adds no field to any
-type. §11 records that implementing it needs a durable copy of the description and
-routes that to a contract ADR of its own; the ADR-0082 §1 classification of that
-addition is owed by the ADR that makes it, not by this one. §4's append-only,
-write-once rule is not merely preserved but is §9's whole reason for putting the
-attempt's outcome in the plan record rather than in the trail.
+**ADR-0021 §1 and §4 — no record owed by *this* ADR, and the reason is a
+distinction worth stating.** §11's surface (a) adds a field to `ActionRequest`
+and `PermissionDecision` and a conjunct to `authorises`, which does sit against
+§1's "the decision binds the payload and holds none of it" — a description is not
+the payload, but a reader holding only ADR-0021 §1 would build a decision with no
+such field. **This ADR adds none of it.** It states that the surface is required
+and routes it to a contract ADR of its own (§11's second clause), and under
+ADR-0082 §1 the record is owed by the ADR that makes the change, against the
+sentence it makes false or over-wide, not by the ADR that says one will be needed.
+Recording it here as well would be writing a note about an edit nobody has made.
+§4's append-only, write-once rule is not merely preserved but is §9's whole reason
+for putting the attempt's outcome in the plan record rather than in the trail.
 
 **ADR-0029 §1, §2, §5, §6 and §8 — no record owed.** The biconditional, the three
 seam checks and their order, the derived idempotency key, the credential rule and
@@ -871,7 +925,7 @@ lets external content select, parameterise or confirm an egress call, and §3
 above refuses a destination this system extracted from a span it selected as an
 authorisation. Its last clause is left unanswered on purpose, by the same reading
 ADR-0147 §11 took — it is reserved to "the lane that designates an actuation
-seam", and §3's fourth clause above routes it to the standing-grant ADR rather
+seam", and §3's fifth clause above routes it to the standing-grant ADR rather
 than answering it.
 
 **ADR-0004 §7 — no record owed, and this one deserves the sentence.** §7 requires
@@ -884,10 +938,10 @@ does **not** find in §7 is a requirement of one decision per access event, and 
 above says why the other reading is refused rather than assuming it away.
 
 **ADR-0097 §7 and ADR-0133 — no record owed.** §7's two clauses are read forward
-and applied, not narrowed: §3's fifth clause above restates the first for this
+and applied, not narrowed: §3's fourth clause above restates the first for this
 seam, and the second — that ADR-0021 §6's standing grants for actions "stay
 deferred, with the precondition ADR-0021 §3 places on the ADR that introduces
-them unspent" — is honoured, since §3's sixth clause above spends nothing and
+them unspent" — is honoured, since §3's fifth clause above spends nothing and
 names that precondition as the successor ADR's. A reader holding only ADR-0097
 finds a grant that authorises "no tool call, no transmission … and nothing
 outside the assistant" and acts identically. ADR-0133 is read for its per-use
@@ -897,7 +951,7 @@ egress recipient.
 
 **ADR-0021 §3 — no record owed.** Its precondition on "the ADR that introduces
 standing grants" is neither met nor spent here: §3's third clause above keeps
-limb (b) closed, and its sixth restates the precondition with the addition that
+limb (b) closed, and its fifth restates the precondition with the addition that
 what must be covered is the canonical destination set. Adding to what a later ADR
 owes is ADR-0098 §3's form and is recorded here rather than on ADR-0021, exactly
 as ADR-0147 §11 recorded its own stacked addition rather than writing it onto
@@ -944,9 +998,10 @@ form).
   asks where the pin lives (per integration, beside the credential, or in the
   seam's client construction), whether same-host or same-suffix redirects must be
   allowed for real APIs, and what each provider SDK exposes. Those are answers to
-  find with code, and §6's fifth clause fixes the authorisation-time half — the
-  endpoint is recorded beside the semantic destination and may not move between
-  ruling and transmission — which is the half #83's own last bullet asks for.
+  find with code, and §6 fixes the authorisation-time half — the endpoint is in
+  the binding, appears beside the semantic destination in the record, and the
+  callable refuses to connect to a different one — which is the half #83's own
+  last bullet asks for.
 - **The payload manifest artifact** — **#57**. §6 and §8 fix its authorisation-time
   face: deterministic, per-span provenance, no tier for user-authored free text,
   both destination forms, no credential value, and what a confirmation must name.
@@ -964,7 +1019,7 @@ form).
 - **ADR-0098 §3's last clause**, whether a standing authorisation may cover an
   action a model selected while reading external content. Reserved by that clause
   to "the lane that designates an actuation seam", left open by ADR-0147 §11 in a
-  marked clause, and routed by §3's fourth clause above to the standing-grant ADR.
+  marked clause, and routed by §3's fifth clause above to the standing-grant ADR.
   No lane reads this ADR's silence as an answer in either direction.
 - **`models/`'s ungated credential read (#74) and unpinned endpoint (#83).** Both
   are pre-existing debt that ADR-0017 §2 named and deliberately did not gate,
@@ -991,7 +1046,11 @@ form).
 > description is absent draws no `ALLOW` (§8); a member added to the destination
 > set after the ruling is refused by the seam rather than transmitted (§4); a tool
 > registered at the seam declaring an empty `discloses` is refused at registration
-> (§8); and a transmission attempted outside a claimed step is refused (§9).
+> (§8); a transmission attempted outside a claimed step is refused (§9); a decision
+> recorded while an id was bound to one connected account is refused after a
+> restart that rebinds the same id, with a byte-identical declaration, to another
+> (§6); and the same for a transport endpoint that differs from the bound one
+> (§6).
 
 > **Normative.** A test asserting only that the happy path transmits satisfies no
 > clause of this section.
@@ -1011,28 +1070,48 @@ the decision. `CONTRIBUTING.md` → "Finishing an ADR PR" owns the sequence, thi
 section points at it rather than re-deriving it, and the outcome is recorded here
 on ratification.
 
+**Two findings changed the decision rather than its wording, and both are recorded
+where they bit rather than only here.** Adversarial found on round 1 that §6's
+first draft bound the **connected account** to nothing durable — the registry is
+rebuilt each run and a definition carries no account, so a `CONFIRM` answered
+after a restart could execute against a second account under a byte-identical
+declaration — and that the **transport endpoint** was required not to move while
+sitting outside the request, where nothing compares it. Both were bounds asserted
+out of machinery that does not provide them, in a document whose §1 argues that
+only what is in the request before the ruling is bound at all. §6 now carries both
+in the egress binding with the callable's own refusal behind them, §11 states the
+surface that costs, and §6's own prose says what the draft got wrong and why.
+**That is the one worth remembering**: the defect is ADR-0147 §13's — stating a
+hazard and then admitting the thing anyway — reproduced in a draft that quotes
+ADR-0147 §13 approvingly, which is the best evidence available that the pull
+toward it is a property of the subject rather than of any draft.
+
 ## Consequences
 
 - **ADR-0017 §3's list stands at fourteen, none discharged.** Nine now have a
   ruled mechanism, one is consumed from ADR-0146, one has its test matrix fixed,
   and three are left with reasons (§10). Designation still needs the ADR §2
   requires, and `tools/` still transmits nothing.
-- **The `permissions/` half of tool egress is decided, and it needed almost no new
-  machinery.** Three of the four facts §6 binds are held by ADR-0021, ADR-0029 and
-  ADR-0037 as already ratified, and the attempt record §9 requires is ADR-0014's.
-  What that cost is §1's constraint: every fact must be in the request before the
-  ruling, which is a real restriction on how an integration is written.
+- **The `permissions/` half of tool egress is decided, and most of it is joinery.**
+  The decision's identity, the argument binding, the re-check at the seam, the
+  read-back and the attempt record are all already ratified in ADR-0021, ADR-0029,
+  ADR-0037 and ADR-0014. What is genuinely new is §1's constraint — every fact
+  must be in the request before the ruling — and the value §6 needs to carry
+  them, which is §11's surface (a).
 - **Two `core` additions are authorised in principle and neither is landed**
   (§11). Each is its own contract ADR under golden rule 5 before its triad, and
   the triad then rides with its primary production implementation as one lane
   (ADR-0137 §2). A lane that starts the implementation before those merge is
-  building against an unratified contract.
+  building against an unratified contract. Surface (a) touches `ActionRequest`,
+  `PermissionDecision` and `authorises` — the most-consumed values in the
+  pipeline — so it is a breaking change and its lane inherits the ADR-0082 §1
+  record against ADR-0021 §1.
 - **Every egress call reaches the user today.** §8's `discloses` clause plus
   ADR-0021 §5's floor plus §3's closed limb (b) means there is exactly one route
   to an `ALLOW`, and it runs through a `CONFIRM` the user answers. That is the
   correct default and the poor steady state ADR-0021 §6 already named; the relief
-  valve is the standing-grant ADR, and §3's fourth clause makes it a valve with
-  two questions attached rather than a switch.
+  valve is the standing-grant ADR, and §3's fifth clause makes it a valve with
+  three questions attached rather than a switch.
 - **An integration becomes more expensive to write**, and this is the honest cost.
   It registers one tool per connected account, declares its destination-bearing
   arguments, canonicalises through the seam's per-protocol canonicaliser rather
