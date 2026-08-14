@@ -1,7 +1,20 @@
 # 148. An egress call is authorised as one whole, and nothing in it moves after the ruling
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-13
+- **Note (2026-08-14): ratified.** `Proposed` → `Accepted`, after **both**
+  required reviews came back green on one tree — adversarial **APPROVE with no
+  findings** and architecture **APPROVE with no findings**, both at tree
+  `dec16944182d`, printed round 23, churn ratio 1.4 — and with both re-run on the
+  flipped tree for coverage. That is the outcome ADR-0070 §1 requires the ratifying
+  edit to record, and the route `CONTRIBUTING.md` → "Finishing an ADR PR" fixes
+  (ADR-0130 §12, ADR-0136 §7, ADR-0146 and ADR-0147's own notes are the worked
+  precedents). **What the ratifying commit edits:** the `Status` line, this note,
+  and §15's unmarked record of the route and the rounds — nothing else, and **no
+  normative clause acquires, loses or alters an obligation**, which is ADR-0070
+  §1's own test applied to the ratifying edit first. §15 is unmarked prose under
+  this ADR's own ADR-0089 regime, so it supplied no obligation before the edit and
+  supplies none after.
 - Decides: the `permissions/`-side mechanisms ADR-0017 §3 reserves to "the
   invocation and `permissions/` ADRs" — how an egress call is **authorised**,
   **bound** and **audited**. §10 states, condition by condition, which of §3's
@@ -1633,6 +1646,22 @@ and it is run while the ADR stands `Proposed` so that a finding can still change
 the decision. `CONTRIBUTING.md` → "Finishing an ADR PR" owns the sequence, this
 section points at it rather than re-deriving it, and the outcome is recorded here
 on ratification.
+
+**The route this ADR took, and what it cost.** Drafted, reviewed and revised as
+`Proposed` across three holders, the second and third taking the lane over under
+ADR-0138 §1 after a required lens recorded seven rounds under the holder before
+them; the handoff comments on the PR carry the counts and the standing findings at
+each transfer. The status was flipped only once **both** required reviews returned
+clean on **one** tree — adversarial and architecture each `APPROVE` with no
+findings at tree `dec16944182d` — and both were re-run on the flipped tree for
+coverage, which is the mechanical refusal `CONTRIBUTING.md` describes rather than a
+second judgement on the decision. Two findings were **contested rather than
+folded** and are recorded as such: a lease held from the post-read check across the
+transport's first write, waived on ADR-0097 §5a's refusal of that mechanism by
+name; and a reading of §6's provenance clause as spending ADR-0146 §8's deferred
+marker, answered by scoping what the clause fixes rather than by dropping an
+obligation ADR-0146 §6 already binds. Nothing implements against §11 until this has
+merged (ADR-0015 §5).
 
 **Two findings changed the decision rather than its wording, and both are recorded
 where they bit rather than only here.** Adversarial found on round 1 that §6's
