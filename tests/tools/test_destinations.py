@@ -206,6 +206,24 @@ def test_an_unhashable_protocol_refuses_before_it_is_used_as_a_key() -> None:
         canonicalise([], "alice@example.com")  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize("supplied", [1, b"alice@example.com", None, ["alice@example.com"]])
+def test_a_supplied_destination_that_is_not_text_is_refused(supplied: object) -> None:
+    """Adversarial round 13: every check below is a string operation.
+
+    `select_destinations` already refuses a non-string entry, so this closes the
+    path a direct call takes — with this seam's own refusal rather than an
+    `AttributeError` raised from inside a guard.
+    """
+    with pytest.raises(DestinationCanonicalisationError, match="not text"):
+        canonicalise(DestinationProtocol.SMTP, supplied)  # type: ignore[arg-type]
+
+
+def test_a_destination_set_holding_a_non_destination_is_refused() -> None:
+    """The set is what a ruling is taken over (ADR-0148 §4), so nothing is skipped."""
+    with pytest.raises(DestinationCanonicalisationError, match="canonicalised destinations"):
+        canonical_destination_set(("alice@example.com",))  # type: ignore[arg-type]
+
+
 def test_the_refusal_is_in_the_assistant_error_hierarchy() -> None:
     """So a request builder can refuse the whole call with one handler."""
     assert issubclass(DestinationCanonicalisationError, ToolError)

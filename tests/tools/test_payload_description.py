@@ -342,6 +342,18 @@ def test_spans_are_ordered_by_declaration_then_by_position() -> None:
     ]
 
 
+def test_describing_against_shapes_this_seam_does_not_read_is_refused() -> None:
+    """Round 13's sweep: all three parameters of the public builder, checked."""
+    with pytest.raises(PayloadDescriptionError, match="an egress declaration"):
+        describe_payload(None, dict(_ARGUMENTS), provenance={})  # type: ignore[arg-type]
+
+    with pytest.raises(PayloadDescriptionError, match="are a mapping"):
+        describe_payload(_DECLARATION, None, provenance={})  # type: ignore[arg-type]
+
+    with pytest.raises(PayloadDescriptionError, match="is a mapping"):
+        describe_payload(_DECLARATION, dict(_ARGUMENTS), provenance=None)  # type: ignore[arg-type]
+
+
 def test_the_bundled_declaration_checks_its_own_fields_before_using_them() -> None:
     """Adversarial round 9: the wrapper was added last and the sweep missed it.
 

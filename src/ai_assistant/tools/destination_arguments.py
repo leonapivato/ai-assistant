@@ -26,7 +26,7 @@ deferred to its own contract ADR; nothing in this module reaches
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -39,8 +39,6 @@ from ai_assistant.tools.destinations import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from ai_assistant.core.types import FrozenJson
 
 
@@ -284,10 +282,20 @@ def select_destinations(
         The selected destinations, ordered deterministically.
 
     Raises:
-        DestinationSelectionError: If a required argument is absent or selects
-            nobody, if a value is not of the declared shape, if a supplied form
+        DestinationSelectionError: If the declaration or the arguments are not of
+            the shapes this seam reads, if a required argument is absent or
+            selects nobody, if a value is not of the declared shape, if a supplied form
             has no canonical form, or if the call selects no recipient at all.
     """
+    given: object = declaration
+    if not isinstance(given, DestinationDeclaration):
+        msg = "destinations are selected against a destination declaration"
+        raise DestinationSelectionError(msg)
+    arguments: object = parameters
+    if not isinstance(arguments, Mapping):
+        msg = f"{given.tool_id}: a call's arguments are a mapping"
+        raise DestinationSelectionError(msg)
+
     selected: list[Destination] = []
     for argument in declaration.arguments:
         if argument.name not in parameters:

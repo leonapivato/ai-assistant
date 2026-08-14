@@ -58,7 +58,7 @@ to shape it.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import TYPE_CHECKING
@@ -68,8 +68,6 @@ from ai_assistant.core.types import DataTier
 from ai_assistant.tools.destination_arguments import DestinationDeclaration, select_destinations
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
-
     from ai_assistant.core.types import FrozenJson
     from ai_assistant.tools.destinations import Destination
 
@@ -538,8 +536,10 @@ def describe_payload(
             covered (ADR-0148 §6, §14).
         DestinationSelectionError: If the destinations cannot be read and
             canonicalised out of ``parameters`` (ADR-0148 §1's third clause).
-        PayloadDescriptionError: If an argument's value is not text or a list of
-            text, if a carried provenance entry is malformed or names an argument
+        PayloadDescriptionError: If the declaration, the arguments or the carried
+            provenance are not of the shapes this seam reads, if an argument's
+            value is not text or a list of text, if a carried provenance entry is
+            malformed or names an argument
             this tool does not declare, or if ``provenance`` names a span this call
             does not transmit.
             The last is refused rather than ignored: a carried provenance for a
@@ -547,6 +547,19 @@ def describe_payload(
             about what the payload is, and the disagreement is exactly what a
             silent drop would hide.
     """
+    given: object = declaration
+    if not isinstance(given, EgressToolDeclaration):
+        msg = "a payload is described against an egress declaration"
+        raise PayloadDescriptionError(msg)
+    arguments: object = parameters
+    if not isinstance(arguments, Mapping):
+        msg = f"{given.tool_id}: a call's arguments are a mapping"
+        raise PayloadDescriptionError(msg)
+    entries: object = provenance
+    if not isinstance(entries, Mapping):
+        msg = f"{given.tool_id}: carried provenance is a mapping from span to provenance"
+        raise PayloadDescriptionError(msg)
+
     carried = _checked_provenance(provenance, declaration)
     declared = {argument.name: argument for argument in declaration.payload.arguments}
     undescribed = set(parameters) - set(declared)
