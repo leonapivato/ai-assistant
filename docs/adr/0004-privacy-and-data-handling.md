@@ -153,14 +153,15 @@
   assistant's own store, or the output of an operation any component supplied such a
   value to at or after the moment that call's plan step was persisted to the plan
   store, and no authorisation cures it — not a per-call user decision, not a standing
-  policy, not a configuration or a connected account. Its subject is a partition of
-  the stores under the data directory: every one is **covered** except a closed list
-  of two — the plan store and the connection store, which the pipeline must read to
-  perform a call the owner already authorised — and a store the list does not name is
-  covered, including one nobody has written yet. So the ordinary execution path is
-  lawful with no exception, and what the clause reaches is a read of a covered store
-  injecting something else into the payload. Its residue clause disposes
-  of everything the first does not
+  policy, not a configuration or a connected account. Its subject is a relation
+  between a read and the call being ruled on: every store under the data directory is
+  **covered**, and exactly two *reads* are excluded — the recorded parameters of the
+  step the reading component is itself executing, and the connection record of the
+  account that call binds against, the two whose whole product is bound into the
+  request the owner rules on. Every other read is covered, whatever plan, step, record
+  or store it names. So the ordinary execution path is lawful, and what the clause
+  reaches is an unexcluded read injecting something else into the payload. Its residue
+  clause disposes of everything the first does not
   reach: §2's conditions govern it, as a residue accepted because the relation a wider
   clause would be stated over is the one ADR-0098 §5 holds unrecoverable and §12
   forbids stating a bound over. That closes the hole adversarial review of PR #72
