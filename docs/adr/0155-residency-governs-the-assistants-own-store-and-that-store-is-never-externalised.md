@@ -27,14 +27,13 @@
   marker the corpus has (ADR-0146's discloser provenance) records *who disclosed* a
   span, not *where it came from*, and the two questions come apart exactly on this
   line.
-- **§3's second clause names what the prohibition cannot reach and gives it one
-  disposition.** A span produced by a model that saw store content in its turn
-  context is the relation ADR-0098 §5 holds **unrecoverable** and §12 forbids stating
-  a bound over, so it is governed by §2's conditions alone — an accepted residue with
-  a revisit trigger, neither barred nor licensed here. An earlier draft reached it
-  with "an artifact derived from one"; architecture review found the defect and it is
-  recorded in §3 rather than quietly repaired, because ADR-0098, ADR-0146 and
-  ADR-0154 each made and corrected the same one.
+- **§3's first clause is stated over what a component obtained, what it supplied and
+  at which stage — never over derivation.** Everything it does not reach is disposed
+  of by its second clause, which carries no antecedent of its own: §2's conditions
+  govern, as an accepted residue with a revisit trigger. Earlier drafts reached the
+  case by derivation and then by a carve-out with its own antecedent; both were
+  defeated in review, and §3 records how rather than quietly repairing it, because
+  ADR-0098, ADR-0146 and ADR-0154 each made and corrected the first of them.
 - **Adds no `core` surface.** No Protocol, no type, no field, no enum member. The
   recorded origin §4 finds missing is `core` surface and owes its own ADR (golden
   rule 5, ADR-0015 §5); §4 defers it with its trigger rather than specifying it.
@@ -389,25 +388,22 @@ checkable direction and the one a reviewer can test a change against.
 
 > **Normative.** No component places into a span it prepares for transmission
 > through the designated `tools/` egress seam a value it obtained from the
-> assistant's own store (§1), nor a value produced from one by an operation to which
-> that component supplied the value as an input — a copy, an excerpt, a re-encoding,
-> a rendering, or a summary or translation it computed or commissioned. The
-> prohibition is stated over what the component **obtained** and what it **supplied**;
-> it is not stated over what a span contains, and no lane reads it as requiring or
+> assistant's own store (§1), nor the output of an operation to which **any**
+> component of this system supplied such a value **in the course of preparing that
+> egress call's arguments** — a copy, an excerpt, a re-encoding, a rendering, or a
+> summary or translation computed or commissioned there. The prohibition is stated
+> over what a component obtained, what it supplied, and at which stage it did so; it
+> is not stated over what a span contains, and no lane reads it as requiring or
 > licensing an inspection of content.
 
-> **Normative.** Where a span's only relation to the assistant's own store runs
-> through a model's context — store content reaching a model by one path, and the
-> model producing an egress argument by another — **and the component preparing the
-> span supplied no value from the assistant's own store as an input to the operation
-> that produced the span**, the clause above does not reach it, and such a send is
-> **permitted or refused by §2's conditions alone**: this ADR adds
-> no bar to it and no licence for it. That disposition is an accepted residue rather
-> than a judgement that the send is desirable, and it is the only disposition
-> available: whether such an argument derives from what the model read is the
-> relation ADR-0098 §5 holds is **not recoverable** once the output has been recorded
-> truthfully, and ADR-0098 §12 forbids stating a bound over it. It is revisited when
-> a recorded origin makes a rule over the case statable (§4, #1154), and not before.
+> **Normative.** A span the clause above does not reach is **permitted or refused by
+> §2's conditions alone**: this ADR adds no bar to it and no licence for it. That
+> disposition is an accepted residue rather than a judgement that such a send is
+> desirable, and it is the only one available — the relation a wider clause would
+> have to be stated over is the one ADR-0098 §5 holds is **not recoverable** once a
+> model's output has been recorded truthfully, and ADR-0098 §12 forbids stating a
+> bound over it. It is revisited when a recorded origin makes a rule over the residue
+> statable (§4, #1154), and not before.
 
 > **Normative.** No authorisation makes a transmission the first clause forbids
 > lawful. A per-call user
@@ -440,48 +436,57 @@ corrected for it twice, and ADR-0098 §3 records the corpus making it and fixing
 before either. **The pull toward it is a property of writing about this subject**, so
 it is recorded rather than quietly repaired.
 
-**The repair keeps the whole of what #95 asked for, and the second clause states
-exactly what it gives up.** #95's case is a *component* act — "a tool could
-persistently write assistant-derived *memory* into a calendar and claim compliance" —
-and that is decidable at the component and is now forbidden absolutely, including the
-evasion of routing the record through a summariser, because the component supplied
-the value as the input. What the first clause cannot reach is a model that saw store
-content in its turn context and later wrote an argument. That is named in the second
-clause rather than covered by a form of words, on ADR-0146 §7's discipline: state the
-bound the system can actually hold, and name what it does not.
+**The repair keeps the whole of what #95 asked for.** #95's case is a *component*
+act — "a tool could persistently write assistant-derived *memory* into a calendar and
+claim compliance" — and that is decidable at the component and is forbidden
+absolutely, including the evasion of routing the record through a summariser first,
+because the store value was supplied to an operation in the course of preparing the
+call's arguments. What the first clause cannot reach is a model that saw store
+content in its turn context in an earlier stage and later wrote an argument. §3's
+second clause disposes of that on ADR-0146 §7's discipline: state the bound the
+system can actually hold, and name what it does not.
 
-**The second clause gives that case one disposition, and it took a second round to
-get there.** A first attempt said no lane may read this ADR "as ruling that case, as
-permitting it, or as having a mechanism for it" — and architecture review found on
-round 3 that the sentence contradicted §2, which does admit content composed for the
-send, so the same call was permitted by one section and denied any permissible
-reading by another. An implementation cannot act on that. The disposition is
-therefore stated outright: **the case is governed by §2's conditions alone**, and
-this ADR adds neither a bar nor a licence. Naming it an accepted residue is the
-difference between deciding it and leaving it undecided, and it is what makes the
-revisit trigger meaningful rather than decorative.
+**Three properties of the first clause carry it, and each was bought by a round.**
 
-**The deliberate route into the residue is excluded by the carve-out's own words,
-and it had to be excluded there rather than in this paragraph.** A component that
-hands a store value to a model *in order to* take the output as an egress span has
-supplied the value as an input to the operation that produced the span — the first
-clause's own words, "a summary or translation it computed or **commissioned**". An
-earlier draft of the carve-out did not say so, and its antecedent ("the span's only
-relation runs through a model's context") was satisfied by that case too, so the
-commissioned summary was forbidden by one clause and released by the next.
-Adversarial review found it on round 4 and was right that the explanation below a
-clause cannot repair it: under ADR-0089 §3 the marked clauses are the whole of what
-this ADR obligates, and prose "never supplies an obligation". The exclusion is now
-inside the carve-out. So the residue is what remains when store content reached the
-model by a path the span-preparing component did not open — a turn that recalled and
-then sent — and it is not a door a component can walk through on purpose.
+- **What a component obtained**, never what a span contains. An earlier draft said
+  "an artifact derived from one", which is the bound this corpus has already ruled
+  nobody may state: ADR-0098 §5 holds "produced from external content" is "**not
+  recoverable** once a model's output has been recorded truthfully", and §12 makes it
+  general — "whatever is decided has to be decidable from recorded origin". A rule two
+  conforming implementations answer oppositely is not a contract the seam can extend
+  against. Architecture review found it on round 2. ADR-0154 §4 was corrected for the
+  identical defect on its own round 6, ADR-0146 twice, and ADR-0098 §3 records the
+  corpus making and fixing it before either — **the pull toward it is a property of
+  writing about this subject**, so it is recorded rather than quietly repaired.
+- **Any component, not the span-preparing one.** Adversarial review found on round 6
+  that a two-component split defeated the earlier wording: component A reads the
+  record and commissions "draft an email summarising this", component B places the
+  output. A prepared no span and B supplied no store value, so neither was reached.
+  The supply now binds whichever component performs it.
+- **At which stage.** This is what keeps the clause from swallowing the product.
+  `orchestration` renders retrieved records into a planner prompt before any plan
+  exists (ADR-0098 §12 records that payload), so recalling the meeting time in order
+  to email Bob about the meeting is *not* a supply in the course of preparing an
+  egress call's arguments, and stays permitted. A component that reads the store
+  while those arguments are being prepared is inside the clause, whatever it does
+  with the value next.
+
+**The second clause is the complement of the first and carries no antecedent of its
+own, which is deliberate.** Architecture review on round 3 required the model-context
+case to have one explicit disposition rather than being left outside §3 while §2's
+general permission reached it — an earlier draft said no lane may read this ADR "as
+permitting it", which contradicted §2 in terms. But a carve-out *stated over its own
+antecedent* is a second surface to game, and adversarial review's round-4 and round-6
+findings were two different ways of gaming exactly that. Defining the residue as
+"what the first clause does not reach" gives the disposition architecture asked for
+and leaves nothing to split: there is one line, and it is drawn once.
 
 **Two wider rules were considered for the residue and both were refused.** Forbidding
-an egress call whose arguments a model produced while store content was in its
-context *is* decidable from recorded origin — but it forbids the product: recalling
-the meeting time in order to email Bob about the meeting is the assistant working, and
-a rule that prohibits it is the "false on the day it is written" shape ADR-0146's
-Context refuses. Gating registration until the residue is resolved — the second
+an egress call whose arguments a model produced while store content was anywhere in
+its context *is* decidable from recorded origin — but it forbids the product, for the
+reason the third property above gives, and a rule that prohibits the assistant using
+what it knows is the "false on the day it is written" shape ADR-0146's Context
+refuses. Gating registration until the residue is resolved — the second
 direction the review offered — was refused because ADR-0154 §6's bar is "until an ADR
 has answered #95", #95's question is the residency scope question §1 answers, and
 gating a registration on a relation ADR-0098 §5 holds unrecoverable would gate it
@@ -601,19 +606,20 @@ not confuse them.** `recall_memory` is registered today and returns matching rec
 to the turn as JSON.
 
 - **A turn that recalls and then sends.** The record reaches the model's turn
-  context, and the model later writes an argument, with no component having supplied
-  the record to the operation that produced that argument. This is §3's second
-  clause exactly: the first clause does not reach it, and §2's conditions govern the
-  send. It is the residue, and a lane may not add a bar the carve-out excludes.
-- **A component that reads the store and puts the value into an egress span**,
-  itself or through a transformation it commissioned. This is §3's first clause,
-  forbidden absolutely — and **no code checks it**. That is the gap, and it is what
-  #1154 carries.
+  context through the ordinary pipeline, and a later plan step carries an egress
+  call whose arguments no component supplied a store value toward. §3's first clause
+  does not reach it, so its second clause governs: **permitted or refused by §2's
+  conditions alone**, and a lane may not add a bar §3 does not impose.
+- **A component that reads the store while an egress call's arguments are being
+  prepared**, and places the value — or the output of something it commissioned on
+  it — into a span. §3's first clause, forbidden absolutely, and **no code checks
+  it**. That is the gap #1154 carries.
 
-The two are one line apart in the code and are opposite in disposition, which is why
-the enforcement point is worth its own issue rather than a note: the property that
-separates them — did *this* component supply the value — is exactly what nothing in
-the payload path records.
+The two differ only in *when* the store was read and *what the read was for*, and
+they are opposite in disposition — which is why the enforcement point is worth its
+own issue rather than a note. Nothing in the payload path records either fact: the
+binding derives spans from arguments and knows nothing about how those arguments came
+to hold what they hold.
 
 **What closing it would take, and why this ADR does not specify it.** It wants a
 **recorded origin** carried with a span — the same discipline ADR-0098 §12 requires
