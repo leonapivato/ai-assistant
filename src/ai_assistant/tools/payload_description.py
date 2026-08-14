@@ -464,16 +464,20 @@ def describe_payload(
     """
     carried = _checked_provenance(provenance, declaration)
     declared = {argument.name: argument for argument in declaration.payload.arguments}
-    undescribed = sorted(set(parameters) - set(declared))
+    undescribed = set(parameters) - set(declared)
     if undescribed:
-        # The offending *keys* are named and no value ever is, which is the line
-        # `tools/builtin.py`'s `_reject_unknown` already draws in this package and
-        # states its reason for: "a value is untrusted input that could carry
-        # Tier 1 data, and only the key set ... is safe to render". A key is
-        # structural — it is what the argument is called, not what was put in it.
+        # The count and the *declared* names, never the undeclared keys. This is
+        # the one place `tools/builtin.py`'s `_reject_unknown` precedent does not
+        # reach, and the difference is when each runs: that one is inside a
+        # callable, so ADR-0145 has already refused an argument outside the
+        # schema's `additionalProperties: false` and an unexpected key cannot be
+        # there. This runs **before** the request is built (ADR-0148 §1), so the
+        # keys are whatever produced them, and a key is a string a model can write
+        # as freely as a value. Adversarial review found it on round 6.
         msg = (
-            f"{declaration.tool_id}: {', '.join(undescribed)} would be transmitted "
-            f"and is not covered by the payload declaration"
+            f"{declaration.tool_id}: {len(undescribed)} argument(s) would be "
+            f"transmitted and are not covered by the payload declaration, which "
+            f"covers {', '.join(sorted(declared))}"
         )
         raise UndescribedSpanError(msg)
 

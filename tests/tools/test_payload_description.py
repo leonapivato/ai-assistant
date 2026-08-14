@@ -185,9 +185,27 @@ def test_a_mixed_payload_with_two_undescribed_span_kinds_is_refused() -> None:
     with pytest.raises(UndescribedSpanError) as again:
         _describe(parameters)
 
-    assert "attached_record" in str(first.value)
-    assert "postscript" in str(first.value)
+    assert "2 argument(s)" in str(first.value)
     assert str(first.value) == str(again.value)
+
+
+def test_the_omitted_span_refusal_names_no_undeclared_key() -> None:
+    """Adversarial round 6: an argument *name* is caller-supplied here too.
+
+    `tools/builtin.py`'s `_reject_unknown` names the unexpected keys it refuses,
+    and its reason holds where it runs — inside a callable, where ADR-0145 has
+    already refused anything outside the schema's ``additionalProperties: false``.
+    This derivation runs *before* the request exists (ADR-0148 §1), so a key here
+    is a string whatever produced the arguments could write as freely as a value.
+    The refusal states a count and the names the declaration itself holds.
+    """
+    needle = "the secret is swordfish"
+
+    with pytest.raises(UndescribedSpanError) as raised:
+        _describe(dict(_ARGUMENTS) | {needle: "x"})
+
+    assert needle not in str(raised.value)
+    assert "1 argument(s)" in str(raised.value)
 
 
 def test_a_description_that_happens_to_be_complete_is_not_what_is_asserted() -> None:
