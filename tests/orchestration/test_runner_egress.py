@@ -164,6 +164,28 @@ def _forged(binding: EgressBinding) -> EgressBinding:
     return EgressBinding.model_validate(dumped)
 
 
+class _LeakyTrail(FakeAuditTrail):
+    """A trail that remembers the decision it most recently handed out.
+
+    ``FakeAuditTrail.get`` already returns a detached snapshot, so what this keeps
+    **is** the object the runner retained — not the trail's own row. That is what
+    ADR-0152 §13's rebind limb needs: the mutation has to land on the confirmation
+    the stage is holding, while it is holding it, without disturbing what the trail
+    stores or the comparison ``record`` makes against it.
+    """
+
+    def __init__(self) -> None:
+        """A trail that has handed nothing out yet."""
+        super().__init__()
+        self.handed_out: PermissionDecision | None = None
+
+    async def get(self, decision_id: str) -> PermissionDecision | None:
+        """Answer as the fake does, keeping the snapshot the caller now holds."""
+        handed = await super().get(decision_id)
+        self.handed_out = handed
+        return handed
+
+
 class _TamperedTrail(FakeAuditTrail):
     """A trail that hands back one named decision with its binding forged.
 
@@ -397,7 +419,8 @@ async def test_the_rebuilt_request_is_built_from_what_rebind_returned() -> None:
     tool = _tool(egress=True)
     watcher = _WatchingBinder(_bound_binder(tool))
     plans = _LeakyPlans(now=lambda: AT)
-    harness = _Harness(tool=tool, binder=watcher, plans=plans, policy=_RecordingPolicy())
+    trail = _LeakyTrail()
+    harness = _Harness(tool=tool, binder=watcher, plans=plans, trail=trail)
     state = await _an_execution(harness.plans, _step())
     parked = await harness.runner.run(state, STEP, timeout=PATIENT)
     assert parked.disposition is Disposition.AWAITING_CONFIRMATION
@@ -416,6 +439,12 @@ async def test_the_rebuilt_request_is_built_from_what_rebind_returned() -> None:
         plan = plans.handed_out
         assert plan is not None
         plan.steps[0].__dict__["parameters"] = {"to": ["mallory@example.com"], "body": "swapped"}
+        # The retained **confirmation tool**, which §13 names beside the parameters:
+        # without it, a stage rebuilding from `confirmed.tool` rather than from
+        # `bound.tool` passes, because the two stay equal.
+        confirmed = trail.handed_out
+        assert confirmed is not None
+        object.__setattr__(confirmed.tool, "id", "somebody-else")
     resumed = await task
 
     assert resumed.disposition is Disposition.EXECUTED
@@ -424,6 +453,7 @@ async def test_the_rebuilt_request_is_built_from_what_rebind_returned() -> None:
     resolved = await harness.trail.get(str(resumed.decision_id))
     assert resolved is not None
     assert resolved.tool == returned.tool
+    assert resolved.tool.id == "smtp"
     assert resolved.egress_binding == returned.binding
     assert resolved.egress_binding is not None
     rebuilt = ActionRequest(
