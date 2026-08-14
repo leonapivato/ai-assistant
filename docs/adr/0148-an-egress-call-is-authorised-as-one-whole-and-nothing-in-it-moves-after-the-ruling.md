@@ -467,6 +467,28 @@ exists; the other three travel together in one value the request carries.
 > refuses the call rather than performing it against another account or another
 > endpoint, and so does a reference re-provisioned for a different account.
 
+> **Normative.** The identity check and the credential read are **one step**: no
+> `await` occurs between reading the identity currently recorded for the bound
+> reference and calling `Secrets.get` for it. This is ADR-0097 §5a's rule for a
+> grant and a read, transposed onto the pair this section binds.
+
+> **Normative.** After the credential is in hand and **before any byte is
+> transmitted**, the callable re-reads the recorded identity and **discards** the
+> credential without transmitting where it no longer equals the bound identity. A
+> read of the identity that cannot be answered is treated as a changed one.
+
+> **Normative.** Provisioning or re-provisioning a connected account is **one
+> act**: the credential and the identity recorded for its reference are written
+> together, and no state is observable in which the two disagree. The lane that
+> builds the connection surface owes this; it is ADR-0124 §6's rule for
+> re-enrolment and ADR-0021 §4's for `record`, applied to this pair.
+
+> **Normative.** What the three clauses above guarantee is that no byte is
+> transmitted under a credential whose recorded account identity was not the bound
+> one both when it was read and immediately before transmission. They do **not**
+> guarantee that no credential is ever read for a call that is then refused, and
+> no lane states them as guaranteeing that.
+
 > **Normative.** No credential value enters an `ActionRequest`, a
 > `PermissionDecision`, an egress binding, a payload description, an audit record
 > or any value derived from one. Only the identity and the reference are bound.
@@ -533,7 +555,25 @@ refusing the substitution. This is the same lesson as the first defect one level
 down: a name that resolves to the right thing today is not a binding to that
 thing.
 
-**What that does not close, said rather than glossed.** The identity is recorded
+**A check and a read are two moments, and the third draft left a window between
+them.** `Secrets.get` is `async` — ADR-0125 §1 makes every method on both faces
+so, because a locked keyring prompts the owner — and "the system composes on one
+event loop" (`CONTRIBUTING.md`) is precisely the setting in which an `await`
+between a check and a use is an interleaving point. Adversarial review found on
+round 3 that a callable could verify identity A, suspend, have the slot
+re-provisioned as B, resume and send under B's token. **The corpus has ratified
+the answer to this exact shape**: ADR-0097 §5a requires that "no `await` may occur
+between the `live()` result a driver gates on and its call to `Reader.read()`",
+that the driver "re-checks the grant when `read()` returns" and discards the
+reading if it has gone, and that it "fails closed on an unanswerable check". The
+three clauses above are that rule transposed onto the credential, and the fourth
+states the residue in §5a's own honest form rather than claiming the window is
+gone. The atomic-provisioning clause is what makes the re-check meaningful: a
+provisioning act that wrote the token and then the identity would leave an
+observable state in which a re-check reads the old identity beside the new token,
+which is ADR-0124 §6's forbidden intermediate state arriving here.
+
+**What none of it closes, said rather than glossed.** The identity is recorded
 when the account is connected and is not re-verified against the service on each
 call; verifying it would be a remote lookup, which §5 makes an egress call of its
 own and which would then need one per send. So a party that writes account B's
@@ -597,6 +637,12 @@ where an old exclusion gets forgotten.
 > the credential read that call performs, and is the record ADR-0004 §7 requires
 > for that access. No second decision is sought and no second audit record is
 > written for the read itself.
+
+> **Normative.** §6's discard clause is not an exception to the clause above.
+> That clause governs a call that was **refused** — a `DENY`, which constructs no
+> `ToolCall` and reaches no callable, so nothing is read. §6's discard governs a
+> call that was **authorised** and whose account changed under it after the read,
+> where the credential is in hand and the rule is that it is not used.
 
 > **Normative.** This settles #74 for `tools/` and for nothing else. `models/`'s
 > ungated provider-credential read is pre-existing debt (ADR-0017 §2, ADR-0125
@@ -1091,6 +1137,13 @@ form).
 > between the ruling and the resume, which is refused, while a rotation of the
 > same account's credential at that reference is not (ADR-0125 §4, §6).
 
+> **Normative.** That lane also ships the interleaving case §6's one-step and
+> re-check clauses exist for: a re-provisioning that lands **after** the identity
+> check and before or during the credential read is caught by the re-check, the
+> credential is discarded, and no byte is transmitted. A test that reprovisions
+> only between the ruling and the start of invocation does not satisfy this
+> clause.
+
 > **Normative.** A test asserting only that the happy path transmits satisfies no
 > clause of this section.
 
@@ -1119,10 +1172,13 @@ sitting outside the request, where nothing compares it. Both were bounds asserte
 out of machinery that does not provide them, in a document whose §1 argues that
 only what is in the request before the ruling is bound at all. Round 2 then found that the repair's account half bound a
 **keyring slot** rather than an account, since ADR-0125 §4 lets `set` replace a
-value in place for rotation. §6 now carries the account's identity beside its
-credential reference, the endpoint alongside both, and the callable's own
-three-way refusal behind all of them; §11 states the surface that costs, and §6's
-own prose says what each draft got wrong and why.
+value in place for rotation; and round 3 that the identity check and the
+credential read are two `await`-separated moments with a window between them.
+§6 now carries the account's identity beside its credential reference, the
+endpoint alongside both, the callable's three-way refusal behind all of them, and
+ADR-0097 §5a's one-step/re-check/fail-closed discipline over the read — with the
+residue stated in §5a's own honest form rather than papered over. §11 states the
+surface that costs, and §6's own prose says what each draft got wrong and why.
 **That is the one worth remembering**: the defect is ADR-0147 §13's — stating a
 hazard and then admitting the thing anyway — reproduced in a draft that quotes
 ADR-0147 §13 approvingly, which is the best evidence available that the pull
