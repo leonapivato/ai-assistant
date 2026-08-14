@@ -233,14 +233,49 @@ convention.
 > `model_construct` is a documented escape hatch, `object.__setattr__` defeats
 > `frozen=True` (ADR-0018 §3), and neither is detectable from a type.
 
-> **Normative.** `rebind` additionally **detaches** `approved` — it reads no field of
-> the caller's object after revalidating it — so a binding mutated while `rebind` is
-> suspended cannot change what §7 compared against. This is ADR-0018 §3's detachment
-> discipline at the one argument on this seam that arrives from outside and is then
-> compared.
+> **Normative.** Both members **detach every argument they revalidate**. Each takes
+> the **revalidated copy** revalidation produced, captures it before it awaits
+> anything, and reads every field from that copy thereafter; the caller's objects are
+> never read again — not `tool`, not `parameters`, not `provenance`, and not
+> `rebind`'s `approved`. This is ADR-0029 §2's step 1 applied **whole** rather than in
+> half. That step obliges a call to be "**revalidated and detached** — first", and
+> states the consequence this clause transcribes: "Every subsequent check reads the
+> revalidated copy, never the argument."
 
-> **Normative.** Past that one revalidation the seam reads the carrier's keys and
-> values **on trust** and performs no `isinstance` check of its own over either. The
+> **Normative.** Every clause of this ADR that reads `tool`, `parameters` or the
+> provenance carrier reads the **detached copy** of that argument and never the
+> caller's object. This binds, without exception: §1's registry-original comparison;
+> §3's declaration read; §5's derivation, its `SYSTEM_SELECTED` write and its
+> absent-span refusal; every refusal condition in §6; §7's re-derivation, its equality
+> comparison and its provenance match; §8's partition condition; and §10's read
+> budget. No clause of this ADR is satisfied by a read of a caller-held object, and no
+> lane reads a section's own wording as licensing one.
+
+> **Normative.** The detachment closes a **suspension** window, and the window is
+> real: both members are `async`, §10 permits exactly one await — the connection-record
+> read — and it falls between §1's registry-original comparison and §5's derivation.
+> Without detachment a caller could hand in a registry-equal definition, let it
+> revalidate and compare, suspend the seam on that read, then replace the declaration
+> with `object.__setattr__` — which defeats `frozen=True` (ADR-0018 §3), and which the
+> revalidation clause above already concedes is undetectable from a type — and have
+> the binding derived under a declaration no longer equal to the registered original,
+> with the ruling recorded before `invoke`'s check ever runs. That is the "closes the
+> door and leaves the window open" position ADR-0018 §3 names, and ADR-0029 §2 refused
+> it at the seam one stage on.
+
+**`approved` was the first argument found to need this, and it is no longer the only
+one.** An earlier draft detached `approved` alone, justified as "the one argument on
+this seam that arrives from outside and is then compared". Adversarial review found
+that justification false against its own neighbour: `tool` also arrives from outside
+and is also compared — against the registered original, by the registry-original
+clause four clauses above — and `parameters` and the carrier are read across the same
+await. The clauses above generalise rather than patch, which is what ADR-0029 §2 had
+already decided for the seam one stage on; §13 pins one detachment case per argument.
+
+> **Normative.** Past the revalidation above, the seam reads the **detached**
+> carrier's keys and values **on trust** and performs no `isinstance` check of its own
+> over either — on trust as to their *types*, which the carrier validated, and from
+> the detached copy as to their *values*, which the clauses above bind. The
 > defence is one call to the type, not a hand-written check per field — which is the
 > distinction ADR-0150 §8 draws, and what keeps this from being PR #1120's eight
 > rounds re-opened. What the seam still refuses beyond it is a **relational** fact no
@@ -602,6 +637,13 @@ those shapes would make the refusals unreachable rather than wrong."
 > canonical destination set and no binding from any caller, and there is no
 > argument through which one could be supplied.
 
+> **Normative.** Every derivation in this section reads the **detached** `tool`,
+> `parameters` and provenance carrier §1 captured, never the caller's objects. The
+> derivation is the one step of the call that runs **after** §10's awaited read, so it
+> is the step the suspension window §1 names would otherwise reach, and a binding
+> derived under a declaration or a payload swapped during that await is exactly the
+> outcome §1's detachment exists to make unreachable.
+
 > **Normative.** Every `EgressDestination` the seam produces carries the canonical
 > form that **this seam's own canonicaliser for that occurrence's protocol**
 > computes from its supplied form. This is the check ADR-0150 §3 routes here, and
@@ -669,6 +711,12 @@ carrying real provenance before then.
 > whole call: the binding is not produced, the `ActionRequest` is not built, and no
 > ruling is sought (ADR-0148 §1's third clause).
 
+> **Normative.** Every condition below is evaluated over the **detached** `tool`,
+> `parameters` and provenance carrier §1 captured, never the caller's objects. A
+> refusal condition read off a caller-held object could be satisfied at the moment it
+> was read and false at the moment the binding is produced, which would make each of
+> these refusals a check rather than a guarantee.
+
 > **Normative. The undescribed key.** The seam refuses a call carrying a top-level
 > key of `parameters` that the bound tool's `parameters_schema` does not
 > **statically name** — that is, a key that is not a key of that schema's top-level
@@ -724,8 +772,10 @@ carrying real provenance before then.
 > failure.
 
 **Five named refusals and a residual clause, rather than an enumeration presented
-as closed.** The sixth clause below is the residual one and the boundary; the five
-above it are the instances the corpus has argued for, each with an ADR behind it.
+as closed.** **The uncompletable call** is the residual one and the boundary; the
+five named refusals above it are the instances the corpus has argued for, each with
+an ADR behind it. The read-binding clause is not a refusal and does not enter the
+count — it fixes what every condition here is evaluated over.
 ADR-0150 §3 records why a list of known-bad shapes is not a boundary:
 "one implementation splits at the final `@` and canonicalises it while another
 refuses it". The same is true one level up — a seam whose refusals were an
@@ -1389,10 +1439,18 @@ rather than a gap discovered late.
 > its inputs ordinarily reaches none of these, and one covering `bind`'s arguments
 > alone leaves `rebind`'s untested.
 
-> **Normative.** That lane ships the **detachment** case §1's `approved` clause is
-> stated for: an `object.__setattr__` performed on the caller's `approved` binding
-> while `rebind` is suspended changes neither what it compares against nor what it
-> returns. A test that mutates a copy does not satisfy it.
+> **Normative.** That lane ships the **detachment** cases §1's detachment clauses are
+> stated for — **one per validated argument**, each exercised by mutating the caller's
+> object with `object.__setattr__` while the member is suspended on §10's awaited
+> connection-record read. Mutating `tool` changes neither the declaration the binding
+> is derived under, nor the registry-original comparison, nor what is returned;
+> mutating `parameters` changes neither the spans derived nor any refusal condition of
+> §6; mutating the `provenance` carrier changes neither the provenance written into a
+> span nor §5's absent-span refusal; and mutating `rebind`'s `approved` changes
+> neither what §7 compares against nor what it returns. A test that mutates a copy
+> satisfies none of these; one that mutates before the await tests revalidation rather
+> than detachment; and one covering `approved` alone leaves every argument the
+> suspension window actually exposes untested.
 
 > **Normative.** That lane ships the **locator** cases §1 is stated for: an
 > `EgressSpanLocator` is hashable and usable as a mapping key; two locators with
@@ -1651,12 +1709,20 @@ query-only registry is unchanged: no member is added to `ToolRegistry`, and §10
 above states the capability argument §5 and ADR-0029 §1 each made. §7's deferral of
 population is untouched.
 
-**ADR-0029 §1, §2, §7 and §8 — no record owed.** §2's step-1 **revalidation** is
-the precedent §1 above applies at a second seam, and applying it is that step being
-used rather than extended: the rule there — "a revalidation failure carrying the
-underlying `ValidationError` as its cause" — is restated for this seam's own error
-class, and the three checks `invoke` performs are neither moved, relaxed nor
-duplicated. §1's biconditional is untouched:
+**ADR-0029 §1, §2, §7 and §8 — no record owed.** §2's step 1 is the precedent §1
+above applies at a second seam, and it is applied **whole**: step 1 is that "the call
+is **revalidated and detached** — first", and §2 states the consequence in terms —
+"Every subsequent check reads the revalidated copy, never the argument." §1 above
+transcribes both halves, for every argument this seam validates rather than for one,
+and §1's read-binding clause is that sentence restated over this ADR's own sections.
+An earlier draft took only the revalidation half and detached `approved` alone;
+adversarial review found the gap, and closing it is that step being **used** rather
+than extended or narrowed — the rule is ADR-0029's, applied where ADR-0029's own
+reasoning already reached. The failure rule — "a revalidation failure carrying the
+underlying `ValidationError` as its cause" — is likewise restated for this seam's own
+error class, and the three checks `invoke` performs are neither moved, relaxed nor
+duplicated: they still run, over the same call, for the reason §2 gives.
+§1's biconditional is untouched:
 this seam registers nothing, invokes nothing, and adds no route to a callable.
 §1's "how the callable is reached is `tools/`-internal, and this ADR does not
 contract it" is relied on **and restated** by §10 above, which is the sentence
@@ -1666,11 +1732,13 @@ is unchanged and §1 above says so. §2's three seam checks are untouched. §7's
 scope-out of designation is honoured by §12. §8's `approval_ref` obligation is
 untouched, and §9 above commits nothing that could reach it.
 
-**ADR-0018 §3 — no record owed.** Its detachment discipline is **applied** at two
-more places — `rebind`'s `approved` argument (§1) and, by ADR-0150 §9, the binding
-`ActionRequest` already detaches — which is that discipline used rather than
-altered, and its own record of what `frozen=True` does not stop is what §1's
-revalidation clause relies on.
+**ADR-0018 §3 — no record owed.** Its detachment discipline is **applied** at every
+argument either member of this seam validates (§1) — `tool`, `parameters`, the
+provenance carrier and `rebind`'s `approved` — and, by ADR-0150 §9, at the binding
+`ActionRequest` already detaches. That is the discipline used rather than altered,
+applied more widely than an earlier draft of §1 applied it rather than differently:
+§3's own record of what `frozen=True` does not stop is both what §1's revalidation
+clause relies on and what makes the detachment necessary across §10's one await.
 
 **ADR-0021 §1, §3 and §5 — no record owed.** §1's digest still binds the arguments
 while storing none of them, and this seam stores nothing at all. §3's rule that a
