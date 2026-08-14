@@ -1282,10 +1282,14 @@ form).
   it". The clause's prohibition is not lifted here, and §8's precondition is what
   keeps it binding on the implementing lane.
 - **One subsystem holds the whole connection concept.** The record, its store, its
-  readers, its writer and its purge are all in `tools/`, so the only contract
-  surface this decision adds is the one the user's act crosses — one Protocol
-  instead of the two a different placement would have cost, and no supersession of
-  ADR-0125 §8.
+  readers, its writer and the purge's mechanism are all in `tools/`, so the
+  contract surface *this ADR places* is the one the user's act crosses — one
+  Protocol instead of the two a different placement would have cost, and no
+  supersession of ADR-0125 §8. That is not a claim about the neighbourhood's total:
+  §8's routing decision may need a Protocol of its own at whichever subsystem
+  boundary its coordinator sits on, and injecting the concrete provisioner across
+  such a boundary in order to keep the count at one is what §8's fourth clause
+  forbids.
 - **`tools/` acquires durable state and a write face onto the keyring**, which it
   did not have. That is the real cost: a subsystem that will host integration code
   now contains the one component that can write an `INTEGRATION` credential. §1's
