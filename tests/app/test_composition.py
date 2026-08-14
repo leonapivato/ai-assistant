@@ -2199,16 +2199,30 @@ async def test_a_configured_but_missing_source_fails_at_run_time_and_not_at_buil
 #: that same operation" — on ADR-0078 §10 item 8's reasoning rather than a new
 #: one, so ``purge_before`` is guarded exactly as the first two names are.
 #:
-#: The last two entries are the canonical fakes **implementing** the seam, not
-#: scheduling a sweep: ``ai_assistant.testing`` is test-only and the composition
-#: root never imports it, so neither is reachable from a deployment. They are
-#: listed rather than excluded by directory, because an excluded directory is a
-#: hole in a guard whose whole value is that it has none.
+#: Two entries are the canonical fakes **implementing** the seam, not scheduling a
+#: sweep: ``ai_assistant.testing`` is test-only and the composition root never
+#: imports it, so neither is reachable from a deployment. They are listed rather
+#: than excluded by directory, because an excluded directory is a hole in a guard
+#: whose whole value is that it has none.
+#:
+#: **``service/purge.py`` is here for the same shape of reason and it is worth
+#: stating rather than waving through**, because it is the first entry that *is*
+#: reachable from a deployment and is still not a second sweeping mechanism. What
+#: ADR-0078 §10 item 8 forbids is a second **retention** sweeper — a store's
+#: expiry horizon enforced on a timer of its own, beside the one job that already
+#: enforces every other store's. ADR-0153 §3's call is none of that: it is the
+#: owner's ADR-0004 §6 delete right, invoked once, by hand, from an offline
+#: console script with the hub stopped and the instance lock held; it takes no
+#: horizon, reads no clock and is on no schedule, and the only thing it shares
+#: with the three above is a method name. The receiver-blindness that catches it
+#: is the same feature ADR-0083 §11 calls one — the guard is meant to make
+#: *every* call argue for itself, and this is that argument.
 _SWEEP_HOME = frozenset(
     {
         ("orchestration/engine.py", "Engine._purge_expired", "purge_expired"),
         ("orchestration/engine.py", "Engine._purge_expired", "purge"),
         ("orchestration/engine.py", "Engine._purge_expired", "purge_before"),
+        ("service/purge.py", "_purge_connections", "purge"),
         ("testing/traces.py", "FakeTraceRetention.purge_before", "purge_before"),
         ("testing/traces.py", "FakeTraceStore.purge_before", "purge_before"),
     }
@@ -2371,9 +2385,12 @@ def test_the_sweep_guard_accepts_only_the_permitted_home(tmp_path: Path) -> None
     The canonical fakes are written out too, because they are in the permitted set:
     a fake *implementing* ``purge_before`` by delegating to its own rows is the
     Protocol's behaviour, not a scheduled sweep, and ``ai_assistant.testing`` is
-    reachable from no deployment.
+    reachable from no deployment. So is the offline delete act's routing
+    (ADR-0153 §3), for the reason recorded on :data:`_SWEEP_HOME`: it is the
+    owner's delete right taken by hand, not a retention horizon on a timer.
     """
     (tmp_path / "orchestration").mkdir()
+    (tmp_path / "service").mkdir()
     (tmp_path / "testing").mkdir()
     permitted = (
         "class Engine:\n"
@@ -2383,6 +2400,11 @@ def test_the_sweep_guard_accepts_only_the_permitted_home(tmp_path: Path) -> None
         "        await self._traces.purge_before(self._clock())\n"
     )
     (tmp_path / "orchestration" / "engine.py").write_text(permitted, encoding="utf-8")
+    (tmp_path / "service" / "purge.py").write_text(
+        "def _purge_connections(data_dir, *, open_connections):\n"
+        "    runner.run(opened.purger.purge())\n",
+        encoding="utf-8",
+    )
     (tmp_path / "testing" / "traces.py").write_text(
         "class FakeTraceRetention:\n"
         "    async def purge_before(self, instant):\n"
