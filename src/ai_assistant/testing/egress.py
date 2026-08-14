@@ -353,9 +353,17 @@ class FakeEgressBinder:
     def _revalidated(
         self, tool: ToolDefinition, parameters: FrozenJsonMapping
     ) -> tuple[ToolDefinition, Mapping[str, FrozenJson]]:
-        """Rebuild and detach the two arguments both members take (ADR-0152 §1)."""
+        """Rebuild and detach the two arguments both members take (ADR-0152 §1).
+
+        A raw, non-model ``tool`` is handed to ``model_validate`` rather than
+        dereferenced: ADR-0152 §1 revalidates "before reading any field of it", and
+        ``model_dump()`` is a field read, so calling it first would let such a value
+        escape as an ``AttributeError`` instead of the chained refusal §1 promises.
+        """
+        given: object = tool
         try:
-            checked = ToolDefinition.model_validate(tool.model_dump())
+            raw = given.model_dump() if isinstance(given, ToolDefinition) else given
+            checked = ToolDefinition.model_validate(raw)
         except ValidationError as exc:
             msg = "the tool definition handed to this seam does not survive its own validation"
             raise _refuse(msg) from exc
@@ -375,9 +383,11 @@ class FakeEgressBinder:
             raise _refuse(msg) from exc
 
     def _revalidated_binding(self, binding: EgressBinding) -> EgressBinding:
-        """Rebuild the approved binding, for the same three reasons."""
+        """Rebuild the approved binding, with :meth:`_revalidated`'s ordering."""
+        given: object = binding
         try:
-            return EgressBinding.model_validate(binding.model_dump())
+            raw = given.model_dump() if isinstance(given, EgressBinding) else given
+            return EgressBinding.model_validate(raw)
         except ValidationError as exc:
             msg = "the approved binding handed to this seam does not survive its own validation"
             raise _refuse(msg) from exc

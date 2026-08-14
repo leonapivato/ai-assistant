@@ -284,13 +284,29 @@ def _revalidated_tool(tool: ToolDefinition) -> ToolDefinition:
     ``frozen=True`` (ADR-0018 §3) — neither is detectable from the annotation, so
     the annotation is not the enforcement.
 
+
+    **A raw, non-model argument is validated rather than dereferenced**, and that
+    ordering is §1's own: "revalidate every argument … **before reading any field
+    of it**". ``model_dump()`` *is* a field read, so calling it first would let a
+    value that is not a model at all escape as an ``AttributeError`` — never the
+    chained refusal §1 promises. §13's bypass list enumerates model instances
+    only; it illustrates §1's clause rather than closing it, so the guard is
+    stated over what the argument **is** rather than over the shapes that list
+    happens to name.
+
     Raises:
         EgressBindingError: Chained from the ``ValidationError``, and from that
             alone. An exception of any other type raised inside a validator is not
             converted here (ADR-0152 §1, §12).
     """
+    given: object = tool
     try:
-        return ToolDefinition.model_validate(tool.model_dump())
+        # A genuine instance is dumped and rebuilt, which is what forces a
+        # `model_construct`ed or `object.__setattr__`-corrupted one back through
+        # every validator; anything else goes straight to `model_validate`, which
+        # refuses it as a `ValidationError` rather than raising on a missing method.
+        raw = given.model_dump() if isinstance(given, ToolDefinition) else given
+        return ToolDefinition.model_validate(raw)
     except ValidationError as exc:
         msg = "the tool definition handed to this seam does not survive its own validation"
         raise _refuse(msg) from exc
@@ -341,11 +357,18 @@ def _revalidated_provenance(provenance: CarriedProvenance) -> CarriedProvenance:
 def _revalidated_binding(binding: EgressBinding) -> EgressBinding:
     """Rebuild an approved binding through validation, for the same three reasons.
 
+    The validate-before-dump ordering is :func:`_revalidated_tool`'s and is there
+    for the same clause: ``approved`` is the other argument this seam reads a
+    method off, so a raw non-model would escape as an ``AttributeError`` rather
+    than the chained refusal ADR-0152 §1 promises.
+
     Raises:
         EgressBindingError: Chained from the ``ValidationError``.
     """
+    given: object = binding
     try:
-        return EgressBinding.model_validate(binding.model_dump())
+        raw = given.model_dump() if isinstance(given, EgressBinding) else given
+        return EgressBinding.model_validate(raw)
     except ValidationError as exc:
         msg = "the approved binding handed to this seam does not survive its own validation"
         raise _refuse(msg) from exc
