@@ -445,6 +445,12 @@ windows are:
   owner re-runs.
 - **Interrupted anywhere later.** ADR-0126 §1's best-effort continuation, unchanged.
 
+**An externally delivered cancellation is an interruption like any other, and it
+lands in these same windows by position.** §4 requires the act to destroy nothing
+and to close the store on its way out, so a cancellation during the purge leaves the
+first window's state and one after the purge leaves the second's. Neither is a failed
+purge, neither is reported as one, and the owner's remedy in both is the same re-run.
+
 **The state this ordering makes unreachable is the one the Context names**, and it
 is worth stating as the negative because it is the only one a re-run cannot repair:
 there is no reachable interruption after which the connection store is gone and a
@@ -453,16 +459,26 @@ only after `purge` returned, and `purge` returns only having confirmed every slo
 
 ### 4. A failed purge destroys nothing, and no argument widens the act
 
-> **Normative.** Where `ConnectionPurger.purge` raises for any reason, the act
-> **destroys nothing**, reports the failure with a diagnostic naming the condition,
-> and exits with a failure status classified as every other refusal of this act is
-> (`classify`, in `ai_assistant.service.exits`). It does not continue on a best-effort
-> basis, and it does not destroy `data_dir` while leaving the connection store.
+> **Normative.** Where `ConnectionPurger.purge` raises any exception other than an
+> externally delivered `CancelledError`, the act **destroys nothing**, reports the
+> failure with a diagnostic naming the condition, and exits with a failure status
+> classified as every other refusal of this act is (`classify`, in
+> `ai_assistant.service.exits`). It does not continue on a best-effort basis, and it
+> does not destroy `data_dir` while leaving the connection store.
+
+> **Normative.** An externally delivered `CancelledError` is **not** a purge failure
+> and is never converted into one. Where one arrives at any point of the act, the act
+> destroys nothing, closes the connection store and everything opened to reach it,
+> and lets the `CancelledError` propagate — it is not classified, not reported as a
+> failed purge, and not routed through `classify`. ADR-0060's rule binds this act as
+> it binds every other module, and ADR-0151 §7 makes the identical carve-out for a
+> provisioning act (ADR-0139 §4).
 
 > **Normative.** A failure to read the connection store at all — through `connected`
-> or inside `purge` — is treated identically: the act destroys nothing and reports.
-> An unreadable index is the case in which proceeding guarantees the unrepairable
-> state rather than risking it.
+> or inside `purge`, and other than an externally delivered `CancelledError` — is
+> treated identically: the act destroys nothing and reports. An unreadable index is
+> the case in which proceeding guarantees the unrepairable state rather than risking
+> it.
 
 > **Normative.** No argument, flag, environment variable or `Settings` value lets
 > the act proceed past a failed or unavailable purge, skip it, or run without it.
@@ -765,16 +781,20 @@ on the **`service`→`tools`** boundary, which no other in-flight decision reach
 > them: a suite binds implementations of `ConnectionPurger` and cannot reach the
 > act. Driving the act with a purger that raises is deterministic, so these are
 > ordinary tests rather than an integration burden. It pins, at minimum: a
-> `connected` that raises leaves **every** entry in `data_dir` present, including
+> `connected` that raises an exception other than an externally delivered
+> `CancelledError` leaves **every** entry in `data_dir` present, including
 > `devices.db`, and the act exits with a failure status whose diagnostic names the
-> condition; a `purge` that raises after the confirmation does the same; a `purge`
-> that raises is followed by no destruction of any kind, best-effort included; a
-> completed `purge` is followed by ADR-0126 §5's ordering unchanged, with
+> condition; a `purge` that raises one after the confirmation does the same; a
+> `purge` that raises is followed by no destruction of any kind, best-effort
+> included; a completed `purge` is followed by ADR-0126 §5's ordering unchanged, with
 > `devices.db` the first entry destroyed; the connection store and everything opened
 > to reach it are closed before the first destruction; every refusal-producing check
-> of ADR-0126 §1 refuses without the purge having been invoked at all; and the
+> of ADR-0126 §1 refuses without the purge having been invoked at all; the
 > statement made before the confirmation carries a row per `SecretScope` member and
-> every live connection's reference and identity.
+> every live connection's reference and identity; and an externally delivered
+> cancellation during the purge destroys nothing, leaves the connection store closed
+> rather than orphaned, and propagates the `CancelledError` rather than exiting
+> through `classify`.
 
 **The second clause exists because the first cannot reach the failure that
 matters.** §4's obligations are on the act, not on the seam, and a conformance
@@ -1079,6 +1099,18 @@ working rather than being narrowed. §15's clause requires ADR-0151's surface to
 in one lane and one PR, and §8 above puts a second Protocol and its triad into that
 same lane — the list stays complete for what it enumerates and everything on it still
 lands together. A reader holding only ADR-0151 acts identically. Stacked addition.
+
+**ADR-0060 and ADR-0151 §7 — no record owed, and §4's cancellation clause is why
+they are checked.** ADR-0060's rule is that a method makes every resource it
+acquired safe under cancellation and that a cancellation delivered from outside is
+delivered onward rather than converted into a return value or a report. §4 applies
+it rather than narrowing it, and states both halves for this act: the connection
+store and everything opened to reach it are closed, and the `CancelledError`
+propagates unclassified. ADR-0151 §7 made the identical carve-out for a provisioning
+act one ADR earlier — "`CancelledError` is not one … propagates unconverted" — and is
+followed rather than extended, since its own clause is about that ADR's provisioning
+classification and reaches no purge. A reader holding only either one acts
+identically. Stacked addition.
 
 **ADR-0148 §6, ADR-0004 §6 and §7, ADR-0083, ADR-0084, ADR-0102, ADR-0123 — no
 record owed.** ADR-0148 §6's binding, ordering and compare-and-swap are about a
