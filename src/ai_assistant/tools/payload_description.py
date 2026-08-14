@@ -333,37 +333,51 @@ def _spans_of(argument: PayloadArgument, value: FrozenJson) -> tuple[tuple[SpanR
 
 
 def _checked_provenance(
-    provenance: Mapping[SpanRef, DiscloserProvenance], tool_id: str
+    provenance: Mapping[SpanRef, DiscloserProvenance], declaration: EgressToolDeclaration
 ) -> dict[SpanRef, DiscloserProvenance]:
-    """Refuse a carried provenance that is not one of ADR-0146 §1's two states.
+    """Check every carried entry before any of it reaches a description or a message.
 
-    The annotation says :class:`DiscloserProvenance`; a mapping arriving at run
-    time says whatever it holds. That gap matters here more than it usually does,
-    because the value being carried is the one ADR-0146 §2 makes fail-closed: a
-    span with **no** recorded origin is system-selected, and an unrecognised value
-    slipping through would be a third state the description records and no clause
-    admits — the permissive default arriving by a different door. So it is
-    checked, in the idiom `tools/registry.py` already uses for ``checked_timeout``
-    and ADR-0026 §2 for an injected clock. Adversarial review found it on round 4.
+    The annotation says :class:`SpanRef` to :class:`DiscloserProvenance`; a mapping
+    arriving at run time says whatever it holds. That gap matters here more than it
+    usually does, because the value being carried is the one ADR-0146 §2 makes
+    fail-closed: a span with **no** recorded origin is system-selected, and an
+    unrecognised value slipping through would be a third state the description
+    records and no clause admits — the permissive default arriving by a different
+    door. So it is checked, in the idiom `tools/registry.py` already uses for
+    ``checked_timeout`` and ADR-0026 §2 for an injected clock. Adversarial review
+    found it on round 4.
 
     Refused rather than defaulted, because a malformed entry is not "no origin was
     recorded" — it is a caller whose wiring is wrong, and ADR-0148 §1's third
     clause refuses a description that cannot be derived rather than deriving a
     plausible one.
 
+    **The key is checked against the declaration before any part of it is named,**
+    which is round 5's finding and the reason this function takes the declaration
+    rather than the tool's id. ``SpanRef.argument`` is caller-supplied too, so a
+    refusal that interpolated it would put arbitrary text — Tier 1 content
+    included — into a message bound for a log, which is the leak `core/logging.py`
+    names and `tools/invocation.py` declines to make with ``str(exc)``. An argument
+    name that the *declaration* holds is safe to name, because the tool's author
+    wrote it; anything else gets a fixed diagnostic and no interpolation at all.
+    Once past this function every key names a declared argument, which is what
+    makes the later refusals safe to be specific.
+
     Args:
         provenance: The carried mapping, as given.
-        tool_id: The tool being described, for the refusal's text.
+        declaration: The bound tool's declaration, which supplies both the id for
+            the refusal's text and the argument names a key may name.
 
     Returns:
         The same mapping, with every key and value checked.
 
     Raises:
-        PayloadDescriptionError: If a key is not a :class:`SpanRef` or a value is
-            not a :class:`DiscloserProvenance`. Neither message quotes the
-            offending value: a forged entry could hold anything, including the
-            content a description exists to avoid holding.
+        PayloadDescriptionError: If a key is not a :class:`SpanRef`, does not name
+            an argument the payload declaration holds, or carries a position that
+            is not an index; or if a value is not a :class:`DiscloserProvenance`.
     """
+    tool_id = declaration.tool_id
+    declared = {argument.name for argument in declaration.payload.arguments}
     checked: dict[SpanRef, DiscloserProvenance] = {}
     for key, value in provenance.items():
         span: object = key
@@ -371,9 +385,20 @@ def _checked_provenance(
         if not isinstance(span, SpanRef):
             msg = f"{tool_id}: carried provenance is keyed by something that is not a span"
             raise PayloadDescriptionError(msg)
+        argument: object = span.argument
+        if not isinstance(argument, str) or argument not in declared:
+            msg = (
+                f"{tool_id}: carried provenance names an argument this tool does not "
+                f"declare; it is not named here because it is not the tool author's text"
+            )
+            raise PayloadDescriptionError(msg)
+        index: object = span.index
+        if index is not None and (isinstance(index, bool) or not isinstance(index, int)):
+            msg = f"{tool_id}: the provenance carried for {argument!r} has no usable position"
+            raise PayloadDescriptionError(msg)
         if not isinstance(recorded, DiscloserProvenance):
             msg = (
-                f"{tool_id}: the provenance carried for {span.argument!r} is not one of "
+                f"{tool_id}: the provenance carried for {argument!r} is not one of "
                 f"the two states ADR-0146 §1 admits"
             )
             raise PayloadDescriptionError(msg)
@@ -429,17 +454,23 @@ def describe_payload(
         DestinationSelectionError: If the destinations cannot be read and
             canonicalised out of ``parameters`` (ADR-0148 §1's third clause).
         PayloadDescriptionError: If an argument's value is not text or a list of
-            text, if a carried provenance is not one of ADR-0146 §1's two states,
-            or if ``provenance`` names a span this call does not transmit.
+            text, if a carried provenance entry is malformed or names an argument
+            this tool does not declare, or if ``provenance`` names a span this call
+            does not transmit.
             The last is refused rather than ignored: a carried provenance for a
             span that is not there means the caller and this derivation disagree
             about what the payload is, and the disagreement is exactly what a
             silent drop would hide.
     """
-    carried = _checked_provenance(provenance, declaration.tool_id)
+    carried = _checked_provenance(provenance, declaration)
     declared = {argument.name: argument for argument in declaration.payload.arguments}
     undescribed = sorted(set(parameters) - set(declared))
     if undescribed:
+        # The offending *keys* are named and no value ever is, which is the line
+        # `tools/builtin.py`'s `_reject_unknown` already draws in this package and
+        # states its reason for: "a value is untrusted input that could carry
+        # Tier 1 data, and only the key set ... is safe to render". A key is
+        # structural — it is what the argument is called, not what was put in it.
         msg = (
             f"{declaration.tool_id}: {', '.join(undescribed)} would be transmitted "
             f"and is not covered by the payload declaration"

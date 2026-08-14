@@ -386,6 +386,37 @@ def test_a_provenance_refusal_never_quotes_what_it_refused() -> None:
     assert needle not in str(raised.value)
 
 
+def test_a_span_reference_naming_an_undeclared_argument_is_refused_unquoted() -> None:
+    """Adversarial round 5: the *key* is caller-supplied too.
+
+    ``SpanRef.argument`` is a plain string a caller writes, so a refusal that
+    named it would put arbitrary text into a message bound for a log — the leak
+    `core/logging.py` names and `tools/invocation.py` declines to make with
+    ``str(exc)``. A name the declaration holds was written by the tool's author
+    and is safe to quote; anything else gets a fixed diagnostic.
+    """
+    needle = "the secret is swordfish"
+    forged: dict[SpanRef, DiscloserProvenance] = {
+        SpanRef(argument=needle): DiscloserProvenance.USER_AUTHORED
+    }
+
+    with pytest.raises(PayloadDescriptionError) as raised:
+        _describe(dict(_ARGUMENTS), forged)
+
+    assert needle not in str(raised.value)
+    assert "does not declare" in str(raised.value)
+
+
+def test_a_span_reference_whose_position_is_not_an_index_is_refused() -> None:
+    """The third caller-supplied field of a forged key, checked with the other two."""
+    forged: dict[SpanRef, DiscloserProvenance] = {
+        SpanRef(argument="to", index="0"): DiscloserProvenance.USER_AUTHORED  # type: ignore[arg-type]
+    }
+
+    with pytest.raises(PayloadDescriptionError, match="no usable position"):
+        _describe(dict(_ARGUMENTS), forged)
+
+
 def test_a_payload_declaration_naming_no_argument_is_refused() -> None:
     """A declaration that covers nothing would make every span undescribed."""
     with pytest.raises(PayloadDescriptionError, match="at least one"):
