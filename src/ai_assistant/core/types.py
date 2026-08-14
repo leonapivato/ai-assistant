@@ -6022,6 +6022,656 @@ def _canonical_json(parameters: Mapping[str, FrozenJson]) -> bytes:
     return _canonical_bytes(_thaw_json(parameters))
 
 
+# --- egress: the binding a ruling is taken over (ADR-0150) -------------------
+# Surface (a) of ADR-0148 §11: the canonical destination set, the connected
+# account, the transport endpoint and the payload description, as **one**
+# validating value that is carried whole, compared whole and transcribed whole.
+#
+# Every fact is carried once. The canonical destination set is a *derived
+# property* rather than a stored field, because two representations of one fact
+# admit disagreement and this is a surface where a disagreement is authoritative
+# (ADR-0150 §3). The occurrences are what is stored, for the reason
+# `parameters_digest` is computed rather than supplied: a value each caller
+# filled in is a canonicalisation per caller, and two that disagreed produce a
+# false mismatch at execution, which reads as an attack rather than as a bug.
+
+
+def _rejecting_invisible(value: str) -> str:
+    """Reject text that renders as nothing, returning it **unchanged**.
+
+    :func:`_visible_identifier` is the same test with a normalising half; this is
+    the rejecting half alone, and the asymmetry is the decision. Every string in
+    this surface is compared against something outside it — a supplied form
+    against an argument the callable will transmit, an account identity against
+    the identity a connection record currently holds — so stripping one here
+    would be `core` rewriting a bound value, which is exactly what ADR-0148 §4's
+    third clause forbids between the ruling and transmission. ADR-0096 §2 states
+    the general rule this follows: **a faithful copy may tighten only in ways
+    that reject.**
+
+    **The message names no value**, which is ADR-0150 §8's second clause: a
+    refusal message reaches a log, and the values here are recipient addresses.
+
+    Raises:
+        ValueError: If nothing in the value renders.
+    """
+    if not _has_visible_text(value):
+        msg = "must contain visible text"
+        raise ValueError(msg)
+    return value
+
+
+type _VisibleUnchangedText = Annotated[EncodableText, AfterValidator(_rejecting_invisible)]
+"""Text that renders as something, byte-for-byte as supplied (ADR-0150 §3, §7)."""
+
+
+class DestinationProtocol(StrEnum):
+    """The protocol under whose rules a destination's canonical form was computed.
+
+    A member is a **safety claim**, not a label: its whole content is a ruling
+    about which two supplied forms denote one recipient (ADR-0148 §2's second
+    clause). ADR-0150 §3 therefore fixes this membership and requires a ratified
+    contract ADR for every further member, stating which equivalences that
+    protocol establishes and which it does not.
+
+    An enum rather than a ``str`` for ADR-0021 §1's canonicalisation-per-caller
+    reason: a string field admits ``"smtp"`` and ``"SMTP"`` as two protocols, and
+    two integrations that disagreed would produce a false mismatch at execution.
+
+    ``SMTP`` asserts exactly the equivalences ADR-0150 §3 states — local parts
+    byte-identical, domains equal after ASCII lowercasing — and **authorises
+    nothing**: it neither implies a canonicaliser exists, nor registers a tool,
+    nor permits any transmission. The canonicaliser itself lives at the seam
+    (ADR-0148 §2's sixth clause), never here; a copy of the rule in `core` would
+    be the second canonicaliser that clause exists to forbid.
+    """
+
+    SMTP = "smtp"
+
+
+class DiscloserProvenance(StrEnum):
+    """Who disclosed a span of an outbound payload (ADR-0146 §1).
+
+    ADR-0146 §8 deferred "the marker that carries a span's discloser provenance
+    to an egress boundary"; ADR-0150 §5 decides that the marker **is** this
+    field on :class:`EgressSpan`, with no separate type and no second carriage.
+    A marker riding anywhere else would have to be joined to the description by
+    something, and the join is a second shape that must agree.
+
+    **Carried, never derived.** No component decides a span's provenance by
+    reading its value, its field, its shape, or by matching it against what the
+    user wrote (ADR-0146 §2). ADR-0146 §2's fail-closed rule is discharged by the
+    component building the span *writing* ``SYSTEM_SELECTED``, which is why
+    :attr:`EgressSpan.provenance` has **no default**: a defaulted field is what a
+    lane forgets, and an implementation that never wired provenance through would
+    get the safe answer for free and its payloads would look correct.
+    """
+
+    #: The user composed this span into the exchange being served.
+    USER_AUTHORED = "user_authored"
+    #: Every other case, including a span this system's model authored and one
+    #: retrieved from this system's own stores (ADR-0146 §1).
+    SYSTEM_SELECTED = "system_selected"
+
+
+class EgressDestination(BaseModel):
+    """One **occurrence** of a recipient, in both the forms ADR-0148 §2 requires.
+
+    The binding carries occurrences and derives the set, never the reverse, and
+    only one of the two directions is available: occurrences yield the set by
+    deduplication, while the set yields nothing, because an alias pair collapses
+    on the way in and ADR-0148 §14 names reconstruction of a supplied form from a
+    canonical one as a failure in terms.
+
+    The span this rides on carries which argument and which position it came
+    from, so no occurrence repeats them (ADR-0150 §3).
+
+    **`core` does not check `canonical` against `supplied`, and that absence is
+    not licence.** ADR-0148 §2's sixth clause puts that computation in one place
+    at the seam, so the rule relating the two forms is not a thing this value
+    holds; ADR-0150 §11 obliges surface (b) to check that every occurrence
+    carries the form that seam's own canonicaliser computes. Until it lands, no
+    lane states that a carried canonical form has been verified against anything.
+    What `core` *can* see it does refuse: :class:`EgressBinding` rejects two
+    occurrences that canonicalise one supplied form two ways.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    protocol: DestinationProtocol = Field(
+        description="Under whose rules the canonical form was computed (ADR-0148 §2)."
+    )
+    supplied: EncodableText = Field(description="The form the arguments carry, unchanged.")
+    canonical: _VisibleUnchangedText = Field(
+        description="The form ADR-0148 §2 computed from the supplied one, at the seam."
+    )
+
+
+class BoundAccount(BaseModel):
+    """The connected account a call is made through, as the ruling fixed it.
+
+    **Not** ADR-0151 §4's ``ConnectedAccount``, and not a narrowing of it. That
+    model is the *live connection record* and carries ``revision`` and ``state``,
+    both of which move while a parked ruling stands; this one is the **snapshot
+    the ruling was taken over**, which ADR-0148 §1 requires not to move after the
+    ruling at all. Carrying the live record here would put a ``revision`` inside
+    the value :meth:`PermissionDecision.authorises` compares, so a
+    re-provisioning between the confirmation and the answer would make a parked
+    ``CONFIRM`` unanswerable (ADR-0150 §7).
+
+    **Two facts, not one.** ADR-0148 §6 binds an account by its identity *and*
+    its connection reference. Two connectable records can hold one identity, so
+    an identity-only account compares equal across them and a standing grant
+    would cover a record the user never granted; a reference is stable across a
+    rotation by design, which is what makes it survive a re-provisioning to a
+    *different* account. Either alone is a destination two different accounts
+    satisfy.
+
+    **No credential slot.** A :class:`SecretName`, its ``name``, and any string
+    identifying a keyring entry are forbidden here and everywhere in this surface
+    (ADR-0150 §7). `core` cannot distinguish a slot name from a reference — both
+    are strings — so that is a rule checked where the connection record is read,
+    not a type, and this docstring claims no protection it does not have.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    identity: _VisibleUnchangedText = Field(
+        description=(
+            "The durable, user-recognisable name recorded when the account was "
+            "connected. Visible text because ADR-0148 §8's fourth clause shows it "
+            "to the user at the moment they decide, and an identity that rendered "
+            "as nothing would leave the confirmation with nothing to say about "
+            "whose account this is."
+        )
+    )
+    reference: DurableIdentifier = Field(
+        description=(
+            "Names the account's connection record (ADR-0149 §3). Never shown to "
+            "the user — ADR-0148 §6 says it is not something an account can be "
+            "recognised by, and §8's fourth clause bars it from the confirmation."
+        )
+    )
+
+
+class CanonicalDestination(BaseModel):
+    """One member of ADR-0148 §2's canonical destination set (ADR-0150 §3).
+
+    **Exactly two well-formed shapes, and it refuses at construction to depart
+    from either**: a *selected recipient*, carrying a protocol and a canonical
+    form and no account; or *the connected account* the call is made to,
+    carrying an account and neither of the other two. No member carries all
+    three, none carries neither shape, and there is no third kind.
+
+    The account is a **member** rather than an alternative to the members, and
+    two earlier drafts failing in opposite directions are why. One defined the
+    derived set to be empty exactly where ADR-0148 §2's third clause says that
+    set *is* the connected account, so a policy reading ADR-0148 §8's third floor
+    literally would refuse every resolution call. The other split the name in two
+    and left the set with no value shape at all, so every consumer would branch
+    and invent its own comparison — this document's own title failing on the
+    document. One type, total for a consumer that never has to ask which case it
+    is in before comparing.
+
+    The account case states no protocol deliberately: an account is not named
+    under any protocol that establishes equivalences between supplied forms, and
+    minting a member for "the account" would require stating which equivalences
+    it establishes, of which it has none.
+
+    **Equality is over every field.** A canonical form is never compared across
+    protocols, and an account member never equals a selected recipient, whatever
+    strings the two hold.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    protocol: DestinationProtocol | None = Field(
+        default=None, description="Set on a selected recipient; absent on the account."
+    )
+    canonical: _VisibleUnchangedText | None = Field(
+        default=None, description="Set on a selected recipient; absent on the account."
+    )
+    account: BoundAccount | None = Field(
+        default=None, description="Set on the connected account; absent on a recipient."
+    )
+
+    @model_validator(mode="after")
+    def _is_one_of_the_two_shapes(self) -> CanonicalDestination:
+        """Refuse every combination ADR-0150 §3's two-shape clause excludes.
+
+        A bag of optional fields would admit eight combinations of which six are
+        meaningless. The distinction ADR-0150 §1 draws against partial states is
+        about facts that are only meaningful together and can arrive apart; here
+        the variants are exactly two and a validator makes every other
+        combination unconstructable.
+
+        **The message names no value**, per ADR-0150 §8: which fields are present
+        is what names the defect, and the strings are recipient addresses.
+
+        Raises:
+            ValueError: If the member is neither a selected recipient nor the
+                connected account.
+        """
+        recipient = self.protocol is not None and self.canonical is not None
+        if recipient and self.account is None:
+            return self
+        if self.account is not None and self.protocol is None and self.canonical is None:
+            return self
+        msg = (
+            "a canonical destination is either a selected recipient (a protocol and a "
+            "canonical form, no account) or the connected account (an account, neither "
+            "of the other two)"
+        )
+        raise ValueError(msg)
+
+
+class EgressSpan(BaseModel):
+    """One described span of an outbound payload (ADR-0150 §4, §5, §6).
+
+    A span is identified by the pair ``(argument, index)``: ``argument`` is a
+    top-level key of the request's ``parameters``, and ``index`` is the
+    zero-based position within an ordered decomposition of that argument's value,
+    **absent** exactly where the span's value is the argument's whole value.
+
+    **The decomposition goes at most one array level deep and never further.**
+    Where an argument's value is a JSON array its elements are its spans,
+    whatever those elements are; where it is any other JSON value it is one span.
+    A span's own value is never decomposed, so a span whose value is a JSON
+    object or a nested array is one span and the extent, provenance and tier it
+    states are that whole value's. An earlier draft made the depth a property of
+    the *value* rather than of the decomposition, and ``[["a"], ["b"]]``
+    satisfied two antecedents whose consequents no binding could satisfy at once.
+
+    **``argument`` is a locator and asserts nothing about what the span
+    contains.** No lane reads an argument name as a payload value, infers a tier
+    or a provenance from it, matches a destination against it, or treats it as
+    authored by the tool rather than supplied by the caller — a schema that does
+    not describe a key still admits it (ADR-0145 §9, §11). What a span says about
+    its content is ``provenance`` and ``tier``, and nothing else.
+
+    **A span carries at most one destination**, which is the type-level half of
+    ADR-0150 §4's cardinality clause. The other half is a *builder* obligation
+    and is not `core`'s: a builder holding two or more recipients inside one
+    undecomposable value refuses rather than carrying one and omitting the rest,
+    and `core`, which cannot see inside such a value, can neither perform that
+    check nor read a structured span's single occurrence as evidence that the
+    value selected one recipient. ADR-0150 §11 routes it, with the
+    mixed-provenance refusal, to the seam that holds the values.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    argument: EncodableText = Field(
+        description="The top-level parameters key this span came from; a locator only."
+    )
+    index: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Zero-based position within the argument's decomposition; absent "
+            "exactly where the span's value is the argument's whole value."
+        ),
+    )
+    provenance: DiscloserProvenance = Field(
+        description=(
+            "Who disclosed this span (ADR-0146 §1). Required with **no default**: "
+            "a defaulted field is what a lane forgets, and a builder holding no "
+            "recorded origin answers SYSTEM_SELECTED in code a reviewer can see."
+        )
+    )
+    extent: int = Field(
+        ge=0,
+        description=(
+            "The number of **Unicode code points** in the span's value where that "
+            "value is a JSON string, and otherwise in that value's canonical JSON "
+            "encoding — the same encoding ``parameters_digest`` is taken over. "
+            "Never bytes, UTF-16 units, grapheme clusters or rendered columns, and "
+            "no configuration selects between them: two components that measured "
+            "differently would build unequal bindings for one request and "
+            "``authorises`` would answer False, which reads as an attack."
+        ),
+    )
+    tier: DataTier | None = Field(
+        default=None,
+        description=(
+            "The tier of this span's value where the field it occupies "
+            "**establishes** one in ADR-0146 §5's sense, and absent otherwise — "
+            "which includes every user-authored free-text span. `core` does not "
+            "check it against the declaration, because ADR-0150 §6 defers that "
+            "vocabulary to surface (b), and that absence is not licence to leave "
+            "the check unbuilt. A stated tier states nothing about "
+            "``ToolDefinition.discloses``, which remains ADR-0016 §3's ceiling."
+        ),
+    )
+    destination: EgressDestination | None = Field(
+        default=None,
+        description="The recipient this span selects, where it selects one.",
+    )
+
+
+class EgressBinding(BaseModel):
+    """The whole egress binding: surface (a) of ADR-0148 §11 (ADR-0150 §1).
+
+    One value rather than several fields, for three reasons and the third is the
+    one that would be hard to recover from. :meth:`PermissionDecision.authorises`
+    gains one conjunct rather than four, and it is an explicit conjunction rather
+    than a total field comparison, so every field added to it is a line someone
+    has to remember. Four independent optional fields admit fifteen partial
+    states, of which fourteen name a destination set and no account or an account
+    and no description — and ADR-0148 §8's third clause makes those a *floor*,
+    which means an implementation that gets it wrong is the thing the floor
+    defends against. And the facts are only meaningful together: a canonical
+    destination set with no connected account is not authorisable, and a payload
+    description with no destinations is ADR-0146 §5's "your words, to this
+    recipient" with the second half missing.
+
+    A binding is **either whole or absent**. Every field here is required; there
+    is no partially populated binding, and ``None`` on a request or a decision
+    means the request is not an egress call.
+
+    **This value does not carry ``parameters``, and no lane gives it a copy so
+    that it can check them here.** That is the state stated twice this decision
+    is named against. The three structural invariants below are facts about this
+    value's own span tuple, so they stay with the value that holds them; every
+    parameter-relative invariant is :class:`ActionRequest`'s alone (ADR-0150 §4),
+    checked by its validator against its own arguments, where both sides are in
+    hand.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    spans: tuple[EgressSpan, ...] = Field(
+        default=(),
+        description=(
+            "The payload description: one span per described value, ordered by "
+            "argument and then by index. Empty only where the call's arguments are "
+            "empty or hold nothing but empty JSON arrays (ADR-0150 §4)."
+        ),
+    )
+    account: BoundAccount = Field(
+        description="The connected account the call is made through, as the ruling fixed it."
+    )
+    transport_endpoint: _VisibleUnchangedText = Field(
+        description=(
+            "Where the call is transmitted. ADR-0150 §7 constrains its scheme, "
+            "host, port and path **not at all**, and that absence is not "
+            "permission: what the endpoint must be, and what a redirect may do, is "
+            "issue #83's and is decided neither here nor by ADR-0148 §6."
+        )
+    )
+
+    @property
+    def canonical_destination_set(self) -> tuple[CanonicalDestination, ...]:
+        """ADR-0148 §2's canonical destination set, **derived** and never stored.
+
+        One member per distinct destination the spans carry — and, where the
+        spans carry **none**, exactly one member: this binding's own connected
+        account, which is ADR-0148 §2's third clause. It is therefore **never
+        empty**, and no policy refuses on ADR-0148 §8's third floor on the ground
+        that a binding's spans carry no destination.
+
+        **Derived rather than stored satisfies ADR-0148 §6's last sentence; a
+        stored field is the shape that would breach it.** That sentence forbids
+        two things. *Derived after the ruling*: the value is fixed before the
+        ruling because everything it reads is — the occurrences and the account
+        are fixed in the request, this model is frozen with ``extra="forbid"``,
+        and the deduplication and a **total** order are fixed here, so the
+        function is single-valued, total and settled at construction. Computing a
+        value on access is not determining it later; nothing that could change
+        the answer survives construction. *Re-derived at the seam*: this runs in
+        `core` over the value's own fields — no seam call, no store read, no
+        clock, no network.
+
+        **Materialising it is what would create the drift.**
+        :meth:`PermissionDecision.authorises` compares whole values, so a stored
+        set that disagreed with the occurrences it was computed from would be
+        compared as written. A decision read back from the record rebuilds the
+        occurrences and recomputes an *identical* set, because the order and the
+        deduplication are fixed here; a stored set could be read back disagreeing
+        with its own occurrences and nothing downstream would catch it.
+
+        **The account substitution is conditional on the spans being complete.**
+        ADR-0148 §2's third clause states its antecedent as a call whose
+        *arguments* select no recipient, and "the spans carry none" stands for
+        that faithfully only where every destination-bearing argument has already
+        yielded its occurrences. `core` cannot check that — which arguments are
+        destination-bearing is the declaration vocabulary ADR-0150 §6 defers — so
+        ADR-0150 §11 obliges surface (b) to refuse the binding that would defeat
+        it. No lane reads an account-only set as evidence that a call selected no
+        recipient.
+
+        **Total, never raising.** ADR-0150 §8's first bullet: a derived property
+        that raises rather than returns is a gate that fails by exception, and an
+        exception is caught somewhere. Every occurrence's ``protocol`` is
+        required and its ``canonical`` form is already visible text, so every
+        member this builds is well-formed by construction.
+
+        Returns:
+            The deduplicated, totally ordered set: account members first, then
+            selected recipients by protocol and then by canonical form, each
+            string compared by Unicode code point.
+        """
+        members = {
+            CanonicalDestination(
+                protocol=span.destination.protocol, canonical=span.destination.canonical
+            )
+            for span in self.spans
+            if span.destination is not None
+        }
+        if not members:
+            return (CanonicalDestination(account=self.account),)
+        return tuple(sorted(members, key=_destination_order))
+
+    @model_validator(mode="after")
+    def _spans_describe_one_decomposition(self) -> EgressBinding:
+        """Refuse ADR-0150 §4's three **structural** span invariants.
+
+        Exactly those three, and they are not the whole of what this value
+        refuses: :meth:`_one_supplied_form_canonicalises_one_way` is a further
+        binding-visible refusal and nothing here narrows it.
+
+        The invariants a binding *can* discharge are facts about its own span
+        tuple. A binding holding a span for ``"body"`` cannot tell whether
+        ``"body"`` is a key at all, whether its value is an array, or how many
+        code points it carries, so requiring it to refuse on those grounds would
+        be an obligation no implementation could discharge, and the first lane to
+        meet it would reach for a copy of ``parameters``.
+
+        **The messages name an argument's position in the tuple rather than its
+        name.** ADR-0150 §8 permits naming an argument; this declines to, because
+        ADR-0150 §13's residue records that a caller — or a model composing the
+        call — can put content of its own choosing into a *key*, and `core`
+        cannot tell an author's key from a caller's. Declining is strictly
+        stronger than the clause requires and cannot breach ADR-0145 §8 either.
+
+        Raises:
+            ValueError: If two spans share an ``(argument, index)`` pair, if an
+                argument's spans are not one indexless span or a contiguous
+                ``0..k-1`` run, or if the tuple is not in order.
+        """
+        keys = [(span.argument, span.index) for span in self.spans]
+        if len(set(keys)) != len(keys):
+            msg = "two spans share an (argument, index) pair, so one span is described twice"
+            raise ValueError(msg)
+
+        by_argument: dict[str, list[int | None]] = {}
+        for argument, index in keys:
+            by_argument.setdefault(argument, []).append(index)
+        for indices in by_argument.values():
+            if indices == [None]:
+                continue
+            positions = [index for index in indices if index is not None]
+            if len(positions) != len(indices) or sorted(positions) != list(range(len(positions))):
+                msg = (
+                    "an argument's spans are either exactly one indexless span or spans "
+                    "indexed 0 through k-1; this argument's are neither"
+                )
+                raise ValueError(msg)
+
+        if keys != sorted(keys, key=lambda key: (key[0], key[1] is not None, key[1] or 0)):
+            msg = (
+                "spans are ordered by argument and then by index, absent first, with "
+                "arguments compared by Unicode code point"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _one_supplied_form_canonicalises_one_way(self) -> EgressBinding:
+        """Refuse two occurrences that canonicalise one supplied form two ways (ADR-0150 §3).
+
+        A canonicaliser is a **function** of the supplied form, so two
+        occurrences sharing a protocol and a supplied form and differing in their
+        canonical form are two derivations of one form disagreeing. This is the
+        part of ADR-0148 §2's sixth clause that is visible from inside one value,
+        and it is checked here rather than assumed.
+
+        It is *not* the correspondence check: whether a carried canonical form is
+        what the seam's own canonicaliser computes is ADR-0150 §11's obligation on
+        surface (b), because ADR-0148 §2 puts that rule at the seam and a copy of
+        it here would be the second canonicaliser that clause forbids.
+
+        Raises:
+            ValueError: If two occurrences share a protocol and a supplied form
+                and differ in their canonical form.
+        """
+        derived: dict[tuple[DestinationProtocol, str], str] = {}
+        for span in self.spans:
+            occurrence = span.destination
+            if occurrence is None:
+                continue
+            key = (occurrence.protocol, occurrence.supplied)
+            if derived.setdefault(key, occurrence.canonical) != occurrence.canonical:
+                msg = (
+                    "two occurrences share a protocol and a supplied form and carry "
+                    "different canonical forms, so one supplied form canonicalised two ways"
+                )
+                raise ValueError(msg)
+        return self
+
+
+def _destination_order(member: CanonicalDestination) -> tuple[int, str, str]:
+    """Order the derived set: account members first, then by protocol and form.
+
+    Total over every well-formed member, and total is what it must be — the
+    ordering is part of what makes the derived property single-valued, so a
+    decision read back from the record recomputes an identical tuple. Strings
+    compare by Unicode code point, which is what Python's ``str`` ordering is.
+    """
+    if member.account is not None:
+        return (0, member.account.reference, member.account.identity)
+    protocol = member.protocol.value if member.protocol is not None else ""
+    return (1, protocol, member.canonical or "")
+
+
+def _detached_binding(value: EgressBinding | None) -> EgressBinding | None:
+    """Take the request's own copy of the binding, rebuilt through validation.
+
+    The discipline :func:`_detached_tool` already carries for the declaration
+    (ADR-0018 §3), applied to the one field whose rewrite ADR-0148 §4's third
+    clause exists to make impossible. Pydantic passes an already-valid model
+    instance through without copying, so an :class:`ActionRequest` would
+    otherwise share the caller's binding — and ``object.__setattr__`` on that
+    original would change which recipients the request is *about* after a policy
+    had ruled on it.
+
+    Rebuilt through ``model_validate`` rather than merely deep-copied, for the
+    same reason the declaration is: a binding assembled by ``model_construct``
+    skips every validator, and revalidating here means the request's own copy has
+    passed them whatever the caller handed over.
+    """
+    if value is None:
+        return None
+    return EgressBinding.model_validate(value.model_dump())
+
+
+def _span_extent(value: FrozenJson) -> int:
+    """Count a span's value in Unicode code points, the way ADR-0150 §4 fixes it.
+
+    A JSON string is counted directly — Python's ``len`` over a ``str`` *is* a
+    code-point count — and every other value in its canonical JSON encoding,
+    which is the encoding :func:`_canonical_bytes` pins and ``parameters_digest``
+    is taken over. Reusing that encoding rather than inventing a second one is
+    the point: the codebase already has exactly one canonical encoding, and a
+    second would be a second thing to get wrong.
+    """
+    if isinstance(value, str):
+        return len(value)
+    return len(_canonical_bytes(_thaw_json(value)).decode("utf-8"))
+
+
+def _decomposition_defect(value: FrozenJson, spans: Sequence[EgressSpan]) -> str | None:
+    """Why ``spans`` are not the decomposition of ``value``, or ``None`` (ADR-0150 §4).
+
+    A frozen JSON array is a ``tuple`` — :func:`_deep_freeze` makes it one — and
+    a ``str`` is not, so "is this argument's value a JSON array" is exactly that
+    test and nothing subtler.
+
+    The clause requiring a **non-array** argument to carry exactly one indexless
+    span is what makes the pair of locatable shapes *exhaustive rather than
+    merely usual*: without it an indexed span on a string-valued argument would
+    be constructable and unlocatable, and :func:`_span_defect` would have a
+    residue this surface would have had to invent an owner for.
+
+    Returns:
+        The defect, phrased without naming the argument or rendering any part of
+        its value (ADR-0150 §8), or ``None`` where the spans decompose it.
+    """
+    elements = value if isinstance(value, tuple) else None
+    if elements is not None and not elements:
+        if spans:
+            return "an argument whose value is an empty JSON array is described by no span"
+        return None
+    if not spans:
+        return "every argument this call carries is described by at least one span"
+    if elements is not None:
+        positions = sorted(span.index for span in spans if span.index is not None)
+        if len(positions) != len(spans) or positions != list(range(len(elements))):
+            return (
+                "an argument whose value is a JSON array of length n is described by "
+                "spans indexed exactly 0 through n-1"
+            )
+    elif len(spans) != 1 or spans[0].index is not None:
+        return (
+            "an argument whose value is not a JSON array is described by exactly one "
+            "span, whose index is absent"
+        )
+    return None
+
+
+def _span_defect(value: FrozenJson, span: EgressSpan) -> str | None:
+    """Why ``span`` misstates the argument value it locates, or ``None`` (ADR-0150 §4).
+
+    Called only after :func:`_decomposition_defect` has cleared, so a span with
+    an ``index`` locates an element of a JSON array of at least that length and
+    one without locates the argument's whole value. Both are what make the
+    recomputation total.
+
+    The supplied-form check is the one that closes at the type level a
+    description "naming a recipient the arguments never selected". It is stated
+    over *a destination on that span* and is therefore vacuous where the span
+    carries none — ADR-0150 §11 obliges surface (b) to refuse the omission,
+    because only the tool's declaration says which arguments are
+    destination-bearing. It is also silent where the located value is not a JSON
+    string, because a supplied form extracted from inside a structured value is
+    something `core` cannot see into; that residue is (b)'s too, and this
+    function claims no check it does not perform.
+
+    The extent, by contrast, leaves no residue: it is stated over the span's
+    **whole** value, and both locatable shapes are reachable from here.
+
+    Returns:
+        The defect, naming no value (ADR-0150 §8), or ``None``.
+    """
+    held: FrozenJson = value if span.index is None else value[span.index]  # type: ignore[index]  # an indexed span locates an array element, checked above
+    occurrence = span.destination
+    if isinstance(held, str) and occurrence is not None and occurrence.supplied != held:
+        return "a span's destination states a supplied form the argument's own value does not hold"
+    if span.extent != _span_extent(held):
+        return "a span's stated extent is not its value's Unicode code-point count"
+    return None
+
+
 # --- permissions: the request, the ruling, their binding (ADR-0021) ----------
 # Three types rather than one (§3): a policy authors only the ruling, so it has
 # no field with which to name a tool it was not handed. `authorises` lives in
@@ -6071,6 +6721,15 @@ class ActionRequest(BaseModel):
     )
     execution_id: DurableIdentifier | None = Field(
         default=None, description="The execution this action belongs to, if any."
+    )
+    egress_binding: Annotated[EgressBinding | None, AfterValidator(_detached_binding)] = Field(
+        default=None,
+        description=(
+            "The egress binding this call is ruled on with (ADR-0150 §1), or "
+            "``None`` where the request is not an egress call. Exactly one field, "
+            "never several: four independent optional fields would admit fifteen "
+            "partial states that ADR-0148 §8's third floor exists to refuse."
+        ),
     )
 
     @property
@@ -6165,6 +6824,82 @@ class ActionRequest(BaseModel):
             raise ValueError(msg) from None
         if violations:
             raise ValueError(_refused_parameters(violations))
+        return self
+
+    @model_validator(mode="after")
+    def _the_binding_covers_the_arguments(self) -> ActionRequest:
+        """Refuse a binding that does not describe this call's own arguments (ADR-0150 §4).
+
+        **The split from :class:`EgressBinding`'s own three invariants is where
+        the inputs are, not a softening of either check.** The binding does not
+        carry ``parameters`` and no lane gives it a copy so that it can check them
+        there — that is the state stated twice ADR-0150 is named against. Here both
+        sides sit on one object, so `core` **recomputes rather than believes**, and
+        an invariant it *can* check is not left to a component further out.
+
+        **Coverage is over the arguments, not over "what the call transmits".**
+        `core` cannot know which arguments a callable transmits and which merely
+        steer it — a ``draft: true`` flag goes nowhere — and the only way to teach
+        it would be a per-argument declaration a tool could get wrong and nothing
+        could detect. Requiring coverage of every argument *over-describes* in that
+        case, which is the conservative direction: the alternative is a description
+        narrower than the payload, the one outcome ADR-0148 §6 forbids in terms.
+
+        **An empty JSON array carries no span**, because a span for it would have
+        to state an extent and a provenance for a thing that does not exist, and
+        ``SYSTEM_SELECTED`` would be a disclosure record for nothing disclosed. An
+        indexless span standing for an absent element would also make ``to: []``
+        and ``to: ""`` indistinguishable in the record.
+
+        This is what makes two of ADR-0148 §14's mandated cases **unconstructable
+        rather than merely forbidden**: an argument with no span is not a request
+        that gets ruled on, it is a request that does not exist — ADR-0029 §2's
+        answer to the same problem shape, where a ``DENY`` produces no
+        ``ToolCall``.
+
+        **What is left over is routed, not pretended away.** Where a supplied form
+        is extracted from *inside* a structured value — a ``{"email": …, "name":
+        …}`` recipient — `core` cannot see into it, so ADR-0150 §11 owes that check
+        to surface (b). An extent has no such case: a span's value is either the
+        argument's whole value or an element of a JSON array, and both are
+        locatable from here.
+
+        **No message names an argument**, for the reason
+        :meth:`EgressBinding._spans_describe_one_decomposition` gives: a caller can
+        write content of its own choosing into a *key*, and `core` cannot tell an
+        author's key from a caller's. That also keeps ADR-0145 §8's rule — no
+        message renders any part of the parameters, neither a value nor a key —
+        true of every message this model raises.
+
+        Raises:
+            ValueError: If any span names an argument the call does not carry, if
+                an argument is undescribed or an empty array is described, if an
+                array's spans are not exactly its elements' positions, if a
+                non-array argument is described by anything but one indexless span,
+                if a destination's supplied form is not the string the argument
+                holds, or if a span's extent is not its value's code-point count.
+        """
+        binding = self.egress_binding
+        if binding is None:
+            return self
+
+        described: dict[str, list[EgressSpan]] = {}
+        for span in binding.spans:
+            described.setdefault(span.argument, []).append(span)
+
+        if not set(described) <= set(self.parameters):
+            msg = "a span names an argument this call's parameters do not carry"
+            raise ValueError(msg)
+
+        for argument, value in self.parameters.items():
+            spans = described.get(argument) or []
+            defect = _decomposition_defect(value, spans)
+            if defect is not None:
+                raise ValueError(defect)
+            for span in spans:
+                defect = _span_defect(value, span)
+                if defect is not None:
+                    raise ValueError(defect)
         return self
 
 
@@ -6300,6 +7035,15 @@ class PermissionDecision(BaseModel):
             "deployment that set no confirmation lifetime."
         ),
     )
+    egress_binding: EgressBinding | None = Field(
+        default=None,
+        description=(
+            "The binding the ruling was taken over, transcribed verbatim from the "
+            "request by :meth:`from_request` and never supplied by a caller "
+            "(ADR-0150 §9). ``None`` for every decision about a non-egress call, "
+            "which is every decision the tree holds today."
+        ),
+    )
 
     @classmethod
     def from_request(  # noqa: PLR0913 — the ADR-0059 §1 signature: recorder-supplied id, decided_at, resolves, expires_at
@@ -6328,16 +7072,25 @@ class PermissionDecision(BaseModel):
         trail rather than a policy subverting a gate, and no producer can
         prevent it (the boundary ADR-0018 §3 drew for detachment).
 
-        **The tool and the ruling are deep-copied, which is what makes "by
-        value" true rather than nominal.** Pydantic passes an already-valid
-        model instance through without copying it, so the decision would
-        otherwise hold the *same* ``ToolDefinition`` object the request does —
-        and ``object.__setattr__(request.tool, "risk_level", CRITICAL)`` would
-        then rewrite what the policy is recorded as having approved, while
+        **The tool, the ruling and the egress binding are deep-copied, which is
+        what makes "by value" true rather than nominal.** Pydantic passes an
+        already-valid model instance through without copying it, so the decision
+        would otherwise hold the *same* ``ToolDefinition`` object the request
+        does — and ``object.__setattr__(request.tool, "risk_level", CRITICAL)``
+        would then rewrite what the policy is recorded as having approved, while
         ``authorises`` went on answering ``True`` because both sides moved
         together. Copying here is the same discipline ADR-0018 §3 applied to
         registry queries, at the moment the value stops being the caller's and
         becomes the record's.
+
+        **The binding is a nested model reached the same way, and copying it is
+        ADR-0148 §4's third clause enforced rather than restated** (ADR-0150 §9).
+        That clause forbids any component from adding to, removing from,
+        substituting within or reordering the canonical destination set between
+        the ruling and transmission; the binding holds the recipients, so its
+        rewrite is precisely what that clause exists to make impossible. It is
+        **transcribed, never supplied** — the signature gains no parameter for it
+        — so a decision cannot name a binding the policy did not see.
 
         Args:
             request: The action ruled on; its subject is copied across.
@@ -6359,6 +7112,7 @@ class PermissionDecision(BaseModel):
         Returns:
             The decision, ready to record.
         """
+        binding = request.egress_binding
         return cls(
             id=id,
             ruling=ruling.model_copy(deep=True),
@@ -6369,6 +7123,7 @@ class PermissionDecision(BaseModel):
             execution_id=request.execution_id,
             resolves=resolves,
             expires_at=expires_at,
+            egress_binding=None if binding is None else binding.model_copy(deep=True),
         )
 
     def authorises(self, request: ActionRequest) -> bool:
@@ -6413,6 +7168,28 @@ class PermissionDecision(BaseModel):
         still meets ADR-0016 §2's test for living on the type — computable from
         the two values alone, independent of policy, config, context and clock —
         because an execution id is a value on both records, not a decision.
+
+        **``egress_binding`` is the fifth conjunct, compared whole and by value**
+        (ADR-0150 §9). Not field by field, not by its derived canonical
+        destination set, not by its account, and by nothing weaker than equality
+        of the whole value. Comparing the whole value is strictly stronger than
+        comparing the set, and the strength is where ADR-0148 §4's third clause is
+        cashed: comparing occurrences refuses adding to, removing from,
+        substituting within and reordering the set *and* refuses a change of
+        supplied form that leaves the canonical set identical — the alias case
+        moving from ``Alice@Example.com`` to ``alice@example.com`` after the user
+        approved the first. ADR-0148 §2's fourth clause requires both forms in the
+        record precisely because they are different facts; a comparison that saw
+        only the set would record one and bind the other.
+
+        The conjunct is ``None``-safe in **both** directions and neither is an
+        exemption. Only one of the two is obvious: a request with a binding
+        meeting a decision without one is plainly a mismatch, while the reverse —
+        a decision recorded for an egress call offered a request with no binding —
+        is the substitution that would let an approval for a described, destined
+        send authorise a call that describes and destines nothing. ``None ==
+        None`` is ``True``, so every request and decision in the tree today
+        compares exactly as it did before this conjunct existed.
         """
         return (
             self.ruling.outcome is PermissionOutcome.ALLOW
@@ -6420,6 +7197,7 @@ class PermissionDecision(BaseModel):
             and request.parameters_digest == self.parameters_digest
             and request.step_id == self.step_id
             and request.execution_id == self.execution_id
+            and request.egress_binding == self.egress_binding
         )
 
     @model_validator(mode="after")
