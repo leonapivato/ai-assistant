@@ -122,6 +122,8 @@ if TYPE_CHECKING:
         BeliefBand,
         BeliefSummary,
         Confirmation,
+        ConnectedAccount,
+        ConnectionAct,
         ContinuationToken,
         Conversation,
         ConversationDigest,
@@ -6644,5 +6646,495 @@ class SecretStore(Secrets, Protocol):
             SecretStoreUnavailableError: If no keyring backend is available, or
                 the backend is locked with no unlock possible in this session.
             SecretStoreError: If the keyring was reached and the removal failed.
+        """
+        ...
+
+
+@runtime_checkable
+class ConnectionProvisioner(Protocol):
+    """Performs ADR-0148 §6's provisioning act, and says what is connected (ADR-0151 §10).
+
+    The seam by which `orchestration` reaches the connection provisioner in
+    `tools/` (ADR-0149 §10). Five members, one per operation on
+    ``AssistantEngine``'s connection surface (ADR-0151 §1), and the placement is
+    forced rather than chosen: those operations are engine methods,
+    ``AssistantEngine`` is `orchestration`'s, the act's owner is in `tools/`
+    (ADR-0149 §1), and a subsystem boundary between them is a Protocol by golden
+    rule 1.
+
+    **Holding this seam is not holding a keyring face**, which is the distinction
+    ADR-0102 §7 drew about a composition root and ``SourceGrantStore`` and
+    ADR-0149 §8's tenth clause states directly for this neighbourhood. The object
+    in `orchestration` names five members that take and return `core` types; it
+    cannot name ``set``, ``delete`` or ``get``, and no annotation on it mentions
+    :class:`Secrets` or :class:`SecretStore` — so ADR-0125 §8's fourth clause
+    stays true of `orchestration` word for word.
+
+    **No credential value, and no value derived from one, is returned by any
+    member**, and no member names a :class:`~ai_assistant.core.types.SecretName`
+    in an argument or a return type (ADR-0149 §10). A
+    :class:`~ai_assistant.core.types.ConnectedAccount` and a
+    :class:`~ai_assistant.core.types.ConnectionAct` are the whole of what crosses
+    it in the returning direction. The credential crosses in the other direction
+    on two members, still wrapped in
+    :data:`~ai_assistant.core.types.SecretValue`'s redacting holder, and an
+    implementation of this seam hands it to the keyring without unwrapping it any
+    more times than the write needs.
+
+    **The members are named shorter than the operations they serve, and that is
+    deliberate** (ADR-0151 §10). ``AssistantEngine`` needs ``connect_account``
+    because its namespace holds twenty-six unrelated methods and a bare
+    ``connect`` would sit beside ADR-0084 §2's connect handshake; this Protocol's
+    whole subject is connections. Members named identically to the engine's would
+    invite a reader to assume one forwards to the other unchanged, which the mint
+    asymmetry and the declared-failure difference both say it does not.
+
+    **Two failures the engine declares are absent here, and their absence is the
+    contract rather than an omission** (ADR-0151 §10). No member declares
+    :class:`~ai_assistant.core.errors.UnusableIdentityError`, because ADR-0151 §5
+    refuses an unusable identity **locally and before any I/O** in every
+    implementation of the engine operation — the wire client included — so no
+    such call arrives here. And no member declares ``ValueError`` for an argument
+    the engine has already validated. :class:`OversizedValueError` is likewise not
+    a seam failure: ADR-0085 §8c bounds a serialised payload, and nothing is
+    serialised across this boundary.
+
+    **This enumeration is what ADR-0151 §10 places and is not a bar on a later
+    ADR adding a member.** ADR-0153 §2 exercised the freedom it reserved by
+    declaring :class:`ConnectionPurger` as a seam of its own rather than by taking
+    the member; this Protocol gains **no** purge member, and ADR-0153 §7 records
+    it as unchanged.
+
+    **Every implementation is reached by injection and never by an injected
+    concrete.** `orchestration` imports no module of `tools/` (golden rule 1), and
+    the composition root wires the one implementation.
+
+    Cancelling any member is governed by this module's cancellation clause
+    (ADR-0060), and it **has bite**: an implementation writes a connection store
+    and a keyring, so a call may be cancelled between two of ADR-0148 §6's three
+    writes. ADR-0151 §7 fixes what that leaves — a cancellation propagates
+    unconverted, is never turned into
+    :class:`~ai_assistant.core.errors.ProvisioningOutcomeUnknownError` or any
+    other class on this surface, and leaves the same outcomes those classes
+    describe, which the caller reports as *not known* and resolves by reading
+    :meth:`connected`. This module's input-observation clause (ADR-0065) is
+    **vacuous** here and is meant to stay that way: every argument is a string, an
+    integer or a redacting holder over a string, so there is no caller-owned
+    container for a result to be torn across.
+    """
+
+    async def provision(
+        self, *, identity: NonBlankEncodableText, credential: SecretValue
+    ) -> ConnectedAccount:
+        """Connect a fresh account, minting its reference (ADR-0148 §6, ADR-0151 §3).
+
+        **Takes no reference argument and accepts none under any other name.**
+        The mint is the provisioner's: ADR-0149 §1 puts the act, and §3 the store,
+        inside `tools/`, so the only component that can mint a reference into that
+        store is this one — and an engine-side factory would put the mint on the
+        far side of the boundary from the compare-and-swap it has to be atomic
+        with. The engine passes nothing and reads the reference off the record
+        this returns.
+
+        **The reference is minted from a source no fresh process resumes** — a
+        version 4 UUID or an equivalent draw, never a counter, a clock or a hash
+        of a supplied value — and is **never reused while the connection store
+        holds any entry naming it**, not after a disconnection and not for a
+        second account (ADR-0151 §3). The store refuses an append that would
+        introduce a reference it already holds, which is the half of the guarantee
+        it can establish by itself. The guarantee is bounded by the store's own
+        history and ADR-0149 §8's purge is what ends it; **no implementation
+        retains a ledger of spent references across a purge**, which would be
+        exactly the Tier 1 data ADR-0004 §6 requires the purge to destroy.
+
+        **It returns only when ADR-0148 §6's third write has landed**, and the
+        record it returns carries
+        :attr:`~ai_assistant.core.types.ProvisioningState.ACTIVE`, the identity
+        supplied in this call, and the revision this act took — the reference's
+        first (ADR-0151 §7). An implementation that returns after the first or
+        second write, or that returns a ``PENDING`` record, does not conform.
+
+        **The identity is recorded verbatim** (ADR-0149 §4): nothing strips,
+        case-folds, case-normalises or Unicode-normalises it, and the record
+        returned carries it byte-for-byte as supplied.
+
+        **Its refusals cannot lose a compare-and-swap and cannot name an unknown
+        reference**, which is why this is two operations over ADR-0148 §6's one
+        act rather than one method with an optional reference (ADR-0151 §1): a
+        fresh connection's reference is minted and no other act can be holding it.
+
+        Args:
+            identity: The user-recognisable name of the account, already refused
+                by the engine if it is unusable (ADR-0151 §5).
+            credential: The account's credential, relayed unwrapped-into-nothing
+                and written to this act's own slot alone.
+
+        Returns:
+            The live record this act wrote, ``ACTIVE`` at its own revision.
+
+        Raises:
+            IncompleteProvisioningError: If the credential write failed, if either
+                of ADR-0148 §6's two re-reads failed, or if the activation's
+                compare-and-swap was observed not to land. It carries the minted
+                reference, which the store then holds, and asserts that this act
+                did not complete and nothing it wrote is or becomes the live
+                credential (ADR-0151 §7). A keyring failure at the credential
+                write is **converted** into it with the
+                :class:`~ai_assistant.core.errors.SecretStoreError` chained as the
+                cause; no implementation converts one into
+                :class:`~ai_assistant.core.errors.ConnectionStoreError`,
+                suppresses one, or treats one as an absent credential.
+            ProvisioningOutcomeUnknownError: If the activation **failed rather
+                than returning**. The store may have committed the
+                compare-and-swap and failed before saying so, so neither
+                completion nor incompletion may be asserted; it carries the
+                reference, which exists.
+            ConnectionStoreError: If the act's own **first** write did not return.
+                It carries no reference, because there may be none to carry, and
+                nothing about the act may be asserted.
+        """
+        ...
+
+    async def reprovision(
+        self,
+        reference: Identifier,
+        *,
+        identity: NonBlankEncodableText,
+        credential: SecretValue,
+    ) -> ConnectedAccount:
+        """Replace the credential under an existing reference (ADR-0148 §6).
+
+        The same three writes as :meth:`provision`, aimed at a reference the hub
+        previously returned: the record first as *pending* at the incremented
+        revision naming this act's own slot, the credential second into that slot,
+        and the record *active* third. The reference is **compared exactly** — no
+        implementation matches one by prefix, by case-insensitive comparison or by
+        any equivalence other than equality (ADR-0151 §3).
+
+        **The revision it takes is strictly greater than every revision that
+        reference has ever held**, a disconnection included, so ADR-0148 §6's "a
+        revision is never reused and never decreases" holds across disconnection
+        and re-connection rather than only within one connected life (ADR-0149
+        §5).
+
+        **It deletes its predecessor's slot once its own activation has landed**,
+        and never before (ADR-0148 §6). A deletion that fails leaves an
+        unreferenced slot rather than an incorrect one, and the failure is
+        reported and never suppressed.
+
+        **No implementation retries a displaced act, reorders the three writes,
+        splits them across calls, or rolls back a write that landed** (ADR-0149
+        §9). None activates a record whose credential write it did not itself
+        perform, infers an identity from a credential, or treats an absent
+        credential as a reason to change a record's state (ADR-0149 §6).
+
+        Args:
+            reference: The connection to re-provision, exactly as the hub
+                returned it.
+            identity: The account identity for the new revision, recorded
+                verbatim. It may differ from the previous revision's.
+            credential: The replacement credential, written to this act's own
+                slot.
+
+        Returns:
+            The live record this act wrote, ``ACTIVE`` at the new revision.
+
+        Raises:
+            UnknownConnectionError: If the store holds no entry for ``reference``.
+                Refused before the first write, so nothing is written.
+            DisplacedProvisioningError: If another act took the record over, at
+                any of ADR-0148 §6's three points. It does **not** mean this act
+                wrote nothing: depending on the point, the store may hold this
+                act's own pending entry and the keyring a credential in this act's
+                own slot, both named by the store and removed by a disconnection
+                of that reference and by ADR-0149 §8's purge (ADR-0151 §7).
+            IncompleteProvisioningError: On :meth:`provision`'s terms.
+            ProvisioningOutcomeUnknownError: On :meth:`provision`'s terms.
+            ResidualCredentialError: If the **predecessor-slot deletion** failed
+                after the activation returned having landed. The act
+                **completed** — the reference is connected at the new revision —
+                and what remains is an unreferenced credential the store still
+                names (ADR-0151 §7). The underlying
+                :class:`~ai_assistant.core.errors.SecretStoreError` is chained as
+                the cause.
+            ConnectionStoreError: On :meth:`provision`'s terms.
+        """
+        ...
+
+    async def disconnect(self, reference: Identifier) -> ConnectedAccount | None:
+        """Remove a reference's live record and delete its credentials (ADR-0149 §5).
+
+        **Two steps in a fixed order**: a removal entry is appended to the
+        connection store **first**, after which the reference has no live record;
+        the credential slots are deleted **second**. No other order is permitted —
+        deleting the credential first would leave a window in which a live,
+        *active* record names a slot holding nothing, which a caller reads as
+        connected and discovers empty at the credential read.
+
+        **The slots it deletes are every distinct slot named by an entry for that
+        reference whose revision is strictly below the removal entry's own.**
+        Deleting only the live record's slot does not satisfy the clause, and
+        deleting a slot named by an entry at or above the removal's revision
+        **violates** it: those belong to acts this disconnection did not displace,
+        and deleting one would leave a later act's activation standing over an
+        empty slot (ADR-0149 §5).
+
+        **Idempotent and re-runnable.** On a reference with entries but no live
+        record it appends no second removal entry and repeats the deletion pass at
+        the latest removal's revision — which is the remedy for a slot a displaced
+        act wrote after that removal landed, and for one whose deletion failed. On
+        a reference the store holds **no entry** for it writes nothing and deletes
+        nothing: no removal entry, so a typo leaves no tombstone and creates no
+        revision sequence.
+
+        **It does not reset the reference's revision** (ADR-0149 §5).
+
+        **What it guarantees is that no live record names any slot for that
+        reference**, and no surface may state the stronger guarantee that the
+        keyring holds nothing for it: a provisioning act displaced by the removal
+        may have a keyring write already in flight, which ADR-0148 §6 rules is
+        "neither stopped nor waited for" and which lands in that act's own slot
+        afterwards. Such a slot is **named by the store**, so a re-run of this call
+        and ADR-0149 §8's purge both still reach it.
+
+        **It is prospective.** It does not wait for, cancel or report a
+        transmission already in flight, and no surface may present it as having
+        stopped one (ADR-0149 §5).
+
+        Args:
+            reference: The connection to disconnect, compared exactly.
+
+        Returns:
+            The live record removed — as it stood immediately before the removal
+            entry was appended — or ``None`` where the reference had no live
+            record to remove, which covers both a reference the store has never
+            held and one whose latest entry is already a removal. A ``None`` is
+            **not** a report of a disconnection: it says one thing, that no live
+            record was removed by this call (ADR-0151 §8).
+
+        Raises:
+            ResidualCredentialError: If the removal entry **landed** and at least
+                one credential deletion did not. The reference is disconnected,
+                the residual credentials stay named by the store, and the remedy
+                is to run this call again (ADR-0151 §8). The underlying
+                :class:`~ai_assistant.core.errors.SecretStoreError` is chained as
+                the cause, and the failure is never suppressed.
+            ConnectionStoreError: If the store could not be read or written.
+        """
+        ...
+
+    async def connected(self) -> tuple[ConnectedAccount, ...]:
+        """The live record for every reference that has one (ADR-0151 §9).
+
+        **The complete set or a failure.** It is not paged, admits no ``limit``
+        and no ``offset``, and no implementation truncates, samples or elides it: a
+        truncated answer to "what is connected" is a false answer rather than a
+        partial one, and there is no honest way for a client to tell the two apart
+        (ADR-0139 §2).
+
+        **Answered from the connection store's live records alone**, whatever
+        tools the hub has registered, whatever integrations exist, and whatever
+        configuration says. A connection whose integration is no longer built,
+        whose tool is no longer registered, or whose configuration has changed is
+        still a connection — the record exists, the credential exists in the
+        keyring, and the user is the only party who can end it. A listing that
+        filtered by what the hub currently holds would hide from the owner exactly
+        the connections they most need to see, and hide them from the
+        disconnection that is their only remedy (ADR-0139 §1).
+
+        **A pending reference is included, with its state**, and is neither
+        omitted nor substituted for by the previous act's record (ADR-0151 §4).
+
+        **Computed from one read of the store**, so it is a snapshot: no reference
+        appears twice, none is missing because another was being written, and the
+        set is internally consistent. It is not a claim that stays true after it is
+        computed, and no client presents it as one.
+
+        Returns:
+            Every live record, in no contractual order.
+
+        Raises:
+            ConnectionStoreError: If the store cannot be read, or holds an entry
+                that no longer validates.
+        """
+        ...
+
+    async def recent_acts(self, *, limit: int) -> tuple[ConnectionAct, ...]:
+        """What was done, newest first, bounded by ``limit`` (ADR-0151 §9).
+
+        **One row per act on a reference** — per ``(reference, revision)`` pair —
+        carrying the furthest provisioning state that act reached, in the store's
+        own append order. The store's entry granularity is `tools/`-internal
+        (ADR-0149 §3) and is not exposed: no implementation returns two rows for
+        one act, and no client reads the store's internal shape off this result.
+
+        **It answers a different question from :meth:`connected` and neither
+        derives the other** (ADR-0139 §1). The unsoundness is the page boundary: a
+        reference whose latest act falls outside the page is one a client walking
+        the page would report by an *earlier* act, so a user with several
+        connections and a busy history would see a disconnected account reported
+        as connected — on the deployment with the most history and nowhere else.
+
+        **It carries no instant**, so its order is the order the store recorded the
+        acts in and that is the whole of what a position means (ADR-0151 §9).
+
+        **``limit`` has no default here.** The default is ``AssistantEngine``'s
+        (ADR-0085 §3a, :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`), and a
+        seam repeating it would be a second place for one number to drift
+        (ADR-0151 §10). The engine has already refused a non-positive value before
+        this seam is reached, so no member declares ``ValueError`` for it.
+
+        Args:
+            limit: The most rows to return, strictly positive.
+
+        Returns:
+            Up to ``limit`` acts, newest first.
+
+        Raises:
+            ConnectionStoreError: If the store cannot be read, or holds an entry
+                that no longer validates.
+        """
+        ...
+
+
+@runtime_checkable
+class ConnectionPurger(Protocol):
+    """The seam ADR-0126's offline delete act reaches the purge through (ADR-0153 §2).
+
+    Two members and no more. The holder is an **offline, irreversible,
+    destructive tool** — ``ai-assistant-purge`` in `service/`, running with the hub
+    stopped and holding the instance lock — and handing it
+    :class:`ConnectionProvisioner` instead would let the one component in the
+    system whose entire purpose is destroying an installation also create a
+    connection in one. Nothing would call it and nothing would notice; the
+    capability would simply be expressible. That is ADR-0125 §1's argument and
+    ADR-0149 §1's arriving a third time, and paying for the narrow face again is
+    consistency rather than novelty.
+
+    **The two Protocols do not inherit from one another, and that is the point.**
+    :class:`SecretStore` inherits from :class:`Secrets` because the wide face
+    genuinely *is* the narrow face plus writes. Here neither face contains the
+    other: this one has :meth:`purge`, which the provisioner must not have — or
+    the engine could purge an installation from a client — and the provisioner has
+    four members this one must not have. Two disjoint faces over one
+    implementation is the honest declaration, and what a consumer holds is decided
+    by what the composition root hands it rather than by a subset relation.
+
+    **Its primary production implementation is the connection provisioner in
+    `tools/`** (ADR-0149 §1, ADR-0149 §8), and no second implementation exists in
+    production. `service/` reaches it by injection from the composition root and
+    constructs neither it, nor a :class:`SecretStore`, nor a connection store
+    (golden rule 1, ADR-0126 §3).
+
+    **Holding it confers no keyring face** (ADR-0149 §8's tenth clause), and no
+    lane cites holding it as acquiring one. It carries no member that writes,
+    provisions, re-provisions or disconnects, no member that reads a credential
+    value, and no member that names a
+    :class:`~ai_assistant.core.types.SecretName` in any argument or return type.
+
+    **``@runtime_checkable`` is stated as a decision rather than left to the
+    house style** (ADR-0153 §2): ADR-0153 §8's conformance suite asserts
+    ``isinstance(subject, ConnectionPurger)``, and against a bare ``Protocol``
+    that obligation would not fail — it would error.
+
+    Cancelling :meth:`purge` is governed by this module's cancellation clause
+    (ADR-0060) and it **has bite**: the purge deletes keyring entries one at a
+    time, so a cancellation can arrive with a deletion in flight. ADR-0153 §4 and
+    §8 fix what that leaves — the ``CancelledError`` propagates unconverted and is
+    never reported as a failed purge, every connection-store entry stays in place,
+    and whatever the implementation acquired has been released or completed by the
+    moment the cancellation leaves it. This module's input-observation clause
+    (ADR-0065) is **vacuous** here: neither member takes an argument.
+    """
+
+    async def connected(self) -> tuple[ConnectedAccount, ...]:
+        """The live record for every reference that has one (ADR-0153 §2).
+
+        **The same question :meth:`ConnectionProvisioner.connected` answers, with
+        the same signature and the same semantics**, and one implementation
+        satisfies both faces with **one** method; no lane gives them divergent
+        behaviour. Two names for one answer would invite two implementations and a
+        drift between them, and a reader comparing the faces would have to check
+        whether the difference in name meant a difference in meaning.
+
+        It writes nothing, deletes nothing and reads no credential value.
+
+        **It is on this face rather than derived elsewhere because ADR-0153 §5's
+        statement needs it and nothing else can supply it.** The offline act has
+        no engine, no hub and no client, so ``connected_accounts`` is unreachable
+        to it; and after the act the connection store is gone, so a statement
+        composed afterwards names nothing. That is ADR-0126 §7's argument for
+        stating the device list before the destruction, applied to a second class
+        of custodian the act cannot reach.
+
+        Returns:
+            Every live record — each reference's latest entry, where that entry is
+            not a removal (ADR-0149 §3).
+
+        Raises:
+            ConnectionStoreError: If the store cannot be read, or holds an entry
+                that no longer validates. The act treats this as a refusal and
+                destroys nothing: an unreadable index is the case in which
+                proceeding guarantees the unrepairable state rather than risking
+                it (ADR-0153 §4).
+        """
+        ...
+
+    async def purge(self) -> None:
+        """Delete every credential the connection store names, then its entries.
+
+        ADR-0149 §8's purge. It deletes every credential slot the store names —
+        the live records' slots and every superseded, pending or removed record's
+        slot — and then the entries that named them. No other component composes
+        such a path, because ADR-0125 §5 refuses enumeration and the connection
+        store is the only durable list of those slots (ADR-0149 §3).
+
+        **The entries are removed only once every distinct slot the store names
+        has been confirmed deleted or confirmed absent.** A slot whose deletion
+        raises leaves **every** entry in place, the failure reported and never
+        suppressed, and no part of the purge proceeding past it. Ordering alone
+        does not discharge the obligation: "slots before the store" is satisfied
+        by a purge that attempts every slot, has one deletion raise, and destroys
+        the store anyway — leaving a credential with no remaining durable name,
+        which is precisely the unreachable-and-present state the ordering exists
+        to prevent (ADR-0149 §8).
+
+        **A partial purge is a failed purge and is never reported as a completed
+        one**, which is why this returns nothing: no value distinguishes a lesser
+        outcome (ADR-0153 §2).
+
+        **Idempotent.** It deduplicates the slot names the store yields, treats an
+        absent entry as deleted — ``delete`` raises nothing for one (ADR-0125 §4)
+        — and re-running it after a failure deletes what remains. Nothing in it
+        may be made to depend on a slot being present, so a second call after a
+        success does nothing and raises nothing.
+
+        **Scope-confined by construction**: the implementation's
+        :class:`SecretStore` instance is bound to
+        :attr:`~ai_assistant.core.types.SecretScope.INTEGRATION` and to one
+        installation (ADR-0125 §2), so the purge cannot reach a ``PROVIDER`` or
+        ``ENROLMENT`` entry or another installation's, and it enumerates nothing.
+
+        **It is a whole-installation act and runs with no provisioning act
+        concurrent with it.** The coordinator is responsible for that, trivially
+        so where the act is offline (ADR-0126 §2, ADR-0149 §8): the instance lock
+        is held across it, no hub can start, and no provisioning act exists to
+        race. The purge itself carries no revision cutoff, because it is deleting
+        everything rather than displacing a state.
+
+        **An installation that never provisioned a connection is unaffected.** A
+        purge over a store that names no slot makes no keyring call, so it cannot
+        fail on an absent, locked or backendless keyring — which is what keeps
+        this from blocking the delete right on a headless box (ADR-0153 §4).
+
+        Raises:
+            SecretStoreUnavailableError: If the keyring cannot be reached at all
+                and the store names at least one slot. Reported as the deployment
+                condition it is and **never** as "there was nothing to purge"
+                (ADR-0125 §7, ADR-0153 §4).
+            SecretStoreError: If the keyring was reached and a deletion failed.
+                Every store entry stays in place.
+            ConnectionStoreError: If the store cannot be read or its entries
+                cannot be removed.
         """
         ...
