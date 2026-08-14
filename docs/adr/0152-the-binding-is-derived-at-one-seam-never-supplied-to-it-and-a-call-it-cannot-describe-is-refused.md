@@ -1,0 +1,1339 @@
+# 152. The binding is derived at one seam, never supplied to it, and a call it cannot describe is refused
+
+- Status: Proposed
+- Date: 2026-08-14
+- **Decides surface (b) of ADR-0148 §11** — the seam by which the egress binding
+  is obtained from `tools/` before `ActionPolicy.decide` is reached. §11's second
+  clause requires that surface to be decided in a contract ADR of its own,
+  ratified and merged before anything implements against it (golden rule 5,
+  ADR-0015 §5). This is that ADR, and it is the last of §11's two.
+- **Consumes ADR-0150's value and redefines no part of it.** `EgressBinding`,
+  `EgressSpan`, `EgressDestination`, `CanonicalDestination`, `BoundAccount`,
+  `DestinationProtocol` and `DiscloserProvenance` are ADR-0150's, used exactly as
+  it defines them. §2 fixes the `core` names this ADR is authorised to add, and
+  they are four.
+- **Discharges every obligation ADR-0150 §11 and §6 route here**, each in §5, §6,
+  §7 or §9, and §14 maps them one by one so a reader can check the routing was
+  spent rather than cited.
+- **Decides ADR-0150 §11's undecided structural option** — whether a
+  destination-bearing declaration is constrained to a decomposable flat shape.
+  §4 takes the constraint, with the argument in text and the producer's flat
+  declarations as the evidence ADR-0073 §4 asks for.
+- **Designates nothing and authorises no byte.** ADR-0017 §2 reserves designation
+  to a later ADR that names the seam module and attests each §3 condition is
+  satisfied **in code**; this ADR supplies a seam. `tools/` still transmits
+  nothing, and `send_email` is still registered nowhere.
+- **No implementation lands with it.** No `src/`, no `tests/`, no
+  `pyproject.toml`. §13 says what the implementing lane owes, and ADR-0150 §11's
+  last paragraph puts the triad obligation here: surface (b) **is** a seam, so its
+  Protocol, its shared conformance suite and its canonical fake ride with the
+  primary production implementation as one lane (ADR-0137 §2).
+- **Every reference below to ADR-NNNN is to its text as merged on 2026-08-14**,
+  the durability form ADR-0100 established and ADR-0149, ADR-0150 and ADR-0151
+  each applied. This decision rests most heavily on ADR-0150 and ADR-0148, and on
+  ADR-0146 §2 and ADR-0145 §9 and §11.
+- **Records owed on other ADRs: none, and §15 shows the working** rather than
+  asserting it, including the two near misses — ADR-0037 §2's five-step sequence
+  and §4's resume sequence — which a reviewer is entitled to contest by naming the
+  sentence that becomes false. No `Status` line moves and no ratified text is
+  rewritten anywhere.
+
+## Context
+
+### What ADR-0148 §11 fixed about (b), and what it left open
+
+ADR-0148 §11 flags (b) as `core` surface the corpus does not have, forbids any
+lane from adding it on that ADR's strength alone, and states why it is forced:
+
+> **(b) is forced by §1's earliness, and it is the surface a reader is most
+> likely to miss.** ADR-0037 §2 has `StepRunner`, in `orchestration`, build the
+> `ActionRequest` from "the tool, the step's parameters and the step id". Under §1
+> that request must already carry the whole binding, every part of which is
+> integration-specific knowledge living in `tools/` — which `orchestration` may
+> reach only through a Protocol (golden rule 1). Neither `ToolRegistry` nor
+> `ToolInvoker` answers that question, and ADR-0029 §1 is explicit that how the
+> callable is reached "is `tools/`-internal, and this ADR does not contract it".
+> So a seam is genuinely missing.
+
+It then fixes four properties and leaves the signature open: (b) is consulted
+**before** the ruling and never after; it **performs no I/O**, so it cannot become
+the resolution path §5 governs; it **refuses** rather than guessing (§1's third
+clause); and its description is **deterministic** (§6). "A contract ADR that
+satisfies those is free to choose the signature; one that does not is changing
+this decision." §1, §5 and §10 below satisfy them and §15 checks each.
+
+### What ADR-0150 routes here, and why each landed here rather than there
+
+ADR-0150 decided surface (a) — the value — and routed to this ADR every check
+whose triggering fact `core` cannot see. Its §11 lists five things (b) owes and
+adds two refusals and a test; its §6 adds one more; and its §11's last
+undecided clause is a structural option it declines to settle without a
+declaration vocabulary in hand. The whole set is enumerated in §14.
+
+They share one shape, and ADR-0150 §4's family paragraph names it: each check
+depends on **the bound tool's declaration**, and the declaration vocabulary is
+what ADR-0150 §6 deferred to this ADR precisely because "splitting it across two
+ADRs would produce two half-decided keyword sets". `core` reads no declaration,
+so `core` cannot perform any of them; this seam reads one, so it is the first
+component with the mechanism. Routing them here was not a preference — it is
+ADR-0146 §7's posture, "do not buy a bound from a mechanism that cannot carry
+it", applied to a component that did not exist yet.
+
+### The producer, and what it makes decidable
+
+PR #1120 built the inert half of the first egress integration inside `tools/`:
+`destinations.py` (the per-protocol canonicaliser), `destination_arguments.py`
+(the destination-bearing declaration and `select_destinations`),
+`payload_description.py` (the deterministic description builder) and
+`send_email.py` (a `ToolDefinition` registered nowhere whose callable raises).
+Its description carries eleven observations under "What this producer wants from
+the contract surfaces"; ADR-0150 §14 maps all eleven, four of which it answered
+and three of which it forwarded here — observations 6, 8 and 11.
+
+The producer is what makes §3 and §4 decidable rather than guessed. It has four
+declared facts per argument across two declarations (`DestinationArgument`'s
+`protocol`, `multiple` and `required`; `PayloadArgument`'s `establishes_tier` and
+`multiple`), and §3 finds that ADR-0150 §4 has since decided two of them, so the
+vocabulary this ADR fixes is **two keywords**, not four. It also declares every
+recipient argument as a flat array of strings, which is the evidence §4 spends.
+
+### The failure this ADR is named after
+
+ADR-0150 is named for two shapes that had to agree arriving separately. This one
+is named for its neighbour: **a value that is derived in one place and accepted in
+another**. PR #1120's round-1 blocker was `describe_payload` taking the
+destinations as an argument beside the parameters they were supposed to come
+from — "a caller could hand over an empty tuple, or one naming a recipient the
+arguments never selected, and get back a description that passed every check in
+this module". The repair was to derive them, and the module's docstring states
+the general rule: "a recipient set handed in beside the arguments is bound by
+nothing and re-derivable by nobody."
+
+The same choice arrives here twice, once on each of this seam's two operations,
+and it is answered the same way both times. Nothing is accepted that can be
+derived; what genuinely cannot be derived — a span's recorded origin — is
+carried, is never invented, and is the one thing §7 transcribes.
+
+## Decision
+
+Marked under ADR-0089: every obligation this ADR imposes is a marked clause, and
+unmarked text supplies none. §16 records the regime.
+
+The decision in one sentence: **one Protocol in `core/protocols.py` with two
+operations, both of which derive the whole binding from the bound tool's
+declaration and the call's arguments and accept none of it, refuse rather than
+describe a call they cannot describe wholly, and fail with one error class that
+no reader can mistake for a denial.**
+
+### 1. One Protocol, two operations, and what each is given
+
+> **Normative.** `core/protocols.py` gains **one** Protocol, `EgressBinder`, the
+> seam by which `orchestration` obtains an egress binding from `tools/` before
+> `ActionPolicy.decide` is reached. It carries exactly two members and no others:
+
+```python
+class EgressBinder(Protocol):
+    async def bind(
+        self,
+        tool: ToolDefinition,
+        *,
+        parameters: FrozenJsonMapping,
+        provenance: Mapping[EgressSpanLocator, DiscloserProvenance],
+    ) -> EgressBinding | None: ...
+
+    async def rebind(
+        self,
+        tool: ToolDefinition,
+        *,
+        parameters: FrozenJsonMapping,
+        approved: EgressBinding | None,
+    ) -> EgressBinding | None: ...
+```
+
+**Docstrings are omitted here and are not optional in the Protocol**, the form
+ADR-0085 §3, ADR-0102 §2 and ADR-0151 §2 each state for their own block. The
+subject is positional and everything else is keyword-only, ADR-0085 §2's
+convention.
+
+> **Normative.** `bind` answers "what binding does this call have", for a call
+> reaching the permission stage for the first time. `rebind` answers "what binding
+> does this call have, and is it the one that was approved", for a call resuming
+> from a parked `CONFIRM` (§7). Neither takes a step id, an execution id, a
+> decision, a ruling or a timeout: what it is given is the bound tool and the
+> arguments, which are the two things ADR-0148 §6's determinism clause makes the
+> description a function of, plus the third thing that clause names and the seam
+> cannot derive.
+
+> **Normative.** Both members take the **`ToolDefinition`** and never a tool id.
+> The declaration the seam reads is recoverable from that definition (§3), which
+> is the same object the `ActionRequest` carries, the policy rules on and the
+> decision embeds verbatim (ADR-0021 §1) — so the declaration the binding was
+> derived under and the declaration bound into the request are one object rather
+> than two lookups that must agree.
+
+> **Normative.** Both members **refuse** a `tool` that is not equal to the
+> definition the implementation holds registered under `tool.id`, and refuse a
+> `tool` whose id it holds no registration for. This is ADR-0029 §1's
+> registry-original check performed one stage earlier and for the same stated
+> reason — the seam is the only place the caller's definition and an untampered
+> original meet — and it is not a substitute for that one, which still runs at
+> `invoke`.
+
+> **Normative.** `parameters` is the `FrozenJsonMapping` the `ActionRequest` will
+> carry, unaltered. Neither member returns parameters, amends them, defaults a
+> value into them or reports a substitute for them, and no caller builds an
+> `ActionRequest` from parameters other than the ones it passed here. A binding
+> derived from one argument mapping and bound beside another is the whole of what
+> ADR-0150 §4's parameter-relative invariants exist to refuse, one stage before
+> they can refuse it.
+
+> **Normative.** `provenance` maps a span's locator to the discloser provenance
+> **recorded** for it (ADR-0146 §2). It has **no default**: a caller holding no
+> recorded origin passes an empty mapping deliberately, which is ADR-0150 §5's
+> no-default reasoning applied at the seam that would otherwise inherit the
+> permissive answer for free.
+
+> **Normative.** Both members are `async`, and that is not permission to await
+> anything. §10's no-I/O clause binds them whole.
+
+**Two members rather than one, because one member with two modes is the partial
+state this family refuses.** The alternative considered was a single `bind` with
+`provenance` and `approved` both optional and a rule that exactly one is
+supplied. That is four constructible states of which two are ill-formed, policed
+by a rule rather than by a type — ADR-0150 §1's fifteen partial states in
+miniature, on a surface where the ill-formed states are "resume without checking
+what was approved" and "authorise afresh with a stored binding". ADR-0151 §4
+refused a discriminator where one optional field carried a distinction
+unambiguously; here neither shape is unambiguous, so the distinction is two
+members. Two is also the whole surface: ADR-0085 §8 makes surface size a contract
+concern, and nothing else about egress crosses this boundary.
+
+**`bind` and `rebind` follow ADR-0151 §10's `provision`/`reprovision` idiom**, and
+they are named short for its stated reason: `EgressBinder`'s whole subject is
+egress bindings, so its members need no disambiguator.
+
+### 2. Exactly which `core` names change
+
+This section is a classification of the change being made and is not normative
+(ADR-0089 §1). The obligations are in the sections it points at.
+
+| Name | Where | What |
+|---|---|---|
+| `EgressBinder` | `core/protocols.py`, new | The seam, with exactly the two members §1 lists. |
+| `EgressSpanLocator` | `core/types.py`, new | A span's key on this seam: the `(argument, index)` pair ADR-0150 §4 identifies a span by (§8). |
+| `EgressBindingError` | `core/errors.py`, new | The one refusal class both members raise (§9). |
+| `Disposition.EGRESS_UNBINDABLE` | `core/types.py`, changed | One new member of an existing enum, returned when the seam refused (§9). |
+| `EgressBinding`, `EgressSpan`, `EgressDestination`, `CanonicalDestination`, `BoundAccount`, `DestinationProtocol`, `DiscloserProvenance` | — | **Not this ADR's.** ADR-0150 §2 adds them. This ADR consumes each unchanged, adds no field to any, and authorises no change to any. |
+| `ActionRequest`, `PermissionDecision`, `from_request`, `authorises` | — | **Not this ADR's.** ADR-0150 §2's list is the whole of what changes on them. This ADR adds no field, no validator and no conjunct, and reads `ActionRequest.egress_binding` as ADR-0150 §1 defines it. |
+| `ConnectedAccount`, `ConnectionAct`, `ProvisioningState`, `ConnectionProvisioner`, `ACCOUNT_IDENTITY_MAX_BYTES`, `CONNECTION_REFERENCE_MAX_BYTES`, and ADR-0151 §2a's seven `core/errors.py` classes | — | **Not this ADR's.** ADR-0151 §4, §5, §10 and §11 add them. This ADR relies on each unchanged, imports none of them into this surface, and in particular does not substitute `ConnectedAccount` where ADR-0150 §7 names `BoundAccount` (§10). |
+| `ToolDefinition`, `ToolRegistry`, `ToolInvoker`, `ToolCall`, `ToolResult` | — | **Unchanged.** No field is added to any, no member is added to either Protocol, and §3 states the constraint that keeps `ToolDefinition` that way. |
+| `SkipReason`, `PermissionRuling`, `PermissionOutcome`, `StepStatus` | — | **Unchanged.** §9 says why the refusal is a `Disposition` member and not a `SkipReason`, and why it writes no state. |
+| `SecretName`, `Secrets`, `SecretStore`, `SecretScope` | — | **Unchanged.** No credential value and no credential slot enters this seam in either direction (§10). |
+
+> **Normative.** The `core` names this ADR authorises a lane to add or change are
+> exactly these and no others: one new Protocol `EgressBinder` in
+> `core/protocols.py` with exactly the two members §1 states; one new type
+> `EgressSpanLocator` in `core/types.py`; one new class `EgressBindingError` in
+> `core/errors.py`; and one new member `EGRESS_UNBINDABLE` on the existing
+> `Disposition` enum in `core/types.py`. No other `core` name changes: no field is
+> added to `ToolDefinition`, `ActionRequest`, `PermissionDecision`, `ToolCall`,
+> `PermissionRuling` or any type ADR-0150 §2 or ADR-0151 §4 adds; no member is
+> added to `ToolRegistry`, `ToolInvoker`, `ActionPolicy`, `AuditTrail`,
+> `AssistantEngine` or `ConnectionProvisioner`; and no member is added to
+> `SkipReason`, `DestinationProtocol`, `DiscloserProvenance`, `DataTier`,
+> `SecretScope` or `ProvisioningState`. A change beyond this list is a change to
+> this decision and needs its own ADR (golden rule 5).
+
+> **Normative.** This ADR claims **no** name in the purge, retention or routing
+> territory ADR-0126, ADR-0149 §8 and issue #909 leave open, and no lane cites it
+> toward one. Nothing here forecloses a seam, a member or a type that territory's
+> own ADR places.
+
+**The intersection was checked rather than assumed.** Against ADR-0150 §2: every
+name it authorises appears above as a non-authorisation row, and the four names
+this ADR claims appear on none of its lists. Against ADR-0151 §15: it authorises
+five `AssistantEngine` methods, one Protocol, three types, two constants and
+seven error classes, and this ADR claims none of them and adds nothing to any.
+The one shared word is `Egress`, which prefixes ADR-0150's value types and this
+ADR's seam and locator; the one shared concept is the connected account, and §10
+states in terms which of the two account types this surface holds.
+
+### 3. The declaration vocabulary is two keywords, and ADR-0150 §4 is why it is not four
+
+ADR-0150 §6 defers the vocabulary to this ADR and constrains it twice: it is
+recoverable from the embedded `ToolDefinition`, and it does not make a schema
+unreadable under ADR-0145 §5 and §6.
+
+> **Normative.** The declaration rides in the tool's `parameters_schema`, in
+> **two** keywords and no others, each read **only** on the immediate subschema of
+> a key of that schema's top-level `properties` object:
+> - `x-egress-destination`, whose value is the `DestinationProtocol` member's own
+>   string value, present exactly on a **destination-bearing** argument
+>   (ADR-0148 §2);
+> - `x-egress-tier`, whose value is the `DataTier` member's own string value,
+>   present exactly where the argument's field **establishes** that tier in
+>   ADR-0146 §5's sense.
+>
+> No other keyword declares anything to this seam, and no field is added to
+> `ToolDefinition` for either.
+
+> **Normative.** Either keyword appearing anywhere else in a `parameters_schema`
+> — nested inside `items`, inside a subschema of a subschema, inside
+> `additionalProperties`, `patternProperties`, `propertyNames`, `$defs`, or in any
+> applicator such as `allOf`, `anyOf`, `oneOf`, `not` or `if`/`then`/`else` — is
+> **refused** rather than ignored. Ignoring it would let an author believe they had
+> declared a recipient argument while the seam described a body span, which is the
+> mis-declaration ADR-0148 §2's third clause names arriving through the mechanism
+> meant to prevent it.
+
+> **Normative.** A value of either keyword that does not name a member of its enum
+> is **refused**, and no lane reads an unrecognised value as "no declaration". A
+> keyword naming a `DestinationProtocol` member for which the seam holds no
+> canonicaliser is likewise refused, which is ADR-0148 §1's third clause and not a
+> pass-through.
+
+> **Normative.** An argument marked destination-bearing **states a tier** — it
+> carries `x-egress-tier` as well — and a declaration marking one without a tier is
+> refused. A recipient is a value whose field establishes its tier by ADR-0146 §5's
+> own worked example, and the destinations are what ADR-0148 §8's fourth clause
+> requires the confirmation to name, so a description stating none for them
+> under-describes the span the approver most needs. **Which** tier it is stays the
+> author's declaration: this ADR classifies no protocol's addresses and adds no
+> member to `DataTier`.
+
+> **Normative.** Nothing in this vocabulary declares whether an argument's value
+> **decomposes**, and no lane adds a keyword for it. ADR-0150 §4 decides
+> decomposition from the value — "where an argument's value is a JSON array, its
+> elements are its spans; where it is any other JSON value, it is one span" — so a
+> `multiple` flag would be a second statement of one fact, which is the defect
+> ADR-0150 is named against arriving in the vocabulary that ADR routed here.
+
+> **Normative.** Nothing in this vocabulary declares whether an argument is
+> **transmitted**, and no lane adds a keyword for it. ADR-0150 §4 decides that
+> coverage is over **the arguments** rather than over what the call transmits, and
+> states its own reason — a per-argument transmission declaration "is a declaration
+> a tool could get wrong and nothing could detect".
+
+> **Normative.** Nothing in this vocabulary declares whether an argument is
+> **required**, and no lane adds a keyword for it. JSON Schema's own `required`
+> states it, ADR-0145 §1 evaluates it before the ruling and before this seam is
+> reached, and a second statement would be one more pair that has to agree.
+
+**Two keywords rather than the producer's four is a result rather than a
+simplification.** PR #1120 carried `protocol`, `multiple` and `required` on a
+destination-bearing argument and `establishes_tier` and `multiple` on a
+transmitted one, across two declarations bound into a third value so that a
+caller could not pair one tool's recipients with another's payload. ADR-0150 §4
+has since removed three of the five and the pairing hazard with them: the
+decomposition is the value's, the coverage is total over the arguments, and both
+declarations collapse into the one schema the definition already carries. What is
+left is exactly the two facts the schema cannot state — which arguments bear
+destinations, and which fields establish a tier — and neither is derivable from
+anything, which is ADR-0016 §1's "declared, not inferred" holding at the two
+places it still bites.
+
+**Riding in `parameters_schema` rather than on a new `ToolDefinition` field is
+ADR-0150 §6's constraint and is also the cheaper shape.** That field is already a
+`FrozenJsonMapping` (ADR-0016 §4), already stored by value in every decision, and
+already the thing ADR-0145 reads — so the declaration reaches the recorded
+decision with no new carriage, and a tool whose declaration and whose schema
+disagreed about which keys exist is not constructible, because they are one
+document. ADR-0150 §13 records the same conclusion from the other side: "§6's
+declaration rides inside a field already declared to hold arbitrary JSON, which is
+that field being used rather than widened."
+
+**An `x-` prefix, and unknown keywords are readable rather than merely
+tolerated.** JSON Schema draft 2020-12 treats a keyword it does not know as an
+annotation and ignores it for validation, so a schema carrying these two validates
+exactly as the same schema without them and ADR-0145 §5's one-dialect rule and
+§6's readability refusal are both untouched — §13 makes the implementing lane pin
+that rather than assert it. The `x-` prefix is chosen over a bare name because
+`$`-prefixed names are reserved to the specification and an unprefixed `egress`
+could collide with a future keyword, at which point a schema would mean two things
+at once.
+
+**Reading the keywords only on a top-level property's own subschema is what keeps
+a locator a locator.** ADR-0150 §4 keys a span by `(argument, index)` where
+`argument` is a top-level key of `parameters`, and §4's locator clause forbids
+reading anything about a span's content off its argument name. A keyword nested
+deeper would be declaring something about a value **inside** a span, which this
+surface has no field to carry and §4's depth rule forbids describing — so it is
+refused rather than read, and refused rather than ignored for the reason the
+clause gives.
+
+### 4. A destination-bearing argument is flat, and this is ADR-0150 §11's structural option taken
+
+ADR-0150 §11 leaves this ADR the question and neither requires nor forbids the
+answer:
+
+> Whether (b)'s declaration vocabulary closes §4's family **structurally** — by
+> constraining a destination-bearing declaration to a **decomposable** shape, a
+> JSON string or an array of JSON strings, so that no destination can sit inside a
+> span unable to carry it — is **not decided here**.
+
+It is taken.
+
+> **Normative.** An argument may be marked destination-bearing **only** where the
+> tool's `parameters_schema` declares its value to be a JSON **string**, or a JSON
+> **array** whose every element is a JSON string. A declaration marking an argument
+> destination-bearing whose subschema does not declare one of those two shapes is
+> **refused**, and the refusal fires when the declaration is read rather than when a
+> call is made.
+
+> **Normative.** A **call** in which a declared destination-bearing argument
+> carries any other value — a JSON object, an array holding a non-string element, a
+> number, a boolean or `null` — is **refused** before the ruling. The static clause
+> above does not make this one redundant: ADR-0145 §9 admits a tool with no schema
+> and a schema that describes no key, so a value of the wrong shape is reachable
+> whenever the static declaration is absent rather than wrong.
+
+> **Normative.** These two clauses are the whole of the constraint. They bind the
+> shape of a **destination-bearing** argument and nothing else: an argument that
+> bears no destination carries any JSON value ADR-0150 §4 admits, decomposes by §4's
+> own rule, and is described as §4 describes it. No lane reads this section as
+> constraining a payload argument, a schema, or the `parameters` of a non-egress
+> call.
+
+> **Normative.** Widening this constraint to admit a structured destination-bearing
+> argument is a change to this decision and needs its own ratified ADR, on the terms
+> ADR-0150 §3 fixes for widening `SMTP`: that ADR arrives with the producer whose
+> recipient shape forces it, and it states how a supplied form is located inside
+> that shape and how the check ADR-0150 §4 could not perform is then performed. No
+> lane widens it by building a seam that accepts more.
+
+**What the constraint buys is that two of ADR-0150 §4's three under-representation
+failures stop being reachable for a destination, rather than being refused.** §4's
+family paragraph enumerates them: total omission, partial omission, and
+mis-representation. Under this section a destination-bearing argument's value is a
+string or an array of strings, so §4's decomposition puts **exactly one recipient
+in exactly one span** in every case; a span cannot hold two recipients, so partial
+omission has no instance, and a supplied form is never extracted from inside a
+structured value, so mis-representation has none either. `core`'s own
+supplied-form invariant — which ADR-0150 §4 states over "a JSON string" and "a
+JSON array whose element at `index` is a JSON string" — is then **total** over
+every destination this seam can produce. That is the residue ADR-0150 §11 routed
+here as an obligation, closed by removing the case rather than by adding a check,
+which is the corpus's stated preference in ADR-0021 §3's words: "removing the
+capability rather than forbidding it".
+
+**Total omission stays reachable and is exactly what §6's second refusal is
+for.** The constraint says nothing about whether a span carries its occurrence,
+only about whether it *could*. That is the one member of the family a declaration
+vocabulary cannot close structurally, and ADR-0150 §11's second refusal is written
+for it.
+
+**The producer costs nothing and the alternative costs a check with no producer.**
+`send_email` declares `to`, `cc` and `bcc` as `{"type": "array", "items": {"type":
+"string"}}`, so every destination it can name already sits in a span that can carry
+it and this constraint refuses none of its calls. ADR-0150 §11's own paragraph
+records that as "evidence about one producer rather than a decision", and it is
+right: what makes the decision is the other side of the ledger. The case that would
+cost something is a later egress tool with a `{"email": …, "name": …}` recipient,
+and there is no such producer — so admitting the shape now means writing the check
+ADR-0150 §4 could not write, against a value shape nobody has, which is a bound
+with no mechanism behind it. ADR-0150 §6 declines exactly that twice and ADR-0098
+§3 records itself making the mistake. ADR-0073 §4's test cuts one way here: the
+producer in hand wants flat, and the producer that wants structured does not
+exist, so the constraint is the decision the evidence supports and the widening is
+the decision that waits for evidence.
+
+**The asymmetry is the same one ADR-0150 §3 spent on `SMTP`'s closed grammar, and
+it comes out the same way.** Refusing a shape costs a recoverable error a tool
+author sees at declaration time, before anything is registered; admitting it costs
+a description narrower than the payload, which ADR-0148 §6 names as the one thing
+an approver may never be shown, reached by a recipient sitting inside a value the
+description could not decompose. ADR-0017 §4's argument applies with full force —
+"a boundary that has never transmitted can be held to the standard we would want
+everywhere" — because nothing is registered at this seam and no author is being
+asked to change a declaration they already wrote.
+
+**What it does *not* do is make ADR-0150 §12's mandated tests unshippable, and
+this is the objection worth answering in advance.** §12 requires the lane landing
+(b) to ship the multi-recipient structured span case: a call whose
+destination-bearing argument holds an undecomposable value naming two recipients
+"is **refused** rather than described by a binding carrying one of them, and the
+test asserts that refusal fires". Under this section that call is refused — by the
+per-call clause above, for carrying a value of the wrong shape rather than for
+carrying two recipients in one span. The test is satisfiable in the terms §12
+states it, because §12 states it over the outcome (a refusal, not a binding
+carrying one recipient) rather than over which clause produced it. ADR-0150 §11
+anticipated precisely this and pre-blessed it: "a vocabulary that could not express
+those shapes would make the refusals unreachable rather than wrong."
+
+### 5. The seam derives the binding whole and accepts no part of it
+
+> **Normative.** `bind` **derives** every field of the binding it returns. It
+> accepts no destination, no canonical form, no span, no extent, no tier, no
+> canonical destination set and no binding from any caller, and there is no
+> argument through which one could be supplied.
+
+> **Normative.** Every `EgressDestination` the seam produces carries the canonical
+> form that **this seam's own canonicaliser for that occurrence's protocol**
+> computes from its supplied form. This is the check ADR-0150 §3 routes here, and
+> it is discharged by the clause above rather than by a comparison: an occurrence
+> the seam computed cannot disagree with the computation that produced it, and a
+> caller has no route by which to present one that does. On the resuming path,
+> where an occurrence does arrive from outside, §7's equality is what performs it.
+
+> **Normative.** For each protocol, the seam reaches **one** canonicaliser, and no
+> integration, declaration, configuration or registration supplies a second for a
+> protocol the seam already canonicalises. This is ADR-0148 §2's sixth clause
+> relied on unchanged, and this ADR neither relocates that computation into `core`
+> nor duplicates it here.
+
+> **Normative.** The seam **refuses** a supplied form for which its canonicaliser
+> asserts no canonical form, and never passes the supplied form through as its own
+> canonical form. This is ADR-0148 §1's third clause, and ADR-0150 §3's acceptance
+> clauses are what decide which forms a protocol asserts.
+
+> **Normative.** The one thing `bind` does **not** derive is a span's
+> `provenance`, which is carried (ADR-0146 §2, ADR-0150 §5). The seam writes
+> `SYSTEM_SELECTED` for every span the `provenance` argument does not name, and
+> that write is the discharge of ADR-0146 §2's fail-closed rule — performed by the
+> component building the span, never by a field default. The seam **refuses** a
+> `provenance` entry naming a span the call does not carry, rather than dropping
+> it: a caller and this derivation disagreeing about what the payload is, is
+> exactly what a silent drop would hide.
+
+> **Normative.** How the caller obtained a recorded origin is **not decided here**,
+> which is where ADR-0150 §5 left it. No lane reads this ADR as deciding that path,
+> as excusing it, or as authorising any component to invent a provenance it was not
+> given.
+
+**Deriving rather than accepting is the repair PR #1120 already paid for, applied
+one boundary out.** Its round-1 blocker was a description builder that took the
+destinations as an argument, and the module's own docstring states the rule the
+repair yielded: "a recipient set handed in beside the arguments is bound by
+nothing and re-derivable by nobody." A seam that accepted occurrences would put
+that defect back at the one place the value becomes durable, since ADR-0148 §3's
+first clause binds a standing grant to the canonical destination set and ADR-0150
+§9 compares the binding whole.
+
+**It is strictly stronger than the check ADR-0150 §3 asked for, and saying so is
+not a way of not doing it.** §3's words are "the check that every occurrence the
+seam hands over carries the form that seam's own canonicaliser computes". A seam
+that computes them satisfies the predicate universally rather than testably, and
+§13 keeps the test reachable by putting it where an occurrence really does arrive
+from outside: §7's resuming path, where the occurrence comes out of a recorded
+decision and the seam has something to disagree with.
+
+**Today's fail-closed provenance is a residue, and it is named rather than
+smoothed over.** Nothing in the tree records a span's origin, so every caller
+passes an empty mapping and every span the first implementation describes is
+`SYSTEM_SELECTED`. That is the conservative direction and it is ADR-0146 §2's own
+answer — but it means ADR-0148 §14's carried-provenance pair is satisfied by a
+seam nobody yet feeds, and a user's own words are described as the system's until
+the origin path lands. The lane that first records an origin is the lane that
+closes it; no clause here bounds when, and no lane records this surface as
+carrying real provenance before then.
+
+### 6. The five refusals
+
+> **Normative.** `bind` and `rebind` each **refuse** — raising rather than
+> returning, §9 — in each of the following cases, and refusing is a refusal of the
+> whole call: the binding is not produced, the `ActionRequest` is not built, and no
+> ruling is sought (ADR-0148 §1's third clause).
+
+> **Normative. The undescribed key.** The seam refuses a call carrying a top-level
+> key of `parameters` that the bound tool's `parameters_schema` does not
+> **statically name** — that is, a key that is not a key of that schema's top-level
+> `properties` object. A key admitted only by an open-ended form —
+> `additionalProperties`, `patternProperties`, `propertyNames`, or any other
+> construct matching keys it does not enumerate — is **not** statically named,
+> however validly the call type-checks against it. This is ADR-0150 §11's first
+> routed refusal, and its test is **authorship, not validity**: a locator is
+> persisted into the recorded decision, so it must be text the tool's author wrote
+> and not text a caller chose.
+
+> **Normative.** A tool at this seam with no `parameters_schema`, or with one
+> carrying no top-level `properties` object, statically names **no** key. A call to
+> it carrying any parameter is refused; a call carrying none is not. No lane reads
+> ADR-0145 §9's "an absent schema declares no constraint" as admitting a key here,
+> and no lane closes this by requiring `additionalProperties: false`, which would
+> add a rule with no effect the clause above does not already have.
+
+> **Normative. The omitted destination.** The seam refuses to produce a binding in
+> which a span of an argument the declaration marks **destination-bearing** carries
+> no `EgressDestination`. This is ADR-0150 §11's second routed refusal. No lane
+> reads such a span as the call having selected no recipient, which is the reading
+> ADR-0150 §3's account substitution would otherwise take and the reading its
+> condition clause forbids.
+
+> **Normative. The unshaped destination.** The seam refuses a call in which a
+> declared destination-bearing argument carries a value that is not a JSON string
+> or a JSON array of JSON strings (§4), and refuses a declaration that marks such
+> an argument at all (§4).
+
+> **Normative. The unusable declaration.** The seam refuses a declaration that
+> breaches §3: a keyword outside a top-level property's own subschema, a keyword
+> value naming no member of its enum, a protocol it holds no canonicaliser for, or
+> a destination-bearing argument stating no tier. A declaration that cannot
+> describe a call does not bind, which is ADR-0016 §1's "a tool that does not
+> declare its reach does not load" at the one seam that reads a declaration the
+> registry does not.
+
+> **Normative. The uncompletable call.** The seam refuses a call for which it
+> cannot produce a whole, well-formed binding for any other reason — a supplied
+> form with no canonical form (§5), a `provenance` entry naming a span the call
+> does not carry (§5), a registered egress tool it holds no connected account or
+> transport endpoint for (§10), a definition unequal to its registered original
+> (§1), or an `EgressBinding` its own construction refuses under ADR-0150 §3, §4 or
+> §8. It never returns a partial binding and never returns `None` to signal a
+> failure.
+
+**Five named refusals and a residual clause, rather than an enumeration presented
+as closed.** ADR-0150 §3 records why a list of known-bad shapes is not a boundary:
+"one implementation splits at the final `@` and canonicalises it while another
+refuses it". The same is true one level up — a seam whose refusals were an
+enumeration would let two implementations disagree about a case nobody listed. The
+last clause is the boundary; the four named ones are the instances the corpus has
+argued for, each with an ADR behind it.
+
+**Every one of them fires before a ruling and commits nothing.** That is ADR-0148
+§1's third clause, and it is what makes §9's disposition honest: at the point this
+seam runs, selection has committed nothing (ADR-0144 §6, ADR-0145 §4), no request
+exists, no decision exists, no claim has been made and the step is still `PENDING`.
+
+**Why the undescribed-key refusal is not closed one stage earlier, and cannot be.**
+ADR-0145 §11 records that a schema omitting `additionalProperties` "permits keys it
+never described, and those keys travel in an authorised payload", and ADR-0145 §9
+admits an empty schema over "a parameter mapping with keys". So schema validation
+passes such a call by design, and ADR-0150 §4's coverage invariant then requires a
+span for the key, whose `argument` reaches the durable decision — the `X-Secret`
+shape ADR-0145's own message tests are written against, and the
+credential-in-a-key breach ADR-0150 §7's prohibition names and §13 there records as
+"a breach of this clause that nothing detects". This clause is what detects it.
+Issue #1127 carries the fail-closed alternative and why it rides here.
+
+### 7. `rebind` re-derives everything but the provenance, and refuses what the approval did not cover
+
+ADR-0037 §4's resume sequence rebuilds the `ActionRequest` "from the
+**confirmation's own embedded `ToolDefinition`** and the step's parameters", and
+a second ruling — `ActionPolicy.resolve` — is taken on it. Under ADR-0148 §1 that
+request must carry the whole binding before that ruling too, and nothing today
+compares the rebuilt request's binding against the one the parked confirmation
+carries.
+
+> **Normative.** `rebind` derives the binding afresh from `tool` and `parameters`,
+> exactly as `bind` does and subject to every clause of §5 and §6, and takes from
+> `approved` **exactly one** thing: each span's `provenance`, matched to the
+> derived span by locator. Nothing else in `approved` is read into the result.
+
+> **Normative.** `rebind` **refuses** unless the binding it derived is **equal** to
+> `approved` — equal as ADR-0150 §9 compares a binding, whole and by value. It
+> returns the binding it derived, never the one it was given, so the rebuilt
+> request carries a value this seam produced rather than one read back out of a
+> store.
+
+> **Normative.** `rebind` **refuses** a `provenance` in `approved` it cannot match:
+> a derived span whose locator names no span of `approved`, and a span of
+> `approved` whose locator names no derived span, are each a refusal. No lane fills
+> an unmatched span with `SYSTEM_SELECTED` here — that default is `bind`'s answer
+> for an origin nobody recorded, and using it on this path would silently convert a
+> disagreement about the payload into an approved-looking description.
+
+> **Normative.** `rebind` called with `approved` **not** `None` for a tool this
+> seam holds no egress registration for **refuses**, and does not return `None`.
+> A recorded decision stating an egress call and a registry stating a non-egress
+> tool disagree about what was authorised, and the answer to a disagreement here is
+> a refusal, not the weaker of the two readings.
+
+> **Normative.** `rebind` called with `approved` of `None` for a tool with no
+> egress registration returns `None`, which is the non-egress resume path and is
+> unchanged by this ADR (§8).
+
+**Re-deriving and comparing is ADR-0148 §6's determinism clause being used, not
+worked around, and the distinction is the one a reviewer should check first.** §6
+forbids two things: "nothing in it is derived after the ruling and nothing in it is
+re-derived at the seam". *Derived after the ruling*: this derivation happens
+**before** `ActionPolicy.resolve` is reached, which is the ruling that authorises
+the resumed call, so it is §1's earliness on the second ruling exactly as `bind` is
+on the first. *Re-derived at the seam*: "the seam" in that sentence is the
+transmitting seam — the callable reached by `invoke`, which ADR-0148 §6's four-way
+refusal governs and which this ADR touches not at all. And §6 states the positive
+form of what this section does, in terms: the description is deterministic so that
+"two derivations of the description for one request agree" and "the approver, the
+seam and a later auditor can each re-derive and compare". This is that comparison,
+performed by the component that has both values.
+
+**Transcribing the provenance is forced, and a seam that re-derived it would refuse
+every resumed egress call.** Provenance is carried and never inferred (ADR-0146 §2,
+ADR-0150 §5), and the recorded origin of a span is a fact about an act that
+happened before the confirmation was parked — plausibly before a restart, which
+ADR-0148 §6 names as "exactly when a parked `CONFIRM` is answered". A `rebind` that
+took a fresh `provenance` argument would receive an empty one, describe every span
+as `SYSTEM_SELECTED`, and compare unequal to an `approved` binding whose spans said
+`USER_AUTHORED` — so every resumed call whose user typed anything would be refused,
+and the fix a lane would reach for is to stop comparing. Taking it from `approved`
+makes the comparison total on every field that *can* be re-derived, and leaves the
+one field that cannot exactly where the trail put it.
+
+**This is where ADR-0150 §12's forged-canonical case becomes reachable, which is
+what §5's by-construction discharge would otherwise have cost.** §12 requires "an
+occurrence whose canonical form is not what that seam's canonicaliser computes from
+its supplied form is refused **before** a ruling is sought". On the `bind` path no
+caller can present one. On this path one can: a decision read back out of the trail
+carrying a forged occurrence is compared against a freshly derived binding, the two
+are unequal, and `rebind` refuses before `resolve` is reached. The same comparison
+refuses a stored binding with an omitted destination, a mis-stated extent, a
+substituted tier, or a swapped account — every field, because ADR-0150 §9's
+equality is over the whole value.
+
+**The account and the endpoint are re-derived too, and a registry rebuilt under a
+different configuration therefore refuses here rather than at the callable.**
+ADR-0148 §6's fourth clause already makes that call refuse at transmission — "a
+registry rebuilt under a different configuration — across a restart, which is
+exactly when a parked `CONFIRM` is answered — refuses the call rather than
+performing it against another account or another endpoint". This section reaches
+the same answer one stage earlier and before a second ruling is recorded, which is
+the whole direction ADR-0148 §1 records the design as moving in: "the design work
+is therefore almost entirely about **moving facts earlier**, not about adding
+checks later." The callable's refusal is not thereby redundant and is not relaxed:
+it is the check that runs after the second ruling, on a fact that can move between
+the ruling and the transmission.
+
+### 8. A tool with no connected account is not an egress call, and the non-egress path is untouched
+
+> **Normative.** `bind` returns `None` **exactly when** the seam holds no egress
+> registration for `tool.id` — that is, no connected account bound to it. `None` is
+> the whole answer for such a call: it is not an egress call, it carries no binding,
+> and every refusal in §6 is inapplicable to it. `None` never signals a failure, and
+> no lane reads it as one.
+
+> **Normative.** What makes a tool an egress tool is the **connected account it is
+> registered against** (ADR-0148 §6's one-account clause), and not the presence of a
+> declaration keyword. A tool bound to an account whose schema carries neither §3
+> keyword is a well-formed egress call selecting no onward recipient, whose canonical
+> destination set is the account alone (ADR-0148 §2's third clause, ADR-0150 §3) —
+> which is the shape a resolution call under ADR-0148 §5 takes.
+
+> **Normative.** The seam **refuses** a tool for which it holds no egress
+> registration but whose `parameters_schema` carries either §3 keyword. A tool
+> declaring destinations or tiers to this seam while registered against no account
+> is mis-registered, and returning `None` would silently discard a declaration its
+> author wrote.
+
+> **Normative.** A caller receiving `None` builds its `ActionRequest` with
+> `egress_binding=None`, which is ADR-0150 §1's default and its stated `None`
+> semantics. No behaviour of any non-egress call changes: `authorises` compares
+> `None == None`, `from_request` transcribes nothing, and the ruling is the ruling
+> that is taken today. `current_time` owes this seam nothing beyond one call
+> returning `None`.
+
+**One call rather than a query and a call, and the reason is a substitution rather
+than a round trip.** The shape a lane reaches for first is `is_egress(tool)`
+followed by `bind(tool, …)`. It is worse in the way this family is always worse:
+two answers that must agree, obtained separately, with a window between them in
+which a registration could differ. One call answers both questions from one read,
+and `None` is unambiguous because every failure raises.
+
+**The one-account clause is what makes "no I/O" achievable, and it is worth
+stating why.** ADR-0148 §6 binds a registered tool to at most one connected
+account, so the account, its reference and the transport endpoint are fixed **at
+registration** rather than per call. The seam therefore reads them out of what
+registration captured, in memory, and consults no connection store, no keyring and
+no network — which is §10's clause discharged by where the facts already are
+rather than by discipline. The cost is a snapshot that a re-provisioning can make
+stale, and that cost is already ruled: ADR-0148 §6's fourth clause makes the
+callable refuse unless the identity **currently recorded** for that reference
+equals the identity the binding carries.
+
+### 9. One failure class, and one `Disposition` member
+
+> **Normative.** `core/errors.py` gains **one** class, `EgressBindingError`, a
+> direct subclass of `AssistantError`. Both members of `EgressBinder` declare it,
+> and every refusal in §6, §7 and §8 raises it. This ADR adds no other error class
+> and no subclass of this one.
+
+> **Normative.** A refusal is **raised**, never returned. The return type carries a
+> binding or `None`, and neither can express "this call cannot be completed" —
+> which is what ADR-0150 §11's first routed obligation and PR #1120's eighth
+> observation each ask for, and what a union return would have answered by making
+> the caller branch on a value it cannot act on.
+
+> **Normative.** `EgressBindingError` carries no structured state: no reference, no
+> argument name, no destination, no tier and no count. What a refusal says is its
+> message, bound by §11.
+
+> **Normative.** `Disposition` gains exactly one member, `EGRESS_UNBINDABLE`,
+> returned by the runner stage when this seam refused. It commits nothing: no ruling
+> is requested, no audit record is written, no claim is made, and the step stays
+> `PENDING`. It is terminal for the turn that met it and for nothing beyond it.
+
+> **Normative.** No lane reports this refusal as `DENIED`, as `INVALID_PARAMETERS`,
+> as `NO_CAPABLE_TOOL`, or through any `SkipReason`. No `SkipReason` is added and no
+> durable state is written.
+
+**One error class rather than a family, and ADR-0145 §4's argument is the one that
+decides it.** ADR-0151 §2a declares seven classes for five operations, and that is
+right there because a caller acts differently on each — a displaced act, an
+incomplete provisioning and an unknown reference lead to different remedies. Here
+they do not: every refusal in §6 ends the turn having disclosed nothing, asked
+nobody, written nothing and claimed nothing, and every one of them is corrected the
+same way, by a different call or a corrected declaration. ADR-0145 §4's sentence
+transfers unchanged: "A second member would be a distinction visible to a client
+that cannot act on it differently."
+
+**A new `Disposition` member rather than reusing `INVALID_PARAMETERS`, and this is
+the choice most worth arguing.** The reuse is tempting: both commit nothing, both
+leave the step `PENDING`, both are terminal for the turn. It is refused because
+`INVALID_PARAMETERS` has a ratified definition with **one definition and two
+causes** (ADR-0145 §4), both of them about a schema evaluation over capable
+candidates — and most of §6's refusals are not about the parameters at all. A
+declaration marking a keyword in the wrong place, a tool registered against no
+account, a definition unequal to its registered original: reporting any of those as
+"the step's parameters were not established as acceptable to any tool that could
+have run them" writes a falsehood into a returned value, and widening
+`INVALID_PARAMETERS` to a third cause would amend ADR-0145 §4 and owe a record
+against it. ADR-0037 §1's argument is the corpus's own and it transfers: "writing a
+falsehood into durable state to make a return value tidier is the failure ADR-0014
+§4's `_LEGAL_SKIP_REASONS` table exists to prevent." `AMBIGUOUS_CAPABILITY` and
+`INVALID_PARAMETERS` were each minted on that argument, and this is the third
+instance of it.
+
+**Distinguishable from a denial is the property PR #1120's eighth observation asked
+for, and the member is where it is cashed.** A `DENY` means the policy refused, is
+recorded in the trail, and moves the step to `SKIPPED`/`APPROVAL_DENIED` naming a
+decision. This refusal has no decision to name, because it happens before one
+exists. A client that could not tell them apart would report "the assistant
+declined to send this" for a tool whose declaration is malformed, which is a
+falsehood about the user's own policy.
+
+**Adding a member is additive on the wire**, ADR-0145 §4's own reasoning
+unchanged: `Disposition`'s values are `StrEnum` strings a client reads (ADR-0084
+§4), the hub is loopback-only and ships with its client from one install, so the
+exhaustive readers are in this repository and §13 makes finding them the
+implementing lane's obligation.
+
+### 10. Where the seam sits, and what this ADR does not contract
+
+> **Normative.** `EgressBinder` is placed in `core/protocols.py` immediately after
+> `ToolInvoker` and before `ActionPolicy`, which is where the pipeline reaches it:
+> it is the third face `tools/` presents and the last thing consulted before the
+> permission stage.
+
+> **Normative.** It is implemented in **`tools/`**, and consumed in
+> **`orchestration`** by the runner stage ADR-0037 §2 and §4 govern — `bind` after
+> selection and before the `ActionRequest` is built, `rebind` after the parked
+> confirmation is authenticated and before the request is rebuilt. `orchestration`
+> reaches it through this Protocol and never through an injected concrete, and
+> imports no module of `tools/` (golden rule 1). The composition root wires the one
+> implementation.
+
+> **Normative.** Whether one object in `tools/` presents this Protocol alongside
+> `ToolRegistry` and `ToolInvoker`, or a second object presents it, is
+> `tools/`-internal and **not contracted here**. So is how a tool comes to be
+> registered against a connected account, how a declaration is read out of a
+> schema, where a canonicaliser lives, and how the callable is reached — the last
+> of which ADR-0029 §1 states in terms is `tools/`-internal and uncontracted, and
+> which no clause of this ADR narrows.
+
+> **Normative.** Neither member performs I/O of any kind: no network, no
+> filesystem, no keyring read, no connection-store read, no clock and no
+> configuration read. This is ADR-0148 §11's fixed property for (b), and its
+> consequence is the one that clause names: this seam can never become the
+> resolution path ADR-0148 §5 governs, and a lane that finds it needs a lookup here
+> is building a resolution call, which is a registered tool with its own ruling.
+
+> **Normative.** No credential value and no credential **slot** crosses this seam
+> in either direction. A `SecretName`, a `SecretName`'s `name`, and any string
+> identifying a keyring entry appear in no argument, no return value and no refusal
+> message. The implementation holds no `Secrets` and no `SecretStore` face
+> (ADR-0125 §8, ADR-0149 §9), and holding this seam is not holding one (ADR-0149
+> §8).
+
+> **Normative.** The account this surface carries is ADR-0150 §7's `BoundAccount`
+> and never ADR-0151 §4's `ConnectedAccount`. No lane substitutes one for the
+> other, and no lane implements this seam by importing the live connection record
+> into a binding: `revision` and `state` move while a parked ruling stands, which is
+> the failure ADR-0150 §7 states its separate type against.
+
+> **Normative.** This seam is reached **after** ADR-0145's schema check, which
+> ADR-0144 §7's eligibility filter performs during selection. Its refusals are
+> therefore about egress and never about the schema — with the one deliberate
+> exception §6's first clause states, where a key ADR-0145 admits is refused here
+> because a locator must be text the tool's author wrote.
+
+**A third Protocol rather than a member on `ToolRegistry`, and ADR-0016 §5's own
+sentence is the reason.** ADR-0029 §1 records it for `invoke`: "the surface should
+not widen to cover a concern its consumers do not have. `ToolRegistry` answers
+questions — the selection stage asks which tools satisfy a capability, and needs no
+power to run one." A binder is a third capability with a third consumer set: the
+selection stage needs it not at all, and the executor needs it not at all. Adding
+`bind` to `ToolRegistry` would hand every holder of a lookup the ability to
+materialise an account reference and a transport endpoint, which is the direction
+ADR-0017 §8 wants to move away from. The split is the same capability distinction,
+made a second time on the same object, and it is why the object in `tools/` may
+present all three faces while the contracts stay three.
+
+**Taking a `ToolDefinition` does not contract registration, and the line is worth
+drawing.** ADR-0029 §1 keeps registration inside `tools/` on ADR-0008's precedent —
+"a `ContextProvider` crosses the boundary while the `ContextSource` seam that
+populates it stays inside `context/`". Nothing in §1's signature names a callable,
+a registration act, an account record or a canonicaliser; the definition crosses
+because the caller already holds it and because ADR-0150 §6 requires the
+declaration to be recoverable from it. What the seam does with `tool.id` internally
+is the populated side of ADR-0008's split, unchanged.
+
+### 11. The refusal-message discipline
+
+> **Normative.** No message any refusal on this surface raises renders an argument
+> value, a supplied or canonical destination form, an account identity, a
+> connection reference, a credential slot, or any part of a span's content. It may
+> name the tool id, an argument name **the bound tool's declaration statically
+> names**, a zero-based index, a count, a field name and an error type.
+
+> **Normative.** A key of `parameters` that the declaration does **not** statically
+> name is **never** interpolated into a message. A refusal for such a key states
+> the count and the declared names, and nothing of the key itself.
+
+> **Normative.** An `EgressSpanLocator`'s `argument` reaching this seam from a
+> caller is caller-supplied text and is bound by the clause above: it is named only
+> once it is known to be an argument the declaration statically names, and reported
+> without interpolation otherwise.
+
+**This is PR #1120's ninth observation stated as the rule its rounds 5 and 6
+produced, at the surface that inherits it.** A declaration is the tool author's
+text and may be named once it is known to be text; a call's arguments and a carried
+provenance key are not, and are never named. The trap the observation names is
+specific and applies here in full: `tools/builtin.py` names the unexpected keys it
+refuses, and may, because it runs **inside** a callable after ADR-0145 has already
+refused anything outside `additionalProperties: false`. This seam runs before the
+request exists, where a key is a string a model can write as freely as a value —
+and where §6's first refusal exists precisely because such a key can be there.
+
+**A refusal message reaches a log, which is why this is a clause rather than a
+convention.** `core/logging.py` names the leak and `tools/invocation.py` declines
+to make it with `str(exc)`. ADR-0150 §8's second clause imposes the same rule on
+every model of surface (a) and gives the reason in one line — "the value it would
+append is a recipient address". The same address reaches this seam one step
+earlier.
+
+### 12. What this ADR does not decide
+
+Scoping something out is a decision, so each carries its reason (ADR-0029 §7's
+form).
+
+> **Normative.** This ADR **designates nothing**, attests no ADR-0017 §3 condition
+> and discharges none. `ai_assistant.tools.egress` stays approved and undesignated
+> (ADR-0017 §2), no tool is registered at it, and no lane cites this ADR toward
+> designation.
+
+> **Normative.** How a **recorded origin** reaches the caller of `bind` is not
+> decided here (§5), which is where ADR-0150 §5 left it.
+
+> **Normative.** ADR-0146 §5's third clause — a value the system already tiered,
+> carried into a field that establishes none — is **not** discharged here, and the
+> `x-egress-tier` keyword does not discharge it. ADR-0150 §6 names the lane that
+> owes it and the ADR-0148 §6 clause that lane will amend, and this ADR neither
+> narrows nor anticipates that.
+
+> **Normative.** Nothing here decides the provisioning act, a keyring face, a
+> connection record's storage, its lifecycle, or how a tool comes to be registered
+> against a connected account. ADR-0149 and ADR-0151 own the first four and §10
+> leaves the fifth `tools/`-internal.
+
+> **Normative.** Nothing here decides what a **transport endpoint** must be, what a
+> redirect may do, or how a client is constructed. ADR-0150 §7 left that to #83 and
+> this ADR consumes the endpoint without constraining it.
+
+> **Normative.** Nothing here decides a **rendering** of a description, which
+> ADR-0150 §10's fourth clause keeps off the surface, nor what a confirmation shows,
+> which ADR-0148 §8's fourth clause and ADR-0150 §10's third clause own.
+
+> **Normative.** Nothing here adds a `DestinationProtocol` member, widens `SMTP`'s
+> acceptance boundary, or authorises a canonicaliser for a protocol ADR-0150 §3 has
+> not admitted. Each of those needs its own ratified ADR on ADR-0150 §3's terms.
+
+> **Normative.** Nothing here decides the purge, retention or routing seam ADR-0126,
+> ADR-0149 §8's fourth clause and issue #909 leave open, and no lane cites this ADR
+> toward one.
+
+**The semantic half of PR #1120's eleventh observation stays open, and this ADR
+narrows it without closing it.** The observation is that "nothing anywhere
+establishes that the declaration describes the tool": a declaration naming a body
+field as destination-bearing is well-formed and wrong. §3 and §4 close the
+*structural* half — a keyword in the wrong place, a value naming no enum member, a
+shape that cannot carry a recipient — and none of that reaches a declaration that
+is well-formed and false. ADR-0148 §2's third clause already classes it, "a defect
+in the same class as a mis-declared `discloses`", ADR-0148 §8 records that "nothing
+in ADR-0016 detects a declaration that understates", and ADR-0021 §1 states the
+general case: "no producer can prevent it". Naming it here is ADR-0146 §7's posture
+rather than a gap discovered late.
+
+### 13. What the implementing lane owes
+
+> **Normative.** Surface (b) is a **seam**, so ADR-0137 §2's widening applies whole
+> and ADR-0150 §11's last paragraph places it here: `EgressBinder`'s **triad** —
+> the Protocol in `core/protocols.py`, its shared conformance suite, and its
+> canonical fake in `ai_assistant.testing` with the concrete `Test…Contract`
+> subclass that runs the suite against it — lands in **one lane and one PR**
+> together with its **primary production implementation** in `tools/` and the
+> `orchestration` consumer that reaches it. No lane splits the triad (ADR-0137 §3),
+> and no lane lands the Protocol ahead of the implementation that shapes it.
+
+> **Normative.** ADR-0150's surface must have merged first. That lane lands
+> `EgressBinding` and its types (ADR-0150 §12); this seam returns one, so nothing
+> here is implementable before it (golden rule 5, ADR-0015 §5).
+
+> **Normative.** That lane ships the **`None` regression pin**: an existing
+> non-egress call — a tool this seam holds no egress registration for — runs the
+> whole runner stage with `bind` returning `None`, builds a request with
+> `egress_binding=None`, and produces byte-identical durable state to the same call
+> before this seam existed. §8's claim that no non-egress behaviour changes is
+> demonstrated rather than asserted.
+
+> **Normative.** That lane ships the **forged-canonical** case ADR-0150 §12 states,
+> in the terms §7 makes it reachable: a parked confirmation whose binding carries an
+> occurrence whose canonical form is not what the seam's canonicaliser computes from
+> its supplied form is **refused** by `rebind` before `resolve` is reached, and no
+> resolving decision is recorded. A test asserting only that a correctly-built
+> occurrence is accepted does not reach it, and no lane records the check as
+> satisfied by `core`'s validators, which ADR-0150 §3 states in terms do not perform
+> it.
+
+> **Normative.** That lane ships the **omitted-destination** case ADR-0150 §12
+> states: a call whose declaration marks an argument destination-bearing and whose
+> derivation would produce that argument's span with no `EgressDestination` is
+> refused before a ruling is sought, so no decision is recorded holding an
+> account-only canonical destination set for it. A case whose binding is also
+> malformed under ADR-0150 §4 demonstrates nothing, and one built from a call whose
+> declaration marks no argument destination-bearing does not reach the check.
+
+> **Normative.** That lane ships the **multi-recipient structured span** case
+> ADR-0150 §12 states, refused under §4's per-call clause: a call whose declared
+> destination-bearing argument holds an undecomposable value naming two recipients —
+> the `{"recipients": {"to": ["alice@example.com", "mallory@example.com"]}}` shape —
+> is **refused** rather than described by a binding carrying one of them, and the
+> test asserts the refusal fires rather than asserting that a structured value naming
+> **one** recipient is accepted.
+
+> **Normative.** That lane ships the **live failure-path** test ADR-0150 §11 states
+> for the undescribed key: a call whose `parameters` carry a top-level key the bound
+> tool's schema never statically named — the `X-Secret` shape, and the
+> credential-in-a-key shape ADR-0150 §7's prohibition reaches — built against a seam
+> that otherwise supplies a binding, asserting the refusal fires **and** asserting
+> what the recorded decision holds when it does not. Issue #1127 carries the
+> fail-closed alternative.
+
+> **Normative.** That lane ships a **declaration-refusal** case for each clause of
+> §3 and §4: a keyword on a nested subschema; a keyword in `$defs`, in
+> `additionalProperties` and inside an applicator; a keyword value naming no enum
+> member; a `DestinationProtocol` the seam holds no canonicaliser for; a
+> destination-bearing argument stating no tier; and a destination-bearing argument
+> whose declared shape is neither a string nor an array of strings. A test
+> exercising only a well-formed declaration satisfies none of these.
+
+> **Normative.** That lane ships the **schema-readability** pin: a
+> `parameters_schema` carrying both §3 keywords is readable under ADR-0145 §6, and
+> validates a given argument mapping **identically** to the same schema with the
+> keywords removed. §3's claim that an unknown keyword is an annotation is
+> demonstrated against the repository's own evaluator rather than against the
+> specification.
+
+> **Normative.** That lane ships the **refusal-message** cases §11 is stated for:
+> a refusal for an undescribed key names neither the key nor its value; a refusal
+> naming an argument names only one the declaration statically names; and no refusal
+> on this surface renders a destination form, an account identity or a connection
+> reference. A test asserting a refusal type without asserting its message satisfies
+> none of these.
+
+> **Normative.** That lane ships the **disposition** cases §9 is stated for: a
+> refusal from either member yields `Disposition.EGRESS_UNBINDABLE`, writes no audit
+> record, makes no claim, and leaves the step `PENDING` at its stored version; and it
+> is distinguishable from `DENIED` and from `INVALID_PARAMETERS` at the client. It
+> also finds and updates every exhaustive reader of `Disposition` in this repository,
+> which ADR-0145 §13 made an obligation for the same reason.
+
+> **Normative.** That lane ships the **`rebind` equality** cases §7 is stated for:
+> a resumed call whose derived binding equals the approved one proceeds and carries
+> the **derived** value; one differing in exactly one span's extent, in one
+> occurrence's supplied form, in the account's identity, in the account's reference,
+> and in the transport endpoint is refused in each case separately; and a resumed
+> call whose approved binding carries `USER_AUTHORED` on a span proceeds with that
+> provenance intact, which is the case a `rebind` re-deriving provenance would fail.
+
+> **Normative.** No lane satisfies any clause of this section with a test that
+> exercises only a well-formed binding on a happy path.
+
+### 14. Every obligation ADR-0150 routed here, and where each lands
+
+This section is a classification and is not normative (ADR-0089 §1). It exists so
+that a reader can check the routing was spent rather than cited.
+
+| # | What ADR-0150 routed | Where it lands |
+|---|---|---|
+| 1 | §11: a way for the seam to **fail distinguishably from a denial** | **§9.** One raised `EgressBindingError`, and `Disposition.EGRESS_UNBINDABLE` with the argument for not reusing `DENIED` or `INVALID_PARAMETERS`. |
+| 2 | §11 and §6: the **declaration vocabulary** | **§3.** Two keywords in `parameters_schema`, read only on a top-level property's own subschema, with the three the producer carried and ADR-0150 §4 has since removed. |
+| 3 | §11: the **structured-value supplied-form** check `core` cannot perform | **§4.** Closed structurally rather than by a check: a destination-bearing argument is a string or an array of strings, so a supplied form is never extracted from inside a structured value and ADR-0150 §4's invariant is total. |
+| 4 | §11 and §3: the **correspondence** check | **§5** by construction on the deriving path — the seam computes occurrences and accepts none — and **§7** by equality on the resuming path, which is where ADR-0150 §12's forged-canonical test lands. |
+| 5 | §11: the **refusal-message discipline** for a component running before ADR-0145 refused anything | **§11.** Stated as PR #1120's rounds 5 and 6 produced it, with the `tools/builtin.py` trap named. |
+| 6 | §11: **a refusal** for the undescribed key, on the authorship test | **§6**'s first clause, with the no-schema and no-`properties` case stated and `additionalProperties: false` explicitly not required. |
+| 7 | §11: the **live failure-path test** for that shape (#1127) | **§13.** |
+| 8 | §11: **a second refusal**, for a declared destination-bearing argument whose span carries no destination | **§6**'s omitted-destination clause, with §13's test. |
+| 9 | §11: the **flat-shapes structural option**, undecided | **§4.** Taken, with the argument, the producer's evidence, the widening route, and the answer to why ADR-0150 §12's structured-span test stays shippable. |
+| 10 | §6: the check that a stated **tier** matches the declaration | **§5** by construction — the tier is derived from `x-egress-tier` and accepted from nobody — and **§7** by equality on the resuming path. |
+| 11 | §11: the **triad** obligation, which "lands there whole" | **§13.** Protocol, suite, fake and the primary production implementation as one lane and one PR (ADR-0137 §2). |
+
+### 15. This ADR classified under ADR-0070 §1 and ADR-0082 §1
+
+ADR-0082 §1 requires the judgement in the later ADR's text and fixes its form: a
+record is owed on an earlier ADR exactly where this ADR **amends a named clause**
+of it — where "a reader holding only the earlier ADR now acts differently, or reads
+one of its clauses more widely than it now holds". Where the answer is no, the
+change is "a **stacked addition**: it is recorded in the ADR that makes it, and
+nowhere else". ADR-0148 §12, ADR-0149 §12, ADR-0150 §13 and ADR-0151 §17 are the
+worked precedents for this section's form.
+
+**The conclusion first: no record is owed against any ADR, and none is written.**
+This ADR's diff is one new file. What follows is the working, ADR by ADR, and a
+disagreement with it takes ADR-0082 §1's own form — naming the sentence that does,
+or does not, become false or over-wide.
+
+**ADR-0037 §2 and §4 — no record owed, and this is the nearest miss, so the working
+is explicit and the contrary case is stated first.** §2's numbered sequence begins
+"build the `ActionRequest` from the tool, the step's parameters and the step id",
+and §4's begins "rebuild the `ActionRequest` from the confirmation's own embedded
+`ToolDefinition` and the step's parameters". This ADR puts a call before each and,
+on §4's path, a refusal. Read as closed enumerations, both sentences would become
+incomplete, and that is the reading a reviewer is entitled to press.
+
+They are not closed enumerations, and three things establish it rather than
+assert it. **First, both were already exceeded without a record.** ADR-0044 §1
+added `execution_id` as a fourth constructor input to §2's step 1 and wrote no note
+on ADR-0037; ADR-0150 §13 rules on that precedent in terms — "a fifth conjunct
+added later does not make it false, and nothing in §1 there claims the list is
+closed". §4's own prose likewise describes `_check_parked` and the freshness check
+after its six-step list, so the list is illustrative on its own page. **Second, two
+ADRs have since inserted whole stages ahead of §2's step 1 and neither recorded
+against §2**: ADR-0144's selection ordering and ADR-0145's eligibility filter both
+run between capability resolution and the request, and ADR-0145 §12's note on
+ADR-0037 is written against a sentence of **§1** — "the parameters flow into the
+`ActionRequest` unvalidated" — which had stopped describing the system, and against
+nothing in §2. That is the discipline working: a record where a sentence became
+false, and none where a sequence grew. **Third, ADR-0144's own supersession entry
+states what survives**, and it is what this ADR relies on: "§2's decide → record →
+read back → claim order, §3's read-back and identity check, §4's parking and
+`resume`" stand unchanged. Every one of those is relied on here unchanged — the
+order is untouched, recording still precedes the claim on every branch, the
+executor still receives the trail's copy, and a `CONFIRM` still parks durably with
+no answer invented. §7's refusal is a refusal **before anything is authored**,
+which is the class §4's own step 2 already contains.
+
+**ADR-0148 §11 — no record owed, and this ADR is that clause working.** §11 defers
+(b) and says in terms that "a contract ADR that satisfies those is free to choose
+the signature; one that does not is changing this decision". Choosing it is the
+deferral working, the shape ADR-0147 §11 found for ADR-0017 §2's seam-naming and
+ADR-0150 §13 for §11's other half: "that deferral working as designed, not a
+supersession" (ADR-0029 §9). Each of §11's four fixed properties is satisfied and
+none is traded: consulted before the ruling and never after (§1, §7, §10's ordering
+clause); no I/O (§10); refuses rather than guessing (§6); deterministic (§5, and
+§7's comparison is what makes the determinism checkable).
+
+**ADR-0148 §1, §2 and §6 — no record owed.** §1's third clause is **used** five
+times over, once per refusal in §6, which is that clause operating rather than
+being narrowed. §2's first, second, third, fourth and sixth clauses are relied on
+unchanged: the seam computes a canonical form for every destination-bearing
+argument before the request is built, folds nothing, reads the account-only case as
+§2's third clause and ADR-0150 §3 leave it, carries both forms, and reaches one
+canonicaliser per protocol without supplying a second. §2's fifth clause — no I/O
+in canonicalisation — is extended to the whole seam by §10, which is ADR-0148 §11's
+own statement of the property rather than a widening of §2. §6's determinism clause
+is consumed with the three inputs it names and no fourth: §5 derives from the
+arguments and the declaration and carries the provenance, and §3's vocabulary is
+how "the registry's definition for the bound tool" supplies its half. §6's
+"nothing in it is re-derived at the seam" is answered in §7 at length, and the
+answer is that the sentence's "seam" is the transmitting one; §6's own following
+sentence — the approver, the seam and a later auditor "can each re-derive and
+compare" — is the clause §7 relies on, so §6 is what obliges the comparison rather
+than what forbids it. §6's fourth clause, the callable's four-way refusal, is
+untouched and §7 states in terms that it is not made redundant.
+
+**ADR-0150 §3, §4, §6 and §11 — no record owed, and every routed obligation is
+discharged rather than narrowed.** §11's clauses are addressed to "(b)'s ADR" by
+name; this is that ADR, and §14 maps each. §3's routed correspondence check is
+discharged **more strongly** than it asked for, which is not a narrowing: its own
+sentence — "no lane states that a carried canonical form has been verified against
+anything" until (b) lands — becomes satisfiable, which is the condition it named.
+§4's supplied-form residue is closed by §4 above removing the case; §11's clause
+routing it says "the check §4's supplied-form invariant cannot perform where a
+supplied form is extracted from inside a structured value", and a vocabulary in
+which no supplied form is so extracted discharges it in its premise, the shape
+ADR-0145 §12 used against ADR-0037 §1. §11's undecided structural clause says the
+judgement "belongs to the lane holding the declaration vocabulary and a producer,
+which is (b)'s", so deciding it is that sentence working. §6's vocabulary deferral
+fixed two constraints and §3 above satisfies both, with §13's readability pin
+making the second checkable.
+
+**ADR-0150 §1, §2, §5, §7, §8, §9, §10 and §12 — no record owed.** §1's `None`
+semantics are consumed exactly (§8), and §2's authorisation list is not extended:
+§2 above adds four names none of which appears on it, and §13's non-substitution
+clause for `ConnectedAccount` is restated here rather than relaxed. §5's
+carried-not-derived rule is applied at the seam and §5 above discharges its
+fail-closed default by having the builder **write** `SYSTEM_SELECTED`, which is §5
+there in terms. §5's third clause — the origin's path is not decided — is relied on
+and §12 above restates it as undecided. §7's credential and slot prohibitions are
+restated for this seam by §10, and §7's residue on a caller-authored key is what
+§6's first refusal closes, which is where §7 there routed it. §8's validating-model
+discipline is what makes §1's signature able to take these values on trust, PR
+#1120's tenth observation coming out the way it predicted. §9's whole-value
+equality is what §7 compares by, unchanged. §10's no-rendering clause is restated as
+out of scope. §12's tests owed by "the lane that lands surface (b)" are restated in
+§13 with the shapes that make each reachable.
+
+**ADR-0146 §1, §2, §5 and §6 — no record owed.** §1's two answers stay two. §2's
+carried-not-inferred rule and its fail-closed default are both applied and neither
+is relaxed — §5 above refuses a provenance entry naming an absent span rather than
+dropping it, which is stricter. §5's first clause supplies the meaning of
+`x-egress-tier` and is not extended: which fields establish a tier stays the
+author's declaration and this ADR classifies nothing. §5's third clause is the one
+§12 above explicitly declines to discharge, and declining leaves it exactly as
+binding — ADR-0150 §13's own form, "the condition is not made false or over-wide by
+being answered", read in the negative. §6's recording obligation on the designating
+lane is untouched.
+
+**ADR-0145 §1, §4, §5, §6, §9 and §11 — no record owed.** §1's pre-ruling check is
+relied on and §10 states that this seam runs after it. §4's `INVALID_PARAMETERS`
+keeps its one definition and its two causes: §9 above declines to add a third and
+mints a separate member instead, and ADR-0150 §13's ruling on ADR-0044 §1 covers
+the enum growing — a member added later does not make §4's sentence false, and
+nothing in §4 claims the enum is closed. §5's one-dialect rule is untouched and §3
+adds no dialect. §6's readability refusal is untouched, and §3 binds the vocabulary
+not to breach it, with §13's pin. §9's "an absent schema declares no constraint" is
+relied on **as true** and is exactly why §6's second clause is needed: the seam adds
+a constraint of its own where the schema declares none, which is an obligation
+stacked beside §9 rather than a re-reading of it. §11's record that a schema
+"permits keys it never described" is likewise relied on as true and is the premise
+of §6's first refusal.
+
+**ADR-0016 §1, §4, §5 and §7 — no record owed.** §1's declared-not-inferred posture
+is applied to the two facts §3 keeps, and §3 above adds no safety field and no
+default. §4's `parameters_schema` stays a `FrozenJsonMapping` and §3 uses it rather
+than widening it, which is ADR-0150 §13's ruling on the same field. §5's
+query-only registry is unchanged: no member is added to `ToolRegistry`, and §10
+above states the capability argument §5 and ADR-0029 §1 each made. §7's deferral of
+population is untouched.
+
+**ADR-0029 §1, §2, §7 and §8 — no record owed.** §1's biconditional is untouched:
+this seam registers nothing, invokes nothing, and adds no route to a callable.
+§1's "how the callable is reached is `tools/`-internal, and this ADR does not
+contract it" is relied on **and restated** by §10 above, which is the sentence
+holding rather than being narrowed. §1's registry-original check is applied a
+second time at a second seam, which is that check being used; the one at `invoke`
+is unchanged and §1 above says so. §2's three seam checks are untouched. §7's
+scope-out of designation is honoured by §12. §8's `approval_ref` obligation is
+untouched, and §9 above commits nothing that could reach it.
+
+**ADR-0021 §1, §3 and §5 — no record owed.** §1's digest still binds the arguments
+while storing none of them, and this seam stores nothing at all. §3's rule that a
+policy returns a `PermissionRuling` is relied on unchanged: this seam runs before
+`decide` and hands the policy nothing. §5's floors are untouched and ADR-0148 §8's
+two additional floors are neither relaxed nor restated here.
+
+**ADR-0151 §2a, §4, §10 and §15 — no record owed, and the overlap is one concept
+rather than one name.** §4's `ConnectedAccount` gains no field, loses none and
+means what it meant; §10's `ConnectionProvisioner` gains no member; §2a's seven
+error classes are untouched and `EgressBindingError` is neither a subclass of nor a
+sibling within that family; §15's normative list of what that ADR authorises is
+disjoint from §2 above. A reader holding only ADR-0151 still finds five operations,
+one Protocol, three types, two constants and seven classes, and acts no differently
+for this ADR existing. What they additionally find, here, is a seam that consumes a
+snapshot of the account rather than the record — which ADR-0150 §7 already decided
+and this ADR only restates as a prohibition on substitution.
+
+**ADR-0017 §2, §3 and §8 — no record owed.** §2's reservation of designation is
+honoured and stated in this ADR's header and in §12. §3's conditions get a
+mechanism and no attestation, and §3's own sentence that later ADRs "may satisfy any
+of them however they judge best" is the sentence this is working under. §8's
+injected-capability direction is cited in §10 as an argument for the split, which
+is using it rather than deciding it.
+
+**ADR-0137 §2 and §3 — no record owed, and §13 invokes §2 rather than widening it.**
+§2's widening is for a slice cut at a contract seam whose implementation would
+otherwise put new machinery into two subsystems; this is exactly that slice, and
+ADR-0150 §11 already states the conclusion — "Surface (b) **is** a seam, so (b)'s
+ADR is where the triad obligation lands, and it lands there whole." §3's rule that
+the triad is never split is relied on and restated in §13.
+
+**ADR-0004 §1 and §7, ADR-0125 §2 and §8, ADR-0149, ADR-0084 §4, ADR-0085 §2, §3
+and §8, ADR-0102 §2, ADR-0008, ADR-0014 §4, ADR-0144 §6 and §7 — no record owed.**
+Each is used for what it is: `DataTier` as the tier vocabulary; §7's minimisation
+scope untouched; no `SecretName` and no keyring face; ADR-0149's record and
+reference consumed without extension; `StrEnum` additivity on the wire; the
+positional-subject convention, the spelled-out annotations and the surface-size
+concern; the near-neighbour naming caution; ADR-0008's populate-inside precedent;
+the transition table, unamended and unreached; and the selection stage's
+commits-nothing property, relied on for §9's disposition.
+
+**Nothing is superseded and nothing is amended, so
+`docs/adr/0152-…md` is the only file this change touches.** No accepted text is
+rewritten anywhere (ADR-0070 §1).
+
+### 16. Marking, review and ratification
+
+**Marked under ADR-0089**, so this ADR is in the marked regime: its unmarked prose
+supplies no obligation and exists to determine what the marked clauses mean (§3
+there). Marking is forward-only (§5), and nothing ratified before it is drawn into
+the regime by it.
+
+**The required set is adversarial *and* architecture.** This ADR decides a contract
+surface in the sense `CONTRIBUTING.md` → "Stop when the required reviews are green"
+gives — it is the ADR that authorises the `core` additions §2 enumerates, including
+a new Protocol — and both are run while it stands `Proposed` so that a finding can
+still change the decision. `CONTRIBUTING.md` → "Finishing an ADR PR" owns the
+sequence; this section points at it rather than re-deriving it, and the outcome is
+recorded here on ratification.
+
+**The outcome is recorded on ratification** and names the set that ran, what it
+returned, any finding standing contested with its grounds in the text above, and
+any finding waived with its rationale.
+
+## Consequences
+
+- **ADR-0148 §11's second deferred surface is decided, and both are now decided.**
+  Nothing implements against either until both have merged; a request cannot be
+  built without the value ADR-0150 supplies, and the value cannot be obtained
+  without the seam this ADR supplies.
+- **The declaration a tool writes is two keywords, and three of the producer's five
+  facts turned out to belong to ADR-0150 §4 rather than to a vocabulary.** A tool
+  author declares which arguments bear destinations and which fields establish a
+  tier, and nothing else; decomposition, coverage and requiredness are decided by
+  the value, by the coverage rule and by JSON Schema respectively.
+- **A destination-bearing argument is flat, and the cost is a later integration
+  with structured recipients that needs an ADR before it can declare one.** The cost
+  is real and the route out is named rather than left to erosion: §4 makes widening
+  an ADR on the same terms ADR-0150 §3 fixed for widening `SMTP`, so the shape comes
+  back with an argument about how a supplied form is located inside it rather than as
+  a patch to a seam. What is bought is that two of ADR-0150 §4's three
+  under-representation failures have no instance for a destination rather than being
+  refused, and `core`'s own supplied-form invariant becomes total.
+- **The seam derives and never accepts, so the correspondence check is satisfied
+  universally on one path and by equality on the other.** ADR-0150 §12's
+  forged-canonical test is reachable because `rebind` is the one place an occurrence
+  arrives from outside — out of a recorded decision, where a tampered trail row is
+  exactly what it is written for.
+- **A parked `CONFIRM` is now checked against what was approved before the second
+  ruling, and not only at the callable.** ADR-0148 §6's four-way refusal at
+  transmission is unchanged and unrelaxed; what changes is that a resumed egress
+  call whose account, endpoint, recipients, extents or tiers have moved is refused
+  before a resolving decision is recorded, which is ADR-0148 §1's stated direction of
+  moving facts earlier.
+- **`Disposition` grows by one member and no durable state changes.** A refusal
+  commits nothing and leaves the step `PENDING`, which is `AMBIGUOUS_CAPABILITY`'s
+  and `INVALID_PARAMETERS`' shape and ADR-0037 §1's argument for the third time. Every
+  exhaustive reader of the enum in this repository is the implementing lane's to find.
+- **The non-egress path is untouched and the lane must prove it.** `None` in, `None`
+  out, `None == None`, and §13's regression pin demands byte-identical durable state
+  rather than a claim.
+- **One residue is opened explicitly and given no deadline.** Nothing in the tree
+  records a span's origin, so every span this seam describes today is
+  `SYSTEM_SELECTED` — the fail-closed answer, and an under-statement of what a user
+  typed. The lane that first records an origin closes it, and no lane records this
+  surface as carrying real provenance before then.
+- **The semantic half of the declaration stays unverified, as three ratified ADRs
+  already say it must.** A declaration that is well-formed and false — a body field
+  marked destination-bearing, a recipient argument unmarked — is undetectable here,
+  and §12 names it rather than claiming a protection this seam does not have.
+- **Nothing here authorises a byte.** The seam remains approved and undesignated, no
+  tool is registered at it, and this ADR supplies a way to obtain a binding for a
+  call that still cannot be made.
