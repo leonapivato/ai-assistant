@@ -85,6 +85,7 @@ from ai_assistant.readers import CalendarReader, EmailReader
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.tools import build_default_registry
 from ai_assistant.tools.connection_store import SqliteConnectionStore
+from ai_assistant.tools.egress_binder import EgressBindingSeam, RegistrationTable
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
 
 if TYPE_CHECKING:
@@ -740,9 +741,44 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # band, so the first band asks for all of it and no band asks for more.
             retrieval_limit=RETRIEVAL_LIMIT,
         )
+        # ADR-0152 §10's marked clause: "It is implemented in `tools/`, and consumed
+        # in `orchestration` by the runner stage … **The composition root wires the
+        # one implementation.**" (#1138). PR #1135 landed the seam and gave
+        # ``StepRunner`` a ``binder`` defaulting to ``None``; this is the wiring it
+        # deferred, because ``records`` needs a connection store the root did not
+        # open until the connection surface arrived.
+        #
+        # **The same store object the provisioner writes**, not a second one over
+        # the same file. ADR-0152 §10 makes the seam read one connection record per
+        # egress call for its connectability and identity, and a second handle would
+        # let a provisioning act commit a revision this seam could not yet see —
+        # the split ADR-0102 §7 refuses one store over, arriving here.
+        #
+        # **`registrations` is empty and that is the honest state**: how a tool comes
+        # to be registered against a connected account is `tools/`-internal and
+        # contracted nowhere (ADR-0152 §10), and nothing registers one yet. What the
+        # empty table buys today is ADR-0152 §8's mis-registration refusal — a tool
+        # declaring either §3 keyword while bound to no connected account is refused
+        # rather than answered ``None`` — which is unreachable in production while
+        # ``binder`` is ``None``, and is the whole reason this wiring is owed before
+        # a tool is registered rather than after.
+        #
+        # **`definitions` is the same object injected as ``ToolRegistry`` and
+        # ``ToolInvoker``**, so ADR-0152 §1's registry-original comparison and the
+        # one ``invoke`` makes read one table rather than two that must agree
+        # (ADR-0029 §1). ``canonicalises`` is left to its default, which is every
+        # protocol `tools.destinations` holds a canonicaliser for: it can only
+        # narrow that set, and narrowing here would manufacture ADR-0152 §3
+        # refusals for protocols the seam can in fact canonicalise.
+        binder = EgressBindingSeam(
+            definitions=tools,
+            registrations=RegistrationTable(),
+            records=connections,
+        )
         runner = StepRunner(
             plans=plans,
             registry=tools,
+            binder=binder,
             # The four gate thresholds are the operator's configuration (ADR-0021 §5,
             # #239); the Settings defaults reproduce the policy's own, so an unset
             # deployment keeps today's gate. The two floors take no setting.
