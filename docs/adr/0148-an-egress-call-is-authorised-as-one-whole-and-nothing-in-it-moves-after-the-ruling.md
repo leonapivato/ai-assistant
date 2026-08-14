@@ -458,9 +458,10 @@ exists; the other three travel together in one value the request carries.
 > **Normative.** A tool registered at the seam is bound to **at most one connected
 > account**. An integration serving several registers one tool per account.
 
-> **Normative.** Before transmitting, the callable refuses unless **all three**
-> hold: the transport endpoint the binding carries is the one it is configured to
-> use; the credential reference the binding carries is the one it reads under; and
+> **Normative.** Before transmitting, the callable refuses unless **all four**
+> hold: the bound reference is **connectable** (below); the transport endpoint the
+> binding carries is the one it is configured to use; the credential reference the
+> binding carries is the one it reads under; and
 > the account identity **currently recorded for that reference** equals the
 > identity the binding carries. A registry rebuilt under a different configuration
 > — across a restart, which is exactly when a parked `CONFIRM` is answered —
@@ -471,34 +472,51 @@ exists; the other three travel together in one value the request carries.
 > incremented by **every** provisioning act on that reference — including one that
 > leaves the identity unchanged. A revision is never reused and never decreases.
 
-> **Normative.** Provisioning or re-provisioning a connected account writes the
-> **connection record first** — the identity and the incremented revision — and
-> the **credential second**. The reverse order is forbidden. No transaction spans
-> the keyring and the connection record, and none is required.
+> **Normative.** A connection record carries a **provisioning state**, which is
+> **pending** or **active**. Provisioning or re-provisioning a connected account is
+> **three writes in a fixed order**: the connection record **first**, as *pending*,
+> carrying the identity and the incremented revision; the **credential second**;
+> and the record marked **active third**. No other order is permitted. The
+> activation is part of the same provisioning act and changes neither the identity
+> nor the revision, so a completed act increments the revision exactly once. No
+> transaction spans the keyring and the connection record, and none is required.
 
-> **Normative.** A provisioning act interrupted between those two writes leaves
-> the record ahead of the keyring. That state is refused by the checks below
-> rather than reconciled: the call does not transmit, and the remedy is to run the
-> provisioning act again. No lane resolves it by trusting the keyring, by rolling
-> the record back, or by inferring an identity from the credential.
+> **Normative.** A reference is **connectable** only while its connection record
+> exists and is **active**. A reference that is not connectable takes no part in an
+> egress call at any stage: no `ActionRequest` is built against it — §11's seam (b)
+> refuses, which is §1's third clause — no ruling is sought for one, and no
+> callable transmits under it. Connectability is read at each of those moments and
+> is never carried over from an earlier one.
+
+> **Normative.** A provisioning act interrupted before its third write leaves the
+> reference **pending**, and therefore not connectable, whichever of the first two
+> writes had landed — the record ahead of the keyring, or both written and the act
+> unfinished. That state is refused rather than reconciled: the call does not
+> transmit, and the remedy is to run the provisioning act again, which increments
+> the revision and re-enters at *pending*. No lane resolves it by trusting the
+> keyring, by rolling the record back, by activating a record whose credential
+> write it did not itself perform, or by inferring an identity from the credential.
 
 > **Normative.** The check and the credential read are **one step**: no `await`
-> occurs between reading the identity and revision recorded for the bound
-> reference and calling `Secrets.get` for it. This is ADR-0097 §5a's rule for a
+> occurs between reading the identity, revision and provisioning state recorded
+> for the bound reference and calling `Secrets.get` for it. This is ADR-0097 §5a's rule for a
 > grant and a read, transposed onto the pair this section binds.
 
 > **Normative.** After the credential is in hand and **before any byte is
-> transmitted**, the callable re-reads the recorded identity and revision and
-> **discards** the credential without transmitting unless the identity still
+> transmitted**, the callable re-reads the recorded identity, revision and
+> provisioning state and **discards** the credential without transmitting unless
+> the record is **still active**, the identity still
 > equals the one the binding carries **and** the revision equals the one read
 > before the credential read. A read that cannot be answered is treated as a
 > changed one.
 
 > **Normative.** The revision is compared **only** before against after, across
 > the credential read; it is never compared against a value the binding carries.
-> A rotation between the ruling and the resume therefore refuses nothing — the
-> identity is unchanged and no revision was read yet — while one landing *inside*
-> the read refuses that read.
+> A **completed** rotation between the ruling and the resume therefore refuses
+> nothing on the revision's account — the identity is unchanged and no revision was
+> read yet — while one landing *inside* the read refuses that read. A rotation
+> still in flight at the resume is refused, but by connectability rather than by
+> the revision.
 
 > **Normative.** A provisioning act landing **after** the post-read check has
 > passed neither retracts the authorisation nor stops a transmission already
@@ -507,8 +525,9 @@ exists; the other three travel together in one value the request carries.
 > flight.
 
 > **Normative.** What the clauses above guarantee is that no byte is transmitted
-> under a credential read across any provisioning act on its reference, and none
-> under an identity other than the bound one. They do **not** guarantee that no
+> under a credential read across any provisioning act on its reference, none under
+> an identity other than the bound one, and none under a reference whose
+> provisioning act has not completed. They do **not** guarantee that no
 > credential is ever read for a call that is then refused, nor that no byte is
 > transmitted after a provisioning act is recorded, and no lane states them as
 > guaranteeing either.
@@ -601,13 +620,15 @@ the credential lives in the OS keyring behind ADR-0125's seam, which stores one
 value per `SecretName` and offers no transaction, and the connection record lives
 in a store beside it. The finding's direction was a further contract ADR for a
 transactional provisioning abstraction; that is not needed, because the property
-the checks actually require is weaker and is bought with ordering alone. Write the
-record first and the only window is one in which the record is **ahead** of the
+the checks actually require is weaker and is bought without one. Write the
+record first and the window is one in which the record is **ahead** of the
 keyring — identity B or revision r+1 recorded while the keyring still holds A's
-token — which the pre- and post-read checks see and refuse. Write the credential
-first and the window has the keyring ahead of the record, which is precisely the
-state those checks cannot see: they read A and pass while `get` returns B's token.
-So the order is the mechanism, and the reverse order is the defect.
+token — which is a state a check can be given something to see. Write the
+credential first and the window has the keyring ahead of the record, which is
+precisely the state no check here can see at all: it reads A and passes while
+`get` returns B's token. So the order is necessary, and the reverse order is a
+defect nothing below repairs. It is not on its own sufficient, which is what round
+7 found next.
 
 **This is ADR-0037 §2's argument on a different pair.** There, "recording precedes
 the claim" because "an audit trail with an entry for an action that did not happen
@@ -620,7 +641,37 @@ had already identified the direction — it said a provisioning act "that wrote 
 token and then the identity would leave an observable state in which a re-check
 reads the old identity beside the new token" — while the clause beside it asked
 for atomicity, which is both stronger than needed and unobtainable. Naming the
-order is the whole repair.
+order is the repair for the direction it names; it is not the whole of the repair.
+
+**The order alone was not enough, and round 7 found its mirror.** Ordering the
+writes refuses a call bound to the *old* identity: the record names B, the binding
+names A, the pre-read check compares the two and refuses. It does nothing for a
+call built *inside* that window, which is bound to B by the record it has just
+read — its pre-check sees `(B, r+1)`, `Secrets.get` returns A's token because the
+credential write has not landed, its post-check sees `(B, r+1)` again, both checks
+pass, and the bytes go out under A's credential while every record says B. The
+checks compare the record against the binding and the record against itself;
+neither inspects the credential's own account, and neither can, because a
+credential is opaque and asking the service whose it is would be an egress call of
+its own (§5). So record-first is not safe alone and credential-first is not safe
+alone — each closes one direction and opens the other — and what was missing is
+not a better order but a **third state**. Marking the record *pending* until the
+credential write lands makes the half-finished state say what it is rather than
+impersonate a finished one, and a state that says what it is can be refused by a
+check that never has to guess. That is the revision's move one level up: the
+revision makes "unchanged since I looked" answerable and the pending state makes
+"finished" answerable, each replacing an inference with a recorded fact. It also
+costs no transaction, which is what round 6 had asked for and what nothing
+available can provide.
+
+**Not connectable is stated over the whole call, not only over the send, because
+§1 is where a refusal is cheapest.** A pending reference could have been refused
+at the seam alone and the bytes would still not leave — but the user would then be
+asked to confirm a call that cannot be performed, which is exactly what §1's third
+clause and ADR-0145's precedent refuse to do. Reading the state when the request
+is built also makes the ordinary case legible: a connection half-provisioned by an
+interrupted act shows up as a tool that cannot be called until provisioning is
+re-run, rather than as a confirmation the user grants and a send that then fails.
 
 **Comparing the identity alone was not enough, and the revision is what closes
 it.** Adversarial found on round 4 that A → B → A defeats an identity comparison:
@@ -1245,11 +1296,17 @@ form).
 > only between the ruling and the start of invocation satisfies neither, and one
 > that compares the identity alone cannot pass the second.
 
-> **Normative.** That lane also ships the interrupted-provisioning case: a
+> **Normative.** That lane also ships the interrupted-provisioning case in **both**
+> directions, because closing one of them is what opened the other (§6). A
 > provisioning act that writes the connection record and then fails before the
-> credential is written leaves a call refused rather than transmitted, and a
-> provisioning implementation that writes the two in the opposite order fails its
-> own test.
+> credential is written leaves a call bound to the **old** identity refused rather
+> than transmitted; and in that same interval a request bound to the **new**
+> identity — record `(B, r+1)`, keyring still holding `A`'s credential — is refused
+> when it is built and again at the seam, rather than transmitting `A`'s credential
+> under `B`'s name. A provisioning implementation that writes the credential before
+> the record fails its own test, and so does one that leaves the reference
+> connectable between the record write and the credential write, or one that marks
+> a record active without having performed that act's credential write.
 
 > **Normative.** A test asserting only that the happy path transmits satisfies no
 > clause of this section.
@@ -1292,13 +1349,21 @@ the keyring and the connection record that no contract provides; its direction w
 a further contract ADR, and the repair taken instead was an **ordering rule** —
 record first, credential second — which buys the property the checks need with no
 new surface, on ADR-0037 §2's argument that two writes are ordered so the crash
-window errs in the direction a reader can detect.
+window errs in the direction a reader can detect. Round 7 then found that repair's
+own mirror: ordering refuses a call bound to the *old* identity, and passes one
+built inside the window and bound to the *new* one, whose checks see the new
+record while the keyring still holds the old credential. The repair is a **third
+provisioning state** — the record written *pending*, marked *active* only after
+the credential write, and not connectable until it is — which makes the
+half-finished state say what it is instead of impersonating a finished one, and
+needs no transaction either.
 §6 now carries the account's identity beside its credential reference, the
-endpoint alongside both, the callable's three-way refusal behind all of them, and
-ADR-0097 §5a's one-step/re-check/fail-closed discipline over the read, and a
+endpoint alongside both, the callable's four-way refusal behind all of them, and
+ADR-0097 §5a's one-step/re-check/fail-closed discipline over the read, a
 monotonic revision on the connection record so the re-check answers "unchanged"
-rather than "equal" — with the residue stated in §5a's own honest form rather than
-papered over. §11 states the
+rather than "equal", and a pending/active provisioning state so that "finished" is
+recorded rather than inferred — with the residue stated in §5a's own honest form
+rather than papered over. §11 states the
 surface that costs, and §6's own prose says what each draft got wrong and why.
 **That is the one worth remembering**: the defect is ADR-0147 §13's — stating a
 hazard and then admitting the thing anyway — reproduced in a draft that quotes
