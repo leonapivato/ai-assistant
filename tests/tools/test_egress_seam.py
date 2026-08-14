@@ -5,10 +5,20 @@ Three properties, and they are not the same property:
 1. **The seam exists and is inert.** ADR-0017 §2 leaves the `tools/` boundary
    approved and *undesignated*, and ADR-0147 §3 names it without designating it, so
    the module has to exist — a contract can only pin a module that is there — while
-   holding nothing. "Holds nothing" is asserted against the module's own syntax
-   tree rather than against its public names: a private helper, a raise-on-use stub
-   or a status constant would each be something a later lane could read as the
-   beginning of permission, and none of them shows up in ``__all__``.
+   transmitting nothing.
+
+   **This used to be asserted as emptiness, and it is now asserted as inertness.**
+   The old check pinned the module's syntax tree to a single node, on the stated
+   ground that a body "would be a shape for a later lane to fill in". That was a
+   proxy: the property ADR-0017 §2 and ADR-0147 §3 actually state is that **no
+   byte leaves**, and emptiness was one way of buying it. Once the transport lands
+   — which it must, because ADR-0017 §3's conditions 5, 8 and 12 are properties of
+   *code* that a designating ADR has to attest against — the proxy has to be
+   replaced by the thing it stood for, not dropped. So three checks stand in its
+   place: no module outside the seam names the transport, so nothing in production
+   constructs one; no registered tool is bound to a callable that could reach it;
+   and inside the seam exactly one function opens a connection, so the boundary
+   still has one place to pin.
 2. **The contract exists, and exempts exactly one module.** Read out of
    ``pyproject.toml`` rather than out of ``import-linter``, for the reason
    ``tests/benchmarks/test_import_discipline.py`` gives for the same move: the
@@ -58,6 +68,10 @@ from typing import Any
 
 import pytest
 from packaging.requirements import Requirement
+
+from ai_assistant.testing import FakeMemoryStore
+from ai_assistant.tools.builtin import build_default_registry
+from ai_assistant.tools.send_email import SEND_EMAIL_ID, SendEmail, UndesignatedSeamError
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TOOLS = _REPO_ROOT / "src" / "ai_assistant" / "tools"
@@ -362,21 +376,86 @@ def test_the_tree_has_modules_to_check() -> None:
     assert len(_modules()) >= 4
 
 
-def test_the_seam_holds_nothing_but_its_docstring() -> None:
-    """ADR-0147 §3 names the seam and designates nothing, so it transmits nothing.
+def test_no_production_module_outside_the_seam_names_the_transport() -> None:
+    """**No production construction site exists**, which is what makes it inert.
 
-    Asserted against the syntax tree, so *any* addition fails — an import, a
-    constant, a stub that raises. The module's value is the name, which is what a
-    contract can pin and what a designating ADR can attest against; a body would be
-    a shape for a later lane to fill in, under an ADR that authorises no byte.
+    This check replaces one that asserted the seam's syntax tree held a single
+    node. That pin was standing in for a property rather than being one: its own
+    docstring gave the reason — a body "would be a shape for a later lane to fill
+    in" — and the property it was buying was that the seam **transmits nothing**,
+    which ADR-0017 §2 states and ADR-0147 §3 restates in a marked clause.
+
+    Emptiness is one way to buy that and it is not the only one. What actually has
+    to hold is that nothing a running system constructs can reach a socket, and
+    the direct form of that is this: no module under ``src/ai_assistant`` other
+    than the seam so much as *names* the transport, so nothing builds one, nothing
+    imports one, and no composition root wires one. A lane that later wires it is
+    the designating lane, and this test is what it has to come here and change.
+
+    The scan reads names, so it shares :func:`_reached_names`'s blind spots — a
+    ``getattr``, a name assembled at runtime. That is ADR-0017 §4's "net, not a
+    proof" for the third time in this file, and it is stated rather than implied.
+    """
+    named = {
+        "SmtpEgressTransport",
+        "SmtpEndpoint",
+        "OutboundEmail",
+        "open_smtp_channel",
+        "parse_smtp_endpoint",
+    }
+    offenders: dict[str, set[str]] = {}
+    for path in sorted((_REPO_ROOT / "src" / "ai_assistant").rglob("*.py")):
+        if path == _modules()[SEAM]:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        found = {
+            node.id if isinstance(node, ast.Name) else node.attr
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Name | ast.Attribute)
+        } | {
+            alias.name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom)
+            for alias in node.names
+        }
+        if found & named:
+            offenders[str(path.relative_to(_REPO_ROOT))] = found & named
+
+    assert not offenders, (
+        f"{offenders} name the egress transport. ADR-0017 §2 leaves the tools/ "
+        f"boundary approved and undesignated and ADR-0147 §3 authorises no byte to "
+        f"leave from tools/, so the transport is constructed nowhere in production. "
+        f"The lane that wires it is the one a designating ADR licenses, and it "
+        f"changes this test."
+    )
+
+
+def test_exactly_one_place_in_the_seam_opens_a_connection() -> None:
+    """The boundary is pinnable only while there is one place to pin.
+
+    Issue #66 asks for a name "precise enough for an import-linter contract to pin
+    the module", and ADR-0147 §3's own argument for one module rather than a
+    package is that a boundary growing with the code is one the contract stops
+    describing. The same argument one level down: a seam with two socket sites has
+    two places a policy can differ, which is #83's third bullet — "if each
+    integration builds its own client, this is unenforceable by construction" —
+    arriving inside the seam instead of outside it.
     """
     tree = ast.parse(_modules()[SEAM].read_text(encoding="utf-8"))
+    opening = {
+        node.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+        and any(
+            isinstance(inner, ast.Attribute) and inner.attr == "open_connection"
+            for inner in ast.walk(node)
+        )
+    }
 
-    assert ast.get_docstring(tree) is not None, "the seam's docstring is what it holds"
-    assert len(tree.body) == 1, (
-        "ai_assistant.tools.egress holds more than its docstring. ADR-0017 §3's "
-        "fourteen conditions are undischarged and ADR-0147 §3 authorises no byte to "
-        "leave from tools/; transport lands here when a designating ADR says so."
+    assert opening == {"open_smtp_channel"}, (
+        f"{sorted(opening)} open a connection. Exactly one function in the seam "
+        f"does, so the pin has one place to live and a test has one place to "
+        f"substitute (ADR-0147 §3, issue #83)."
     )
 
 
@@ -391,6 +470,22 @@ def test_the_seam_docstring_records_that_it_is_undesignated() -> None:
     assert docstring is not None
     assert "undesignated" in docstring
     assert "ADR-0017" in docstring
+
+
+async def test_no_registered_tool_can_reach_the_transport() -> None:
+    """The other half of inertness: nothing an ``invoke`` can reach transmits.
+
+    The static scan above says no module *names* the transport; this says the
+    running system has no tool bound to a callable that could. ``send_email`` is
+    the integration a designating ADR would register, and it is deliberately
+    absent from the default registry *and* refuses when called — two independent
+    reasons, which is what ``send_email.py``'s own docstring records.
+    """
+    registry = build_default_registry(memory=FakeMemoryStore())
+
+    assert SEND_EMAIL_ID not in {tool.id for tool in await registry.all_tools()}
+    with pytest.raises(UndesignatedSeamError):
+        await SendEmail()({"to": ["someone@example.invalid"]}, idempotency_key=None)
 
 
 def test_the_contract_exempts_the_seam_and_nothing_else() -> None:

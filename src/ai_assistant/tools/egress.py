@@ -639,7 +639,14 @@ class SmtpEgressTransport:
                 *second* read is different, and an unanswerable one there is
                 treated as a change.
         """
+        # Every refusal that is decidable from the binding alone runs first, so a
+        # call that cannot be performed as bound never reaches a credential read
+        # at all. ADR-0148 §6 is explicit that its clauses do not guarantee that —
+        # "they do not guarantee that no credential is ever read for a call that
+        # is then refused" — so this is strictly better than the clause requires
+        # and is here rather than in a docstring claiming a bound nobody has.
         endpoint = self._pinned(binding)
+        sender = self._sender(binding)
         recipients = self._checked_message(binding, message)
 
         before = await self._records.latest(self._registration.reference)
@@ -657,7 +664,7 @@ class SmtpEgressTransport:
 
         await self._send(
             endpoint,
-            sender=self._sender(binding),
+            sender=sender,
             recipients=recipients,
             secret=credential.get_secret_value(),
             message=message,
