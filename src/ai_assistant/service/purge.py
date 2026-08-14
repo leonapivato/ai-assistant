@@ -476,11 +476,22 @@ def _purge_connections(
     owner's confirmation is taken between them and outside any running loop, which
     is what keeps the blocking prompt off an event loop's thread.
 
-    **A ``CancelledError`` is not caught here.** It is not an
-    :class:`~ai_assistant.core.errors.AssistantError` and not an ``OSError``, so
-    it passes both clauses below, runs the ``finally`` — which is the act closing
-    the store *after* ``purge`` has returned control to it, never racing work the
-    purge still holds — and propagates unconverted (ADR-0153 §4, ADR-0060).
+    **The three clauses below catch ``Exception`` rather than a named family, and
+    the breadth is the contract rather than a shrug.** ADR-0153 §4's first clause
+    reaches "**any** exception other than an externally delivered
+    ``CancelledError``", and it has to: a purger that raised a ``RuntimeError``
+    past a narrower ``except`` would leave the owner a traceback instead of the
+    diagnostic the clause requires, and §4's whole subject is that this step fails
+    *legibly* or not at all. Nothing is swallowed — every one is reported by
+    :func:`_report_purge_failure` and classified — which is the condition
+    `CONTRIBUTING.md` actually places on catching broadly.
+
+    **A ``CancelledError`` is not caught here**, because it derives from
+    ``BaseException`` and not from ``Exception``. So it passes all three clauses,
+    runs the ``finally`` — which is the act closing the store *after* ``purge`` has
+    returned control to it, never racing work the purge still holds — and
+    propagates unconverted (ADR-0153 §4, ADR-0060). ``KeyboardInterrupt`` passes
+    them for the same reason and lands on the handler ADR-0126 §1 already gave it.
 
     Args:
         data_dir: The directory whose contents are about to be destroyed.
@@ -502,18 +513,18 @@ def _purge_connections(
     with asyncio.Runner() as runner:
         try:
             opened = open_connections()
-        except (AssistantError, OSError) as exc:
+        except Exception as exc:  # ADR-0153 §4 reaches any exception but CancelledError
             return _Purged(failure=exc)
         try:
             try:
                 accounts = runner.run(opened.purger.connected())
-            except (AssistantError, OSError) as exc:
+            except Exception as exc:  # ADR-0153 §4 reaches any exception but CancelledError
                 return _Purged(failure=exc)
             _state_before(data_dir, devices, accounts)
             _confirm(data_dir, given=confirmation)
             try:
                 runner.run(opened.purger.purge())
-            except (AssistantError, OSError) as exc:
+            except Exception as exc:  # ADR-0153 §4 reaches any exception but CancelledError
                 return _Purged(accounts=accounts, failure=exc)
         finally:
             opened.close()
