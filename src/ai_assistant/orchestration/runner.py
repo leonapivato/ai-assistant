@@ -53,9 +53,15 @@ import structlog
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import AuditError, PermissionDeniedError, PlanningError
+from ai_assistant.core.errors import (
+    AuditError,
+    EgressBindingError,
+    PermissionDeniedError,
+    PlanningError,
+)
 from ai_assistant.core.types import (
     ActionRequest,
+    CarriedProvenance,
     Disposition,
     ExecutionState,
     PermissionDecision,
@@ -76,10 +82,14 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         ActionPolicy,
         AuditTrail,
+        EgressBinder,
         PlanStore,
         ToolRegistry,
     )
     from ai_assistant.core.types import (
+        BoundEgressCall,
+        EgressBinding,
+        FrozenJsonMapping,
         ParameterViolation,
         PermissionRuling,
         ToolDefinition,
@@ -206,6 +216,53 @@ def _detached_state(state: ExecutionState) -> ExecutionState:
         raise PlanningError(msg) from exc
 
 
+def _requested(
+    tool: ToolDefinition,
+    step: PlanStep,
+    state: ExecutionState,
+    bound: BoundEgressCall | None,
+) -> ActionRequest:
+    """Build the request from what the binding seam returned, never from what was retained.
+
+    ADR-0152 §1: the caller builds its ``ActionRequest`` from the returned
+    :class:`~ai_assistant.core.types.BoundEgressCall`'s ``tool``, ``parameters``
+    and ``binding``, and **never** from objects it held across the call. The seam
+    derives from copies it detached before its one awaited read, so a runner that
+    kept its own would hand the policy a request the seam never described — the
+    mismatched pair ADR-0152 §1 says must not exist, reachable through a mutation
+    landed during that suspension.
+
+    This is called with no ``await`` between it and the seam returning, which is
+    what keeps the residual obligation one clause on one site rather than a rule
+    about an object's whole lifetime.
+
+    Where ``bound`` is ``None`` the request is built exactly as it was before this
+    seam existed — the tool and the parameters this stage already holds, with
+    ``egress_binding=None`` (ADR-0152 §8). There is no binding, so there is no pair
+    to hold together and no divergence to falsify anything.
+
+    Args:
+        tool: The selected or confirmed definition, used only on the ``None`` path.
+        step: The plan step, for its id and its parameters on the ``None`` path.
+        state: The execution, for its id.
+        bound: What the seam returned, or ``None``.
+
+    Returns:
+        The request the policy will rule on.
+    """
+    if bound is None:
+        return ActionRequest(
+            tool=tool, parameters=step.parameters, step_id=step.id, execution_id=state.id
+        )
+    return ActionRequest(
+        tool=bound.tool,
+        parameters=bound.parameters,
+        step_id=step.id,
+        execution_id=state.id,
+        egress_binding=bound.binding,
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class StepDisposition:
     """What one pass of :class:`StepRunner` did with a step (ADR-0037 §4).
@@ -217,7 +274,7 @@ class StepDisposition:
     instead, richer by the confirmation content a bare tool id cannot convey.
 
     Attributes:
-        disposition: Which of the five outcomes happened.
+        disposition: Which outcome happened.
         state: Durable execution state after the last transition this pass
             committed — the caller's ``state`` unchanged where it committed none.
         decision_id: The recorded decision this pass rested on, or ``None`` where
@@ -279,6 +336,19 @@ class StepRunner:
         executor: The ``execute`` stage. This package's own object rather than a
             Protocol, because it is not another subsystem: golden rule 1 governs
             what crosses a package boundary, and nothing here does.
+        binder: The egress binding seam (ADR-0152 §1), consulted after selection
+            and before the ``ActionRequest`` is built, and again after a parked
+            confirmation is authenticated and before the request is rebuilt. It
+            answers what the call would transmit and to whom, which is
+            integration-specific knowledge living in `tools/` — so it is reached
+            through its Protocol and never through an injected concrete.
+            ``None``, the default, is the behaviour before ADR-0152 exactly:
+            every request is built with ``egress_binding=None``. That is not a
+            gap left open, because ``ai_assistant.tools.egress`` is approved and
+            **undesignated** (ADR-0017 §2) and no tool is registered at it, so a
+            runner without a binder cannot reach an egress call to leave unbound;
+            the composition root wires the one implementation when there is
+            something to bind.
         now: Clock stamping ``decided_at`` on each decision; injectable so
             recorded decisions are deterministic in tests. Guarded by
             :func:`~ai_assistant.core.clock.checked_clock`, so a non-conforming
@@ -303,6 +373,7 @@ class StepRunner:
         policy: ActionPolicy,
         trail: AuditTrail,
         executor: StepExecutor,
+        binder: EgressBinder | None = None,
         now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
         confirmation_ttl: timedelta | None = None,
@@ -365,6 +436,7 @@ class StepRunner:
         self._policy = policy
         self._trail = trail
         self._executor = executor
+        self._binder = binder
         self._clock = checked_clock(now, owner="StepRunner")
         self._id_factory = id_factory
         self._confirmation_ttl = confirmation_ttl
@@ -439,9 +511,22 @@ class StepRunner:
             return chosen
 
         tool = chosen
-        request = ActionRequest(
-            tool=tool, parameters=step.parameters, step_id=step.id, execution_id=state.id
-        )
+        try:
+            bound = await self._bound(tool, step.parameters)
+        except EgressBindingError:
+            # ADR-0152 §9: the seam refused, so the call cannot be completed. It
+            # commits nothing -- no ruling requested, no audit record written, no
+            # claim made -- and the step stays `PENDING` at its stored version,
+            # which is `INVALID_PARAMETERS`' shape one stage on. A
+            # `ConnectionStoreError` is deliberately *not* caught: a store that
+            # could not be read asserts nothing about the call, and reporting it
+            # as unbindable would write a falsehood into a returned value.
+            _log.info("egress_unbindable", step_id=step.id, tool_id=tool.id)
+            return StepDisposition(Disposition.EGRESS_UNBINDABLE, state)
+        # No `await` sits between the seam returning and this construction, so
+        # nothing interleaves on the one event loop and the copies it handed back
+        # cannot be reached or replaced before the request is built (ADR-0152 §1).
+        request = _requested(tool, step, state, bound)
         # The policy rules on its *own* copy, and never on the object that is
         # then bound and executed (`_detached_request`).
         ruling = await self._policy.decide(_detached_request(request))
@@ -570,9 +655,18 @@ class StepRunner:
         self._check_parked(opened, step, confirmed.tool.id, confirmation_id=confirmed.id)
         self._check_fresh(confirmed)
 
-        request = ActionRequest(
-            tool=confirmed.tool, parameters=step.parameters, step_id=step.id, execution_id=state.id
-        )
+        try:
+            bound = await self._rebound(confirmed.tool, step.parameters, confirmed.egress_binding)
+        except EgressBindingError:
+            # ADR-0152 §7: the binding derived for this resumed call is not the
+            # one that was approved, or the reference went `PENDING` while the
+            # question stood. Refused *before* the resolving ruling is sought, so
+            # no second decision is recorded -- ADR-0148 §1's direction of moving
+            # facts earlier, and the check that runs one stage ahead of the
+            # callable's own four-way refusal at transmission (ADR-0148 §6).
+            _log.info("egress_unbindable_on_resume", step_id=step.id, tool_id=confirmed.tool.id)
+            return StepDisposition(Disposition.EGRESS_UNBINDABLE, state)
+        request = _requested(confirmed.tool, step, state, bound)
         # Its own copy again, for `run`'s reason: `confirmed.id` is read after
         # this returns, and it is what `resolves` will point at.
         ruling = await self._policy.resolve(confirmed.model_copy(deep=True), approved=approved)
@@ -580,6 +674,75 @@ class StepRunner:
         if decision.ruling.outcome is PermissionOutcome.ALLOW:
             return await self._execute(state, step, request, decision, timeout=timeout)
         return await self._deny(state, step, decision, confirmed.tool)
+
+    async def _bound(
+        self, tool: ToolDefinition, parameters: FrozenJsonMapping
+    ) -> BoundEgressCall | None:
+        """Ask the binding seam what this call's egress binding is (ADR-0152 §1, §10).
+
+        Reached **after** selection and **before** the ``ActionRequest`` is built,
+        which is ADR-0148 §1's earliness: the request the policy rules on must
+        already carry the whole binding, and every part of it is
+        integration-specific knowledge living in `tools/`, which this package may
+        reach only through a Protocol (golden rule 1).
+
+        ``None`` comes back for a call that is not an egress call — no connected
+        account is bound to the tool and its schema declares neither keyword — and
+        for a deployment that has wired no binder at all. The two are the same
+        answer here on purpose: today nothing is registered at the egress seam,
+        which stays approved and undesignated (ADR-0017 §2), so a runner built
+        without one cannot reach an egress call to leave unbound. The composition
+        root wires the one implementation when there is something to bind.
+
+        The provenance handed over is **empty**, and that is ADR-0152 §5's named
+        residue rather than an omission: nothing in this tree records a span's
+        origin, so every span the seam describes today is ``SYSTEM_SELECTED`` —
+        the fail-closed answer ADR-0146 §2 requires, and an under-statement of what
+        a user typed. The lane that first records an origin is the lane that closes
+        it; it is passed deliberately rather than defaulted, which is why
+        :class:`~ai_assistant.core.types.CarriedProvenance` has no default for it.
+
+        Returns:
+            The derived binding beside the detached call, or ``None``.
+
+        Raises:
+            EgressBindingError: If the seam refused the call.
+            ConnectionStoreError: If the connection record could not be read.
+                Propagated out of this stage unconverted (ADR-0152 §9), which has
+                committed nothing at that point.
+        """
+        if self._binder is None:
+            return None
+        return await self._binder.bind(
+            tool, parameters=parameters, provenance=CarriedProvenance(spans={})
+        )
+
+    async def _rebound(
+        self, tool: ToolDefinition, parameters: FrozenJsonMapping, approved: EgressBinding | None
+    ) -> BoundEgressCall | None:
+        """Re-derive a resuming call's binding and check it against what was approved.
+
+        ADR-0037 §4 rebuilds the request from the confirmation's own embedded
+        definition and the step's parameters; ADR-0148 §1 requires that request to
+        carry the whole binding before ``resolve`` too, and nothing before ADR-0152
+        compared the rebuilt binding against the one the parked confirmation
+        carries.
+
+        The provenance is **not** passed here and is taken from ``approved``
+        inside the seam (ADR-0152 §7). A ``rebind`` handed a fresh, empty carrier
+        would describe every span as ``SYSTEM_SELECTED`` and refuse every resumed
+        call whose user typed anything.
+
+        Returns:
+            The **derived** binding beside the detached call, or ``None``.
+
+        Raises:
+            EgressBindingError: If the seam refused the call.
+            ConnectionStoreError: If the connection record could not be read.
+        """
+        if self._binder is None:
+            return None
+        return await self._binder.rebind(tool, parameters=parameters, approved=approved)
 
     async def _confirmation_for(
         self, state: ExecutionState, step_id: str, confirmation_id: str | None
