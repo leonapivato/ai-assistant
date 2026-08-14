@@ -445,7 +445,7 @@ exists; the other three travel together in one value the request carries.
 > **Normative.** The remaining three facts travel together as one value, the
 > **egress binding**: the canonical destination set with the supplied form each
 > member came from (§2), the **connected account** as both its identity and its
-> credential reference (below), the **transport endpoint**, and the **payload
+> connection reference (below), the **transport endpoint**, and the **payload
 > description**. It is fixed in the `ActionRequest` before the ruling, is compared
 > by `PermissionDecision.authorises` alongside the tool, the parameters digest and
 > the step, and is transcribed verbatim into the recorded decision. Nothing in it
@@ -453,18 +453,21 @@ exists; the other three travel together in one value the request carries.
 
 > **Normative.** The connected account is bound by **two** non-secret facts, not
 > one: its **identity** — the durable, user-recognisable name of the account
-> itself, recorded when that account was connected — and its **credential
-> reference**, the `SecretName` (ADR-0125 §2) the callable reads under. Neither is
-> a secret and both may be held in a Tier 1 store (ADR-0125 §2). An account whose
+> itself, recorded when that account was connected — and its **connection
+> reference**, which names that account's **connection record** and nothing else.
+> A connection reference is **not** a `SecretName`: `SecretName` (ADR-0125 §2) is
+> reserved here for a **credential slot**, which is per provisioning act and
+> therefore not stable enough for a binding (below). Neither bound fact is a
+> secret and both may be held in a Tier 1 store (ADR-0125 §2). An account whose
 > identity was never recorded is not connectable, no tool is registered against
-> it, and no identity is inferred from a credential, a name or an endpoint.
+> it, and no identity is inferred from a credential, a slot, a name or an endpoint.
 
 > **Normative.** A tool registered at the seam is bound to **at most one connected
 > account**. An integration serving several registers one tool per account.
 
 > **Normative.** Before transmitting, the callable refuses unless **all four**
 > hold: the bound reference is **connectable** (below); the transport endpoint the
-> binding carries is the one it is configured to use; the credential reference the
+> binding carries is the one it is configured to use; the connection reference the
 > binding carries names the connection record it consults, and it reads under the
 > slot that record names (below); and
 > the account identity **currently recorded for that reference** equals the
@@ -492,7 +495,7 @@ exists; the other three travel together in one value the request carries.
 > increments the revision exactly once. No transaction spans the keyring and the
 > connection record, and none is required.
 
-> **Normative.** The **credential reference** the binding carries names the
+> **Normative.** The **connection reference** the binding carries names the
 > connection record; the **slot** is what the callable reads under, and it is
 > obtained from that record in the same step as the identity and the revision.
 > The reference is therefore stable across a rotation, which is what keeps a
@@ -628,7 +631,7 @@ is not a stronger claim about the registry; it is putting the reference where
 every other bound fact already is, and adding the callable's own refusal so the
 binding is checked by the party that holds the truth.
 
-**A credential reference is not an account, and the draft that repaired the first
+**A keyring slot is not an account, and the draft that repaired the first
 defect got that wrong too.** That draft bound the account by its `SecretName`
 alone, and adversarial review found on round 2 that a `SecretName` names a
 **keyring slot**, not an account: ADR-0125 §4 rules that `set` "stores `value`
@@ -637,13 +640,15 @@ on the ground that an entry already exists" — ratified deliberately, because
 "rotation is the case that matters". So a confirmation taken against
 `SecretName(INTEGRATION, "gmail")` while it held account A's token can be resumed
 after that slot is re-provisioned with account B's, with the reference and the
-endpoint both matching. The repair binds the account's own identity beside the
-reference and has the callable compare the identity *currently* recorded for that
-reference — which keeps ADR-0125 §4's rotation case working exactly as it was
-ratified to (same account, new token, same identity, call proceeds) while
-refusing the substitution. This is the same lesson as the first defect one level
-down: a name that resolves to the right thing today is not a binding to that
-thing.
+endpoint both matching. The repair binds the account's own identity beside a
+**connection reference** — which names the connection record rather than a keyring
+slot — and has the callable compare the identity *currently* recorded there. That
+keeps ADR-0125 §4's rotation case working exactly as it was ratified to (same
+account, new token, same identity, call proceeds) while refusing the substitution.
+This is the same lesson as the first defect one level down: a name that resolves
+to the right thing today is not a binding to that thing. The round-10 repair below
+is the last step of the same argument — once the slot moves per act, a binding
+that named a slot would have been a binding to the wrong kind of thing again.
 
 **A check and a read are two moments, and the third draft left a window between
 them.** `Secrets.get` is `async` — ADR-0125 §1 makes every method on both faces
@@ -957,8 +962,9 @@ that is not already satisfied, and it may not be cited as satisfying one.
 
 > **Normative.** What is put to the user for a `CONFIRM` on an egress call names
 > the connected account's **identity** (§6), the canonical destination set in both
-> forms (§2), and the payload description (§6). It names no credential reference:
-> a keyring slot name is not something a user can recognise an account by. A confirmation that names the tool and not the
+> forms (§2), and the payload description (§6). It names neither the connection
+> reference nor a credential slot: neither is something a user can recognise an
+> account by. A confirmation that names the tool and not the
 > recipients is not a confirmation of an egress call.
 
 **ADR-0017 §3 asks for "a named approver able to refuse" and gives the reason:
@@ -1437,9 +1443,12 @@ form).
 > recorded while an id was bound to one connected account is refused after a
 > restart that rebinds the same id, with a byte-identical declaration, to another
 > (§6); the same for a transport endpoint that differs from the bound one (§6);
-> and a credential reference **re-provisioned in place** for a different account
+> and a connection reference **re-provisioned** for a different account
 > between the ruling and the resume, which is refused, while a rotation of the
-> same account's credential at that reference is not (ADR-0125 §4, §6).
+> same account's credential at that reference is not (ADR-0125 §4, §6). The
+> rotation half asserts *which slot is read*: the parked approval resumes against
+> the slot the record now names, not against any slot bound or read earlier, and
+> an implementation that reads a slot carried in the binding fails it.
 
 > **Normative.** That lane also ships two interleaving cases §6's one-step,
 > revision and re-check clauses exist for: a re-provisioning landing **after** the
@@ -1572,7 +1581,7 @@ which would prejudge the marker. §11 now scopes it to a builder's inputs. The
 finding's direction — remove the carriage, or make this the designating ADR — is
 refused: the second is reserved by ADR-0017 §2 and disclaimed in this ADR's own
 header, and the first would drop an obligation ADR-0146 §6 already binds.
-§6 now carries the account's identity beside its credential reference, the
+§6 now carries the account's identity beside its connection reference, the
 endpoint alongside both, the callable's four-way refusal behind all of them, and
 ADR-0097 §5a's one-step/re-check/fail-closed discipline over the read, a
 monotonic revision on the connection record so the re-check answers "unchanged"
