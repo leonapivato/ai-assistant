@@ -294,6 +294,31 @@ This is PR #1120's first observation, and it is stated there exactly:
 > canonical forms as comparable because the strings match; and an account member
 > never equals a selected recipient, whatever strings the two hold.
 
+**A derived property satisfies ADR-0148 §6's last sentence, and a stored field is the
+shape that would breach it.** That sentence forbids two things — "nothing in it is
+derived after the ruling and nothing in it is re-derived at the seam" — and the clause
+above answers both. *Derived after the ruling*: the set's **value** is fixed before the
+ruling because everything it reads is. The occurrences and the account are fixed in the
+`ActionRequest` before the ruling (ADR-0148 §6), the binding is frozen with
+`extra="forbid"` (§8), and the clause above fixes the deduplication and a **total**
+order, so the function is single-valued, total, and settled at construction. Computing
+a value **on access** is not determining it later; nothing that could change the answer
+survives construction. *Re-derived at the seam*: the seam is `tools/`, and this
+derivation runs in `core` over the value's own fields — no seam call, no store read, no
+clock, no network, which is §4's determinism clause one field over.
+
+**Materialising it is the option that creates the drift ADR-0148 §6 is guarding
+against.** Two representations of one fact admit disagreement, and this surface is one
+where a disagreement is authoritative: `authorises` compares whole values (§9), so a
+stored set that disagreed with the occurrences it was computed from would be compared
+as written, and ADR-0148 §14's alias case names reconstruction from the set as a
+failure in terms. The deserialisation case makes it concrete rather than answering it
+the other way: a decision read back from the record rebuilds the occurrences and
+recomputes an **identical** set, because the order and the deduplication are fixed
+here; a stored set could be read back disagreeing with its own occurrences, and nothing
+downstream would catch it. That is also this ADR's title — the fifteen partial states
+§1 refuses are the same defect at a different scale.
+
 > **Normative.** No policy refuses on ADR-0148 §8's third floor — "the request
 > carries no canonical destination set" — on the ground that a binding's spans carry
 > no destination. That request carries a set of exactly one member and is ruled on
