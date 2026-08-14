@@ -385,6 +385,23 @@ part and another keep it, both conforming, both deriving different bindings for 
 request, which is ADR-0148 §2's sixth clause failing at the one place it was written
 for. The rules are now clauses.
 
+**Refusing is stricter than ADR-0148 §2's second clause requires and is not in tension
+with it, and the distinction is worth being exact about because adversarial review read
+it the other way on round 7.** That clause says the canonical form of an
+unproven-equivalence pair "is the supplied form unchanged", which — read as an
+obligation to *accept* — would have `SMTP` canonicalise a quoted local part to itself.
+Read that way it would also contradict ADR-0148 §1's third clause in the same document,
+which names "a destination that will not canonicalise" as refused before the ruling, and
+whose own argument is that where a canonicaliser has no rule, "the tempting behaviour is
+to pass the supplied form through and let the upstream sort it out. That is exactly how a
+grant for one address comes to authorise another." The two clauses divide the question
+rather than answering it twice: §2's second clause forbids **rewriting** a form that is
+accepted, and §1's third clause governs whether it is accepted at all. This ADR's
+membership clause puts the second half where the corpus already puts it — with the
+protocol's own ADR — and every refusal below lands on the conservative side of §2's own
+asymmetry, since a refusal is "a recoverable error the user sees" and the alternative it
+forecloses is a disclosure. §13 records the ADR-0082 §1 judgement on both clauses.
+
 **Each refusal is a case where the protocol does not settle equivalence, and folding
 would be inventing one.** RFC 5321 §2.4 makes an SMTP local part case-sensitive and
 leaves the domain not (RFC 4343), which is why the two halves are treated differently
@@ -420,6 +437,21 @@ the reason this member is decidable here at all.
 > which the domain is an IP address rather than a name; a trailing dot on the domain;
 > an address carrying whitespace anywhere, which is refused and never trimmed; and
 > any string with no `@` or with an empty local part or domain.
+
+> **Normative.** A refusal under the clause above is **not a canonical form** and is
+> not a rewrite. ADR-0148 §2's second clause governs what a canonicaliser does to a
+> form it **accepts** — it forbids folding, stripping, reordering or rewriting one —
+> and ADR-0148 §1's third clause is what governs a form it does not accept, naming "a
+> destination that will not canonicalise" as refused before the ruling. Which forms a
+> protocol accepts is what that protocol's member asserts, and asserting it is what
+> this clause and the one below are for. No lane reads a refusal here as folding, and
+> no lane reads ADR-0148 §2's second clause as obliging a canonicaliser to accept
+> every string a caller supplies.
+
+> **Normative.** Widening `SMTP` to accept a form the clause above refuses is a change
+> to what that member asserts and needs its own ratified ADR, on the same terms as
+> adding a member: it states which equivalences the newly accepted forms do and do not
+> establish. No lane widens it by building a canonicaliser that accepts more.
 
 > **Normative.** Every further member is added by a **ratified contract ADR of its
 > own**, merged before any canonicaliser, integration or lane implements against it
@@ -1065,6 +1097,24 @@ This ADR's diff is one new file. What follows is the working, ADR by ADR, and a
 disagreement with it takes ADR-0082 §1's own form — naming the sentence that does, or
 does not, become false or over-wide.
 
+**ADR-0148 §1 and §2 — no record owed, and this is the pair adversarial review
+contested on round 7, so the working is explicit.** §1's third clause is *used*: §3's
+`SMTP` refusals and §4's undecomposable-span refusal are both requests refused before
+the ruling, which is that clause operating rather than being narrowed. §2's second
+clause — "the canonical form is the supplied form unchanged and comparison against it
+is byte-exact" — stays true of every form `SMTP` accepts, and its prohibition on
+folding, stripping, reordering and rewriting is neither relaxed nor qualified: §3
+forbids folding a local part in the same terms and refuses whitespace precisely
+*because* trimming would be a rewrite. What §3 adds is a rule about which forms are
+accepted, which §2's second clause does not speak to and §1's third clause reserves. A
+reader holding only ADR-0148 §2 still finds the same instruction about what to do with
+a form in hand, and still may not fold one; what they additionally find, in this ADR,
+is that `SMTP` hands them fewer forms. That is ADR-0082 §1's stacked addition — an
+obligation contradicting no sentence the earlier ADR wrote — "recorded in the ADR that
+makes it, and nowhere else". §2's sixth clause (one canonicaliser per protocol) is
+relied on unchanged and is the reason the member's assertion is stated once, here,
+rather than per integration.
+
 **ADR-0148 §6 and §11 — no record owed, and this is the one the whole ADR turns on.**
 §11's clause defers the shape and its unmarked prose says in terms that "a contract
 ADR that satisfies those is free to choose the signature". Choosing it is that
@@ -1279,6 +1329,15 @@ rather than re-deriving it, and the outcome is recorded here on ratification.
   not discharged by this description, is not detectable without machinery nothing has,
   and is not refused, because refusing it would be a bound with no mechanism behind
   it. §6 names the lane that owes it and the ADR-0148 §6 clause that lane will amend.
+- **`SMTP` accepts less than RFC 5321 admits, and the cost is a user who cannot yet
+  email an internationalised address.** Six forms are refused rather than carried
+  byte-exact, each because the protocol does not settle its equivalence and this ADR
+  would rather spend a recoverable error than an undetectable disclosure — ADR-0017
+  §4's asymmetry argument, that "a boundary that has never transmitted can be held to
+  the standard we would want everywhere". The cost is real and the route out is
+  named rather than left to erosion: §3 makes widening `SMTP` an ADR, on the same
+  terms as adding a protocol, so the forms come back with an argument about what
+  equivalences they establish rather than as a patch to a canonicaliser.
 - **Nothing here authorises a byte.** The seam remains approved and undesignated, no
   tool is registered at it, and this ADR supplies a value for a decision that has
   nothing to rule on yet.
