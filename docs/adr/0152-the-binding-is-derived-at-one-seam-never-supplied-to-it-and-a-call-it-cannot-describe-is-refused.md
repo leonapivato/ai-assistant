@@ -212,10 +212,26 @@ convention.
 > reasoning applied at the seam that would otherwise inherit the permissive answer
 > for free.
 
-> **Normative.** The seam takes a `CarriedProvenance`'s keys and values **on
-> trust**, because the model has already validated them, and performs no `isinstance`
-> check of its own over either. What it still refuses is a **relational** fact the
-> model cannot see: a locator naming a span this call does not carry (§5).
+> **Normative.** `CarriedProvenance` and `EgressSpanLocator` each set
+> `revalidate_instances="always"`, the mechanism `core/types.py` already uses on
+> `SecretName` for this reason: `model_construct` builds an instance without running
+> validators, and it is public.
+
+> **Normative.** Both members **revalidate every model they are handed** before
+> reading it — the `tool` and the `provenance` — and refuse with an
+> `EgressBindingError` chained from the underlying `ValidationError` where
+> revalidation fails. This is ADR-0029 §2's step 1 at a second seam, whose rule is
+> already written: "a revalidation failure carrying the underlying `ValidationError`
+> as its cause". No lane omits it on the ground that the annotation says the value is
+> valid: `model_construct` is a documented escape hatch, `object.__setattr__` defeats
+> `frozen=True` (ADR-0018 §3), and neither is detectable from a type.
+
+> **Normative.** Past that one revalidation the seam reads the carrier's keys and
+> values **on trust** and performs no `isinstance` check of its own over either. The
+> defence is one call to the type, not a hand-written check per field — which is the
+> distinction ADR-0150 §8 draws, and what keeps this from being PR #1120's eight
+> rounds re-opened. What the seam still refuses beyond it is a **relational** fact no
+> model can see: a locator naming a span this call does not carry (§5).
 
 > **Normative.** `EgressBinder` is decorated `@runtime_checkable`, as every
 > Protocol in `core/protocols.py` is. `tests/core/test_protocol_triad.py` reaches a
@@ -1295,6 +1311,17 @@ rather than a gap discovered late.
 > and a construction omitting `spans` raises. A test that only constructs a
 > well-formed carrier over a non-empty mapping satisfies none of these.
 
+> **Normative.** That lane ships the **bypass** cases §1's revalidation clause is
+> stated for, exercised by calling `bind` and `rebind` **directly**: a carrier built
+> by `CarriedProvenance.model_construct` over a mapping whose keys and values are
+> neither a locator nor a provenance; a carrier whose `spans` was replaced by
+> `object.__setattr__` after construction; a locator built by `model_construct` with
+> an `argument` its validator would refuse; and a `tool` built the same way. Each is
+> refused with an `EgressBindingError` **chained from** the underlying
+> `ValidationError`, and never with an `AttributeError`, a `TypeError`, a bare
+> `ValidationError` or a binding. A test that constructs its inputs ordinarily
+> reaches none of these.
+
 > **Normative.** That lane ships the **locator** cases §1 is stated for: an
 > `EgressSpanLocator` is hashable and usable as a mapping key; two locators with
 > equal fields are equal and hash equally; one carrying an `argument` or an `index`
@@ -1545,7 +1572,12 @@ query-only registry is unchanged: no member is added to `ToolRegistry`, and §10
 above states the capability argument §5 and ADR-0029 §1 each made. §7's deferral of
 population is untouched.
 
-**ADR-0029 §1, §2, §7 and §8 — no record owed.** §1's biconditional is untouched:
+**ADR-0029 §1, §2, §7 and §8 — no record owed.** §2's step-1 **revalidation** is
+the precedent §1 above applies at a second seam, and applying it is that step being
+used rather than extended: the rule there — "a revalidation failure carrying the
+underlying `ValidationError` as its cause" — is restated for this seam's own error
+class, and the three checks `invoke` performs are neither moved, relaxed nor
+duplicated. §1's biconditional is untouched:
 this seam registers nothing, invokes nothing, and adds no route to a callable.
 §1's "how the callable is reached is `tools/`-internal, and this ADR does not
 contract it" is relied on **and restated** by §10 above, which is the sentence
