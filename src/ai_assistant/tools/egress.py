@@ -146,6 +146,23 @@ _DEFAULT_PORTS: Final[dict[str, int]] = {IMPLICIT_TLS_SCHEME: 465, STARTTLS_SCHE
 #: 512, and this leaves room for a non-conforming but honest server.
 _MAX_REPLY_LINE_OCTETS: Final = 4096
 
+#: Message fields rendered into an RFC 5322 **header**, where a line break ends
+#: the header and begins another. The body is deliberately not among them: it is
+#: content, and RFC 5321 §4.5.2's transparency is what makes its line breaks safe.
+#:
+#: **This is refusal hygiene, not a disclosure control, and the difference is worth
+#: stating.** ``EmailMessage`` already refuses a header value containing ``CR`` or
+#: ``LF`` — "Header values may not contain linefeed or carriage return characters"
+#: — so a smuggled ``Bcc:`` never reaches the wire whether or not this check
+#: exists, and no unauthorised recipient is reachable through it. What the stdlib's
+#: refusal does *not* do is arrive at the right time or in the right type: it fires
+#: inside :func:`_rendered`, which runs after the credential has been presented and
+#: the envelope accepted, and it escapes as a bare ``ValueError`` that ADR-0029 §3
+#: records as ``INTERNAL``. ADR-0148 §1's third clause is the ground for moving it:
+#: a call that cannot be performed is refused before anything is spent on it, which
+#: is ADR-0145's precedent one field over. Adversarial round 4 found it.
+_HEADER_TEXT_FIELDS: Final = frozenset({"subject"})
+
 #: How many lines of one reply this transport will hold. RFC 5321 places no bound
 #: on continuation lines, so this one is ours: the largest real ``EHLO`` responses
 #: run to a couple of dozen extensions, and a far end needing more than this is not
@@ -1066,8 +1083,9 @@ def smtp_message(parameters: Mapping[str, FrozenJson], *, tool_id: str) -> Outbo
     Raises:
         BoundCallChangedError: If a key is one this seam does not transmit, a
             recipient list is not a list of strings, a text field is not a string,
-            or no recipient is named. The message renders no value, because every
-            one of them is either a recipient or payload content.
+            a header field carries a line break, or no recipient is named. The
+            message renders no value, because every one of them is either a
+            recipient or payload content.
     """
     unknown = set(parameters) - {"to", "cc", "bcc", "subject", "body"}
     if unknown:
@@ -1089,6 +1107,13 @@ def smtp_message(parameters: Mapping[str, FrozenJson], *, tool_id: str) -> Outbo
         text = parameters.get(field, "")
         if not isinstance(text, str):
             msg = f"{tool_id}: the {field!r} argument is not text"
+            raise _refuse_changed(msg)
+        if field in _HEADER_TEXT_FIELDS and ("\r" in text or "\n" in text):
+            msg = (
+                f"{tool_id}: the {field!r} argument carries a line break, which ends "
+                f"a header and begins another, so it is refused before anything is "
+                f"spent on the call (ADR-0148 §1)"
+            )
             raise _refuse_changed(msg)
         texts[field] = text
     if not recipients["to"] and not recipients["cc"] and not recipients["bcc"]:
