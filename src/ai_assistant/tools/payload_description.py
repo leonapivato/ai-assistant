@@ -310,14 +310,30 @@ def describe_payload(
             covered (ADR-0148 §6, §14).
         DestinationSelectionError: If the destinations cannot be read and
             canonicalised out of ``parameters`` (ADR-0148 §1's third clause).
-        PayloadDescriptionError: If the two declarations disagree about which
-            arguments exist, if an argument's value is not text or a list of
-            text, or if ``provenance`` names a span this call does not transmit.
+        PayloadDescriptionError: If the two declarations are not the same tool's,
+            if they disagree about which arguments exist, if an argument's value
+            is not text or a list of text, or if ``provenance`` names a span this
+            call does not transmit.
             The last is refused rather than ignored: a carried provenance for a
             span that is not there means the caller and this derivation disagree
             about what the payload is, and the disagreement is exactly what a
             silent drop would hide.
     """
+    if recipients.tool_id != declaration.tool_id:
+        # Both types carry a `tool_id` so a declaration cannot be paired with one
+        # it was not written for, and that property is worth nothing until
+        # something compares them. Adversarial found on round 2 that it did not:
+        # a destination declaration for another tool, naming `body`, would make
+        # the description record the message body as the recipient and omit `to`
+        # — a description of a different call, under this tool's name. It is the
+        # same shape as the round-1 defect one level up, which is why the repair
+        # is a comparison rather than a note.
+        msg = (
+            f"{declaration.tool_id}: the destination declaration is "
+            f"{recipients.tool_id}'s, so its arguments are not this tool's"
+        )
+        raise PayloadDescriptionError(msg)
+
     declared = {argument.name: argument for argument in declaration.arguments}
     bearing = {argument.name for argument in recipients.arguments}
     if not bearing <= set(declared):
