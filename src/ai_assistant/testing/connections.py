@@ -213,6 +213,18 @@ class FakeConnectionProvisioner:
         """
         return self._resource.suspend_next()
 
+    def suspend_next_credential_write(self) -> LoopSuspension:
+        """Hold the next credential *write* open, for ADR-0151 §7's cancellation case.
+
+        The same resource as :meth:`suspend_next_deletion` — one subject holds one
+        keyring, and the two are never in flight together — so arming both at once
+        is refused rather than silently making the second a no-op.
+
+        Returns:
+            The suspension, which the suite waits on and then releases.
+        """
+        return self._resource.suspend_next()
+
     @property
     def resource_log(self) -> ResourceLog:
         """What the suspendable resource saw, so a suite can prove no overlap."""
@@ -277,7 +289,8 @@ class FakeConnectionProvisioner:
         # ADR-0148 §6: re-read before the credential write.
         self._still_ours(reference, filed, displaceable=plan.displaceable)
         try:
-            await self.secrets.set(slot, credential)
+            async with self._resource.held():
+                await self.secrets.set(slot, credential)
         except SecretStoreError as exc:
             msg = (
                 f"the credential for connection {reference!r} could not be written, so the "
@@ -333,8 +346,8 @@ class FakeConnectionProvisioner:
                 failure = failure if failure is not None else exc
         if failure is not None:
             msg = (
-                f"connection {reference!r} is disconnected; at least one of its credentials "
-                f"could not be deleted and remains unreferenced. Run the disconnection again"
+                f"connection {reference!r} is disconnected; a credential could not be "
+                f"deleted and remains unreferenced. Run the disconnection again"
             )
             raise ResidualCredentialError(msg, reference) from failure
         return None if removed is None else removed.account()

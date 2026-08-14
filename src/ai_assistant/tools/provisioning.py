@@ -97,18 +97,23 @@ _SLOT_PREFIX: Final = "connection."
 #: ``hub_max_frame_bytes`` leaves at its 1024-byte floor, which is 512 bytes
 #: (ADR-0085 §8c, §8d). The arithmetic at that floor: the widest code is
 #: ``ProvisioningOutcomeUnknownError``'s 31 bytes, a reference is at most
-#: :data:`~ai_assistant.core.types.CONNECTION_REFERENCE_MAX_BYTES`, and the
-#: envelope's four member names and JSON punctuation come to under 60 — so 200
-#: leaves well over a hundred bytes of headroom and the reduction ADR-0085 §10a
-#: would perform is unreachable. That matters because the reduction **nulls
-#: ``details`` before it truncates a message**, and on the two classes
-#: ``connect_account`` raises the reference is the only handle the caller will
-#: ever have.
+#: :data:`~ai_assistant.core.types.CONNECTION_REFERENCE_MAX_BYTES` (64), and the
+#: envelope's four member names and JSON punctuation come to under 60 — so
+#: 31 + 64 + 60 + 256 is 411 against a budget of 512, leaving a hundred bytes of
+#: headroom and putting the reduction ADR-0085 §10a would perform out of reach.
+#: That matters because the reduction **nulls ``details`` before it truncates a
+#: message**, and on the two classes ``connect_account`` raises the reference is
+#: the only handle the caller will ever have.
 #:
-#: Held by ``tests/tools/test_connection_error_payloads.py`` rather than by a
-#: check in this module: a bound enforced at the raise site would turn a report
-#: about a failure into a second failure.
-MESSAGE_MAX_BYTES: Final = 200
+#: **A message carries its own reference, so the bound is over the rendered
+#: text** rather than over a template: ADR-0151 §2a has a refusal name the
+#: reference the call carried, and a bound that excluded it would be measuring
+#: the wrong string.
+#:
+#: Held by ``tests/tools/test_connection_provisioner.py`` rather than by a check
+#: in this module: a bound enforced at the raise site would turn a report about a
+#: failure into a second failure.
+MESSAGE_MAX_BYTES: Final = 256
 
 
 def _mint_reference() -> str:
@@ -565,8 +570,8 @@ class KeyringConnectionProvisioner:
                 failure = failure if failure is not None else exc
         if failure is not None:
             msg = (
-                f"connection {reference!r} is disconnected; at least one of its credentials "
-                f"could not be deleted and remains unreferenced. Run the disconnection again"
+                f"connection {reference!r} is disconnected; a credential could not be "
+                f"deleted and remains unreferenced. Run the disconnection again"
             )
             raise ResidualCredentialError(msg, reference) from failure
         return None if removal.removed is None else removal.removed.account()
