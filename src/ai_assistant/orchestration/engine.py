@@ -3508,6 +3508,7 @@ class Engine:
             self._connections.connect(identity=named, credential=secret),
             "connect_account",
             checked=True,
+            traced=False,
         )
 
     async def reprovision_account(
@@ -3556,6 +3557,7 @@ class Engine:
             self._connections.reprovision(handle, identity=named, credential=secret),
             "reprovision_account",
             checked=True,
+            traced=False,
         )
 
     async def disconnect_account(self, reference: Identifier) -> ConnectedAccount | None:
@@ -3577,7 +3579,7 @@ class Engine:
         handle = identifier(reference, name="reference")
         check_arguments("disconnect_account", max_bytes=self._max_payload_bytes, reference=handle)
         return await self._tracked(
-            self._connections.disconnect(handle), "disconnect_account", checked=True
+            self._connections.disconnect(handle), "disconnect_account", checked=True, traced=False
         )
 
     async def connected_accounts(self) -> tuple[ConnectedAccount, ...]:
@@ -3600,7 +3602,7 @@ class Engine:
         """
         self._reject_if_closing()
         return await self._tracked(
-            self._connections.connected(), "connected_accounts", checked=True
+            self._connections.connected(), "connected_accounts", checked=True, traced=False
         )
 
     async def recent_connection_acts(
@@ -3624,7 +3626,10 @@ class Engine:
         positive_page_argument(limit, name="limit")
         check_arguments("recent_connection_acts", max_bytes=self._max_payload_bytes, limit=limit)
         return await self._tracked(
-            self._connections.recent_acts(limit=limit), "recent_connection_acts", checked=True
+            self._connections.recent_acts(limit=limit),
+            "recent_connection_acts",
+            checked=True,
+            traced=False,
         )
 
     async def aclose(self) -> None:
@@ -3782,7 +3787,7 @@ class Engine:
         # gather and skips its siblings. Every one must complete before a closer runs.
         await asyncio.gather(*pending, return_exceptions=True)
 
-    async def _tracked(
+    async def _tracked(  # noqa: PLR0913 — the work, its seam, and one knob per policy a caller sets
         self,
         coro: Awaitable[_T],
         seam: str,
@@ -3790,8 +3795,9 @@ class Engine:
         *,
         checked: bool = False,
         shielded: bool = True,
+        traced: bool = True,
     ) -> _T:
-        """Run ``coro`` as a tracked, **traced** task, so shutdown can drain it.
+        """Run ``coro`` as a tracked task, so shutdown can drain it — and usually trace it.
 
         The task is what :meth:`aclose` awaits. **Tracking is what ADR-0042 §2
         requires, and it is the whole of what it requires here**: the façade
@@ -3875,13 +3881,36 @@ class Engine:
                 for an operation that must stop when its caller goes away
                 (ADR-0131 §2a). **Tracking is unaffected either way** — the drain
                 covers the task in both cases, which is what ADR-0042 §2 binds.
+            traced: Whether an ADR-0119 §8 operation trace is emitted. ``True``
+                everywhere except ADR-0151 §1's five connection operations, whose
+                §6 forbids it: "No provisioning act, and no operation on this
+                surface, is recorded in a trace (ADR-0141), an ``AuditTrail``, a
+                conversation or a plan."
+
+                **It suppresses the trace and nothing else** — the task is still
+                registered, still drained and still shielded on the same terms, so
+                ADR-0042 §2's obligation is untouched. That split is the whole
+                reason this is a knob rather than a separate method: the connection
+                store is connection-owning like every other, so an untracked
+                provisioning act would let :meth:`aclose` close the store out from
+                under ADR-0148 §6's three writes.
+
+                **The prohibition is categorical rather than credential-scoped.**
+                No trace here carries an argument — a trace records the seam, the
+                outcome, the elapsed time and the fault class — so nothing leaks
+                today. What §6 forecloses is the *act* being recorded at all, and
+                the reason is legible in ADR-0151 §18: a connection record
+                deliberately carries **no instant** (ADR-0149 §3), so a trace of
+                ``connect_account`` would reintroduce a timestamped record of the
+                owner's act through a different door, which §18 defers to "the
+                first surface that has to answer 'when did I connect this?'".
 
         Returns:
             Whatever ``coro`` returned.
         """
         work = self._checked_result(coro, seam) if checked else coro
         task: asyncio.Task[_T] = asyncio.ensure_future(
-            self._operation_traces.observing(seam, work, observe)
+            self._operation_traces.observing(seam, work, observe) if traced else work
         )
         self._inflight.add(task)
         task.add_done_callback(self._inflight.discard)
