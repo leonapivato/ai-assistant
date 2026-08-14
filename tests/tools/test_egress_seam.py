@@ -517,7 +517,7 @@ def test_no_other_tools_module_names_a_transport(module: str) -> None:
         ("import os\nos.system('x')", "os.system"),
         ("import os as _os\n_os.execvpe('x', [], {})", "os.execvpe"),
         ("import os.path\nos.spawnve('x', [], {})", "os.spawnve"),
-        ("from os import spawnlpe", "os.spawnlpe"),
+        ("from os import execve", "os.execve"),
         ("import asyncio\nasyncio.create_subprocess_exec('x')", "asyncio.create_subprocess_exec"),
         ("from asyncio import create_subprocess_shell", "asyncio.create_subprocess_shell"),
         ("from asyncio import subprocess", "asyncio.subprocess"),
@@ -530,6 +530,11 @@ def test_the_scanner_catches_each_form_a_launch_is_written_in(source: str, expec
 
     Standard-library names only: a third-party transport is the *contract's* to catch,
     including a lazy import inside a function body, which the graph records.
+
+    Every launcher named here is one CPython defines on every platform, because the
+    sets it is checked against are derived from the running interpreter — `spawnlpe`
+    and the other `p` variants exist only where `os.spawnvp` does, so a case built on
+    one would assert about the platform rather than about the scanner.
     """
     reached = {name for raw in _reached_names(source) for name in _containing_packages(raw)}
 
