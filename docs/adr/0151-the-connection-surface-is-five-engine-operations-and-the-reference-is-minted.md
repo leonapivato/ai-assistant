@@ -440,10 +440,9 @@ its length (ADR-0125 §6). The others are a blank or unwritable `reference` and 
 > one, or treats one as an absent credential (ADR-0125 §7, ADR-0149 §6).
 
 > **Normative.** ADR-0148 §6's **activation is a connection-store write, not a
-> keyring one**, and raises no keyring failure. An activation whose
-> compare-and-swap does not land is `DisplacedProvisioningError`; one that fails as
-> a store failure is `IncompleteProvisioningError`, by §7's first-write rule. No
-> lane reads the conversion clause above as reaching the activation.
+> keyring one**, and raises no keyring failure, so the conversion clause above does
+> not reach it and no lane reads it as doing so. What an activation raises is
+> classified by §7 and by nothing here.
 
 **The conversion clause is not the whole classification, and §7 is where the rest
 of it lives.** This clause says what a *keyring* failure becomes; §7's first-write
@@ -767,7 +766,7 @@ that performs the act". §17 records that no sentence of ADR-0124 §6 becomes fa
 >   an observed non-landing activation is `IncompleteProvisioningError`, except
 >   where what the act observes is that a later act holds the record, which is
 >   `DisplacedProvisioningError`.
-> - **An activation that raises rather than returning** —
+> - **An activation that fails rather than returning** —
 >   `ProvisioningOutcomeUnknownError`, carrying the reference. The store may have
 >   committed the compare-and-swap and failed before saying so, so neither
 >   completion nor incompletion may be asserted.
@@ -777,6 +776,15 @@ that performs the act". §17 records that no sentence of ADR-0124 §6 becomes fa
 >
 > No implementation classifies by which call raised, by the exception's own type,
 > or by a phase it infers after the fact.
+
+> **Normative.** The classification above governs a **failure**, and a
+> `CancelledError` is not one. A cancellation at any point of a provisioning act
+> propagates unconverted — ADR-0060's rule that external cancellation is re-raised
+> is neither relaxed nor satisfied by a report — and no implementation converts one
+> into `ProvisioningOutcomeUnknownError` or into any other class here, at the
+> activation or anywhere else. A cancelled act leaves the same outcome those
+> classes describe and the client says so under the unread-outcome clause below,
+> without the reference and without starting a call to obtain one.
 
 > **Normative.** A `ConnectionStoreError` raised by `connect_account` or
 > `reprovision_account` therefore leaves the act's outcome **not known**: the first
@@ -849,6 +857,10 @@ many different next steps follow:
 | `DisplacedProvisioningError` | another act took the reference over | read what is connected |
 | `ResidualCredentialError` | connected; an old credential could not be deleted | fix the keyring, or nothing |
 | `ConnectionStoreError` | the store failed; nothing can be said | read again later |
+
+Five of §2a's seven classes are in that table; the other two are the refusals that
+never reach an act at all — `UnusableIdentityError`, refused locally, and
+`UnknownConnectionError`, refused before the first write.
 
 Six sentences, six next steps, and no two of them interchangeable — a surface that
 collapsed any pair would tell a user their credential was unused when it was live,
@@ -1431,11 +1443,14 @@ anything this ADR adds.
    > the activation, and a keyring failure at the credential write each raise
    > `IncompleteProvisioningError` whose `reference` the store then holds. An
    > activation whose compare-and-swap is observed not to land raises
-   > `DisplacedProvisioningError`. An activation that **raises** raises
+   > `DisplacedProvisioningError`. An activation that **fails** raises
    > `ProvisioningOutcomeUnknownError`, exercised with the store scripted to
    > **commit and then fail** — the case that makes the distinction from
    > `IncompleteProvisioningError` real, since a following `connected_accounts`
-   > then shows that reference `ACTIVE`. And a predecessor-slot deletion failing
+   > then shows that reference `ACTIVE`. A provisioning act **cancelled** while
+   > awaiting its activation propagates `CancelledError` and raises none of these
+   > classes, which is the case a suite testing only failures never reaches. And a
+   > predecessor-slot deletion failing
    > **after** the activation returned raises `ResidualCredentialError`, with that
    > reference `ACTIVE` at the new revision.
 
