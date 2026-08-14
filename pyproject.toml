@@ -1257,11 +1257,14 @@ as_packages = "false"
 allow_indirect_imports = "true"
 source_modules = [
     "ai_assistant.tools",
+    "ai_assistant.tools._transactions",
     "ai_assistant.tools.builtin",
+    "ai_assistant.tools.connection_store",
     "ai_assistant.tools.destination_arguments",
     "ai_assistant.tools.destinations",
     "ai_assistant.tools.invocation",
     "ai_assistant.tools.payload_description",
+    "ai_assistant.tools.provisioning",
     "ai_assistant.tools.registry",
     "ai_assistant.tools.send_email",
 ]
