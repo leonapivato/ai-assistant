@@ -34,6 +34,7 @@ from ai_assistant.core.errors import ToolError
 from ai_assistant.tools.destinations import (
     Destination,
     DestinationCanonicalisationError,
+    DestinationProtocol,
     canonicalise,
 )
 
@@ -41,7 +42,6 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from ai_assistant.core.types import FrozenJson
-    from ai_assistant.tools.destinations import DestinationProtocol
 
 
 class DestinationSelectionError(ToolError):
@@ -98,7 +98,8 @@ class DestinationDeclaration:
             ``to`` before ``bcc`` is what a user reads.
 
     Raises:
-        DestinationSelectionError: If it names no argument, or names one twice.
+        DestinationSelectionError: If it names no argument, names one twice, or
+            names one whose protocol this seam does not canonicalise.
     """
 
     tool_id: str
@@ -118,7 +119,8 @@ class DestinationDeclaration:
         carve-out #68's third comment warns "needs care".
 
         Raises:
-            DestinationSelectionError: On an empty or duplicated declaration.
+            DestinationSelectionError: On an empty or duplicated declaration, or
+                one naming an unusable protocol or a nameless argument.
         """
         if not self.arguments:
             msg = (
@@ -132,6 +134,24 @@ class DestinationDeclaration:
         if len(set(names)) != len(names):
             msg = f"{self.tool_id}: a destination declaration names each argument once"
             raise DestinationSelectionError(msg)
+        for argument in self.arguments:
+            # Checked here so a malformed declaration does not load, rather than
+            # reaching `canonicalise` at call time with a protocol that has no
+            # canonicaliser and no name — ADR-0016 §1's "a tool that does not
+            # declare its reach does not load", and adversarial round 7's finding.
+            # Neither message names the offending value: a declaration is the tool
+            # author's, but a forged one is whatever a caller wrote.
+            declared: object = argument.protocol
+            if not isinstance(declared, DestinationProtocol):
+                msg = (
+                    f"{self.tool_id}: a destination-bearing argument names a protocol "
+                    f"this seam does not canonicalise"
+                )
+                raise DestinationSelectionError(msg)
+            named: object = argument.name
+            if not isinstance(named, str) or not named:
+                msg = f"{self.tool_id}: a destination-bearing argument has no name"
+                raise DestinationSelectionError(msg)
 
 
 def _supplied_forms(

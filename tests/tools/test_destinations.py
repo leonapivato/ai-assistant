@@ -175,6 +175,25 @@ def test_a_refusal_never_quotes_the_address_it_refused() -> None:
     assert needle not in str(raised.value)
 
 
+def test_a_protocol_with_no_canonicaliser_refuses_without_dereferencing_it() -> None:
+    """Adversarial round 7: the missing-canonicaliser branch read `.value`.
+
+    That branch is reached exactly when the protocol is not one this seam knows,
+    which includes the case where it is not a member at all — so building the
+    refusal out of `protocol.value` raised `AttributeError` instead of the
+    documented refusal. The member's own value is named where there is one,
+    because an enum member is the tool author's text; anything else is a
+    caller-supplied value and is not rendered.
+    """
+    needle = "the secret is swordfish"
+
+    with pytest.raises(DestinationCanonicalisationError) as raised:
+        canonicalise(needle, "alice@example.com")  # type: ignore[arg-type]
+
+    assert needle not in str(raised.value)
+    assert "no canonicaliser" in str(raised.value)
+
+
 def test_the_refusal_is_in_the_assistant_error_hierarchy() -> None:
     """So a request builder can refuse the whole call with one handler."""
     assert issubclass(DestinationCanonicalisationError, ToolError)

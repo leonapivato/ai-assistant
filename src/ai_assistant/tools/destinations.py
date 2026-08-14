@@ -333,8 +333,15 @@ def canonicalise(protocol: DestinationProtocol, supplied: str) -> Destination:
             than sending it for a ruling in an incomplete form.
     """
     canonicaliser = _CANONICALISERS.get(protocol)
-    if canonicaliser is None:  # pragma: no cover — no protocol lacks one today.
-        raise _refuse(f"no canonicaliser at this seam for protocol {protocol.value!r}")
+    if canonicaliser is None:
+        # Named only where the protocol is a member of the enum, which is the
+        # tool author's own text. Anything else is a caller-supplied value that
+        # could carry content, and rendering it would be the leak the module
+        # docstring rules out; it is also the shape a malformed declaration
+        # arrives in, so this branch must not dereference `.value` to build its
+        # own refusal. Adversarial review found it on round 7.
+        named = protocol.value if isinstance(protocol, DestinationProtocol) else "the one given"
+        raise _refuse(f"no canonicaliser at this seam for protocol {named!r}")
     return Destination(protocol=protocol, supplied=supplied, canonical=canonicaliser(supplied))
 
 
