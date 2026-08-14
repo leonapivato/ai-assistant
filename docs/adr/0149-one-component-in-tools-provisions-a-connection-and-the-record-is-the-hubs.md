@@ -518,12 +518,20 @@ from configuration — and, from ADR-0097 §4, the append-only store that record
 > did not displace.
 
 > **Normative.** A disconnection is **idempotent and re-runnable**. Disconnecting
-> a reference that has no live record appends no second removal entry and repeats
-> the deletion pass for the latest removal entry's revision, which is the remedy
-> for a slot a displaced act wrote after that removal landed (below) or for one
-> whose deletion failed. `delete` returns whether an entry was there and raises
-> nothing for an absent one (ADR-0125 §4), so a repeat costs nothing and asserts
-> nothing.
+> a reference that has entries but no live record appends no second removal entry
+> and repeats the deletion pass at the latest removal entry's revision, which is
+> the remedy for a slot a displaced act wrote after that removal landed (below) or
+> for one whose deletion failed. `delete` returns whether an entry was there and
+> raises nothing for an absent one (ADR-0125 §4), so a repeat costs nothing and
+> asserts nothing.
+
+> **Normative.** Disconnecting a reference the store holds **no entry** for —
+> never connected, or a mistyped reference — **writes nothing and deletes
+> nothing**: no removal entry is appended, so a typo leaves no tombstone and
+> creates no revision sequence, and no deletion pass runs, because there is no
+> revision to bound it by. What the client is told is the surface ADR's (§9),
+> under the one constraint that it may not report a disconnection that did not
+> happen.
 
 > **Normative.** A removal entry carries the reference, the incremented revision
 > and the fact that the connection was removed. It carries **no** credential
@@ -1180,6 +1188,12 @@ form).
 > failure reported; a test that re-running it after that failure completes; and a
 > test that it reaches no entry outside the `INTEGRATION` scope or outside its
 > installation (ADR-0125 §2).
+
+> **Normative.** That lane also ships the two degenerate disconnections §5
+> defines: one on a reference with entries but no live record, which appends
+> nothing and re-runs the deletion pass at the latest removal's revision, and one
+> on a reference the store has never held, which writes nothing, deletes nothing
+> and leaves the store byte-identical.
 
 > **Normative.** That lane also ships the identity refusals §4 adds: an act whose
 > supplied identity equals the supplied credential is refused with nothing
