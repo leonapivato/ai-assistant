@@ -575,22 +575,29 @@ This is PR #1120's third observation:
 > units, of grapheme clusters, or of rendered columns, and no configuration selects
 > between them.
 
-> **Normative.** `EgressBinding` **refuses at construction**, and `ActionRequest`
-> refuses a binding for which any of the following fails against its own
-> `parameters`:
+> **Normative.** `EgressBinding` **refuses at construction** every invariant visible
+> from its own fields, which are exactly these three:
+> - for each argument that carries spans, either exactly one span with `index`
+>   absent, or spans whose indices are exactly `0` through `k-1` for some `k ≥ 1`;
+> - no two spans share an `(argument, index)` pair;
+> - the spans are ordered by `argument` and then by `index`, absent sorting first,
+>   with `argument` compared by Unicode code point.
+
+> **Normative.** Every remaining invariant of this section is **parameter-relative**
+> and is `ActionRequest`'s alone, checked by the model validator §2 names against its
+> own `parameters`. `EgressBinding` does **not** carry `parameters`, and no lane gives
+> it a copy so that it can check them there: that is the state stated twice this ADR
+> is named against, and the binding is a value a decision carries whole rather than a
+> second place the arguments live. `ActionRequest` refuses a binding for which any of
+> the following fails against its own `parameters`:
 > - every span's `argument` is a top-level key of `parameters`;
 > - every top-level key of `parameters` whose value is not an **empty JSON array** is
 >   the `argument` of at least one span, and a key whose value **is** an empty JSON
 >   array is the `argument` of **no** span;
-> - for each argument that carries spans, either exactly one span with `index`
->   absent, or spans whose indices are exactly `0` through `k-1` for some `k ≥ 1`;
-> - where that argument's value is a JSON array of length `n ≥ 1`, the second form
->   holds with `k == n`;
-> - where that argument's value is **not** a JSON array, the **first** form holds: it
->   carries exactly one span, and that span's `index` is **absent**;
-> - no two spans share an `(argument, index)` pair;
-> - the spans are ordered by `argument` and then by `index`, absent sorting first,
->   with `argument` compared by Unicode code point;
+> - where an argument's value is a JSON array of length `n ≥ 1`, its spans carry
+>   indices exactly `0` through `n-1`;
+> - where an argument's value is **not** a JSON array, it carries exactly one span and
+>   that span's `index` is **absent**;
 > - where the argument's value is a JSON string and the span's `index` is absent, a
 >   destination on that span carries that string as its `supplied` form; and where
 >   the argument's value is a JSON array whose element at `index` is a JSON string, a
@@ -599,6 +606,17 @@ This is PR #1120's third observation:
 >   value, counted under this section's unit rule and **recomputed from `parameters`**
 >   rather than taken as supplied — the argument's whole value where the span's
 >   `index` is absent, and that argument's value's element at `index` otherwise.
+
+**The split is where the inputs are, not a softening of either check.** A binding
+holding a span for `"body"` cannot tell whether `"body"` is a key at all, whether its
+value is an array, or how many code points it carries, because none of that is among
+its fields — so requiring it to refuse on those grounds would be an obligation no
+implementation could discharge, and the first lane to meet it would reach for a copy of
+`parameters`. The three invariants above it *can* discharge are structural facts about
+its own span tuple, and they stay with the value that holds them so that a binding is
+never well-formed in one place and malformed in another. Every invariant in this
+section is still checked before any ruling is taken, because ADR-0148 §1 has the
+request carry the binding and §2's validator runs on the request.
 
 > **Normative.** A builder holding two values of **differing provenance** inside one
 > undecomposable span — inside a JSON object, or inside a nested array — cannot
@@ -1149,7 +1167,10 @@ lands there whole.
 > does not satisfy it.
 
 > **Normative.** That lane also ships the **construction refusals**, one case each,
-> for every invariant §4 states: an argument with no span; a span naming an argument
+> for every invariant §4 states — each exercised at the type §4 assigns it to, which
+> is `EgressBinding`'s own constructor for the three structural ones and
+> `ActionRequest`'s validator for the parameter-relative rest, and a case asserting a
+> refusal at the wrong one of those two satisfies neither: an argument with no span; a span naming an argument
 > `parameters` does not carry; a duplicate `(argument, index)`; a mis-ordered span
 > tuple; an array argument of length `n` described by `k ≠ n` spans; a **non-array**
 > argument described by an indexed span; a string-valued argument whose span's
