@@ -763,11 +763,18 @@ subject is a secret.
 > (ADR-0125 §2), so the purge cannot reach a `PROVIDER` or `ENROLMENT` entry or
 > another installation's, and it enumerates nothing.
 
-> **Normative.** A coordinator that must purge the hub's Tier 0 entries receives
-> the provisioner by injection from the composition root and invokes the purge.
-> Holding the provisioner is **not** holding a keyring face — the distinction
-> ADR-0102 §7 already drew about the composition root and `SourceGrantStore` — so
-> nothing here gives a face to a component ADR-0125 §8 keeps out of the seam.
+> **Normative.** A coordinator **outside `tools/`** that invokes the purge reaches
+> it through a Protocol in `core/protocols.py`, like any other cross-subsystem
+> reach (golden rule 1). This ADR neither declares that Protocol nor permits an
+> injected concrete provisioner in its place: its shape, and whether it is a seam
+> of its own or a member of the one §9 defers, belong to the routing decision
+> (#909) together with the choice of coordinator.
+
+> **Normative.** What this ADR fixes about that reach is one thing: **holding such
+> a seam is not holding a keyring face** — the distinction ADR-0102 §7 drew about
+> the composition root and `SourceGrantStore` — so routing the purge gives no
+> component a face ADR-0125 §8 keeps out of the seam, and no lane cites the
+> routing as acquiring one.
 
 > **Normative.** **This ADR does not route ADR-0126's act to that purge.** That
 > act is offline, is in `service/`, and ADR-0126 §6's first clause states that it
@@ -886,10 +893,13 @@ granted one. Whether it is one operation or several is the surface ADR's.
 
 ### 10. New `core` contract surface, flagged and not landed here
 
-> **Normative.** This decision cannot be implemented without one piece of contract
-> surface `core` does not have: a Protocol by which `orchestration` reaches the
-> provisioner in `tools/` (§9). It is flagged here under golden rule 5 and **is
-> not added by this ADR**. It is decided in the contract ADR §9 names — the same
+> **Normative.** The **user-facing** half of this decision cannot be implemented
+> without one piece of contract surface `core` does not have: a Protocol by which
+> `orchestration` reaches the provisioner in `tools/` (§9). It is flagged here
+> under golden rule 5 and **is not added by this ADR**. It is not the whole of the
+> contract surface this decision's neighbourhood will need — §8's routing decision
+> owes whatever seam its coordinator's boundary requires — and no lane reads this
+> clause as capping that. It is decided in the contract ADR §9 names — the same
 > one that decides the operations it serves, because they are one question — and
 > its triad rides with the **primary production implementation** as one lane
 > (ADR-0137 §2, `CONTRIBUTING.md` → "Adding a Protocol").
@@ -904,13 +914,26 @@ granted one. Whether it is one operation or several is the surface ADR's.
 > Protocol for the connection record itself (§3). A lane that finds it needs any
 > of those is changing a ratified decision and owes its own ADR.
 
-**One Protocol is the floor and it is derived rather than chosen.** The operations
-are `AssistantEngine` methods, `AssistantEngine` is `orchestration`'s (ADR-0102
-§7), the act's owner is in `tools/`, and a subsystem boundary between them is a
-Protocol by golden rule 1. Every other seam this decision needs falls inside one
-subsystem: the record's store, the callable's read of it, ADR-0148 §11(b)'s
-consultation of it and §8's purge are all `tools/`-internal, which is the
-placement's whole economy (§1).
+**One Protocol is the floor for what this ADR places, and it is derived rather
+than chosen.** The operations are `AssistantEngine` methods, `AssistantEngine` is
+`orchestration`'s (ADR-0102 §7), the act's owner is in `tools/`, and a subsystem
+boundary between them is a Protocol by golden rule 1. Every other seam *this ADR
+places* falls inside one subsystem: the record's store, the callable's read of
+it, ADR-0148 §11(b)'s consultation of it, and the purge's implementation are all
+`tools/`-internal, which is the placement's whole economy (§1).
+
+**The purge's *invocation* is the exception, and counting it here would have been
+the error.** §8's purge is `tools/`-internal as a mechanism, but whoever calls it
+may not be: ADR-0126 §2 puts the owner-delete act in `service/`, so a routing
+decision that reaches this purge from that act crosses a subsystem boundary and
+owes a Protocol exactly as this one does — golden rule 1 admits no injected
+concrete in its place, whatever the composition root is willing to hand over.
+Architecture review found an earlier draft claiming one Protocol as the complete
+floor while §8 contemplated that second consumer, which is a floor stated over
+half the neighbourhood. §8's clauses now put the seam with the decision that
+chooses the coordinator, because the seam's shape is not answerable before the
+coordinator is, and §13 lists that routing as out of scope rather than counting
+its surface here.
 
 ### 11. What this ADR does not gate, discharge or authorise
 
@@ -1086,11 +1109,13 @@ record carries; or reading ADR-0148 §6's states as admitting a third.
 Scoping something out is a decision, so each carries its reason (ADR-0029 §7's
 form).
 
-- **Who invokes §8's purge when the owner deletes everything** — **#909**, and
-  §8's fifth and sixth clauses say why it is not answered here and what is
-  blocked until it is. The candidate answers ADR-0126 §6 names are still the
-  candidates: a coordinator composing each consumer's deletion path, and whether
-  that coordinator is the hub or the offline tool.
+- **Who invokes §8's purge when the owner deletes everything, and the seam they
+  reach it through** — **#909**, and §8's clauses say why neither is answered here
+  and what is blocked until they are. The candidate answers ADR-0126 §6 names are
+  still the candidates: a coordinator composing each consumer's deletion path, and
+  whether that coordinator is the hub or the offline tool. Whichever it is, a
+  coordinator outside `tools/` owes a `core` Protocol for the reach (golden rule
+  1, §8's fourth clause), and that surface is that decision's rather than §10's.
 - **The provider key's provisioning surface** — ADR-0125 §12's first bullet and
   **#74**. A provider credential has no connection record, no account identity,
   no per-call binding and no callable position: none of ADR-0148 §6's machinery
@@ -1233,13 +1258,19 @@ form).
   "purges the record and the credential slot it names together" without a path by
   which any delete surface could reach the slot — the bound-with-nothing-behind-it
   defect ADR-0098 §3 records itself making twice, and ADR-0126 §6's forward clause
-  had been written to catch exactly it. Adversarial review's round then produced
-  §4's identity refusals, §5's every-slot, revision-cutoff and idempotence clauses with the honest
-  guarantee beside them, and §8's completeness clause — three defects of one
-  family, in which a rule was stated over the ordinary case and a conforming
-  implementation could satisfy it while leaving a credential in the keyring.
-  Findings raised after the flip were folded the same way. Nothing implements
-  against this ADR until it has merged (ADR-0015 §5).
+  had been written to catch exactly it. Adversarial review's rounds then produced
+  §4's identity refusals, §5's every-slot, revision-cutoff and idempotence
+  clauses with the honest guarantee beside them, §5's two degenerate
+  disconnections, and §8's completeness clause — one family of defect, in which a
+  rule was stated over the ordinary case while a conforming implementation could
+  satisfy it and still leave a credential in the keyring — and it caught the
+  prescribed ratification note still claiming a discharge the rest of the document
+  had already withdrawn. Architecture's later round produced §8's fourth clause
+  and §10's correction: an earlier draft counted one Protocol as the complete
+  contract floor while §8 contemplated a purge coordinator outside `tools/`, which
+  golden rule 1 gives a seam of its own. Findings raised after the flip were
+  folded the same way. Nothing implements against this ADR until it has merged
+  (ADR-0015 §5).
 
 ## Consequences
 
