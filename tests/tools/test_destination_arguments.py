@@ -165,3 +165,32 @@ def test_a_declaration_naming_one_argument_twice_is_refused() -> None:
     """Two entries for one field would describe one span twice or disagree."""
     with pytest.raises(DestinationSelectionError, match="each argument once"):
         DestinationDeclaration(tool_id="send_email", arguments=(_TO, _TO))
+
+
+def test_a_declaration_naming_a_protocol_this_seam_cannot_canonicalise_is_refused() -> None:
+    """Adversarial round 7: it reached the canonicaliser and raised the wrong error.
+
+    A protocol with no entry in the seam's mapping has no canonical form to
+    assert, so the declaration cannot be completed against — ADR-0148 §2's first
+    clause and §1's third. Caught at construction, so a malformed declaration does
+    not load rather than failing at the first call made against it.
+    """
+    malformed = DestinationArgument(
+        name="to",
+        protocol=None,  # type: ignore[arg-type]
+        multiple=True,
+        required=True,
+    )
+
+    with pytest.raises(DestinationSelectionError, match="does not canonicalise"):
+        DestinationDeclaration(tool_id="send_email", arguments=(malformed,))
+
+
+def test_a_declaration_naming_a_nameless_argument_is_refused() -> None:
+    """An argument with no name selects from no field and describes no span."""
+    nameless = DestinationArgument(
+        name="", protocol=DestinationProtocol.SMTP, multiple=True, required=True
+    )
+
+    with pytest.raises(DestinationSelectionError, match="has no name"):
+        DestinationDeclaration(tool_id="send_email", arguments=(nameless,))
