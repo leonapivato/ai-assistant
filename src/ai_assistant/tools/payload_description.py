@@ -332,6 +332,55 @@ def _spans_of(argument: PayloadArgument, value: FrozenJson) -> tuple[tuple[SpanR
     return ((SpanRef(argument=argument.name), value),)
 
 
+def _checked_provenance(
+    provenance: Mapping[SpanRef, DiscloserProvenance], tool_id: str
+) -> dict[SpanRef, DiscloserProvenance]:
+    """Refuse a carried provenance that is not one of ADR-0146 §1's two states.
+
+    The annotation says :class:`DiscloserProvenance`; a mapping arriving at run
+    time says whatever it holds. That gap matters here more than it usually does,
+    because the value being carried is the one ADR-0146 §2 makes fail-closed: a
+    span with **no** recorded origin is system-selected, and an unrecognised value
+    slipping through would be a third state the description records and no clause
+    admits — the permissive default arriving by a different door. So it is
+    checked, in the idiom `tools/registry.py` already uses for ``checked_timeout``
+    and ADR-0026 §2 for an injected clock. Adversarial review found it on round 4.
+
+    Refused rather than defaulted, because a malformed entry is not "no origin was
+    recorded" — it is a caller whose wiring is wrong, and ADR-0148 §1's third
+    clause refuses a description that cannot be derived rather than deriving a
+    plausible one.
+
+    Args:
+        provenance: The carried mapping, as given.
+        tool_id: The tool being described, for the refusal's text.
+
+    Returns:
+        The same mapping, with every key and value checked.
+
+    Raises:
+        PayloadDescriptionError: If a key is not a :class:`SpanRef` or a value is
+            not a :class:`DiscloserProvenance`. Neither message quotes the
+            offending value: a forged entry could hold anything, including the
+            content a description exists to avoid holding.
+    """
+    checked: dict[SpanRef, DiscloserProvenance] = {}
+    for key, value in provenance.items():
+        span: object = key
+        recorded: object = value
+        if not isinstance(span, SpanRef):
+            msg = f"{tool_id}: carried provenance is keyed by something that is not a span"
+            raise PayloadDescriptionError(msg)
+        if not isinstance(recorded, DiscloserProvenance):
+            msg = (
+                f"{tool_id}: the provenance carried for {span.argument!r} is not one of "
+                f"the two states ADR-0146 §1 admits"
+            )
+            raise PayloadDescriptionError(msg)
+        checked[span] = recorded
+    return checked
+
+
 def describe_payload(
     declaration: EgressToolDeclaration,
     parameters: Mapping[str, FrozenJson],
@@ -380,12 +429,14 @@ def describe_payload(
         DestinationSelectionError: If the destinations cannot be read and
             canonicalised out of ``parameters`` (ADR-0148 §1's third clause).
         PayloadDescriptionError: If an argument's value is not text or a list of
-            text, or if ``provenance`` names a span this call does not transmit.
-            The second is refused rather than ignored: a carried provenance for a
+            text, if a carried provenance is not one of ADR-0146 §1's two states,
+            or if ``provenance`` names a span this call does not transmit.
+            The last is refused rather than ignored: a carried provenance for a
             span that is not there means the caller and this derivation disagree
             about what the payload is, and the disagreement is exactly what a
             silent drop would hide.
     """
+    carried = _checked_provenance(provenance, declaration.tool_id)
     declared = {argument.name: argument for argument in declaration.payload.arguments}
     undescribed = sorted(set(parameters) - set(declared))
     if undescribed:
@@ -403,7 +454,7 @@ def describe_payload(
             spans.append(
                 SpanDescription(
                     span=span,
-                    provenance=provenance.get(span, DiscloserProvenance.SYSTEM_SELECTED),
+                    provenance=carried.get(span, DiscloserProvenance.SYSTEM_SELECTED),
                     characters=len(text),
                     tier=argument.establishes_tier,
                 )
@@ -411,7 +462,7 @@ def describe_payload(
 
     unknown = sorted(
         f"{span.argument}[{span.index}]" if span.index is not None else span.argument
-        for span in set(provenance) - {described.span for described in spans}
+        for span in set(carried) - {described.span for described in spans}
     )
     if unknown:
         msg = (

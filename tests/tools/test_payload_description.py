@@ -346,6 +346,46 @@ def test_the_bundled_declaration_is_checked_once_and_then_trusted() -> None:
     }
 
 
+def test_a_carried_provenance_outside_the_two_states_is_refused() -> None:
+    """Adversarial round 4: the annotation is not the check.
+
+    ADR-0146 §2's fail-closed rule covers the span with **no** recorded origin. A
+    value that is not one of §1's two states is a different thing — a caller whose
+    wiring is wrong — and letting it through would put a third provenance in a
+    description that no clause admits, which is the permissive default arriving by
+    another door.
+    """
+    forged: dict[SpanRef, DiscloserProvenance] = {
+        SpanRef(argument="body"): "user_authored"  # type: ignore[dict-item]
+    }
+
+    with pytest.raises(PayloadDescriptionError, match="two states"):
+        _describe(dict(_ARGUMENTS), forged)
+
+
+def test_a_carried_provenance_keyed_by_something_other_than_a_span_is_refused() -> None:
+    """The other half of the same mapping, checked for the same reason."""
+    forged: dict[SpanRef, DiscloserProvenance] = {
+        "body": DiscloserProvenance.USER_AUTHORED  # type: ignore[dict-item]
+    }
+
+    with pytest.raises(PayloadDescriptionError, match="not a span"):
+        _describe(dict(_ARGUMENTS), forged)
+
+
+def test_a_provenance_refusal_never_quotes_what_it_refused() -> None:
+    """A forged entry can hold anything, content included."""
+    needle = "the secret is swordfish"
+    forged: dict[SpanRef, DiscloserProvenance] = {
+        SpanRef(argument="body"): needle  # type: ignore[dict-item]
+    }
+
+    with pytest.raises(PayloadDescriptionError) as raised:
+        _describe(dict(_ARGUMENTS), forged)
+
+    assert needle not in str(raised.value)
+
+
 def test_a_payload_declaration_naming_no_argument_is_refused() -> None:
     """A declaration that covers nothing would make every span undescribed."""
     with pytest.raises(PayloadDescriptionError, match="at least one"):
