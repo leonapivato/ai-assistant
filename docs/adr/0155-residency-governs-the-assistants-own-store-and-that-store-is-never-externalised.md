@@ -408,7 +408,10 @@ checkable direction and the one a reviewer can test a change against.
 > it, and those arguments were admitted or refused by §2 and by this clause when they
 > were composed. That exclusion reaches that step's own recorded arguments and
 > nothing else the store holds — not another step, not another plan, and no other
-> record. The prohibition is stated
+> record — and it is an exclusion from this clause's **direct-obtaining limb alone**.
+> It says nothing about how those arguments came to hold what they hold, neither
+> permitting nor excusing it; that question is the clause below's, and §4's first
+> concrete path is the worked case. The prohibition is stated
 > over what a component obtained, what it supplied, and when it supplied it, that
 > moment being a recorded persistence and never a construction, an intention or a
 > purpose. It is not stated over what a span contains, and no lane reads it as
@@ -533,11 +536,17 @@ system can actually hold, and name what it does not.
   and plans do belong to the store (§1's own illustration says so); what over-reached
   was the prohibition, so the prohibition is what narrows.
 
-  **It does not reopen #95's hole**, and the reason is that the excluded value is only
-  what was already in that step's arguments when the plan was persisted. A planner
-  that writes a recalled record into an argument from its own prompt context is the
-  case §3's second clause already disposes of as an accepted residue, governed by §2's
-  conditions alone — the exclusion moves nothing into or out of that residue. What the
+  **It does not reopen #95's hole**, and adversarial review put the question directly
+  on round 10: a planner handed a recalled record emits it into the step's parameters
+  before persistence, and the exclusion then covers the runner's read. That is
+  **§4's first concrete path**, which this document has disposed of as the second
+  clause's accepted residue since before the exclusion existed — so the exclusion
+  moves nothing into or out of that residue. It could not have been otherwise: what
+  caught that path before round 9 was the runner's store read, the same limb that
+  caught *every* send and made the clause self-refuting, and a limb that forbids the
+  whole of §2 closed nothing. #95's hole is narrower and is stated in its own words —
+  "a **tool** could persistently write assistant-derived *memory* into a calendar" —
+  which is a component act at execution and is forbidden absolutely. What the
   first clause still bites on is a component reading the store **at execution** and
   routing the value into a span: #95's tool that writes assistant-derived memory into a
   calendar, and §4's second concrete path, both reached exactly as before. Nor can the
