@@ -23,9 +23,17 @@
   rather than diluting it should read §1's rationale and §3 together — §3 is the
   half the clause never had.
 - **§4 states what enforces §3 in this tree: nothing yet.** The finding is named
-  with an issue rather than smoothed, and the reason is structural — the marker the
-  corpus has (ADR-0146's discloser provenance) records *who disclosed* a span, not
-  *where it came from*, and the two questions come apart exactly on this line.
+  with an issue (#1154) rather than smoothed, and the reason is structural — the
+  marker the corpus has (ADR-0146's discloser provenance) records *who disclosed* a
+  span, not *where it came from*, and the two questions come apart exactly on this
+  line.
+- **§3's second clause names what the prohibition cannot reach, rather than covering
+  it with a form of words.** A span produced by a model that saw store content in its
+  turn context is the relation ADR-0098 §5 holds **unrecoverable** and §12 forbids
+  stating a bound over. An earlier draft reached it with "an artifact derived from
+  one"; architecture review found the defect and it is recorded in §3 rather than
+  quietly repaired, because ADR-0098, ADR-0146 and ADR-0154 each made and corrected
+  the same one.
 - **Adds no `core` surface.** No Protocol, no type, no field, no enum member. The
   recorded origin §4 finds missing is `core` surface and owes its own ADR (golden
   rule 5, ADR-0015 §5); §4 defers it with its trigger rather than specifying it.
@@ -380,11 +388,23 @@ checkable direction and the one a reviewer can test a change against.
 
 > **Normative.** No component places into a span it prepares for transmission
 > through the designated `tools/` egress seam a value it obtained from the
-> assistant's own store (§1), or an artifact derived from one. The prohibition is on
-> what the component **obtained**; it is not stated over what a span contains, and no
-> lane reads it as requiring or licensing an inspection of content.
+> assistant's own store (§1), nor a value produced from one by an operation to which
+> that component supplied the value as an input — a copy, an excerpt, a re-encoding,
+> a rendering, or a summary or translation it computed or commissioned. The
+> prohibition is stated over what the component **obtained** and what it **supplied**;
+> it is not stated over what a span contains, and no lane reads it as requiring or
+> licensing an inspection of content.
 
-> **Normative.** No authorisation makes such a transmission lawful. A per-call user
+> **Normative.** The clause above does not reach a span whose only relation to the
+> assistant's own store runs through a model's context — a model given store content
+> by one path and producing an egress argument by another. Whether such an argument
+> derives from what the model read is the relation ADR-0098 §5 holds is **not
+> recoverable** once the output has been recorded truthfully, and ADR-0098 §12
+> forbids stating a bound over it. No lane reads this ADR as ruling that case, as
+> permitting it, or as having a mechanism for it.
+
+> **Normative.** No authorisation makes a transmission the first clause forbids
+> lawful. A per-call user
 > decision under ADR-0148 §3 does not; a standing user policy does not, and
 > ADR-0154 §4 admits none at this seam in any case; and neither a configuration, a
 > connected account, a tool declaration nor an approved payload description does.
@@ -398,6 +418,53 @@ checkable direction and the one a reviewer can test a change against.
 > **Normative.** No lane reads this ADR, ADR-0004 §6, ADR-0073 §10's deferred
 > `export` command, ADR-0007's `MemoryStore.export`, or ADR-0123's backup artifact
 > as being, or as authorising, the ADR the clause above reserves the exception to.
+
+**The first clause is stated over what a component obtained and supplied, and an
+earlier draft stated it over "an artifact derived from one" — which is the bound
+this corpus has already ruled nobody may state.** Architecture review found it on
+round 2 of the loop, and it is the most valuable finding this document received. A
+model handed recalled memory and asked to draft a message produces a body, and no
+component can tell which of its words derive from which of the model's inputs;
+ADR-0098 §5 holds that "produced from external content" is "**not recoverable** once
+a model's output has been recorded truthfully", and §12 makes the constraint general:
+"whatever is decided has to be decidable from recorded origin". A rule two conforming
+implementations answer oppositely is not a contract the seam can extend against.
+ADR-0154 §4 was corrected for the identical defect on its own round 6, ADR-0146 was
+corrected for it twice, and ADR-0098 §3 records the corpus making it and fixing it
+before either. **The pull toward it is a property of writing about this subject**, so
+it is recorded rather than quietly repaired.
+
+**The repair keeps the whole of what #95 asked for, and the second clause states
+exactly what it gives up.** #95's case is a *component* act — "a tool could
+persistently write assistant-derived *memory* into a calendar and claim compliance" —
+and that is decidable at the component and is now forbidden absolutely, including the
+evasion of routing the record through a summariser, because the component supplied
+the value as the input. What the first clause cannot reach is a model that saw store
+content in its turn context and later wrote an argument. That is named in the second
+clause rather than covered by a form of words, on ADR-0146 §7's discipline: state the
+bound the system can actually hold, and name what it does not.
+
+**Two wider rules were considered for the residue and both were refused.** Forbidding
+an egress call whose arguments a model produced while store content was in its
+context *is* decidable from recorded origin — but it forbids the product: recalling
+the meeting time in order to email Bob about the meeting is the assistant working, and
+a rule that prohibits it is the "false on the day it is written" shape ADR-0146's
+Context refuses. Gating registration until the residue is resolved — the second
+direction the review offered — was refused because ADR-0154 §6's bar is "until an ADR
+has answered #95", #95's question is the residency scope question §1 answers, and
+gating a registration on a relation ADR-0098 §5 holds unrecoverable would gate it
+indefinitely on something no ADR can deliver. What is owed instead is the recorded
+origin **#1154** carries, which is what would make a narrower rule over the residue
+statable at all; §4 names it with its trigger.
+
+**What bounds the residue today, honestly enumerated.** Every send is a fresh decision
+of the owner about that call, over a canonical destination set and a payload
+description stating each span's extent (§2, ADR-0148 §8). No external content selects,
+parameterises or confirms the call (ADR-0098 §1, ADR-0154 §4). And the owner is the
+one person who can read the body and recognise their own memory in it. That is
+containment and not prevention, and the distance between those two words is this
+clause's accepted cost — the same sentence ADR-0146 §7 wrote about a different gap,
+for the same reason.
 
 **This is the clause the removed draft did not have, and it is why this ADR is a
 strengthening.** #95's hole was that a reading confining residency to the
@@ -450,6 +517,14 @@ head-on.
 This section is otherwise an account of the tree and is **not normative**
 (ADR-0089 §1). It was verified by reading `origin/main` at `9a401306`, not by
 transcribing a prior ADR's summary.
+
+**Two different absences, and they are not the same kind.** §3's first clause is
+**statable and unenforced**: it is decidable at the component, a reviewer can test a
+change against it, and what is missing is a mechanism. §3's second clause records
+something else — a case that is **not statable at all** today, because the relation
+it would be stated over is unrecoverable (ADR-0098 §5, §12). Issue #1154 is what
+would change the second into the first, which is why its trigger is written where it
+is rather than at the first externalisation.
 
 **What holds today, and it is a fact rather than a control.** No tool is registered
 at the seam: `build_default_registry` in `ai_assistant.tools.builtin` returns
@@ -696,7 +771,7 @@ neither performs nor blesses any of it.
 
 ### 7. What is not decided here
 
-> **Normative.** Beyond §1's three clauses, §2's two, §3's four, §4's one, §5's
+> **Normative.** Beyond §1's three clauses, §2's two, §3's five, §4's one, §5's
 > three and §6's four, this ADR decides nothing. It registers no tool, designates
 > no seam, attests, relaxes or adds no condition of ADR-0017 §3, adds no `core`
 > name, changes no Protocol, adds no `DestinationProtocol` member and authorises no
@@ -746,6 +821,12 @@ absorbed:
 - **ADR-0004 §2's residency clause becomes narrower in reach and stronger in
   force.** It stops purporting to forbid the tool layer the same ADR provisions, and
   it acquires — in §3 — the prohibition #95 showed the natural reading lacked.
+- **Three states are now distinguished where the corpus had one.** A rule that is
+  *unenforceable as stated* (the flat reading), a rule that is *statable and
+  unenforced* (§3's first clause, with #1154 as its mechanism), and a case that is
+  *not statable* because the relation is unrecoverable (§3's second clause, ADR-0098
+  §5 and §12). Naming the third rather than covering it with a form of words is what
+  architecture review's round-2 blocker bought.
 - **A rule that was unenforceable and a rule that is unenforced are now distinct,
   and the second is written down.** §3 binds authors and reviewers today; §4 says in
   a marked clause that nothing in code enforces it, and the issue it files carries
@@ -772,7 +853,7 @@ absorbed:
 This ADR is in **ADR-0089's marked regime**: it carries well-formed clauses, so the
 marked clauses are the whole of what it obligates and the prose beside them supplies
 nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR cites is
-retro-marked. What binds is **nineteen clauses**: §1's three, §2's two, §3's four,
+retro-marked. What binds is **twenty clauses**: §1's three, §2's two, §3's five,
 §4's one, §5's three, §6's four and §7's two. Every one is a block quote at column 0
 preceded by a blank line, which ADR-0089 §2 requires, and each states one obligation
 with its own scope — two passages were split in drafting for that reason, §3's
