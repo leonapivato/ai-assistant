@@ -376,18 +376,50 @@ provider aliasing gives the inverse failure." That is a decision with an ADR's w
 of argument behind it, not a line in an enum, and a member added without one is a
 grant boundary drawn by whoever needed a canonicaliser that afternoon.
 
-**`SMTP` lands here rather than with (b) because this ADR has the evidence for it.**
-PR #1120 built the canonicaliser and argued its equivalences from the RFCs: the
-domain is lowered, the local part is copied byte for byte, and every form whose
-equivalence the protocol does not establish — a quoted local part, a non-ASCII
-address where IDNA2003 and IDNA2008 disagree, an address literal, a trailing dot,
-whitespace — is refused rather than folded. That is ADR-0148 §2's second clause
-satisfied with its working shown, which is exactly what the clause above asks a
-member's ADR for, and this is the ADR holding that producer.
+**`SMTP` lands here rather than with (b) because this ADR has the evidence for it,
+and its content is marked because an unmarked version of it would bind nobody.** An
+earlier draft stated the rules in this paragraph and left the clause above saying only
+that the member exists. Adversarial review found on round 6 that ADR-0089 §3 then
+makes those rules explanatory text — so one canonicaliser could refuse a quoted local
+part and another keep it, both conforming, both deriving different bindings for one
+request, which is ADR-0148 §2's sixth clause failing at the one place it was written
+for. The rules are now clauses.
+
+**Each refusal is a case where the protocol does not settle equivalence, and folding
+would be inventing one.** RFC 5321 §2.4 makes an SMTP local part case-sensitive and
+leaves the domain not (RFC 4343), which is why the two halves are treated differently
+and why the local part is copied byte for byte — "MUST BE interpreted and assigned
+semantics only by the host specified in the domain part". A **quoted** local part has
+escaping rules whose unquoted equivalent the protocol does not establish. A
+**non-ASCII** address is refused because IDNA2003 and IDNA2008 disagree about U-label
+and A-label equivalence, so there is no single answer to fold to. An **address
+literal** names an equivalence class belonging to the IP stack rather than to this
+seam. A **trailing dot** is a DNS root marker whose equivalence to the dotless form is
+a resolver's rule, not the address grammar's. **Whitespace** is refused rather than
+trimmed because trimming is a rewrite, which ADR-0148 §2's second clause forbids on any
+ground weaker than the protocol saying the two forms are one recipient. PR #1120 built
+and reviewed exactly this canonicaliser, which is the evidence ADR-0073 §4 asks for and
+the reason this member is decidable here at all.
 
 > **Normative.** `DestinationProtocol` has exactly **one** member, `SMTP`, and this
 > ADR fixes that membership. Adding it authorises nothing: it neither implies a
 > canonicaliser exists, nor registers a tool, nor permits any transmission.
+
+> **Normative.** `SMTP` asserts exactly these equivalences and no others. Two
+> supplied forms denote one recipient when their **local parts** — everything before
+> the final `@` — are **byte-identical**, and their **domains** — everything after it
+> — are equal after **ASCII lowercasing**. The canonical form is the supplied form
+> with the domain ASCII-lowercased and the local part copied unchanged. No
+> canonicaliser folds, strips, trims, reorders or otherwise rewrites a local part on
+> any ground.
+
+> **Normative.** Under `SMTP`, every form whose equivalence the protocol does not
+> establish is **refused** rather than canonicalised, and a refusal is ADR-0148 §1's
+> third clause — the request is not built and no ruling is sought. Refused: a quoted
+> local part; any address carrying a character outside ASCII; an address literal, in
+> which the domain is an IP address rather than a name; a trailing dot on the domain;
+> an address carrying whitespace anywhere, which is refused and never trimmed; and
+> any string with no `@` or with an empty local part or domain.
 
 > **Normative.** Every further member is added by a **ratified contract ADR of its
 > own**, merged before any canonicaliser, integration or lane implements against it
@@ -987,11 +1019,26 @@ lands there whole.
 > span, each stating that whole value's extent. A binding that decomposes either
 > further is refused.
 
+> **Normative.** That lane also ships a **construction refusal for every ill-formed
+> `CanonicalDestination`** §3's two-shape clause excludes: a member carrying a
+> protocol, a canonical form **and** an account; one carrying an account and exactly
+> one of the other two; one carrying a protocol and no canonical form, or a canonical
+> form and no protocol; and one carrying none of the three. A test exercising only the
+> two well-formed shapes satisfies none of these.
+
 > **Normative.** That lane also ships the **account-member** pair: two bindings whose
 > accounts share an identity and differ in their connection reference derive
 > **unequal** canonical destination sets, and two whose accounts share a reference and
 > differ in identity likewise. An implementation whose account member holds one of the
 > two facts passes one of these and fails the other (§3).
+
+> **Normative.** The lane that implements the seam's `SMTP` canonicaliser ships a case
+> for **each** equivalence and **each** refusal §3 states: a pair differing only in
+> domain case canonicalises to one form; a pair differing only in local-part case
+> canonicalises to **two**; and a quoted local part, a non-ASCII address, an address
+> literal, a trailing dot, an address carrying whitespace, and a string with no `@`
+> are each **refused** rather than canonicalised or passed through. A canonicaliser
+> that lowercases the whole address passes the first and fails the second.
 
 > **Normative.** The lane that builds an egress `CONFIRM` ships the
 > **duplicate-across-arguments** case §10's third clause is stated for: one recipient
