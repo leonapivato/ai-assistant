@@ -1195,6 +1195,74 @@ def test_a_purge_that_raises_destroys_nothing_at_all(
     assert "the keyring is locked" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize(
+    "fault",
+    [
+        RuntimeError("the backend blew up in a way nobody enumerated"),
+        ValueError("a shape the seam never promised"),
+    ],
+    ids=["runtime-error", "value-error"],
+)
+@pytest.mark.usefixtures("settings")
+def test_a_purge_raising_outside_the_named_families_still_destroys_nothing(
+    data_dir: Path, purger: _WatchedPurger, fault: Exception, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §4's first clause reaches **any** exception, not a family of them.
+
+    An implementation is free to raise something nobody enumerated, and the clause
+    is written to cover exactly that: the act's obligation is to fail *legibly* —
+    nothing destroyed, the condition named, a classified exit — rather than to hand
+    the owner a traceback and an unswept directory. A narrower ``except`` would
+    satisfy every named case and breach the clause on the unnamed one.
+    """
+    _enrol(data_dir, "device-a")
+    purger.connect("someone@example.com")
+    purger.purge_fault = fault
+    before = _remaining(data_dir)
+
+    assert _run(data_dir) == EXIT_RESTART
+    assert _remaining(data_dir) == before
+    assert (data_dir / ENROLMENTS_FILENAME).exists()
+    assert purger.events == ["open", "connected", "purge", "close"]
+    printed = capsys.readouterr().err
+    assert str(fault) in printed
+    assert "Nothing was destroyed." in printed
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_connected_raising_outside_the_named_families_still_destroys_nothing(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §4's third clause is "treated identically", which reaches the breadth too."""
+    _enrol(data_dir, "device-a")
+    purger.connected_fault = RuntimeError("the store answered something unreadable")
+    before = _remaining(data_dir)
+
+    assert _run(data_dir) == EXIT_RESTART
+    assert _remaining(data_dir) == before
+    assert purger.events == ["open", "connected", "close"]
+    assert "the store answered something unreadable" in capsys.readouterr().err
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_build_raising_outside_the_named_families_still_destroys_nothing(
+    data_dir: Path, purger: _WatchedPurger, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The open is covered by the same breadth as the two calls after it."""
+    _enrol(data_dir, "device-a")
+
+    def refuse(_settings: Settings) -> OpenedConnections:
+        msg = "the composition root could not build a purger"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(purge, "build_connection_purger", refuse)
+    before = _remaining(data_dir)
+
+    assert _run(data_dir) == EXIT_RESTART
+    assert _remaining(data_dir) == before
+    assert purger.events == []
+
+
 @pytest.mark.usefixtures("settings")
 def test_a_connected_that_raises_destroys_nothing_and_never_reaches_the_purge(
     data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
