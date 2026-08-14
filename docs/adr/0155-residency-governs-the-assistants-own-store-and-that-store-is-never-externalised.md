@@ -28,7 +28,8 @@
   span, not *where it came from*, and the two questions come apart exactly on this
   line.
 - **§3's first clause is stated over what a component obtained, what it supplied and
-  at which stage — never over derivation.** Everything it does not reach is disposed
+  when — the moment fixed by the existence of the plan step naming the call, never
+  over derivation and never over purpose.** Everything it does not reach is disposed
   of by its second clause, which carries no antecedent of its own: §2's conditions
   govern, as an accepted residue with a revisit trigger. Earlier drafts reached the
   case by derivation and then by a carve-out with its own antecedent; both were
@@ -389,12 +390,14 @@ checkable direction and the one a reviewer can test a change against.
 > **Normative.** No component places into a span it prepares for transmission
 > through the designated `tools/` egress seam a value it obtained from the
 > assistant's own store (§1), nor the output of an operation to which **any**
-> component of this system supplied such a value **in the course of preparing that
-> egress call's arguments** — a copy, an excerpt, a re-encoding, a rendering, or a
-> summary or translation computed or commissioned there. The prohibition is stated
-> over what a component obtained, what it supplied, and at which stage it did so; it
-> is not stated over what a span contains, and no lane reads it as requiring or
-> licensing an inspection of content.
+> component of this system supplied such a value **at or after the moment the plan
+> step naming that egress call came into existence** — a copy, an excerpt, a
+> re-encoding, a rendering, or a summary or translation computed or commissioned from
+> that moment on. The prohibition is stated over what a component obtained, what it
+> supplied, and when it supplied it, that moment being fixed by the existence of a
+> recorded artifact and never by a judgement about purpose. It is not stated over what
+> a span contains, and no lane reads it as requiring or licensing an inspection of
+> content.
 
 > **Normative.** A span the clause above does not reach is **permitted or refused by
 > §2's conditions alone**: this ADR adds no bar to it and no licence for it. That
@@ -463,13 +466,24 @@ system can actually hold, and name what it does not.
   record and commissions "draft an email summarising this", component B places the
   output. A prepared no span and B supplied no store value, so neither was reached.
   The supply now binds whichever component performs it.
-- **At which stage.** This is what keeps the clause from swallowing the product.
-  `orchestration` renders retrieved records into a planner prompt before any plan
-  exists (ADR-0098 §12 records that payload), so recalling the meeting time in order
-  to email Bob about the meeting is *not* a supply in the course of preparing an
-  egress call's arguments, and stays permitted. A component that reads the store
-  while those arguments are being prepared is inside the clause, whatever it does
-  with the value next.
+- **When, fixed by a recorded artifact.** This is what keeps the clause from
+  swallowing the product, and it took two attempts to state objectively. The moment
+  is the existence of the **plan step naming the egress call** — a durable record in
+  the plan store (ADR-0014), the same artifact ADR-0148 §9 hangs the attempt
+  identifier and the four outcomes on. Before it exists there is no egress call to
+  prepare for: `orchestration` renders retrieved records into a planner prompt while
+  no plan exists at all (ADR-0098 §12 records that payload), so recalling the meeting
+  time in order to email Bob about the meeting stays permitted. From that moment on,
+  any component reading the store and routing the value toward a span of that call is
+  inside the clause — including through an earlier step of the same plan, since the
+  send step already exists when that step runs.
+
+  An earlier draft said "in the course of preparing that egress call's arguments",
+  and adversarial review found on round 7 that the phrase has no determinate
+  boundary: the planner run that emits the step *literally* produces that call's
+  arguments, so two lanes could classify the same path oppositely. ADR-0089 §3 puts
+  the condition inside the clause, and a condition a reader cannot evaluate is not one.
+  The repair is the review's own direction — an objective recorded event.
 
 **The second clause is the complement of the first and carries no antecedent of its
 own, which is deliberate.** Architecture review on round 3 required the model-context
@@ -605,21 +619,24 @@ and this ADR closes neither.
 not confuse them.** `recall_memory` is registered today and returns matching records
 to the turn as JSON.
 
-- **A turn that recalls and then sends.** The record reaches the model's turn
-  context through the ordinary pipeline, and a later plan step carries an egress
-  call whose arguments no component supplied a store value toward. §3's first clause
+- **A turn that recalls and then sends.** The record reaches the planner's prompt
+  before any plan exists, and the plan that comes back carries an egress step. No
+  component supplied a store value at or after that step existed. §3's first clause
   does not reach it, so its second clause governs: **permitted or refused by §2's
   conditions alone**, and a lane may not add a bar §3 does not impose.
-- **A component that reads the store while an egress call's arguments are being
-  prepared**, and places the value — or the output of something it commissioned on
-  it — into a span. §3's first clause, forbidden absolutely, and **no code checks
-  it**. That is the gap #1154 carries.
+- **A component that reads the store once the egress step exists** — during that
+  step, or during an earlier step of the same plan — and places the value, or the
+  output of something it commissioned on it, into a span. §3's first clause,
+  forbidden absolutely, and **no code checks it**. That is the gap #1154 carries.
 
-The two differ only in *when* the store was read and *what the read was for*, and
-they are opposite in disposition — which is why the enforcement point is worth its
-own issue rather than a note. Nothing in the payload path records either fact: the
-binding derives spans from arguments and knows nothing about how those arguments came
-to hold what they hold.
+The two differ only in **when** the store was read relative to a durable record that
+already exists, and they are opposite in disposition — which is why the enforcement
+point is worth its own issue rather than a note. Nothing in the payload path records
+the fact: `EgressBindingSeam._spans_of` derives spans from arguments and knows
+nothing about how those arguments came to hold what they hold, and no store read is
+correlated with a plan step anywhere. The fact is *recordable* — which is what makes
+#1154 a mechanism question rather than another unrecoverable relation — and it is not
+recorded.
 
 **What closing it would take, and why this ADR does not specify it.** It wants a
 **recorded origin** carried with a span — the same discipline ADR-0098 §12 requires
