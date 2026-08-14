@@ -446,23 +446,25 @@ This section is a classification of the change being made and is not normative
 > this decision and needs its own ADR (golden rule 5).
 
 > **Normative.** This ADR claims **no** name in the purge, retention or routing
-> territory ADR-0126, ADR-0149 §8 and issue #909 leave open, and no lane cites it
-> toward one. Nothing here forecloses a seam, a member or a type that territory's
-> own ADR places.
+> territory ADR-0126, ADR-0149 §8 and issue #909 opened — neither in the part
+> ADR-0153 has since decided, whose one `core` name is its `ConnectionPurger`, nor in
+> the part that stays open, which ADR-0153 §8 confines to every `SecretScope` member
+> other than `INTEGRATION`. No lane cites this ADR toward either. Nothing here
+> forecloses a seam, a member or a type that territory's own ADR places.
 
 **The intersection was checked rather than assumed, and re-checked when the sixth
 name was added.** Against ADR-0150 §2: every name it authorises appears above as a
 non-authorisation row, and the six names this ADR claims appear on none of its lists.
 Against ADR-0151 §15: it authorises five `AssistantEngine` methods, one Protocol,
 three types, two constants and seven error classes, and this ADR claims none of them
-and adds nothing to any. Against the one other decision in flight beside this — the
-offline delete act's routing to the integration purge, drafted in **PR #1129** and
-unmerged, so not yet a decision anything may cite: its `core` authorisation is
-exactly one new Protocol in `core/protocols.py`, and it states in terms that it adds
-no type to `core/types.py`, no class to `core/errors.py` and no enum member. The two
-authorisation lists are therefore disjoint, and that lane sits on the
-`service`→`tools` boundary this ADR does not reach. Checked against its drafted text
-rather than assumed, and it binds nothing until it merges.
+and adds nothing to any. Against **ADR-0153 §7**, which merged while this ADR was in
+review: it authorises exactly one `core` name, the Protocol `ConnectionPurger`, and
+states in terms that it adds no type to `core/types.py`, no class to `core/errors.py`
+and no enum member. The two authorisation lists are therefore disjoint, and that
+decision sits on the `service`→`tools` boundary this ADR does not reach. ADR-0153
+also partially supersedes ADR-0126; nothing this ADR relies on comes from either of
+the limbs it replaced, which are the delete act's keyring reach and its injection
+boundary, and §12 records that the territory's decided half changes nothing here.
 The one shared word is `Egress`, which prefixes ADR-0150's value types and this
 ADR's seam, locator and returned call; the one shared concept is the connected
 account, and §10 states in terms which of the two account types this surface holds.
@@ -1354,8 +1356,10 @@ form).
 > not admitted. Each of those needs its own ratified ADR on ADR-0150 §3's terms.
 
 > **Normative.** Nothing here decides the purge, retention or routing seam ADR-0126,
-> ADR-0149 §8's fourth clause and issue #909 leave open, and no lane cites this ADR
-> toward one.
+> ADR-0149 §8's fourth clause and issue #909 opened, and no lane cites this ADR
+> toward one. ADR-0153 has since decided the `INTEGRATION` routing and partially
+> superseded ADR-0126 in doing so; that changes nothing above, because this ADR
+> decided no part of that territory before and decides none of it now.
 
 > **Normative.** A **`RecursionError`** raised by `_deep_freeze` in
 > `core/types.py` while §1's revalidation rebuilds a `FrozenJsonMapping` argument is
