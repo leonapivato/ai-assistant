@@ -27,37 +27,33 @@
   marker the corpus has (ADR-0146's discloser provenance) records *who disclosed* a
   span, not *where it came from*, and the two questions come apart exactly on this
   line.
-- **§3's first clause is the maximally restrictive interim rule, and it carries no
-  time predicate and no exception.** No component introduces into an egress span a
-  value it obtained from any store under `Settings.data_dir`, nor the output of an
-  operation, or chain of operations, that any component fed such a value into — at any
-  moment, by any route, and to any depth, with a model call carved out because §3's
-  second clause governs it exclusively, which is what keeps that clause's reserved fork
-  reachable. No
-  authorisation
-  cures it. The ordinary machinery is untouched because nothing on the send path
-  *introduces* such a value: ADR-0150 §4 pins a span to a key of the request's own
+- **§3 defines one class and partitions only its governance.** §3's first clause
+  defines **covered content**: a value obtained from any store under
+  `Settings.data_dir`, and the output of any operation — model call or otherwise —
+  supplied covered content, propagating through every operation without exception and
+  decided at each supply site from recorded origin, never by inspecting content. §3's
+  second clause forbids introducing covered content into an egress span where **no
+  model call is in its chain**; §3's third clause forbids a span carrying covered
+  content where **one is**. Every chain either contains a model call or does not, so
+  the pair is exhaustive and nothing escapes both. No authorisation cures either.
+- **The ordinary machinery is untouched**, because nothing on the send path
+  *introduces* covered content: ADR-0150 §4 pins a span to a key of the request's own
   `parameters`, so the runner carries what was composed rather than adding to it, and
   the binder's connection read reaches the binding and the destination set, which are
   not spans.
-- **§3's second clause forbids the model-context case outright, and reserves only
-  its relaxation to the owner.** Diffuse influence — a model drafting under a prompt
-  that carried store content, with no component routing an extractable value — is the
-  boundary twelve review rounds could not state a *permissive* rule for, so the clause
-  states the restrictive one and makes it decidable at the supply site: the component
-  assembling a model call's context knows what it put there, and does not emit that
-  call's output into an egress span, and the clause defines "supplied values" itself
-  rather than borrowing a word the codebase already uses for a narrower thing. What an
-  owner ruling decides is whether to ratify it as permanent or to commission a later
-  ADR designing a content-bearing approval surface compatible with ADR-0150 §10, under
-  which a relaxation could then be considered — so **relaxation needs its own decision
-  and its own mechanism**, and neither exists today. An owner ruling alone does not
-  relax the clause. Earlier drafts reached the case
-  by derivation, by a
-  carve-out with its own antecedent, by an exception for the call's own recorded
-  arguments, by a store partition and by a read-relation pair; all five were
-  defeated in review, and §3 records how rather than quietly repairing it, because
-  ADR-0098, ADR-0146 and ADR-0154 each made and corrected the first of them.
+- **§3's third clause is an interim, and only its relaxation is reserved to the
+  owner.** Model-influenced content — the boundary twelve review rounds could not
+  state a *permissive* rule for — is forbidden outright today. What an owner ruling
+  decides is whether to ratify that permanently or to commission a later ADR designing
+  a content-bearing approval surface compatible with ADR-0150 §10, under which a
+  relaxation could then be considered — so **relaxation needs its own decision and its
+  own mechanism**, and neither exists today. An owner ruling alone does not relax the
+  clause. Earlier drafts reached the case by derivation, by a carve-out with its own
+  antecedent, by an exception for the call's own recorded arguments, by a store
+  partition, by a read-relation pair, by a persistence moment and by a chain limb with
+  the model carved out of it; all seven were defeated in review, and §3 records how
+  rather than quietly repairing it, because ADR-0098, ADR-0146 and ADR-0154 each made
+  and corrected the first of them.
 - **Adds no `core` surface.** No Protocol, no type, no field, no enum member. The
   recorded origin §4 finds missing is `core` surface and owes its own ADR (golden
   rule 5, ADR-0015 §5); §4 defers it with its trigger rather than specifying it.
@@ -223,8 +219,8 @@ unmarked text supplies none.
 > this system keeps on the owner's behalf, under the data directory
 > `Settings.data_dir` resolves. That store lives on the owner's machine, under that
 > one directory, and no component of this system places any part of it in a service
-> another party operates — save to the extent an ADR reserved by §3's fourth clause
-> permits, which is the only exception to this clause and to §3's first.
+> another party operates — save to the extent an ADR reserved by §3's fifth clause
+> permits, which is the only exception to this clause and to §3's second.
 
 > **Normative.** Whether a value belongs to the assistant's own store is decided by
 > **where this system persists it**, never by what it contains and never by how
@@ -257,7 +253,7 @@ nothing.
 
 **The first clause carries the export exception inside itself, and it had to.** An
 earlier draft stated the prohibition unconditionally here and reserved the exception
-in §3's fourth clause alone. Adversarial review found on round 1 that the pair left
+in §3's fifth clause alone. Adversarial review found on round 1 that the pair left
 the reserved ADR with no lawful outcome: an export it permitted would satisfy §3 and
 still breach §1, so the route §3 offers would have been unreachable without
 superseding a clause that never mentioned it. That is ADR-0089 §3's requirement
@@ -410,44 +406,36 @@ checkable direction and the one a reviewer can test a change against.
 
 ### 3. The hard line: assistant-derived state is never externalised
 
-> **Normative.** No component introduces into a span of an egress call at the
-> designated `tools/` egress seam a value it obtained from **any** store this system
-> keeps under `Settings.data_dir`, nor the output of an operation — or of any chain of
-> operations — where any component of this system supplied to that operation, or to any
-> earlier operation in the chain, such a value or an output governed by this limb;
-> **except a model call, which the clause below governs exclusively**. This holds **at
-> any moment, by any route**, whether the value travels verbatim or as a copy, an
-> excerpt, a re-encoding, a rendering, a summary or a translation. There is no moment
-> before which this is permitted and no read of any such store that is excepted from
-> it, and no authorisation cures it. This clause reaches the **direct** case — a value
-> a component obtained from such a store and introduced, or fed into a chain of
-> non-model operations whose output any component then introduced — which is its
-> predicate's whole extent; the model-context case is the clause below's and is not
-> governed here. This clause is stated over what a component obtained and what it
-> introduced, never over what a span contains, and no lane reads it as requiring or
-> licensing an inspection of content.
+> **Normative.** **Covered content** is: a value any component obtained from a store
+> this system keeps under `Settings.data_dir`; and the output of any operation — a
+> model call or any other — to which any component of this system supplied covered
+> content, under any parameter and whatever that parameter is named. The class
+> propagates through every operation without exception; what varies below is only which
+> clause governs its reaching an egress span. Membership is decided at each supply site
+> from recorded origin — a component knows whether what it supplies is covered — and
+> never by inspecting content for resemblance, which is the unrecoverable relation
+> ADR-0098 §5 and §12 forbid deciding on.
 
-> **Normative.** An egress span may not carry content produced by a model call **any**
-> of whose supplied values carried a value obtained from a store this system keeps
-> under `Settings.data_dir` —
-> whether or not any component routed an extractable value into the span. For this
-> clause a model call's supplied values are **every value rendered into or otherwise
-> supplied to that call, whatever the parameter is named**, explicitly including
-> `Planner.plan`'s `memories` argument and conversation history, and not only a value
-> passed under a parameter called `context`. This is decidable at the supply site: the
-> component that assembles a model call knows what it supplied to it, and such a
-> component does not emit that call's output into an egress step's parameters or into
-> any egress span. What is reserved to an owner ruling is whether to **(a)** ratify
-> this clause as permanent, or **(b)** commission a later ADR that designs a
-> content-bearing approval surface compatible with ADR-0150 §10 and states its privacy
-> consequences, under which a relaxation could then be considered. **An owner ruling
-> alone does not relax this clause; relaxation requires the commissioned ADR and its
-> approval surface, ratified, and until then every lane implements the prohibition as
-> written.** No lane, reviewer or later ADR makes that choice without an owner ruling,
-> and this clause is deliberately the more restrictive reading.
+> **Normative.** No component introduces covered content into a span of an egress call
+> at the designated `tools/` egress seam, where **no model call occurs in that
+> content's derivation chain**. This holds at any moment and by any route, whether the
+> content travels verbatim or as a copy, an excerpt, a re-encoding, a rendering, a
+> summary or a translation. No authorisation cures it, and its only exception is the
+> export ADR this section reserves below.
 
-> **Normative.** No authorisation makes a transmission the first clause forbids
-> lawful. A per-call user
+> **Normative.** An egress span may not carry covered content **whose derivation chain
+> includes a model call** — wherever that model call sits in the chain, upstream or
+> downstream of any other operation. What is reserved to an owner ruling is whether to
+> **(a)** ratify this clause as permanent, or **(b)** commission a later ADR that
+> designs a content-bearing approval surface compatible with ADR-0150 §10 and states
+> its privacy consequences, under which a relaxation could then be considered. **An
+> owner ruling alone does not relax this clause; relaxation requires the commissioned
+> ADR and its approval surface, ratified, and until then every lane implements the
+> prohibition as written.** No lane, reviewer or later ADR makes that choice without an
+> owner ruling, and this clause is deliberately the more restrictive reading.
+
+> **Normative.** No authorisation makes a transmission either prohibition above
+> forbids lawful. A per-call user
 > decision under ADR-0148 §3 does not; a standing user policy does not, and
 > ADR-0154 §4 admits none at this seam in any case; and neither a configuration, a
 > connected account, a tool declaration nor an approved payload description does.
@@ -477,37 +465,36 @@ corrected for it twice, and ADR-0098 §3 records the corpus making it and fixing
 before either. **The pull toward it is a property of writing about this subject**, so
 it is recorded rather than quietly repaired.
 
-**The limb closes over chains, because a prohibition that stops at one hop is a
-laundering instruction.** A limb reaching only an operation *directly* supplied a store
-value is defeated by inserting a second one: supply the record to formatter A, supply
-A's output to formatter B, introduce B's output. Architecture review found exactly that
-on round 19. So the limb propagates — an output it governs is itself a governed input,
-through every non-model transformation and to any depth. The decidability story is
-unchanged and is per-supply-site: each component knows what it supplied to what, which
-is recorded origin rather than an inference about content, and **#1154** remains the
-enforcement gap for all of it.
+**The class is defined once and only its governance is partitioned, which is what
+rounds 19 and 20 forced.** Earlier drafts wrote the propagation into the prohibition
+itself and then carved the model call out of it, and that entangled two different
+questions: *what is covered* and *which clause governs it*. Every version of the
+entanglement leaked. A limb reaching only an operation directly supplied a store value
+was defeated by inserting a second one — record to formatter A, A's output to formatter
+B, introduce B's output (architecture, round 19). Closing the chain but carving the
+model call out broke propagation at the model boundary in both directions: a store-fed
+model reply passed to a formatter before the span (both lenses, round 20), and a
+formatter's output fed *into* a model call, which the model clause's own predicate did
+not reach. Defining **covered content** once, with propagation through every operation
+and no exception, removes the seam rather than patching it: there is no boundary left
+for the class to stop at.
 
-**The model call is carved out because it has its own clause, and the carve is what
-keeps the reservation reachable.** A model call supplied store content is governed by
-the clause below and by nothing else here. That is deliberate: adversarial review found
-on round 19 that a limb reaching model outputs too would forbid the model-context case
-from *two* clauses, so the fork reserved below could never be relaxed however the owner
-ruled — the relaxation would have had to be written as an exception to every clause that
-otherwise forbade it. Carving the limb answers that by construction instead: **no other
-clause forbids the model case**, so the reservation's arms operate on exactly one clause
-and reach the whole of what they must reach. The carve narrows nothing in practice,
-because the clause below forbids the model case outright today.
+**The two prohibitions partition that class exhaustively, and that is a parity
+argument.** Every derivation chain either contains a model call or it does not. §3's
+second clause governs the chains that do not; §3's third clause governs the chains that
+do. No third case exists, so **no span carrying covered content escapes both**, which
+answers rounds 19 and 20 by construction rather than by another patch. And because the
+partition is drawn on exactly that predicate, the reserved fork in the third clause
+reaches exactly the model-influenced subclass — upstream and downstream variants alike,
+wherever the model call sits — so an owner relaxing it later relaxes the whole of what
+they were asked about and nothing else.
 
-**The operation-output limb binds *any* component, and that word was bought by a
-round.** Adversarial review found on round 6 that a two-component split defeated an
-earlier wording: component A reads the record and commissions "draft an email
-summarising this", component B places the output — A prepared no span and B supplied no
-store value, so neither was reached. A later rewrite of this clause narrowed the limb
-back to a single component and architecture review found the same split again on round
-18, which is why the rationale is written here rather than left to the clause: a
-property nothing explains is a property a rewrite silently drops. The supply binds
-whichever component performs it, and the introduction binds whichever component
-performs that.
+**Decidability is per supply site and unchanged.** A component knows whether what it is
+handing to an operation is covered, because it knows where it got it; nothing here asks
+whether a span's text *resembles* a stored record, which is the relation ADR-0098 §5
+holds unrecoverable and §12 forbids stating a bound over. **#1154** remains the gap
+between a rule authors and reviewers are bound by and a mechanism that enforces it, for
+both clauses equally.
 
 **The clause reaches #95's case whole, and reaches it without a time test.** #95's
 case is a *component* act — "a tool could persistently write assistant-derived
@@ -672,11 +659,12 @@ This section is otherwise an account of the tree and is **not normative**
 transcribing a prior ADR's summary.
 
 **Two absences, and both clauses are statable — what neither has is a mechanism.**
-§3's first clause is **statable and unenforced**: it is decidable at the component, a
-reviewer can test a change against it, and what is missing is enforcement. §3's second
-clause is **also statable**, and that is the change round 17 forced into the open: it
-is stated at the *supply site*, over what a component supplied to a model call, which
-is a fact about the request. What remains unrecoverable is the different relation
+§3's second clause is **statable and unenforced**: it is decidable at the component, a
+reviewer can test a change against it, and what is missing is enforcement. §3's third
+clause is **also statable**, and that is the change rounds 17 and 20 forced into the
+open: both are stated over §3's first clause's *supply-site* class, over what a
+component supplied to what, which is a fact about the request. What remains
+unrecoverable is the different relation
 ADR-0098 §5 and §12 name — whether a particular span's content was *produced from* a
 particular input — and no clause here is stated over that. So the two clauses differ
 in what they reach, not in whether they can be said. Issue #1154 carries the
@@ -725,29 +713,28 @@ and this ADR closes neither.
 not confuse them.** `recall_memory` is registered today and returns matching records
 to the turn as JSON.
 
-- **A turn that recalls and then sends, where the record reaches the planner's prompt
-  and the model writes the argument.** No component routed an extractable value into a
-  span — the influence ran through the model, so §3's first clause does not reach it.
-  §3's **second clause forbids it directly**: the span carries content produced by a
-  model call that was supplied store content — as `memories`, one of the supplied
-  values the clause names — and `ConversationLoop`, which assembled that call, is the
-  component the clause binds. An owner ruling may later ratify that, or commission the
+- **A turn that recalls and then sends.** `ConversationLoop` supplies the records to
+  the planner's model call, so that call's output is covered content with a model call
+  in its chain, and so is anything a later operation derives from it. §3's **third
+  clause** forbids it reaching a span — no component needed to route an extractable
+  value, which is the point. An owner ruling may later ratify that, or commission the
   approval surface under which relaxing it could be considered; a lane may not read
   the reservation as a permission now.
 - **A component that reads a store and introduces the value, or the output of any
-  chain of non-model operations it fed that value into, into a span** — any store, at
-  any moment and to any depth, whether during that step, an earlier step of the same
-  plan, or before any plan existed.
-  §3's first clause, forbidden absolutely, and **no code checks it**. That is the gap
-  #1154 carries.
+  chain of operations it fed that value into, into a span**, with no model call
+  anywhere in that chain — any store, at any moment and to any depth, whether during
+  that step, an earlier step of the same plan, or before any plan existed.
+  §3's **second clause**, forbidden absolutely, and **no code checks it**. That is the
+  gap #1154 carries.
 
-The two differ in **whether a component routed an extractable value** or a model was
-merely influenced, and they are not opposite in disposition today: the first is
-forbidden by the interim clause and reserved for the owner to relax, the second is
-forbidden outright. That is why the enforcement point is worth its own issue rather
-than a note. Nothing in the payload path records the fact: `EgressBindingSeam._spans_of`
-derives spans from arguments and knows nothing about how those arguments came to hold
-what they hold, and no store read is correlated with a span anywhere. The fact is
+The two differ in **whether a model call sits in the derivation chain**, which is the
+predicate the two clauses partition on, and they are not opposite in disposition
+today: the first is forbidden by the interim clause with its relaxation reserved to
+the owner, the second is forbidden outright with no reservation at all. That is why
+the enforcement point is worth its own issue rather than a note. Nothing in the
+payload path records the fact: `EgressBindingSeam._spans_of` derives spans from
+arguments and knows nothing about how those arguments came to hold what they hold,
+and no supply of covered content is correlated with a span anywhere. The fact is
 *recordable* — which is what makes #1154 a mechanism question rather than another
 unrecoverable relation — and it is not recorded.
 
@@ -914,10 +901,10 @@ one.
 > request's own `parameters`, which ADR-0150 §4 makes the spans themselves, and the
 > binder's connection read reaches the binding and the destination set rather than a
 > span, and it feeds no chain of operations whose output reaches one. This statement is
-> about §3's first clause only and does not reach §3's second:
-> whether a particular call's arguments were produced by a model call supplied store
-> content is a fact about that call, and the registering lane's statement under
-> the clause above addresses it call by call rather than once for the tool. The
+> about §3's second clause only and does not reach §3's third: whether a particular
+> call's arguments are covered content with a model call in their chain is a fact about
+> that call, and the registering lane's statement under the clause above addresses it
+> call by call rather than once for the tool. The
 > statement is about the tool's ordinary operation and its declared arguments; it is
 > not a statement about the payload of any particular call, which §3 governs call by
 > call.
@@ -960,7 +947,7 @@ neither performs nor blesses any of it.
 
 ### 7. What is not decided here
 
-> **Normative.** Beyond §1's three clauses, §2's two, §3's five, §4's one, §5's
+> **Normative.** Beyond §1's three clauses, §2's two, §3's six, §4's one, §5's
 > three and §6's four, this ADR decides nothing. It registers no tool, designates
 > no seam, attests, relaxes or adds no condition of ADR-0017 §3, adds no `core`
 > name, changes no Protocol, adds no `DestinationProtocol` member and authorises no
@@ -1012,8 +999,8 @@ absorbed:
   it acquires — in §3 — the prohibition #95 showed the natural reading lacked.
 - **Three states are now distinguished where the corpus had one.** A rule that is
   *unenforceable as stated* (the flat reading), a rule that is *statable and
-  unenforced* (§3's first clause, with #1154 as its mechanism), and a question that is
-  *not decided here at all* and reserved to the owner (§3's second clause). Naming the
+  unenforced* (§3's second clause, with #1154 as its mechanism), and a question that is
+  *not decided here at all* and reserved to the owner (§3's third clause). Naming the
   third and putting the restrictive rule in force meanwhile, rather than covering it
   with a form of words, is what architecture review's round-2 and round-3 blockers and
   twelve later rounds bought.
@@ -1022,8 +1009,9 @@ absorbed:
   content composed for that send from what the turn itself supplied, introduces no
   store value and is produced by no model call carrying store content — so neither
   clause of §3 reaches it. **A recall-then-send turn cannot draft egress arguments
-  under the interim**: once recalled records are in the planner's context, §3's second
-  clause forbids that call's output reaching a span. A QA send therefore composes from
+  under the interim**: once recalled records are supplied to the planner's model call,
+  its output is covered content with a model call in its chain, and §3's third clause
+  forbids it reaching a span. A QA send therefore composes from
   turn content only. That is a real narrowing of what a first integration may do, it
   is what makes the interim restrictive rather than nominal, and it is stated here
   rather than discovered during QA.
@@ -1046,7 +1034,7 @@ absorbed:
   accumulated model, because §3 forbids the only route by which a second custodian
   could acquire part of it.
 - **A later ADR wanting to permit owner-directed export has a clean question**,
-  reserved by §3's fourth clause with the decision it must make named, rather than
+  reserved by §3's fifth clause with the decision it must make named, rather than
   being pre-empted or arrived at by accident.
 - **Revisit trigger.** The first lane that registers an integration whose declared
   arguments admit free text. That is the moment §4's absence becomes reachable and
@@ -1058,7 +1046,7 @@ absorbed:
 This ADR is in **ADR-0089's marked regime**: it carries well-formed clauses, so the
 marked clauses are the whole of what it obligates and the prose beside them supplies
 nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR cites is
-retro-marked. What binds is **twenty clauses**: §1's three, §2's two, §3's five,
+retro-marked. What binds is **twenty-one clauses**: §1's three, §2's two, §3's six,
 §4's one, §5's three, §6's four and §7's two. Every one is a block quote at column 0
 preceded by a blank line, which ADR-0089 §2 requires, and each states one obligation
 with its own scope — two passages were split in drafting for that reason, §3's
@@ -1066,7 +1054,7 @@ export reservation and §6's registering-lane statement, and §3's **second clau
 added in review to reserve the model-context boundary to an owner ruling rather than
 decide it, after twelve rounds established that no formulation of it held. The
 ordinals of §3's clauses in this document were corrected in the same review: the
-export reservation is §3's fourth clause and had been cited as its third since the
+export reservation is §3's fifth clause and had been cited as its third since the
 drafting split.
 
 §1's four-reading subsection, §4's account of the tree, §5's ADR-0082 §1 classifications

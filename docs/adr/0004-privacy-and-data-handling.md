@@ -149,26 +149,25 @@
   scope, and is governed by ADR-0017 §1, ADR-0017 §3 and ADR-0148 instead.
 
   **And a prohibition this clause never carried is added beside it.** ADR-0155 §3
-  forbids any component introducing into an egress span a value it obtained from any
-  store under the data directory, or the output of any operation or chain of
-  operations that any component fed such a value into — a model call excepted, since
-  §3's second clause governs that case exclusively — and no authorisation cures it:
-  not a per-call user decision, not a standing policy, not a configuration or a
-  connected account. It is
-  deliberately the
-  maximally restrictive reading and carries no time predicate and no exception: any
-  store under the data directory, at any moment, by any route. The ordinary send path
-  is untouched because nothing on it *introduces* such a value — ADR-0150 §4 makes a
-  span a key of the request's own parameters, so the runner carries what was composed,
-  and the binder's connection read reaches the binding rather than a span. Its second
-  clause forbids the model-context case outright — an egress span may not carry
-  content produced by a model call any of whose supplied values carried store content,
-  decidable at the component that assembled the call — and reserves to an owner ruling
-  only whether to ratify it as permanent or to commission a later ADR designing a
-  content-bearing approval surface compatible with ADR-0150 §10, under which a
-  relaxation could then be considered. An owner ruling alone does not relax it —
-  relaxation requires that commissioned ADR and its approval surface, ratified. Both
-  arms and their costs are named there; until then, the restrictive reading governs.
+  defines **covered content** — a value obtained from any store under the data
+  directory, and the output of any operation, model call or otherwise, supplied
+  covered content, propagating through every operation and decided at each supply site
+  from recorded origin rather than by inspecting content — and then forbids it
+  reaching an egress span under two clauses that partition it: one for derivation
+  chains with no model call in them, one for chains that have one. Every chain is in
+  exactly one, so nothing escapes both, and no authorisation cures either — not a
+  per-call user decision, not a standing policy, not a configuration or a connected
+  account. It is deliberately the maximally restrictive reading and carries no time
+  predicate and no exception. The ordinary send path is untouched because nothing on
+  it *introduces* covered content — ADR-0150 §4 makes a span a key of the request's
+  own parameters, so the runner carries what was composed, and the binder's connection
+  read reaches the binding rather than a span. The model-chain clause is an **interim**:
+  it forbids the case outright and reserves to an owner ruling only whether to ratify
+  that permanently or to commission a later ADR designing a content-bearing approval
+  surface compatible with ADR-0150 §10, under which a relaxation could then be
+  considered. An owner ruling alone does not relax it. Both arms and their costs are
+  named there; until then, the restrictive reading governs.
+
   That closes the hole adversarial review of PR #72 identified in
   the reading ADR-0017 declined to adopt: assistant-derived memory written into a
   calendar and excused because "the data now lives in the user's account". ADR-0155
