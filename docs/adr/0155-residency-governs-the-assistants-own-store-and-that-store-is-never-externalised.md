@@ -596,12 +596,24 @@ field that establishes no tier, is described with an extent and a provenance and
 tier, so the owner is not told its tier either. ADR-0154 §6 carries both residues
 and this ADR closes neither.
 
-**The path is short and concrete, which is why the gap is named rather than
-noted.** `recall_memory` is registered today and returns matching records to the
-turn as JSON. A turn that recalls and then sends puts store content into a model's
-context and the model into a position to write it into `body`. Every step of that
-is permitted machinery doing its job; §3 is the rule that says the last step must
-not happen, and no code checks it.
+**Two concrete paths, and §3 answers them differently — a registration lane should
+not confuse them.** `recall_memory` is registered today and returns matching records
+to the turn as JSON.
+
+- **A turn that recalls and then sends.** The record reaches the model's turn
+  context, and the model later writes an argument, with no component having supplied
+  the record to the operation that produced that argument. This is §3's second
+  clause exactly: the first clause does not reach it, and §2's conditions govern the
+  send. It is the residue, and a lane may not add a bar the carve-out excludes.
+- **A component that reads the store and puts the value into an egress span**,
+  itself or through a transformation it commissioned. This is §3's first clause,
+  forbidden absolutely — and **no code checks it**. That is the gap, and it is what
+  #1154 carries.
+
+The two are one line apart in the code and are opposite in disposition, which is why
+the enforcement point is worth its own issue rather than a note: the property that
+separates them — did *this* component supply the value — is exactly what nothing in
+the payload path records.
 
 **What closing it would take, and why this ADR does not specify it.** It wants a
 **recorded origin** carried with a span — the same discipline ADR-0098 §12 requires
