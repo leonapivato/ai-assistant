@@ -1,6 +1,6 @@
 # 149. One component in `tools/` provisions a connection, and the record it writes is the hub's
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-13
 - **Decides** the two questions ADR-0148 §11's fourth clause and ADR-0148 §13's
   ninth bullet name as undecided — who performs a provisioning act, and where a
