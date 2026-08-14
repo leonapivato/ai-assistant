@@ -206,7 +206,7 @@ This section is a classification of the change being made and is not normative
 | `ConnectedAccount` | `core/types.py`, new | The account's identity and its connection reference (§7). |
 | `CanonicalDestination` | `core/types.py`, new | One member of ADR-0148 §2's canonical destination set, in one of two validated shapes: a protocol-qualified recipient, or the connected account whole (§3). |
 | `EgressBinding` | `core/types.py`, new | The whole binding: spans, account, transport endpoint; ADR-0148 §2's canonical destination set as a derived property (§1, §3, §7). |
-| `ActionRequest` | `core/types.py`, changed | Gains `egress_binding`, an optional `EgressBinding` defaulting to `None`, detached at validation; gains one model validator for §4's coverage invariants. |
+| `ActionRequest` | `core/types.py`, changed | Gains `egress_binding`, an optional `EgressBinding` defaulting to `None`, detached at validation; gains one model validator for the invariants §4 states against `parameters`. |
 | `PermissionDecision` | `core/types.py`, changed | Gains `egress_binding`, an optional `EgressBinding` defaulting to `None`. |
 | `PermissionDecision.from_request` | `core/types.py`, changed | Transcribes the binding by deep copy. **Its signature does not change** (§9). |
 | `PermissionDecision.authorises` | `core/types.py`, changed | Gains one conjunct (§9). |
@@ -536,13 +536,19 @@ This is PR #1120's third observation:
 >   absent, or spans whose indices are exactly `0` through `k-1` for some `k ≥ 1`;
 > - where that argument's value is a JSON array of length `n ≥ 1`, the second form
 >   holds with `k == n`;
+> - where that argument's value is **not** a JSON array, the **first** form holds: it
+>   carries exactly one span, and that span's `index` is **absent**;
 > - no two spans share an `(argument, index)` pair;
 > - the spans are ordered by `argument` and then by `index`, absent sorting first,
 >   with `argument` compared by Unicode code point;
 > - where the argument's value is a JSON string and the span's `index` is absent, a
 >   destination on that span carries that string as its `supplied` form; and where
 >   the argument's value is a JSON array whose element at `index` is a JSON string, a
->   destination on that span carries that element as its `supplied` form.
+>   destination on that span carries that element as its `supplied` form;
+> - every span's `extent` equals the number of Unicode code points in that span's
+>   value, counted under this section's unit rule and **recomputed from `parameters`**
+>   rather than taken as supplied — the argument's whole value where the span's
+>   `index` is absent, and that argument's value's element at `index` otherwise.
 
 > **Normative.** A builder holding two values of **differing provenance** inside one
 > undecomposable span — inside a JSON object, or inside a nested array — cannot
@@ -590,6 +596,30 @@ have pasted a credential into, and that is accepted rather than overlooked: ADR-
 states the honest description in those terms, and a description that withheld the size
 would leave the approver with less to decide on.
 
+**Extent is recomputed rather than believed, and unlike the supplied form it leaves no
+residue for (b).** An earlier draft fixed extent's *unit* and left its relationship to
+the value it measures unstated, so a binding stating `extent=0` over a three-character
+`body` satisfied every other invariant on this list: the argument exists, is covered
+once by an indexless span, and is ordered. Adversarial review found it on round 9. An
+approver could then be shown a description of a zero-character payload while the
+callable received three characters — a description narrower than the payload, which is
+the one outcome ADR-0148 §6 forbids in terms, and reached without anything having to
+move after the ruling. The repair is the same shape as the supplied-form invariant
+above, and for the same reason: `core` holds `parameters` and the binding on one
+object, so it recomputes rather than believes, and an invariant it *can* check is not
+left to a component further out. **Where the two differ is what is left over.** A
+supplied form can be extracted from inside a structured value — a
+`{"email": ..., "name": ...}` recipient — which `core` cannot see into, so §11 owes
+that check to (b). An extent has no such case: it is stated over the span's **whole**
+value, the decomposition clause above admits exactly two shapes for a span, and both
+are locatable from `parameters` — an indexless span's value is the argument's whole
+value, and an indexed span's is an element of a JSON array. The invariant requiring a
+non-array argument to carry exactly one indexless span is what makes that enumeration
+**exhaustive rather than merely usual**: it puts into the checked list what the
+decomposition clause had already decided, and without it an indexed span on a
+string-valued argument would be constructable, unlocatable, and a residue this section
+would have had to invent an owner for.
+
 **Coverage is checked in `core` because `core` is where both sides are in hand, and
 that is what makes ADR-0148 §14's omitted-span case unconstructable rather than
 merely forbidden.** §14 requires the implementing lane to ship a mixed payload — a
@@ -613,7 +643,8 @@ Over-describing is the conservative direction here for the same reason ADR-0148 
 third clause gives — the alternative is a description narrower than the payload,
 which ADR-0148 §6 names as the thing an approver may never be shown.
 
-**The last invariant is the one that closes round 1's finding at the type level.** A
+**The supplied-form invariant is the one that closes round 1's finding at the type
+level.** A
 description "naming a recipient the arguments never selected" is what PR #1120's
 first blocker was, and where the argument's own value is a string or an array of
 strings, `core` now holds both sides and refuses the mismatch. Where the supplied
@@ -860,8 +891,9 @@ worse, and each is a reason on its own:
   reached. A comparison that raises on a malformed field is not a comparison that
   answered `False`.
 - **The invariants §4 states are only expressible in a validating model.** Ordering,
-  contiguity, uniqueness and coverage are not annotations; they are checks, and a
-  dataclass has nowhere to put them. Choosing the dataclass would not merely inherit
+  contiguity, uniqueness, coverage, and recomputation of a stated form or extent
+  against `parameters`, are not annotations; they are checks, and a dataclass has
+  nowhere to put them. Choosing the dataclass would not merely inherit
   #1122's class — it would forfeit the mechanism that makes ADR-0148 §14's
   omitted-span case unconstructable.
 
@@ -1003,7 +1035,7 @@ Scoping something out is a decision, so each carries its reason (ADR-0029 §7's 
 > inherited from here by silence: a way for the seam to **fail distinguishably from
 > a denial**, because this value cannot express "this call cannot be completed" and
 > deliberately does not try; the declaration vocabulary §6 constrains but does not
-> fix; the check §4's last invariant cannot perform where a supplied form is
+> fix; the check §4's supplied-form invariant cannot perform where a supplied form is
 > extracted from inside a structured value; and the refusal-message discipline
 > ADR-0146 §2 and PR #1120's ninth observation impose on a component that runs
 > **before** ADR-0145 has refused anything outside the schema.
@@ -1056,8 +1088,14 @@ lands there whole.
 > **Normative.** That lane also ships the **construction refusals**, one case each,
 > for every invariant §4 states: an argument with no span; a span naming an argument
 > `parameters` does not carry; a duplicate `(argument, index)`; a mis-ordered span
-> tuple; an array argument of length `n` described by `k ≠ n` spans; and a
-> string-valued argument whose span's destination carries a different supplied form.
+> tuple; an array argument of length `n` described by `k ≠ n` spans; a **non-array**
+> argument described by an indexed span; a string-valued argument whose span's
+> destination carries a different supplied form; a span over a JSON **string** whose
+> `extent` is not that string's code-point count; and a span over a **non-string**
+> value whose `extent` is not the code-point count of that value's canonical JSON
+> encoding. The last two are exercised on a binding that is otherwise well-formed: a
+> case whose extent is wrong **and** whose coverage or ordering is wrong demonstrates
+> neither check, because either refusal alone produces the same outcome.
 
 > **Normative.** That lane also ships the **`None`-asymmetry** pair in both
 > directions (§9), the **account-only** case of §3 — a binding whose spans carry no
@@ -1159,7 +1197,11 @@ value (§7), and states no tier for a user-authored free-text span (§6). §6's
 determinism clause is consumed with **three** inputs and no fourth: §5 makes the
 carried provenance and the description's provenance the same bytes rather than a new
 input, and §6 above explicitly refuses to add a carried tier, routing it to a later
-ADR that will amend that clause and record it. §11's unmarked observation that "there
+ADR that will amend that clause and record it. §6's prohibition on showing an approver
+"a description narrower than the payload" is consumed the same way rather than
+narrowed: §4's extent invariant recomputes each span's stated extent from `parameters`
+and refuses the mismatch, which is that prohibition enforced at construction, not a
+rule added beside it. §11's unmarked observation that "there
 is no producer" is a statement of fact ADR-0148 itself made contingent — it deferred
 "with a producer in hand" — and PR #1120 arriving is the condition ADR-0148 named,
 not a sentence of it becoming false.
