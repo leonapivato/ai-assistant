@@ -33,6 +33,28 @@
   its working, and carries **the exact text of both halves** so that what will be
   written is reviewable while this ADR is still `Proposed`. ADR-0126's `Status` line
   has no leading token today and therefore takes one (ADR-0082 §2).
+
+  **This defers no substance past review, and the objection is answered rather than
+  waved away because both reviewers raised it from opposite sides.** Three things
+  answer it. `CONTRIBUTING.md` → "Finishing an ADR PR" step 3 requires the whole
+  required set to be **re-run on the flipped tree** — "not a judgement call and not
+  a symptom of anything" — so the ratification commit is reviewed by both lenses,
+  and "Trivial ADR edits" is scoped by its own words to a review *of the edit
+  itself* rather than to coverage. §10 carries the exact text of both halves now, in
+  a fence, so what will be written is read while this ADR is `Proposed` — which is
+  the state a finding can still change it in — rather than first seen at the flip.
+  And the judgement ADR-0082 §1 actually places is the **classification**, which it
+  requires "in the later ADR's text, which is where it is reviewed": that is §10,
+  and it is in this change from the first commit.
+
+  **The leading token is what makes the ordering matter rather than merely tidy.**
+  ADR-0082 §2 and `docs/adr/template.md` put `Partially superseded by` at the head
+  of the line and **drop `Accepted`**, so that "a prefix match on 'Accepted' cannot
+  misread the replaced part as live". Written before ratification, that line would
+  stop ADR-0126 reading as `Accepted` at all, on the authority of a document nothing
+  has ratified — a live decision demoted by a draft. That is a worse state than the
+  one deferring it creates, and it is the concrete form of the state claim ADR-0019
+  forbids.
 - **No implementation lands with it.** No `src/`, no `tests/`, no
   `pyproject.toml`. §8 sequences the two lanes that build against it.
 - **It decides `core` surface.** One Protocol in `core/protocols.py`,
