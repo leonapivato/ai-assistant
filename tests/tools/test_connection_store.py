@@ -15,7 +15,12 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ai_assistant.core.errors import ConnectionStoreError
-from ai_assistant.core.types import ProvisioningState, SecretName, SecretScope
+from ai_assistant.core.types import (
+    ACCOUNT_IDENTITY_MAX_BYTES,
+    ProvisioningState,
+    SecretName,
+    SecretScope,
+)
 from ai_assistant.tools.connection_store import ConnectionEntry, SqliteConnectionStore
 
 if TYPE_CHECKING:
@@ -157,6 +162,34 @@ async def test_liveness_is_not_decided_by_a_column_a_file_edit_can_flip(
 
     assert columns == {"sequence", "reference", "revision", "data"}
     assert [record.state for record in await store.live()] == [ProvisioningState.ACTIVE]
+
+
+@pytest.mark.parametrize(
+    "identity",
+    [
+        pytest.param("owner\nadmin", id="line-break"),
+        pytest.param("owner\u2028admin", id="unicode-line-separator"),
+        pytest.param("owner\x07", id="control-character"),
+        pytest.param("o" * (ACCOUNT_IDENTITY_MAX_BYTES + 1), id="over-the-bound"),
+    ],
+)
+async def test_a_persisted_identity_outside_the_shape_is_reported_on_the_way_out(
+    store: SqliteConnectionStore, identity: str
+) -> None:
+    """ADR-0149 §4 binds the store, so the read enforces it as well as the write.
+
+    A row whose JSON ``identity`` was edited stays a syntactically valid entry:
+    the reference, the revision, the state and the slot all still validate, so the
+    decode alone lets it through. A store that enforced only on append would hand
+    a caller an identity it would refuse to accept, which is one file edit away.
+    """
+    await store.append(entry(), expected_latest=None)
+    conn: sqlite3.Connection = store._conn
+    with conn:
+        conn.execute("UPDATE entries SET data = json_set(data, '$.identity', ?)", (identity,))
+
+    with pytest.raises(ConnectionStoreError):
+        await store.live()
 
 
 # --- ADR-0148 §6's compare-and-swap, as one primitive -----------------------
