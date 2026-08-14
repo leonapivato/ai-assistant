@@ -48,7 +48,7 @@ locally, before any I/O" lives one layer up, in the caller — ``Engine``, the
 canonical fake and ``HubEngineClient`` alike — because a refusal that happened only
 here would happen only on the hub, which is the round trip §9 exists to remove. By
 the time a call reaches this object its identity has passed
-:func:`~ai_assistant.orchestration.payloads.usable_identity` and its ``limit``
+:func:`~ai_assistant.orchestration.payloads.check_provisioning_call` and its ``limit``
 :func:`~ai_assistant.orchestration.payloads.positive_page_argument`, which is why
 :class:`~ai_assistant.core.errors.UnusableIdentityError` appears nowhere below and
 why the seam declares no ``ValueError`` for an argument already validated

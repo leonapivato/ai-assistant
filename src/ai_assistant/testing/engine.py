@@ -85,13 +85,12 @@ from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     check_arguments,
     check_payload,
-    check_provisioning_arguments,
+    check_provisioning_call,
     grant_scope,
     identifier,
     non_blank_text,
     page_argument,
     positive_page_argument,
-    usable_identity,
 )
 from ai_assistant.testing.connections import FakeConnectionProvisioner
 from ai_assistant.testing.notifications import (
@@ -802,15 +801,15 @@ class FakeAssistantEngine:
         """
         secret = secret_value(credential)
         named = non_blank_text(identity, name="identity")
-        usable_identity(named, credential=secret)
-        # The credential is deliberately not a member of the measured object: it
-        # has no canonical projection at all (ADR-0151 §6), which is the property
-        # that stops a redaction being sent in its place.
-        check_provisioning_arguments(
+        # **One call, one read of the plaintext** (ADR-0151 §5, §11). §5's exact
+        # comparison against the identity and §11's frame measurement need the same
+        # value, and `orchestration` holds it once: a second helper would give this
+        # package two plaintext-handling sites where §5 obliges one.
+        check_provisioning_call(
             "connect_account",
             max_bytes=self._max_payload_bytes,
-            credential=secret,
             identity=named,
+            credential=secret,
         )
         self.calls.append(("connect_account", {"identity": named}))
         return self._checked(
@@ -828,13 +827,12 @@ class FakeAssistantEngine:
         secret = secret_value(credential)
         handle = identifier(reference, name="reference")
         named = non_blank_text(identity, name="identity")
-        usable_identity(named, credential=secret)
-        check_provisioning_arguments(
+        check_provisioning_call(
             "reprovision_account",
             max_bytes=self._max_payload_bytes,
+            identity=named,
             credential=secret,
             reference=handle,
-            identity=named,
         )
         self.calls.append(("reprovision_account", {"reference": handle, "identity": named}))
         return self._checked(
