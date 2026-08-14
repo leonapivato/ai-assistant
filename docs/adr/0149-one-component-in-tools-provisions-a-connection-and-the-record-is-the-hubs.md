@@ -8,11 +8,14 @@
   provisioning surface" bullet that reaches **an integration credential**. The
   provider key's half stays where ADR-0125 §12's first bullet and #74 put it
   (§13).
-- **It also discharges ADR-0126 §6's forward clause**, which requires the lane
-  that first gives a component on the hub's machine a Tier 0 keyring entry to
-  decide, in the same change, how a hub-side delete reaches it (#909). §8 is that
-  decision, and it carries a precondition rather than pretending the coordinating
-  half is settled.
+- **It answers the contract half of ADR-0126 §6's forward clause**, which
+  requires the lane that first gives a component on the hub's machine a Tier 0
+  keyring entry to decide, in the same change, how a hub-side delete reaches it
+  (#909). §8 supplies the path, its ordering and its completeness. It does **not**
+  discharge that clause: who invokes the purge — and whether ADR-0126's own act
+  changes to do it — is left to #909, and §6's prohibition on writing such an
+  entry stays operative until that lands. §8's precondition carries it forward
+  rather than replacing it.
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-13**,
   the durability form ADR-0100 established. This decision rests most heavily on
   ADR-0148, ratified the same day, and on ADR-0125 and ADR-0126, whose §8 and §6
@@ -503,17 +506,24 @@ from configuration — and, from ADR-0097 §4, the append-only store that record
 
 > **Normative.** Disconnecting a reference is **two steps in a fixed order**: a
 > **removal entry** is appended to the connection store **first**, after which the
-> reference has no live record; **every distinct credential slot the store names
-> for that reference** — the removed record's, and every superseded, pending or
-> earlier removed entry's — is deleted **second**. No other order is permitted,
-> and deleting only the live record's slot does not satisfy this clause.
+> reference has no live record; the credential slots it deletes are deleted
+> **second**. No other order is permitted.
+
+> **Normative.** The slots a disconnection deletes are **every distinct slot named
+> by an entry for that reference whose revision is strictly less than that
+> disconnection's own removal entry's revision** — the removed record's, and every
+> superseded, pending or earlier removed entry's. Deleting only the live record's
+> slot does not satisfy this clause, and deleting a slot named by an entry at or
+> above its own revision **violates** it: those belong to acts the disconnection
+> did not displace.
 
 > **Normative.** A disconnection is **idempotent and re-runnable**. Disconnecting
-> a reference that has no live record appends no second removal entry and deletes
-> whatever slots the store still names for it, which is the remedy for a slot a
-> displaced act wrote after an earlier disconnection (below) or for one whose
-> deletion failed. `delete` returns whether an entry was there and raises nothing
-> for an absent one (ADR-0125 §4), so a repeat costs nothing and asserts nothing.
+> a reference that has no live record appends no second removal entry and repeats
+> the deletion pass for the latest removal entry's revision, which is the remedy
+> for a slot a displaced act wrote after that removal landed (below) or for one
+> whose deletion failed. `delete` returns whether an entry was there and raises
+> nothing for an absent one (ADR-0125 §4), so a repeat costs nothing and asserts
+> nothing.
 
 > **Normative.** A removal entry carries the reference, the incremented revision
 > and the fact that the connection was removed. It carries **no** credential
@@ -595,6 +605,20 @@ ADR-0097 §5a examined and refused — so what is bought instead is that the slo
 *named*, which makes the remedy an idempotent re-run and makes §8's purge
 complete. Claiming the stronger guarantee is the overclaim ADR-0102 §9 forbids a
 client from making, which is why the clause above states the weaker, true form.
+
+**The repair for that had a mirror of its own, and the revision cutoff is what
+closes it.** A draft that deleted "every slot the store names for the reference"
+read the store at deletion time, so a disconnection whose deletion pass was slow
+would delete the slot of a *later* act: the removal lands, the user reconnects,
+the new act appends its pending entry and writes its credential, and the earlier
+disconnection then deletes it — leaving an activation that succeeds over an empty
+slot, which §6 refuses at every call while the user's most recent act reported
+success. Adversarial review found it on the round that produced the every-slot
+clause. The cutoff is the ownership rule §6 already uses one level up: an act owns
+what it displaced and nothing later, and the revision is what says which is which.
+It is exactly the reason ADR-0148 §6 gives the revision — "unchanged since I
+looked", made answerable by a value that never repeats — applied to a deletion
+pass rather than to a credential read.
 
 ### 6. An active record over an empty slot is refused, and nothing repairs it automatically
 
@@ -717,6 +741,14 @@ subject is a secret.
 > **Normative.** No component discharging the owner's delete right destroys the
 > connection store while any slot the store names is unconfirmed. A delete path
 > that would destroy it regardless is one the precondition below keeps unreached.
+
+> **Normative.** The purge is a **whole-installation act and runs with no
+> provisioning act concurrent with it**. A coordinator that invokes it is
+> responsible for that — trivially so where the act is offline (ADR-0126 §2) — and
+> the purge itself carries no revision cutoff, because it is deleting everything
+> rather than displacing a state. A coordinator that cannot establish it may not
+> invoke the purge, since a provisioning act running underneath it would have its
+> credential deleted from beneath a record it had just activated (§5's mirror).
 
 > **Normative.** The purge is scope-confined by construction: the provisioner's
 > `SecretStore` instance is bound to `INTEGRATION` and to one installation
@@ -968,12 +1000,17 @@ asserted because a reviewer is entitled to check it, and ADR-0082 §1 gives them
 the way to overturn it — by naming the sentence of §8 that becomes false or
 over-wide.
 
-**ADR-0126 §6 — no record owed, and the clause is discharged rather than
-changed.** Its forward clause requires the lane that first gives a component on
+**ADR-0126 §6 — no record owed, and the clause is answered in part and left
+standing.** Its forward clause requires the lane that first gives a component on
 the hub's machine a Tier 0 keyring entry to decide, in the same change, how a
-hub-side delete reaches it, and §8 above is that decision. A condition "is not
-made false or over-wide by being answered" (ADR-0147 §11's formulation). Its
-other clauses stay true as written: the act still reaches no keyring, still holds
+hub-side delete reaches it. §8 above decides the contract half — the path, whose
+consumer holds it, what it composes from, its ordering and its completeness — and
+leaves the routing half to #909. **The clause is therefore not discharged**, and
+this ADR does not say it is: its last sentence, that no such entry may be written
+until the decision lands, stays operative and §8's precondition is that sentence
+carried into this ADR rather than relaxed. A clause partly answered and still
+binding is the clearest case there is of one that owes no record. Its other
+clauses stay true as written: the act still reaches no keyring, still holds
 neither face, still performs no keyring operation and still enumerates nothing,
 because §8's fifth clause deliberately does not route it. §6's second clause —
 "No component of this system writes a Tier 0 keyring entry on the hub's machine
@@ -1126,6 +1163,14 @@ form).
 > displaced write created is deleted by a re-run of the disconnection and by §8's
 > purge. A test that disconnects only a quiescent reference satisfies none of this.
 
+> **Normative.** That lane also ships the **inverse** interleaving §5's revision
+> cutoff exists for: a disconnection whose removal entry has landed and whose
+> deletion pass has not yet run, a re-provisioning that appends its pending entry
+> and writes its credential in that window, and the deletion pass running
+> afterwards. The re-provisioned slot survives, the activation lands over a
+> credential that is present, and a call under it transmits. An implementation
+> that deletes every slot the store names at deletion time fails this test.
+
 > **Normative.** That lane also ships §8's purge with a test that it deletes the
 > slot of a superseded, a pending and a removed record as well as of a live one; a
 > test that a deletion that raises leaves every store entry in place and the
@@ -1148,8 +1193,9 @@ form).
 > **Normative.** No lane implements any of it before the contract ADR §9 names has
 > merged (golden rule 5, ADR-0015 §5), and no lane provisions a connection in an
 > installation before §8's precondition is met. This ADR merging discharges
-> ADR-0148 §11's fourth clause and ADR-0126 §6's forward clause, and no other
-> precondition.
+> **ADR-0148 §11's fourth clause and no other precondition**: ADR-0126 §6's
+> forward clause is answered in part (§8, §12) and its prohibition stands until
+> #909 is ruled.
 
 ### 15. Marking, review and ratification
 
@@ -1171,7 +1217,7 @@ form).
   which any delete surface could reach the slot — the bound-with-nothing-behind-it
   defect ADR-0098 §3 records itself making twice, and ADR-0126 §6's forward clause
   had been written to catch exactly it. Adversarial review's round then produced
-  §4's identity refusals, §5's every-slot and idempotence clauses with the honest
+  §4's identity refusals, §5's every-slot, revision-cutoff and idempotence clauses with the honest
   guarantee beside them, and §8's completeness clause — three defects of one
   family, in which a rule was stated over the ordinary case and a conforming
   implementation could satisfy it while leaving a credential in the keyring.
@@ -1182,9 +1228,11 @@ form).
 
 - **ADR-0148 §6 becomes performable.** Its clauses had no party entitled to
   satisfy them; §1 names one, and ADR-0148 §14's test list acquires a subject.
-- **ADR-0126 §6's forward clause is discharged and its remaining question is
-  small.** The path exists, its ordering is fixed, and #909 is reduced from "how
-  does a hub-side delete reach a keyring entry" to "who calls it".
+- **ADR-0126 §6's forward clause is answered in part and its remaining question is
+  small.** The path exists, its ordering and completeness are fixed, and #909 is
+  reduced from "how does a hub-side delete reach a keyring entry" to "who calls
+  it". The clause's prohibition is not lifted here, and §8's precondition is what
+  keeps it binding on the implementing lane.
 - **One subsystem holds the whole connection concept.** The record, its store, its
   readers, its writer and its purge are all in `tools/`, so the only contract
   surface this decision adds is the one the user's act crosses — one Protocol
