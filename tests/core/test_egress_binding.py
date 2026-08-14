@@ -194,6 +194,29 @@ def test_a_request_carries_exactly_one_field_for_the_binding() -> None:
     assert binding_fields == {"egress_binding"}
 
 
+@pytest.mark.parametrize("omitted", sorted(EgressBinding.model_fields))
+def test_every_field_of_a_binding_is_required(omitted: str) -> None:
+    """§1's "every field §2 names is required on it", one omission at a time.
+
+    A binding is **either whole or absent**, so there is no partially populated
+    one. ``spans`` is the field where a default would bite hardest and be hardest
+    to see: an omitted description would silently become an *empty* one rather
+    than obliging the producer to state that the payload has no spans, and the
+    empty description is exactly what ADR-0148 §8's third clause makes a floor.
+    """
+    whole = {
+        "spans": (_span("body", extent=2),),
+        "account": _ACCOUNT,
+        "transport_endpoint": _ENDPOINT,
+    }
+    assert EgressBinding(**whole)  # type: ignore[arg-type]  # heterogeneous test kwargs
+
+    with pytest.raises(ValidationError) as raised:
+        EgressBinding(**{name: value for name, value in whole.items() if name != omitted})  # type: ignore[arg-type]  # heterogeneous test kwargs
+
+    assert omitted in str(raised.value)
+
+
 # --- §8: validating models, and no message renders a value -------------------
 
 

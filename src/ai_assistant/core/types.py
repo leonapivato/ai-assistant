@@ -6381,12 +6381,15 @@ class EgressBinding(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
 
     spans: tuple[EgressSpan, ...] = Field(
-        default=(),
         description=(
             "The payload description: one span per described value, ordered by "
             "argument and then by index. Empty only where the call's arguments are "
-            "empty or hold nothing but empty JSON arrays (ADR-0150 §4)."
-        ),
+            "empty or hold nothing but empty JSON arrays (ADR-0150 §4). "
+            "**Required with no default**, like every field §2 names: ADR-0150 §1 "
+            "makes a binding whole or absent, and a defaulted description would let "
+            "a producer omit the field and get an empty payload description rather "
+            "than having to state that the payload has no spans."
+        )
     )
     account: BoundAccount = Field(
         description="The connected account the call is made through, as the ruling fixed it."
