@@ -204,7 +204,7 @@ This section is a classification of the change being made and is not normative
 | `EgressDestination` | `core/types.py`, new | The two forms of one recipient and the protocol that relates them (§3). |
 | `EgressSpan` | `core/types.py`, new | One described span of the payload: where it came from, who disclosed it, how much of it there is, its tier if its field establishes one, and its destination if it is one (§4, §5, §6). |
 | `ConnectedAccount` | `core/types.py`, new | The account's identity and its connection reference (§7). |
-| `CanonicalDestination` | `core/types.py`, new | One member of ADR-0148 §2's canonical destination set: a protocol-qualified recipient, or the connected account under an absent protocol (§3). |
+| `CanonicalDestination` | `core/types.py`, new | One member of ADR-0148 §2's canonical destination set, in one of two validated shapes: a protocol-qualified recipient, or the connected account whole (§3). |
 | `EgressBinding` | `core/types.py`, new | The whole binding: spans, account, transport endpoint; ADR-0148 §2's canonical destination set as a derived property (§1, §3, §7). |
 | `ActionRequest` | `core/types.py`, changed | Gains `egress_binding`, an optional `EgressBinding` defaulting to `None`, detached at validation; gains one model validator for §4's coverage invariants. |
 | `PermissionDecision` | `core/types.py`, changed | Gains `egress_binding`, an optional `EgressBinding` defaulting to `None`. |
@@ -244,28 +244,36 @@ This is PR #1120's first observation, and it is stated there exactly:
 > it came from, so no occurrence repeats them.
 
 > **Normative.** A member of a canonical destination set is a `CanonicalDestination`,
-> one `core` type with exactly two fields: `protocol`, a `DestinationProtocol` or
-> **nothing**, and `canonical`, non-blank visible text. `protocol` is present for a
-> recipient the call's arguments select, and is **absent** for exactly one thing —
-> the connected account the call is made to, whose `canonical` is that account's
-> identity (§7). There is no third member kind and no other absent-`protocol`
-> meaning.
+> one `core` type with three fields and exactly two well-formed shapes, which it
+> **refuses at construction** to depart from: a **selected recipient**, carrying a
+> `DestinationProtocol` and a canonical form of non-blank visible text and no
+> account; or the **connected account** the call is made to, carrying a
+> `ConnectedAccount` (§7) and neither of the other two. No member carries all three,
+> none carries neither shape, and there is no third kind.
+
+> **Normative.** An account member carries the account **whole** — its identity and
+> its connection reference, which is the pair ADR-0148 §6 binds an account by — and
+> its equality is over both. No lane reduces an account member to its identity, to
+> its reference, or to any single string: an identity alone is shared by two
+> connection records the moment one account is connected twice, and a reference alone
+> survives its own re-provisioning to a different account, so either alone is a
+> destination that two different accounts can satisfy.
 
 > **Normative.** ADR-0148 §2's **canonical destination set** is a single **derived
 > property** of `EgressBinding` and is not a stored field. It is the deduplicated
-> tuple of `CanonicalDestination`, ordered by `protocol` and then by `canonical` with
-> an absent `protocol` first and `canonical` compared by Unicode code point,
-> containing one member per distinct destination the binding's spans carry — and,
-> where the spans carry **none**, exactly one member: the bound connected account
-> under an absent `protocol`, which is ADR-0148 §2's third clause. It is therefore
-> **never empty**. No lane stores it beside the occurrences, accepts it from a
+> tuple of `CanonicalDestination` holding one member per distinct destination the
+> binding's spans carry — and, where the spans carry **none**, exactly one member:
+> the binding's own connected account, which is ADR-0148 §2's third clause. It is
+> therefore **never empty**. It is totally ordered: account members first, then
+> selected recipients by protocol and then by canonical form, each string compared by
+> Unicode code point. No lane stores it beside the occurrences, accepts it from a
 > caller, or lets a caller supply a tuple the occurrences and the account do not
 > produce.
 
-> **Normative.** Two members are equal when and only when **both** fields are equal.
+> **Normative.** Two members are equal when and only when **every** field is equal.
 > A canonical form is never compared across protocols; no lane treats two protocols'
 > canonical forms as comparable because the strings match; and an account member
-> never equals a selected-recipient member however their `canonical` values compare.
+> never equals a selected recipient, whatever strings the two hold.
 
 > **Normative.** No policy refuses on ADR-0148 §8's third floor — "the request
 > carries no canonical destination set" — on the ground that a binding's spans carry
@@ -290,14 +298,37 @@ the document, and the second draft was worse than the first for it, because the 
 at least had one type.
 
 **The repair is to make the account a member rather than an alternative to the
-members.** `protocol` absent is not a partial state — both fields are present and
-carry meaning — and it says exactly what is true: this destination is the account the
-call is made to, which is not named under any protocol that establishes equivalences
-between supplied forms. That the two kinds can never compare equal is the safety half:
-a future standing grant bound to the canonical destination set (ADR-0148 §3's first
-and fifth clauses) cannot have a grant over an account reach a recipient whose address
-happens to equal the account's identity, and no `DestinationProtocol` member has to be
-minted for "the account" to make the type total.
+members**, and it is a validated two-variant shape rather than a bag of optional
+fields. The distinction §1 draws against partial states is about facts that are only
+meaningful together and can arrive apart; here the variants are exactly two, a
+validator makes every other combination unconstructable, and the type is total for a
+consumer that never has to ask which case it is in before comparing. This destination
+is the account the call is made to, which is not named under any protocol that
+establishes equivalences between supplied forms, and saying so with an absent protocol
+avoids minting a `DestinationProtocol` member for "the account" — a member that would
+then have to state which equivalences it establishes (§3's membership clause) and has
+none to state.
+
+**The account member carries the account whole, and round 5 is why.** A first version
+of it carried the identity alone, on the ground that the identity is what ADR-0148 §8's
+fourth clause shows the user. Architecture review found that this drops the half
+ADR-0148 §6 spent two adversarial rounds adding: "The connected account is bound by
+**two** non-secret facts, not one." Two connectable records can hold one identity, so
+identity-only account members compare equal across them — and a standing grant, which
+ADR-0148 §3's first and fifth clauses bind to the canonical destination set rather than
+to the tool or the account, would then cover a record the user never granted. The
+inverse is equally true and is why the reference alone is not the answer either: a
+reference is stable across a rotation *by design* (ADR-0148 §6), which is exactly what
+makes it survive a re-provisioning to a different account. Both facts, or the member is
+a destination two different accounts satisfy.
+
+**What a policy compares and what a user reads are deliberately different fields.**
+The set member holds the reference, which is not something a user can recognise an
+account by — ADR-0148 §6 says so and §8's fourth clause bars it from the confirmation.
+The confirmation names `ConnectedAccount.identity`, from the binding's own account
+field (§7, §10). Neither substitutes for the other, and the reason they are not one
+field is that they answer different questions: "is this the same connection" and "whose
+account is this".
 
 **Carrying occurrences and deriving the set, rather than the reverse, is the whole
 of the answer, and the reason is §1's failure.** Both shapes are needed: ADR-0148 §4
@@ -701,10 +732,12 @@ This is PR #1120's tenth observation and it is the one the producer paid the mos
 > take it on trust and this whole class disappears; if it makes it a plain dataclass,
 > (b) inherits the class instead.
 
-> **Normative.** `EgressBinding`, `EgressSpan`, `EgressDestination` and
-> `ConnectedAccount` are pydantic models in `core/types.py`, each with
-> `extra="forbid"` and `frozen=True`, and each validating every field it declares.
-> None is a dataclass, a `TypedDict`, a `NamedTuple` or an unvalidated container.
+> **Normative.** `EgressBinding`, `EgressSpan`, `EgressDestination`,
+> `CanonicalDestination` and `ConnectedAccount` are pydantic models in
+> `core/types.py`, each with `extra="forbid"` and `frozen=True`, and each validating
+> every field it declares — `CanonicalDestination` included, and its two-shape
+> invariant (§3) is one of the things it validates. None is a dataclass, a
+> `TypedDict`, a `NamedTuple` or an unvalidated container.
 
 > **Normative.** Every model in this surface sets `hide_input_in_errors=True`, and
 > no message any of them raises renders an argument value, a supplied or canonical
@@ -937,8 +970,7 @@ lands there whole.
 > **Normative.** That lane also ships the **`None`-asymmetry** pair in both
 > directions (§9), the **account-only** case of §3 — a binding whose spans carry no
 > destination is well-formed and its derived canonical destination set is exactly one
-> member, the connected account under an absent `protocol`, which no
-> selected-recipient member equals — the
+> member, the bound connected account, which no selected recipient equals — the
 > **empty-array** case of §4, in which an argument whose value is `[]` carries no
 > span and the binding is still well-formed, and a case asserting that a construction
 > omitting `provenance` **raises**, which is what §5's no-default clause is worth.
@@ -954,6 +986,12 @@ lands there whole.
 > per top-level element, and an argument whose value is a JSON object by one indexless
 > span, each stating that whole value's extent. A binding that decomposes either
 > further is refused.
+
+> **Normative.** That lane also ships the **account-member** pair: two bindings whose
+> accounts share an identity and differ in their connection reference derive
+> **unequal** canonical destination sets, and two whose accounts share a reference and
+> differ in identity likewise. An implementation whose account member holds one of the
+> two facts passes one of these and fails the other (§3).
 
 > **Normative.** The lane that builds an egress `CONFIRM` ships the
 > **duplicate-across-arguments** case §10's third clause is stated for: one recipient
