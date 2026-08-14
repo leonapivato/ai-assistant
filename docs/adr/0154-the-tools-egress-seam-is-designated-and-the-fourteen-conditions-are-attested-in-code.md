@@ -1010,30 +1010,57 @@ ADR *inheriting* an answer from **ADR-0148**, its silence, or its limb (b). Noth
 forbids this ADR from setting the floor, and leaving it unanswered is what two
 marked clauses forbid.
 
+**The answer has to be decidable from recorded origin, and that is what fixes its
+shape.** A first draft of this section stated the floor over the call "whose
+destination, or whose payload, was selected by a model while reading external
+content", and adversarial review found on round 6 that such a floor cannot be
+implemented: for two identical `send_email` calls, nothing durable distinguishes a
+planner run whose prompt carried an external span from one that did not, so an
+authoriser could only guess. ADR-0098 made and corrected the same mistake in its own
+drafting, and §12 states the constraint in terms: "§5's unobtainability argument is
+an input: an answer phrased over 'output produced from external content' is not
+checkable, so **whatever is decided has to be decidable from recorded origin**."
+§5's finding is that "produced from external content" is "**not recoverable** once a
+model's output has been recorded truthfully", and §3's own discussion adds that
+stating a bound over it is "the unobtainable bound §6's second clause forbids anyone
+from stating".
+
+So the answer is **no**, stated over a fact any authoriser can evaluate — the
+absence of the authorisation itself — with the condition for revisiting named:
+
 > **Normative.** No standing authorisation — an ADR-0021 §6 standing grant, or a
-> standing user policy in ADR-0017 §3's third condition — covers an egress call
-> through this seam whose destination, or whose payload, was selected by a model
-> while reading external content (ADR-0098 §1). Such a call requires a decision of
-> the user about **that** call, on ADR-0148 §3's route (a), whatever standing
-> authorisation would otherwise reach it.
+> standing user policy in ADR-0017 §3's third condition — covers any egress call
+> through this seam. Every egress call is authorised by a decision of the user about
+> **that** call, on ADR-0148 §3's route (a).
 
-> **Normative.** The clause above is a **floor**. The ADR that establishes standing
-> grants may state it more finely and may decide the cases this one does not reach;
-> it may not relax it, and a lane that would permit such a call under a standing
-> authorisation supersedes this clause rather than reading around it.
+> **Normative.** The ADR that would permit a standing authorisation to cover an
+> egress call at this seam first establishes a **recorded origin** the authoriser
+> evaluates at the moment it rules — a fact the request carries, never an inference
+> about how a model produced it (ADR-0098 §5, §12) — and states its rule over that
+> fact. Until such a surface exists and an ADR rests on it, the clause above holds
+> as written.
 
-**Why this answer and not the other one.** The alternative — letting a standing
-authorisation cover such a call — is the composition ADR-0098 exists to prevent,
-arriving one seam later: external content cannot select an actuator directly, but a
-standing grant would let it select one *indirectly*, by choosing the recipient of a
-call the grant already covers. ADR-0098 §1's first clause says a recorded external
-span may not "change a policy decision", and a standing authorisation is a policy
-decision whose extent that span would be choosing. The conservative answer costs
-nothing today — ADR-0148 §3's third clause closes route (b) entirely until a
-standing-grant ADR opens it, so there is no standing authorisation for this clause
-to restrict — and it is far cheaper to state now than to retrofit onto a standing-grant
-ADR that has already shipped a store. That is ADR-0098 §3's own stated reason for
-ruling its actuator clause early: "free now and expensive later".
+**This is a restriction at this seam, and it is declared rather than glossed.**
+ADR-0017 §3's third condition permits recipient authorisation to trace to "a user
+decision **or** a standing user policy"; the clauses above satisfy it by the first
+limb alone and close the second at this seam. That satisfies the condition rather
+than narrowing it — §3 offers the two as acceptable sources and requires neither to
+be available — but it *is* stricter than §3 obliges, and saying so is the half
+ADR-0098's own faulted draft omitted when "§11 claimed it narrowed neither". It
+supersedes nothing: ADR-0021 §6's standing grants are untouched everywhere else, and
+ADR-0148 §3's third clause already closes route (b) for egress until a standing-grant
+ADR opens it, so this clause restricts nothing that exists.
+
+**Why no rather than yes.** Letting a standing authorisation cover such a call is
+the composition ADR-0098 exists to prevent, arriving one seam later: external content
+cannot select an actuator directly, but a standing grant would let it select one
+*indirectly*, by choosing the recipient of a call the grant already covers. ADR-0098
+§1's first clause says a recorded external span may not "change a policy decision",
+and a standing authorisation is a policy decision whose extent that span would be
+choosing. Answering yes would need the very predicate §5 says is unrecoverable;
+answering no needs nothing. And it is far cheaper to state now than to retrofit onto
+a standing-grant ADR that has already shipped a store — ADR-0098 §3's own reason for
+ruling its actuator clause early, "free now and expensive later".
 
 ### 5. The transition, recorded
 
@@ -1190,10 +1217,10 @@ than answering it. What follows is what this ADR does *not* decide.
 
 > **Normative.** No lane reads §4's standing-authorisation floor or §6's residency
 > clauses as deciding anything beyond their own terms. The floor rules on standing
-> authorisation for content-selected egress at this seam and settles no other
-> question about standing grants, which stay ADR-0021 §6's and ADR-0148 §3's; the
-> residency clauses oblige a registering lane to face #95 and answer neither #95
-> nor ADR-0004 §2's residency clause.
+> authorisation **at this seam** and settles no question about standing grants
+> elsewhere, which stay ADR-0021 §6's and ADR-0148 §3's; the residency clauses
+> oblige a registering lane to face #95 and answer neither #95 nor ADR-0004 §2's
+> residency clause.
 
 - **Who registers `send_email`, against which account, and how.** ADR-0152 §10
   leaves registration `tools/`-internal and uncontracted; the exit-QA registration
