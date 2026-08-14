@@ -20,6 +20,12 @@ from ai_assistant.testing.batch import (
     FakeBatchCompleter,
     ProgrammedOutcome,
 )
+from ai_assistant.testing.connections import (
+    SLOT_PREFIX,
+    FakeConnectionEntry,
+    FakeConnectionProvisioner,
+    FakeConnectionPurger,
+)
 from ai_assistant.testing.context import FakeContextProvider
 from ai_assistant.testing.conversations import FakeConversationStore
 from ai_assistant.testing.deferrals import FakeDeferralStore
@@ -90,6 +96,7 @@ __all__ = [
     "DEFAULT_OCCURRED_AT",
     "DEFAULT_READER_NAME",
     "OTHER_INSTALLATION",
+    "SLOT_PREFIX",
     "TRACE_NOT_RECORDED",
     "BatchProvider",
     "Disclosure",
@@ -98,6 +105,9 @@ __all__ = [
     "FakeAssistantEngine",
     "FakeAuditTrail",
     "FakeBatchCompleter",
+    "FakeConnectionEntry",
+    "FakeConnectionProvisioner",
+    "FakeConnectionPurger",
     "FakeContextProvider",
     "FakeConversationStore",
     "FakeDeferralStore",
