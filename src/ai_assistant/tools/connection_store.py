@@ -402,9 +402,18 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
     return outcome[0]
 
 
-@final
 class SqliteConnectionStore:
     """A persistent, append-only connection store (ADR-0149 §3).
+
+    **Not ``@final``, unlike the value types above, and the exception is
+    deliberate.** ADR-0148 §6's classification is stated over what a *store*
+    failure does at each of five points — the first write, both re-reads, an
+    activation whose swap does not land, and an activation that fails rather than
+    returning — and ADR-0151 §16 requires one deterministic case each. A subclass
+    that overrides one method to raise, or to commit and then raise, is how a test
+    reaches those points against the real implementation; the alternative is a
+    duck-typed double, which would test a second store rather than this one. No
+    production subclass exists and none is expected.
 
     **Entries are stored as their JSON dump and rebuilt on every read**, which is
     how a detached snapshot is obtained here without a copy step to forget:
