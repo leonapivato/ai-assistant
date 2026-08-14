@@ -463,8 +463,16 @@ class FakeConnectionProvisioner:
 
 #: The Unicode general categories ADR-0149 §4's "no control character, no line
 #: break" excludes. ``Cc`` is every C0 and C1 control; ``Zl`` and ``Zp`` are the
-#: two separators that are line breaks without being controls.
-_UNPRINTABLE_CATEGORIES: Final = frozenset({"Cc", "Zl", "Zp"})
+#: two separators that are line breaks without being controls; ``Cf`` is the format
+#: controls, which ADR-0151 §5's display clause is what excludes — ``U+202E``
+#: reorders what is rendered, so an identity carrying one is displayed as something
+#: other than what is recorded.
+#:
+#: **It is the production store's set, and moves with it.** A canonical fake
+#: stricter than the store it stands in for hides a divergence rather than closing
+#: one: the conformance suite would pass against the fake and the real store would
+#: still admit the value. `tools/connection_store.py` carries the whole argument.
+_UNPRINTABLE_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
 def _printable(identity: str) -> str:

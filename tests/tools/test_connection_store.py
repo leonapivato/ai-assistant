@@ -170,6 +170,8 @@ async def test_liveness_is_not_decided_by_a_column_a_file_edit_can_flip(
         pytest.param("owner\nadmin", id="line-break"),
         pytest.param("owner\u2028admin", id="unicode-line-separator"),
         pytest.param("owner\x07", id="control-character"),
+        pytest.param("Alice\u202ebob", id="bidi-override"),
+        pytest.param("zero\u200bwidth", id="zero-width-space"),
         pytest.param("o" * (ACCOUNT_IDENTITY_MAX_BYTES + 1), id="over-the-bound"),
     ],
 )
@@ -182,6 +184,12 @@ async def test_a_persisted_identity_outside_the_shape_is_reported_on_the_way_out
     the reference, the revision, the state and the slot all still validate, so the
     decode alone lets it through. A store that enforced only on append would hand
     a caller an identity it would refuse to accept, which is one file edit away.
+
+    The two ``Cf`` cases are the ones a file edit is *most* likely to carry: the
+    write path refuses them at the surface as well, so a row holding one is a row
+    nothing in this system appended, and the bidi override is what makes the
+    identity a client displays differ from the identity the record holds
+    (ADR-0151 §5).
     """
     await store.append(entry(), expected_latest=None)
     conn: sqlite3.Connection = store._conn
