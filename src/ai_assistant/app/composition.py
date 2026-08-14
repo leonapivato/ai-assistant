@@ -30,7 +30,7 @@ from ai_assistant.context import (
 )
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.core.errors import ConfigurationError, ModelError
-from ai_assistant.core.types import DELIVERY_RESERVE_BYTES
+from ai_assistant.core.types import DELIVERY_RESERVE_BYTES, SecretScope
 from ai_assistant.evaluation import MeasureReader, SqliteTraceStore
 from ai_assistant.learning import ModelBackedObserver, RuleBasedFeedbackProcessor
 from ai_assistant.memory import (
@@ -81,14 +81,17 @@ from ai_assistant.permissions import (
 )
 from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
 from ai_assistant.readers import CalendarReader, EmailReader
+from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.tools import build_default_registry
+from ai_assistant.tools.connection_store import SqliteConnectionStore
+from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
-    from ai_assistant.core.protocols import Embedder, Reader, TraceSink
+    from ai_assistant.core.protocols import ConnectionPurger, Embedder, Reader, TraceSink
 
 
 #: What this layer tunes :class:`LearningLoop`'s retrieval to, and **passed
@@ -1926,3 +1929,99 @@ def build_store_health_reader(
     """
     directory = data_dir if data_dir is not None else settings.data_dir
     return StoreHealthReader(store=directory / "memory.db")
+
+
+@dataclass(frozen=True, slots=True)
+class OpenedConnections:
+    """A :class:`ConnectionPurger` over an opened store, and the close it owes.
+
+    Returned by :func:`build_connection_purger` and consumed by the offline delete
+    act. The pair is one value rather than two returns because ADR-0153 §3 makes
+    the close an obligation of the *act* — "whatever the act opens in order to
+    reach the purge — the connection store, and the objects the composition root
+    builds around it — is **closed before the first destruction begins**" — and a
+    builder that handed back only the purger would leave the caller no way to
+    discharge it, since :class:`ConnectionPurger` carries two members and neither
+    is a close (ADR-0153 §2).
+
+    **The purger is typed as the narrow face and never as the concrete class**,
+    the same narrowing :class:`Composition` gives its ``TraceSink``. The holder is
+    an offline, irreversible, destructive tool; handing it
+    ``ConnectionProvisioner`` would let the one component whose purpose is
+    destroying an installation also create a connection in one (ADR-0153 §2).
+
+    Attributes:
+        purger: The two-member seam ADR-0153 §2 places, satisfied here by the
+            connection provisioner in `tools/` — its primary production
+            implementation, and the only one.
+        close: Releases the connection store this build opened. Synchronous, and
+            idempotent because the store's own close is.
+    """
+
+    purger: ConnectionPurger
+    close: Callable[[], None]
+
+
+def build_connection_purger(
+    settings: Settings, *, data_dir: Path | None = None
+) -> OpenedConnections:
+    """Wire the offline delete act to ADR-0149 §8's purge (ADR-0153 §2, §6).
+
+    The composition root's fifth function, and it is here for the reason the
+    second, third and fourth are, stated once more because this one has a second
+    boundary to cross. ``lint-imports``' "no subsystem imports the secret store"
+    contract names ``ai_assistant.service`` in its source list, so the entry point
+    **cannot** construct the ``INTEGRATION``-scoped keyring face this provisioner
+    needs; and ADR-0153 §6's fourth clause puts the rest of it beyond argument —
+    `service` "imports no subsystem directly", reaches
+    :class:`~ai_assistant.core.protocols.ConnectionPurger` as a Protocol in
+    ``core``, and "receives the implementation by injection from `app`". So the
+    delete act arrives at its mechanism the same indirect way the re-embedder, the
+    measure report and the store-health census do.
+
+    **The store is opened here, unlike in the three functions above**, and the
+    difference is the mechanism rather than a change of posture: a connection
+    store that is not open cannot answer :meth:`ConnectionPurger.connected`, and
+    ADR-0153 §3 requires that answer *before* the owner's confirmation. The cost
+    is that a deployment which never connected an account gets a
+    ``connections.db`` created by this call — which is the same file the hub
+    creates on its next start (ADR-0149 §3), destroyed by this very act on the
+    path that completes, and left behind only where the act refuses after the
+    preflights. It is not, in other words, "a file left behind that the
+    installation never had" in ADR-0126 §7's sense.
+
+    **Nothing about the keyring is touched here.** ADR-0125 §7: "Constructing an
+    implementation touches no keyring. The backend is resolved on the first call."
+    An installation whose store names no slot therefore makes no keyring call at
+    any point of the act, which is what keeps a headless box's delete right
+    intact (ADR-0153 §4).
+
+    Two facts are chosen here and the act can name neither (ADR-0125 §2): the
+    scope, so the object handed out reaches only ``INTEGRATION`` entries, and the
+    installation namespace — the data directory, injected rather than read by the
+    store itself, exactly as ``interfaces/cli.py``'s ``_enrolment_secrets``
+    injects it for the device's own scope.
+
+    Args:
+        settings: Loaded application settings — ``data_dir`` locates the store and
+            names the installation.
+        data_dir: Overrides ``settings.data_dir`` when given, exactly as
+            :func:`build_engine`'s keyword does (ADR-0083 §2).
+
+    Returns:
+        The purger, and the close that releases everything opened to reach it.
+
+    Raises:
+        ConnectionStoreError: If ``<data_dir>/connections.db`` cannot be opened or
+            initialised. ADR-0153 §4's third clause governs what the act does with
+            that: it destroys nothing and reports, because an unreadable index is
+            the case in which proceeding guarantees the unrepairable state rather
+            than risking it.
+    """
+    directory = data_dir if data_dir is not None else settings.data_dir
+    store = SqliteConnectionStore(path=directory / "connections.db")
+    purger = KeyringConnectionProvisioner(
+        store=store,
+        secrets=KeyringSecretStore(scope=SecretScope.INTEGRATION, installation=str(directory)),
+    )
+    return OpenedConnections(purger=purger, close=store.close)

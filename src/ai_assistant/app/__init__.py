@@ -33,7 +33,12 @@ tool arriving by that same route (ADR-0120 §9): ``service`` may not import
 here. :func:`build_store_health_reader` is the third of that family (ADR-0129 §5),
 and it arrives by the *other* half of the same rule: its mechanism is in
 ``memory/`` rather than in a leaf package, and ``service`` may name no subsystem
-type at all.
+type at all. :func:`build_connection_purger` is the fourth, and the one with two
+boundaries to cross rather than one (ADR-0153 §6): the offline delete act reaches
+:class:`~ai_assistant.core.protocols.ConnectionPurger` as a Protocol in ``core``
+and receives its implementation — the provisioner in ``tools/``, over an
+``INTEGRATION``-scoped keyring face ``lint-imports`` forbids ``service`` to
+construct — by injection from here.
 """
 
 from __future__ import annotations
@@ -43,7 +48,9 @@ from ai_assistant.app.composition import (
     STORE_HEALTH_DEFAULT_SAMPLE,
     STORE_HEALTH_MAX_K,
     Composition,
+    OpenedConnections,
     build_composition,
+    build_connection_purger,
     build_engine,
     build_measure_reader,
     build_reembedder,
@@ -56,7 +63,9 @@ __all__ = [
     "STORE_HEALTH_DEFAULT_SAMPLE",
     "STORE_HEALTH_MAX_K",
     "Composition",
+    "OpenedConnections",
     "build_composition",
+    "build_connection_purger",
     "build_engine",
     "build_measure_reader",
     "build_reembedder",

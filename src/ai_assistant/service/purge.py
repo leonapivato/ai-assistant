@@ -34,16 +34,31 @@ left behind is "a device left holding a credential to a store that no longer
 exists", the outcome ADR-0124 §8 exists to prevent, produced by the act meant to
 satisfy it.
 
-**And it says what it did not reach** (§6, §7). A hub-side delete cannot touch a
-credential on another machine, cannot touch a keyring it holds no face of, and
-cannot touch a backup artifact ADR-0123 §11 requires to be written outside this
-directory. The report names each, before the act and again after it, and it never
-claims to have purged everything.
+**It routes the integration purge, before it destroys anything** (ADR-0153). The
+connection store under ``Settings.data_dir`` is the *only* durable list of the
+``INTEGRATION`` credential slots this installation holds — ADR-0125 §5 refuses
+enumeration, so nothing can discover a slot it did not record — and destroying
+that store while a slot survives leaves Tier 0 data "unreachable and present"
+that no later act could ever name. So the act reads the live connections, states
+them, takes the owner's confirmation, invokes
+:meth:`~ai_assistant.core.protocols.ConnectionPurger.purge`, closes the store, and
+only then destroys the first entry. A purge that fails destroys nothing at all
+(ADR-0153 §4), and no argument, flag or setting lets the act past one.
+
+**And it says what it did not reach** (§6, §7, ADR-0153 §5). A hub-side delete
+cannot touch a credential on another machine, cannot touch the provider key an
+operator holds in their environment, and cannot touch a backup artifact ADR-0123
+§11 requires to be written outside this directory. The report is stated scope by
+scope over :class:`~ai_assistant.core.types.SecretScope`'s closed enum — every
+member owes a row, which is what makes ADR-0125 §5's no-skipped-scope clause
+checkable rather than merely stated — before the act and again after it, and it
+never claims to have purged everything.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import errno
 import os
 import re
@@ -53,10 +68,12 @@ import sys
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
+from ai_assistant.app import build_connection_purger
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import AssistantError, ConfigurationError
+from ai_assistant.core.types import SecretScope
 from ai_assistant.service import datadir
 from ai_assistant.service.backup import SIDECAR_SUFFIXES
 from ai_assistant.service.enrolment import ENROLMENTS_FILENAME, EnrolmentStore
@@ -65,9 +82,18 @@ from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.service.refusal import RefusalError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
+    from ai_assistant.app import OpenedConnections
+    from ai_assistant.core.types import ConnectedAccount
     from ai_assistant.service.enrolment import Enrolment
+
+#: How the act obtains ADR-0153 §2's seam and the close that releases it. A
+#: factory rather than a value, so that nothing is opened until every
+#: refusal-producing check of ADR-0126 §1 has passed — a refusal must "cost the
+#: owner nothing and leave the keyring exactly as it was" (ADR-0153 §3) — and so
+#: that a test drives the act against a purger it scripts (ADR-0153 §8).
+type _Opener = Callable[[], OpenedConnections]
 
 #: The act at an enrolled device that removes the credential this one cannot reach
 #: (ADR-0124 §8, shipped in ``interfaces/cli.py`` as ``device unenrol``). §7
@@ -217,11 +243,39 @@ class _Devices:
     note: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class _Purged:
+    """What the integration purge left the act holding (ADR-0153 §3, §4).
+
+    Attributes:
+        accounts: The live connections, read **before** the purge and held for the
+            restatement afterwards. Empty where the purge never got that far — and
+            also, legitimately, where this installation has connected no account,
+            which the report distinguishes by saying so rather than by omission.
+        failure: What stopped the purge, or ``None``. Kept as the exception rather
+            than as a string so :func:`~ai_assistant.service.exits.classify`
+            decides the exit code from the same fault an operator reads about,
+            which is the shape :class:`_Survivor` already takes for the
+            destruction's own failures.
+    """
+
+    accounts: tuple[ConnectedAccount, ...] = ()
+    failure: Exception | None = None
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Destroy the data directory's contents and return the process's exit code.
 
     Args:
         argv: Command-line arguments, for tests. ``None`` reads ``sys.argv``.
+
+    **An externally delivered cancellation is not caught here and is not converted
+    into an exit code** (ADR-0153 §4, ADR-0060). ``CancelledError`` derives from
+    ``BaseException``, so none of the clauses below sees one and it leaves this
+    function unclassified and unreported — which is the whole of the carve-out:
+    the act begins no further destructive work of its own, closes what it opened,
+    and leaves whatever it had already destroyed standing, landing in whichever of
+    ADR-0153 §3's interruption windows the arrival falls in.
 
     Returns:
         ``0`` when the directory holds nothing but the instance lock, ``78`` for
@@ -237,7 +291,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigurationError as exc:
         return _report(exc)
     try:
-        return _purge(settings.data_dir, confirmation=args.confirm)
+        return _purge(
+            settings.data_dir,
+            confirmation=args.confirm,
+            open_connections=lambda: build_connection_purger(settings),
+        )
     except RefusalError as exc:
         print(f"the purge was refused: {exc}", file=sys.stderr)
         return EXIT_DEPLOYMENT
@@ -282,7 +340,7 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def _purge(data_dir: Path, *, confirmation: Path | None) -> int:
+def _purge(data_dir: Path, *, confirmation: Path | None, open_connections: _Opener) -> int:
     """Refuse what can be refused before the lock, then take it and do the work.
 
     **ADR-0083 §3's step 2 runs in full, and that is §1's own choice rather than
@@ -310,7 +368,7 @@ def _purge(data_dir: Path, *, confirmation: Path | None) -> int:
     if not _acquire(lock):
         return _report_contention(lock)
     try:
-        return _run_locked(data_dir, confirmation=confirmation)
+        return _run_locked(data_dir, confirmation=confirmation, open_connections=open_connections)
     finally:
         lock.release()
 
@@ -358,22 +416,142 @@ def _acquire(lock: InstanceLock) -> bool:
         raise RefusalError(msg) from exc
 
 
-def _run_locked(data_dir: Path, *, confirmation: Path | None) -> int:
-    """Everything §5 requires to happen under one instance lock.
+def _run_locked(data_dir: Path, *, confirmation: Path | None, open_connections: _Opener) -> int:
+    """Everything §5 and ADR-0153 §3 require to happen under one instance lock.
 
     The lock is taken before the record is read and held past the last
     destruction, which is what makes "as part of the same act" a fact rather than
     a hope: while it is held no hub can start, so no process exists that could
     read a half-destroyed directory or admit a device against a record that is
     gone.
+
+    **ADR-0153 §3 extends that hold backwards over the integration purge**, and
+    that is what discharges ADR-0149 §8's sixth clause rather than merely
+    satisfying it: nothing can start a hub, so no provisioning act is concurrent
+    with the purge. A hub-side coordinator would have had to establish the same
+    property inside a running process that is simultaneously serving the operation
+    that provisions, and nothing in ADR-0151's surface offers it a quiesce.
+
+    **The order of the two steps below is forced at both ends, by different
+    rules.** The purge is after the confirmation because ADR-0126 §7 admits no
+    destruction before one and a keyring deletion is a destruction; it is before
+    :func:`_destroy` because the connection store lives in ``data_dir`` and is the
+    only index into the keyring. And it is after :func:`_refuse_unremovable`
+    because "an implementation that purged the keyring first and then hit that
+    refusal would leave an owner with every credential deleted, every byte of data
+    intact, and a diagnostic about a directory mode".
     """
     devices = _live_enrolments(data_dir)
     _refuse_unremovable(data_dir)
-    _state_before(data_dir, devices)
-    _confirm(data_dir, given=confirmation)
+    purged = _purge_connections(
+        data_dir, devices=devices, confirmation=confirmation, open_connections=open_connections
+    )
+    if purged.failure is not None:
+        return _report_purge_failure(purged.failure)
 
     survivors = _destroy(data_dir)
-    return _state_after(data_dir, devices, survivors)
+    return _state_after(data_dir, devices, survivors, purged.accounts)
+
+
+def _purge_connections(
+    data_dir: Path, *, devices: _Devices, confirmation: Path | None, open_connections: _Opener
+) -> _Purged:
+    """Read the connections, state them, confirm, purge, and close (ADR-0153 §3, §4).
+
+    Everything the connection store is open for happens inside this one function,
+    which is how "closed before the first destruction begins" is a property of the
+    code's shape rather than of a caller remembering: :func:`_destroy` runs in
+    :func:`_run_locked`, after this has returned and its ``finally`` has run.
+
+    **Closing the store before the destruction is where the obvious implementation
+    goes wrong**, and it is ADR-0126 §2's own central argument arriving one layer
+    down — "unlinking their files under a live process leaves a hub writing to
+    descriptors whose paths are gone". An act that held the store open across
+    :func:`_destroy` would be doing exactly that to itself, in a tool whose entire
+    premise is that nothing else is.
+
+    **One :class:`asyncio.Runner` spans both calls**, rather than a fresh
+    ``asyncio.run`` per call: the store's own lock binds to the loop it is first
+    awaited on, so a second loop would meet a lock belonging to a dead one. The
+    owner's confirmation is taken between them and outside any running loop, which
+    is what keeps the blocking prompt off an event loop's thread.
+
+    **A ``CancelledError`` is not caught here.** It is not an
+    :class:`~ai_assistant.core.errors.AssistantError` and not an ``OSError``, so
+    it passes both clauses below, runs the ``finally`` — which is the act closing
+    the store *after* ``purge`` has returned control to it, never racing work the
+    purge still holds — and propagates unconverted (ADR-0153 §4, ADR-0060).
+
+    Args:
+        data_dir: The directory whose contents are about to be destroyed.
+        devices: §7's device list, already read.
+        confirmation: What ``--confirm`` carried, or ``None`` to prompt.
+        open_connections: How to obtain ADR-0153 §2's seam.
+
+    Returns:
+        The live connections read *before* the purge — held for the restatement,
+        because afterwards "the store it would read is gone" — and the failure
+        that stopped the act, if one did.
+
+    Raises:
+        RefusalError: If the owner's confirmation does not name the directory.
+            Deliberately not captured as a purge failure: it is ADR-0126 §7's own
+            refusal, it happens before the purge is invoked, and reporting it as a
+            keyring fault would name the wrong cause for the right outcome.
+    """
+    with asyncio.Runner() as runner:
+        try:
+            opened = open_connections()
+        except (AssistantError, OSError) as exc:
+            return _Purged(failure=exc)
+        try:
+            try:
+                accounts = runner.run(opened.purger.connected())
+            except (AssistantError, OSError) as exc:
+                return _Purged(failure=exc)
+            _state_before(data_dir, devices, accounts)
+            _confirm(data_dir, given=confirmation)
+            try:
+                runner.run(opened.purger.purge())
+            except (AssistantError, OSError) as exc:
+                return _Purged(accounts=accounts, failure=exc)
+        finally:
+            opened.close()
+    return _Purged(accounts=accounts)
+
+
+def _report_purge_failure(exc: Exception) -> int:
+    """Report a purge that did not complete, having destroyed nothing (ADR-0153 §4).
+
+    **Refusing whole is ADR-0126 §1's own instrument, applied where it matters
+    most.** That section already carves ``devices.db`` out of best-effort
+    continuation because for that one entry "the safe failure is to have destroyed
+    nothing". The connection store is the second such entry and for a stronger
+    reason: a failed ``devices.db`` leaves a state the owner can re-run out of, and
+    a destroyed index leaves one nobody can.
+
+    **The exit code comes from :func:`~ai_assistant.service.exits.classify`**,
+    which ADR-0153 §4's first clause names, so a keyring the deployment cannot
+    reach and a store that failed transiently are separated by ADR-0083 §5's one
+    question rather than flattened into a single number here.
+
+    **No account identity appears**, which is ADR-0153 §5's last clause reaching
+    every diagnostic §4 requires: a failure is reported by reference and by
+    condition, never by account. Nothing is interpolated but the exception, whose
+    own text is bound by ADR-0149 §3 to carry none.
+    """
+    code, action = classify(exc)
+    print(f"the integration credentials could not be purged: {exc}", file=sys.stderr)
+    print(
+        "Nothing was destroyed. The connection store is the only record of which credentials "
+        "this installation holds, so destroying the data directory now would leave them in "
+        "your keyring with nothing able to name them again. Clear the fault and run this "
+        "again — no argument skips this step.",
+        file=sys.stderr,
+    )
+    if action:
+        print(f"what to do: {action}", file=sys.stderr)
+    return code
 
 
 def _live_enrolments(data_dir: Path) -> _Devices:
@@ -770,14 +948,21 @@ def _check_access(directory: int, name: str, *, shown: Path, failures: list[str]
     return False
 
 
-def _state_before(data_dir: Path, devices: _Devices) -> None:
-    """§7's statement, made before anything is destroyed.
+def _state_before(
+    data_dir: Path, devices: _Devices, accounts: tuple[ConnectedAccount, ...]
+) -> None:
+    """§7's statement, made before anything is destroyed (ADR-0153 §5).
 
     **Before, because of the crash.** After the act the record naming the devices
     is gone, so "an implementation that composed its report from the record and
     printed it at the end would, on a crash between the two, destroy the enrolment
     record and leave the owner with no way to learn which devices they must still
     visit". The restatement afterwards is a convenience; this is the guarantee.
+
+    **The connection list is in identical case**, which is why ADR-0153 §5 puts it
+    here rather than composing it from what the purge returned: the store naming
+    the accounts is destroyed by the same act, and the owner must go to each
+    service and revoke. A report composed afterwards would name nothing.
     """
     print(f"about to destroy everything in {data_dir}")
     print("  every file and directory inside it, to any depth, the enrolment record first.")
@@ -786,25 +971,115 @@ def _state_before(data_dir: Path, devices: _Devices) -> None:
     print()
     _state_devices(devices, heading="devices you must still visit:")
     print()
+    _state_credentials(data_dir, accounts)
+    print()
     print("what this act does not reach:")
-    print(
-        f"  no keyring. A model provider credential you hold in your environment or a shell "
-        f"profile is not in the keyring, is not in {data_dir}, and is not removed here — "
-        f"remove it where you set it."
-    )
     print(
         "  no backup artifact. A backup is written outside the data directory, so a complete "
         "encrypted copy of everything destroyed here may still exist; deal with it yourself."
     )
     print()
     print("what this act may not claim, so it does not:")
-    print("  it does not purge everything.")
+    print("  it does not purge everything, and it does not purge Tier 0.")
+    print(
+        "  it does not sweep the keyring. Nothing in this system enumerates one; what goes is "
+        "the set of credentials the connection store recorded, and nothing else."
+    )
     print("  it reaches nothing on an enrolled device.")
     print(
         "  it does not retract what a device already holds. What a device received before "
         "this act, it keeps."
     )
     print()
+
+
+def _state_credentials(data_dir: Path, accounts: tuple[ConnectedAccount, ...]) -> None:
+    """State, for **every** member of ``SecretScope``, whether this act reaches it.
+
+    **Indexing the report on the closed enum is what makes ADR-0125 §5's second
+    clause checkable** (ADR-0153 §5). "No lane may present a purge that skips a
+    scope as complete" is a sentence a report can satisfy by saying nothing about a
+    scope; a report a reader can only write by answering for each member cannot.
+    The ``match`` below is the mechanical half: a fourth member added by a future
+    ADR makes :func:`typing.assert_never` unreachable and fails ``mypy`` here,
+    which is a row the report owes rather than a row it silently omits.
+    """
+    print("Tier 0 credentials, one kind at a time (ADR-0125 §2):")
+    for scope in SecretScope:
+        _state_scope(scope, data_dir=data_dir, accounts=accounts)
+
+
+def _state_scope(
+    scope: SecretScope, *, data_dir: Path, accounts: tuple[ConnectedAccount, ...]
+) -> None:
+    """Say whether this act reaches one scope, and where it does not, what to do."""
+    match scope:
+        case SecretScope.PROVIDER:
+            print("  provider — not reached.")
+            print(
+                f"    A model provider credential you hold in your environment or a shell "
+                f"profile is not in the keyring, is not in {data_dir}, and is not removed "
+                f"here — remove it where you set it."
+            )
+        case SecretScope.INTEGRATION:
+            print("  integration — reached, before anything in the data directory is destroyed.")
+            print(
+                "    Every credential this installation's connection store names is deleted, "
+                "including those of accounts you already disconnected."
+            )
+            _state_connections(accounts, heading="Accounts still connected")
+        case SecretScope.ENROLMENT:
+            # Unchanged by ADR-0153 §5, deliberately down to what it points at: the
+            # device list above already names each device *and* the act at it, so
+            # restating the command here would be a second copy of ADR-0126 §7's
+            # obligation rather than this row's own answer.
+            print("  enrolment — not reached.")
+            print(
+                "    This act reaches nothing on an enrolled device. The device list above "
+                "names each one, and the act at that device that removes what it holds."
+            )
+        case _:  # pragma: no cover - unreachable while SecretScope has three members
+            assert_never(scope)
+
+
+def _state_connections(accounts: tuple[ConnectedAccount, ...], *, heading: str) -> None:
+    """Name every live connection, and say what deleting its credential does not do.
+
+    **Both halves are ADR-0153 §5.** The reference is a minted handle and the
+    identity is "the durable, user-recognisable name of the account itself", so an
+    owner holding only the first cannot act on the list; both are non-secret facts
+    the Tier 1 record already held, so naming them discloses nothing new. And the
+    non-revocation sentence is the honesty obligation an implementation would most
+    naturally omit: deleting an OAuth refresh token from a keyring does not revoke
+    it at the issuer, and the act "may not present the removal of a local
+    credential as the withdrawal of an authorisation held elsewhere".
+
+    **It names no endpoint**, because this system holds none it is entitled to
+    name: no integration exists and ADR-0017 §3's egress seam is undesignated. So
+    the statement names the accounts and the obligation, and does not invent a URL.
+
+    **Only *live* connections are named.** The purge deletes every slot the store
+    holds, superseded and removed ones included, and that is right — an
+    unreferenced slot is still a credential. But an account the owner already
+    disconnected is one they have already dealt with, and listing it back at them
+    under "accounts you must still revoke" would restate a completed decision as an
+    outstanding obligation.
+
+    Args:
+        accounts: The live connections, as they were read before the purge.
+        heading: What to call the list, which differs before and after the act.
+    """
+    if not accounts:
+        print("    This installation has connected no account, so there is nothing to revoke.")
+    else:
+        print(f"    {heading}, by reference and account:")
+        for account in accounts:
+            print(f"      {account.reference}  {account.identity}")
+    print(
+        "    Deleting a credential here does not revoke it at the service that issued it. "
+        "The access stays live until you revoke it there, which is an act at that service "
+        "and not one this act can perform."
+    )
 
 
 def _state_devices(devices: _Devices, *, heading: str) -> None:
@@ -1109,13 +1384,24 @@ def _open_directory(directory: int | None, name: str) -> int:
     return os.open(name, flags, dir_fd=directory)
 
 
-def _state_after(data_dir: Path, devices: _Devices, survivors: list[_Survivor]) -> int:
-    """Say what remains, restate the devices, and return the act's exit code (§1, §7).
+def _state_after(
+    data_dir: Path,
+    devices: _Devices,
+    survivors: list[_Survivor],
+    accounts: tuple[ConnectedAccount, ...],
+) -> int:
+    """Say what remains, restate the custodians, and return the exit code (§1, §7).
+
+    **The restatement re-reads nothing** (ADR-0153 §5). Both lists are the ones
+    read before the confirmation: the enrolment record and the connection store
+    are both gone by the time this runs, so a statement composed here would name
+    nothing. What it is for is the session scrolled past the first statement.
 
     Args:
         data_dir: The directory the act emptied.
         devices: §7's list, read before the record was destroyed.
         survivors: Every path that remains, and why.
+        accounts: ADR-0153 §5's list, read before the purge.
 
     Returns:
         ``0`` when nothing remains, and otherwise the code ADR-0083 §5's test gives
@@ -1133,6 +1419,9 @@ def _state_after(data_dir: Path, devices: _Devices, survivors: list[_Survivor]) 
         print("Deal with each, then run this again — the act is repeatable.")
     print()
     _state_devices(devices, heading="devices you must still visit:")
+    print()
+    print("integration credentials: deleted, every one this installation's store named.")
+    _state_connections(accounts, heading="Accounts you must still revoke")
     if not survivors:
         return EXIT_OK
     return _failure_code(survivors)

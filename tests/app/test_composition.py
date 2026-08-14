@@ -9,6 +9,7 @@ or API key is needed.
 from __future__ import annotations
 
 import ast
+import asyncio
 import os
 import stat
 import sys
@@ -26,6 +27,7 @@ import ai_assistant
 from ai_assistant.app import (
     Composition,
     build_composition,
+    build_connection_purger,
     build_engine,
     build_measure_reader,
     build_reembedder,
@@ -41,12 +43,14 @@ from ai_assistant.core.config import EmbedderKind, Settings, load_settings
 from ai_assistant.core.errors import (
     AssistantError,
     ConfigurationError,
+    ConnectionStoreError,
     DeferralStoreError,
     ModelError,
     ReaderError,
     SourceNotGrantedError,
     TraceStoreError,
 )
+from ai_assistant.core.protocols import ConnectionPurger
 from ai_assistant.core.types import (
     BeliefBand,
     ClassReach,
@@ -88,6 +92,7 @@ from ai_assistant.orchestration.upcoming import (
 from ai_assistant.permissions import ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.readers import CALENDAR_READER_NAME, EMAIL_READER_NAME
+from ai_assistant.secret_store import backend as secret_store_module
 from ai_assistant.testing import FakeMemoryStore, FakeTraceSink, evaluation_trace
 from ai_assistant.tools import InMemoryToolRegistry
 
@@ -2883,3 +2888,87 @@ async def test_a_raised_class_reaches_a_polling_device_on_the_live_handoff(
         assert delivery.notification.producer == UPCOMING_PRODUCER
     finally:
         await engine.aclose()
+
+
+class TestBuildConnectionPurger:
+    """The composition root's fifth function (ADR-0153 §2, §6).
+
+    The offline delete act may name no subsystem and — ``lint-imports``' "no
+    subsystem imports the secret store" — may not construct the
+    ``INTEGRATION``-scoped keyring face at all, so what is on test here is that
+    this layer supplies both and hands back the **narrow** face plus the close
+    ADR-0153 §3 makes the act's obligation.
+    """
+
+    def test_it_points_the_purger_at_the_connection_store(self, tmp_path: Path) -> None:
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
+
+        opened = build_connection_purger(settings)
+        try:
+            assert isinstance(opened.purger, ConnectionPurger)
+            assert (tmp_path / "connections.db").exists()
+        finally:
+            opened.close()
+
+    def test_the_data_dir_keyword_wins_over_the_setting(self, tmp_path: Path) -> None:
+        configured = tmp_path / "configured"
+        configured.mkdir()
+        passed = tmp_path / "passed"
+        passed.mkdir()
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=configured)
+
+        opened = build_connection_purger(settings, data_dir=passed)
+        try:
+            assert (passed / "connections.db").exists()
+            assert not (configured / "connections.db").exists()
+        finally:
+            opened.close()
+
+    def test_building_it_touches_no_keyring(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """ADR-0125 §7: "the backend is resolved on the first call", not at construction.
+
+        Which is what ADR-0153 §4 rests on for every installation that never
+        connected an account: the purge's loop runs zero times, so a headless box
+        with no keyring at all runs the delete act exactly as it does today.
+        """
+
+        def refuse() -> object:
+            msg = "no keyring backend on this machine"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(secret_store_module, "select_backend", refuse)
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
+
+        opened = build_connection_purger(settings)
+        opened.close()
+
+    async def test_a_purge_over_a_store_naming_no_slot_makes_no_keyring_call(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The same fact end to end, through the real store and the real purger."""
+
+        def refuse() -> object:
+            msg = "no keyring backend on this machine"
+            raise AssertionError(msg)
+
+        monkeypatch.setattr(secret_store_module, "select_backend", refuse)
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
+
+        opened = build_connection_purger(settings)
+        try:
+            assert await opened.purger.connected() == ()
+            await opened.purger.purge()
+        finally:
+            opened.close()
+
+    def test_the_close_it_hands_back_releases_the_store(self, tmp_path: Path) -> None:
+        """ADR-0153 §3: the act "does not destroy a file it is holding open"."""
+        settings = Settings(embedder=EmbedderKind.HASHING, data_dir=tmp_path)
+
+        opened = build_connection_purger(settings)
+        opened.close()
+
+        with pytest.raises(ConnectionStoreError):
+            asyncio.run(opened.purger.connected())
