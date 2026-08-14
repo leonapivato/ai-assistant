@@ -11,6 +11,8 @@ for one tool.
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from typing import TYPE_CHECKING, Final, cast
 
 import pytest
@@ -34,6 +36,7 @@ from ai_assistant.core.types import (
     parameter_violations,
 )
 from ai_assistant.testing.cancellation import LoopSuspension
+from ai_assistant.tools import egress_binder as seam_module
 from ai_assistant.tools.connection_store import ConnectionEntry, StoredEntry
 from ai_assistant.tools.egress_binder import (
     EgressBindingSeam,
@@ -362,4 +365,46 @@ async def test_no_refusal_message_renders_a_destination_form_or_an_identity() ->
         assert IDENTITY not in message
         assert "X-Secret" not in message
         assert _SLOT.key not in message
+    # The permitted half of the clause, exercised rather than assumed: ADR-0152 §11
+    # lets a refusal name the tool id, an argument the declaration **statically
+    # names**, and the connection reference — so a discipline that named nothing at
+    # all would pass every assertion above while leaving a refusal unreadable.
+    assert "'to'" in refusals[0]
+    assert SEND_EMAIL.id in refusals[0]
     assert REFERENCE in refusals[-1]
+
+
+def test_the_seam_holds_no_keyring_face_and_no_collaborator_beyond_its_three() -> None:
+    """ADR-0152 §10, §13: the half of the read-budget pin an instrumented double cannot see.
+
+    "It reads no keyring… The implementation holds no ``Secrets`` and no
+    ``SecretStore`` face, and holding this seam is not holding one" (ADR-0125 §8,
+    ADR-0149 §8). A doubles-based assertion can only show that a *given* keyring
+    was not called; what makes the claim structural is that the module names no
+    such face to call and this object holds no fourth collaborator to hide one
+    behind.
+
+    Asserted against the module's own syntax tree rather than against its text, so
+    the docstring naming the classes it does **not** hold does not satisfy it.
+    """
+    tree = ast.parse(Path(str(seam_module.__file__)).read_text(encoding="utf-8"))
+    imported = {
+        alias.asname or alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom | ast.Import)
+        for alias in node.names
+    }
+    modules = {
+        node.module
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom) and node.module is not None
+    }
+
+    assert not ({"Secrets", "SecretStore", "SecretName", "SecretValue"} & imported)
+    assert not any("secret" in module for module in modules)
+    assert set(EgressBindingSeam.__slots__) == {
+        "_canonicalises",
+        "_definitions",
+        "_records",
+        "_registrations",
+    }

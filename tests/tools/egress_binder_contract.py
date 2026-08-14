@@ -863,42 +863,169 @@ class EgressBinderContract(ABC):
         }
         assert set(BoundEgressCall.model_fields) == {"binding", "tool", "parameters"}
 
-    async def test_a_mutation_during_the_read_reaches_neither_the_derivation_nor_the_result(
+    # --- ADR-0152 §1, §13: the detachment cases, one per validated argument --
+    #
+    # Each mutates the caller's own object with `object.__setattr__` **while the
+    # member is suspended on §10's awaited connection-record read** — the window the
+    # detachment exists to close. §13: "A test that mutates a copy satisfies none of
+    # these; one that mutates before the await tests revalidation rather than
+    # detachment; and one covering `approved` alone leaves every argument the
+    # suspension window actually exposes untested."
+
+    async def test_a_tool_mutated_during_the_read_changes_neither_derivation_nor_result(
         self, binder: EgressBinder
     ) -> None:
-        """ADR-0152 §1, §13: the detachment case, one per validated argument.
+        """ADR-0152 §1: the declaration the binding is derived under is the detached one.
 
-        Mutated with ``object.__setattr__`` **while the member is suspended on the
-        awaited connection-record read** — the window the detachment exists to
-        close. A test that mutated a copy would satisfy nothing, and one that
-        mutated before the await would be testing revalidation instead.
+        The mutation is on the **declaration** rather than on a label, because that
+        is what the clause names: a caller that hands in a registry-equal
+        definition, lets it revalidate and compare, suspends the seam on its read
+        and then strips the destination keyword would otherwise have the binding
+        derived under a schema no longer equal to the registered original — with the
+        ruling recorded before ``invoke``'s own check ever runs.
+        """
+        tool = tool_declaring({"to": recipients(), "body": {"type": "string"}})
+        self.register_egress(binder, tool)
+        held = self.suspend_next_read(binder)
+
+        async with held_at_its_first_await(
+            held,
+            binder.bind(
+                tool,
+                parameters={"to": ["a@example.com"], "body": "b"},
+                provenance=_no_provenance(),
+            ),
+        ) as task:
+            object.__setattr__(
+                tool,
+                "parameters_schema",
+                {"type": "object", "properties": {"to": {"type": "array"}, "body": {}}},
+            )
+            object.__setattr__(tool, "id", "somebody-else")
+        bound = await task
+
+        assert bound is not None
+        assert bound.tool.id == "send_email@work"
+        located = {(span.argument, span.index): span for span in bound.binding.spans}
+        assert located[("to", 0)].destination is not None
+        assert located[("to", 0)].destination.canonical == "a@example.com"
+        assert located[("to", 0)].tier is DataTier.PERSONAL
+
+    async def test_parameters_mutated_during_the_read_change_no_span_and_no_refusal(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0152 §1: neither the spans derived nor any refusal condition of §6.
+
+        The mutation adds a key the schema never statically names *and* rewrites a
+        described one, so a seam reading the caller's mapping after the await would
+        either refuse under §6 or describe a payload nobody proposed.
         """
         self.register_egress(binder, SEND_EMAIL)
-        parameters: dict[str, FrozenJson] = {"to": ["a@example.com"], "subject": "s", "body": "b"}
+        parameters: dict[str, FrozenJson] = {
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body": "hello",
+        }
+        held = self.suspend_next_read(binder)
+
+        async with held_at_its_first_await(
+            held, binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        ) as task:
+            parameters["body"] = "rewritten while the seam was suspended"
+            parameters["X-Secret"] = "sk-live-0001"
+        bound = await task
+
+        assert bound is not None
+        located = {(span.argument, span.index): span for span in bound.binding.spans}
+        assert set(located) == {("body", None), ("subject", None), ("to", 0)}
+        assert located[("body", None)].extent == len("hello")
+        assert bound.parameters["body"] == "hello"
+        assert "X-Secret" not in bound.parameters
+
+    async def test_a_carrier_mutated_during_the_read_changes_no_provenance(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0152 §1: neither the provenance written into a span nor §5's absent-span refusal.
+
+        Emptying the carrier mid-flight would silently downgrade a user-authored
+        span to ``SYSTEM_SELECTED``; naming an absent span would make §5's refusal
+        fire on a call that never carried one.
+        """
+        self.register_egress(binder, SEND_EMAIL)
         carrier = CarriedProvenance(
             spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED}
         )
         held = self.suspend_next_read(binder)
 
         async with held_at_its_first_await(
-            held, binder.bind(SEND_EMAIL, parameters=parameters, provenance=carrier)
+            held,
+            binder.bind(
+                SEND_EMAIL,
+                parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
+                provenance=carrier,
+            ),
         ) as task:
-            object.__setattr__(SEND_EMAIL, "id", "somebody-else")
-            object.__setattr__(carrier, "spans", {})
-            parameters["subject"] = "rewritten while the seam was suspended"
-        try:
-            bound = await task
-        finally:
-            object.__setattr__(SEND_EMAIL, "id", "send_email@work")
+            object.__setattr__(
+                carrier,
+                "spans",
+                {EgressSpanLocator(argument="attachment"): DiscloserProvenance.USER_AUTHORED},
+            )
+        bound = await task
 
         assert bound is not None
-        assert bound.tool.id == "send_email@work"
-        located = {(span.argument, span.index): span for span in bound.binding.spans}
-        assert located[("body", None)].provenance is DiscloserProvenance.USER_AUTHORED
-        assert located[("subject", None)].extent == len("s")
-        assert bound.parameters["subject"] == "s"
+        located = {(span.argument, span.index): span.provenance for span in bound.binding.spans}
+        assert located[("body", None)] is DiscloserProvenance.USER_AUTHORED
+        assert located[("subject", None)] is DiscloserProvenance.SYSTEM_SELECTED
+
+    async def test_an_approved_binding_mutated_during_the_read_changes_nothing_it_decides(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0152 §1, §13: ``rebind``'s own argument across its own awaited read.
+
+        A caller that hands in a matching binding and swaps in another while the
+        seam is suspended would otherwise have §7's equality decided against a value
+        nobody approved. Asserted in both directions: the resume still succeeds, and
+        what comes back is the **derived** binding rather than the substituted one.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+        parameters: dict[str, FrozenJson] = {
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body": "b",
+        }
+        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        assert first is not None
+        approved = EgressBinding.model_validate(first.binding.model_dump())
+        held = self.suspend_next_read(binder)
+
+        async with held_at_its_first_await(
+            held, binder.rebind(SEND_EMAIL, parameters=parameters, approved=approved)
+        ) as task:
+            object.__setattr__(approved, "transport_endpoint", "test://somewhere-else")
+        again = await task
+
+        assert again is not None
+        assert again.binding == first.binding
+        assert again.binding.transport_endpoint == ENDPOINT
 
     # --- ADR-0152 §1: the bypass cases --------------------------------------
+    #
+    # ADR-0152 §13: "Each is exercised against a tool this seam holds **no** egress
+    # registration for and whose schema carries neither §3 keyword, as well as
+    # against a registered one: that is the branch §8 would otherwise answer with
+    # `None`, so it is where the revalidation ordering §8 states is actually
+    # pinned." So every shape below is parametrized over both sides of §8's
+    # partition, and every one asserts the **chained** `ValidationError` — which is
+    # what distinguishes "revalidated first" from "looked the registration up first
+    # and refused for another reason".
+
+    def _bypass_subject(self, binder: EgressBinder, *, registered: bool) -> ToolDefinition:
+        """The tool a bypass case is aimed at, on each side of ADR-0152 §8's partition."""
+        if registered:
+            self.register_egress(binder, SEND_EMAIL)
+            return SEND_EMAIL
+        self.register(binder, NOT_EGRESS)
+        return NOT_EGRESS
 
     @pytest.mark.parametrize("registered", [True, False], ids=["egress-tool", "non-egress-tool"])
     async def test_a_carrier_built_by_model_construct_is_refused_with_a_chained_error(
@@ -906,85 +1033,129 @@ class EgressBinderContract(ABC):
     ) -> None:
         """ADR-0152 §1, §13: chained from the ``ValidationError``, never a bare one.
 
-        Exercised against a tool this seam holds **no** egress registration for as
-        well as against a registered one: that is the branch ADR-0152 §8 would
-        otherwise answer ``None`` for, so it is where the revalidation ordering is
-        actually pinned, and a suite exercising only the egress branch leaves it
-        unpinned.
+        ``model_construct`` builds an instance without running validators and is
+        public, so the annotation on the argument is not the enforcement.
         """
-        tool = SEND_EMAIL if registered else NOT_EGRESS
-        if registered:
-            self.register_egress(binder, tool)
-        else:
-            self.register(binder, tool)
+        tool = self._bypass_subject(binder, registered=registered)
         forged = CarriedProvenance.model_construct(spans={"body": "hearsay"})
 
         with pytest.raises(EgressBindingError) as raised:
             await binder.bind(tool, parameters={}, provenance=forged)
 
-        assert raised.value.__cause__ is not None
         assert type(raised.value.__cause__).__name__ == "ValidationError"
 
+    @pytest.mark.parametrize("registered", [True, False], ids=["egress-tool", "non-egress-tool"])
     async def test_a_carrier_rewritten_after_construction_is_refused(
-        self, binder: EgressBinder
+        self, binder: EgressBinder, *, registered: bool
     ) -> None:
-        """ADR-0152 §1: ``object.__setattr__`` defeats ``frozen=True`` (ADR-0018 §3)."""
-        self.register(binder, NOT_EGRESS)
+        """ADR-0152 §1: ``object.__setattr__`` defeats ``frozen=True`` (ADR-0018 §3).
+
+        A different hole from the one above: this carrier passed every validator on
+        the way in and was corrupted afterwards.
+        """
+        tool = self._bypass_subject(binder, registered=registered)
         carrier = CarriedProvenance(spans={})
         object.__setattr__(carrier, "spans", {object(): object()})
 
-        with pytest.raises(EgressBindingError):
-            await binder.bind(NOT_EGRESS, parameters={}, provenance=carrier)
+        with pytest.raises(EgressBindingError) as raised:
+            await binder.bind(tool, parameters={}, provenance=carrier)
 
-    async def test_a_tool_built_by_model_construct_is_refused(self, binder: EgressBinder) -> None:
-        """ADR-0152 §1: ``model_construct`` is a documented escape hatch, and it is public."""
-        forged = ToolDefinition.model_construct(id="", capability="")
+        assert type(raised.value.__cause__).__name__ == "ValidationError"
 
-        with pytest.raises(EgressBindingError):
+    @pytest.mark.parametrize("registered", [True, False], ids=["egress-tool", "non-egress-tool"])
+    async def test_a_locator_built_by_model_construct_is_refused_at_the_seam(
+        self, binder: EgressBinder, *, registered: bool
+    ) -> None:
+        """ADR-0152 §1, §13: the locator shape, exercised by calling ``bind`` directly.
+
+        Its refusal *at construction* is pinned in
+        ``tests/core/test_egress_binding_seam_types.py``; §13 states this one over
+        the seam, because a carrier holding a forged key can only be built by a
+        caller and can only be refused where the seam revalidates it.
+        """
+        tool = self._bypass_subject(binder, registered=registered)
+        forged = CarriedProvenance.model_construct(
+            spans={
+                EgressSpanLocator.model_construct(argument=object(), index="nine"): (
+                    DiscloserProvenance.USER_AUTHORED
+                )
+            }
+        )
+
+        with pytest.raises(EgressBindingError) as raised:
+            await binder.bind(tool, parameters={}, provenance=forged)
+
+        assert type(raised.value.__cause__).__name__ == "ValidationError"
+
+    @pytest.mark.parametrize("registered", [True, False], ids=["egress-tool", "non-egress-tool"])
+    async def test_a_tool_built_by_model_construct_is_refused(
+        self, binder: EgressBinder, *, registered: bool
+    ) -> None:
+        """ADR-0152 §1, §13: the ``tool`` shape, on both sides of the partition.
+
+        The forged definition carries the **registered** id on the egress side, so
+        the case really does reach the branch a registration lookup would take.
+        """
+        registered_tool = self._bypass_subject(binder, registered=registered)
+        forged = ToolDefinition.model_construct(id=registered_tool.id, capability="")
+
+        with pytest.raises(EgressBindingError) as raised:
             await binder.bind(forged, parameters={}, provenance=_no_provenance())
 
-    async def test_parameters_carrying_a_refused_value_are_refused(
-        self, binder: EgressBinder
-    ) -> None:
-        """ADR-0152 §1: ``FrozenJsonMapping`` is an alias, and Python enforces no annotation."""
-        self.register(binder, NOT_EGRESS)
+        assert type(raised.value.__cause__).__name__ == "ValidationError"
 
-        with pytest.raises(EgressBindingError):
+    @pytest.mark.parametrize("registered", [True, False], ids=["egress-tool", "non-egress-tool"])
+    async def test_parameters_carrying_a_refused_value_are_refused(
+        self, binder: EgressBinder, *, registered: bool
+    ) -> None:
+        """ADR-0152 §1, §13: ``FrozenJsonMapping`` is an alias, and Python enforces none.
+
+        A non-finite float satisfies ``float`` and has no JSON representation, so it
+        would validate against the annotation and fail far away — the
+        "accepted, then unusable" shape ADR-0014 §2 exists to close.
+        """
+        tool = self._bypass_subject(binder, registered=registered)
+        argument = "body" if registered else "query"
+
+        with pytest.raises(EgressBindingError) as raised:
             await binder.bind(
-                NOT_EGRESS,
-                parameters={"query": float("nan")},
-                provenance=_no_provenance(),
+                tool, parameters={argument: float("nan")}, provenance=_no_provenance()
             )
 
+        assert type(raised.value.__cause__).__name__ == "ValidationError"
+
+    @pytest.mark.parametrize("registered", [True, False], ids=["egress-tool", "non-egress-tool"])
     async def test_an_approved_binding_built_by_model_construct_is_refused(
-        self, binder: EgressBinder
+        self, binder: EgressBinder, *, registered: bool
     ) -> None:
-        """ADR-0152 §1, §13: ``rebind``'s arguments, which a ``bind``-only suite leaves untested."""
-        self.register_egress(binder, SEND_EMAIL)
+        """ADR-0152 §1, §13: ``rebind``'s own argument, which a ``bind``-only suite leaves untested.
+
+        On the non-egress side this is where §8's ordering is pinned for
+        ``approved``: an implementation looking the registration up first would
+        refuse for a different reason and carry no chained ``ValidationError``.
+        """
+        tool = self._bypass_subject(binder, registered=registered)
         forged = EgressBinding.model_construct(spans="not a tuple", account=None)
 
         with pytest.raises(EgressBindingError) as raised:
-            await binder.rebind(
-                SEND_EMAIL,
-                parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
-                approved=forged,
-            )
+            await binder.rebind(tool, parameters={}, approved=forged)
 
-        assert raised.value.__cause__ is not None
+        assert type(raised.value.__cause__).__name__ == "ValidationError"
 
+    @pytest.mark.parametrize("registered", [True, False], ids=["egress-tool", "non-egress-tool"])
     async def test_an_approved_binding_rewritten_after_construction_is_refused(
-        self, binder: EgressBinder
+        self, binder: EgressBinder, *, registered: bool
     ) -> None:
         """ADR-0152 §1, §13: the second ``approved`` bypass, which the first does not reach.
 
-        §13 names **two** hostile shapes for ``rebind``'s ``approved``: one built
-        by ``EgressBinding.model_construct``, and one "whose field was replaced by
-        ``object.__setattr__`` after construction". They are different holes —
-        the first skips every validator on the way in, the second passes them all
-        and is corrupted afterwards, which is what ``frozen=True`` does not stop
-        (ADR-0018 §3). An implementation that revalidated only what looked
-        unconstructed would pass the first and read the second's forged field as
-        the binding a user approved.
+        §13 names **two** hostile shapes for ``approved``: one built by
+        ``EgressBinding.model_construct``, and one "whose field was replaced by
+        ``object.__setattr__`` after construction". They are different holes — the
+        first skips every validator on the way in, the second passes them all and is
+        corrupted afterwards, which is what ``frozen=True`` does not stop (ADR-0018
+        §3). An implementation revalidating only what looked unconstructed would
+        pass the first and read the second's forged account as the one a user
+        approved.
         """
         self.register_egress(binder, SEND_EMAIL)
         parameters: dict[str, FrozenJson] = {
@@ -996,11 +1167,17 @@ class EgressBinderContract(ABC):
         assert first is not None
         corrupted = EgressBinding.model_validate(first.binding.model_dump())
         object.__setattr__(corrupted, "account", None)
+        subject = SEND_EMAIL if registered else NOT_EGRESS
+        if not registered:
+            self.register(binder, NOT_EGRESS)
 
         with pytest.raises(EgressBindingError) as raised:
-            await binder.rebind(SEND_EMAIL, parameters=parameters, approved=corrupted)
+            await binder.rebind(
+                subject,
+                parameters=parameters if registered else {"query": "q"},
+                approved=corrupted,
+            )
 
-        assert raised.value.__cause__ is not None
         assert type(raised.value.__cause__).__name__ == "ValidationError"
 
     # --- ADR-0152 §7: the resuming path -------------------------------------
@@ -1076,6 +1253,44 @@ class EgressBinderContract(ABC):
             await binder.rebind(
                 SEND_EMAIL, parameters=parameters, approved=_differing(first.binding, field)
             )
+
+    async def test_rebind_refuses_an_approved_binding_with_a_destination_omitted(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0150 §11's second routed refusal, ADR-0152 §6, §13: the omitted destination.
+
+        §13 states it as "a call whose declaration marks an argument
+        destination-bearing and whose derivation would produce that argument's span
+        with no ``EgressDestination`` is refused before a ruling is sought, so no
+        decision is recorded holding an account-only canonical destination set for
+        it", and rules out two shapes that do not reach it: a binding also malformed
+        under ADR-0150 §4, and one whose declaration marks no argument
+        destination-bearing.
+
+        On the deriving path the case has **no instance**: ADR-0152 §4 makes a
+        destination-bearing argument's value a string or an array of strings, so
+        every span of one carries an occurrence by construction and a supplied form
+        with no canonical form is refused instead. So it is exercised where an
+        omission really can arrive — a binding read back out of the trail — and the
+        assertion above the refusal is the thing the refusal prevents: that binding's
+        derived set names the **account alone**, which ADR-0150 §3's condition clause
+        forbids reading as "this call selected no recipient".
+        """
+        self.register_egress(binder, SEND_EMAIL)
+        parameters: dict[str, FrozenJson] = {
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body": "b",
+        }
+        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        assert first is not None
+        stripped = _without_destinations(first.binding)
+        assert [member.account for member in stripped.canonical_destination_set] == [
+            stripped.account
+        ]
+
+        with pytest.raises(EgressBindingError):
+            await binder.rebind(SEND_EMAIL, parameters=parameters, approved=stripped)
 
     async def test_rebind_keeps_a_user_authored_provenance(self, binder: EgressBinder) -> None:
         """ADR-0152 §7, §13: the case a ``rebind`` re-deriving provenance would fail.
@@ -1158,6 +1373,19 @@ class EgressBinderContract(ABC):
 def _destination_keywords() -> dict[str, FrozenJson]:
     """The two keywords a destination-bearing argument carries."""
     return {"x-egress-destination": "smtp", "x-egress-tier": "personal"}
+
+
+def _without_destinations(binding: EgressBinding) -> EgressBinding:
+    """``binding`` with every occurrence dropped, its spans otherwise unchanged.
+
+    Well-formed under ADR-0150 §3 and §4 — which is the point: §13 rules out a case
+    whose binding is *also* malformed, because such a case demonstrates the wrong
+    refusal.
+    """
+    dumped = binding.model_dump()
+    for span in dumped["spans"]:
+        span["destination"] = None
+    return EgressBinding.model_validate(dumped)
 
 
 def _with_forged_canonical(binding: EgressBinding) -> EgressBinding:
