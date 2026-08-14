@@ -1279,7 +1279,8 @@ def test_a_connected_that_raises_destroys_nothing_and_never_reaches_the_purge(
     assert _remaining(data_dir) == before
     assert purger.events == ["open", "connected", "close"]
     printed = capsys.readouterr()
-    assert "the connection store could not be read" in printed.err
+    assert "ConnectionStoreError" in printed.err
+    assert "the connection store in this data directory could not be read" in printed.err
     assert "about to destroy everything" not in printed.out
 
 
@@ -1577,6 +1578,36 @@ def test_an_identity_in_an_unexpected_failures_text_never_reaches_the_operator(
     # The identity is still in the *statement*, which is one of the two places §5
     # puts it. What the clause forbids is a diagnostic carrying one.
     assert identity in printed.out
+
+
+@pytest.mark.usefixtures("settings")
+def test_a_store_failure_that_quotes_a_corrupt_row_never_reaches_the_operator(
+    data_dir: Path, purger: _WatchedPurger, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """ADR-0153 §5 over the one contract class whose own text can carry an identity.
+
+    ``tools/connection_store.py``'s ``_decoded`` renders a corrupt row's
+    ``ValidationError`` into the ``ConnectionStoreError`` it raises, and pydantic
+    quotes the input that failed — so a store whose ``identity`` field no longer
+    validates produces exactly the message shaped below. That the store produces it
+    is that module's own property and is pinned there; what is pinned *here* is the
+    act's obligation, which is that it does not repeat it. ADR-0153 §7 listing the
+    class among the failures §4 governs says which failures the act must handle, not
+    whose text it may quote.
+    """
+    accounts = purger.connect("someone@example.com")
+    identity = accounts[0].identity
+    purger.connected_fault = ConnectionStoreError(
+        f"the connection store holds an entry that no longer validates: 1 validation error "
+        f"for ConnectionEntry\nidentity\n  Input should be a valid string "
+        f"[type=string_type, input_value=['{identity}'], input_type=list]"
+    )
+
+    assert _run(data_dir) != EXIT_OK
+    printed = capsys.readouterr()
+    assert identity not in printed.err
+    assert "input_value" not in printed.err
+    assert "ConnectionStoreError" in printed.err
 
 
 @pytest.mark.usefixtures("settings")
