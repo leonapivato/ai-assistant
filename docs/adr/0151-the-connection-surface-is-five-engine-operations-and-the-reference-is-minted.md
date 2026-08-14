@@ -7,7 +7,7 @@
   ADR-0149's merge met. `AssistantEngine` gains **five** methods —
   `connect_account`, `reprovision_account`, `disconnect_account`,
   `connected_accounts` and `recent_connection_acts` — `core/types.py` gains
-  **three** types and one constant, and `core/errors.py` gains **six** classes.
+  **three** types and two constants, and `core/errors.py` gains **six** classes.
   It also decides the shape of the Protocol ADR-0149 §10 flags, by which
   `orchestration` reaches the provisioner in `tools/`. No code ships with it.
 - **Flagged as a breaking change under golden rule 5.** The implementing lane
@@ -240,7 +240,8 @@ ADR-0139 §4 already ruled must report each half's outcome separately.
 convention: the subject of a call is positional and every other argument is
 keyword-only. `Identifier`, `NonBlankEncodableText`, `SecretValue` and
 `DEFAULT_PAGE_SIZE` are `core/types.py`'s existing names; `ConnectedAccount`,
-`ConnectionAct` and `ACCOUNT_IDENTITY_MAX_BYTES` are §4's and §5's additions.
+`ConnectionAct`, `ACCOUNT_IDENTITY_MAX_BYTES` and `CONNECTION_REFERENCE_MAX_BYTES`
+are §4's, §5's and §11's additions.
 
 ```python
 async def connect_account(
@@ -606,7 +607,7 @@ recorded instant is a change to ADR-0149 §3 owing its own ADR.
 
 ### 5. The identity is the user's, is refused rather than normalised, and its bound is one contract constant
 
-> **Normative.** `core/types.py` gains one constant,
+> **Normative.** `core/types.py` gains the constant
 > `ACCOUNT_IDENTITY_MAX_BYTES: Final[int]`, the bound ADR-0149 §4 leaves to the
 > implementing lane. Its value is that lane's; its **location** is fixed here, and
 > every implementation of `connect_account` and `reprovision_account` — the wire
@@ -1079,17 +1080,49 @@ answers differ across these five.
   ADR-0084 §4 already forbids silent truncation on this surface. The reachable
   population is an operator who deliberately configured the floor, since the
   default is four orders of magnitude above any credential.
-- **`connected_accounts` grows with the number of live connections** and each row
-  has one unbounded factor — the identity, bounded by
-  `ACCOUNT_IDENTITY_MAX_BYTES` (§5) — plus a minted reference, which
-  `DurableIdentifier` does not bound. §9 makes it unpaged, so the whole set must
-  fit or the call fails; with the identity bound in place the reachable way past a
-  default frame is a very large number of connections or a factory minting very
-  long references, and the declared `OversizedValueError` is the answer to both.
+- **`connected_accounts` grows with the number of live connections**, and every
+  factor in a row is bounded: the identity by `ACCOUNT_IDENTITY_MAX_BYTES` (§5),
+  the reference by the clause below, the revision by an integer's decimal width,
+  the state by one of two words. §9 makes it unpaged, so the whole set must fit or
+  the call fails — and with both bounds in place the only reachable way past a
+  default frame is a very large **number** of connections, for which the declared
+  `OversizedValueError` is the answer and `hub_max_frame_bytes` the remedy. It is
+  the one operation here whose worst case grows with what the user did rather than
+  with what the user typed.
 
-  > **Normative.** The lane that mints references chooses a bounded encoded form,
-  > and records its width where the constant lives. A minting scheme whose output
-  > is unbounded is refused by this clause rather than by a later frame failure.
+  > **Normative.** `core/types.py` gains a second constant,
+  > `CONNECTION_REFERENCE_MAX_BYTES: Final[int]`, whose value is **at most 64**,
+  > and no minted reference exceeds it. Unlike `ACCOUNT_IDENTITY_MAX_BYTES` its
+  > ceiling is fixed here rather than left to the lane, because §3's mint makes a
+  > reference the one value on this surface a caller cannot re-supply: a bound
+  > wide enough to bust a frame would produce a handle the hub can write and the
+  > caller can never receive.
+
+  > **Normative.** The lane sizes `IncompleteProvisioningError`'s message so that
+  > its whole error payload — code, message and the one `details` member — fits
+  > the payload budget `hub_max_frame_bytes` leaves at its 1024-byte floor
+  > (ADR-0085 §8c, §8d). ADR-0085 §10a's reduction **nulls `details` before it
+  > truncates a message**, so a payload that has to be reduced is one that loses
+  > the reference, which is the one thing that error exists to deliver.
+
+  **The arithmetic, at the floor, because that is the only place it is close.**
+  The payload budget at a 1024-byte frame is 512 bytes. A `ConnectedAccount`
+  encodes as four members and their names — on the order of 60 bytes of
+  punctuation and keys — plus a reference at most 64 and an identity bounded by
+  `ACCOUNT_IDENTITY_MAX_BYTES`. An `IncompleteProvisioningError` payload is its
+  code at 28 bytes, the member names, a `details` object carrying one reference at
+  most 64, and its message. Both fit the floor with room for a message and an
+  identity of a couple of hundred bytes, which is the constraint the lane sizes
+  those two values against.
+
+  **A bounded reference is not the same guarantee as a bounded identity, and the
+  asymmetry is the mint.** An oversized *identity* refuses the request the caller
+  sent, and the caller still holds the value and can send a shorter one; there is
+  nothing to recover. An oversized *reference* refuses a response carrying a value
+  that exists only in the hub, so the act has landed and its handle is
+  unreachable — recoverable only by matching on an identity §3 does nothing to
+  make unique. Bounding it here rather than leaving it to the lane is what stops a
+  conforming minting scheme producing that state.
 - **`recent_connection_acts` is bounded by `limit` exactly as the other paging
   methods are**, and busts a 1024-byte frame at the default page for the same
   reason they do; ADR-0085 §8e's answer applies unchanged, a declared
@@ -1246,7 +1279,7 @@ repeating it would be doing exactly that by silence one document later.
 > **Normative.** This decision cannot be implemented without contract surface
 > `core` does not have, all of it flagged here under golden rule 5 and **none of it
 > added by this ADR**: five methods on `AssistantEngine`; one new Protocol (§10);
-> three types and one constant in `core/types.py` (§4, §5); and six classes in
+> three types and two constants in `core/types.py` (§4, §5, §11); and six classes in
 > `core/errors.py` (§2a).
 
 > **Normative.** All of it lands in **one lane and one PR**: the `AssistantEngine`
@@ -1297,7 +1330,8 @@ anything this ADR adds.
 1. The five methods on `AssistantEngine` with §2a's declared failures in their
    docstrings; `ConnectionProvisioner` in `core/protocols.py` with §10's five
    signatures; `ProvisioningState`, `ConnectedAccount`, `ConnectionAct` and
-   `ACCOUNT_IDENTITY_MAX_BYTES` in `core/types.py`; and the six classes in
+   `ACCOUNT_IDENTITY_MAX_BYTES` and `CONNECTION_REFERENCE_MAX_BYTES` in
+   `core/types.py`; and the six classes in
    `core/errors.py`.
 2. **The `AssistantEngine` conformance suite gains a clause per ruling above that a
    store cannot exhibit**, which is the whole of §2a's local refusals, §5, §7, §8
@@ -1341,6 +1375,15 @@ anything this ADR adds.
    > an activation that fails as a **store** failure raises
    > `IncompleteProvisioningError` whose `reference` the store then holds. A suite
    > that exercises only a keyring failure reaches neither.
+
+   > **Normative.** The suite pins both `connect_account` outcomes at the frame
+   > floor, against the **wire** implementation: with `hub_max_frame_bytes` at
+   > 1024, a maximal minted reference and a maximal identity, a completed
+   > `connect_account` returns its `ConnectedAccount` rather than raising
+   > `OversizedValueError`, and one whose credential write fails delivers
+   > `IncompleteProvisioningError` with its `reference` intact and
+   > `details_elided` false. A reference the caller cannot receive is the failure
+   > §3's mint makes unrecoverable, and it is reachable only over the wire.
 
    > **Normative.** The suite pins the mint's uniqueness where the store can
    > establish it: an append introducing a reference the store already holds is
