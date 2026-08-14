@@ -600,8 +600,11 @@ This is PR #1120's third observation:
 > units, of grapheme clusters, or of rendered columns, and no configuration selects
 > between them.
 
-> **Normative.** `EgressBinding` **refuses at construction** every invariant visible
-> from its own fields, which are exactly these three:
+> **Normative.** `EgressBinding` **refuses at construction** the three **structural
+> span** invariants below — the invariants of its own span tuple, and exactly those
+> three of *this section's* list. They are not the whole of what the value refuses:
+> §3 states a further binding-visible refusal, over two occurrences that canonicalise
+> one supplied form two ways, and nothing here narrows it.
 > - for each argument that carries spans, either exactly one span with `index`
 >   absent, or spans whose indices are exactly `0` through `k-1` for some `k ≥ 1`;
 > - no two spans share an `(argument, index)` pair;
