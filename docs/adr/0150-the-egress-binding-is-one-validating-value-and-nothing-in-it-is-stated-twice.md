@@ -201,7 +201,7 @@ This section is a classification of the change being made and is not normative
 |---|---|---|
 | `DestinationProtocol` | `core/types.py`, new | `StrEnum`, one member `SMTP`. The protocol under whose rules a destination's canonical form was computed (§3). |
 | `DiscloserProvenance` | `core/types.py`, new | `StrEnum`, two members, ADR-0146 §1's two answers (§5). |
-| `EgressDestination` | `core/types.py`, new | One recipient as the arguments supplied it, the protocol that relates supplied forms, and that protocol's canonicalisation as a derived property — the sole implementation of it (§3). |
+| `EgressDestination` | `core/types.py`, new | The two forms of one recipient and the protocol that relates them (§3). |
 | `EgressSpan` | `core/types.py`, new | One described span of the payload: where it came from, who disclosed it, how much of it there is, its tier if its field establishes one, and its destination if it is one (§4, §5, §6). |
 | `ConnectedAccount` | `core/types.py`, new | The account's identity and its connection reference (§7). |
 | `CanonicalDestination` | `core/types.py`, new | One member of ADR-0148 §2's canonical destination set, in one of two validated shapes: a protocol-qualified recipient, or the connected account whole (§3). |
@@ -218,9 +218,7 @@ This section is a classification of the change being made and is not normative
 > `DiscloserProvenance`, `EgressDestination`, `CanonicalDestination`, `EgressSpan`,
 > `ConnectedAccount` and `EgressBinding`, all in `core/types.py`; one new optional field named
 > `egress_binding` on `ActionRequest` and one on `PermissionDecision`, each holding
-> an `EgressBinding` or nothing; the acceptance boundary and canonicalisation §3 fixes
-> for `SMTP`, implemented on `EgressDestination` and nowhere else; that field's
-> transcription in
+> an `EgressBinding` or nothing; that field's transcription in
 > `PermissionDecision.from_request`; the conjunct §9 adds to
 > `PermissionDecision.authorises`; and the model validator §4 requires on
 > `ActionRequest`. No other `core` name changes: no field is added to
@@ -239,24 +237,27 @@ This is PR #1120's first observation, and it is stated there exactly:
 > of the set and **two** supplied forms that must both survive.
 
 > **Normative.** The binding **carries occurrences**. Each destination is carried on
-> the span it occupies (§4) as an `EgressDestination` holding exactly **two** stored
-> fields: the `DestinationProtocol` under whose rules its canonical form is computed,
-> and the `supplied` form as the arguments carry it. ADR-0148 §2's `canonical` form is
-> a **derived property** of that pair, computed by that protocol's own rule, and is
-> never a field a caller fills in or a value a caller may contradict. The span it
-> rides on carries which argument and which position it came from, so no occurrence
-> repeats them.
+> the span it occupies (§4) as an `EgressDestination` with exactly three fields: the
+> `DestinationProtocol` under whose rules the canonical form was computed, the
+> `supplied` form as the arguments carry it, and the `canonical` form ADR-0148 §2
+> computed from it. The span it rides on carries which argument and which position
+> it came from, so no occurrence repeats them.
 
-> **Normative.** `EgressDestination` **refuses at construction** a `supplied` form the
-> destination's protocol does not accept. That is ADR-0148 §1's third clause reaching
-> the type — "a destination that will not canonicalise" is refused before the ruling —
-> and it is what makes the derived property total. The acceptance boundary and the
-> canonicalisation rule are stated below for `SMTP`, and are implemented **once**, in
-> `core`, as this type's own derivation. No lane writes a second canonicaliser for a
-> protocol, accepts a canonical form from a caller, or compares against a canonical
-> form it did not derive — which is ADR-0148 §2's sixth clause, "two integrations
-> speaking one protocol cannot disagree about whether two destinations are the same
-> recipient", satisfied by construction rather than by instruction.
+> **Normative.** A canonicaliser is a **function** of the supplied form, so
+> `EgressBinding` **refuses at construction** a binding carrying two occurrences that
+> share a `protocol` and a `supplied` form and differ in their `canonical` form. This
+> is the part of ADR-0148 §2's sixth clause that is visible from inside one value —
+> two derivations of one form disagreeing — and it is checked here rather than assumed.
+
+> **Normative.** `core` does **not** check an occurrence's `canonical` form against its
+> `supplied` form, and no lane reads that absence as licence to leave the check
+> unbuilt. ADR-0148 §2's sixth clause puts that computation "in **one** place at the
+> seam", so the rule relating the two forms is not a thing this value holds; **(b)'s
+> ADR owes the check** that every occurrence the seam hands over carries the form that
+> seam's own canonicaliser computes. Until it lands, no lane states that a carried
+> canonical form has been verified against anything. No lane closes this by moving
+> canonicalisation into `core`: that is a change to where ADR-0148 §2 says it happens
+> and needs an ADR superseding that clause, not a validator.
 
 > **Normative.** A member of a canonical destination set is a `CanonicalDestination`,
 > one `core` type with three fields and exactly two well-formed shapes, which it
@@ -357,36 +358,36 @@ that reconstructs a supplied form from it". So the occurrences are what is store
 and this is the same shape as `parameters_digest`: a derived property computed where
 both sides are in hand, rather than a field each caller fills in.
 
-**The canonical form is derived for the same reason the set is, and round 10 is why it
-is not merely cross-checked.** An earlier draft stored `canonical` beside `supplied`
-as a third field and required no relationship between them. Adversarial review found
-that a caller could then build `supplied="Alice@EXAMPLE.com"`, `canonical="mallory@example.com"`
-over `parameters={"to": "Alice@EXAMPLE.com"}`: it passes §4's supplied-form invariant,
-it passes §4's extent check, and the `CanonicalDestination` it yields is well-formed
-because the forged string is non-blank visible text. ADR-0148 §3's first clause binds
-a standing grant to the canonical destination set, so that binding is a call to Alice
-carrying a grant boundary drawn around Mallory — a substitution ADR-0148 §3's second
-clause spends a list of near-misses refusing. The direction of the asymmetry is
-already settled two paragraphs down: **only one of the two forms reconstructs the
-other.** The supplied form yields the canonical one, because the protocol's rule is a
-function of it; the canonical form yields nothing, which is why ADR-0148 §14 names
-reconstructing a supplied form from a canonical one as a failure in terms. So the
-supplied form is what is stored and the canonical form is what is derived — the same
-move this section makes one level up, where occurrences are stored and the set is
-derived. Cross-checking a stored `canonical` against a derived one would close the
-same hole, and it was rejected: it keeps a second copy of a fact, which is what this
-ADR is named after, and a copy that can be wrong is a copy that will be wrong in the
-one code path nobody tested. **What deriving would otherwise have cost is a recorded
-decision's canonical forms moving under it**, and round 11 found it: approve a request
-for `Alice@EXAMPLE.com`, let a later ADR change `SMTP`'s folding rule, and the set
-derived at transmission is not the set the user approved — ADR-0148 §4's rule that no
-component adds, removes, substitutes or reorders that set between ruling and
-transmission, broken by an edit to a document rather than by a component. The
-immutability clause below pays it: a ratified member's folding rule never changes, a
-changed rule is a **new member**, and a recorded destination's `protocol` therefore
-pins the derivation it was ruled under for as long as the record lasts. Only the
-acceptance boundary may widen, and widening it re-relates no pair of forms that was
-already accepted.
+**The forged canonical form is a real hole, it is (b)'s to close, and the two review
+lenses disagreed about that in a way worth recording.** Adversarial review found on
+round 10 that a caller could build `supplied="Alice@EXAMPLE.com"` beside
+`canonical="mallory@example.com"` over `parameters={"to": "Alice@EXAMPLE.com"}`: §4's
+supplied-form invariant passes, §4's extent check passes, and the
+`CanonicalDestination` it yields is well-formed because the forged string is non-blank
+visible text. Since ADR-0148 §3's first clause binds a standing grant to the canonical
+destination set, that is a call to Alice carrying a grant boundary drawn around
+Mallory. A draft answered it by making `canonical` a derived property and putting
+`SMTP`'s rule on this type; architecture review found on round 12 that this
+contradicts two ratified clauses at once — ADR-0148 §2's fourth, which carries **both**
+forms in the request, and its sixth, which computes the canonical form "in one place at
+the seam", where `tools/destinations.py` already computes it. A ratified clause is not
+this ADR's to relocate, so the draft was withdrawn whole.
+
+**What is left is a line worth drawing explicitly, because §4 recomputes two things and
+this section recomputes none.** The checks §4 adds are relations between two things
+`core` holds on one object — a supplied form against `parameters`, an extent against
+`parameters` — and an invariant `core` can see is one it must not leave to a component
+further out. The canonical relation is between the binding and a **rule**, and
+ADR-0148 §2 put that rule at the seam deliberately, on #83's construction argument: one
+canonicaliser per protocol rather than one per integration, "unenforceable by
+construction" otherwise. A copy of it in `core` would be a second canonicaliser and
+would defeat the clause it was meant to serve. So this section refuses what it can see
+— a binding whose own two occurrences canonicalise one form two ways — routes the
+correspondence check to (b) beside §6's `tier` and §4's structured-value supplied form,
+and forbids reading that routing as licence. The residual exposure is bounded by §4:
+the supplied form is pinned to `parameters`, so a forged canonical form cannot change
+what the callable transmits, only what a grant is matched against — and matching is
+performed by the same surface that owes the check.
 
 **Protocol-qualifying the set is not decoration, and leaving it out would be a
 silent widening later.** ADR-0148 §2's second clause makes comparison byte-exact
@@ -478,11 +479,8 @@ and reviewed exactly this canonicaliser, which is the evidence ADR-0073 §4 asks
 the reason this member is decidable here at all.
 
 > **Normative.** `DestinationProtocol` has exactly **one** member, `SMTP`, and this
-> ADR fixes that membership. Adding it authorises no transmission: it registers no
-> tool, designates no seam, and permits no call. What it does carry is the
-> canonicalisation the clauses below state, which §3's second clause puts on
-> `EgressDestination` and nowhere else — a rule for relating two supplied forms, not a
-> licence to send to either.
+> ADR fixes that membership. Adding it authorises nothing: it neither implies a
+> canonicaliser exists, nor registers a tool, nor permits any transmission.
 
 > **Normative.** `SMTP` asserts exactly these equivalences and no others. Two
 > supplied forms denote one recipient when their **local parts** — everything before
@@ -525,26 +523,10 @@ the reason this member is decidable here at all.
 > no lane reads ADR-0148 §2's second clause as obliging a canonicaliser to accept
 > every string a caller supplies.
 
-> **Normative.** A member's **asserted equivalences and its canonicalisation rule are
-> immutable once ratified**, and no ADR edits them. An ADR that would change which
-> supplied forms a member folds together, or what it folds them to, adds a **new
-> member** and leaves the existing one exactly as it stands; it also states what
-> becomes of the decisions and standing grants recorded under the member it replaces,
-> which keep that member. This is what makes a derived canonical form stable across a
-> ruling: a recorded destination's canonical form is a function of its `protocol` and
-> its `supplied` form, neither of which can change after the ruling, so the canonical
-> destination set at transmission is the set that was ruled on — ADR-0148 §4's rule,
-> which a re-derivation under a moved rule would otherwise break without any component
-> touching the decision.
-
-> **Normative.** Widening a member's **acceptance boundary** — admitting a form the
-> clause above refuses — is a change to what that member asserts and needs its own
-> ratified ADR, on the same terms as adding a member: it states which equivalences the
-> newly accepted forms do and do not establish. It is the **only** change permitted on
-> a ratified member, and it is permitted because admitting a form re-relates no pair of
-> forms that was already accepted: every canonical form already derived is derived
-> unchanged under the wider boundary. No lane widens a member by building a
-> canonicaliser that accepts more, and no lane changes a member's folding rule at all.
+> **Normative.** Widening `SMTP` to accept a form the clause above refuses is a change
+> to what that member asserts and needs its own ratified ADR, on the same terms as
+> adding a member: it states which equivalences the newly accepted forms do and do not
+> establish. No lane widens it by building a canonicaliser that accepts more.
 
 > **Normative.** Every further member is added by a **ratified contract ADR of its
 > own**, merged before any canonicaliser, integration or lane implements against it
@@ -924,9 +906,8 @@ This is PR #1120's tenth observation and it is the one the producer paid the mos
 > `CanonicalDestination` and `ConnectedAccount` are pydantic models in
 > `core/types.py`, each with `extra="forbid"` and `frozen=True`, and each validating
 > every field it declares — `CanonicalDestination` included, and its two-shape
-> invariant (§3) is one of the things it validates, as is `EgressDestination`'s
-> acceptance boundary, which a type that merely held its fields could not enforce.
-> None is a dataclass, a `TypedDict`, a `NamedTuple` or an unvalidated container.
+> invariant (§3) is one of the things it validates. None is a dataclass, a
+> `TypedDict`, a `NamedTuple` or an unvalidated container.
 
 > **Normative.** Every model in this surface sets `hide_input_in_errors=True`, and
 > no message any of them raises renders an argument value, a supplied or canonical
@@ -1102,7 +1083,9 @@ Scoping something out is a decision, so each carries its reason (ADR-0029 §7's 
 > a denial**, because this value cannot express "this call cannot be completed" and
 > deliberately does not try; the declaration vocabulary §6 constrains but does not
 > fix; the check §4's supplied-form invariant cannot perform where a supplied form is
-> extracted from inside a structured value; and the refusal-message discipline
+> extracted from inside a structured value; the check §3 routes here, that every
+> occurrence carries the canonical form the seam's own canonicaliser computes from its
+> supplied form under its protocol; and the refusal-message discipline
 > ADR-0146 §2 and PR #1120's ninth observation impose on a component that runs
 > **before** ADR-0145 has refused anything outside the schema.
 
@@ -1196,9 +1179,8 @@ lands there whole.
 > differ in identity likewise. An implementation whose account member holds one of the
 > two facts passes one of these and fails the other (§3).
 
-> **Normative.** Because §3 puts the canonicaliser on `EgressDestination` and nowhere
-> else, the lane that lands **this** surface ships a case for **each** equivalence and
-> **each** refusal §3 states: a pair differing only in
+> **Normative.** The lane that implements the seam's `SMTP` canonicaliser ships a case
+> for **each** equivalence and **each** refusal §3 states: a pair differing only in
 > domain case canonicalises to one form; a pair differing only in local-part case
 > canonicalises to **two**; and a quoted local part, a non-ASCII address, an address
 > literal, a trailing dot, an address carrying whitespace, a string with **two** `@`
@@ -1209,12 +1191,18 @@ lands there whole.
 > whole address passes the first and fails the second, and one that splits at the
 > final `@` passes every refusal case except the two-`@` one.
 
-> **Normative.** That lane also ships the **derived-canonical** pair §3's first two
-> clauses are worth: a construction **passing `canonical`** as an argument raises,
-> rather than being accepted or silently ignored; and a destination whose `supplied`
-> form the protocol refuses raises at construction rather than at the seam. A test
-> asserting only that the derived form has the expected value demonstrates neither, and
-> no lane satisfies the first by asserting that a stored field was overwritten.
+> **Normative.** The lane that lands **this** surface also ships the
+> **disagreeing-derivation** case §3 refuses: one binding carrying two occurrences that
+> share a protocol and a supplied form and differ in their canonical form is refused at
+> construction. A case whose two occurrences differ in their supplied forms as well
+> demonstrates nothing, because the alias clause above already accepts that shape.
+
+> **Normative.** The lane that closes §3's routed correspondence check — the lane that
+> lands surface (b) — ships the **forged-canonical** case in the terms §3 states it: an
+> occurrence whose canonical form is not what that seam's canonicaliser computes from
+> its supplied form is refused **before** a ruling is sought, and a test asserting only
+> that a correctly-built occurrence is accepted does not reach it. No lane records that
+> check as satisfied by `core`'s validators, which §3 states in terms do not perform it.
 
 > **Normative.** The lane that builds an egress `CONFIRM` ships the
 > **duplicate-across-arguments** case §10's third clause is stated for: one recipient
@@ -1255,31 +1243,16 @@ reader holding only ADR-0148 §2 still finds the same instruction about what to 
 a form in hand, and still may not fold one; what they additionally find, in this ADR,
 is that `SMTP` hands them fewer forms. That is ADR-0082 §1's stacked addition — an
 obligation contradicting no sentence the earlier ADR wrote — "recorded in the ADR that
-makes it, and nowhere else". §2's sixth clause (one canonicaliser per protocol) is
-relied on unchanged and is the reason the member's assertion is stated once, here,
-rather than per integration — and §3's second clause discharges it more completely
-than it asks, by leaving one implementation rather than one specification, which
-narrows nothing and adds no obligation to any reader of §2. §2's **fourth** clause,
-requiring both forms of every destination-bearing argument to reach the record, is
-satisfied and not narrowed by deriving the canonical one: the clause asks what the
-record yields, not which of the two a field holds, and the set it names in the same
-breath was already a derived property in ADR-0148's own terms. What §14 forbids is the
-other direction — reconstructing a supplied form from a canonical one — and this ADR
-stores the form that direction requires.
-
-**ADR-0148 §3 and §4 — no record owed, and §3's second clause was written to keep it
-that way.** §4's rule that nothing adds, removes, substitutes or reorders the
-authorised set between ruling and transmission is relied on unchanged, and deriving a
-canonical form is what put it at risk: a set derived at transmission under a folding
-rule that had moved since the ruling would break §4 with no component having touched
-the decision. The immutability clause in §3 closes that inside this ADR rather than by
-qualifying §4 — a ratified member's rule never changes, so a recorded destination's
-`protocol` and `supplied` form pin one canonical form for the life of the record. §3's
-first clause, binding a standing grant to the canonical destination set, is relied on
-in the same way and for the same reason. A reader holding only ADR-0148 §§3 and 4 finds
-every sentence still true and no sentence reaching further; what they additionally find
-here is an obligation on a **future** ADR, which is ADR-0082 §1's stacked addition,
-"recorded in the ADR that makes it, and nowhere else".
+makes it, and nowhere else". §2's **fourth** clause is relied on unchanged and is why
+`EgressDestination` stores both forms rather than deriving one: a draft that derived
+the canonical form was withdrawn on review for contradicting it. §2's **sixth** clause
+(one canonical form per protocol, computed in one place at the seam) is likewise relied
+on unchanged, and is both the reason the member's assertion is stated once, here,
+rather than per integration, **and** the reason §3 routes the correspondence check to
+the seam instead of performing it in `core` — a `core` copy of the rule would be the
+second canonicaliser that clause exists to forbid. Neither clause is narrowed, extended
+or qualified, and a reader holding only ADR-0148 §2 finds both sentences doing exactly
+what they say.
 
 **ADR-0148 §6 and §11 — no record owed, and this is the one the whole ADR turns on.**
 §11's clause defers the shape and its unmarked prose says in terms that "a contract
@@ -1344,12 +1317,9 @@ identity and **connection reference** ... the transport endpoint, and a payload
 *description*", and adds that the description "states extent, provenance, tiers and
 destinations rather than content". Every field this ADR adds is inside that sentence:
 
-- `EgressDestination.supplied` — named verbatim. Its `.canonical` is derived rather
-  than stored (§3), so the recorded decision holds **less** than the note describes,
-  never more; the note's "canonical destination set" is likewise a derived property,
-  which is the shape it was already written over.
-- `EgressDestination.protocol` — not an argument value; it names which canonicalisation
-  relates a supplied form to a canonical one.
+- `EgressDestination.supplied` and `.canonical` — named verbatim.
+- `EgressDestination.protocol` — not an argument value; it names which canonicaliser
+  related the two forms.
 - `ConnectedAccount.identity` and `.reference`, `transport_endpoint` — named verbatim.
 - `EgressSpan.provenance`, `.tier`, `.extent` — "extent, provenance, tiers" verbatim.
 - `EgressSpan.argument` and `.index` — an argument **name** is part of
@@ -1441,7 +1411,7 @@ a reader can check that the producer's evidence was spent rather than cited.
 
 | # | The producer's observation | Where it lands |
 |---|---|---|
-| 1 | A destination set has two shapes | **§3.** Occurrences are carried; each occurrence's canonical form and the set over them are both derived, and the set is protocol-qualified. |
+| 1 | A destination set has two shapes | **§3.** Occurrences are carried; the set is derived and protocol-qualified. |
 | 2 | The selecting argument is part of what the user approves | **§4** carries it on every span; **§10**'s third clause puts it in the confirmation. |
 | 3 | Per-span provenance needs a span identity | **§4.** `(argument, index)`, with the index rule stated so it is derivable. |
 | 4 | A system-selected free-text span has no ruled tier | **§6.** Named as a residue against ADR-0146 §5's third clause, with the closing lane and its ADR-0082 §1 duty named. Not closed. |
@@ -1510,13 +1480,9 @@ rather than re-deriving it, and the outcome is recorded here on ratification.
   the standard we would want everywhere". The acceptance boundary is a **closed
   grammar** rather than a list of refusals, so a form nobody thought of is refused
   rather than silently canonicalised by whichever implementation saw it first. The
-  cost is real and the route out is named rather than left to erosion: §3 makes widening
-  `SMTP`'s acceptance boundary an ADR, on the same terms as adding a protocol, so the
-  forms come back with an argument about what equivalences they establish rather than as
-  a patch to a canonicaliser. What that route does **not** reach is the folding rule,
-  which §3 makes immutable — a member that folded differently would re-derive the
-  canonical forms inside decisions already ruled on, so a changed rule is a new member
-  and the old records keep the old one.
+  cost is real and the route out is named rather than left to erosion: §3 makes widening `SMTP` an ADR, on the same
+  terms as adding a protocol, so the forms come back with an argument about what
+  equivalences they establish rather than as a patch to a canonicaliser.
 - **Nothing here authorises a byte.** The seam remains approved and undesignated, no
   tool is registered at it, and this ADR supplies a value for a decision that has
   nothing to rule on yet.
