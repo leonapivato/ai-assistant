@@ -229,6 +229,29 @@ def test_a_non_text_argument_has_no_described_extent() -> None:
         )
 
 
+def test_a_destination_declaration_for_another_tool_is_refused() -> None:
+    """Adversarial round 2: the `tool_id` fields were carried and never compared.
+
+    A destination declaration belonging to some other tool, naming an argument
+    this tool happens to have, would have the description record the message body
+    as the recipient and omit `to` — a description of a different call, published
+    under this tool's name. ADR-0148 §6 makes the description a function of the
+    bound tool's definition, so a declaration that is not that tool's is not an
+    input to it.
+    """
+    other = DestinationDeclaration(
+        tool_id="post_message",
+        arguments=(
+            DestinationArgument(
+                name="body", protocol=DestinationProtocol.SMTP, multiple=False, required=True
+            ),
+        ),
+    )
+
+    with pytest.raises(PayloadDescriptionError, match="not this tool's"):
+        describe_payload(_PAYLOAD, other, dict(_ARGUMENTS), provenance={})
+
+
 def test_a_recipient_field_the_payload_declaration_omits_is_refused() -> None:
     """The description would then cover every span but the recipients (ADR-0148 §6).
 
