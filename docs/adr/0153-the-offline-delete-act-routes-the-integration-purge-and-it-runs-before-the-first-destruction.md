@@ -445,10 +445,12 @@ windows are:
 - **Interrupted anywhere later.** ADR-0126 §1's best-effort continuation, unchanged.
 
 **An externally delivered cancellation is an interruption like any other, and it
-lands in these same windows by position.** §4 requires the act to destroy nothing
-and to close the store on its way out, so a cancellation during the purge leaves the
-first window's state and one after the purge leaves the second's. Neither is a failed
-purge, neither is reported as one, and the owner's remedy in both is the same re-run.
+lands in these same windows by position.** §4 requires the act to destroy no entry in
+`data_dir` and to close the store on its way out, and it leaves whatever slot
+deletions the purge had already completed exactly as any other interruption does — so
+a cancellation during the purge leaves the first window's state, deleted slots
+included, and one after the purge leaves the second's. Neither is a failed purge,
+neither is reported as one, and the owner's remedy in both is the same re-run.
 
 **The state this ordering makes unreachable is the one the Context names**, and it
 is worth stating as the negative because it is the only one a re-run cannot repair:
@@ -467,11 +469,15 @@ only after `purge` returned, and `purge` returns only having confirmed every slo
 
 > **Normative.** An externally delivered `CancelledError` is **not** a purge failure
 > and is never converted into one. Where one arrives at any point of the act, the act
-> destroys nothing, closes the connection store and everything opened to reach it,
-> and lets the `CancelledError` propagate — it is not classified, not reported as a
-> failed purge, and not routed through `classify`. ADR-0060's rule binds this act as
-> it binds every other module, and ADR-0151 §7 makes the identical carve-out for a
-> provisioning act (ADR-0139 §4).
+> **destroys no entry in `data_dir`** and begins no further destructive work of its
+> own, closes the connection store and everything opened to reach it, and lets the
+> `CancelledError` propagate — it is not classified, not reported as a failed purge,
+> and not routed through `classify`. Slot deletions the purge had already completed
+> **stand**, as they do after any other interruption (§3): ADR-0149 §8's third clause
+> keeps every entry in place until every slot is confirmed, so a re-run deletes the
+> remainder and confirms the rest. ADR-0060's rule binds this act as it binds every
+> other module — its resource half is the closing above — and ADR-0151 §7 makes the
+> identical carve-out for a provisioning act (ADR-0139 §4).
 
 > **Normative.** A failure to read the connection store at all — through `connected`
 > or inside `purge`, and other than an externally delivered `CancelledError` — is
@@ -791,9 +797,9 @@ on the **`service`→`tools`** boundary, which no other in-flight decision reach
 > of ADR-0126 §1 refuses without the purge having been invoked at all; the
 > statement made before the confirmation carries a row per `SecretScope` member and
 > every live connection's reference and identity; and an externally delivered
-> cancellation during the purge destroys nothing, leaves the connection store closed
-> rather than orphaned, and propagates the `CancelledError` rather than exiting
-> through `classify`.
+> cancellation during the purge destroys no entry in `data_dir`, leaves the
+> connection store closed rather than orphaned and every one of its entries in place,
+> and propagates the `CancelledError` rather than exiting through `classify`.
 
 **The second clause exists because the first cannot reach the failure that
 matters.** §4's obligations are on the act, not on the seam, and a conformance
