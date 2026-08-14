@@ -7,35 +7,41 @@
   connection record lives — and with them the half of ADR-0125 §12's "a
   provisioning surface" bullet that reaches **an integration credential**. The
   provider key's half stays where ADR-0125 §12's first bullet and #74 put it
-  (§11).
+  (§13).
+- **It also discharges ADR-0126 §6's forward clause**, which requires the lane
+  that first gives a component on the hub's machine a Tier 0 keyring entry to
+  decide, in the same change, how a hub-side delete reaches it (#909). §8 is that
+  decision, and it carries a precondition rather than pretending the coordinating
+  half is settled.
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-13**,
   the durability form ADR-0100 established. This decision rests most heavily on
-  ADR-0148, ratified the same day, and on ADR-0125, whose §8 carries the clause
-  a new holder of a keyring face has to get past; a citation that silently means
-  "whatever that ADR says when you read it" is not checkable. Where a later ADR
-  changes one of them, this one is read against the text named here until an ADR
-  says otherwise.
+  ADR-0148, ratified the same day, and on ADR-0125 and ADR-0126, whose §8 and §6
+  respectively carry the clauses a new holder of a keyring face has to get past; a
+  citation that silently means "whatever that ADR says when you read it" is not
+  checkable. Where a later ADR changes one of them, this one is read against the
+  text named here until an ADR says otherwise.
 - **Records for ratification: one dated note appended to ADR-0125's header**,
   applied in the same commit that flips this ADR's `Status` to `Accepted` and not
   before — ADR-0017 §7 requires the operation performed on another ADR to be
   recorded rather than inferred, and writing "discharged by ADR-0149" onto
   ADR-0125 while this ADR is `Proposed` would be the state claim ADR-0019
-  forbids. §10 applies ADR-0082 §1's test to every ADR this one touches and shows
+  forbids. §12 applies ADR-0082 §1's test to every ADR this one touches and shows
   its working. **No `Status` line moves and no ratified text is rewritten.**
 - **No implementation lands with it.** No `src/`, no `tests/`, no
   `pyproject.toml`. Nothing implements a provisioning act on the strength of this
   ADR alone: the act is reached through contract surface that does not exist, and
-  §8 says what is owed and who owes it.
-- **It decides no `core` surface and names one that is owed.** §7 defers the
+  §10 says what is owed and who owes it.
+- **It decides no `core` surface and names one that is owed.** §9 defers the
   shape of that surface, with its firing condition, to the contract ADR that
   decides the operations it serves — the split ADR-0097 §9 made and ADR-0102
   discharged, taken deliberately rather than by resemblance.
 - **Its required review set is adversarial *and* architecture.** It decides who
   may hold a write face onto the keyring, where a new durable Tier 1 store lives,
-  and the shape a still-undecided contract surface has to be able to land into —
-  each answerable from prose before an implementation commits to an answer
-  (`CONTRIBUTING.md` → "Contract ADRs land before their implementation"). §13
-  records the set that ran and the order it ran in.
+  how a delete right reaches a Tier 0 entry, and the shape a still-undecided
+  contract surface has to be able to land into — each answerable from prose
+  before an implementation commits to an answer (`CONTRIBUTING.md` → "Contract
+  ADRs land before their implementation"). §15 records the set that ran and the
+  order it ran in.
 
 ## Context
 
@@ -55,8 +61,8 @@ is live. A displaced act's late write lands in a slot no live record names. An
 act deletes its predecessor's slot once its own activation has landed.
 
 What §6 does not say is **whose hands** perform any of it. It names no component,
-grants no keyring face, and locates no record. §11's fourth clause says so
-normatively and forbids the obvious shortcut:
+grants no keyring face, and locates no record. ADR-0148 §11's fourth clause says
+so normatively and forbids the obvious shortcut:
 
 > Neither surface is the **provisioning act's owner**, and this ADR gives no
 > component a keyring face. Who holds an `INTEGRATION`-scoped `SecretStore`
@@ -76,8 +82,10 @@ including the ones ADR-0148 §14 requires the implementing lanes to test.
 ADR-0125 §1 splits the keyring seam into two faces: `Secrets` reads,
 `SecretStore` extends it and adds `set` and `delete`. §2 binds an instance to one
 installation and one `SecretScope`, so a consumer reaches only the scope it was
-handed. §8 then says who holds which face — and its fourth clause is the one a
-new holder meets:
+handed. §5 refuses enumeration outright — no method lists the entries in an
+installation — which is why a purge path has to be composed from names something
+recorded (§8). §8 then says who holds which face, and its fourth clause is the
+one a new holder meets:
 
 > No other subsystem holds either face. `orchestration`, `memory`, `context`,
 > `planning`, `permissions`, `learning`, `readers`, `evaluation`, `service` and
@@ -93,6 +101,29 @@ this section "mechanical, not advisory". §12's provisioning bullet then scopes
 out the surface this ADR decides, in terms that reach "a provider key **or an
 integration credential**".
 
+### The delete right already has an act, and it already named this lane
+
+ADR-0126 §1 makes deleting the owner's data at the hub the destruction of the
+resolved `data_dir`, and §2 makes it an offline console entry point in
+`service/`. §6 then rules that the act "reaches no keyring", because ADR-0125 §8
+keeps `service` out of the seam and §5 refuses enumeration — and it states the
+premise that made that acceptable: "No component of this system writes a Tier 0
+keyring entry on the hub's machine today, so the act misses no keyring entry."
+
+**This ADR is what makes that premise expire**, and ADR-0126 §6 anticipated it in
+a marked clause aimed at exactly this lane:
+
+> The lane that first gives a component on the hub's machine a Tier 0 keyring
+> entry owes, in the same change, a decision about how a hub-side delete reaches
+> it. That decision is a contract question and not a wiring detail — ADR-0125 §5
+> refuses enumeration and puts the deletion path on the consumer that wrote the
+> entry, and ADR-0125 §8 keeps `service` out of the seam, so no path exists today
+> that this act could take. Until that decision lands, this ADR authorises no such
+> entry to be written, and no lane may cite this section as a route to one.
+
+§8 below is that decision. **#909** carries the question and names the three
+things ADR-0126 §6 said such a decision would have to weigh.
+
 ### The tree, read rather than remembered
 
 Checked on the branch this ADR was written on, at `origin/main`:
@@ -106,7 +137,8 @@ Checked on the branch this ADR was written on, at `origin/main`:
 - **No `INTEGRATION`-scoped instance is wired anywhere.** `build_engine` in
   `ai_assistant.app.composition` constructs neither face, and no module under
   `tools/` names one. So this ADR grants a face to a component that does not
-  exist yet rather than relocating one that does.
+  exist yet rather than relocating one that does, and ADR-0126 §6's premise is
+  still true of the tree as this ADR is written.
 - `tools/` holds `registry.py`, `invocation.py`, `builtin.py` and `egress.py`.
   The last is the seam ADR-0147 §3 named, and it is deliberately empty: it holds
   no client, no connection and no constant, and `tools/` transmits nothing.
@@ -146,9 +178,11 @@ disturb. Only the third is open.
 - **ADR-0017 §3's conditions, and the designation of the `tools/` egress seam.**
   Nothing here attests a condition, designates a seam, or authorises a byte to
   leave the device.
-- **ADR-0147 §4's stdio question** (§11).
-- **Whether a credential read is a permission subject** — #74, left exactly where
-  ADR-0125 §9 left it (§9).
+- **ADR-0126's act.** Its unit, its offline placement, its refusals, its ordering
+  and its report are that ADR's. §8 supplies the path §6 asked a later lane for;
+  it does not route ADR-0126's act to it, because doing so would change §6's
+  first clause and that is ADR-0126's to change.
+- **ADR-0147 §4's stdio question** (§13).
 
 ## Decision
 
@@ -202,7 +236,7 @@ available). And `orchestration` holding a `SecretStore` contradicts ADR-0125 §8
 fourth clause in terms, which is a change to what §8 decided and therefore a
 partial supersession of it (ADR-0070 §1), not a stacked addition. Putting the
 writer where the readers already are costs **one** Protocol — the user-facing one
-§7 keeps — leaves the record's own seam `tools/`-internal (§3), and leaves every
+§9 keeps — leaves the record's own seam `tools/`-internal (§3), and leaves every
 sentence of ADR-0125 §8 true (§2).
 
 **A leaf package outside every subsystem was the other candidate and it is
@@ -264,11 +298,11 @@ this placement want revisiting, and ADR-0125 §2 already says the fix would be
 additive: a capability narrower than a scope, handed out at the same wiring
 point.
 
-**§10 applies ADR-0082 §1's test to §8 and finds no record owed.** Every sentence
+**§12 applies ADR-0082 §1's test to §8 and finds no record owed.** Every sentence
 of §8 stays true, and a reader holding only ADR-0125 wires exactly what they
 wired before.
 
-### 3. The connection record is the hub's, under `Settings.data_dir`, and its store is `tools/`-internal
+### 3. The connection store is the hub's, under `Settings.data_dir`, and it is append-only
 
 > **Normative.** The connection record ADR-0148 §6 specifies is **durable
 > hub-side state under `Settings.data_dir`** (ADR-0083 §2), held in a store
@@ -284,28 +318,55 @@ wired before.
 > `core` seam between two modules of one subsystem is surface with no boundary to
 > hold.
 
+> **Normative.** The store is **append-only**. Every act on a reference appends an
+> entry; no entry is ever updated in place and none is deleted except by the
+> wholesale purges §8 governs. The **live connection record** for a reference —
+> the one ADR-0148 §6's clauses are about, and the only one any check reads — is
+> that reference's latest entry, and a reference whose latest entry is a removal
+> (§5) has no live record at all. ADR-0148 §6's compare-and-swap is performed
+> against that latest entry: an act appends only if the entry it observed is still
+> the latest, and appends nothing otherwise.
+
+> **Normative.** The store is therefore the **record of the act**: what the user
+> connected, re-provisioned and disconnected, for which reference, in order. It
+> carries the identity, the revision, the provisioning state and the slot ADR-0148
+> §6 requires, and no credential value or value derived from one, in any field,
+> including the identity (ADR-0148 §6's exclusion clause, applied to the record
+> the same clause creates).
+
 > **Normative.** A connection record is a **Tier 1** store (ADR-0004 §1): the
 > account identity ADR-0148 §6 requires is a user-recognisable name and may be
-> personal data. It is therefore subject to ADR-0004 §6's rights — the deletion
-> path purges the record **and** the credential slot it names together — and to
+> personal data. It is therefore subject to ADR-0004 §6's rights (§8), and to
 > ADR-0004 §5's logging rule: no log line, error message or operator diagnostic
 > emitted by the provisioner or by a callable carries an account identity. The
 > **connection reference** and the **credential slot** are non-secret handles
 > chosen by code (ADR-0125 §2) and may be logged.
 
-> **Normative.** A connection record holds **no credential value** and no value
-> derived from one, in any field, including the identity (ADR-0148 §6's
-> exclusion clause, applied to the record the same clause creates).
+**Append-only is ADR-0097 §4's shape and it is taken for that section's reason.**
+A grant store is append-only because "the record says what the user actually
+decided and when", and a store that edits its own history cannot say it. The same
+is true here one axis over, and it buys three things at once: it is what §7 offers
+as ADR-0004 §7's *recorded* half; it makes §5's revision monotonicity a property
+of the store rather than an extra obligation on an implementation; and it keeps
+the superseded slots visible to the purge §8 composes, which is what stops a
+failed predecessor deletion from becoming an entry nothing can name.
+
+**It costs nothing ADR-0148 §6 relies on, and that is worth checking rather than
+asserting.** §6 speaks of *the* connection record, its state, its revision and a
+compare-and-swap "on that record"; every one of those is a statement about the
+live record, which the third clause above identifies exactly. An act that appends
+a new entry only if the entry it observed is still the latest is a
+compare-and-swap in §6's own terms — from "the identity, revision and state it
+observed" to the new pending entry — and an act whose append is refused "never
+held it and writes nothing". Nothing in §6 requires the previous state to be
+overwritten, and nothing in it is satisfied less well by a store that keeps it.
 
 **The record is what makes ADR-0004 §6's Tier 0 purge composable, and that is a
-consequence worth stating.** ADR-0125 §5 refuses enumeration — no method lists
-the entries in an installation — and ADR-0125 §10 draws the conclusion for a
-neighbouring lane: "its purge path is composed from names it recorded rather than
-discovered". The connection record is that recorded list for the `INTEGRATION`
-scope. A design that kept the slot only in memory, or reconstructed it from a
-convention, would leave the keyring holding entries nothing can name, which is
-exactly the state ADR-0004 §6's "purges Tier 0 and Tier 1 together" cannot be
-satisfied from.
+consequence rather than a convenience.** ADR-0125 §5 refuses enumeration — no
+method lists the entries in an installation — and ADR-0125 §10 draws the
+conclusion for a neighbouring lane: "its purge path is composed from names it
+recorded rather than discovered". The connection store is that recorded list for
+the `INTEGRATION` scope, and §8 is where it is used.
 
 **`build_engine` opens it for ADR-0102 §7's reason, unchanged.** Every other Tier
 1 store in this system — memory, the audit trail, plans, conversations, the
@@ -372,7 +433,8 @@ empty.
 **A connection is not grant-shaped, and saying which parts do and do not transfer
 is the point of naming it.** What transfers is the *act*: a recorded user
 decision, hub-side, reached through a client, unavailable to a model, unmintable
-from configuration. What does not transfer is the *record*:
+from configuration — and, from ADR-0097 §4, the append-only store that records it
+(§3). What does not transfer is the *subject* and the *shape of the live state*:
 
 - **The subject differs.** A grant's subject is a reader's declared identity — a
   declared constant, which is what keeps personal data out of it (ADR-0097 §1,
@@ -380,48 +442,46 @@ from configuration. What does not transfer is the *record*:
   precisely the user-recognisable value a declared constant may not be. That is
   why §3 rules the store Tier 1 and keeps the identity out of logs, where a grant
   needed no such rule.
-- **The mutation semantics differ, and cannot be reconciled.** A grant store is
-  append-only and a revocation is a new record (ADR-0097 §4). ADR-0148 §6
-  requires a *live* record that an act takes by compare-and-swap and mutates
-  through two states. A store cannot be both without deciding which one ADR-0148
-  §6's checks read, and §6 already decided: they read the record.
+- **The live state differs.** A grant is answered by "is there a live grant for
+  this source", derived from the record history. ADR-0148 §6 needs more than that:
+  a live record with a *mutable-looking* state that an act takes by
+  compare-and-swap and moves from *pending* to *active*. §3 supplies both — the
+  history and the latest-entry projection — where a `SourceGrantStore` supplies
+  only the first and could not be made to supply the second without changing what
+  ADR-0097 §4 decided.
 - **The axis differs.** `VISION.md` governs reading and acting separately, and
   ADR-0097 §3 quotes it against exactly this merge: "Collapsing the two into one
   notion of 'integration' would either over-restrict reading or under-restrict
   acting." A grant is standing authorisation to *read* a source; a connection is
   the provenance of a credential on the *acting* side, where ADR-0148 makes every
   call individually authorised. Making a connection an authorisation would create
-  the standing act-authorisation ADR-0021 §6 defers and §11 keeps deferred.
-
-**Nothing here is gated by `permissions/`, and that is deliberate.** A
-provisioning act is the user acting, not the assistant proposing — the shape
-ADR-0021 §1 has the audit trail record as "a human answered". Grants are not
-ruled by `ActionPolicy` either (ADR-0102 carries no gate), for the same reason.
-What stays open and untouched is the *other* question: whether a credential
-**read** is a permission subject is #74's, and ADR-0125 §9 keeps it open (§9).
+  the standing act-authorisation ADR-0021 §6 defers and §13 keeps deferred.
 
 ### 5. Disconnection is a user act, it is prospective, and it never resets a revision
 
-> **Normative.** Disconnecting a reference is **two writes in a fixed order**:
-> the connection record ceases to be live **first**, and the credential slot it
-> named is deleted **second**. No other order is permitted.
+> **Normative.** Disconnecting a reference is **two writes in a fixed order**: a
+> **removal entry** is appended to the connection store **first**, after which the
+> reference has no live record; the credential slot the removed record named is
+> deleted **second**. No other order is permitted.
 
-> **Normative.** After the first write the reference is **not connectable** in
-> ADR-0148 §6's sense — no `ActionRequest` is built against it, no ruling is
-> sought for one, and no callable transmits under it — and the disconnection
-> introduces **no third provisioning state**: ADR-0148 §6's states remain exactly
-> *pending* and *active*, and a disconnected reference has no live record at all.
+> **Normative.** A removal entry carries the reference, the incremented revision
+> and the fact that the connection was removed. It carries **no** credential
+> value, and it is **not** a connection record in a third provisioning state:
+> ADR-0148 §6's states remain exactly *pending* and *active*, and a reference
+> whose latest entry is a removal has no live connection record at all, so it is
+> not connectable in §6's sense — no `ActionRequest` is built against it, no ruling
+> is sought for one, and no callable transmits under it.
 
-> **Normative.** A disconnection **does not reset the reference's revision**. The
-> store retains, durably and per reference, the highest revision it has ever
-> issued for that reference, and a later provisioning act on the same reference
-> takes a revision strictly greater than it. ADR-0148 §6's "A revision is never
-> reused and never decreases" holds across disconnection and re-connection, not
-> only within one connected life.
+> **Normative.** A disconnection **does not reset the reference's revision**. A
+> later provisioning act on the same reference takes a revision strictly greater
+> than every revision that reference has ever held, so ADR-0148 §6's "A revision
+> is never reused and never decreases" holds across disconnection and
+> re-connection and not only within one connected life.
 
 > **Normative.** A slot deletion that fails leaves an **unreferenced slot** rather
 > than a live credential no record describes; the failure is reported and never
-> suppressed, and the reference stays disconnected. This is ADR-0148 §6's rule for
+> suppressed, the reference stays disconnected, and the slot stays nameable from
+> the removed entry so §8's purge still reaches it. This is ADR-0148 §6's rule for
 > a predecessor slot, applied to the deletion that ends a connection.
 
 > **Normative.** A disconnection is **prospective**. It does not wait for, cancel
@@ -442,21 +502,14 @@ direction the reader can detect.
 it is a gap with teeth.** §6 states monotonicity over "that reference" and
 requires the taking act's compare-and-swap to observe "the identity, revision and
 state" — which says nothing about a reference whose record has been removed. A
-store that dropped the counter with the record would restart a re-connected
+store that dropped the history with the record would restart a re-connected
 reference at the first revision, and the ABA sequence §6's revision exists to
 refuse becomes reachable through a *conforming* path: connect A at revision 1,
 disconnect, connect A again at revision 1, and a credential read spanning the
 three sees the same identity and the same revision it started with. That is the
 defect §6 spent round 4 closing, arriving through the one act §6 did not
-enumerate. Retaining the counter costs a durable integer per reference and no
-history.
-
-**Keeping the counter is not keeping a history, and the difference is a data
-right.** What survives a disconnection is a reference and a number, neither of
-which is personal data (§3). A full history of connected accounts would keep
-identities after the user disconnected them, which is durable Tier 1 data with an
-ADR-0004 §6 obligation and no consumer asking for it — ADR-0148 §6's checks read
-only the live record. §11 scopes the history out rather than buying it here.
+enumerate. §3's append-only store closes it by construction rather than by a
+counter an implementation has to remember to keep.
 
 ### 6. An active record over an empty slot is refused, and nothing repairs it automatically
 
@@ -487,23 +540,150 @@ gives the interrupted act: the state is refused rather than reconciled.
 **It is a stacked addition to ADR-0148 §6 and not a change to it.** §6 rules what
 happens when the record disagrees with the binding or with itself; it is silent
 on an empty slot, and nothing in it becomes false or over-wide by this clause
-(§10). §6's guarantee clause is likewise unaffected — it guarantees no byte is
+(§12). §6's guarantee clause is likewise unaffected — it guarantees no byte is
 transmitted under a credential read across a provisioning act, and refusing when
 there is no credential at all is that guarantee's direction, not an exception to
 it.
 
-### 7. The user reaches it as a hub operation, and the operation's shape is its own contract ADR
+### 7. What ADR-0004 §7 asks of a provisioning act, and what answers it
+
+ADR-0004 §7 is engaged here and is answered rather than assumed away, because a
+provisioning act writes a Tier 0 credential and a Tier 1 record and its sentence
+reaches both halves: "Access to Tier 0/1 data and every side-effecting tool call
+is gated by the `permissions/` layer and recorded in an **audit trail**, making
+the assistant's behaviour transparent and reviewable."
+
+> **Normative.** No `ActionPolicy` ruling is sought for a provisioning act, and
+> no provisioning act is presented as authorised by a `PermissionDecision`. A
+> provisioning act is the owner acting at their own installation through a
+> client, not the assistant proposing an action — the distinction ADR-0005 §3
+> draws and ADR-0021 §1 records when it says the trail records "that a human
+> answered". `permissions/` rules what the assistant proposes.
+
+> **Normative.** The **record** half of ADR-0004 §7 is met by the append-only
+> connection store (§3), which is what makes an act transparent and reviewable:
+> it says, completely and in order, which reference the user connected,
+> re-provisioned or disconnected, under which identity, at which revision, and
+> which slot each act wrote. No `AuditTrail` record is written for a provisioning
+> act, because an `AuditTrail` record is a permission decision's (ADR-0021 §1)
+> and no decision is taken; writing one would be recording a ruling nobody made.
+
+> **Normative.** The act is confined in the sense ADR-0126 §11's replacements
+> use: one purpose and one path, performed by §1's component alone, on the
+> owner's own installation, over ADR-0084 §1's `0600` socket, with the credential
+> coming to rest only in the keyring (§9). Custody of the keyring is the operating
+> system's own access control (ADR-0125 §7).
+
+> **Normative.** This is **not an exemption from ADR-0004 §7 and no lane may cite
+> it as one.** Nothing here narrows §7, exempts any existing access, or reaches
+> any access other than a provisioning act. §7's gate over the *read* of an
+> `INTEGRATION` credential is untouched and is additionally constrained by
+> position under ADR-0148 §7, which this ADR inherits (§1).
+
+**The corpus has already ratified this reading twice, which is why it is stated
+as a reading rather than as a new exemption.** ADR-0097 §9 and ADR-0102's four
+operations create, revoke and list a durable Tier 1 store on an explicit user
+act, with no `ActionPolicy` ruling and no `AuditTrail` record — and ADR-0097 §11
+examined ADR-0004 §7 explicitly and recorded no amendment against it, while
+ADR-0102 §11 answers the auditing question by pointing at ADR-0097 §4's
+append-only store rather than at the trail. A provisioning act is that act's
+sibling: the same user, the same client, the same hub-side store, one tier
+further down. If the corpus later decides that §7's gate does reach an act the
+owner performs directly, it reaches the grant operations and this one together,
+and ADR-0125 §9 has already shaped the seam so that such a gate arrives as a
+decorator at the composition root with **no signature in `core/protocols.py`
+changing**.
+
+**What is genuinely different from the grant case is the tier, and it is why §3
+and §8 exist in the form they do.** A grant record is Tier 1 and reviewable on
+its own; a credential is Tier 0 and can be reviewed only through what the record
+says about it. So the record carries the slot, the store keeps the history, and
+§8 makes the delete right reach the entry — three properties a grant store never
+needed and the ones that make "transparent and reviewable" true of an act whose
+subject is a secret.
+
+### 8. Deleting the owner's data reaches these entries — the path, its ordering, and what is left to #909
+
+> **Normative.** The deletion path for an `INTEGRATION` keyring entry is the
+> provisioner's, and it is the only one: it exposes a **purge** that deletes every
+> credential slot the connection store names — the live records' slots and every
+> superseded or removed record's slot — and then the entries that named them. No
+> other component composes such a path, because ADR-0125 §5 refuses enumeration
+> and the connection store is the only durable list of those slots (§3).
+
+> **Normative.** The purge deletes slots **before** anything destroys the
+> connection store. A destruction that removed the store first would leave keyring
+> entries no component in this system can ever name again — Tier 0 data that is
+> unreachable and present, which is the state ADR-0004 §6's "purges Tier 0 and
+> Tier 1 together" exists to prevent, and which no later act could repair.
+
+> **Normative.** The purge is scope-confined by construction: the provisioner's
+> `SecretStore` instance is bound to `INTEGRATION` and to one installation
+> (ADR-0125 §2), so the purge cannot reach a `PROVIDER` or `ENROLMENT` entry or
+> another installation's, and it enumerates nothing.
+
+> **Normative.** A coordinator that must purge the hub's Tier 0 entries receives
+> the provisioner by injection from the composition root and invokes the purge.
+> Holding the provisioner is **not** holding a keyring face — the distinction
+> ADR-0102 §7 already drew about the composition root and `SourceGrantStore` — so
+> nothing here gives a face to a component ADR-0125 §8 keeps out of the seam.
+
+> **Normative.** **This ADR does not route ADR-0126's act to that purge.** That
+> act is offline, is in `service/`, and ADR-0126 §6's first clause states that it
+> "reaches no keyring" and "performs no keyring operation"; making it invoke the
+> purge would change that clause, and changing it is ADR-0126's to do rather than
+> this ADR's (**#909**).
+
+> **Normative.** **No lane provisions a connection in an installation before a
+> ratified decision routes the owner's delete right to the purge above.** This is
+> a named precondition on the implementing lane, in the form ADR-0021 §3 used on
+> the standing-grant ADR and ADR-0097 §9a used on the source-registry lane, and it
+> is what keeps ADR-0126 §6's last clause honoured rather than merely cited: until
+> it lands, an installation that ran the offline delete would keep credentials the
+> owner asked to destroy.
+
+**What ADR-0126 §6 asked for was a decision, and this is the half of it that is
+this lane's.** That clause said the question "is a contract question and not a
+wiring detail", because "ADR-0125 §5 refuses enumeration and puts the deletion
+path on the consumer that wrote the entry, and ADR-0125 §8 keeps `service` out of
+the seam, so no path exists today". The clauses above supply the path, put it on
+exactly the consumer ADR-0125 §5 puts it on, fix what it composes from and the
+one ordering constraint that cannot be discovered later, and establish that a
+coordinator can hold it without acquiring a face. Of the three things ADR-0126 §6
+said such a decision would have to weigh, two are answered here — the purge is
+composed by the consumer that wrote the entries, and it requires **no** fourth
+face and no widened scope enum — and the third, whether the coordinator is the
+hub or the offline tool, is left where it belongs, with the ADR that owns the act.
+
+**Answering the third here would have been the overreach, not the diligence.**
+ADR-0126 §2 shows the offline placement is forced rather than preferred, §5 makes
+the instance lock the act's atomicity, and §6's first clause is marked. An ADR
+about who holds a keyring face is not the document that reopens any of that, and
+ADR-0126 §6's own forward clause is careful to bind that "the question be
+*decided* — by whoever creates it, at the moment they create it — rather than
+that it be answered here in a package that may not answer it". The symmetric
+restraint is the right one in this direction too.
+
+**The precondition is the honest instrument and it is deliberately blocking.**
+ADR-0126 §6 already blocks the entry — "Until that decision lands, this ADR
+authorises no such entry to be written" — so a version of this ADR without the
+precondition would be authorising, by silence, exactly what that clause forbids.
+What the clauses above buy is that the remaining question is small and named: not
+"how does a delete reach a keyring entry", which is answered, but "who calls the
+purge, and does ADR-0126's act change to do it".
+
+### 9. The user reaches it as a hub operation, and the operation's shape is its own contract ADR
 
 > **Normative.** Connecting, re-provisioning, disconnecting and listing
 > connections are **hub operations reached by a client** (ADR-0084, ADR-0097 §9's
 > shape). They are implemented in `orchestration`, which delegates each act to the
-> provisioner (§1) through a Protocol in `core/protocols.py` (§8).
+> provisioner (§1) through a Protocol in `core/protocols.py` (§10).
 > `orchestration` holds no keyring face, opens no connection store and performs
 > none of ADR-0148 §6's three writes.
 
 > **Normative.** The `AssistantEngine` method signatures for these operations,
 > the result types they promote to `core/types.py`, their wire frames and the
-> shape of the Protocol §8 names are **not decided here**. They are owed as their
+> shape of the Protocol §10 names are **not decided here**. They are owed as their
 > own contract ADR, on ADR-0084 §5's step-1/step-2 split, ratified and merged
 > before any client or any implementation is built against them. **Its firing
 > condition is this ADR merging.**
@@ -551,19 +731,19 @@ live is one the user cannot read, which defeats §4's informed-act property the
 same way ADR-0102 §3 argues a client must not derive the grantable set from the
 granted one. Whether it is one operation or several is the surface ADR's.
 
-### 8. New `core` contract surface, flagged and not landed here
+### 10. New `core` contract surface, flagged and not landed here
 
 > **Normative.** This decision cannot be implemented without one piece of contract
 > surface `core` does not have: a Protocol by which `orchestration` reaches the
-> provisioner in `tools/` (§7). It is flagged here under golden rule 5 and **is
-> not added by this ADR**. It is decided in the contract ADR §7 names — the same
+> provisioner in `tools/` (§9). It is flagged here under golden rule 5 and **is
+> not added by this ADR**. It is decided in the contract ADR §9 names — the same
 > one that decides the operations it serves, because they are one question — and
 > its triad rides with the **primary production implementation** as one lane
 > (ADR-0137 §2, `CONTRIBUTING.md` → "Adding a Protocol").
 
 > **Normative.** No credential value appears in that Protocol's return types
-> (§7). It carries no `SecretName` a caller could use to reach the keyring by
-> another route, and holding it confers no keyring face.
+> (§9). It carries no `SecretName` a caller could use to reach the keyring by
+> another route, and holding it confers no keyring face (§8).
 
 > **Normative.** This ADR adds **no** member to `SecretScope`, changes **no**
 > signature on `Secrets` or `SecretStore`, adds no field to `ActionRequest`,
@@ -575,25 +755,25 @@ granted one. Whether it is one operation or several is the surface ADR's.
 are `AssistantEngine` methods, `AssistantEngine` is `orchestration`'s (ADR-0102
 §7), the act's owner is in `tools/`, and a subsystem boundary between them is a
 Protocol by golden rule 1. Every other seam this decision needs falls inside one
-subsystem: the record's store, the callable's read of it, and ADR-0148 §11(b)'s
-consultation of it are all `tools/`-internal, which is the placement's whole
-economy (§1).
+subsystem: the record's store, the callable's read of it, ADR-0148 §11(b)'s
+consultation of it and §8's purge are all `tools/`-internal, which is the
+placement's whole economy (§1).
 
-### 9. What this ADR does not gate, discharge or authorise
+### 11. What this ADR does not gate, discharge or authorise
 
 > **Normative.** Nothing here discharges any of ADR-0017 §3's fourteen
 > conditions, attests that one holds in code, or designates the `tools/` egress
 > seam. `tools/` still transmits nothing, and no lane may cite this ADR toward a
 > condition, a designation, or a connection to any counterparty.
 
-> **Normative.** Nothing here gates a credential read, narrows ADR-0004 §7, or
-> closes #74. ADR-0125 §9's clause stands exactly as written: this is a storage
-> and provenance decision, not an authorisation seam, and the provisioner
-> consults no policy and writes no audit record.
+> **Normative.** Nothing here closes **#74**, which asks whether ADR-0004 §7's
+> Tier 0 gating reaches the model provider credential. ADR-0125 §9's clause stands
+> exactly as written — the keyring seam gates nothing and is a storage seam — and
+> §7 above is a statement about a provisioning act and about nothing else.
 
 > **Normative.** Nothing here authorises connecting to an MCP server over any
 > transport. ADR-0147 §4's fourth and fifth clauses stand undischarged and
-> unrelaxed (§11).
+> unrelaxed (§13).
 
 **The reason for saying it is ADR-0147 §3's and ADR-0148 §13's:** a document that
 supplies the machinery for holding an integration's credential reads like
@@ -602,7 +782,7 @@ that a lane may *write* a credential and a record — and a lane may still not
 transmit a byte, because the conditions that gate transmission are ADR-0017 §3's
 and none of them moves here.
 
-### 10. This ADR classified under ADR-0070 §1 and ADR-0082 §1
+### 12. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
 ADR-0082 §1 requires the judgement in the later ADR's text, naming the clause and
 applying ADR-0070 §1's test: would a reader holding only the earlier ADR now act
@@ -639,22 +819,24 @@ commit:
   the system, to perform ADR-0148 §6's credential write and its predecessor
   deletion; it calls `set` and `delete` and never `get`, so §8's rule that a tool
   holds `Secrets` and nothing wider, and ADR-0148 §7's positional rule for reads,
-  are both untouched. ADR-0149 §3 puts the connection record under
-  `Settings.data_dir`, opened by `build_engine`, with its store seam
-  `tools/`-internal, so no Protocol is added to `core/protocols.py` for it. **§8
-  is unchanged**: its fourth clause enumerates ten subsystems, `tools/` is not
-  among them, and its second clause — about the tool that needs a read face —
-  stays true as written (ADR-0149 §2). §1's two faces, §2's scope and
-  installation binding, §4's replace-in-place `set` and its concurrency
-  disclaimers, §5's refusal of enumeration, §6's absence rule and §7's platform
-  posture are consumed exactly as ratified; §9 is untouched and #74 stays open.
-  The bullet's **provider key** half is **not** discharged: it stays with §12's
-  first bullet, #74 and a `models/` lane (ADR-0149 §11). §12's other bullets —
-  rotation and expiry *policy*, the `keyring` dependency, backup, and #462 — are
-  unaffected and remain scoped out, though ADR-0149 §5 and §6 decide two
-  consequences that meet the backup bullet and the rotation bullet at their
-  edges: a disconnection never resets a reference's revision, and an active
-  record over an empty slot is refused rather than repaired.
+  are both untouched. ADR-0149 §3 puts the connection store under
+  `Settings.data_dir`, opened by `build_engine`, append-only, with its seam
+  `tools/`-internal, so no Protocol is added to `core/protocols.py` for it; §5's
+  refusal of enumeration is what makes that store the only composable purge path,
+  which ADR-0149 §8 uses to discharge ADR-0126 §6's forward clause. **§8 is
+  unchanged**: its fourth clause enumerates ten subsystems, `tools/` is not among
+  them, and its second clause — about the tool that needs a read face — stays true
+  as written (ADR-0149 §2). §1's two faces, §2's scope and installation binding,
+  §4's replace-in-place `set` and its concurrency disclaimers, §6's absence rule
+  and §7's platform posture are consumed exactly as ratified; §9 is untouched and
+  #74 stays open on its own subject. The bullet's **provider key** half is **not**
+  discharged: it stays with §12's first bullet, #74 and a `models/` lane
+  (ADR-0149 §13). §12's other bullets — rotation and expiry *policy*, the
+  `keyring` dependency, backup, and #462 — are unaffected and remain scoped out,
+  though ADR-0149 §5 and §6 decide two consequences that meet the backup bullet
+  and the rotation bullet at their edges: a disconnection never resets a
+  reference's revision, and an active record over an empty slot is refused rather
+  than repaired.
 ```
 
 **ADR-0125 §8 — no record owed, and this is the one that needs the argument.**
@@ -673,47 +855,81 @@ asserted because a reviewer is entitled to check it, and ADR-0082 §1 gives them
 the way to overturn it — by naming the sentence of §8 that becomes false or
 over-wide.
 
+**ADR-0126 §6 — no record owed, and the clause is discharged rather than
+changed.** Its forward clause requires the lane that first gives a component on
+the hub's machine a Tier 0 keyring entry to decide, in the same change, how a
+hub-side delete reaches it, and §8 above is that decision. A condition "is not
+made false or over-wide by being answered" (ADR-0147 §11's formulation). Its
+other clauses stay true as written: the act still reaches no keyring, still holds
+neither face, still performs no keyring operation and still enumerates nothing,
+because §8's fifth clause deliberately does not route it. §6's second clause —
+"No component of this system writes a Tier 0 keyring entry on the hub's machine
+today" — is a dated statement about the tree, which is still true of the tree (§
+*The tree, read rather than remembered*) and which the implementing lane, not
+this ADR, makes false; §8's precondition is what keeps that lane from making it
+false before the coordinator question is ruled. §6's supersession of ADR-0004 §6
+for a Tier 0 credential held *outside* the keyring is self-limiting by its own
+terms and is neither cited nor widened here: a slot in the keyring is not what
+that clause reaches. ADR-0126 §11's supersession of ADR-0004 §7 is likewise
+confined to that act, is not cited here, and §7 above is careful to take nothing
+from it (§7's fourth clause).
+
+**ADR-0004 §6 and §7 — no record owed.** §6 is used as given and is served rather
+than narrowed: §3 makes the connection store a Tier 1 artifact under `data_dir`
+and §8 makes its Tier 0 entries reachable by a purge, which is §6's "purges Tier 0
+(keyring entries) and Tier 1 (database rows) together" being made *possible* for
+a new entry rather than being qualified. §7 is engaged and answered in §7 above,
+with its gate half read as reaching the assistant's accesses rather than the
+owner's own acts — the reading ADR-0097 and ADR-0102 already embody, and which
+ADR-0097 §11 examined against §7 without recording an amendment — and its record
+half supplied by the append-only store. No exemption is claimed, and §7's fourth
+clause forbids a lane from reading one.
+
 **ADR-0148 §6, §11 and §13 — no record owed.** §11's fourth clause requires "the
 ADR that names its owner", §13's ninth bullet says the owner "wants the producer
-§11 defers for", and this ADR names the owner. A condition "is not made false or
-over-wide by being answered" (ADR-0147 §11's formulation, adopted by ADR-0146
-§10): a lane holding only ADR-0148 still finds §6's semantics, still finds no
-component authorised by §6 itself, and still needs the later ADR §11 requires.
-§6's clauses are consumed and not restated; §5 and §6 above add beside them —
-disconnection, the revision across it, and the empty slot — and each is a case §6
-does not rule on, so no sentence of §6 becomes false. §7's positional read rule is
+§11 defers for", and this ADR names the owner. A condition is not made false by
+being answered. §6's clauses are consumed and not restated; §5, §6 and §8 above
+add beside them — disconnection, the revision across it, the empty slot and the
+purge — and each is a case §6 does not rule on, so no sentence of §6 becomes
+false. §3's append-only store satisfies §6's compare-and-swap in §6's own terms
+and is checked against it clause by clause in §3. §7's positional read rule is
 strengthened in fact and unchanged in text (§1). §11's own deferral of surfaces
 (a) and (b) is untouched, and this ADR decides neither.
 
-**ADR-0097 §§1, 3, 8 and 9, and ADR-0102 §§1, 7, 8 and 9 — no record owed.** They
-are read as **precedent** and, in §4, as a model this ADR partly declines. A
-connection is not a `SourceGrant`, the grant store gains nothing and loses
-nothing, `GrantScope` gains no member, no clause about a source's identity is
-read wider, and the four grant operations are untouched. ADR-0102 §7's "no other
-object in the system holds a `SourceGrantStore`" stays true — the provisioner
-holds none.
+**ADR-0097 §§1, 3, 4, 8 and 9, and ADR-0102 §§1, 7, 8, 9 and 11 — no record
+owed.** They are read as **precedent** and, in §4, as a model this ADR partly
+declines. A connection is not a `SourceGrant`, the grant store gains nothing and
+loses nothing, `GrantScope` gains no member, no clause about a source's identity
+is read wider, and the four grant operations are untouched. ADR-0102 §7's "no
+other object in the system holds a `SourceGrantStore`" stays true — the
+provisioner holds none.
 
-**ADR-0083 §2, ADR-0084 §§5 and 9, ADR-0004 §§1, 5, 6 and 7, ADR-0016 §§5, 6 and
-7, ADR-0029 §§1, 2 and 6, ADR-0021 §1, ADR-0125 §§1–7 and 9, ADR-0147 §§3 and 4,
-ADR-0123 — no record owed.** Each is used as given. A new store under `data_dir`
-is `Settings.data_dir` working as ADR-0083 §2 designed it; a new hub operation is
+**ADR-0083 §2, ADR-0084 §§5 and 9, ADR-0016 §§5, 6 and 7, ADR-0029 §§1, 2 and 6,
+ADR-0021 §1, ADR-0125 §§1–7 and 9, ADR-0147 §§3 and 4, ADR-0123 — no record
+owed.** Each is used as given. A new store under `data_dir` is
+`Settings.data_dir` working as ADR-0083 §2 designed it; a new hub operation is
 ADR-0084 §5's split working as designed; ADR-0016's registry rules are relied on
 and not narrowed; ADR-0029 §6's "no credential value crosses this seam" is
 inherited; ADR-0123's backup scope is stated rather than changed, and §6 above
 adds the refusal that scope implies rather than asking that lane for anything.
 
 **What would have owed a record and is deliberately not done.** Giving
-`orchestration`, `service` or `interfaces` a keyring face (that is ADR-0125 §8's
-fourth clause and would be a partial supersession — §1 explains why it is refused
-on its own merits, not to avoid the record); adding a `SecretScope` member;
-changing what a connection record carries; or reading ADR-0148 §6's states as
-admitting a third.
+`orchestration`, `service` or `interfaces` a keyring face (ADR-0125 §8's fourth
+clause — §1 refuses that placement on its own merits, not to avoid the record);
+routing ADR-0126's act to §8's purge (ADR-0126 §6's first clause — §8's fifth
+clause refuses it); adding a `SecretScope` member; changing what a connection
+record carries; or reading ADR-0148 §6's states as admitting a third.
 
-### 11. Explicitly out of scope
+### 13. Explicitly out of scope
 
 Scoping something out is a decision, so each carries its reason (ADR-0029 §7's
 form).
 
+- **Who invokes §8's purge when the owner deletes everything** — **#909**, and
+  §8's fifth and sixth clauses say why it is not answered here and what is
+  blocked until it is. The candidate answers ADR-0126 §6 names are still the
+  candidates: a coordinator composing each consumer's deletion path, and whether
+  that coordinator is the hub or the offline tool.
 - **The provider key's provisioning surface** — ADR-0125 §12's first bullet and
   **#74**. A provider credential has no connection record, no account identity,
   no per-call binding and no callable position: none of ADR-0148 §6's machinery
@@ -734,7 +950,7 @@ form).
   what remained was placement. That ADR-0149 makes it possible to *hold* a
   credential for a server does not make it possible to *reach* one — ADR-0147 §4's
   fourth clause forbids connecting over any transport until it is authorised, and
-  §9 above adds nothing to §3's list and relaxes none of it.
+  §11 above adds nothing to ADR-0017 §3's list and relaxes none of it.
 - **Standing grants** (ADR-0021 §6). A connection authorises nothing (§4), so it
   is not the relief valve §6 defers and does not pre-shape it. ADR-0148 §3's
   fourth clause adds two questions that ADR must answer before an egress recipient
@@ -755,17 +971,17 @@ form).
   ADR-0148 §6's shape, performed by §1's owner, on a user's initiative) and says
   nothing about when one is due, whether an expiry is tracked, or whether anything
   reminds the user. Nothing automatic may perform one (§4).
-- **A history of connections.** §5 keeps a revision counter and no more. Retaining
-  disconnected accounts' identities is durable Tier 1 data with an ADR-0004 §6
-  obligation and, today, no consumer: ADR-0148 §6's checks read only the live
-  record and no surface asks what was connected last year. A lane that finds a
-  consumer decides it then, and §5's counter is what keeps that decision additive.
+- **What a connection listing shows, and whether the store's history is exposed
+  to the user.** §3 keeps the history because the act's record is what ADR-0004 §7
+  asks for (§7) and because §8's purge is composed from it; whether a client
+  renders past connections, and under what paging, is the surface ADR's (§9),
+  bounded by §9's third clause.
 - **Whether a backup carries a connection record** — ADR-0123's scope, stated
   rather than changed. §6 rules what happens when a restored record outlives its
   credential; whether the record is in the backup at all is that lane's.
 - **Provisioning from an enrolled device over the remote transport.** ADR-0124 §1
   enumerates the boundaries and a credential crossing to the hub from a remote
-  spoke raises questions about that hop this ADR has no producer for. §7's surface
+  spoke raises questions about that hop this ADR has no producer for. §9's surface
   ADR decides which clients may reach the operations; what this ADR fixes is that
   the credential comes to rest only in the hub's keyring wherever it was typed.
 - **Per-tool confinement inside `INTEGRATION`** — ADR-0125 §2's named residual,
@@ -775,15 +991,23 @@ form).
   ADR-0148 §13 owns both; a connection record carries no endpoint and no
   description.
 
-### 12. What the implementing lanes owe
+### 14. What the implementing lanes owe
 
 > **Normative.** The lane that lands the provisioner ships, beyond ADR-0148 §14's
 > matrix: a test that a disconnection followed by a re-connection on the same
 > reference takes a revision strictly greater than every revision that reference
 > ever held (§5); a test that a call bound to a reference whose record is active
-> and whose slot is empty is refused and transmits nothing (§6); a test that the
-> provisioner never calls `get`; and a test that a disconnection whose slot
-> deletion fails leaves the reference disconnected and reports the failure (§5).
+> and whose slot is empty is refused and transmits nothing (§6); a test that a
+> provisioning act appends rather than overwriting, so the store still answers
+> what the previous act recorded (§3); a test that the provisioner never calls
+> `get`; and a test that a disconnection whose slot deletion fails leaves the
+> reference disconnected, reports the failure, and leaves the slot reachable by
+> §8's purge (§5).
+
+> **Normative.** That lane also ships §8's purge with a test that it deletes the
+> slot of a superseded and of a removed record as well as of a live one, and a
+> test that it reaches no entry outside the `INTEGRATION` scope or outside its
+> installation (ADR-0125 §2).
 
 > **Normative.** That lane also ships the import-linter or equivalent mechanical
 > confinement that the provisioner's module is the only module under `tools/`
@@ -792,16 +1016,18 @@ form).
 > ADR-0125 §8 records as having survived from ADR-0004's ratification until a
 > third consumer made it blocking.
 
-> **Normative.** No lane implements any of it before the contract ADR §7 names has
-> merged (golden rule 5, ADR-0015 §5). This ADR merging discharges ADR-0148 §11's
-> fourth clause and no other precondition.
+> **Normative.** No lane implements any of it before the contract ADR §9 names has
+> merged (golden rule 5, ADR-0015 §5), and no lane provisions a connection in an
+> installation before §8's precondition is met. This ADR merging discharges
+> ADR-0148 §11's fourth clause and ADR-0126 §6's forward clause, and no other
+> precondition.
 
-### 13. Marking, review and ratification
+### 15. Marking, review and ratification
 
 - **Marked under ADR-0089 §2, and the marks are the whole of what this ADR
   obligates** (§3 there). Unmarked text — the placement arguments in §1 and §2,
-  the classification in §10 and the scope-outs in §11 — is read to determine what
-  a marked clause means and supplies no obligation of its own, except where §11's
+  the classification in §12 and the scope-outs in §13 — is read to determine what
+  a marked clause means and supplies no obligation of its own, except where §13's
   bullets restate a marked clause elsewhere by citation.
 - **Citations are in ADR-0088 §1's forms**, and no code citation carries a line
   number (§5 there): the modules and symbols named above are named by symbol.
@@ -809,35 +1035,47 @@ form).
   adversarial *and* architecture — run against it in that state, its status
   flipped only once both returned clean on one tree, and both re-run on the
   flipped tree for the coverage reason `CONTRIBUTING.md` → "Finishing an ADR PR"
-  gives. Findings raised after the flip were folded the same way. Nothing
-  implements against this ADR until it has merged (ADR-0015 §5).
+  gives. Architecture review's first round produced §3's append-only store, §7 and
+  §8: the first draft made the store's shape an implementation detail, asserted
+  ADR-0004 §7's inapplicability in half a sentence, and promised that deletion
+  "purges the record and the credential slot it names together" without a path by
+  which any delete surface could reach the slot — the bound-with-nothing-behind-it
+  defect ADR-0098 §3 records itself making twice, and ADR-0126 §6's forward clause
+  had been written to catch exactly it. Findings raised after the flip were folded
+  the same way. Nothing implements against this ADR until it has merged (ADR-0015
+  §5).
 
 ## Consequences
 
 - **ADR-0148 §6 becomes performable.** Its clauses had no party entitled to
   satisfy them; §1 names one, and ADR-0148 §14's test list acquires a subject.
+- **ADR-0126 §6's forward clause is discharged and its remaining question is
+  small.** The path exists, its ordering is fixed, and #909 is reduced from "how
+  does a hub-side delete reach a keyring entry" to "who calls it".
 - **One subsystem holds the whole connection concept.** The record, its store, its
-  readers and its writer are all in `tools/`, so the only contract surface this
-  decision adds is the one the user's act crosses — one Protocol instead of the
-  two a different placement would have cost, and no supersession of ADR-0125 §8.
+  readers, its writer and its purge are all in `tools/`, so the only contract
+  surface this decision adds is the one the user's act crosses — one Protocol
+  instead of the two a different placement would have cost, and no supersession of
+  ADR-0125 §8.
 - **`tools/` acquires durable state and a write face onto the keyring**, which it
   did not have. That is the real cost: a subsystem that will host integration code
   now contains the one component that can write an `INTEGRATION` credential. §1's
-  confinement clauses and §12's mechanical check are what keep the blast radius at
+  confinement clauses and §14's mechanical check are what keep the blast radius at
   one module, and ADR-0125 §2's plugin caveat is the condition under which this
   placement wants revisiting.
-- **A connection becomes a user act with the same shape as a grant and none of its
-  record semantics.** An installation cannot acquire a live connection by being
-  configured, upgraded or restored, which closes the route by which ADR-0148 §6's
-  identity binding would attest something nobody asserted.
+- **A connection becomes a user act with the same shape as a grant and a store
+  that records it.** An installation cannot acquire a live connection by being
+  configured, upgraded or restored, and what the owner connected and disconnected
+  is answerable afterwards — which is what §7 offers ADR-0004 §7 in place of an
+  audit record no permission decision produced.
 - **Two states ADR-0148 §6 left reachable are now refused rather than
   reconciled** — a re-connected reference reusing a revision, and an active record
   over an empty slot. Both are cheap to hold and neither was detectable by the
   checks §6 already specifies.
-- **The chain to leg 12's exit gains one ADR and no more.** The surface ADR §7
-  names decides the operations and the Protocol together; ADR-0148 §11's (a) and
-  (b), the designating ADR and ADR-0147 §4's authorising ADR are unchanged in
-  number and in scope.
+- **Leg 12's actuator work now waits on two decisions rather than one.** The
+  surface ADR §9 names, and #909's coordinator ruling that §8's precondition
+  binds. Neither is invented here: the first is ADR-0084 §5's split and the second
+  is ADR-0126 §6's own clause, which already forbade the entry until it lands.
 - **Nothing transmits.** `tools/egress` stays empty and every one of ADR-0017 §3's
   conditions stays undischarged.
 
@@ -861,23 +1099,30 @@ form).
   ability to author the credential its own identity binding rests on.
 - **A connection as a `SourceGrant` with a third `GrantScope` member.** Refused in
   §4 on three independent grounds — the subject is personal data where a grant's
-  is a declared constant, the store's mutation semantics are append-only where
-  ADR-0148 §6 requires a live record taken by compare-and-swap, and `VISION.md`
-  governs reading and acting separately. Attractive because it would have reused a
-  ratified store and surface; unavailable because ADR-0148 §6's checks read a
-  record that a grant store cannot be.
-- **A `core` Protocol pair for the connection record**, mirroring
-  `SourceGrants`/`SourceGrantStore`, so the record is a first-class contract.
-  Refused in §3: with writer and readers in one subsystem it is a boundary with
-  nothing on the other side, and ADR-0029 §1 already rules the callable's reach
-  `tools/`-internal. If a future consumer outside `tools/` appears — a
-  connections screen served from another subsystem, say — promoting the seam is
-  additive and is that lane's decision.
+  is a declared constant, the live state ADR-0148 §6 requires is not one a grant
+  store can express, and `VISION.md` governs reading and acting separately.
+  Attractive because it would have reused a ratified store and surface;
+  unavailable because ADR-0148 §6's checks read a record a `SourceGrantStore`
+  cannot be. What *is* taken from it is ADR-0097 §4's append-only shape (§3).
+- **A live-record-only store, with a retained revision counter and no history.**
+  The first draft's answer, and refused for two reasons found in review: it left
+  ADR-0004 §7's recording half unanswered for a Tier 0 write, and it left a failed
+  predecessor deletion holding a slot no record names — an entry §8's purge could
+  not compose. Append-only costs a row and answers both.
+- **Superseding ADR-0004 §7 for the provisioning act**, in ADR-0126 §11's
+  instrument. Refused in §7: §7's gate is unavailable to ADR-0126's act because no
+  policy layer is running, which is what made a supersession the honest instrument
+  there. Here the act runs inside a live hub, the reading it takes is the one the
+  grant operations already embody, and claiming an exemption would put on the
+  record a narrowing of a safety clause that this ADR does not need and could not
+  confine.
+- **Routing ADR-0126's offline act to §8's purge**, which would close the delete
+  question outright. Refused in §8: it changes ADR-0126 §6's first marked clause,
+  and ADR-0126 §6 is explicit that the deciding lane should not answer in a
+  package that may not answer it. The precondition is the instrument that leaves
+  that ruling where it belongs while refusing to ship an unpurgeable credential.
 - **Deciding the engine operations here**, so that one ADR unblocks the
-  implementation entirely. Refused in §7 on ADR-0084 §5's split and ADR-0073 §4's
+  implementation entirely. Refused in §9 on ADR-0084 §5's split and ADR-0073 §4's
   producer test: `AssistantEngine` is a closed graph with a wire encoding, and the
   arguments a connect operation needs are exactly what a first real integration
   would tell us.
-- **Letting a disconnection erase the reference's counter**, which is the simpler
-  store. Refused in §5: it reopens the ABA sequence ADR-0148 §6's revision exists
-  to refuse, through a conforming path.
