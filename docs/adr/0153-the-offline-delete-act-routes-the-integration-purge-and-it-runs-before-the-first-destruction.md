@@ -1,11 +1,12 @@
 # 153. The offline delete act routes the integration purge, and it runs before the first destruction
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
+- Accepted: 2026-08-14
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-14**,
   the durability form ADR-0100 established and ADR-0125, ADR-0126, ADR-0149 and
-  ADR-0151 each followed. ADR-0126 **will be edited by this change, in its
-  ratification commit** (the records bullet below), and ADR-0149 and
+  ADR-0151 each followed. ADR-0126 **is edited by this change, in its ratification
+  commit** (the records bullet below), and ADR-0149 and
   ADR-0151 were ratified in the last six days; a citation that silently means
   "whatever this ADR says when you read it" is not checkable. Where a later ADR
   changes one of them, this one is read against the text named here until an ADR
@@ -850,7 +851,7 @@ The dated note, appended after that line and before ADR-0126's existing header
 bullets:
 
 ```text
-- Partially superseded: <ratification date> by ADR-0153 — **six limbs, one scope,
+- Partially superseded: 2026-08-14 by ADR-0153 — **six limbs, one scope,
   one seam, and the forward clause that asked for this is discharged for
   `INTEGRATION` alone.** §6's last clause bound "the lane that first gives a
   component on the hub's machine a Tier 0 keyring entry" to decide how a hub-side
@@ -1050,11 +1051,39 @@ are classifications of the change and are not normative (ADR-0089 §1).
 
 Its required review set is **adversarial and architecture**, because it decides a
 contract surface (`CONTRIBUTING.md` → "Stop when the required reviews are green").
-It was drafted, reviewed and revised while `Proposed`; its status was flipped only
-once both required reviews returned clean on one tree; and both were re-run on the
-flipped tree, which `CONTRIBUTING.md` → "Finishing an ADR PR" step 3 obliges and
-ADR-0130 §12 and ADR-0136 §7 each record as the route they took. Nothing implements
-against this decision until this PR merges (ADR-0015 §5, golden rule 5).
+Both ran against this decision while it was `Proposed`, and both changed it.
+Adversarial produced §2's `@runtime_checkable` clause — without it §8's suite
+obligation would have errored rather than failed, since `isinstance` against a bare
+`Protocol` raises `TypeError` — and §8's second clause, the routing lane's test
+obligations, without which an implementation whose `purge` raised and which then
+destroyed `data_dir` anyway would have satisfied every stated obligation while
+producing the one unrepairable state this ADR exists to prevent. Architecture
+produced the records-for-ratification bullet and the placement of ADR-0126's pair.
+Each is recorded at the clause it changed rather than only here.
+
+**One `blocker` was waived, and the waiver is recorded rather than smoothed over.**
+Architecture blocked ADR-0126's pair being written while this ADR stood `Proposed`;
+adversarial then blocked its deferral, three rounds running, and the two required
+lenses were demanding opposite bytes on one decision. Architecture returned
+**APPROVE** with no findings on the tree carrying the deferred form; adversarial's
+blocker on that same tree was **waived by the coordinator** on four grounds — that
+no sentence of ADR-0126 becomes false or over-wide while this ADR is `Proposed`,
+which is the only ground ADR-0082 §1 admits and whose "book-keeping grounds alone"
+prohibition names this exact opposite-direction deadlock shape; that the leading
+token drops `Accepted` (ADR-0082 §2), so writing it early would put a live decision's
+standing under an unratified draft's authority; that nothing escapes review, since
+§10 carries the exact text of both halves and `CONTRIBUTING.md` step 3 re-runs the
+full set on the flipped tree that lands them; and that ADR-0149's header bullet is
+the standing precedent one ADR earlier. `CONTRIBUTING.md` → "Triage every finding"
+permits the waiver and requires the rationale, which is in the PR.
+
+The status was flipped only once architecture returned clean and adversarial's
+sole outstanding finding stood waived, on one tree; and both lenses were re-run on
+the flipped tree, which `CONTRIBUTING.md` → "Finishing an ADR PR" step 3 obliges
+and ADR-0130 §12 and ADR-0136 §7 each record as the route they took. The
+ratification commit is also the one carrying ADR-0126's pair, by the header bullet
+above, so the tree those re-runs read is the tree that lands the record. Nothing
+implements against this decision until this PR merges (ADR-0015 §5, golden rule 5).
 
 ## Consequences
 
