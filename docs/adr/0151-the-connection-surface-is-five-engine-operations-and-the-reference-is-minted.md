@@ -866,8 +866,9 @@ class ConnectionProvisioner(Protocol):
 > **Normative.** `provision` takes **no** reference argument and accepts none
 > under any other name: §3 makes the mint the provisioner's, so the engine passes
 > nothing and `provision` returns the `ConnectedAccount` carrying the reference it
-> minted. The other four members take the reference the engine received from its
-> caller, unaltered.
+> minted. `reprovision` and `disconnect` take the reference the engine received
+> from its caller, unaltered. `connected` and `recent_acts` take no reference at
+> all: each answers over the whole store (§9).
 
 > **Normative.** `recent_acts` takes `limit` with **no default**. The default is
 > `AssistantEngine`'s (§2), and a seam repeating it would be a second place for one
