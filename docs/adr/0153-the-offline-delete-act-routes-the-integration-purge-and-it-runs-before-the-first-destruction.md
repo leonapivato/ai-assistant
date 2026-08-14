@@ -225,11 +225,17 @@ Tier 0 data that nothing can ever name.
 > exactly two members, with these signatures:
 
 ```python
+@runtime_checkable
 class ConnectionPurger(Protocol):
     async def connected(self) -> tuple[ConnectedAccount, ...]: ...
 
     async def purge(self) -> None: ...
 ```
+
+> **Normative.** `ConnectionPurger` is `@runtime_checkable`, so
+> `isinstance(subject, ConnectionPurger)` answers rather than raising, and §8's
+> suite asserts it. `ConnectionProvisioner` is not made runtime-checkable by this
+> ADR and ADR-0151 §10's declaration is unchanged.
 
 > **Normative.** `connected` answers with the live connection record for every
 > reference the store holds one for, in ADR-0149 §3's sense of *live* — the
@@ -304,6 +310,17 @@ structurally, so a composition root hands each consumer the face its job needs
 without needing two classes." Two names for one answer would invite two
 implementations and a drift between them, and a reader comparing the two faces
 would have to check whether the difference in name meant a difference in meaning.
+
+**The decorator is here and not on `ConnectionProvisioner`, and the difference is
+the arrangement rather than a preference.** ADR-0125 §1 made both `Secrets` and
+`SecretStore` `@runtime_checkable` for exactly this shape — two faces over one
+object, handed out separately by a composition root — and ADR-0125 §11 spends two
+suite obligations on the resulting `isinstance` checks. That is the shape here.
+`ConnectionProvisioner` has no sibling face over the same object, so ADR-0151 §10
+needed no such check and this ADR adds none to it. Without the decorator the claim
+below would be false rather than merely unproven: `isinstance` against a bare
+`Protocol` raises `TypeError`, so a suite written to the sentence would not fail,
+it would error.
 
 **The Protocols are not made to inherit from one another, and that is the point.**
 `SecretStore(Secrets, Protocol)` inherits because the wide face genuinely *is* the
@@ -670,9 +687,36 @@ on the **`service`→`tools`** boundary, which no other in-flight decision reach
 > distinct slot the store names including a superseded one and a removed one, then
 > removes the entries; a `purge` whose slot deletion raises leaves **every** entry
 > in place and re-raises; `purge` is idempotent, so a second call after a failure
-> completes and a second call after a success does nothing and raises nothing; and
-> no credential value, `SecretName` or slot appears in any return value or in any
-> error the subject raises.
+> completes and a second call after a success does nothing and raises nothing; the
+> subject satisfies `ConnectionPurger` by `isinstance`; and no credential value,
+> `SecretName` or slot appears in any return value or in any error the subject
+> raises.
+
+> **Normative.** The **routing lane** pins §3's and §4's obligations against
+> `ai-assistant-purge` itself, and the conformance suite above does not discharge
+> them: a suite binds implementations of `ConnectionPurger` and cannot reach the
+> act. Driving the act with a purger that raises is deterministic, so these are
+> ordinary tests rather than an integration burden. It pins, at minimum: a
+> `connected` that raises leaves **every** entry in `data_dir` present, including
+> `devices.db`, and the act exits with a failure status whose diagnostic names the
+> condition; a `purge` that raises after the confirmation does the same; a `purge`
+> that raises is followed by no destruction of any kind, best-effort included; a
+> completed `purge` is followed by ADR-0126 §5's ordering unchanged, with
+> `devices.db` the first entry destroyed; the connection store and everything opened
+> to reach it are closed before the first destruction; every refusal-producing check
+> of ADR-0126 §1 refuses without the purge having been invoked at all; and the
+> statement made before the confirmation carries a row per `SecretScope` member and
+> every live connection's reference and identity.
+
+**The second clause exists because the first cannot reach the failure that
+matters.** §4's obligations are on the act, not on the seam, and a conformance
+suite is bound to subjects that satisfy the Protocol. An implementation whose
+`purge` raised and which then destroyed `data_dir` anyway would pass every
+obligation the suite above carries while producing exactly the unrepairable state
+this ADR exists to prevent — which is the gap ADR-0149 §8 found in its own earlier
+draft, where "slots before the store" was satisfied by a purge that destroyed the
+store after a deletion raised. The repair is the same instrument: name the failure
+path as a test obligation on the lane that owns the code the failure lives in.
 
 **Discharging the precondition by ratification is what ADR-0149 §8's clause
 literally says, and the implementation precondition is what makes it honest.**
