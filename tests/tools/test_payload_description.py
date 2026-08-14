@@ -20,6 +20,7 @@ from ai_assistant.tools.destination_arguments import (
 from ai_assistant.tools.destinations import DestinationProtocol
 from ai_assistant.tools.payload_description import (
     DiscloserProvenance,
+    EgressToolDeclaration,
     PayloadArgument,
     PayloadDeclaration,
     PayloadDescriptionError,
@@ -52,6 +53,10 @@ _PAYLOAD = PayloadDeclaration(
     ),
 )
 
+_DECLARATION = EgressToolDeclaration(
+    tool_id="send_email", payload=_PAYLOAD, recipients=_DESTINATIONS
+)
+
 _ARGUMENTS: Mapping[str, FrozenJson] = {
     "to": ("bob@example.com",),
     "subject": "lunch",
@@ -63,12 +68,7 @@ def _describe(
     parameters: Mapping[str, FrozenJson],
     provenance: Mapping[SpanRef, DiscloserProvenance] | None = None,
 ) -> PayloadDescription:
-    return describe_payload(
-        _PAYLOAD,
-        _DESTINATIONS,
-        parameters,
-        provenance=provenance or {},
-    )
+    return describe_payload(_DECLARATION, parameters, provenance=provenance or {})
 
 
 def test_two_derivations_of_one_request_agree() -> None:
@@ -212,25 +212,24 @@ def test_provenance_carried_for_a_span_the_call_does_not_transmit_is_refused() -
 
 def test_a_non_text_argument_has_no_described_extent() -> None:
     """Stating a digit count would be describing a span by guessing its encoding."""
-    numeric = PayloadDeclaration(
+    numeric = EgressToolDeclaration(
         tool_id="send_email",
-        arguments=(
-            PayloadArgument(name="to", establishes_tier=DataTier.PERSONAL, multiple=True),
-            PayloadArgument(name="priority", establishes_tier=None),
+        payload=PayloadDeclaration(
+            tool_id="send_email",
+            arguments=(
+                PayloadArgument(name="to", establishes_tier=DataTier.PERSONAL, multiple=True),
+                PayloadArgument(name="priority", establishes_tier=None),
+            ),
         ),
+        recipients=_DESTINATIONS,
     )
 
     with pytest.raises(PayloadDescriptionError, match="not text"):
-        describe_payload(
-            numeric,
-            _DESTINATIONS,
-            {"to": ("bob@example.com",), "priority": 3},
-            provenance={},
-        )
+        describe_payload(numeric, {"to": ("bob@example.com",), "priority": 3}, provenance={})
 
 
 def test_a_destination_declaration_for_another_tool_is_refused() -> None:
-    """Adversarial round 2: the `tool_id` fields were carried and never compared.
+    """Adversarial rounds 2 and 3: two halves that can be paired can be mis-paired.
 
     A destination declaration belonging to some other tool, naming an argument
     this tool happens to have, would have the description record the message body
@@ -238,6 +237,10 @@ def test_a_destination_declaration_for_another_tool_is_refused() -> None:
     under this tool's name. ADR-0148 §6 makes the description a function of the
     bound tool's definition, so a declaration that is not that tool's is not an
     input to it.
+
+    Refused when the declaration is **built** rather than when a call is
+    described, which is what round 3 asked for: the pairing is checked once, so a
+    tool whose halves disagree does not load.
     """
     other = DestinationDeclaration(
         tool_id="post_message",
@@ -249,7 +252,7 @@ def test_a_destination_declaration_for_another_tool_is_refused() -> None:
     )
 
     with pytest.raises(PayloadDescriptionError, match="not this tool's"):
-        describe_payload(_PAYLOAD, other, dict(_ARGUMENTS), provenance={})
+        EgressToolDeclaration(tool_id="send_email", payload=_PAYLOAD, recipients=other)
 
 
 def test_a_recipient_field_the_payload_declaration_omits_is_refused() -> None:
@@ -265,8 +268,8 @@ def test_a_recipient_field_the_payload_declaration_omits_is_refused() -> None:
     )
 
     with pytest.raises(PayloadDescriptionError, match="bears destinations"):
-        describe_payload(
-            without_recipients, _DESTINATIONS, {"body": "see you at one"}, provenance={}
+        EgressToolDeclaration(
+            tool_id="send_email", payload=without_recipients, recipients=_DESTINATIONS
         )
 
 
@@ -319,6 +322,28 @@ def test_spans_are_ordered_by_declaration_then_by_position() -> None:
         ("subject", None),
         ("body", None),
     ]
+
+
+def test_the_bundled_declaration_is_checked_once_and_then_trusted() -> None:
+    """Where the regress stops, asserted as a property rather than left implied.
+
+    A caller can still write a declaration that misdescribes its own tool, and
+    nothing in `tools/` detects it: ADR-0148 §2 calls that "a defect in the same
+    class as a mis-declared ``discloses``", §8 records that "nothing in ADR-0016
+    detects a declaration that understates", and ADR-0021 §1 rules the general
+    case — "no producer can prevent it". What is prevented is two honest halves
+    being combined wrongly, and a declaration that survived construction is one
+    whose halves agree.
+    """
+    declaration = EgressToolDeclaration(
+        tool_id="send_email", payload=_PAYLOAD, recipients=_DESTINATIONS
+    )
+
+    assert declaration.payload.tool_id == declaration.tool_id
+    assert declaration.recipients.tool_id == declaration.tool_id
+    assert {argument.name for argument in declaration.recipients.arguments} <= {
+        argument.name for argument in declaration.payload.arguments
+    }
 
 
 def test_a_payload_declaration_naming_no_argument_is_refused() -> None:

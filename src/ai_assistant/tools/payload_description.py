@@ -206,6 +206,74 @@ class PayloadDeclaration:
 
 
 @dataclass(frozen=True, slots=True)
+class EgressToolDeclaration:
+    """One registered tool's whole declaration of what a call would transmit.
+
+    The two halves are separate concepts — which arguments bear destinations is
+    ADR-0148 §2's question and which spans are transmitted is §6's — and they are
+    *bound into one value* so that no caller can pair one tool's recipients with
+    another's payload. Adversarial review reached that pairing twice, from a
+    different angle each time, which is what promoted it from a comparison inside
+    :func:`describe_payload` to an invariant of a value: the halves are checked
+    against each other **once, when the declaration is built**, so a tool whose
+    declarations disagree does not load rather than describing a call wrongly at
+    the moment one is made. That is ADR-0016 §1's own posture — "a tool that does
+    not declare its reach does not load".
+
+    **Where this stops, and why it stops there.** A caller can still construct a
+    declaration that misdescribes its own tool: naming a body field as
+    destination-bearing, or omitting a recipient field. Nothing in `tools/`
+    detects that, and the corpus has already ruled why it does not have to.
+    ADR-0148 §2's third clause calls it "a defect in the same class as a
+    mis-declared ``discloses``", ADR-0148 §8 records that "nothing in ADR-0016
+    detects a declaration that understates", and ADR-0021 §1 names the general
+    shape: "a caller falsifying its own audit trail, not a policy subverting a
+    gate, and no producer can prevent it". What *can* be prevented is two honest
+    declarations being combined wrongly, and that is what this value does. The
+    binding of a declaration to a registered tool is ADR-0148 §11's surface (b),
+    which no lane may build against until its contract ADR has merged.
+
+    Attributes:
+        tool_id: The ``ToolDefinition.id`` both halves describe.
+        payload: Every argument the call transmits.
+        recipients: The destination-bearing subset of them (ADR-0148 §2).
+
+    Raises:
+        PayloadDescriptionError: If the halves name different tools, or if a
+            destination-bearing argument is not one the payload declaration
+            covers — a recipient transmitted and undescribed is the same defect
+            as any other uncovered span (§6), and one wrong for every call that
+            tool could make rather than for one.
+    """
+
+    tool_id: str
+    payload: PayloadDeclaration
+    recipients: DestinationDeclaration
+
+    def __post_init__(self) -> None:
+        """Check the two halves against each other, once.
+
+        Raises:
+            PayloadDescriptionError: On a mismatched or uncovered pairing.
+        """
+        for half, name in (
+            (self.payload.tool_id, "payload"),
+            (self.recipients.tool_id, "recipient"),
+        ):
+            if half != self.tool_id:
+                msg = f"{self.tool_id}: the {name} declaration is {half}'s, not this tool's"
+                raise PayloadDescriptionError(msg)
+        covered = {argument.name for argument in self.payload.arguments}
+        bearing = {argument.name for argument in self.recipients.arguments}
+        if not bearing <= covered:
+            msg = (
+                f"{self.tool_id}: {', '.join(sorted(bearing - covered))} bears destinations "
+                f"and is not covered by the payload declaration"
+            )
+            raise PayloadDescriptionError(msg)
+
+
+@dataclass(frozen=True, slots=True)
 class PayloadDescription:
     """The whole account of one call's payload (ADR-0148 §6).
 
@@ -265,8 +333,7 @@ def _spans_of(argument: PayloadArgument, value: FrozenJson) -> tuple[tuple[SpanR
 
 
 def describe_payload(
-    declaration: PayloadDeclaration,
-    recipients: DestinationDeclaration,
+    declaration: EgressToolDeclaration,
     parameters: Mapping[str, FrozenJson],
     *,
     provenance: Mapping[SpanRef, DiscloserProvenance],
@@ -275,7 +342,7 @@ def describe_payload(
 
     Deterministic over ADR-0148 §6's three inputs and nothing else: the call's
     arguments, the provenance carried for their spans, and the tool's own
-    declarations — which are what "the registry's definition for the bound tool"
+    declaration — which is what "the registry's definition for the bound tool"
     supplies to this derivation, namely which arguments are transmitted, which of
     them bear destinations, and what each field establishes.
 
@@ -290,12 +357,14 @@ def describe_payload(
     approver, the seam and a later auditor can each re-derive and compare". A
     value nobody else can reproduce is exactly the "second, divergent account of
     the call" §6's determinism clause exists to prevent. Adversarial review found
-    it on round 1.
+    it on round 1, and rounds 2 and 3 walked the same defect down into the pair of
+    declarations, which is why they now arrive as one checked value
+    (:class:`EgressToolDeclaration`) rather than as two arguments this function
+    compares.
 
     Args:
-        declaration: The tool's transmitted arguments.
-        recipients: The tool's destination-bearing arguments, from which the
-            canonical destination set is computed (ADR-0148 §2).
+        declaration: The bound tool's declaration, whose halves were checked
+            against each other when it was built.
         parameters: The call's arguments.
         provenance: The recorded origin of each span. A span absent from it is
             ``SYSTEM_SELECTED`` (ADR-0146 §2) — the fail-closed default, never a
@@ -310,43 +379,14 @@ def describe_payload(
             covered (ADR-0148 §6, §14).
         DestinationSelectionError: If the destinations cannot be read and
             canonicalised out of ``parameters`` (ADR-0148 §1's third clause).
-        PayloadDescriptionError: If the two declarations are not the same tool's,
-            if they disagree about which arguments exist, if an argument's value
-            is not text or a list of text, or if ``provenance`` names a span this
-            call does not transmit.
-            The last is refused rather than ignored: a carried provenance for a
+        PayloadDescriptionError: If an argument's value is not text or a list of
+            text, or if ``provenance`` names a span this call does not transmit.
+            The second is refused rather than ignored: a carried provenance for a
             span that is not there means the caller and this derivation disagree
             about what the payload is, and the disagreement is exactly what a
             silent drop would hide.
     """
-    if recipients.tool_id != declaration.tool_id:
-        # Both types carry a `tool_id` so a declaration cannot be paired with one
-        # it was not written for, and that property is worth nothing until
-        # something compares them. Adversarial found on round 2 that it did not:
-        # a destination declaration for another tool, naming `body`, would make
-        # the description record the message body as the recipient and omit `to`
-        # — a description of a different call, under this tool's name. It is the
-        # same shape as the round-1 defect one level up, which is why the repair
-        # is a comparison rather than a note.
-        msg = (
-            f"{declaration.tool_id}: the destination declaration is "
-            f"{recipients.tool_id}'s, so its arguments are not this tool's"
-        )
-        raise PayloadDescriptionError(msg)
-
-    declared = {argument.name: argument for argument in declaration.arguments}
-    bearing = {argument.name for argument in recipients.arguments}
-    if not bearing <= set(declared):
-        # A recipient the payload declaration does not name would be transmitted
-        # and uncovered, which is the same defect the coverage check below
-        # refuses — caught here because it is a defect in the *declarations*
-        # rather than in one call's arguments, so it is wrong for every call.
-        msg = (
-            f"{declaration.tool_id}: {', '.join(sorted(bearing - set(declared)))} bears "
-            f"destinations and is not covered by the payload declaration"
-        )
-        raise PayloadDescriptionError(msg)
-
+    declared = {argument.name: argument for argument in declaration.payload.arguments}
     undescribed = sorted(set(parameters) - set(declared))
     if undescribed:
         msg = (
@@ -356,7 +396,7 @@ def describe_payload(
         raise UndescribedSpanError(msg)
 
     spans: list[SpanDescription] = []
-    for argument in declaration.arguments:
+    for argument in declaration.payload.arguments:
         if argument.name not in parameters:
             continue
         for span, text in _spans_of(argument, parameters[argument.name]):
@@ -382,13 +422,14 @@ def describe_payload(
 
     return PayloadDescription(
         tool_id=declaration.tool_id,
-        destinations=select_destinations(recipients, parameters),
+        destinations=select_destinations(declaration.recipients, parameters),
         spans=tuple(spans),
     )
 
 
 __all__ = [
     "DiscloserProvenance",
+    "EgressToolDeclaration",
     "PayloadArgument",
     "PayloadDeclaration",
     "PayloadDescription",

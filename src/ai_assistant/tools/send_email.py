@@ -62,6 +62,7 @@ from ai_assistant.tools.destination_arguments import (
 )
 from ai_assistant.tools.destinations import DestinationProtocol
 from ai_assistant.tools.payload_description import (
+    EgressToolDeclaration,
     PayloadArgument,
     PayloadDeclaration,
     describe_payload,
@@ -219,6 +220,21 @@ these five are all there are.
 """
 
 
+SEND_EMAIL_DECLARATION: Final = EgressToolDeclaration(
+    tool_id=SEND_EMAIL_ID,
+    payload=SEND_EMAIL_PAYLOAD,
+    recipients=SEND_EMAIL_DESTINATIONS,
+)
+"""The two halves bound into the one value a description is derived from.
+
+Built at import, so the checks its construction performs — that both halves are
+this tool's, and that every destination-bearing argument is covered by the
+payload declaration — run when the module loads rather than when a call is
+described. ADR-0016 §1's posture applied to the pair: "a tool that does not
+declare its reach does not load."
+"""
+
+
 class UndesignatedSeamError(ToolError):
     """The call reached a callable at a seam that transmits nothing (ADR-0017 §2).
 
@@ -298,16 +314,12 @@ def describe_send_email(
         PayloadDescriptionError: If a span would be transmitted uncovered, or an
             argument is not text.
     """
-    return describe_payload(
-        SEND_EMAIL_PAYLOAD,
-        SEND_EMAIL_DESTINATIONS,
-        parameters,
-        provenance=provenance,
-    )
+    return describe_payload(SEND_EMAIL_DECLARATION, parameters, provenance=provenance)
 
 
 __all__ = [
     "SEND_EMAIL",
+    "SEND_EMAIL_DECLARATION",
     "SEND_EMAIL_DESTINATIONS",
     "SEND_EMAIL_ID",
     "SEND_EMAIL_PAYLOAD",
