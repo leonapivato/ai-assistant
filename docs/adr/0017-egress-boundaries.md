@@ -1,8 +1,36 @@
 # 17. Egress boundaries: `models/` is not the only one
 
-- Status: Partially superseded by ADR-0124 (§1's rule as an exhaustive enumeration of the components that may transmit, and §2's framing of those two as the complete set of boundaries)
+- Status: Partially superseded by ADR-0124 (§1's rule as an exhaustive enumeration of the components that may transmit, and §2's framing of those two as the complete set of boundaries); §2's `tools/` seam designated by ADR-0154 (§3's fourteen conditions attested in code)
 - Date: 2026-07-19
 - Accepted: 2026-07-20
+- **Designated: 2026-08-14 by ADR-0154 — §2's condition met, and §3 is not
+  superseded by it.** ADR-0154 is the "later ADR" §2 reserves designation to: it
+  names the seam module `ai_assistant.tools.egress`, attests each of §3's fourteen
+  conditions is satisfied **in code** and how, and records the transition. The
+  `tools/` seam therefore passes from **approved and undesignated** to
+  **designated**, and may transmit.
+
+  **Nothing in this ADR is replaced, and §3 least of all.** Its fourteen conditions
+  stand exactly as ratified, and they must: ADR-0154 §4 is an attestation *against*
+  that list, so a reader has to be able to see the list as it was written. What
+  changed is not the conditions but whether they hold — §3's own closing sentence,
+  "A boundary meeting these in a document but not in code is approved, not
+  designated", is the test ADR-0154 answers rather than a rule it amends. §2's
+  requirement is likewise met rather than removed: it said designation is "Not a
+  status amendment: a second operational egress boundary is a substantive
+  decision, and ADR-0001 reserves those to a new ADR", and ADR-0154 is that new
+  ADR. This note records that the act happened; the act itself lives there.
+
+  **What acceptance did not change.** Ratification of ADR-0154 registers no tool,
+  approves no destination and moves no byte — `send_email` is still bound to no
+  account and still refuses. §2's three pre-existing `models/` gaps (#83's
+  `models/` half, #74, #89) are untouched, and ADR-0154 §2 forbids citing it
+  toward any of them. §8's deferred injected transport capability (#85) stays
+  deferred, and §4's "an import contract is a net, not a proof" stands unamended —
+  ADR-0154 §4's condition 1 attests the contract exists and is kept, never that it
+  is a proof. The residues §3's conditions carried into their mechanisms — #57's
+  manifest granularity, #68's approved-recipient policy, #95's residency question
+  — remain open and are listed in ADR-0154 §6.
 - Partially superseded: 2026-08-09 by ADR-0124 — **two clauses, and §3 is not
   among them.** ADR-0124 ratifies the hop off the device that ADR-0084 §1 and §11
   named as owing its own egress decision, and authorises a **third** boundary: the
