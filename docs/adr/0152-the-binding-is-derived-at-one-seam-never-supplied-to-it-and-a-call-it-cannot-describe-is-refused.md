@@ -381,21 +381,27 @@ answer:
 
 It is taken.
 
-> **Normative.** An argument may be marked destination-bearing **only** where the
-> tool's `parameters_schema` declares its value to be a JSON **string**, or a JSON
-> **array** whose every element is a JSON string. A declaration marking an argument
-> destination-bearing whose subschema does not declare one of those two shapes is
-> **refused**, and the refusal fires when the declaration is read rather than when a
-> call is made.
+> **Normative.** An argument may be marked destination-bearing **only** where its
+> subschema is a **flat declaration**, which is exactly one of two forms and no
+> other: `"type": "string"`, or `"type": "array"` whose `items` is a subschema whose
+> own `"type"` is `"string"`. A subschema declaring no `type`, a union of types, a
+> `$ref`, or an applicator (`allOf`, `anyOf`, `oneOf`, `not`, `if`/`then`/`else`) in
+> place of a type is **not** a flat declaration, and a declaration marking such an
+> argument destination-bearing is **refused** when the declaration is read, before
+> any call is made.
 
-> **Normative.** A **call** in which a declared destination-bearing argument
-> carries any other value — a JSON object, an array holding a non-string element, a
-> number, a boolean or `null` — is **refused** before the ruling. The static clause
-> above does not make this one redundant: ADR-0145 §9 admits a tool with no schema
-> and a schema that describes no key, so a value of the wrong shape is reachable
-> whenever the static declaration is absent rather than wrong.
+> **Normative.** A **call** in which a declared destination-bearing argument carries
+> a value that is not a JSON string and not a JSON array of JSON strings — a JSON
+> object, an array holding a non-string element, a number, a boolean or `null` — is
+> **refused** before the ruling, **whether or not** the clause above has already
+> refused the declaration.
 
-> **Normative.** These two clauses are the whole of the constraint. They bind the
+> **Normative.** The seam **assumes nothing** about what a caller checked before
+> reaching it. It re-establishes from the `tool` and the `parameters` it was handed
+> every shape any clause of this ADR depends on, and no lane weakens a clause on the
+> ground that the ordinary path would have refused the input earlier (§10).
+
+> **Normative.** These clauses are the whole of the constraint. They bind the
 > shape of a **destination-bearing** argument and nothing else: an argument that
 > bears no destination carries any JSON value ADR-0150 §4 admits, decomposes by §4's
 > own rule, and is described as §4 describes it. No lane reads this section as
@@ -430,6 +436,24 @@ only about whether it *could*. That is the one member of the family a declaratio
 vocabulary cannot close structurally, and ADR-0150 §11's second refusal is written
 for it.
 
+**The per-call clause is not redundant beside the declaration clause, and the
+reason it survives is not the one an earlier draft gave.** That draft argued from
+ADR-0145 §9 — a tool with no schema, or a schema describing no key — and adversarial
+review found on round 3 that the argument refutes itself: the keywords live inside
+`properties`, so a tool with no `properties` declares no destination-bearing
+argument at all, and where one *is* declared the declaration clause has already
+forced a flat schema that ADR-0145 evaluates before the runner reaches this seam.
+The finding is right and the clause's ground is different. It is that **this seam
+does not assume its caller validated anything**: it is a Protocol, its conformance
+suite calls it directly, and ADR-0029 §2 already puts a revalidation at a second
+seam for exactly this — `invoke` re-checks a request the ordinary path has validated
+because "a request built by a bypass reaches the seam" (ADR-0145 §3). PR #1120 spent
+eight consecutive adversarial rounds on callers reaching its functions with values
+their annotations forbade; a seam whose refusals were reachable only through the
+happy path would be that class re-opened at the boundary ADR-0150 §8 built its
+validating models to close. §10 states the posture and §13 puts the tests where they
+are reachable.
+
 **The producer costs nothing and the alternative costs a check with no producer.**
 `send_email` declares `to`, `cc` and `bcc` as `{"type": "array", "items": {"type":
 "string"}}`, so every destination it can name already sits in a span that can carry
@@ -462,7 +486,8 @@ destination-bearing argument holds an undecomposable value naming two recipients
 "is **refused** rather than described by a binding carrying one of them, and the
 test asserts that refusal fires". Under this section that call is refused — by the
 per-call clause above, for carrying a value of the wrong shape rather than for
-carrying two recipients in one span. The test is satisfiable in the terms §12
+carrying two recipients in one span, and reached at the seam's own boundary rather
+than through the runner (§10, §13). The test is satisfiable in the terms §12
 states it, because §12 states it over the outcome (a refusal, not a binding
 carrying one recipient) rather than over which clause produced it. ADR-0150 §11
 anticipated precisely this and pre-blessed it: "a vocabulary that could not express
@@ -973,11 +998,19 @@ implementing lane's obligation.
 > into a binding: `revision` and `state` move while a parked ruling stands, which is
 > the failure ADR-0150 §7 states its separate type against.
 
-> **Normative.** This seam is reached **after** ADR-0145's schema check, which
-> ADR-0144 §7's eligibility filter performs during selection. Its refusals are
-> therefore about egress and never about the schema — with the one deliberate
-> exception §6's first clause states, where a key ADR-0145 admits is refused here
-> because a locator must be text the tool's author wrote.
+> **Normative.** On the **ordinary path** this seam is reached after ADR-0145's
+> schema check, which ADR-0144 §7's eligibility filter performs during selection.
+> That is an ordering of the runner stage and **not a precondition this seam
+> assumes**: no clause of this ADR is discharged, weakened or made unreachable by it,
+> and every shape a clause depends on is re-established here from the `tool` and the
+> `parameters` handed over. This is ADR-0029 §2's revalidation posture at a second
+> seam — `invoke` revalidates a request the ordinary path has already validated,
+> precisely because "a request built by a bypass reaches the seam" (ADR-0145 §3).
+
+> **Normative.** A conformance suite for this Protocol therefore exercises every
+> refusal **directly**, against a subject handed inputs no runner would produce. An
+> implementation that refuses only what the runner would already have refused does
+> not satisfy this contract.
 
 **A third Protocol rather than a member on `ToolRegistry`, and ADR-0016 §5's own
 sentence is the reason.** ADR-0029 §1 records it for `invoke`: "the surface should
@@ -1140,7 +1173,12 @@ rather than a gap discovered late.
 > the `{"recipients": {"to": ["alice@example.com", "mallory@example.com"]}}` shape —
 > is **refused** rather than described by a binding carrying one of them, and the
 > test asserts the refusal fires rather than asserting that a structured value naming
-> **one** recipient is accepted.
+> **one** recipient is accepted. It is exercised **at the seam**, by calling `bind`
+> with that value against a tool whose declaration is flat and well-formed — which is
+> §10's posture in a test, and the only place the case is reachable now that §4's
+> declaration clause refuses the schema that would carry it and ADR-0145 refuses the
+> value against the schema that survives. A test routing it through the runner
+> asserts ADR-0145's refusal and not this one.
 
 > **Normative.** That lane ships the **live failure-path** test ADR-0150 §11 states
 > for the undescribed key: a call whose `parameters` carry a top-level key the bound
@@ -1391,17 +1429,19 @@ binding — ADR-0150 §13's own form, "the condition is not made false or over-w
 being answered", read in the negative. §6's recording obligation on the designating
 lane is untouched.
 
-**ADR-0145 §1, §4, §5, §6, §9 and §11 — no record owed.** §1's pre-ruling check is
-relied on and §10 states that this seam runs after it. §4's `INVALID_PARAMETERS`
+**ADR-0145 §1, §3, §4, §5, §6, §9 and §11 — no record owed.** §1's pre-ruling check
+is relied on and §10 states that the ordinary path reaches this seam after it —
+as an ordering rather than as a precondition, which is §3's own bypass reasoning
+("a request built by a bypass reaches the seam") used rather than narrowed. §4's `INVALID_PARAMETERS`
 keeps its one definition and its two causes: §9 above declines to add a third and
 mints a separate member instead, and ADR-0150 §13's ruling on ADR-0044 §1 covers
 the enum growing — a member added later does not make §4's sentence false, and
 nothing in §4 claims the enum is closed. §5's one-dialect rule is untouched and §3
 adds no dialect. §6's readability refusal is untouched, and §3 binds the vocabulary
 not to breach it, with §13's pin. §9's "an absent schema declares no constraint" is
-relied on **as true** and is exactly why §6's second clause is needed: the seam adds
-a constraint of its own where the schema declares none, which is an obligation
-stacked beside §9 rather than a re-reading of it. §11's record that a schema
+relied on **as true** and is why §6's second clause is needed: the seam adds a
+constraint of its own where the schema declares none, which is an obligation stacked
+beside §9 rather than a re-reading of it. §11's record that a schema
 "permits keys it never described" is likewise relied on as true and is the premise
 of §6's first refusal.
 
