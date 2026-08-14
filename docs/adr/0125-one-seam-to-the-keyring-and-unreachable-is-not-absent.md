@@ -62,6 +62,34 @@
   else: no decision text moves and no marked clause acquires, loses or alters an
   obligation, which is ADR-0070 §1's own test applied to the ratifying edit first.
   The rounds run after it were not required, and they bought two real findings.
+- Note (2026-08-13): §12's **provisioning surface** bullet is discharged **in
+  part** by ADR-0149, for the `INTEGRATION` scope only. ADR-0149 §1 gives one
+  component in `tools/` — the connection provisioner, which is not a tool and is
+  not reachable by `ToolInvoker` — the only `INTEGRATION`-scoped `SecretStore` in
+  the system, to perform ADR-0148 §6's credential write and its predecessor
+  deletion; it calls `set` and `delete` and never `get`, so §8's rule that a tool
+  holds `Secrets` and nothing wider, and ADR-0148 §7's positional rule for reads,
+  are both untouched. ADR-0149 §3 puts the connection store under
+  `Settings.data_dir`, opened by `build_engine`, append-only, with its seam
+  `tools/`-internal, so no Protocol is added to `core/protocols.py` for it; §5's
+  refusal of enumeration is what makes that store the only composable purge path,
+  which ADR-0149 §8 uses to answer the purge-contract half of ADR-0126 §6's
+  forward clause. That clause is **not** discharged: its prohibition on writing
+  such an entry stands until #909 settles who routes the owner's delete to that
+  purge, and ADR-0149 §8 carries it forward as a precondition. **§8 is
+  unchanged**: its fourth clause enumerates ten subsystems, `tools/` is not among
+  them, and its second clause — about the tool that needs a read face — stays true
+  as written (ADR-0149 §2). §1's two faces, §2's scope and installation binding,
+  §4's replace-in-place `set` and its concurrency disclaimers, §6's absence rule
+  and §7's platform posture are consumed exactly as ratified; §9 is untouched and
+  #74 stays open on its own subject. The bullet's **provider key** half is **not**
+  discharged: it stays with §12's first bullet, #74 and a `models/` lane
+  (ADR-0149 §13). §12's other bullets — rotation and expiry *policy*, the
+  `keyring` dependency, backup, and #462 — are unaffected and remain scoped out,
+  though ADR-0149 §5 and §6 decide two consequences that meet the backup bullet
+  and the rotation bullet at their edges: a disconnection never resets a
+  reference's revision, and an active record over an empty slot is refused rather
+  than repaired.
 
 ## Context
 
