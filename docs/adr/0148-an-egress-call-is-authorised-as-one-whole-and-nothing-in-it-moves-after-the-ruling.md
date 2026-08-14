@@ -607,10 +607,13 @@ exists; the other three travel together in one value the request carries.
 > nothing downstream of the ruling may add it.
 
 > **Normative.** The payload description is **deterministic**: it is a function of
-> exactly three things — the request's own arguments, the provenance the request
-> carries for their spans, and the registry's definition for the bound tool — and
-> of nothing else: no clock, no configuration, no store read, no network. Two
-> derivations of the description for one request agree.
+> exactly three things — the request's own arguments, each destination-bearing one
+> in **both** the supplied and the canonical form the request already carries for
+> it (§1's second clause, §2's fourth), the provenance the request carries for
+> their spans, and the registry's definition for the bound tool — and of nothing
+> else: no clock, no configuration, no store read, no network. Two derivations of
+> the description for one request agree, and two requests whose supplied forms
+> differ are two different inputs however their canonical forms compare.
 
 > **Normative.** The description covers **every span the call transmits**, and a
 > span transmitted but not covered is a defect rather than a permitted omission.
@@ -1536,6 +1539,14 @@ form).
 > one description for both and fails this pair — the inference ADR-0146 §2 forbids
 > — and so does one that labels every covered span with a single provenance. A case
 > built from one request alone distinguishes neither.
+
+> **Normative.** That lane also ships the **alias** case, which is where the
+> supplied form is easiest to lose: two calls whose destination-bearing arguments
+> were supplied in different forms that canonicalise to one recipient produce
+> descriptions and audit records each stating its **own** supplied form beside the
+> shared canonical one (§2's fourth clause). An implementation that records only
+> the canonical form fails this case, and so does one that reconstructs a supplied
+> form from it.
 
 > **Normative.** A test asserting only that the happy path transmits satisfies no
 > clause of this section.
