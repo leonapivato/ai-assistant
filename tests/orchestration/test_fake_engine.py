@@ -80,6 +80,12 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         return ConnectionSubject(engine=engine, provisioner=engine.connections)
 
     @pytest.fixture
+    def tiny_connections(self) -> ConnectionSubject:
+        """The same fake at the limit the suite can reach."""
+        engine = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+        return ConnectionSubject(engine=engine, provisioner=engine.connections)
+
+    @pytest.fixture
     def granting_engine(self) -> AssistantEngine:
         """One fake engine holding a single grantable source with a location."""
         engine = FakeAssistantEngine()

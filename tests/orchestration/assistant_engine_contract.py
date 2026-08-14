@@ -87,6 +87,7 @@ from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.types import (
     ACCOUNT_IDENTITY_MAX_BYTES,
     DEFAULT_PAGE_SIZE,
+    SECRET_VALUE_MAX_BYTES,
     AnswerKind,
     BeliefBand,
     BeliefSummary,
@@ -106,6 +107,14 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import SecretValue
     from ai_assistant.testing import FakeConnectionProvisioner
+
+#: A credential over :data:`_TINY_LIMIT` and comfortably under
+#: :data:`~ai_assistant.core.types.SECRET_VALUE_MAX_BYTES`, so ``secret_value``
+#: accepts it and the **only** thing that can refuse the call is the frame bound.
+#: A value at or above the secret bound would be refused a step earlier by a
+#: different clause, which would leave ADR-0151 §11 untested by a case that passed.
+_OVERSIZED_CREDENTIAL_BYTES = 712
+
 
 #: A generous per-turn budget: nothing in this suite is about a deadline.
 _PATIENT = timedelta(seconds=30)
@@ -341,6 +350,21 @@ class AssistantEngineContract(ABC):
         every ``ConnectionProvisioner`` in
         ``tests/tools/connection_provisioner_contract.py``. Restating it here would
         bind the same subject twice through a longer path and would drift.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def tiny_connections(self) -> ConnectionSubject:
+        """:attr:`connections`' subject at :data:`_TINY_LIMIT`, and its provisioner.
+
+        **A separate subject for the reason :attr:`tiny_engine` is one**: the limit
+        is a construction-time property of a deployment rather than something a
+        caller changes mid-flight. It exists because a credential is the one
+        argument on this surface whose *size* can decide a call, and because the
+        three implementations reach that decision by different routes — the wire
+        client measures a payload it is about to serialise, and the in-process ones
+        measure a payload nobody will. ADR-0084 §4 requires them to agree anyway,
+        and only a shared clause at a reachable limit says whether they do.
         """
 
     @pytest.fixture
@@ -1713,6 +1737,73 @@ class AssistantEngineContract(ABC):
             await connections.engine.recent_connection_acts(limit=limit)
 
         assert connections.provisioner.entries == []
+
+    async def test_an_oversized_credential_is_refused_with_nothing_written(
+        self, tiny_connections: ConnectionSubject
+    ) -> None:
+        """ADR-0151 §11: fail closed, in **every** implementation.
+
+        **The case that separates a bound from a serialisation accident.** The
+        credential has no canonical projection at all (ADR-0151 §6), so an
+        implementation measuring its argument object the obvious way measures
+        everything *except* the credential — and then the wire client, which
+        serialises for real, refuses a call the in-process engine has already
+        carried out. That is ADR-0084 §4's substitutability failure with a Tier 0
+        value inside it: the same request writes a credential to the keyring on one
+        implementation and raises on the other.
+
+        The credential here is well within :data:`SECRET_VALUE_MAX_BYTES`, so
+        ``secret_value`` accepts it and the only thing that can refuse the call is
+        the frame bound this clause is about.
+
+        **Nothing written is the other half**, and it is why the provisioner comes
+        with the subject: a refusal issued *after* ADR-0148 §6's first write would
+        raise the right class while leaving a pending record naming a reference the
+        caller was never told about.
+        """
+        oversized = "s" * _OVERSIZED_CREDENTIAL_BYTES
+        assert _TINY_LIMIT < len(oversized.encode()) < SECRET_VALUE_MAX_BYTES
+
+        with pytest.raises(OversizedValueError):
+            await tiny_connections.engine.connect_account(
+                identity="ada", credential=_credential(oversized)
+            )
+
+        assert tiny_connections.provisioner.entries == []
+        assert await tiny_connections.engine.connected_accounts() == ()
+
+    async def test_a_credential_inside_the_limit_is_admitted(
+        self, tiny_connections: ConnectionSubject
+    ) -> None:
+        """The complement, without which the clause above is satisfied by refusing
+        everything — which is the failure mode a fail-closed rule invites."""
+        record = await tiny_connections.engine.connect_account(
+            identity="ada", credential=_credential("small-secret")
+        )
+
+        assert record.state is ProvisioningState.ACTIVE
+
+    async def test_no_refusal_names_the_credential_or_its_length(
+        self, tiny_connections: ConnectionSubject
+    ) -> None:
+        """ADR-0125 §6: not a prefix, not a suffix, not a digest, **not a length**.
+
+        The size refusal is the likeliest leak on this surface, because reporting a
+        measurement is what a size check naturally does — and a length is a
+        derivation from the value handed over by the seam's own code rather than by
+        a backend it was wrapping.
+        """
+        plaintext = "s" * _OVERSIZED_CREDENTIAL_BYTES
+
+        with pytest.raises(OversizedValueError) as caught:
+            await tiny_connections.engine.connect_account(
+                identity="ada", credential=_credential(plaintext)
+            )
+
+        rendered = str(caught.value)
+        assert plaintext not in rendered
+        assert plaintext[:8] not in rendered
+        assert str(len(plaintext)) not in rendered
 
     async def test_no_result_on_this_surface_carries_a_credential(
         self, connections: ConnectionSubject

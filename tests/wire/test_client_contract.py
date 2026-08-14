@@ -181,6 +181,20 @@ class TestHubEngineClientContract(AssistantEngineContract):
             yield ConnectionSubject(engine=client, provisioner=backing.connections)
 
     @pytest.fixture
+    async def tiny_connections(self, tmp_path: Path) -> AsyncIterator[ConnectionSubject]:
+        """A client of a hub whose published limit is small enough to reach.
+
+        **The binding that proves the other two are enforcing anything.** This one
+        really serialises, so it would refuse an oversized credential even if the
+        clause were never implemented in-process — which is exactly why the clause
+        is in the shared suite rather than here: what it catches is the *other* two
+        agreeing with each other and not with this one.
+        """
+        backing = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+        async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=_TINY_FRAME) as client:
+            yield ConnectionSubject(engine=client, provisioner=backing.connections)
+
+    @pytest.fixture
     async def granting_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
         """A client of a hub holding a single grantable source with a location.
 
