@@ -1,6 +1,6 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause) and ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete) and ADR-0155 (§2's residency clause)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
@@ -127,6 +127,51 @@
   ADR-0126 §11 states that it does not cite, rest on or widen ADR-0124 §6's
   exemption, which stays confined to a client's bootstrap credential read; **#74**
   is untouched and this ADR's §3 keyring rule is applied rather than narrowed.
+- Partially superseded: 2026-08-14 by ADR-0155 — **one clause, and it is the one
+  #95 has been open on since 2026-07-19.** ADR-0155 answers #95: it decides what
+  §2's residency clause governs, now that ADR-0154 has designated the `tools/`
+  egress seam and a write-capable integration is about to be registered against it.
+
+  **Replaced — §2's residency clause.** "All persistent data lives on the user's
+  machine, under a single platform-appropriate data directory… No cloud storage by
+  default." Read flatly that sentence forbids every write-capable integration —
+  sending an email persists it in a mailbox — which contradicts §3, which provisions
+  credentials for exactly those integrations, §7, which gates "every side-effecting
+  tool call", this ADR's own Consequences, and ADR-0017 §1's rule as ADR-0124 §1
+  restates it and ADR-0154 §1 designates the second boundary under. In its place
+  ADR-0155 §1 puts the clause's **surviving scope**: it governs the assistant's own
+  store — the persistent data this system keeps on the owner's behalf under the
+  directory `Settings.data_dir` resolves — which lives on the owner's machine, under
+  that one directory, and no part of which any component may place in a service
+  another party operates. Membership is decided by where this system persists a
+  value, never by what it contains. Persistence a connected service performs as the
+  ordinary consequence of an egress call the owner authorised is outside the clause's
+  scope, and is governed by ADR-0017 §1, ADR-0017 §3 and ADR-0148 instead.
+
+  **And a prohibition this clause never carried is added beside it.** ADR-0155 §3
+  forbids any component placing into an egress payload a value it obtained from the
+  assistant's own store, or an artifact derived from one, and no authorisation cures
+  it — not a per-call user decision, not a standing policy, not a configuration or a
+  connected account. That closes the hole adversarial review of PR #72 identified in
+  the reading ADR-0017 declined to adopt: assistant-derived memory written into a
+  calendar and excused because "the data now lives in the user's account". ADR-0155
+  §4 states in a marked clause that **nothing in the tree enforces §3 mechanically
+  today**, and names the recorded-origin surface that would, with an issue and a
+  trigger. So the clause is narrower in reach and stronger in force than the sentence
+  it replaces, and ADR-0155 §1 states what refusing the flat reading costs rather
+  than arguing that the flat reading was never meant.
+
+  **Not replaced — everything else, which is nearly all of it.** §2's egress clause
+  is ADR-0017's and stays so; §2's telemetry clause and the configured-set amendment
+  are untouched, as are §1's tiers, §3's secrets rule, §4's at-rest posture, §5's
+  logging and redaction, §6's data rights and §7's gate and minimisation rule.
+  ADR-0155 §5's third clause states in terms that §6's rights reach this system's own
+  store and have never reached a message the owner sent, and §5's second clause
+  states that ADR-0119 §12's absolute no-egress clause on evaluation traces is
+  stricter and untouched. ADR-0155 adds no `core` surface, attests, relaxes and adds
+  no condition of ADR-0017 §3, registers no tool and authorises no destination.
+  **#95 is answered**; #57, #74, #83, #89 and the residues ADR-0154 §6 carries stay
+  open on their own terms.
 - Note (2026-07-20): **§2's egress clause is superseded by ADR-0017.** That
   clause named `models/` the only component permitted to send user data
   off-device; ADR-0017 §1 replaces it with `models/` plus a designated
