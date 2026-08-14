@@ -204,7 +204,8 @@ This section is a classification of the change being made and is not normative
 | `EgressDestination` | `core/types.py`, new | The two forms of one recipient and the protocol that relates them (§3). |
 | `EgressSpan` | `core/types.py`, new | One described span of the payload: where it came from, who disclosed it, how much of it there is, its tier if its field establishes one, and its destination if it is one (§4, §5, §6). |
 | `ConnectedAccount` | `core/types.py`, new | The account's identity and its connection reference (§7). |
-| `EgressBinding` | `core/types.py`, new | The whole binding: spans, account, transport endpoint; the onward destinations as a derived property (§1, §3, §7). |
+| `CanonicalDestination` | `core/types.py`, new | One member of ADR-0148 §2's canonical destination set: a protocol-qualified recipient, or the connected account under an absent protocol (§3). |
+| `EgressBinding` | `core/types.py`, new | The whole binding: spans, account, transport endpoint; ADR-0148 §2's canonical destination set as a derived property (§1, §3, §7). |
 | `ActionRequest` | `core/types.py`, changed | Gains `egress_binding`, an optional `EgressBinding` defaulting to `None`, detached at validation; gains one model validator for §4's coverage invariants. |
 | `PermissionDecision` | `core/types.py`, changed | Gains `egress_binding`, an optional `EgressBinding` defaulting to `None`. |
 | `PermissionDecision.from_request` | `core/types.py`, changed | Transcribes the binding by deep copy. **Its signature does not change** (§9). |
@@ -214,8 +215,8 @@ This section is a classification of the change being made and is not normative
 
 > **Normative.** The `core` names this ADR authorises a lane to add or change are
 > exactly these and no others: the new types `DestinationProtocol`,
-> `DiscloserProvenance`, `EgressDestination`, `EgressSpan`, `ConnectedAccount` and
-> `EgressBinding`, all in `core/types.py`; one new optional field named
+> `DiscloserProvenance`, `EgressDestination`, `CanonicalDestination`, `EgressSpan`,
+> `ConnectedAccount` and `EgressBinding`, all in `core/types.py`; one new optional field named
 > `egress_binding` on `ActionRequest` and one on `PermissionDecision`, each holding
 > an `EgressBinding` or nothing; that field's transcription in
 > `PermissionDecision.from_request`; the conjunct §9 adds to
@@ -242,48 +243,63 @@ This is PR #1120's first observation, and it is stated there exactly:
 > computed from it. The span it rides on carries which argument and which position
 > it came from, so no occurrence repeats them.
 
-> **Normative.** The **onward destinations** are a **derived property** of
-> `EgressBinding` and not a stored field: the deduplicated, sorted tuple of
-> `(protocol, canonical)` pairs of every span that carries a destination, possibly
-> empty. No lane stores it beside the occurrences, accepts it from a caller, or lets
-> a caller supply a tuple the occurrences do not produce.
+> **Normative.** A member of a canonical destination set is a `CanonicalDestination`,
+> one `core` type with exactly two fields: `protocol`, a `DestinationProtocol` or
+> **nothing**, and `canonical`, non-blank visible text. `protocol` is present for a
+> recipient the call's arguments select, and is **absent** for exactly one thing —
+> the connected account the call is made to, whose `canonical` is that account's
+> identity (§7). There is no third member kind and no other absent-`protocol`
+> meaning.
 
-> **Normative.** Two destinations are the same onward destination when and only when
-> **both** the protocol and the canonical form are equal. A canonical form is never
-> compared across protocols, and no lane treats two protocols' canonical forms as
-> comparable because the strings match.
+> **Normative.** ADR-0148 §2's **canonical destination set** is a single **derived
+> property** of `EgressBinding` and is not a stored field. It is the deduplicated
+> tuple of `CanonicalDestination`, ordered by `protocol` and then by `canonical` with
+> an absent `protocol` first and `canonical` compared by Unicode code point,
+> containing one member per distinct destination the binding's spans carry — and,
+> where the spans carry **none**, exactly one member: the bound connected account
+> under an absent `protocol`, which is ADR-0148 §2's third clause. It is therefore
+> **never empty**. No lane stores it beside the occurrences, accepts it from a
+> caller, or lets a caller supply a tuple the occurrences and the account do not
+> produce.
 
-> **Normative.** The onward destinations are **not** ADR-0148 §2's canonical
-> destination set, and the two names are never used for one another. For a request
-> carrying an `EgressBinding`, ADR-0148 §2's canonical destination set is the
-> binding's onward destinations where those are **non-empty**, and the bound
-> connected account alone where they are **empty** — which is ADR-0148 §2's third
-> clause, computed from two fields the binding already carries rather than stored a
-> second time.
+> **Normative.** Two members are equal when and only when **both** fields are equal.
+> A canonical form is never compared across protocols; no lane treats two protocols'
+> canonical forms as comparable because the strings match; and an account member
+> never equals a selected-recipient member however their `canonical` values compare.
 
-> **Normative.** An empty onward tuple is therefore **not** an absent canonical
-> destination set, and no policy refuses on ADR-0148 §8's third floor — "the request
-> carries no canonical destination set" — because the onward tuple is empty. That
-> request carries a canonical destination set of exactly one member, the account, and
-> is ruled on against it. No lane synthesises a destination *occurrence* from the
-> account, writes one into the spans, or reads an empty onward tuple as a defect.
+> **Normative.** No policy refuses on ADR-0148 §8's third floor — "the request
+> carries no canonical destination set" — on the ground that a binding's spans carry
+> no destination. That request carries a set of exactly one member and is ruled on
+> against it. No lane synthesises a destination *occurrence* from the account, writes
+> one into the spans, or treats the account member as an argument the call selected.
 
-**Two names rather than one, because ADR-0148 §2 defines its set in two clauses and
-an earlier draft collapsed them.** That draft called the derived property "the
-canonical destination set" and then said it is empty exactly in the case ADR-0148 §2's
-third clause says that set is the connected account. Architecture review found on
-round 3 that this gives one name two values for one request, and that a policy reading
-ADR-0148 §8's third floor literally would refuse an account-only call for carrying no
-destination set — which is the opposite of what §2's third clause rules and would make
-every resolution call under ADR-0148 §5 unauthorisable, since a resolution call's own
-set is the account. The repair is not a cleverer derivation but a second name: the
-binding derives what its *arguments select*, which is §2's first clause, and ADR-0148
-§2's canonical destination set is that or the account, which is §2's first and third
-clauses joined. Both remain computable from what the binding stores, so nothing is
-stated twice; what changes is that the two things ADR-0148 keeps apart are kept apart
-here too.
+**One derived property with one member type, arrived at over two review rounds, and
+both drafts it replaces are worth recording because they failed in opposite
+directions.** The first called the derived property "the canonical destination set"
+and defined it to be empty exactly where ADR-0148 §2's third clause says that set is
+the connected account — one name with two values for one request. Architecture review
+found on round 3 that a policy reading ADR-0148 §8's third floor literally would then
+refuse an account-only call for carrying no destination set, which is the opposite of
+what §2 rules and would make every resolution call under ADR-0148 §5 unauthorisable,
+since a resolution call's own set is the account. The second draft split the name in
+two — an onward tuple, plus a rule saying what ADR-0148's set is in terms of it — and
+round 4 found that this leaves the set itself with **no value shape at all**: an
+onward call yields pairs and an account-only call yields an account, so every consumer
+branches and invents its own comparison. That is this document's own title failing on
+the document, and the second draft was worse than the first for it, because the first
+at least had one type.
 
-**Carrying occurrences and deriving them, rather than the reverse, is the whole
+**The repair is to make the account a member rather than an alternative to the
+members.** `protocol` absent is not a partial state — both fields are present and
+carry meaning — and it says exactly what is true: this destination is the account the
+call is made to, which is not named under any protocol that establishes equivalences
+between supplied forms. That the two kinds can never compare equal is the safety half:
+a future standing grant bound to the canonical destination set (ADR-0148 §3's first
+and fifth clauses) cannot have a grant over an account reach a recipient whose address
+happens to equal the account's identity, and no `DestinationProtocol` member has to be
+minted for "the account" to make the type total.
+
+**Carrying occurrences and deriving the set, rather than the reverse, is the whole
 of the answer, and the reason is §1's failure.** Both shapes are needed: ADR-0148 §4
 authorises "the set" as a single value with no partial `ALLOW`, and ADR-0148 §2's
 fourth clause requires both forms of every argument to reach the audit record. Only
@@ -417,9 +433,9 @@ transmits no value, so a span for it would have to state an extent and a disclos
 provenance for a thing that does not exist — and `SYSTEM_SELECTED`, §5's fail-closed
 answer, would be a disclosure record for nothing disclosed. It is also the shape
 ADR-0148 §2's third clause reaches most naturally: a call whose recipient arguments
-are present and empty selects no onward recipient, so its destination set is the
-connected account alone (§3's last clause), and the binding for it is well-formed with
-no destination-carrying span at all. The alternative — an indexless span standing for
+are present and empty selects no recipient beyond the service the call is made to, so
+its canonical destination set is the connected account alone (§3), and the binding for
+it is well-formed with no destination-carrying span at all. The alternative — an indexless span standing for
 an absent element — would make `to: []` and `to: ""` indistinguishable in the record.
 
 **One array level and no more, because the alternative is a key that recurses and a
@@ -670,9 +686,9 @@ one.** It recorded that the connected-account-only case "has no expressible form
 `tools/` today", because the account is bound by facts living in a connection record
 whose owner ADR-0125 §12 left undecided. ADR-0149 has since decided it — one
 component in `tools/` provisions a connection and the record is the hub's — so the
-case is buildable, and §3's onward-destinations clauses above are what make it
-expressible in the binding: the onward tuple is empty and the canonical destination
-set is the account.
+case is buildable, and §3's account-member clauses above are what make it
+expressible in the binding: no span carries a destination, and the derived canonical
+destination set is the account alone.
 
 ### 8. Every value in this surface is a validating model, and no message it raises renders an argument
 
@@ -739,7 +755,8 @@ the outer model and not the inner ones would be the leak wearing the fix's cloth
 > **Normative.** `PermissionDecision.authorises` gains exactly one conjunct:
 > `request.egress_binding == self.egress_binding`. It compares the binding **whole**
 > and by value. No lane compares it field by field, compares only its derived
-> onward destinations, compares only its account, or admits any comparison
+> derived canonical destination set, compares only its account, or admits any
+> comparison
 > weaker than equality of the whole value.
 
 > **Normative.** The conjunct is `None`-safe in both directions and neither
@@ -894,13 +911,13 @@ lands there whole.
 
 > **Normative.** That lane also ships the **alias pair at the `core` level**: two
 > spans whose supplied forms differ and whose canonical forms and protocol are
-> identical are **two occurrences** and **one** onward destination, with both
-> supplied forms surviving on the binding. An implementation whose onward tuple
-> carries two members, or whose occurrences carry one supplied form, fails it, and
+> identical are **two occurrences** and **one** member of the derived canonical
+> destination set, with both supplied forms surviving on the binding. An
+> implementation whose derived set carries two members, or whose occurrences carry one supplied form, fails it, and
 > so does one that reconstructs a supplied form from a canonical one (ADR-0148 §14).
 
 > **Normative.** That lane also ships the **substitution pair**: two bindings
-> differing in exactly one span's supplied form, with identical onward tuples, are
+> differing in exactly one span's supplied form, with identical derived sets, are
 > unequal, and a decision recorded for either does not authorise a request carrying
 > the other. The same for two bindings differing only in one span's `provenance`,
 > which is ADR-0148 §14's carried-provenance pair reaching `authorises` rather than
@@ -919,8 +936,9 @@ lands there whole.
 
 > **Normative.** That lane also ships the **`None`-asymmetry** pair in both
 > directions (§9), the **account-only** case of §3 — a binding whose spans carry no
-> destination has an empty onward tuple, is a well-formed binding, and has a
-> canonical destination set of exactly one member, the account — the
+> destination is well-formed and its derived canonical destination set is exactly one
+> member, the connected account under an absent `protocol`, which no
+> selected-recipient member equals — the
 > **empty-array** case of §4, in which an argument whose value is `[]` carries no
 > span and the binding is still well-formed, and a case asserting that a construction
 > omitting `provenance` **raises**, which is what §5's no-default clause is worth.
@@ -941,7 +959,7 @@ lands there whole.
 > **duplicate-across-arguments** case §10's third clause is stated for: one recipient
 > selected by two arguments produces a confirmation naming **both** arguments beside
 > that recipient's forms. A confirmation that names one argument per member of the
-> onward destinations fails it, and a case built from a call whose
+> derived canonical destination set fails it, and a case built from a call whose
 > recipients are each selected once does not reach it.
 
 > **Normative.** No lane satisfies any clause of this section with a test that
@@ -1120,7 +1138,7 @@ a reader can check that the producer's evidence was spent rather than cited.
 | 3 | Per-span provenance needs a span identity | **§4.** `(argument, index)`, with the index rule stated so it is derivable. |
 | 4 | A system-selected free-text span has no ruled tier | **§6.** Named as a residue against ADR-0146 §5's third clause, with the closing lane and its ADR-0082 §1 duty named. Not closed. |
 | 5 | `discloses` cannot express what an egress tool transmits | **§6**'s last clause: the description is the per-call measure, `discloses` stays the ceiling, and neither is read as the other. |
-| 6 | The connected-account-only case is not expressible | Answered by **ADR-0149**, which merged after that observation was written; **§3**'s onward-destinations clauses and **§7** make it expressible here. |
+| 6 | The connected-account-only case is not expressible | Answered by **ADR-0149**, which merged after that observation was written; **§3**'s account-member clauses and **§7** make it expressible here. |
 | 7 | A description nobody can render is not inspectable | **§10**'s fourth clause: no rendering rides here, and no rendering is the bound artifact. |
 | 8 | (b)'s signature must be able to fail | **§11**'s second clause, routed to (b) and not decided. |
 | 9 | A refusal message is a Tier 1 hazard | **§8**'s second clause, per model rather than per package. |
