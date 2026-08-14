@@ -105,17 +105,31 @@ type _Opener = Callable[[], OpenedConnections]
 
 #: The failure classes whose message this act repeats verbatim in a diagnostic.
 #:
-#: **ADR-0153 §7's own enumeration**, which names "the failures §4 governs" as
-#: ``SecretStoreError``, ``SecretStoreUnavailableError`` (ADR-0125 §6) and
-#: ``ConnectionStoreError`` (ADR-0151 §2a) — the second being a subclass of the
-#: first, so two names carry all three. Each is raised inside this system by code
-#: ADR-0149 §3 forbids to put an account identity in an error message, which is
-#: what entitles the act to repeat the text rather than reduce it (§5).
+#: **Entitlement is per class and is argued per class**, because ADR-0153 §5's
+#: obligation is on this act and a class name is not on its own a warrant to
+#: repeat what an instance of it carries.
 #:
-#: ``OSError`` is here on a different ground and it is worth separating: its text
-#: is the operating system's, an errno and a path inside ``data_dir``, produced by
-#: the kernel rather than by anything holding a connection record.
-_PURGE_CONDITIONS: Final = (SecretStoreError, ConnectionStoreError, OSError)
+#: ``SecretStoreError`` and its ``SecretStoreUnavailableError`` subclass
+#: (ADR-0125 §6, §7) are entitled because their whole text is written by
+#: ``secret_store/store.py``'s ``_surface`` out of two interpolations — the
+#: method name, and the *class name* of the backend fault, which that function
+#: takes deliberately so that "neither the backend's exception nor anything it
+#: carries" crosses. Nothing an account identity could reach is in scope there:
+#: the keyring layer sees a :class:`~ai_assistant.core.types.SecretName` and a
+#: credential value and never a connection record.
+#:
+#: ``OSError`` is entitled on a different ground: its text is the operating
+#: system's own errno and a path inside ``data_dir``, produced by the kernel
+#: rather than by anything holding a connection record.
+#:
+#: **``ConnectionStoreError`` is deliberately *not* here**, though ADR-0153 §7
+#: lists it among the classes §4 governs — §7 says which failures the act must
+#: handle, not whose text it may quote. ``tools/connection_store.py``'s
+#: ``_decoded`` renders a corrupt row's ``ValidationError`` into the message, and
+#: pydantic quotes the offending input, so a store whose ``identity`` field no
+#: longer validates produces a ``ConnectionStoreError`` carrying that identity.
+#: :func:`_condition_of` names that condition in the act's own words instead.
+_PURGE_CONDITIONS: Final = (SecretStoreError, OSError)
 
 #: ADR-0151 §7's three failures that name the connection they were on. The
 #: reference is a non-secret handle chosen by code (ADR-0149 §3), so it is what
@@ -631,9 +645,25 @@ def _condition_of(exc: Exception) -> str:
     Returns:
         The condition, and the reference where the failure carries one.
     """
-    named = str(exc) if isinstance(exc, _PURGE_CONDITIONS) else type(exc).__name__
+    named = str(exc) if isinstance(exc, _PURGE_CONDITIONS) else _in_the_acts_own_words(exc)
     if isinstance(exc, _REFERENCE_CARRYING) and exc.reference:
         return f"{named} (connection {exc.reference})"
+    return named
+
+
+def _in_the_acts_own_words(exc: Exception) -> str:
+    """Name a condition without quoting anyone's text (ADR-0153 §5).
+
+    The class is always the condition. ``ConnectionStoreError`` earns a sentence
+    beside it because it is the failure an owner is most likely to actually meet
+    here, and a bare class name would tell them nothing about which of the two
+    things this act touches went wrong — while its own message is the one that
+    cannot be repeated, since ``_decoded`` renders a corrupt row's validation
+    failure into it and pydantic quotes the input that failed.
+    """
+    named = type(exc).__name__
+    if isinstance(exc, ConnectionStoreError):
+        return f"{named}: the connection store in this data directory could not be read"
     return named
 
 
