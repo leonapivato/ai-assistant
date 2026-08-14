@@ -93,6 +93,10 @@ class ConnectionProvisionerContract(ABC):
         """Script the subject's reference factory to repeat its last value."""
 
     @abstractmethod
+    def mint_an_unusable_reference(self, provisioner: ConnectionProvisioner) -> None:
+        """Script the subject's factory to mint a reference past ADR-0151 §11's bound."""
+
+    @abstractmethod
     def suspend_next_credential_write(self, provisioner: ConnectionProvisioner) -> SuspendedCall:
         """Hold the subject's next credential write open."""
 
@@ -155,6 +159,28 @@ class ConnectionProvisionerContract(ABC):
         live = await provisioner.connected()
         assert [record.identity for record in live] == [IDENTITY]
         assert live[0].reference == first.reference
+
+    async def test_a_reference_the_caller_could_never_receive_is_refused(
+        self, provisioner: ConnectionProvisioner
+    ) -> None:
+        """ADR-0151 §11: no minted reference exceeds CONNECTION_REFERENCE_MAX_BYTES.
+
+        The bound's ceiling is fixed by §11 rather than left to a lane, and the
+        asymmetry with the identity's bound is the mint: an oversized identity
+        refuses the request the caller sent and the caller can send a shorter one,
+        while an oversized reference refuses a **response** carrying a value that
+        exists only in the hub — so the act would have landed with its handle
+        unreachable, recoverable only by matching on an identity nothing makes
+        unique. Refused before the first write, so nothing is written.
+        """
+        self.mint_an_unusable_reference(provisioner)
+
+        with pytest.raises(ConnectionStoreError):
+            await provisioner.provision(identity=IDENTITY, credential=credential())
+
+        assert await provisioner.connected() == ()
+        assert await provisioner.recent_acts(limit=10) == ()
+        assert self.keyring_entries(provisioner) == 0
 
     # --- ADR-0148 §6: re-provisioning ---------------------------------------
 

@@ -217,9 +217,13 @@ class RepeatableMint:
         """Create a factory that has minted nothing."""
         self.last = ""
         self.repeat = False
+        self.unusable = False
 
     def __call__(self) -> str:
-        """Draw the next reference, or repeat the previous one."""
+        """Draw the next reference, or one of the two scripted values."""
+        if self.unusable:
+            self.unusable = False
+            return "r" * (CONNECTION_REFERENCE_MAX_BYTES + 1)
         if self.repeat:
             self.repeat = False
             return self.last
@@ -269,6 +273,11 @@ class ProvisionerHarness:
         """Script the subject's injected reference factory to repeat its last value."""
         del provisioner
         self.mint.repeat = True
+
+    def mint_an_unusable_reference(self, provisioner: object) -> None:
+        """Script the subject's injected factory past ADR-0151 §11's bound."""
+        del provisioner
+        self.mint.unusable = True
 
     def suspend_next_credential_write(self, provisioner: object) -> SuspendedCall:
         """Hold the subject's next credential write open."""
@@ -326,7 +335,7 @@ def _entries(store: SqliteConnectionStore) -> list[tuple[Any, ...]]:
     """
     connection: Any = store._conn
     rows = connection.execute(
-        "SELECT reference, revision, state, slot FROM entries ORDER BY sequence"
+        "SELECT reference, revision, data FROM entries ORDER BY sequence"
     ).fetchall()
     return [tuple(row) for row in rows]
 

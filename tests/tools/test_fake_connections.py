@@ -60,6 +60,10 @@ class FakeConnectionHooks:
         """Put the fake's keyring into ADR-0125 §7's unavailable state."""
         _fake(purger).secrets.become_unavailable()
 
+    def mint_an_unusable_reference(self, provisioner: object) -> None:
+        """Script the fake's factory to mint a reference past ADR-0151 §11's bound."""
+        _fake(provisioner).mint_an_unusable_reference()
+
     def suspend_next_credential_write(self, provisioner: object) -> SuspendedCall:
         """Hold the fake's next credential write open."""
         return _fake(provisioner).suspend_next_credential_write()

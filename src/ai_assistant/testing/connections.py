@@ -47,11 +47,13 @@ from ai_assistant.core.errors import (
     UnknownConnectionError,
 )
 from ai_assistant.core.types import (
+    CONNECTION_REFERENCE_MAX_BYTES,
     ConnectedAccount,
     ConnectionAct,
     ProvisioningState,
     SecretName,
     SecretScope,
+    encodable_text,
 )
 from ai_assistant.testing.cancellation import SuspendableResource
 from ai_assistant.testing.secrets import FakeSecretStore
@@ -177,6 +179,7 @@ class FakeConnectionProvisioner:
         self._mint_reference = mint_reference if mint_reference is not None else _reference
         self._mint_slot = mint_slot if mint_slot is not None else _slot
         self._repeat_reference: str | None = None
+        self._unusable_reference: str | None = None
         self._last_reference: str | None = None
         self._resource = SuspendableResource()
 
@@ -190,6 +193,16 @@ class FakeConnectionProvisioner:
         return f"{type(self).__name__}(entries={len(self.entries)})"
 
     # --- the test-only switches ----------------------------------------------
+
+    def mint_an_unusable_reference(self) -> None:
+        """Make the next mint produce a reference no caller could ever receive.
+
+        One byte past :data:`~ai_assistant.core.types.CONNECTION_REFERENCE_MAX_BYTES`,
+        which is the state ADR-0151 §11 requires an implementation to refuse
+        *before* the first write — the one factory fault whose consequence is
+        durable state with an unreachable handle.
+        """
+        self._unusable_reference = "r" * (CONNECTION_REFERENCE_MAX_BYTES + 1)
 
     def repeat_next_reference(self) -> None:
         """Make the next mint repeat the value the previous one produced.
@@ -236,7 +249,7 @@ class FakeConnectionProvisioner:
         self, *, identity: NonBlankEncodableText, credential: SecretValue
     ) -> ConnectedAccount:
         """Connect a fresh account under a reference this subject mints."""
-        reference = self._next_reference()
+        reference = _receivable(self._next_reference())
         if any(entry.reference == reference for entry in self.entries):
             msg = (
                 "the connection log already holds the reference this act minted, so "
@@ -434,12 +447,50 @@ class FakeConnectionProvisioner:
         return tuple(seen.values())
 
     def _next_reference(self) -> str:
-        """Draw the next reference, honouring :meth:`repeat_next_reference`."""
+        """Draw the next reference, honouring the two test-only switches."""
+        if self._unusable_reference is not None:
+            unusable, self._unusable_reference = self._unusable_reference, None
+            return unusable
         if self._repeat_reference is not None:
             repeated, self._repeat_reference = self._repeat_reference, None
             return repeated
         self._last_reference = self._mint_reference()
         return self._last_reference
+
+
+def _receivable(reference: str) -> str:
+    """Refuse a minted reference the caller could never receive (ADR-0151 §11).
+
+    §11 bounds the reference here rather than leaving it to a lane because the
+    asymmetry with the identity's bound is the mint: an oversized identity refuses
+    the request the caller sent, while an oversized reference refuses a *response*
+    carrying a value that exists only in the hub — so the act has landed and its
+    handle is unreachable.
+
+    Written here rather than imported from the production module, because a
+    canonical fake that borrowed the implementation's own guard would make the
+    shared suite's case a tautology.
+
+    Raises:
+        ConnectionStoreError: If it has no UTF-8 encoding, or if that encoding
+            exceeds the bound.
+    """
+    try:
+        encoded = len(encodable_text(reference).encode("utf-8"))
+    except ValueError as exc:
+        msg = (
+            "the reference factory produced a value with no UTF-8 encoding; a handle the "
+            "caller could never receive is refused before anything is written"
+        )
+        raise ConnectionStoreError(msg) from exc
+    if encoded > CONNECTION_REFERENCE_MAX_BYTES:
+        msg = (
+            f"the reference factory produced {encoded} bytes, above "
+            f"CONNECTION_REFERENCE_MAX_BYTES ({CONNECTION_REFERENCE_MAX_BYTES}); a handle "
+            f"the caller could never receive is refused before anything is written"
+        )
+        raise ConnectionStoreError(msg)
+    return reference
 
 
 def _reference() -> str:
