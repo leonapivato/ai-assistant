@@ -120,6 +120,7 @@ from ai_assistant.core.types import (
     TraceOutcome,
     TurnOutcome,
     band_of,
+    secret_value,
 )
 from ai_assistant.orchestration.notifications import hand_off
 from ai_assistant.orchestration.payloads import (
@@ -131,6 +132,7 @@ from ai_assistant.orchestration.payloads import (
     non_blank_text,
     page_argument,
     positive_page_argument,
+    usable_identity,
 )
 from ai_assistant.orchestration.questions import question_state
 from ai_assistant.orchestration.traces import Observation, OperationTraces
@@ -152,6 +154,8 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         AnswerOutcome,
         BeliefBand,
+        ConnectedAccount,
+        ConnectionAct,
         Conversation,
         ConversationDigest,
         DeferralAdmission,
@@ -171,9 +175,11 @@ if TYPE_CHECKING:
         ObservationReport,
         PermissionDecision,
         Question,
+        SecretValue,
         SourceGrant,
         TurnResult,
     )
+    from ai_assistant.orchestration.connections import ConnectionOperations
     from ai_assistant.orchestration.consolidation import (
         ConsolidationReport,
         ConsolidationStage,
@@ -895,6 +901,7 @@ class Engine:
         observation: ObservationStage,
         questions: QuestionStage,
         grant_operations: GrantOperations,
+        connection_operations: ConnectionOperations,
         calendar_ingestion: IngestionStage | None = None,
         email_ingestion: IngestionStage | None = None,
         upcoming: UpcomingEventStage | None = None,
@@ -1069,6 +1076,29 @@ class Engine:
                 in this package, and ADR-0102 §2 records that reusing a word for a
                 different type one constructor over is how two things come to be
                 confused at a glance.
+            connection_operations: The five connection operations (ADR-0151 §1,
+                §10) — the **only** object in this package holding a
+                :class:`~ai_assistant.core.protocols.ConnectionProvisioner`. The
+                façade delegates ``connect_account``, ``reprovision_account``,
+                ``disconnect_account``, ``connected_accounts`` and
+                ``recent_connection_acts`` to it, keeping this class's own job the
+                argument validation, the size measurement and the drain tracking.
+
+                **Required, on ``grant_operations``' argument exactly** — these
+                five are ``AssistantEngine`` methods and the shared conformance
+                suite runs against this class, so an engine that could be built
+                without them is one whose surface is conditionally present. It is
+                also the shape #684 taught: ``build_engine`` once took a ``grants``
+                parameter its one production caller never filled, and the answer
+                was that an engine "either has a grant seam or does not build".
+
+                **Holding it is not holding a keyring face** (ADR-0149 §8, ADR-0151
+                §10). This class names five members that take and return `core`
+                types; it cannot name ``set``, ``delete`` or ``get``, and no
+                annotation on it mentions
+                :class:`~ai_assistant.core.protocols.Secrets` or
+                :class:`~ai_assistant.core.protocols.SecretStore` — so ADR-0125 §8's
+                fourth clause stays true of `orchestration` word for word.
             calendar_ingestion: The **calendar's** read-only ingestion stage
                 (ADR-0093 §6), or ``None`` where this deployment configured no
                 calendar source. It writes through the *same* write stage the learn
@@ -1278,6 +1308,7 @@ class Engine:
         self._observation = observation
         self._questions = questions
         self._grants = grant_operations
+        self._connections = connection_operations
         self._calendar_ingestion = calendar_ingestion
         self._email_ingestion = email_ingestion
         self._upcoming = upcoming
@@ -3416,6 +3447,181 @@ class Engine:
         """
         self._reject_if_closing()
         return await self._tracked(self._grants.standing_grants(), "standing_grants", checked=True)
+
+    # --- the connection surface (ADR-0151 §1) -------------------------------
+
+    async def connect_account(
+        self, *, identity: NonBlankEncodableText, credential: SecretValue
+    ) -> ConnectedAccount:
+        """Connect a fresh account under a reference the provisioner mints.
+
+        **Three local refusals before any I/O, in this order** (ADR-0085 §9,
+        ADR-0151 §5): the credential is revalidated through ``secret_value``
+        because :data:`~ai_assistant.core.types.SecretValue` is an ``Annotated``
+        alias whose validator never runs on a directly-constructed ``SecretStr``
+        (ADR-0125 §4); the identity is refused blank or unwritable and
+        **normalised by nothing**; and it is then refused unusable — oversized,
+        carrying a control character or a line break, or **equal to the
+        credential's plaintext**. A wire client refuses exactly what this refuses,
+        so no such call reaches the hub and no credential is sent for one.
+
+        **The size check measures the identity and not the credential.** ADR-0151
+        §11 requires the whole argument payload to fit the configured frame, and
+        the credential is part of it — but a payload measurement projects its
+        members, and ``project`` has no form for a ``SecretStr`` at all (ADR-0151
+        §6), which is exactly the property that stops a redaction being sent as a
+        secret. So the credential's own bound is
+        :data:`~ai_assistant.core.types.SECRET_VALUE_MAX_BYTES`, enforced by
+        ``secret_value`` above, and what is measured here is everything else. The
+        hub-side consequence is stated rather than hidden: a maximal credential
+        does not fit a 1024-byte frame, and the client is where that call is
+        refused, because it is the client that serialises.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``identity`` is blank or unwritable, or ``credential``
+                is blank, unencodable or oversized.
+            UnusableIdentityError: If ``identity`` is one ADR-0149 §4 does not
+                admit. Nothing is written and no credential is sent.
+            IncompleteProvisioningError: If the act's first write returned and the
+                act did not complete. Carries the minted reference.
+            ProvisioningOutcomeUnknownError: If the activation failed rather than
+                returning. Carries the reference; the outcome is not known.
+            ConnectionStoreError: If the act's first write did not return. Carries
+                no reference, and the outcome is not known.
+            OversizedValueError: If the arguments or the record exceed the limit.
+        """
+        self._reject_if_closing()
+        secret = secret_value(credential)
+        named = non_blank_text(identity, name="identity")
+        usable_identity(named, credential=secret)
+        # **The credential is not a member of the measured object** — see the
+        # docstring. Naming it here would put a ``SecretStr`` in front of
+        # ``project``, which refuses it (ADR-0151 §6), turning every well-formed
+        # call into a ``TypeError``.
+        check_arguments("connect_account", max_bytes=self._max_payload_bytes, identity=named)
+        return await self._tracked(
+            self._connections.connect(identity=named, credential=secret),
+            "connect_account",
+            checked=True,
+        )
+
+    async def reprovision_account(
+        self,
+        reference: Identifier,
+        *,
+        identity: NonBlankEncodableText,
+        credential: SecretValue,
+    ) -> ConnectedAccount:
+        """Replace the credential under a reference this hub previously returned.
+
+        :meth:`connect_account`'s three local refusals, plus ``reference``, which
+        is validated and **normalised** as every id argument on this surface is
+        (ADR-0085 §3c): a reference is a minted id no user authors, so the
+        strengthening is harmless where nothing was typed, and a client comparing
+        values of the same type is what §3c buys. The store then compares it
+        exactly (ADR-0151 §3).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``reference`` is blank or unwritable, ``identity`` is
+                blank or unwritable, or ``credential`` is blank, unencodable or
+                oversized.
+            UnusableIdentityError: On :meth:`connect_account`'s terms.
+            UnknownConnectionError: If the store holds no entry for ``reference``.
+            DisplacedProvisioningError: If another act took the record over.
+            IncompleteProvisioningError: On :meth:`connect_account`'s terms.
+            ProvisioningOutcomeUnknownError: On :meth:`connect_account`'s terms.
+            ResidualCredentialError: If the predecessor-slot deletion failed after
+                the activation landed. The act **completed**.
+            ConnectionStoreError: On :meth:`connect_account`'s terms.
+            OversizedValueError: If the arguments or the record exceed the limit.
+        """
+        self._reject_if_closing()
+        secret = secret_value(credential)
+        handle = identifier(reference, name="reference")
+        named = non_blank_text(identity, name="identity")
+        usable_identity(named, credential=secret)
+        check_arguments(
+            "reprovision_account",
+            max_bytes=self._max_payload_bytes,
+            reference=handle,
+            identity=named,
+        )
+        return await self._tracked(
+            self._connections.reprovision(handle, identity=named, credential=secret),
+            "reprovision_account",
+            checked=True,
+        )
+
+    async def disconnect_account(self, reference: Identifier) -> ConnectedAccount | None:
+        """Disconnect a reference, or report that there was no live record.
+
+        A ``None`` is **not** a report of a disconnection (ADR-0151 §8): it says
+        one thing, that no live record was removed by this call, and it covers
+        both a reference the store has never held and one already disconnected.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``reference`` is blank or unwritable.
+            ResidualCredentialError: If the removal entry landed and a credential
+                deletion did not. The reference **is** disconnected.
+            ConnectionStoreError: If the store cannot be read or written.
+            OversizedValueError: If the argument or the record exceeds the limit.
+        """
+        self._reject_if_closing()
+        handle = identifier(reference, name="reference")
+        check_arguments("disconnect_account", max_bytes=self._max_payload_bytes, reference=handle)
+        return await self._tracked(
+            self._connections.disconnect(handle), "disconnect_account", checked=True
+        )
+
+    async def connected_accounts(self) -> tuple[ConnectedAccount, ...]:
+        """List every connection that has a live record, pending ones included.
+
+        **The measurement is the operation's distinguishing property, not
+        boilerplate**, exactly as for ``standing_grants``. ADR-0151 §9 refuses a
+        paged answer — a truncated answer to "what is connected" is a false one
+        rather than a partial one — so a live set that does not fit the frame is
+        an ``OversizedValueError`` and no set at all. ``hub_max_frame_bytes`` is
+        the operator's remedy and the only one offered; a frame too small to list
+        what is connected still lets a reference be disconnected, because
+        ``disconnect_account``'s request and result are two small values.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ConnectionStoreError: If the store cannot be read, or holds an entry
+                that no longer validates.
+            OversizedValueError: If the live set does not fit the contract limit.
+        """
+        self._reject_if_closing()
+        return await self._tracked(
+            self._connections.connected(), "connected_accounts", checked=True
+        )
+
+    async def recent_connection_acts(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[ConnectionAct, ...]:
+        """List what was done to connections, newest first (ADR-0151 §9).
+
+        ``limit`` is refused when it is **not strictly positive**, on
+        ``recent_grants``' reason and in every implementation (ADR-0151 §2a), so
+        neither is silently more permissive than the other.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+            ConnectionStoreError: If the store cannot be read, or holds an entry
+                that no longer validates.
+            OversizedValueError: If the page exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        positive_page_argument(limit, name="limit")
+        check_arguments("recent_connection_acts", max_bytes=self._max_payload_bytes, limit=limit)
+        return await self._tracked(
+            self._connections.recent_acts(limit=limit), "recent_connection_acts", checked=True
+        )
 
     async def aclose(self) -> None:
         """Stop accepting work, drain what is in flight, then close owned resources.

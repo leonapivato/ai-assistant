@@ -59,6 +59,7 @@ from assistant_engine_contract import (
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
     AssistantEngineContract,
+    ConnectionSubject,
     backwards_clock,
 )
 
@@ -158,6 +159,26 @@ class TestHubEngineClientContract(AssistantEngineContract):
         backing = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
         async with serving(backing, tmp_path / "hub.sock", max_frame_bytes=_TINY_FRAME) as client:
             yield client
+
+    @pytest.fixture
+    async def connections(self, tmp_path: Path) -> AsyncIterator[ConnectionSubject]:
+        """A client of a hub, and the provisioner on the hub's side of the socket.
+
+        **This is the binding the connection clauses were written for.** Two of
+        them can only fail here: the identity's byte-for-byte crossing, which an
+        ``Identifier`` annotation would have silently stripped in
+        ``wire/surface.py``'s argument validation before ``wire/server.py``
+        dispatched; and the local refusals, which the client owes in its own right
+        so that no credential is put on a socket for a call the hub would refuse
+        (ADR-0085 §9, ADR-0151 §5).
+
+        The provisioner read here is the hub's, reached from the test process
+        rather than over the wire — which is the point: a negative control has to
+        be read from where the writes would have landed.
+        """
+        backing = FakeAssistantEngine()
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield ConnectionSubject(engine=client, provisioner=backing.connections)
 
     @pytest.fixture
     async def granting_engine(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:

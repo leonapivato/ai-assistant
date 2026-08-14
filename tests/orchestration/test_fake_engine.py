@@ -28,6 +28,7 @@ from assistant_engine_contract import (
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
     AssistantEngineContract,
+    ConnectionSubject,
     backwards_clock,
     page_after_mutating_the_filter,
 )
@@ -65,6 +66,18 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
     def tiny_engine(self) -> AssistantEngine:
         """The same implementation, with the limit small enough to reach."""
         return FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+
+    @pytest.fixture
+    def connections(self) -> ConnectionSubject:
+        """The fake and the provisioner it already holds — the same object, twice.
+
+        This binding is where the pairing is least ceremonious and most revealing:
+        ``FakeAssistantEngine.connections`` **is** the canonical provisioner fake,
+        so a clause below is judged against exactly the object the other two
+        bindings reach through a seam and a socket.
+        """
+        engine = FakeAssistantEngine()
+        return ConnectionSubject(engine=engine, provisioner=engine.connections)
 
     @pytest.fixture
     def granting_engine(self) -> AssistantEngine:

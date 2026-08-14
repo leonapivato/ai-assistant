@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from test_engine import AT, Harness, _grant_operations
+from test_engine import AT, Harness, _connection_operations, _grant_operations
 
 from ai_assistant.core.errors import (
     ConfigurationError,
@@ -77,6 +77,7 @@ def _wired(harness: Harness, outbox: DeliveryOutbox | None = None, **kwargs: obj
     """A façade over ``harness``'s durable state, holding a delivery outbox."""
     return Engine(
         grant_operations=_grant_operations(),
+        connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,

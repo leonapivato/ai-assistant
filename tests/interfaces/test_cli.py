@@ -84,6 +84,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.orchestration import (
+    ConnectionOperations,
     ConversationLifecycle,
     Engine,
     GrantOperations,
@@ -101,6 +102,7 @@ from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAssistantEngine,
     FakeAuditTrail,
+    FakeConnectionProvisioner,
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
@@ -148,6 +150,19 @@ def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
         id_factory=_grant_ids(),
         clock=lambda: AT,
     )
+
+
+def _connection_operations() -> ConnectionOperations:
+    """The connection collaborator every ``Engine`` needs (ADR-0151 §10).
+
+    Required rather than optional on the façade, on ``_grant_operations``' reason
+    exactly: the five connection methods are on the Protocol, so an engine that
+    could be built without them is one whose surface is conditionally present. The
+    canonical fake is the subject, so a case that wants a live record, a pending
+    one, or a keyring that raises scripts it through the provisioner's own switches
+    rather than through a second double.
+    """
+    return ConnectionOperations(provisioner=FakeConnectionProvisioner())
 
 
 #: The route the harness's observation stage reports (ADR-0077 §3). In production
@@ -272,6 +287,7 @@ def _engine(
     conversations = FakeConversationStore(now=lambda: AT)
     return Engine(
         grant_operations=_grant_operations(),
+        connection_operations=_connection_operations(),
         loop=loop,
         runner=runner,
         plans=plans,
@@ -1826,6 +1842,7 @@ def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
     conversations = FakeConversationStore(now=lambda: AT)
     engine = Engine(
         grant_operations=_grant_operations(),
+        connection_operations=_connection_operations(),
         loop=loop,
         runner=runner,
         plans=plans,

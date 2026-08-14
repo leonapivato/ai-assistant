@@ -104,7 +104,21 @@ from ai_assistant.wire.errors import (
 #: method that build's engine surface does not declare, so ``_dispatch`` closes the
 #: connection with no reply — and the bump is what turns that into §3's message
 #: naming both versions.
-PROTOCOL_VERSION: Final[int] = 6
+#:
+#: **7 since ADR-0151 §1**, which adds the five connection operations —
+#: ``connect_account``, ``reprovision_account``, ``disconnect_account``,
+#: ``connected_accounts`` and ``recent_connection_acts``. ADR-0124 §9's **first**
+#: limb again, and the largest single move the method set has made: five at once
+#: rather than one. Nothing about them offers a way out either, and one of them
+#: makes the half-finished upgrade worse than it has been before — a
+#: ``connect_account`` from a new client to an old hub is a method that build's
+#: surface does not declare, so ``_dispatch`` closes the connection with no reply,
+#: and the call the operator retries is **the one carrying a credential**. A
+#: dropped socket is the worst available outcome there precisely because the
+#: natural response to one is to send it again (ADR-0151 §2a), which is why the
+#: handshake refusal this number buys is worth more on this surface than on any
+#: before it.
+PROTOCOL_VERSION: Final[int] = 7
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

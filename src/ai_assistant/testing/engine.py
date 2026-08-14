@@ -79,6 +79,7 @@ from ai_assistant.core.types import (
     TurnOutcome,
     TurnResult,
     encodable_text,
+    secret_value,
 )
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
@@ -89,7 +90,9 @@ from ai_assistant.orchestration.payloads import (
     non_blank_text,
     page_argument,
     positive_page_argument,
+    usable_identity,
 )
+from ai_assistant.testing.connections import FakeConnectionProvisioner
 from ai_assistant.testing.notifications import (
     FakeNotificationOutbox,
     FakeNotificationPolicy,
@@ -100,6 +103,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from ai_assistant.core.types import (
+        ConnectedAccount,
+        ConnectionAct,
         EncodableText,
         FeedbackEvent,
         HeldNotification,
@@ -107,6 +112,7 @@ if TYPE_CHECKING:
         NonBlankEncodableText,
         NotificationDelivery,
         NotificationPreferences,
+        SecretValue,
     )
 
 #: A fixed instant, so a fake engine's output is deterministic without a clock.
@@ -212,8 +218,24 @@ class FakeAssistantEngine:
         #: engine refuses a poll above. §5a's own default, so a fake is not looser
         #: than the contract it stands in for.
         self.max_notification_budget = timedelta(seconds=300)
+        #: The connection surface's whole state (ADR-0151 §16 item 4), scriptable
+        #: through the canonical provisioner fake's own switches: its ``entries``
+        #: are the live records and the history, ``secrets.fail()`` makes a keyring
+        #: write or deletion raise, and ``repeat_next_reference()`` makes the mint
+        #: collide — so a client's own refusal paths are all reachable from a test.
+        #:
+        #: **A provisioner rather than a dictionary**, because ADR-0148 §6's three
+        #: writes are what the interesting obligations are about: a fake engine
+        #: that set an entry and returned would answer every listing correctly
+        #: while exhibiting none of the partial outcomes ADR-0151 §7 exists to make
+        #: reportable.
+        self.connections = FakeConnectionProvisioner()
         #: Every call, in order, as ``(method, arguments)`` — so a test can assert
         #: what reached the engine without reaching into its state.
+        #:
+        #: **A provisioning call records its identity and never its credential**
+        #: (ADR-0151 §6): this list is read by tests and printed by failures, and a
+        #: secret in it would be a disclosure path through the test double.
         self.calls: list[tuple[str, dict[str, object]]] = []
 
     # --- the two turn calls -----------------------------------------------
@@ -763,6 +785,78 @@ class FakeAssistantEngine:
         by_id = sorted(live, key=lambda record: record.id)
         ordered = sorted(by_id, key=lambda record: record.decided_at, reverse=True)
         return self._checked(tuple(ordered), "standing_grants")
+
+    # --- the connection surface (ADR-0151 §1) ------------------------------
+
+    async def connect_account(
+        self, *, identity: NonBlankEncodableText, credential: SecretValue
+    ) -> ConnectedAccount:
+        """Connect a fresh account, minting a reference through :attr:`connections`.
+
+        **The local refusals are implemented here rather than delegated**, which
+        is what ADR-0085 §9 asks of *every* implementation: a fake that let an
+        oversized identity or one equal to the credential through would let a
+        client's tests pass over the one path where the client is the last thing
+        between a user's secret and the wire (ADR-0151 §5).
+        """
+        secret = secret_value(credential)
+        named = non_blank_text(identity, name="identity")
+        usable_identity(named, credential=secret)
+        # The credential is deliberately not a member of the measured object: it
+        # has no canonical projection at all (ADR-0151 §6), which is the property
+        # that stops a redaction being sent in its place.
+        check_arguments("connect_account", max_bytes=self._max_payload_bytes, identity=named)
+        self.calls.append(("connect_account", {"identity": named}))
+        return self._checked(
+            await self.connections.provision(identity=named, credential=secret), "connect_account"
+        )
+
+    async def reprovision_account(
+        self,
+        reference: Identifier,
+        *,
+        identity: NonBlankEncodableText,
+        credential: SecretValue,
+    ) -> ConnectedAccount:
+        """Replace the credential under an existing reference."""
+        secret = secret_value(credential)
+        handle = identifier(reference, name="reference")
+        named = non_blank_text(identity, name="identity")
+        usable_identity(named, credential=secret)
+        check_arguments(
+            "reprovision_account",
+            max_bytes=self._max_payload_bytes,
+            reference=handle,
+            identity=named,
+        )
+        self.calls.append(("reprovision_account", {"reference": handle, "identity": named}))
+        return self._checked(
+            await self.connections.reprovision(handle, identity=named, credential=secret),
+            "reprovision_account",
+        )
+
+    async def disconnect_account(self, reference: Identifier) -> ConnectedAccount | None:
+        """Disconnect a reference, or report that no live record was removed."""
+        handle = identifier(reference, name="reference")
+        check_arguments("disconnect_account", max_bytes=self._max_payload_bytes, reference=handle)
+        self.calls.append(("disconnect_account", {"reference": handle}))
+        return self._checked(await self.connections.disconnect(handle), "disconnect_account")
+
+    async def connected_accounts(self) -> tuple[ConnectedAccount, ...]:
+        """Every live record, pending ones included and never truncated."""
+        self.calls.append(("connected_accounts", {}))
+        return self._checked(await self.connections.connected(), "connected_accounts")
+
+    async def recent_connection_acts(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[ConnectionAct, ...]:
+        """What was done, newest first, one row per ``(reference, revision)``."""
+        positive_page_argument(limit, name="limit")
+        check_arguments("recent_connection_acts", max_bytes=self._max_payload_bytes, limit=limit)
+        self.calls.append(("recent_connection_acts", {"limit": limit}))
+        return self._checked(
+            await self.connections.recent_acts(limit=limit), "recent_connection_acts"
+        )
 
     def _live_grant(self, source: str) -> SourceGrant | None:
         """The grant on ``source`` no recorded revocation names (ADR-0097 §4).
