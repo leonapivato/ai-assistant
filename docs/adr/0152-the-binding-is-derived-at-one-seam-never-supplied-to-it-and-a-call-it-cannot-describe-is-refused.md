@@ -1,6 +1,6 @@
 # 152. The binding is derived at one seam, never supplied to it, and a call it cannot describe is refused
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
 - **Decides surface (b) of ADR-0148 §11** — the seam by which the egress binding
   is obtained from `tools/` before `ActionPolicy.decide` is reached. §11's second
@@ -1940,9 +1940,32 @@ still change the decision. `CONTRIBUTING.md` → "Finishing an ADR PR" owns the
 sequence; this section points at it rather than re-deriving it, and the outcome is
 recorded here on ratification.
 
-**The outcome is recorded on ratification** and names the set that ran, what it
-returned, any finding standing contested with its grounds in the text above, and
-any finding waived with its rationale.
+**The outcome, recorded on ratification.** The required set is adversarial and
+architecture. Both were run while this ADR stood `Proposed`, both returned
+**APPROVE** on **one** tree, and the status was flipped only then — with both re-run
+on the flipped tree, which is coverage rather than a re-triage.
+`CONTRIBUTING.md` → "Finishing an ADR PR" owns that sequence and this line points at
+it rather than re-deriving it, as ADR-0130 §12 and ADR-0136 §7 each do.
+
+**No finding was waived, none stands contested, and no issue was filed.** Every
+finding was folded. One is worth naming because what was folded is narrower than what
+was asked: an adversarial `blocker` held that revalidating `parameters` can raise a
+`RecursionError` the seam does not convert. The mechanism is true and §1 and §12 above
+carry it — §1 promises the chained refusal for a `ValidationError` and for nothing
+else, §12 routes the `RecursionError`. The finding's **direction**, which was to
+specify a bounded parameter-validation path here, was declined: that is a `core`-wide
+instance depth bound over every holder of `FrozenJsonMapping`, which ADR-0145 §14
+already ruled is its own decision and tracked as **#1107**, and §15 records that
+bullet as relied on as ruled. Declining a direction while folding its mechanism is not
+a waiver, and nothing about this seam's exposure changed either way.
+
+**Two decisions moved materially under review**, both recorded where they bind rather
+than only here: the seam reads the connection record **per call** rather than carrying
+a registration snapshot (§8, §10, with §15 showing why ADR-0148 §11's unmarked no-I/O
+prose yields to ADR-0148 §6's marked connectability clause under ADR-0089 §3); and
+both members return a **`BoundEgressCall`** rather than a bare binding, so the binding
+and the call it describes cannot drift apart between this seam and the request (§1).
+The second is why §2 authorises six names rather than five.
 
 ## Consequences
 
