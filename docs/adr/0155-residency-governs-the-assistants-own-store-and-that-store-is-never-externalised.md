@@ -29,7 +29,9 @@
   line.
 - **§3's first clause is stated over what a component obtained, what it supplied and
   when — the moment fixed by the recorded persistence of the plan step naming the
-  call, never over derivation and never over purpose.** Everything it does not reach
+  call, never over derivation and never over purpose, and with that call's own
+  recorded arguments excluded as this system's record of the act rather than a source
+  for it.** Everything it does not reach
   is disposed of by its second clause, which carries no antecedent of its own: §2's
   conditions govern, as an accepted residue with a revisit trigger. Earlier drafts
   reached the case by derivation and then by a carve-out with its own antecedent;
@@ -398,7 +400,15 @@ checkable direction and the one a reviewer can test a change against.
 > `PlanStore.save_plan` (`core/protocols.py`) for the plan holding that step. A
 > supply made before it — including one made while a plan was being constructed in
 > memory, replanned or abandoned — is outside this clause, and a span reaching the
-> seam by that route is disposed of by the clause below. The prohibition is stated
+> seam by that route is disposed of by the clause below. A value the store holds
+> **only because this system recorded this very egress call's own arguments** — the
+> `parameters` of the plan step being executed, read back by the component executing
+> it — is not, for this clause, a value obtained from the assistant's own store: the
+> plan record of an act is this system's record of that act rather than a source for
+> it, and those arguments were admitted or refused by §2 and by this clause when they
+> were composed. That exclusion reaches that step's own recorded arguments and
+> nothing else the store holds — not another step, not another plan, and no other
+> record. The prohibition is stated
 > over what a component obtained, what it supplied, and when it supplied it, that
 > moment being a recorded persistence and never a construction, an intention or a
 > purpose. It is not stated over what a span contains, and no lane reads it as
@@ -455,7 +465,7 @@ content in its turn context in an earlier stage and later wrote an argument. §3
 second clause disposes of that on ADR-0146 §7's discipline: state the bound the
 system can actually hold, and name what it does not.
 
-**Three properties of the first clause carry it, and each was bought by a round.**
+**Four properties of the first clause carry it, and each was bought by a round.**
 
 - **What a component obtained**, never what a span contains. An earlier draft said
   "an artifact derived from one", which is the bound this corpus has already ruled
@@ -509,6 +519,31 @@ system can actually hold, and name what it does not.
   window persistence opens is one in which no component but the planner is running —
   and what the planner does there, rendering retrieved records into its own prompt,
   is the case §3's second clause already disposes of by design.
+- **The call's own recorded arguments are not a source.** Adversarial review found on
+  round 9 that this clause and §1's second clause collided, and that the collision
+  forbade the whole of §2. §1 puts a value in the store by where this system persists
+  it and names plans as inside it; an egress call's arguments live in
+  `PlanStep.parameters` in the plan store under `Settings.data_dir`; and at execution
+  `StepRunner._planned` in `ai_assistant.orchestration.runner` re-reads the plan
+  through `PlanStore.get_plan` — deliberately, as "the one place the capability and
+  the parameters can come from without a caller's word for it" — before passing
+  `step.parameters` to the egress binder. So every send obtained its payload from the
+  assistant's own store, and §6's fourth clause asserted the opposite. **The repair is
+  stated here and not on §1**, because §1's membership rule is what residency needs
+  and plans do belong to the store (§1's own illustration says so); what over-reached
+  was the prohibition, so the prohibition is what narrows.
+
+  **It does not reopen #95's hole**, and the reason is that the excluded value is only
+  what was already in that step's arguments when the plan was persisted. A planner
+  that writes a recalled record into an argument from its own prompt context is the
+  case §3's second clause already disposes of as an accepted residue, governed by §2's
+  conditions alone — the exclusion moves nothing into or out of that residue. What the
+  first clause still bites on is a component reading the store **at execution** and
+  routing the value into a span: #95's tool that writes assistant-derived memory into a
+  calendar, and §4's second concrete path, both reached exactly as before. Nor can the
+  exclusion be laundered after the fact: `ActionPlan` is frozen and `PlanStore`
+  contracts `save_plan` and `get_plan` with no update, so no component can place a
+  store value into a persisted step's arguments once that step exists to be excluded.
 
 **The second clause is the complement of the first and carries no antecedent of its
 own, which is deliberate.** Architecture review on round 3 required the model-context
@@ -646,14 +681,16 @@ to the turn as JSON.
 
 - **A turn that recalls and then sends.** The record reaches the planner's prompt
   before any plan is persisted, and the plan that comes back carries an egress step.
-  No component supplied a store value at or after that step was persisted. §3's first
+  No component supplied a store value at or after that step was persisted, and the
+  runner's own read of that step's `parameters` is the excluded case. §3's first
   clause does not reach it, so its second clause governs: **permitted or refused by
   §2's conditions alone**, and a lane may not add a bar §3 does not impose.
-- **A component that reads the store once the egress step has been persisted** —
-  during that step, or during an earlier step of the same plan, since `Engine`
-  persists the plan whole before it starts execution — and places the value, or the
-  output of something it commissioned on it, into a span. §3's first clause,
-  forbidden absolutely, and **no code checks it**. That is the gap #1154 carries.
+- **A component that reads the store — anything other than the executing step's own
+  arguments — once the egress step has been persisted**: during that step, or during
+  an earlier step of the same plan, since `Engine` persists the plan whole before it
+  starts execution. It places the value, or the output of something it commissioned
+  on it, into a span. §3's first clause, forbidden absolutely, and **no code checks
+  it**. That is the gap #1154 carries.
 
 The two differ only in **when** the store was read relative to a durable record the
 plan store already holds, and they are opposite in disposition — which is why the
@@ -823,7 +860,10 @@ one.
 > service, so §1's first clause is not engaged by it, and the copies its operation
 > causes — the sent-mail copy in the owner's own connected account, and each
 > recipient's mailbox — fall under §1's third clause as the ordinary consequence of
-> an owner-directed send under §2. The statement is about the tool's ordinary
+> an owner-directed send under §2. Its ordinary execution path does not engage §3
+> either: the runner reading back the `parameters` of the step it is executing is the
+> case §3's first clause excludes, and no other store read stands between that step
+> and the payload. The statement is about the tool's ordinary
 > operation and its declared arguments; it is not a statement about the payload of
 > any particular call, which §3 governs call by call.
 

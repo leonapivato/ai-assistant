@@ -153,7 +153,11 @@
   assistant's own store, or the output of an operation any component supplied such a
   value to at or after the moment that call's plan step was persisted to the plan
   store, and no authorisation cures it — not a per-call user decision, not a standing
-  policy, not a configuration or a connected account. Its second clause disposes of everything the first does not
+  policy, not a configuration or a connected account. The call's *own* recorded
+  arguments are excluded, being this system's record of the act rather than a source
+  for it, so the ordinary execution path is not caught and what the clause reaches is
+  a store read injecting something else into the payload. Its second clause disposes
+  of everything the first does not
   reach: §2's conditions govern it, as a residue accepted because the relation a wider
   clause would be stated over is the one ADR-0098 §5 holds unrecoverable and §12
   forbids stating a bound over. That closes the hole adversarial review of PR #72
