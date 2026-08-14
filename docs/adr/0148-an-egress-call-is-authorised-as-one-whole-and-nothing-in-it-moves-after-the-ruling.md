@@ -598,9 +598,18 @@ exists; the other three travel together in one value the request carries.
 > **pin** it. What the endpoint must be, and what a redirect may do, is #83's and
 > is not decided here (§13).
 
+> **Normative.** The request carries, for **every span the description covers**,
+> that span's recorded discloser provenance (ADR-0146 §1). It is carried rather
+> than derived: no component decides a span's provenance by reading its value, its
+> field or its shape, which is the inference ADR-0146 §2 forbids. Where it rides
+> inside the request is ADR-0146 §8's deferred marker and is not decided here
+> (§11); **that** it reaches the request before the ruling is decided here, because
+> nothing downstream of the ruling may add it.
+
 > **Normative.** The payload description is **deterministic**: it is a function of
-> the request's own arguments and the registry's definition for the bound tool,
-> and of nothing else — no clock, no configuration, no store read, no network. Two
+> exactly three things — the request's own arguments, the provenance the request
+> carries for their spans, and the registry's definition for the bound tool — and
+> of nothing else: no clock, no configuration, no store read, no network. Two
 > derivations of the description for one request agree.
 
 > **Normative.** The payload description states, for every span it covers, that
@@ -1166,19 +1175,21 @@ surface as (a) or rides inside it, and this ADR neither merges them nor rules th
 are distinct: it is the same lane's decision, made with the same producer in hand,
 and prejudging it here would be exactly the guess ADR-0146 §8 declined.
 
-**One sentence of §6 has to be read narrowly for that to stay true, so it is said
-here rather than left to be inferred.** §6's determinism clause makes the
-description "a function of the request's own arguments and the registry's
-definition for the bound tool, and of nothing else". That is a rule about the
-description's **inputs at derivation time** — it forbids a clock, a store read or
-a network call, so that two derivations agree and an auditor can re-derive one. It
-is **not** a ruling that provenance must be recoverable from an argument's value,
-which would be ADR-0146 §2's forbidden inference arriving late, and it is not a
-ruling that the deferred marker must ride inside `parameters`. Whatever carries a
-span's provenance *into* the request is the marker's business and stays ADR-0146
-§8's; the determinism clause binds only what a builder may consult once the
-request is in hand. Architecture review read the clause the other way on its first
-pass, which is why the scope is now stated.
+**§6's determinism clause names the marker as one of its three inputs, and that
+is what keeps this from being a ruling on the marker's shape.** The clause forbids
+a clock, a store read or a network call, so that two derivations agree and an
+auditor can re-derive one; it does **not** rule that provenance is recoverable
+from an argument's value, which would be ADR-0146 §2's forbidden inference
+arriving late, and it does not rule that the marker rides inside `parameters`. An
+earlier draft listed only two inputs and was incoherent for it — adversarial found
+on round 13 that two calls identical in arguments and definition, differing only
+in whether the user typed a span or the system selected it, would owe different
+descriptions from identical inputs. The repair is to admit the carried provenance
+as an input rather than to weaken either clause. What stays ADR-0146 §8's is
+**where it rides and what type it is**; what this ADR fixes is that it is carried
+rather than inferred, that it is in the request before the ruling, and that the
+description is a function of it. Architecture review read the earlier clause as
+prejudging the marker, which is the reading this paragraph exists to close.
 
 ### 12. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -1306,9 +1317,11 @@ clauses rather than answered. §8's **first** deferral — the marker carrying a
 span's provenance to an egress boundary — is honoured rather than spent: §6's
 provenance clause is ADR-0146 §6's *requirement* being consumed, which §6's own
 prose contemplates landing "on the payload description itself", and §11 above
-declines to rule whether that marker and surface (a) are one. The determinism
-clause beside it is scoped in §11 so that it constrains a builder's inputs and
-not the marker's shape.
+declines to rule whether that marker and surface (a) are one. §6 requires the
+provenance to be **carried** into the request rather than inferred, and names it
+among the description's inputs; both are restatements of ADR-0146 §2 and §6 for
+this seam, and neither chooses where it rides or what type it is, which is the
+whole of what §8 deferred.
 
 **ADR-0147 §3, §4 and §12 — no record owed.** §3's seam name is used. §4's fifth
 clause binds "the ADR that authorises a stdio server"; this ADR is not that ADR
