@@ -29,6 +29,7 @@ from ai_assistant.testing.connections import (
 from ai_assistant.testing.context import FakeContextProvider
 from ai_assistant.testing.conversations import FakeConversationStore
 from ai_assistant.testing.deferrals import FakeDeferralStore
+from ai_assistant.testing.egress import FakeEgressBinder
 from ai_assistant.testing.embeddings import FakeEmbedder
 from ai_assistant.testing.engine import FakeAssistantEngine
 from ai_assistant.testing.grants import (
@@ -111,6 +112,7 @@ __all__ = [
     "FakeContextProvider",
     "FakeConversationStore",
     "FakeDeferralStore",
+    "FakeEgressBinder",
     "FakeEmbedder",
     "FakeFeedbackProcessor",
     "FakeMemoryPolicy",
