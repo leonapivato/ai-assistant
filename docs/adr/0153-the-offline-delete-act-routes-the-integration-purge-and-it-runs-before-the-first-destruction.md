@@ -445,12 +445,14 @@ windows are:
 - **Interrupted anywhere later.** ADR-0126 §1's best-effort continuation, unchanged.
 
 **An externally delivered cancellation is an interruption like any other, and it
-lands in these same windows by position.** §4 requires the act to destroy no entry in
-`data_dir` and to close the store on its way out, and it leaves whatever slot
-deletions the purge had already completed exactly as any other interruption does — so
-a cancellation during the purge leaves the first window's state, deleted slots
-included, and one after the purge leaves the second's. Neither is a failed purge,
-neither is reported as one, and the owner's remedy in both is the same re-run.
+lands in these same windows by position.** §4 requires the act to begin no further
+destructive work of its own and to close the store on its way out, and to leave
+whatever it had already destroyed exactly as any other interruption does — so a
+cancellation during the purge leaves the first window's state, deleted slots
+included; one after the purge leaves the second's; and one during the destruction
+leaves the third's or the fourth's, `devices.db` already gone. None of them is a
+failed purge, none is reported as one, and the owner's remedy in each is the re-run
+that window already names.
 
 **The state this ordering makes unreachable is the one the Context names**, and it
 is worth stating as the negative because it is the only one a re-run cannot repair:
@@ -469,14 +471,18 @@ only after `purge` returned, and `purge` returns only having confirmed every slo
 
 > **Normative.** An externally delivered `CancelledError` is **not** a purge failure
 > and is never converted into one. Where one arrives at any point of the act, the act
-> **destroys no entry in `data_dir`** and begins no further destructive work of its
-> own, closes the connection store and everything opened to reach it, and lets the
-> `CancelledError` propagate — it is not classified, not reported as a failed purge,
-> and not routed through `classify`. Slot deletions the purge had already completed
-> **stand**, as they do after any other interruption (§3): ADR-0149 §8's third clause
-> keeps every entry in place until every slot is confirmed, so a re-run deletes the
-> remainder and confirms the rest. ADR-0060's rule binds this act as it binds every
-> other module — its resource half is the closing above — and ADR-0151 §7 makes the
+> **begins no further destructive work of its own**, closes the connection store and
+> everything opened to reach it, and lets the `CancelledError` propagate — it is not
+> classified, not reported as a failed purge, and not routed through `classify`.
+> Whatever it had already destroyed when the cancellation arrived **stands** — slots
+> the purge had deleted, and any entry of `data_dir` already destroyed — and nothing
+> is rolled back: the act lands in whichever of §3's interruption windows the arrival
+> falls in, exactly as any other interruption does. ADR-0149 §8's third clause keeps
+> every connection-store entry in place until every slot is confirmed, so a re-run
+> deletes the remainder and confirms the rest. ADR-0060 binds this act as it binds
+> every other module — its resource half is the closing above, and its rule that a
+> cancelled call's effect is indeterminate to the caller is why this clause points at
+> those windows rather than promising one end-state — and ADR-0151 §7 makes the
 > identical carve-out for a provisioning act (ADR-0139 §4).
 
 > **Normative.** A failure to read the connection store at all — through `connected`
@@ -1131,7 +1137,11 @@ it rather than narrowing it, and states both halves for this act: the connection
 store and everything opened to reach it are closed, and the `CancelledError`
 propagates unclassified — and §8 puts that resource half on the purger too, in the
 conformance suite, which is the only place a subject can be held still long enough to
-observe it. ADR-0151 §7 made the identical carve-out for a provisioning
+observe it. Its third rule — that a cancelled call's effect is indeterminate to the
+caller — is relied on rather than narrowed as well: §4 promises no single end-state
+for a cancelled act and points at §3's windows instead, which is that rule's shape
+for an act whose steps are ordered. ADR-0151 §7 made the identical carve-out for a
+provisioning
 act one ADR earlier — "`CancelledError` is not one … propagates unconverted" — and is
 followed rather than extended, since its own clause is about that ADR's provisioning
 classification and reaches no purge. A reader holding only either one acts
