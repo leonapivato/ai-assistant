@@ -4,10 +4,10 @@
 - Date: 2026-08-14
 - **This is the answer to #95.** ADR-0017 §1 deferred it at its own ratification;
   five ratified ADRs route to it and none answers it (ADR-0004, ADR-0017,
-  ADR-0124, ADR-0146, ADR-0154); ADR-0154 §6's second clause makes it blocking for
+  ADR-0124, ADR-0146, ADR-0154); ADR-0154 §6's third clause makes it blocking for
   **any** registration at the now-designated `tools/` egress seam; and #1152
   records the registration lane stopping on it rather than reading an answer out of
-  the corpus, which ADR-0154 §6's third clause forbids.
+  the corpus, which ADR-0154 §6's fourth clause forbids.
 - **It partially supersedes ADR-0004 §2's residency clause, and it is a
   supersession rather than a clarification on purpose.** Read flatly the clause
   forbids every write-capable integration. This ADR does not explain that reading
@@ -134,7 +134,7 @@ spent.** §6's #95 residue:
 
 The lane reached it. #1152 records lane Y of this batch making ADR-0154 §6's first
 statement — "**Yes — and on any other reading, unclear**" — and stopping, because
-§6's second clause makes the consequent unconditional and §6's third clause forbids
+§6's third clause makes the consequent unconditional and §6's fourth clause forbids
 reading an answer out of the designation. That stop was correct on the corpus as it
 then stood: no reading of the clause was ratified, so *unclear* was the honest
 answer and there was no lawful route to any other.
@@ -315,7 +315,7 @@ outside it.** Refused as a complete answer and refused as a route.
   service is prohibited outright rather than being excused by the account it landed
   in.
 - **As a route**, it is unavailable at all. Adopting it by clarification is what
-  ADR-0017 §5 refuses, what ADR-0017 §1 declined, and what ADR-0154 §6's third
+  ADR-0017 §5 refuses, what ADR-0017 §1 declined, and what ADR-0154 §6's fourth
   clause forbids sourcing from the designation. This ADR reaches a related
   conclusion by the only lawful instrument — ADR-0070 §1's supersession — and §5
   performs it.
@@ -629,7 +629,7 @@ this; §4 names it with its trigger, and it is orthogonal to the fork.
 strengthening.** #95's hole was that a reading confining residency to the
 assistant's own state says nothing about that state being *moved* — a tool writes a
 memory record into a calendar and the reading has no sentence to refuse it with,
-"since the data now lives in 'the user's account'". The first clause refuses it
+"since the data now lives in 'the user's account'". §3's second clause refuses it
 directly, and its own words refuse the excuse: the account it lands in is not a
 defence, and neither is the owner having pressed *yes*.
 
@@ -854,13 +854,13 @@ designation, which wrote no note on ADR-0017 for it either.
 **ADR-0017 §3 — no record owed.** No condition is discharged, relaxed or added here;
 §6 below says so in a clause.
 
-**ADR-0154 §6 — no record owed.** Its second clause's bar is stated over the corpus
+**ADR-0154 §6 — no record owed.** Its third clause's bar is stated over the corpus
 — "until an ADR has answered #95" — and an ADR now has. A condition satisfied is not
 a condition made false or over-wide: that is ADR-0146 §10's finding about ADR-0017
 §3's classification condition ("The condition is not made false or over-wide by
 being answered; it stands as written and stays a condition"), and it is ADR-0154's
 own relation to ADR-0017 §3, which it satisfied while leaving "exactly as ratified".
-Its first clause is untouched and §6 keeps it live; its third clause stays true,
+Its second clause is untouched and §6 keeps it live; its fourth clause stays true,
 because this ADR is not read out of ADR-0154 — it is a separate decision, reached by
 supersession of ADR-0004.
 
@@ -896,13 +896,13 @@ one.
 
 ### 6. ADR-0154 §6's gate, and what a registering lane still owes
 
-> **Normative.** ADR-0154 §6's second clause — "the lane does not register the
+> **Normative.** ADR-0154 §6's third clause — "the lane does not register the
 > integration until an ADR has answered #95" — has its condition satisfied on this
 > ADR's merge. The clause is not amended, narrowed or read away: its bar is stated
 > over the corpus rather than over an integration, so it is discharged for **every**
 > integration at once and not for one.
 
-> **Normative.** ADR-0154 §6's first clause stands unchanged and binds every
+> **Normative.** ADR-0154 §6's second clause stands unchanged and binds every
 > registering lane. A lane registering an integration at the seam states in its own
 > change whether that integration's ordinary operation places the owner's data into
 > a third-party service in the sense ADR-0004 §2's residency clause is about, and on
@@ -933,7 +933,7 @@ one.
 > call.
 
 **Why the gate lifts corpus-wide rather than per integration, decided rather than
-assumed.** ADR-0154 §6's second clause names its own condition, and the condition is
+assumed.** ADR-0154 §6's third clause names its own condition, and the condition is
 a fact about the corpus. Reading it as requiring an ADR *per integration* would read
 it more narrowly than it is written, which ADR-0089 §3 forbids doing to a marked
 clause and which nothing in ADR-0154 supports — §6's own framing is that "the one
@@ -944,7 +944,7 @@ clause's statement, and this ADR adds to that statement rather than removing it.
 
 **What the statement is now worth, which is the change.** Before this ADR the first
 clause asked a lane to answer a question with no ratified reading available, so the
-only honest answers were "yes" and "unclear" and both fired the second clause —
+only honest answers were "yes" and "unclear" and both fired the third clause —
 which is precisely what #1152 records. With §1 ratified the question has an
 answerable form, and answering it is a real check rather than a formality: a lane
 must look at what its integration's ordinary operation persists, and a lane whose
@@ -952,10 +952,10 @@ integration would write assistant-derived state as part of its ordinary operatio
 now finds §3 rather than an open question.
 
 **This diverges from #1152's stated answer, and the divergence is the point.**
-#1152 answered ADR-0154 §6's first clause "**Yes — and on any other reading,
+#1152 answered ADR-0154 §6's second clause "**Yes — and on any other reading,
 unclear**", and that was correct on the corpus as it stood: the only reading under
 which the answer was no was the one three ratified grounds made unavailable. The
-third clause above answers **no** — not because #1152 misread anything, but because
+fourth clause above answers **no** — not because #1152 misread anything, but because
 the sense the question is asked in has now been decided, and under it `send_email`
 places no part of the assistant's store anywhere. #1152's own proposed resolution is
 the shape this ADR takes; where it differs is that §3 is stated as a prohibition
@@ -988,7 +988,7 @@ absorbed:
   text is #57's granularity question arriving on §3's line. #57 stays as ADR-0148
   §13 and ADR-0154 §6 leave it, and no clause here is a claim about what a
   description should carry.
-- **The owner's export of their own model into a service they name.** §3's fourth
+- **The owner's export of their own model into a service they name.** §3's fifth
   clause reserves it to its own ADR and states what that ADR must decide.
   ADR-0073 §10's deferred `export` command and ADR-0007's `MemoryStore.export`
   produce portable JSON locally and are untouched.
@@ -1013,8 +1013,8 @@ absorbed:
 
 ## Consequences
 
-- **#95 is answered and the registration gate lifts.** ADR-0154 §6's second clause
-  is discharged for every integration, its first clause survives with more content
+- **#95 is answered and the registration gate lifts.** ADR-0154 §6's third clause
+  is discharged for every integration, its second clause survives with more content
   than it had, and the registration lane can proceed against a ratified reading
   instead of stopping (#1152).
 - **ADR-0004 §2's residency clause becomes narrower in reach and stronger in
