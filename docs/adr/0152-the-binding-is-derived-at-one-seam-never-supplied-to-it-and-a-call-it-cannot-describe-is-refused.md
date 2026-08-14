@@ -10,8 +10,9 @@
 - **Consumes ADR-0150's value and redefines no part of it.** `EgressBinding`,
   `EgressSpan`, `EgressDestination`, `CanonicalDestination`, `BoundAccount`,
   `DestinationProtocol` and `DiscloserProvenance` are ADR-0150's, used exactly as
-  it defines them. §2 fixes the `core` names this ADR is authorised to add, and
-  they are five.
+  it defines them — `EgressBinding` is **carried** by the value §1 returns, not
+  amended by it. §2 fixes the `core` names this ADR is authorised to add, and
+  they are six.
 - **Discharges every obligation ADR-0150 §11 and §6 route here**, each in §5, §6,
   §7 or §9, and §14 maps them one by one so a reader can check the routing was
   spent rather than cited.
@@ -136,8 +137,9 @@ no reader can mistake for a denial.**
 ### 1. One Protocol, two operations, and what each is given
 
 > **Normative.** `core/protocols.py` gains **one** Protocol, `EgressBinder`, the
-> seam by which `orchestration` obtains an egress binding from `tools/` before
-> `ActionPolicy.decide` is reached. It carries exactly two members and no others:
+> seam by which `orchestration` obtains an egress binding — together with the call it
+> was derived under — from `tools/` before `ActionPolicy.decide` is reached. It
+> carries exactly two members and no others:
 
 ```python
 @runtime_checkable
@@ -148,7 +150,7 @@ class EgressBinder(Protocol):
         *,
         parameters: FrozenJsonMapping,
         provenance: CarriedProvenance,
-    ) -> EgressBinding | None: ...
+    ) -> BoundEgressCall | None: ...
 
     async def rebind(
         self,
@@ -156,7 +158,7 @@ class EgressBinder(Protocol):
         *,
         parameters: FrozenJsonMapping,
         approved: EgressBinding | None,
-    ) -> EgressBinding | None: ...
+    ) -> BoundEgressCall | None: ...
 ```
 
 **Docstrings are omitted here and are not optional in the Protocol**, the form
@@ -190,12 +192,64 @@ convention.
 > below, which runs ahead of it.
 
 > **Normative.** `parameters` is the `FrozenJsonMapping` the `ActionRequest` will
-> carry, unaltered. Neither member returns parameters, amends them, defaults a
-> value into them or reports a substitute for them, and no caller builds an
-> `ActionRequest` from parameters other than the ones it passed here. A binding
-> derived from one argument mapping and bound beside another is the whole of what
-> ADR-0150 §4's parameter-relative invariants exist to refuse, one stage before
-> they can refuse it.
+> carry, unaltered. Neither member amends them, defaults a value into them or reports
+> a substitute for them: what a member hands back on the egress path is the **same**
+> mapping it derived under, carried on the `BoundEgressCall` below rather than left
+> for the caller to supply again. A binding derived from one argument mapping and
+> bound beside another is the whole of what ADR-0150 §4's parameter-relative
+> invariants exist to refuse, one stage before they can refuse it — and returning the
+> pair together is what makes that refusal unnecessary rather than merely stated.
+
+> **Normative.** Both members return a **`BoundEgressCall`**: a frozen pydantic model
+> in `core/types.py` with `extra="forbid"`, `frozen=True`,
+> `hide_input_in_errors=True` and `revalidate_instances="always"`, carrying exactly
+> **three** fields and no others — `binding`, the `EgressBinding` the seam derived;
+> `tool`, the **detached** `ToolDefinition` the derivation read; and `parameters`, the
+> **detached** `FrozenJsonMapping` it read. It carries **no** provenance field: a
+> span's provenance is already inside `binding`, and a second copy beside it would be
+> two shapes of one fact — the duplication ADR-0150 is named against, and the
+> objection this section's locator clauses already answer. `rebind` has no `provenance`
+> argument at all, so such a field would also be filled from a different source per
+> member, for no consumer.
+
+> **Normative.** The caller builds its `ActionRequest` from the returned
+> `BoundEgressCall`'s fields — its `tool`, its `parameters` and its `binding` — and
+> **never** from objects it retained across the call. This replaces the weaker rule an
+> earlier draft stated, "no caller builds an `ActionRequest` from parameters other
+> than the ones it passed here", which a caller could satisfy to the letter while the
+> mapping it retained had moved underneath it.
+
+> **Normative.** No `await` sits between a member returning and the caller
+> constructing the `ActionRequest` from what it returned. The system composes on one
+> event loop, so with no suspension point between them nothing else interleaves there
+> and the returned copies cannot be reached or replaced before the request is built.
+> The residual obligation is therefore **one** clause on **one** site, discharged by
+> the absence of a suspension rather than by trusting a caller to be careful.
+
+> **Normative.** Where `bind` returns `None` (§8) the caller builds its
+> `ActionRequest` as it does today, from its own `tool` and `parameters`, with
+> `egress_binding=None`. There is no binding, so there is no pair to hold together and
+> no divergence to falsify anything — which is what keeps §8's claim that no behaviour
+> of any non-egress call changes exactly true rather than nearly true.
+
+**The binding and the call it describes are returned together, and the two
+alternatives were refused for different reasons.** Adversarial review found that
+detaching inside the seam (above) makes the seam derive from its own copies while the
+caller builds the request from its objects, so a mutation across §10's one await
+produces exactly the mismatched pair the `parameters` clause says must not exist.
+Three shapes answer it and only one is sound. **Returning the pair** is taken.
+**Passing a pre-detached call snapshot in** is refused as *unsound* rather than merely
+inferior: a snapshot the caller constructs stays caller-reachable across the await, so
+it reproduces the same divergence one level up, and it moves detachment to every
+caller besides. **Leaving the surface alone and obliging the caller by rule** is
+refused on this section's own ground — it is a rule where a type will do, which is the
+objection this section makes below against a single two-mode member, and which
+ADR-0150 §1's fifteen partial states are the corpus's worked instance of. What makes
+the taken shape sound is that the seam's detached copies are created **before** the one
+await and are unreachable from outside the seam until they are returned: a mutation
+bypass needs a reference, and during the suspension nothing outside the seam holds one.
+That is why the residual rule is narrower than any alternative's — it governs one
+construction site with no suspension inside it, rather than an object's whole lifetime.
 
 > **Normative.** `provenance` is a `CarriedProvenance`: a frozen pydantic model in
 > `core/types.py` with `extra="forbid"`, `frozen=True` and
@@ -361,6 +415,7 @@ This section is a classification of the change being made and is not normative
 | Name | Where | What |
 |---|---|---|
 | `EgressBinder` | `core/protocols.py`, new | The seam, with exactly the two members §1 lists. |
+| `BoundEgressCall` | `core/types.py`, new | What both members return: a frozen model carrying the derived `EgressBinding` beside the **detached** `tool` and `parameters` it was derived from, so the caller builds its `ActionRequest` from that pair rather than from objects of its own (§1). |
 | `EgressSpanLocator` | `core/types.py`, new | A span's key on this seam: a frozen, hashable model carrying the `argument` and `index` ADR-0150 §4 identifies a span by, with those fields' types and validation taken from `EgressSpan` (§1). |
 | `CarriedProvenance` | `core/types.py`, new | The validating carrier for the recorded origins crossing this seam: one immutable, validated mapping from locator to provenance (§1). |
 | `EgressBindingError` | `core/errors.py`, new | The one refusal class both members raise (§9). |
@@ -376,8 +431,9 @@ This section is a classification of the change being made and is not normative
 > **Normative.** The `core` names this ADR authorises a lane to add or change are
 > exactly these and no others: one new Protocol `EgressBinder` in
 > `core/protocols.py`, `@runtime_checkable`, with exactly the two members §1 states;
-> two new types in `core/types.py`, `EgressSpanLocator` with exactly the two fields
-> §1 states and `CarriedProvenance` with exactly the one field §1 states; one new
+> three new types in `core/types.py` — `BoundEgressCall` with exactly the three fields
+> §1 states, `EgressSpanLocator` with exactly the two fields §1 states, and
+> `CarriedProvenance` with exactly the one field §1 states; one new
 > class `EgressBindingError` in
 > `core/errors.py`; and one new member `EGRESS_UNBINDABLE` on the existing
 > `Disposition` enum in `core/types.py`. No other `core` name changes: no field is
@@ -394,14 +450,26 @@ This section is a classification of the change being made and is not normative
 > toward one. Nothing here forecloses a seam, a member or a type that territory's
 > own ADR places.
 
-**The intersection was checked rather than assumed.** Against ADR-0150 §2: every
-name it authorises appears above as a non-authorisation row, and the five names
-this ADR claims appear on none of its lists. Against ADR-0151 §15: it authorises
-five `AssistantEngine` methods, one Protocol, three types, two constants and
-seven error classes, and this ADR claims none of them and adds nothing to any.
+**The intersection was checked rather than assumed, and re-checked when the sixth
+name was added.** Against ADR-0150 §2: every name it authorises appears above as a
+non-authorisation row, and the six names this ADR claims appear on none of its lists.
+Against ADR-0151 §15: it authorises five `AssistantEngine` methods, one Protocol,
+three types, two constants and seven error classes, and this ADR claims none of them
+and adds nothing to any. Against the one other decision in flight beside this — the
+offline delete act's routing to the integration purge, drafted in **PR #1129** and
+unmerged, so not yet a decision anything may cite: its `core` authorisation is
+exactly one new Protocol in `core/protocols.py`, and it states in terms that it adds
+no type to `core/types.py`, no class to `core/errors.py` and no enum member. The two
+authorisation lists are therefore disjoint, and that lane sits on the
+`service`→`tools` boundary this ADR does not reach. Checked against its drafted text
+rather than assumed, and it binds nothing until it merges.
 The one shared word is `Egress`, which prefixes ADR-0150's value types and this
-ADR's seam and locator; the one shared concept is the connected account, and §10
-states in terms which of the two account types this surface holds.
+ADR's seam, locator and returned call; the one shared concept is the connected
+account, and §10 states in terms which of the two account types this surface holds.
+`BoundEgressCall` and ADR-0150 §2's `BoundAccount` share a prefix and are not near
+neighbours in ADR-0102 §2's sense: the head nouns differ and name different things —
+an account bound **into** a binding, and the call the binding **describes** — and
+neither is constructible where the other is expected.
 
 ### 3. The declaration vocabulary is two keywords, and ADR-0150 §4 is why it is not four
 
@@ -632,7 +700,7 @@ those shapes would make the refusals unreachable rather than wrong."
 
 ### 5. The seam derives the binding whole and accepts no part of it
 
-> **Normative.** `bind` **derives** every field of the binding it returns. It
+> **Normative.** `bind` **derives** every field of the binding it produces. It
 > accepts no destination, no canonical form, no span, no extent, no tier, no
 > canonical destination set and no binding from any caller, and there is no
 > argument through which one could be supplied.
@@ -768,8 +836,9 @@ carrying real provenance before then.
 > does not carry (§5), a registered egress tool it holds no connected account or
 > transport endpoint for (§10), a definition unequal to its registered original
 > (§1), or an `EgressBinding` its own construction refuses under ADR-0150 §3, §4 or
-> §8. It never returns a partial binding and never returns `None` to signal a
-> failure.
+> §8. It never returns a partial binding, never returns a `BoundEgressCall` whose
+> `tool` or `parameters` is other than the one the binding it carries was derived
+> under, and never returns `None` to signal a failure.
 
 **Five named refusals and a residual clause, rather than an enumeration presented
 as closed.** **The uncompletable call** is the residual one and the boundary; the
@@ -812,10 +881,12 @@ carries.
 > derived span by locator. Nothing else in `approved` is read into the result.
 
 > **Normative.** `rebind` **refuses** unless the binding it derived is **equal** to
-> `approved` — equal as ADR-0150 §9 compares a binding, whole and by value. It
-> returns the binding it derived, never the one it was given, so the rebuilt
-> request carries a value this seam produced rather than one read back out of a
-> store.
+> `approved` — equal as ADR-0150 §9 compares a binding, whole and by value. The
+> `BoundEgressCall` it returns carries the binding it **derived**, never the one it
+> was given, so the rebuilt request carries a value this seam produced rather than one
+> read back out of a store — and it carries that binding beside the detached `tool`
+> and `parameters` it was derived under, so ADR-0037 §4's rebuilt request is built
+> from the same pair on the resuming path as on the first (§1).
 
 > **Normative.** `rebind` **refuses** a `provenance` in `approved` it cannot match:
 > a derived span whose locator names no span of `approved`, and a span of
@@ -924,9 +995,11 @@ the ruling and the transmission.
 > partition and precedes both, so it neither widens the refusing limb nor narrows the
 > `None` one.
 
-> **Normative.** A caller receiving `None` builds its `ActionRequest` with
-> `egress_binding=None`, which is ADR-0150 §1's default and its stated `None`
-> semantics. No behaviour of any non-egress call changes: `authorises` compares
+> **Normative.** A caller receiving `None` builds its `ActionRequest` from its own
+> `tool` and `parameters`, with `egress_binding=None`, which is ADR-0150 §1's default
+> and its stated `None` semantics. §1's build-from-the-returned-value clause governs
+> the egress path and this one governs here, because there is no binding and so no
+> pair to hold together. No behaviour of any non-egress call changes: `authorises` compares
 > `None == None`, `from_request` transcribes nothing, and the ruling is the ruling
 > that is taken today. `current_time` owes this seam nothing beyond one call
 > returning `None`.
@@ -1000,7 +1073,7 @@ user takes to answer, rather than over the life of a registry.
 > and no subclass of this one.
 
 > **Normative.** A refusal is **raised**, never returned. The return type carries a
-> binding or `None`, and neither can express "this call cannot be completed" —
+> `BoundEgressCall` or `None`, and neither can express "this call cannot be completed" —
 > which is what ADR-0150 §11's first routed obligation and PR #1120's eighth
 > observation each ask for, and what a union return would have answered by making
 > the caller branch on a value it cannot act on.
@@ -1330,7 +1403,8 @@ rather than a gap discovered late.
 
 > **Normative.** Surface (b) is a **seam**, so ADR-0137 §2's widening applies whole
 > and ADR-0150 §11's last paragraph places it here: `EgressBinder`'s **triad** —
-> the Protocol in `core/protocols.py`, its shared conformance suite, and its
+> the Protocol in `core/protocols.py` together with the three types §2 authorises in
+> `core/types.py`, which are the types it exchanges, its shared conformance suite, and its
 > canonical fake in `ai_assistant.testing` with the concrete `Test…Contract`
 > subclass that runs the suite against it — lands in **one lane and one PR**
 > together with its **primary production implementation** in `tools/` and the
@@ -1438,6 +1512,23 @@ rather than a gap discovered late.
 > suite exercising only the egress branch leaves it unpinned. A test that constructs
 > its inputs ordinarily reaches none of these, and one covering `bind`'s arguments
 > alone leaves `rebind`'s untested.
+
+> **Normative.** That lane ships the **pairing** pin §1's return clauses are stated
+> for: the `ActionRequest` the runner builds carries `parameters` **equal** to the
+> returned `BoundEgressCall`'s `parameters` and a `tool` equal to its `tool`, asserted
+> on a call where the runner's own retained objects were **mutated across §10's
+> awaited read** so that they are *unequal* to the returned ones. The divergence is
+> what makes the assertion discriminating: without it, equality holds whichever object
+> the runner used and the test pins nothing.
+
+> **Normative.** That assertion is **equality, not identity**, and the reason is
+> mechanical rather than stylistic: `FrozenJsonMapping` carries an `AfterValidator`
+> that rebuilds the mapping through `_deep_freeze` in `core/types.py`, which
+> constructs a fresh `FrozenDict` unconditionally, so constructing an `ActionRequest`
+> cannot preserve the identity of `parameters` and an identity assertion could never
+> pass. No lane weakens the clause to equality **without** the divergence, and no lane
+> strengthens it to identity on `tool` alone, which would split one rule into two on
+> the accident of which field's validator happens to rebuild.
 
 > **Normative.** That lane ships the **detachment** cases §1's detachment clauses are
 > stated for — **one per validated argument**, each exercised by mutating the caller's
@@ -1650,8 +1741,14 @@ making the second checkable.
 
 **ADR-0150 §1, §2, §5, §7, §8, §9, §10 and §12 — no record owed.** §1's `None`
 semantics are consumed exactly (§8), and §2's authorisation list is not extended:
-§2 above adds four names none of which appears on it, and §13's non-substitution
-clause for `ConnectedAccount` is restated here rather than relaxed. §5's
+§2 above adds six names none of which appears on it, and §13's non-substitution
+clause for `ConnectedAccount` is restated here rather than relaxed. In particular
+**`BoundEgressCall` carries an `EgressBinding` without touching one**: it adds no
+field to that model, reinterprets none, stores no second copy of one and mints no
+alternative to it, so ADR-0150 §9's whole-value equality still compares the same
+shape and a reader holding only ADR-0150 finds every one of its types exactly as it
+defined them. A type that *holds* another is not a change to the held one, which is
+the same reading ADR-0150 §7's `BoundAccount` already relies on. §5's
 carried-not-derived rule is applied at the seam and §5 above discharges its
 fail-closed default by having the builder **write** `SYSTEM_SELECTED`, which is §5
 there in terms. §5's third clause — the origin's path is not decided — is relied on
@@ -1863,6 +1960,13 @@ any finding waived with its rationale.
   commits nothing and leaves the step `PENDING`, which is `AMBIGUOUS_CAPABILITY`'s
   and `INVALID_PARAMETERS`' shape and ADR-0037 §1's argument for the third time. Every
   exhaustive reader of the enum in this repository is the implementing lane's to find.
+- **The seam returns the call it bound, not only the binding.** Both members hand
+  back the derived binding beside the detached `tool` and `parameters` it was derived
+  under, and the runner builds its `ActionRequest` from that value. The cost is one
+  more `core` type and a sixth claimed name; what it buys is that the binding and the
+  payload it describes cannot drift apart between the seam and the request — a
+  property a rule obliging the caller could state but not enforce, which is why the
+  two rule-shaped alternatives were refused (§1).
 - **The non-egress path is untouched and the lane must prove it.** `None` in, `None`
   out, `None == None`, and §13's regression pin demands byte-identical durable state
   rather than a claim.
