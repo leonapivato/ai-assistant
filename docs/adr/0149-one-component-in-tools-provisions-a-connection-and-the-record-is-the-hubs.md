@@ -968,7 +968,10 @@ commit:
   `Settings.data_dir`, opened by `build_engine`, append-only, with its seam
   `tools/`-internal, so no Protocol is added to `core/protocols.py` for it; §5's
   refusal of enumeration is what makes that store the only composable purge path,
-  which ADR-0149 §8 uses to discharge ADR-0126 §6's forward clause. **§8 is
+  which ADR-0149 §8 uses to answer the purge-contract half of ADR-0126 §6's
+  forward clause. That clause is **not** discharged: its prohibition on writing
+  such an entry stands until #909 settles who routes the owner's delete to that
+  purge, and ADR-0149 §8 carries it forward as a precondition. **§8 is
   unchanged**: its fourth clause enumerates ten subsystems, `tools/` is not among
   them, and its second clause — about the tool that needs a read face — stays true
   as written (ADR-0149 §2). §1's two faces, §2's scope and installation binding,
