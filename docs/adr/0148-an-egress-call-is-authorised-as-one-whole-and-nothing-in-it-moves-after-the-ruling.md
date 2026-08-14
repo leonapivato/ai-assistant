@@ -126,7 +126,11 @@ ruling and moves for nothing afterwards.**
 Throughout, **egress call** means an invocation, through the module ADR-0147 §3
 names as the seam, that transmits off the device under ADR-0124 §1's second
 boundary; and **destination-bearing argument** means an argument of such a call
-from which a semantic recipient is determined.
+from which a semantic recipient **of that same call** is determined. The scope
+matters where a call's whole purpose is to interpret a name: the key a resolution
+call sends to a lookup service is an argument of that call and not a destination
+of it, so that call's own destination set is the connected account under §2's
+third clause and §1's refusal of an unresolved destination does not reach it (§5).
 
 ### 1. The unit of authorisation is the whole call, and it is complete before the ruling
 
@@ -481,6 +485,33 @@ exists; the other three travel together in one value the request carries.
 > nor the revision, so a completed act increments the revision exactly once. No
 > transaction spans the keyring and the connection record, and none is required.
 
+> **Normative.** **At most one provisioning act is in flight per credential
+> reference**, and the connection record is what enforces it. An act *begins* by a
+> single **compare-and-swap** on that record — from the identity, revision and
+> state it observed, to *pending* with the incremented revision — and an act whose
+> compare-and-swap fails has not begun and writes nothing, neither the credential
+> nor the activation. This is ADR-0014 §5's compare-and-swap applied to the one
+> store that can offer it; nothing of the kind is asked of the keyring, which
+> ADR-0125 §4 rules never refuses a `set`.
+
+> **Normative.** Before the credential write, and again before the activation, a
+> provisioning act re-reads the connection record and **abandons** — performing
+> neither write — unless it still carries the identity and revision that act's own
+> first write recorded. Each re-read is **one step** with the write it precedes, in
+> the sense the clause below gives. An abandoned act rolls nothing back: the record
+> it found belongs to the act that displaced it.
+
+> **Normative.** What those two clauses do **not** close is a credential write
+> already in flight when its act is displaced. `Secrets.set` never refuses and the
+> keyring offers no compare-and-swap (ADR-0125 §4), so a displaced act's `set` can
+> land after the displacing act has activated, leaving the keyring holding a
+> credential the record does not describe. That is the same state, and the same
+> limit, as the operator writing a credential into a slot directly (below). It is
+> stated here rather than closed, and no lane presents these clauses as closing it.
+> Fully linearising provisioning belongs to the ADR that decides the provisioning
+> surface, which does not exist yet; this section fixes what the checks require of
+> that surface and nothing about its shape.
+
 > **Normative.** A reference is **connectable** only while its connection record
 > exists and is **active**. A reference that is not connectable takes no part in an
 > egress call at any stage: no `ActionRequest` is built against it — §11's seam (b)
@@ -663,6 +694,32 @@ revision makes "unchanged since I looked" answerable and the pending state makes
 "finished" answerable, each replacing an inference with a recorded fact. It also
 costs no transaction, which is what round 6 had asked for and what nothing
 available can provide.
+
+**Two provisioning acts are a third interleaving, and round 8 found that the state
+alone does not order them.** Nothing above stopped a second act beginning on a
+reference a first had left *pending*: act B writes pending `(B, r1)` and pauses,
+act C writes pending `(C, r2)`, writes C's credential and activates, and B then
+writes B's credential into the same slot — leaving an *active* record naming C over
+a keyring holding B's token, which every check passes. The connection record is the
+only store here that can arbitrate, so it does: an act begins by a compare-and-swap
+on it and re-checks it before each of its two remaining writes. That gives a
+pending record two jobs at once — it is the state a call refuses on, and it is the
+token an act holds — which is why the ordering rule and the state come out as one
+mechanism rather than two. C's takeover is what turns B's resume into an
+abandonment, and taking over is deliberately **permitted** rather than forbidden,
+because forbidding it would strand a reference left pending by an act that died,
+while the remedy this section names is to run the provisioning act again.
+
+**The sliver that survives is worth naming precisely, because a clause implying
+otherwise would be the overclaim this ADR keeps refusing.** If B's `Secrets.set`
+is already in flight when C activates, no re-check either of them can perform sees
+it: the write lands in a store that cannot refuse it and cannot be asked what it
+now holds. Closing it wants a credential slot **per provisioning act**, with the
+record resolving the stable reference to that act's slot — buildable, and a
+decision about the provisioning surface rather than about the checks, so it is not
+taken here (ADR-0073 §4's test, applied as §11 applies it). What the clause does
+instead is state the residue and say where its answer belongs, which is the
+posture §5a's residue and round 5's boundary already take in this section.
 
 **Not connectable is stated over the whole call, not only over the send, because
 §1 is where a refusal is cheapest.** A pending reference could have been refused
@@ -1124,7 +1181,10 @@ on; §1's earliness sits inside step 1 of §2's five-step sequence ("build the
 `StepRunner`'s sequence and nothing is reordered.
 
 **ADR-0014 §4 and §5 — no record owed.** §9 above reads the transition table and
-the recovery scan and applies them; no legal move is added or removed, and no
+the recovery scan and applies them; §6 above takes §5's compare-and-swap as a
+*pattern* and applies it to a different store, which adds nothing to the plan
+record and leaves §5's own version, its holder and its conflict behaviour exactly
+as ratified. No legal move is added or removed, and no
 trigger column becomes wrong — ADR-0029 §9 already recorded the second trigger for
 `RUNNING → INDETERMINATE` as a note on ADR-0014, and this ADR adds no third.
 
@@ -1308,6 +1368,15 @@ form).
 > connectable between the record write and the credential write, or one that marks
 > a record active without having performed that act's credential write.
 
+> **Normative.** That lane also ships the **two-act** case: a second provisioning
+> act beginning on a reference a first left *pending* takes the reference over, and
+> the first, resuming afterwards, writes neither its credential nor its activation.
+> A provisioning implementation whose act begins without a compare-and-swap on the
+> connection record, or which writes its credential or activates without re-reading
+> that record first, fails that test. What the test does **not** assert is that a
+> `set` already in flight is stopped: §6 states that residue, and a test claiming
+> to close it would assert more than the mechanism provides.
+
 > **Normative.** A test asserting only that the happy path transmits satisfies no
 > clause of this section.
 
@@ -1356,14 +1425,34 @@ record while the keyring still holds the old credential. The repair is a **third
 provisioning state** — the record written *pending*, marked *active* only after
 the credential write, and not connectable until it is — which makes the
 half-finished state say what it is instead of impersonating a finished one, and
-needs no transaction either.
+needs no transaction either. Round 8 found the third interleaving in the same
+family — two *provisioning acts* on one reference rather than an act against a
+call — and the repair keeps the arbitration in the one store that can offer it: an
+act begins by a **compare-and-swap** on the connection record and re-reads it
+before each of its two remaining writes, so a displaced act abandons instead of
+writing a credential the record no longer describes. The sliver that survives, a
+`Secrets.set` already in flight when another act activates, is **stated rather
+than closed**, with the slot-per-act mechanism that would close it named and
+routed to the ADR that decides the provisioning surface.
+
+**Round 8's second finding was assessed as resting on a misreading and was
+answered by tightening a definition rather than a decision.** It read §1's refusal
+of "a name that has not been resolved" as reaching the resolution call §5
+requires, making that call unauthorisable. It does not: a resolution call's
+arguments select no recipient beyond the service it is made to, so §2's third
+clause already gives it a canonical destination set — the connected account — and
+§5's prose already said so. What the finding did expose is that the term
+**destination-bearing argument** did not say *whose* recipient it means, and a key
+sent to a lookup service determines a recipient of a later call. The definition now
+carries that scope. No clause changed.
 §6 now carries the account's identity beside its credential reference, the
 endpoint alongside both, the callable's four-way refusal behind all of them, and
 ADR-0097 §5a's one-step/re-check/fail-closed discipline over the read, a
 monotonic revision on the connection record so the re-check answers "unchanged"
-rather than "equal", and a pending/active provisioning state so that "finished" is
-recorded rather than inferred — with the residue stated in §5a's own honest form
-rather than papered over. §11 states the
+rather than "equal", and a pending/active provisioning state — begun and held by a
+compare-and-swap — so that "finished" is recorded rather than inferred, and so that
+two provisioning acts on one reference are ordered by the store that can order them
+— with each residue stated in §5a's own honest form rather than papered over. §11 states the
 surface that costs, and §6's own prose says what each draft got wrong and why.
 **That is the one worth remembering**: the defect is ADR-0147 §13's — stating a
 hazard and then admitting the thing anyway — reproduced in a draft that quotes
