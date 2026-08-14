@@ -30,6 +30,7 @@ from ai_assistant.tools.destinations import canonical_destination_set
 from ai_assistant.tools.payload_description import DiscloserProvenance, SpanRef
 from ai_assistant.tools.send_email import (
     SEND_EMAIL,
+    SEND_EMAIL_DECLARATION,
     SEND_EMAIL_DESTINATIONS,
     SEND_EMAIL_ID,
     SEND_EMAIL_PAYLOAD,
@@ -167,6 +168,17 @@ def test_the_recipient_fields_establish_a_tier_and_the_free_text_fields_do_not()
         "subject": None,
         "body": None,
     }
+
+
+def test_the_declaration_binds_both_halves_to_this_tool() -> None:
+    """Built at import, so a tool whose halves disagree does not load.
+
+    ADR-0016 §1's posture — "a tool that does not declare its reach does not load"
+    — applied to the pair rather than to one declaration.
+    """
+    assert SEND_EMAIL_DECLARATION.tool_id == SEND_EMAIL.id
+    assert SEND_EMAIL_DECLARATION.payload is SEND_EMAIL_PAYLOAD
+    assert SEND_EMAIL_DECLARATION.recipients is SEND_EMAIL_DESTINATIONS
 
 
 def test_describing_a_send_yields_both_forms_and_one_canonical_member() -> None:
