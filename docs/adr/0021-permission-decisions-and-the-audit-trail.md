@@ -1,6 +1,6 @@
 # 21. Permission decisions and the audit trail
 
-- Status: Accepted
+- Status: Accepted, §1's payload-storage sentence amended by ADR-0148 (§6's egress binding is carried in the recorded decision)
 - Date: 2026-07-20
 
 ## Context
@@ -288,6 +288,30 @@ nothing leaves the prompt with nothing to say.
 > restarted process recovers a parked confirmation by its binding rather than by
 > a decision id it no longer holds (§3). The live contract in `core/protocols.py`
 > and `core/types.py` governs.
+
+> **Amended by ADR-0148 §6 (2026-08-13).** One sentence above is now over-wide:
+> "the decision binds the payload and holds none of it". For an egress call at
+> the `tools/` seam, ADR-0148 §6 rules that an **egress binding** — the canonical
+> destination set with the supplied form each member came from, the connected
+> account's identity and credential reference, the transport endpoint, and a
+> payload *description* — is fixed in the `ActionRequest` before the ruling,
+> compared by `authorises`, and **transcribed verbatim into the recorded
+> decision**. A supplied destination form is an argument value, and "a recipient"
+> is one of the three examples above of what this section declines to store, so
+> the recorded decision now holds some of what it ruled on. ADR-0017 §3's tenth
+> condition is why it is unavoidable: both the supplied and the canonical form
+> must reach the audit record.
+>
+> **What does not change.** `parameters_digest` is untouched and still binds the
+> arguments while storing none of them; `parameters` still may not carry a Tier 0
+> value, and ADR-0148 §6 restates that exclusion for the new value rather than
+> relaxing it. The description states extent, provenance, tiers and destinations
+> rather than content, which is the artifact this section's reasoning — that a
+> verbatim copy of the arguments would make the trail "a second copy of the
+> user's most sensitive material" — leaves room for. Nothing here reaches a
+> boundary other than the `tools/` egress seam, and ADR-0148 adds no field: its
+> §11 flags the surface under golden rule 5 and reserves the shape to a contract
+> ADR of its own, ratified and merged before anything implements against it.
 
 ### 2. `PermissionOutcome` is an ordered scale, reusing `_SeverityScale`
 

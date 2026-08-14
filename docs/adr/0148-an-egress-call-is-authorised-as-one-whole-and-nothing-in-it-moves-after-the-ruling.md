@@ -1118,6 +1118,20 @@ surface as (a) or rides inside it, and this ADR neither merges them nor rules th
 are distinct: it is the same lane's decision, made with the same producer in hand,
 and prejudging it here would be exactly the guess ADR-0146 §8 declined.
 
+**One sentence of §6 has to be read narrowly for that to stay true, so it is said
+here rather than left to be inferred.** §6's determinism clause makes the
+description "a function of the request's own arguments and the registry's
+definition for the bound tool, and of nothing else". That is a rule about the
+description's **inputs at derivation time** — it forbids a clock, a store read or
+a network call, so that two derivations agree and an auditor can re-derive one. It
+is **not** a ruling that provenance must be recoverable from an argument's value,
+which would be ADR-0146 §2's forbidden inference arriving late, and it is not a
+ruling that the deferred marker must ride inside `parameters`. Whatever carries a
+span's provenance *into* the request is the marker's business and stays ADR-0146
+§8's; the determinism clause binds only what a builder may consult once the
+request is in hand. Architecture review read the clause the other way on its first
+pass, which is why the scope is now stated.
+
 ### 12. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
 ADR-0082 §1 requires the judgement in the later ADR's text, and it is made here.
@@ -1152,18 +1166,38 @@ seam and changes no sentence of §5. §6's **standing grants** bullet is untouch
 that nothing here pre-shapes it, so a reader holding only ADR-0021 §6 finds the
 same deferral, with the same relief-valve role, and acts identically.
 
-**ADR-0021 §1 and §4 — no record owed by *this* ADR, and the reason is a
-distinction worth stating.** §11's surface (a) adds a field to `ActionRequest`
-and `PermissionDecision` and a conjunct to `authorises`, which does sit against
-§1's "the decision binds the payload and holds none of it" — a description is not
-the payload, but a reader holding only ADR-0021 §1 would build a decision with no
-such field. **This ADR adds none of it.** It states that the surface is required
-and routes it to a contract ADR of its own (§11's second clause), and under
-ADR-0082 §1 the record is owed by the ADR that makes the change, against the
-sentence it makes false or over-wide, not by the ADR that says one will be needed.
-Recording it here as well would be writing a note about an edit nobody has made.
-§4's append-only, write-once rule is not merely preserved but is §9's whole reason
-for putting the attempt's outcome in the plan record rather than in the trail.
+**ADR-0021 §1 — a record *is* owed, and it is written.** The clause is §1's
+"**the decision binds the payload and holds none of it**". §6 above fixes the
+egress binding in the `ActionRequest` before the ruling and has it **transcribed
+verbatim into the recorded decision**, and that binding carries the supplied form
+of every destination — an argument value, and "a recipient" is one of the three
+examples §1 gives of what it declines to store. A reader holding only ADR-0021 §1
+therefore reads that sentence more widely than it now holds, which is ADR-0070
+§1's test coming out **yes**, so under ADR-0082 §1 the record goes on ADR-0021's
+`Status` line and in an appended dated note at the end of its §1. It is an
+**amendment** and not a supersession: `parameters_digest` stands, `parameters`
+store nothing and still admit no Tier 0 value, and what §1 decided about *the
+arguments* is untouched — the sentence is over-wide rather than replaced.
+
+**An earlier draft of this section cleared that clause, and the argument it used
+is worth recording as wrong.** It reasoned that §11 routes the surface to a
+contract ADR of its own, that "this ADR adds none of it", and that the record is
+therefore owed by the ADR that makes the change rather than by the one saying a
+change will be needed. Architecture review found the flaw: ADR-0082 §1 applies
+ADR-0070 §1's test "to the earlier ADR's **text**", not to a tree, and the
+substance is decided *here* — §6's transcription clause is marked and normative on
+ratification, while §11 defers only the surface's **shape**. The later contract
+ADR will choose fields; it will not choose whether the recorded decision holds a
+destination form, because this ADR already has. ADR-0044 is the worked precedent
+in the other direction: its note sits on ADR-0021 §1 from the day ADR-0044 merged,
+ahead of the implementation that followed it. Nor is the storage avoidable by
+redesign, which is what makes this an amendment rather than a preference:
+ADR-0017 §3's tenth condition and §2's fourth clause above each require **both**
+the supplied and the canonical form to reach the audit record.
+
+**ADR-0021 §4 — no record owed.** Its append-only, write-once rule is not merely
+preserved but is §9's whole reason for putting the attempt's outcome in the plan
+record rather than in the trail.
 
 **ADR-0029 §1, §2, §5, §6 and §8 — no record owed.** The biconditional, the three
 seam checks and their order, the derived idempotency key, the credential rule and
@@ -1175,10 +1209,17 @@ does not alter the field. ADR-0029 §7's scope-out — "Designating the `tools/`
 egress seam … This contract is a precondition for that ADR, not a substitute for
 it" — is true of this ADR in exactly the same words, and §13 says so.
 
-**ADR-0037 §2 and §3 — no record owed.** The order and the read-back are relied
-on; §1's earliness sits inside step 1 of §2's five-step sequence ("build the
-`ActionRequest`"), which §2 already places before `decide`. Nothing is added to
-`StepRunner`'s sequence and nothing is reordered.
+**ADR-0037 §2 and §3 — no record owed, and §3 is the near miss worth showing.**
+The order and the read-back are relied on; §1's earliness sits inside step 1 of
+§2's five-step sequence ("build the `ActionRequest`"), which §2 already places
+before `decide`. Nothing is added to `StepRunner`'s sequence and nothing is
+reordered. §3 is where the ADR-0021 §1 amendment above could plausibly have
+reached a second clause, since it is the section that says what the trail must
+return — and it clears on its own sentence: the equality check "is total over the
+fields, **so a field added to `PermissionDecision` later is covered without anyone
+remembering to extend a list**". A clause that provided for this addition in
+advance is not made false or over-wide by it; §3's guarantee is unchanged and
+strictly cheaper to keep than a field list would have been.
 
 **ADR-0014 §4 and §5 — no record owed.** §9 above reads the transition table and
 the recovery scan and applies them; §6 above takes §5's compare-and-swap as a
@@ -1204,7 +1245,13 @@ designates the `tools/` seam" is carried into §6 and §8 above and is neither
 widened nor narrowed — its `models/` exemption is untouched. §8's second clause,
 which leaves open whether a standing policy may authorise forwarding
 user-authored content to a third party, is honoured by §3's third and fourth
-clauses rather than answered.
+clauses rather than answered. §8's **first** deferral — the marker carrying a
+span's provenance to an egress boundary — is honoured rather than spent: §6's
+provenance clause is ADR-0146 §6's *requirement* being consumed, which §6's own
+prose contemplates landing "on the payload description itself", and §11 above
+declines to rule whether that marker and surface (a) are one. The determinism
+clause beside it is scoped in §11 so that it constrains a builder's inputs and
+not the marker's shape.
 
 **ADR-0147 §3, §4 and §12 — no record owed.** §3's seam name is used. §4's fifth
 clause binds "the ADR that authorises a stdio server"; this ADR is not that ADR
@@ -1256,8 +1303,11 @@ this ADR governs are the second of its three boundaries, and nothing here widens
 the set or cites §1 toward designating the seam, which its own marked clause
 forbids.
 
-**No ADR is amended and none is superseded**, so no `Status` line and no appended
-note is written anywhere in `docs/adr/` but this file. Under ADR-0082 §1 a
+**Exactly one ADR is amended and none is superseded**, so `docs/adr/0021-…md` is
+the only file besides this one that this change touches: its `Status` line gains
+the qualifier in the shape ADR-0082 §2 keeps permitted on a line with no leading
+token, and its §1 gains an appended dated note. No accepted text is rewritten
+anywhere, here or there (ADR-0070 §1). Under ADR-0082 §1 a
 reviewer "may not demand a record, or its removal, on book-keeping grounds
 alone", and may require one by "naming the sentence of the earlier ADR that does,
 or does not, become false or over-wide" — which is the form a disagreement with
@@ -1445,6 +1495,28 @@ clause already gives it a canonical destination set — the connected account �
 **destination-bearing argument** did not say *whose* recipient it means, and a key
 sent to a lookup service determines a recipient of a later call. The definition now
 carries that scope. No clause changed.
+
+**Architecture's first round changed §12, which is the section it was always most
+likely to reach.** It found that §12 cleared ADR-0021 §1 wrongly: §6 has the
+egress binding transcribed verbatim into the recorded decision, that binding
+carries every destination's supplied form, and §1 names "a recipient" among the
+argument values it declines to store — so "the decision binds the payload and
+holds none of it" is over-wide, and the record is owed **here**, because ADR-0082
+§1 applies its test to the earlier ADR's text rather than to a tree and §11 defers
+only the surface's shape. The record is now written: a `Status` qualifier and a
+dated note on ADR-0021, and the judgement declared in §12. Re-running §12's sweep
+after that reversal found no second clause caught by the same test; the nearest
+neighbour, ADR-0037 §3, clears on its own sentence that its equality check covers
+"a field added to `PermissionDecision` later". The round's other finding — that
+§6's provenance clause spends ADR-0146 §8's deferred marker — was assessed as
+reaching a real ambiguity by the wrong route: ADR-0146 §6 states the requirement
+and its own prose names the payload description as a place the mechanism may land,
+so §6 consumes it rather than deciding it. What the finding did expose is that
+§6's determinism clause could be read as ruling on where provenance comes from,
+which would prejudge the marker. §11 now scopes it to a builder's inputs. The
+finding's direction — remove the carriage, or make this the designating ADR — is
+refused: the second is reserved by ADR-0017 §2 and disclaimed in this ADR's own
+header, and the first would drop an obligation ADR-0146 §6 already binds.
 §6 now carries the account's identity beside its credential reference, the
 endpoint alongside both, the callable's four-way refusal behind all of them, and
 ADR-0097 §5a's one-step/re-check/fail-closed discipline over the read, a
