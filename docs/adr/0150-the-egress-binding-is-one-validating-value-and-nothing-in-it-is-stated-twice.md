@@ -376,9 +376,17 @@ move this section makes one level up, where occurrences are stored and the set i
 derived. Cross-checking a stored `canonical` against a derived one would close the
 same hole, and it was rejected: it keeps a second copy of a fact, which is what this
 ADR is named after, and a copy that can be wrong is a copy that will be wrong in the
-one code path nobody tested. What it costs is that a recorded decision's canonical
-forms are re-derived under the member's rule rather than frozen at the ruling, which
-is why the widening clause below now carries that obligation.
+one code path nobody tested. **What deriving would otherwise have cost is a recorded
+decision's canonical forms moving under it**, and round 11 found it: approve a request
+for `Alice@EXAMPLE.com`, let a later ADR change `SMTP`'s folding rule, and the set
+derived at transmission is not the set the user approved — ADR-0148 §4's rule that no
+component adds, removes, substitutes or reorders that set between ruling and
+transmission, broken by an edit to a document rather than by a component. The
+immutability clause below pays it: a ratified member's folding rule never changes, a
+changed rule is a **new member**, and a recorded destination's `protocol` therefore
+pins the derivation it was ruled under for as long as the record lasts. Only the
+acceptance boundary may widen, and widening it re-relates no pair of forms that was
+already accepted.
 
 **Protocol-qualifying the set is not decoration, and leaving it out would be a
 silent widening later.** ADR-0148 §2's second clause makes comparison byte-exact
@@ -517,14 +525,26 @@ the reason this member is decidable here at all.
 > no lane reads ADR-0148 §2's second clause as obliging a canonicaliser to accept
 > every string a caller supplies.
 
-> **Normative.** Widening `SMTP` to accept a form the clause above refuses, or changing
-> the rule by which it folds one, is a change to what that member asserts and needs its
-> own ratified ADR, on the same terms as adding a member: it states which equivalences
-> the newly accepted forms do and do not establish, **and what it does to the canonical
-> forms already derived in recorded decisions**, which are re-derived under the rule as
-> it then stands rather than frozen at the ruling. No lane widens the member by
-> building a canonicaliser that accepts more, and no lane changes the derivation
-> without one.
+> **Normative.** A member's **asserted equivalences and its canonicalisation rule are
+> immutable once ratified**, and no ADR edits them. An ADR that would change which
+> supplied forms a member folds together, or what it folds them to, adds a **new
+> member** and leaves the existing one exactly as it stands; it also states what
+> becomes of the decisions and standing grants recorded under the member it replaces,
+> which keep that member. This is what makes a derived canonical form stable across a
+> ruling: a recorded destination's canonical form is a function of its `protocol` and
+> its `supplied` form, neither of which can change after the ruling, so the canonical
+> destination set at transmission is the set that was ruled on — ADR-0148 §4's rule,
+> which a re-derivation under a moved rule would otherwise break without any component
+> touching the decision.
+
+> **Normative.** Widening a member's **acceptance boundary** — admitting a form the
+> clause above refuses — is a change to what that member asserts and needs its own
+> ratified ADR, on the same terms as adding a member: it states which equivalences the
+> newly accepted forms do and do not establish. It is the **only** change permitted on
+> a ratified member, and it is permitted because admitting a form re-relates no pair of
+> forms that was already accepted: every canonical form already derived is derived
+> unchanged under the wider boundary. No lane widens a member by building a
+> canonicaliser that accepts more, and no lane changes a member's folding rule at all.
 
 > **Normative.** Every further member is added by a **ratified contract ADR of its
 > own**, merged before any canonicaliser, integration or lane implements against it
@@ -1247,6 +1267,20 @@ breath was already a derived property in ADR-0148's own terms. What §14 forbids
 other direction — reconstructing a supplied form from a canonical one — and this ADR
 stores the form that direction requires.
 
+**ADR-0148 §3 and §4 — no record owed, and §3's second clause was written to keep it
+that way.** §4's rule that nothing adds, removes, substitutes or reorders the
+authorised set between ruling and transmission is relied on unchanged, and deriving a
+canonical form is what put it at risk: a set derived at transmission under a folding
+rule that had moved since the ruling would break §4 with no component having touched
+the decision. The immutability clause in §3 closes that inside this ADR rather than by
+qualifying §4 — a ratified member's rule never changes, so a recorded destination's
+`protocol` and `supplied` form pin one canonical form for the life of the record. §3's
+first clause, binding a standing grant to the canonical destination set, is relied on
+in the same way and for the same reason. A reader holding only ADR-0148 §§3 and 4 finds
+every sentence still true and no sentence reaching further; what they additionally find
+here is an obligation on a **future** ADR, which is ADR-0082 §1's stacked addition,
+"recorded in the ADR that makes it, and nowhere else".
+
 **ADR-0148 §6 and §11 — no record owed, and this is the one the whole ADR turns on.**
 §11's clause defers the shape and its unmarked prose says in terms that "a contract
 ADR that satisfies those is free to choose the signature". Choosing it is that
@@ -1476,9 +1510,13 @@ rather than re-deriving it, and the outcome is recorded here on ratification.
   the standard we would want everywhere". The acceptance boundary is a **closed
   grammar** rather than a list of refusals, so a form nobody thought of is refused
   rather than silently canonicalised by whichever implementation saw it first. The
-  cost is real and the route out is named rather than left to erosion: §3 makes widening `SMTP` an ADR, on the same
-  terms as adding a protocol, so the forms come back with an argument about what
-  equivalences they establish rather than as a patch to a canonicaliser.
+  cost is real and the route out is named rather than left to erosion: §3 makes widening
+  `SMTP`'s acceptance boundary an ADR, on the same terms as adding a protocol, so the
+  forms come back with an argument about what equivalences they establish rather than as
+  a patch to a canonicaliser. What that route does **not** reach is the folding rule,
+  which §3 makes immutable — a member that folded differently would re-derive the
+  canonical forms inside decisions already ruled on, so a changed rule is a new member
+  and the old records keep the old one.
 - **Nothing here authorises a byte.** The seam remains approved and undesignated, no
   tool is registered at it, and this ADR supplies a value for a decision that has
   nothing to rule on yet.
