@@ -471,12 +471,16 @@ exists; the other three travel together in one value the request carries.
 > incremented by **every** provisioning act on that reference — including one that
 > leaves the identity unchanged. A revision is never reused and never decreases.
 
-> **Normative.** Provisioning or re-provisioning a connected account is **one
-> act**: the credential, the identity recorded for its reference and that
-> reference's revision are written together, and no state is observable in which
-> they disagree. The lane that builds the connection surface owes this; it is
-> ADR-0124 §6's rule for re-enrolment and ADR-0021 §4's for `record`, applied to
-> this triple.
+> **Normative.** Provisioning or re-provisioning a connected account writes the
+> **connection record first** — the identity and the incremented revision — and
+> the **credential second**. The reverse order is forbidden. No transaction spans
+> the keyring and the connection record, and none is required.
+
+> **Normative.** A provisioning act interrupted between those two writes leaves
+> the record ahead of the keyring. That state is refused by the checks below
+> rather than reconciled: the call does not transmit, and the remedy is to run the
+> provisioning act again. No lane resolves it by trusting the keyring, by rolling
+> the record back, or by inferring an identity from the credential.
 
 > **Normative.** The check and the credential read are **one step**: no `await`
 > occurs between reading the identity and revision recorded for the bound
@@ -587,11 +591,36 @@ between the `live()` result a driver gates on and its call to `Reader.read()`",
 that the driver "re-checks the grant when `read()` returns" and discards the
 reading if it has gone, and that it "fails closed on an unanswerable check". The
 clauses above are that rule transposed onto the credential, with the last stating
-the residue in §5a's own honest form rather than claiming the window is gone. The
-atomic-provisioning clause is what makes the re-check meaningful: a provisioning
-act that wrote the token and then the identity would leave an observable state in
-which a re-check reads the old identity beside the new token, which is ADR-0124
-§6's forbidden intermediate state arriving here.
+the residue in §5a's own honest form rather than claiming the window is gone.
+
+**The provisioning clause asks for an order, not a transaction, and an earlier
+draft asked for the transaction.** That draft required the credential, the
+identity and the revision to be "written together" with "no state observable in
+which they disagree". Adversarial found on round 6 that nothing can provide it:
+the credential lives in the OS keyring behind ADR-0125's seam, which stores one
+value per `SecretName` and offers no transaction, and the connection record lives
+in a store beside it. The finding's direction was a further contract ADR for a
+transactional provisioning abstraction; that is not needed, because the property
+the checks actually require is weaker and is bought with ordering alone. Write the
+record first and the only window is one in which the record is **ahead** of the
+keyring — identity B or revision r+1 recorded while the keyring still holds A's
+token — which the pre- and post-read checks see and refuse. Write the credential
+first and the window has the keyring ahead of the record, which is precisely the
+state those checks cannot see: they read A and pass while `get` returns B's token.
+So the order is the mechanism, and the reverse order is the defect.
+
+**This is ADR-0037 §2's argument on a different pair.** There, "recording precedes
+the claim" because "an audit trail with an entry for an action that did not happen
+is strictly better than an action with no entry" — order the two writes so the
+crash window errs in the direction the reader can detect. Here a connection record
+describing a credential that is not yet in the keyring is strictly better than a
+credential in the keyring that no record describes, and for the same reason: the
+first is visible to a check and the second is not. The earlier draft's own prose
+had already identified the direction — it said a provisioning act "that wrote the
+token and then the identity would leave an observable state in which a re-check
+reads the old identity beside the new token" — while the clause beside it asked
+for atomicity, which is both stronger than needed and unobtainable. Naming the
+order is the whole repair.
 
 **Comparing the identity alone was not enough, and the revision is what closes
 it.** Adversarial found on round 4 that A → B → A defeats an identity comparison:
@@ -1216,6 +1245,12 @@ form).
 > only between the ruling and the start of invocation satisfies neither, and one
 > that compares the identity alone cannot pass the second.
 
+> **Normative.** That lane also ships the interrupted-provisioning case: a
+> provisioning act that writes the connection record and then fails before the
+> credential is written leaves a call refused rather than transmitted, and a
+> provisioning implementation that writes the two in the opposite order fails its
+> own test.
+
 > **Normative.** A test asserting only that the happy path transmits satisfies no
 > clause of this section.
 
@@ -1252,7 +1287,12 @@ transport's write — was **contested rather than folded**: §6 now states that
 boundary as a decision, on ADR-0097 §5a's refusal of a lease and ADR-0102 §9's
 in-flight rule, because the send that follows an already-passed check is the one
 that was authorised and the requested mechanism is one the corpus examined and
-declined.
+declined. Round 6 found that the provisioning clause demanded a transaction across
+the keyring and the connection record that no contract provides; its direction was
+a further contract ADR, and the repair taken instead was an **ordering rule** —
+record first, credential second — which buys the property the checks need with no
+new surface, on ADR-0037 §2's argument that two writes are ordered so the crash
+window errs in the direction a reader can detect.
 §6 now carries the account's identity beside its credential reference, the
 endpoint alongside both, the callable's three-way refusal behind all of them, and
 ADR-0097 §5a's one-step/re-check/fail-closed discipline over the read, and a
