@@ -30,7 +30,8 @@
 - **§3's first clause is the maximally restrictive interim rule, and it carries no
   time predicate and no exception.** No component introduces into an egress span a
   value it obtained from any store under `Settings.data_dir`, nor the output of an
-  operation it supplied one to — at any moment, by any route, and no authorisation
+  operation *any* component supplied one to — at any moment, by any route, and no
+  authorisation
   cures it. The ordinary machinery is untouched because nothing on the send path
   *introduces* such a value: ADR-0150 §4 pins a span to a key of the request's own
   `parameters`, so the runner carries what was composed rather than adding to it, and
@@ -47,7 +48,8 @@
   owner ruling decides is whether to ratify it as permanent or to commission a later
   ADR designing a content-bearing approval surface compatible with ADR-0150 §10, under
   which a relaxation could then be considered — so **relaxation needs its own decision
-  and its own mechanism**, and neither exists today. Earlier drafts reached the case
+  and its own mechanism**, and neither exists today. An owner ruling alone does not
+  relax the clause. Earlier drafts reached the case
   by derivation, by a
   carve-out with its own antecedent, by an exception for the call's own recorded
   arguments, by a store partition and by a read-relation pair; all five were
@@ -407,21 +409,22 @@ checkable direction and the one a reviewer can test a change against.
 
 > **Normative.** No component introduces into a span of an egress call at the
 > designated `tools/` egress seam a value it obtained from **any** store this system
-> keeps under `Settings.data_dir`, nor the output of an operation to which it supplied
-> such a value — **at any moment, by any route**, whether verbatim or as a copy, an
+> keeps under `Settings.data_dir`, nor the output of an operation to which **any**
+> component of this system supplied such a value — **at any moment, by any route**,
+> whether verbatim or as a copy, an
 > excerpt, a re-encoding, a rendering, a summary or a translation. There is no moment
 > before which this is permitted and no read of any such store that is excepted from
-> it, and no authorisation cures it. This clause reaches the **direct** case — a
-> component that itself obtained the value and introduced it, or supplied it to an
-> operation whose output it introduced — which is its predicate's whole extent; the
-> model-context case is the clause below's and is not governed here. This clause is
+> it, and no authorisation cures it. This clause reaches the **direct** case — a value
+> a component obtained from such a store and introduced, or supplied to an operation
+> whose output any component then introduced — which is its predicate's whole extent;
+> the model-context case is the clause below's and is not governed here. This clause is
 > stated over what a component
 > obtained and what it introduced, never over what a span contains, and no lane reads
 > it as requiring or licensing an inspection of content.
 
-> **Normative.** Until an owner ruling under this clause provides otherwise, an egress
-> span may not carry content produced by a model call **any** of whose supplied values
-> carried a value obtained from a store this system keeps under `Settings.data_dir` —
+> **Normative.** An egress span may not carry content produced by a model call **any**
+> of whose supplied values carried a value obtained from a store this system keeps
+> under `Settings.data_dir` —
 > whether or not any component routed an extractable value into the span. For this
 > clause a model call's supplied values are **every value rendered into or otherwise
 > supplied to that call, whatever the parameter is named**, explicitly including
@@ -432,10 +435,11 @@ checkable direction and the one a reviewer can test a change against.
 > any egress span. What is reserved to an owner ruling is whether to **(a)** ratify
 > this clause as permanent, or **(b)** commission a later ADR that designs a
 > content-bearing approval surface compatible with ADR-0150 §10 and states its privacy
-> consequences, under which a relaxation could then be considered. No lane, reviewer or
-> later ADR makes that choice, or relaxes this clause, without an owner ruling. Until
-> one is made, this clause governs, and it is deliberately the more restrictive
-> reading.
+> consequences, under which a relaxation could then be considered. **An owner ruling
+> alone does not relax this clause; relaxation requires the commissioned ADR and its
+> approval surface, ratified, and until then every lane implements the prohibition as
+> written.** No lane, reviewer or later ADR makes that choice without an owner ruling,
+> and this clause is deliberately the more restrictive reading.
 
 > **Normative.** No authorisation makes a transmission the first clause forbids
 > lawful. A per-call user
@@ -467,6 +471,17 @@ ADR-0154 §4 was corrected for the identical defect on its own round 6, ADR-0146
 corrected for it twice, and ADR-0098 §3 records the corpus making it and fixing it
 before either. **The pull toward it is a property of writing about this subject**, so
 it is recorded rather than quietly repaired.
+
+**The operation-output limb binds *any* component, and that word was bought by a
+round.** Adversarial review found on round 6 that a two-component split defeated an
+earlier wording: component A reads the record and commissions "draft an email
+summarising this", component B places the output — A prepared no span and B supplied no
+store value, so neither was reached. A later rewrite of this clause narrowed the limb
+back to a single component and architecture review found the same split again on round
+18, which is why the rationale is written here rather than left to the clause: a
+property nothing explains is a property a rewrite silently drops. The supply binds
+whichever component performs it, and the introduction binds whichever component
+performs that.
 
 **The clause reaches #95's case whole, and reaches it without a time test.** #95's
 case is a *component* act — "a tool could persistently write assistant-derived
