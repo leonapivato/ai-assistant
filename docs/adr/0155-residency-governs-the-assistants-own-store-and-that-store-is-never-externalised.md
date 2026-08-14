@@ -29,19 +29,23 @@
   line.
 - **§3's first clause is stated over what a component obtained, what it supplied and
   when — the moment fixed by the recorded persistence of the plan step naming the
-  call, never over derivation and never over purpose — and its subject is fixed by a
-  relation between a read and the call being ruled on, not by a test on the value and
-  not by a list of stores.** §3's second clause covers **every** store under
-  `Settings.data_dir` and excludes a closed list of two *reads*: the recorded
-  parameters of the step the reading component is itself executing, and the connection
-  record of the account that call binds against — the two whose whole product is bound
-  into the request the owner rules on. **Every other read is covered**, whatever plan,
-  step, record or store it names. Everything the first clause does not reach
-  is disposed of by §3's third clause, which carries no antecedent of its own: §2's
-  conditions govern, as an accepted residue with a revisit trigger. Earlier drafts
-  reached the case by derivation, then by a carve-out with its own antecedent, then by
-  an exception for the call's own recorded arguments, then by excluding two whole
-  stores; all four were
+  **§3's first clause is the maximally restrictive interim rule, and it carries no
+  time predicate and no exception.** No component introduces into an egress span a
+  value it obtained from any store under `Settings.data_dir`, nor the output of an
+  operation it supplied one to — at any moment, by any route, and no authorisation
+  cures it. The ordinary machinery is untouched because nothing on the send path
+  *introduces* such a value: ADR-0150 §4 pins a span to a key of the request's own
+  `parameters`, so the runner carries what was composed rather than adding to it, and
+  the binder's connection read reaches the binding and the destination set, which are
+  not spans.
+- **One question is reserved to the owner rather than decided here.** Diffuse
+  model-context influence — a model drafting under a prompt that carried store
+  content, with no component routing an extractable value — is the boundary twelve
+  review rounds could not state. §3's second clause names both candidate rules and
+  their costs and **reserves the choice to an owner ruling**, with the restrictive
+  clause governing until then. Earlier drafts reached the case by derivation, by a
+  carve-out with its own antecedent, by an exception for the call's own recorded
+  arguments, by a store partition and by a read-relation pair; all five were
   defeated in review, and §3 records how rather than quietly repairing it, because
   ADR-0098, ADR-0146 and ADR-0154 each made and corrected the first of them.
 - **Adds no `core` surface.** No Protocol, no type, no field, no enum member. The
@@ -209,7 +213,7 @@ unmarked text supplies none.
 > this system keeps on the owner's behalf, under the data directory
 > `Settings.data_dir` resolves. That store lives on the owner's machine, under that
 > one directory, and no component of this system places any part of it in a service
-> another party operates — save to the extent an ADR reserved by §3's fifth clause
+> another party operates — save to the extent an ADR reserved by §3's fourth clause
 > permits, which is the only exception to this clause and to §3's first.
 
 > **Normative.** Whether a value belongs to the assistant's own store is decided by
@@ -243,7 +247,7 @@ nothing.
 
 **The first clause carries the export exception inside itself, and it had to.** An
 earlier draft stated the prohibition unconditionally here and reserved the exception
-in §3's fifth clause alone. Adversarial review found on round 1 that the pair left
+in §3's fourth clause alone. Adversarial review found on round 1 that the pair left
 the reserved ADR with no lawful outcome: an export it permitted would satisfy §3 and
 still breach §1, so the route §3 offers would have been unreachable without
 superseding a clause that never mentioned it. That is ADR-0089 §3's requirement
@@ -396,48 +400,29 @@ checkable direction and the one a reviewer can test a change against.
 
 ### 3. The hard line: assistant-derived state is never externalised
 
-> **Normative.** No component places into a span it prepares for transmission
-> through the designated `tools/` egress seam a value it obtained by a **read the
-> clause below does not exclude**, nor the output of an operation to
-> which **any**
-> component of this system supplied such a value **at or after the moment that
-> egress call's plan step was successfully persisted to the plan store** — a copy,
-> an excerpt, a re-encoding, a rendering, or a summary or translation computed or
-> commissioned from that moment on. That moment is the successful return of
-> `PlanStore.save_plan` (`core/protocols.py`) for the plan holding that step. A
-> supply made before it — including one made while a plan was being constructed in
-> memory, replanned or abandoned — is outside this clause, and a span reaching the
-> seam by that route is disposed of by this section's residue clause. The prohibition
-> is stated
-> over what a component obtained, what it supplied, and when it supplied it, that
-> moment being a recorded persistence and never a construction, an intention or a
-> purpose. It is not stated over what a span contains, and no lane reads it as
-> requiring or licensing an inspection of content.
+> **Normative.** No component introduces into a span of an egress call at the
+> designated `tools/` egress seam a value it obtained from **any** store this system
+> keeps under `Settings.data_dir`, nor the output of an operation to which it supplied
+> such a value — **at any moment, by any route**, whether verbatim or as a copy, an
+> excerpt, a re-encoding, a rendering, a summary or a translation. There is no moment
+> before which this is permitted and no read of any such store that is excepted from
+> it, and no authorisation cures it. This clause is stated over what a component
+> obtained and what it introduced, never over what a span contains, and no lane reads
+> it as requiring or licensing an inspection of content.
 
-> **Normative.** Every store this system keeps under `Settings.data_dir` is a
-> **covered store**, whatever it is called and whenever it was added. A read of a
-> covered store is excluded from the clause above **exactly when its product is bound
-> into the very request the owner rules on**: (a) the recorded parameters of the plan
-> step the reading component is itself executing — the parameters the permission
-> decision binds (ADR-0021 §1) and the parked confirmation is answered against
-> (ADR-0037 §4); and (b) the connection record of the account that call binds against,
-> whose identity the binding carries into that same record (ADR-0150). The exclusion
-> list is **closed**. Every other read of any store under the directory is within the
-> clause — whatever plan, step, record or store it names, including any store nobody
-> has written yet. A read is not excluded by being operational, by being necessary, or
-> by being content-equal to an excluded one; only the two relations exclude, and each
-> is decidable from recorded origin — the runner knows the step it executes, the
-> binder knows the account it binds.
-
-> **Normative.** A span the first clause of this section does not reach is
-> **permitted or refused by
-> §2's conditions alone**: this ADR adds no bar to it and no licence for it. That
-> disposition is an accepted residue rather than a judgement that such a send is
-> desirable, and it is the only one available — the relation a wider clause would
-> have to be stated over is the one ADR-0098 §5 holds is **not recoverable** once a
-> model's output has been recorded truthfully, and ADR-0098 §12 forbids stating a
-> bound over it. It is revisited when a recorded origin makes a rule over the residue
-> statable (§4, #1154), and not before.
+> **Normative.** One case is **not decided by this ADR**: diffuse model-context
+> influence — a model drafting an argument under a prompt that carried store content,
+> where no component routed an extractable value into the span. Two rules are
+> available and this ADR adopts neither. **(a) Treat it as covered**, so an egress
+> argument drafted by a model whose context held store content is forbidden; its cost
+> is that retrieval-augmented drafting of outbound content ends entirely. **(b) Treat
+> it as residue**, disposed of by §2's conditions and by the owner reading the payload
+> at confirmation; its cost is accepting that store content externalises by influence,
+> with the owner's `CONFIRM` as the only control. The choice is **reserved to an owner
+> ruling** and to no lane, no reviewer and no later ADR acting without one; the record
+> of rounds 4 through 15 on this document's own PR (#1153) is the evidence that the
+> boundary was worked and did not resolve. Until the owner rules, the clause above
+> governs the case, and it is deliberately the more restrictive of the two readings.
 
 > **Normative.** No authorisation makes a transmission the first clause forbids
 > lawful. A per-call user
@@ -470,175 +455,97 @@ corrected for it twice, and ADR-0098 §3 records the corpus making it and fixing
 before either. **The pull toward it is a property of writing about this subject**, so
 it is recorded rather than quietly repaired.
 
-**The repair keeps the whole of what #95 asked for.** #95's case is a *component*
-act — "a tool could persistently write assistant-derived *memory* into a calendar and
-claim compliance" — and that is decidable at the component and is forbidden
-absolutely, including the evasion of routing the record through a summariser first,
-because the store value was supplied to an operation at or after the moment that
-call's plan step was persisted — a tool runs during a step of a plan the store
-already holds. What the first clause cannot reach is a model that saw store
-content in its turn context in an earlier stage and later wrote an argument. §3's
-second clause disposes of that on ADR-0146 §7's discipline: state the bound the
-system can actually hold, and name what it does not.
+**The clause reaches #95's case whole, and reaches it without a time test.** #95's
+case is a *component* act — "a tool could persistently write assistant-derived
+*memory* into a calendar and claim compliance" — and it is forbidden absolutely,
+including the evasion of routing the record through a summariser first, because the
+store value was supplied to an operation whose output the component then introduced.
+No moment qualifies the prohibition, so there is no window in which the same act is
+lawful, and no store is excepted, so there is no store to launder through.
 
-**Four properties of the first clause carry it, and each was bought by a round.**
+**Why the ordinary machinery is untouched by a rule this broad.** The clause binds a
+component that *introduces* a value, and the two reads the pipeline performs on the
+way to a send introduce nothing.
 
-- **What a component obtained**, never what a span contains. An earlier draft said
-  "an artifact derived from one", which is the bound this corpus has already ruled
-  nobody may state: ADR-0098 §5 holds "produced from external content" is "**not
-  recoverable** once a model's output has been recorded truthfully", and §12 makes it
-  general — "whatever is decided has to be decidable from recorded origin". A rule two
-  conforming implementations answer oppositely is not a contract the seam can extend
-  against. Architecture review found it on round 2. ADR-0154 §4 was corrected for the
-  identical defect on its own round 6, ADR-0146 twice, and ADR-0098 §3 records the
-  corpus making and fixing it before either — **the pull toward it is a property of
-  writing about this subject**, so it is recorded rather than quietly repaired.
-- **Any component, not the span-preparing one.** Adversarial review found on round 6
-  that a two-component split defeated the earlier wording: component A reads the
-  record and commissions "draft an email summarising this", component B places the
-  output. A prepared no span and B supplied no store value, so neither was reached.
-  The supply now binds whichever component performs it.
-- **When, fixed by a recorded persistence.** This is what keeps the clause from
-  swallowing the product, and it took three attempts to state objectively. The
-  moment is the **successful persistence of the plan step naming the egress call**
-  to the plan store (ADR-0014) — the return of `PlanStore.save_plan` for the plan
-  holding it, that step being the same durable artifact ADR-0148 §9 hangs the attempt
-  identifier and the four outcomes on. Before that return there is no recorded egress
-  call to prepare for: `orchestration` renders retrieved records into a planner
-  prompt while nothing is persisted (ADR-0098 §12 records that payload), so recalling
-  the meeting time in order to email Bob about it stays permitted — and so does
-  a plan replanned or abandoned before it is ever saved. From that moment on, any
-  component reading the store and routing the value toward a span of that call is
-  inside the clause — including through an earlier step of the same plan, since
-  `orchestration` persists the plan whole before it starts execution, so the send
-  step is already in the store when any step of that plan runs.
+- **The runner introduces nothing.** ADR-0150 §4 pins a span to the pair
+  `(argument, index)`, where `argument` "is a top-level key of the request's
+  `parameters`" — so the spans of a call *are* its arguments, decomposed. Reading the
+  step back and passing its parameters to the binder therefore carries what was
+  already composed into the request rather than introducing anything into a span, and
+  `EgressBindingSeam._spans_of` derives every span from those same arguments. A
+  component that adds nothing adds nothing under this clause either.
+- **The binder's connection read reaches the binding, not a span.** What
+  `EgressBindingSeam` takes from the connection record is the account identity, and
+  what it builds with it is the binding and the canonical destination set — the
+  addressing of the call. A destination is not a span of the payload, and this clause
+  is stated over spans. So the ordinary bind is outside it as written, with no
+  exception needed and none granted.
 
-  An earlier draft said "in the course of preparing that egress call's arguments",
-  and adversarial review found on round 7 that the phrase has no determinate
-  boundary: the planner run that emits the step *literally* produces that call's
-  arguments, so two lanes could classify the same path oppositely. ADR-0089 §3 puts
-  the condition inside the clause, and a condition a reader cannot evaluate is not one.
-  The repair was the review's own direction — an objective recorded event.
+That is the whole reason this maximally restrictive rule is compatible with §2 and
+with §6's fourth clause: **`send_email` sends what was composed for the send**, and
+nothing on its path introduces a stored value into a span.
 
-  It was then stated as the step's **coming into existence**, and adversarial review
-  found on round 8 that this is satisfiable before anything is recorded:
-  `ModelBackedPlanner._step_payload` in `ai_assistant.planning.planner` constructs a
-  `PlanStep`, and `Engine._converse` in `ai_assistant.orchestration.engine` calls
-  `PlanStore.save_plan` only afterwards, so a read landing between the two was
-  forbidden under "came into existence" and permitted under the unmarked gloss this
-  bullet then carried, "a durable record in the plan store". Under ADR-0089 §3 an
-  unmarked gloss settles nothing, so the two readings stood level and
-  the clause decided nothing about that window. Persistence is named in the clause
-  itself now, and the window before it is classified there too rather than left to
-  the prose. **The moment is deliberately the later of the two**: construction is the
-  conservative boundary but is not observable, which was the whole defect, while the
-  window persistence opens is one in which no component but the planner is running —
-  and what the planner does there, rendering retrieved records into its own prompt,
-  is the case §3's third clause already disposes of by design.
-- **Which read-relation, not which value and not which store.** The clause's subject
-  is a relation between a read and the call being ruled on, and reaching it cost six
-  rounds worth recording because each refuted a different alternative. Adversarial
-  review found on round 9 that the clause and §1's second clause collided and forbade
-  the whole of §2: §1 fixes membership by where a value is persisted and its own
-  illustration names plans as inside the store; an egress call's arguments live in
-  `PlanStep.parameters` in the plan store; and at execution `StepRunner._planned` in
-  `ai_assistant.orchestration.runner` re-reads the plan through `PlanStore.get_plan` —
-  deliberately, as "the one place the capability and the parameters can come from
-  without a caller's word for it" — before passing `step.parameters` to the egress
-  binder. So every send obtained its payload from the assistant's own store, and §6's
-  fourth clause asserted the opposite.
+**The boundary this document does not decide, and why it is the owner's.** Rounds 4
+through 15 of this document's review loop worked the line between a store value a
+component routes into a span and store content that merely shaped what a model wrote,
+and every formulation of that line was defeated. The record is on PR #1153 and is
+worth keeping as evidence rather than summarising away: a carve-out with its own
+antecedent (rounds 4 and 6), a derivation test the corpus forbids (round 2,
+architecture), a stage predicate with no determinate boundary (round 7), a
+construction moment that was satisfiable before anything was recorded (round 8), an
+exception for the call's own recorded arguments that could not be stated without
+either excusing a laundering route or forbidding the ordinary path (rounds 9 through
+13), a store-scoped partition that `PlanStore.get_plan`'s arbitrary `plan_id` defeated
+(round 14), and a read-relation pair whose granularity did not match the store APIs
+(round 15, adversarial). Round 15's architecture finding closed the circle from the
+other side: any rule whose coverage begins at a moment leaves the pre-moment planner
+route open.
 
-  **Two routes were tried and both were defeated, which is why the third is stated
-  over a relation.** An exception for the call's own recorded arguments failed across
-  rounds 10 to 13: it read as unconditional and excused a planner's pre-persistence
-  supply; bounding it to the direct-obtaining limb re-armed the operation-output limb
-  against the ordinary path, since the runner supplies the stored arguments to the
-  binder and the transport supplies them to `smtp_message`; an operation handed both
-  those arguments *and* a memory record read after persistence had two dispositions at
-  once; and a rule admitting no mixture then caught the connection record
-  `EgressBindingSeam` must read through `self._records.latest` in
-  `ai_assistant.tools.egress_binder` to bind any call at all. Excluding the two
-  **stores** instead failed on round 14 for the opposite reason: `PlanStore.get_plan`
-  takes an arbitrary `plan_id`, so a store-wide exclusion let a component read *any*
-  persisted plan after the egress step existed, render its stored parameters and place
-  the output in the payload — plan-held assistant state externalised through the very
-  hole §3 exists to close.
+Twelve rounds is enough evidence to conclude something other than "try again". The
+two remaining rules are stated in the clause above and they differ on a question no
+ADR in this corpus settles: whether an assistant drafting outbound content *from what
+it knows about its owner, at that owner's request* is the product working or the
+protection failing. That is a question about what this system is for. It is reserved
+to the owner by name, the more restrictive reading governs meanwhile, and no lane
+resolves it by writing a fourteenth formulation.
 
-  **So the exclusion is two read-relations, and coverage is universal at every level.**
-  Round 14's attack fails in terms: another plan is not the step the reading component
-  is itself executing, so that read is within the clause. And the shape cannot regrow
-  rounds 10 to 13's limb and mixture rules, because it partitions **reads by their
-  relation to the act** rather than values by their provenance — there is no value
-  test to compose against, and no second surface for a mixture to sit in.
+**The reserved clause is a reservation, not a disposition, and the difference is the
+point.** Architecture review on round 3 required the model-context case to have one
+explicit disposition rather than being left outside §3 while §2's general permission
+reached it, and every disposition attempted since was defeated. What it has now is
+stronger than the "accepted residue" earlier drafts offered: the case is **governed**
+by the clause above — the restrictive reading — rather than left to §2, and what is
+open is only whether the owner relaxes it. A reader who wants to know what a lane may
+do today does not need the fork resolved; they need the clause above, which is
+unconditional.
 
-  **Why excluding these two reads is not a gap in the protection.** Their entire
-  product is bound into the request the owner rules on: the step's recorded parameters
-  are what the permission decision binds (ADR-0021 §1) and what the parked confirmation
-  is answered against (ADR-0037 §4), and the account identity is carried into that same
-  record by the binding (ADR-0150). A read whose whole product surfaces in the ruled
-  request cannot smuggle anything past the ruling — so excluding it is not a hole
-  beside the protection but the protection's own per-call machinery reaching the same
-  end by another route. Every read outside those two relations is covered by default,
-  and the default is stated at every level: every store, every plan, every step, every
-  record, and any store nobody has written yet.
+**Both candidate rules were reachable and neither is obviously right, which is why
+neither is taken here.** (a) is decidable from recorded origin — whether store content
+was in a model's context is a fact about the request, not an inference about the
+output — so nothing in ADR-0098 §5's unrecoverability bars it; what bars it from being
+adopted quietly is its cost, which is that the assistant may not draft outbound content
+from what it knows, the "false on the day it is written" shape ADR-0146's Context
+refuses. (b) is the reading the corpus has drifted toward, and its cost is that the
+`CONFIRM` is doing work ADR-0150 §10 says it cannot do well: the description holds no
+content, so an owner approving a payload description is not reading the body for their
+own memory in it. Both costs are real and they fall on different things — one on the
+product, one on the protection — which is exactly the trade an owner makes and a lane
+does not.
 
-  **The honest cost, and the mitigation.** This is a change to what §3 decides, not a
-  wording repair — an earlier tree of this ADR prohibited reads the clause now
-  excludes, and a reader comparing them should see a decision, not a clarification. A
-  closed list is also what §1's second clause refused, for the reason §1 gives: a list
-  drifts, and drifts silently in the permissive direction. What bounds it here is that
-  the list enumerates **exclusions only** and coverage is otherwise total, so anything
-  added later — a store, a plan shape, a new execution record — is covered rather than
-  missed. The residual is real and is chosen deliberately: a genuinely new read the
-  egress path must perform would be covered and would make the ordinary path unlawful
-  until an ADR added it. That direction stops a send; it does not leak one.
-
-  Nothing about #95's hole moves. What the first clause bites on is a component
-  performing an unexcluded read at execution and routing the value into a span: "a
-  tool could persistently write assistant-derived *memory* into a calendar", forbidden
-  absolutely, and §4's second concrete path. What it does not reach is a planner that
-  wrote a recalled record into the arguments before persistence — §4's first concrete
-  path, disposed of as §3's third clause's accepted residue throughout, and unchanged
-  by anything here.
-
-**The third clause is the complement of the first and carries no antecedent of its
-own, which is deliberate.** Architecture review on round 3 required the model-context
-case to have one explicit disposition rather than being left outside §3 while §2's
-general permission reached it — an earlier draft said no lane may read this ADR "as
-permitting it", which contradicted §2 in terms. But a carve-out *stated over its own
-antecedent* is a second surface to game, and adversarial review's round-4 and round-6
-findings were two different ways of gaming exactly that. Defining the residue as
-"what the first clause does not reach" gives the disposition architecture asked for
-and leaves nothing to split: there is one line, and it is drawn once.
-
-**Two wider rules were considered for the residue and both were refused.** Forbidding
-an egress call whose arguments a model produced while store content was anywhere in
-its context *is* decidable from recorded origin — but it forbids the product, for the
-reason the third property above gives, and a rule that prohibits the assistant using
-what it knows is the "false on the day it is written" shape ADR-0146's Context
-refuses. Gating registration until the residue is resolved — the second
-direction the review offered — was refused because ADR-0154 §6's bar is "until an ADR
-has answered #95", #95's question is the residency scope question §1 answers, and
-gating a registration on a relation ADR-0098 §5 holds unrecoverable would gate it
-indefinitely on something no ADR can deliver. What is owed instead is the recorded
-origin **#1154** carries, which is what would make a narrower rule over the residue
-statable at all; §4 names it with its trigger.
-
-**What bounds the residue today, honestly enumerated.** Every send is a fresh decision
-of the owner about that call, over a canonical destination set and a payload
-description stating each span's extent (§2, ADR-0148 §8). No external content selects,
-parameterises or confirms the call (ADR-0098 §1, ADR-0154 §4). And the owner is the
-one person who can read the body and recognise their own memory in it. That is
-containment and not prevention, and the distance between those two words is this
-clause's accepted cost — the same sentence ADR-0146 §7 wrote about a different gap,
-for the same reason.
+**Gating registration until the fork resolves was considered and refused.** ADR-0154
+§6's bar is "until an ADR has answered #95", #95's question is the residency scope
+question §1 answers, and this ADR answers it. Holding registration open for the fork
+as well would gate it on a ruling nobody has asked the owner for, and — under the
+clause above — would gate it while the restrictive rule is already in force. The
+recorded origin **#1154** carries remains what would let a *mechanism* enforce any of
+this; §4 names it with its trigger, and it is orthogonal to the fork.
 
 **This is the clause the removed draft did not have, and it is why this ADR is a
 strengthening.** #95's hole was that a reading confining residency to the
 assistant's own state says nothing about that state being *moved* — a tool writes a
 memory record into a calendar and the reading has no sentence to refuse it with,
 "since the data now lives in 'the user's account'". The first clause refuses it
-directly, and the second refuses the excuse: the account it lands in is not a
+directly, and its own words refuse the excuse: the account it lands in is not a
 defence, and neither is the owner having pressed *yes*.
 
 **Why a per-call user decision cannot cure it, which is the part most likely to be
@@ -687,7 +594,7 @@ transcribing a prior ADR's summary.
 
 **Two different absences, and they are not the same kind.** §3's first clause is
 **statable and unenforced**: it is decidable at the component, a reviewer can test a
-change against it, and what is missing is a mechanism. §3's third clause records
+change against it, and what is missing is a mechanism. §3's second clause records
 something else — a case that is **not statable at all** today, because the relation
 it would be stated over is unrecoverable (ADR-0098 §5, §12). Issue #1154 is what
 would change the second into the first, which is why its trigger is written where it
@@ -735,29 +642,27 @@ and this ADR closes neither.
 not confuse them.** `recall_memory` is registered today and returns matching records
 to the turn as JSON.
 
-- **A turn that recalls and then sends.** The record reaches the planner's prompt
-  before any plan is persisted, and the plan that comes back carries an egress step.
-  No component supplied an unexcluded read's product at or after that step was
-  persisted, and the runner's later read of that step's own recorded parameters is an
-  excluded read. §3's first
-  clause does not reach it, so its third clause governs: **permitted or refused by
-  §2's conditions alone**, and a lane may not add a bar §3 does not impose.
-- **A component that performs an unexcluded read once the egress step has been
-  persisted** — any store, and in the plan store any plan or step other than the one it
-  is itself executing: during that step, or during an earlier step of the same plan,
-  since `Engine` persists the plan whole before it starts execution. It places the
-  value, or the output of something it commissioned on it, into a span. §3's first clause,
-  forbidden absolutely, and **no code checks it**. That is the gap #1154 carries.
+- **A turn that recalls and then sends, where the record reaches the planner's prompt
+  and the model writes the argument.** No component routed an extractable value into a
+  span — the influence ran through the model. This is exactly the case §3's second
+  clause **reserves to the owner**, and until they rule, §3's first clause governs it:
+  the restrictive reading, under which the send is forbidden. A lane may not read the
+  reservation as a permission.
+- **A component that reads a store and introduces the value, or the output of
+  something it commissioned on it, into a span** — any store, at any moment, whether
+  during that step, an earlier step of the same plan, or before any plan existed.
+  §3's first clause, forbidden absolutely, and **no code checks it**. That is the gap
+  #1154 carries.
 
-The two differ only in **when** the store was read relative to a durable record the
-plan store already holds, and they are opposite in disposition — which is why the
-enforcement
-point is worth its own issue rather than a note. Nothing in the payload path records
-the fact: `EgressBindingSeam._spans_of` derives spans from arguments and knows
-nothing about how those arguments came to hold what they hold, and no store read is
-correlated with a plan step anywhere. The fact is *recordable* — which is what makes
-#1154 a mechanism question rather than another unrecoverable relation — and it is not
-recorded.
+The two differ in **whether a component routed an extractable value** or a model was
+merely influenced, and they are not opposite in disposition today: the first is
+forbidden by the interim clause and reserved for the owner to relax, the second is
+forbidden outright. That is why the enforcement point is worth its own issue rather
+than a note. Nothing in the payload path records the fact: `EgressBindingSeam._spans_of`
+derives spans from arguments and knows nothing about how those arguments came to hold
+what they hold, and no store read is correlated with a span anywhere. The fact is
+*recordable* — which is what makes #1154 a mechanism question rather than another
+unrecoverable relation — and it is not recorded.
 
 **What closing it would take, and why this ADR does not specify it.** It wants a
 **recorded origin** carried with a span — the same discipline ADR-0098 §12 requires
@@ -918,10 +823,10 @@ one.
 > causes — the sent-mail copy in the owner's own connected account, and each
 > recipient's mailbox — fall under §1's third clause as the ordinary consequence of
 > an owner-directed send under §2. Its ordinary execution path does not engage §3
-> either: the two reads its execution performs — the step's own recorded parameters
-> and the account identity it binds against — are the two §3's second clause excludes,
-> and no unexcluded read stands
-> between that step and the payload. The statement is about the tool's ordinary
+> either: its execution introduces nothing into a span — the runner carries the
+> request's own `parameters`, which ADR-0150 §4 makes the spans themselves, and the
+> binder's connection read reaches the binding and the destination set rather than a
+> span. The statement is about the tool's ordinary
 > operation and its declared arguments; it is not a statement about the payload of
 > any particular call, which §3 governs call by call.
 
@@ -963,7 +868,7 @@ neither performs nor blesses any of it.
 
 ### 7. What is not decided here
 
-> **Normative.** Beyond §1's three clauses, §2's two, §3's six, §4's one, §5's
+> **Normative.** Beyond §1's three clauses, §2's two, §3's five, §4's one, §5's
 > three and §6's four, this ADR decides nothing. It registers no tool, designates
 > no seam, attests, relaxes or adds no condition of ADR-0017 §3, adds no `core`
 > name, changes no Protocol, adds no `DestinationProtocol` member and authorises no
@@ -981,7 +886,7 @@ absorbed:
   text is #57's granularity question arriving on §3's line. #57 stays as ADR-0148
   §13 and ADR-0154 §6 leave it, and no clause here is a claim about what a
   description should carry.
-- **The owner's export of their own model into a service they name.** §3's fifth
+- **The owner's export of their own model into a service they name.** §3's fourth
   clause reserves it to its own ADR and states what that ADR must decide.
   ADR-0073 §10's deferred `export` command and ADR-0007's `MemoryStore.export`
   produce portable JSON locally and are untouched.
@@ -1015,11 +920,23 @@ absorbed:
   it acquires — in §3 — the prohibition #95 showed the natural reading lacked.
 - **Three states are now distinguished where the corpus had one.** A rule that is
   *unenforceable as stated* (the flat reading), a rule that is *statable and
-  unenforced* (§3's first clause, with #1154 as its mechanism), and a case that is
-  *not statable* because the relation is unrecoverable (§3's third clause, ADR-0098
-  §5 and §12), which is therefore disposed of by §2's conditions alone. Naming the
-  third and giving it a disposition, rather than covering it with a form of words, is
-  what architecture review's round-2 and round-3 blockers bought.
+  unenforced* (§3's first clause, with #1154 as its mechanism), and a question that is
+  *not decided here at all* and reserved to the owner (§3's second clause). Naming the
+  third and putting the restrictive rule in force meanwhile, rather than covering it
+  with a form of words, is what architecture review's round-2 and round-3 blockers and
+  twelve later rounds bought.
+- **`send_email` can be registered and QA'd under the interim rule.** A send whose
+  spans carry only content the owner authored, or content composed for that send in
+  the turn, routes no store value into a span and is untouched by §3's first clause.
+  Anything more — an argument drafted from recalled memory — waits on the owner's
+  ruling on §3's second clause, and until then the restrictive reading applies. That
+  is a real narrowing of what a first integration may do, and it is stated rather than
+  discovered later.
+- **The batch ratifies what the corpus could decide and stops where it could not.**
+  Fourteen of this ADR's clauses were settled by reading the corpus; the fifteenth's
+  crux is a question about what this system is *for*, and it is recorded as the
+  owner's rather than answered by a lane. The evidence is the review record on
+  PR #1153, kept rather than summarised away.
 - **A rule that was unenforceable and a rule that is unenforced are now distinct,
   and the second is written down.** §3 binds authors and reviewers today; §4 says in
   a marked clause that nothing in code enforces it, and the issue it files carries
@@ -1034,7 +951,7 @@ absorbed:
   accumulated model, because §3 forbids the only route by which a second custodian
   could acquire part of it.
 - **A later ADR wanting to permit owner-directed export has a clean question**,
-  reserved by §3's fifth clause with the decision it must make named, rather than
+  reserved by §3's fourth clause with the decision it must make named, rather than
   being pre-empted or arrived at by accident.
 - **Revisit trigger.** The first lane that registers an integration whose declared
   arguments admit free text. That is the moment §4's absence becomes reachable and
@@ -1046,16 +963,16 @@ absorbed:
 This ADR is in **ADR-0089's marked regime**: it carries well-formed clauses, so the
 marked clauses are the whole of what it obligates and the prose beside them supplies
 nothing. ADR-0089 §5 makes marking forward-only, so nothing this ADR cites is
-retro-marked. What binds is **twenty-one clauses**: §1's three, §2's two, §3's six,
+retro-marked. What binds is **twenty clauses**: §1's three, §2's two, §3's five,
 §4's one, §5's three, §6's four and §7's two. Every one is a block quote at column 0
 preceded by a blank line, which ADR-0089 §2 requires, and each states one obligation
 with its own scope — two passages were split in drafting for that reason, §3's
 export reservation and §6's registering-lane statement, and §3's **second clause** was
-added in review to state its first clause's subject as a closed pair of excluded
-read-relations over universally covered stores, rather than leave it to §1's general
-membership rule. The ordinals of §3's clauses in
-this document were corrected at the same time: the export reservation is §3's fifth
-clause and had been cited as its third since the drafting split.
+added in review to reserve the model-context boundary to an owner ruling rather than
+decide it, after twelve rounds established that no formulation of it held. The
+ordinals of §3's clauses in this document were corrected in the same review: the
+export reservation is §3's fourth clause and had been cited as its third since the
+drafting split.
 
 §1's four-reading subsection, §4's account of the tree, §5's ADR-0082 §1 classifications
 and every argument in this document are deliberately unmarked: they are argument and

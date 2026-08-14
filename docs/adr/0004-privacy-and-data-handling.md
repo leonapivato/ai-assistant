@@ -149,23 +149,20 @@
   scope, and is governed by ADR-0017 §1, ADR-0017 §3 and ADR-0148 instead.
 
   **And a prohibition this clause never carried is added beside it.** ADR-0155 §3
-  forbids any component placing into an egress payload a value it obtained from the
-  assistant's own store, or the output of an operation any component supplied such a
-  value to at or after the moment that call's plan step was persisted to the plan
-  store, and no authorisation cures it — not a per-call user decision, not a standing
-  policy, not a configuration or a connected account. Its subject is a relation
-  between a read and the call being ruled on: every store under the data directory is
-  **covered**, and exactly two *reads* are excluded — the recorded parameters of the
-  step the reading component is itself executing, and the connection record of the
-  account that call binds against, the two whose whole product is bound into the
-  request the owner rules on. Every other read is covered, whatever plan, step, record
-  or store it names. So the ordinary execution path is lawful, and what the clause
-  reaches is an unexcluded read injecting something else into the payload. Its residue
-  clause disposes of everything the first does not
-  reach: §2's conditions govern it, as a residue accepted because the relation a wider
-  clause would be stated over is the one ADR-0098 §5 holds unrecoverable and §12
-  forbids stating a bound over. That closes the hole adversarial review of PR #72
-  identified in
+  forbids any component introducing into an egress span a value it obtained from any
+  store under the data directory, or the output of an operation it supplied such a
+  value to, and no authorisation cures it — not a per-call user decision, not a
+  standing policy, not a configuration or a connected account. It is deliberately the
+  maximally restrictive reading and carries no time predicate and no exception: any
+  store under the data directory, at any moment, by any route. The ordinary send path
+  is untouched because nothing on it *introduces* such a value — ADR-0150 §4 makes a
+  span a key of the request's own parameters, so the runner carries what was composed,
+  and the binder's connection read reaches the binding rather than a span. Its second
+  clause reserves one question to the owner rather than deciding it: whether a model
+  drafting an argument under a prompt that carried store content is covered, which
+  twelve review rounds could not state a rule for. Both candidate rules and their
+  costs are named there, and the restrictive clause governs until the owner rules.
+  That closes the hole adversarial review of PR #72 identified in
   the reading ADR-0017 declined to adopt: assistant-derived memory written into a
   calendar and excused because "the data now lives in the user's account". ADR-0155
   §4 states in a marked clause that **nothing in the tree enforces §3 mechanically
