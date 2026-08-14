@@ -325,6 +325,32 @@ downstream would catch it. That is also this ADR's title — the fifteen partial
 > against it. No lane synthesises a destination *occurrence* from the account, writes
 > one into the spans, or treats the account member as an argument the call selected.
 
+> **Normative.** The account substitution in the derived-property clause above is
+> **conditional on the spans being complete**. ADR-0148 §2's third clause states its
+> antecedent as an egress call whose *arguments* select no recipient; "the spans carry
+> none" stands for that antecedent, and stands for it faithfully only where every
+> destination-bearing argument has already yielded its occurrences onto its spans.
+> `core` cannot check that — which arguments are destination-bearing is the declaration
+> vocabulary §6 defers — so §11 obliges (b) to refuse the binding that would defeat it.
+> No lane reads the substitution as licence to omit an occurrence, and no lane reads an
+> account-only derived set as evidence that a call selected no recipient.
+
+**The omission that clause closes is the mirror image of the forged canonical form, and
+adversarial review found it on round 21.** A binding over
+`{"to": "mallory@example.com", "body": "hi"}` whose `to` span carries the right extent
+and provenance but **no** `EgressDestination` satisfies every invariant §4 lists — the
+supplied-form invariant is stated over "a destination on that span" and is vacuous where
+the span carries none — and the substitution above then yields a set of one member, the
+connected account. The approver is shown an account-only call while the callable
+transmits to Mallory: ADR-0148 §2's fourth clause defeated by omission rather than by
+contradiction, and its first clause — a canonical form for **every** destination-bearing
+argument, computed before the request is built — never engaged. `core` cannot close it,
+for the same reason it cannot close the undescribed key: the fact that would trigger the
+check, that `to` is destination-bearing, lives in the declaration §6 routes to (b), and
+inferring it from an argument's name is what §4's locator clause forbids in terms. So
+the refusal lands in §11, on the first component with the mechanism, and this clause
+states the condition the substitution was always carrying silently.
+
 **One derived property with one member type, arrived at over two review rounds, and
 both drafts it replaces are worth recording because they failed in opposite
 directions.** The first called the derived property "the canonical destination set"
@@ -1154,7 +1180,7 @@ Scoping something out is a decision, so each carries its reason (ADR-0029 §7's 
 > here**, and no lane reads this ADR's value as fixing that seam's signature, its
 > holder or its error behaviour.
 
-> **Normative.** (b)'s ADR owes four things this decision leaves it, and none is
+> **Normative.** (b)'s ADR owes five things this decision leaves it, and none is
 > inherited from here by silence: a way for the seam to **fail distinguishably from
 > a denial**, because this value cannot express "this call cannot be completed" and
 > deliberately does not try; the declaration vocabulary §6 constrains but does not
@@ -1190,6 +1216,23 @@ Scoping something out is a decision, so each carries its reason (ADR-0029 §7's 
 > against a seam that supplies a binding, asserting the refusal above fires and
 > asserting what the recorded decision holds when it does not. Issue #1127 carries the
 > fail-closed alternative and why it rides with that ADR.
+
+> **Normative.** (b)'s ADR owes a **second refusal**, on the same terms: the seam
+> **refuses to produce a binding** in which an argument the bound tool's declaration
+> marks **destination-bearing** carries a span holding **no** `EgressDestination`. Such
+> a span states its destination or the call is not ruled on, and no lane reads an absent
+> destination on a declared destination-bearing argument as the call having selected no
+> recipient — which is the reading §3's account substitution would otherwise take, and
+> the reading its condition clause forbids. §12 states the test that refusal owes.
+
+> **Normative.** That refusal is stated here and discharged there for the reason the
+> undescribed-key refusal gives: which arguments are destination-bearing is the
+> declaration vocabulary §6 defers to (b), so the seam is the first component with the
+> mechanism, and `core`, which reads no declaration, cannot perform the check. No lane
+> closes it early by having `core` infer destination-bearing from an argument's name,
+> from its value's shape, or from whether its value parses as an address — the first of
+> those §4's locator clause forbids outright. Naming the refusal decides no part of that
+> vocabulary: it fixes only what (b)'s answer must be able to express.
 
 > **Normative.** This ADR designates nothing, attests no ADR-0017 §3 condition, and
 > discharges none. It supplies the `core` value conditions 8 and 10 need and no lane
@@ -1309,6 +1352,17 @@ lands there whole.
 > that a correctly-built occurrence is accepted does not reach it. No lane records that
 > check as satisfied by `core`'s validators, which §3 states in terms do not perform it.
 
+> **Normative.** That same lane ships the **omitted-destination** case §11's second
+> refusal is stated for: a call whose bound tool's declaration marks an argument
+> destination-bearing, whose binding carries that argument's span with **no**
+> `EgressDestination`, and whose spans are otherwise well-formed — the
+> `{"to": …, "body": …}` shape — is refused **before** a ruling is sought, so no decision
+> is recorded holding an account-only canonical destination set for it. A case whose
+> binding is also malformed under §4 demonstrates nothing, because the refusal
+> `ActionRequest` already performs produces the same outcome; and one built from a call
+> whose declaration marks no argument destination-bearing does not reach the check at
+> all.
+
 > **Normative.** The lane that builds an egress `CONFIRM` ships the
 > **duplicate-across-arguments** case §10's third clause is stated for: one recipient
 > selected by two arguments produces a confirmation naming **both** arguments beside
@@ -1350,7 +1404,16 @@ is that `SMTP` hands them fewer forms. That is ADR-0082 §1's stacked addition �
 obligation contradicting no sentence the earlier ADR wrote — "recorded in the ADR that
 makes it, and nowhere else". §2's **fourth** clause is relied on unchanged and is why
 `EgressDestination` stores both forms rather than deriving one: a draft that derived
-the canonical form was withdrawn on review for contradicting it. §2's **sixth** clause
+the canonical form was withdrawn on review for contradicting it. §2's **first** and
+**third** clauses are relied on unchanged in the same way, and §3's substitution
+condition is what keeps them so rather than a qualification of either. The third
+clause's antecedent is a call whose *arguments* select no recipient, so a binding that
+omits an occurrence of a recipient the arguments **did** select was never inside it, and
+saying so states which calls the clause reaches rather than narrowing what it says about
+them; §11's second refusal then enforces the first clause — a canonical form for every
+destination-bearing argument, computed before the request is built — on the component
+that can see which arguments those are. A reader holding only ADR-0148 §2 finds both
+sentences doing exactly what they say, and acts no differently. §2's **sixth** clause
 (one canonical form per protocol, computed in one place at the seam) is likewise relied
 on unchanged, and is both the reason the member's assertion is stated once, here,
 rather than per integration, **and** the reason §3 routes the correspondence check to
