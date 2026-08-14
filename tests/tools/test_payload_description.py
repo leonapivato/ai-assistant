@@ -476,6 +476,19 @@ def test_a_payload_declaration_holding_a_malformed_member_is_refused() -> None:
         PayloadDeclaration(tool_id="send_email", arguments=(unhashable,))
 
 
+@pytest.mark.parametrize("truthy", [[], ["yes"], 0, 1, None])
+def test_a_payload_declaration_whose_multiple_is_not_stated_is_refused(truthy: object) -> None:
+    """Round 12's flag, on this side: it decides how many spans are covered."""
+    forged = PayloadArgument(
+        name="to",
+        establishes_tier=DataTier.PERSONAL,
+        multiple=truthy,  # type: ignore[arg-type]
+    )
+
+    with pytest.raises(PayloadDescriptionError, match="is not stated"):
+        PayloadDeclaration(tool_id="send_email", arguments=(forged,))
+
+
 def test_a_payload_declaration_establishing_a_non_tier_is_refused() -> None:
     """ADR-0146 §5 admits a tier or none, and nothing else is a third answer."""
     forged = PayloadArgument(name="body", establishes_tier="personal")  # type: ignore[arg-type]

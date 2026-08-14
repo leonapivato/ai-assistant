@@ -116,8 +116,9 @@ def _checked_name(member: DestinationArgument, tool_id: str) -> str:
 
     Raises:
         DestinationSelectionError: If the entry is not a
-            :class:`DestinationArgument`, has no usable name, or names a protocol
-            this seam does not canonicalise. No message renders the offending
+            :class:`DestinationArgument`, has no usable name, names a protocol
+            this seam does not canonicalise, or leaves either flag unstated. No
+            message renders the offending
             value: a well-formed declaration is the tool author's text, and a
             malformed one is whatever a caller wrote.
     """
@@ -136,6 +137,16 @@ def _checked_name(member: DestinationArgument, tool_id: str) -> str:
             f"does not canonicalise"
         )
         raise DestinationSelectionError(msg)
+    for flag, field in ((argument.multiple, "multiple"), (argument.required, "required")):
+        declared: object = flag
+        if not isinstance(declared, bool):
+            # Not read for truthiness. Both flags decide behaviour rather than
+            # describe it — `required` decides whether an absent recipient
+            # argument refuses the call, and `multiple` decides whether a value
+            # is one destination or many — so a non-boolean silently *changes*
+            # the selection instead of being refused. Adversarial round 12.
+            msg = f"{tool_id}: a destination-bearing argument's {field!r} is not stated"
+            raise DestinationSelectionError(msg)
     return name
 
 

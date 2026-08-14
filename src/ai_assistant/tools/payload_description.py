@@ -192,9 +192,9 @@ def _checked_payload_name(member: PayloadArgument, tool_id: str) -> str:
 
     Raises:
         PayloadDescriptionError: If the entry is not a :class:`PayloadArgument`,
-            has no usable name, or states an established tier that is not a
-            :class:`~ai_assistant.core.types.DataTier`. No message renders the
-            offending value.
+            has no usable name, states an established tier that is not a
+            :class:`~ai_assistant.core.types.DataTier`, or leaves ``multiple``
+            unstated. No message renders the offending value.
     """
     argument: object = member
     if not isinstance(argument, PayloadArgument):
@@ -210,6 +210,13 @@ def _checked_payload_name(member: PayloadArgument, tool_id: str) -> str:
             f"{tool_id}: a transmitted argument establishes something that is not a "
             f"data tier; ADR-0146 §5 admits a tier or none"
         )
+        raise PayloadDescriptionError(msg)
+    multiple: object = argument.multiple
+    if not isinstance(multiple, bool):
+        # Decides whether the value is one span or a span per entry, so reading
+        # it for truthiness would change how many spans a description covers
+        # rather than refuse the declaration (adversarial round 12).
+        msg = f"{tool_id}: a transmitted argument's 'multiple' is not stated"
         raise PayloadDescriptionError(msg)
     return name
 
