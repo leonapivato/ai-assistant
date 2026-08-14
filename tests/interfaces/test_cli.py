@@ -331,13 +331,35 @@ def test_invalid_parameters_renders_a_line_of_its_own(output: StringIO) -> None:
     about why nothing ran.
     """
     cli._render_disposition(Disposition.INVALID_PARAMETERS, None)
-    rendered = output.getvalue()
+    rendered = _flowed(output.getvalue())
 
-    assert rendered.strip()  # something was printed at all — the whole of #1113
-    assert "argument" in rendered.lower()  # and it names what did not fit
+    assert rendered  # something was printed at all — the whole of #1113
+    assert "arguments" in rendered  # and it names what was at fault
     # No tool is named: the eligibility filter emptied the candidate set, so there
     # is no "selected tool" and ``tool_id`` is ``None`` (ADR-0144 §7).
     assert "the selected tool" not in rendered
+
+
+def test_invalid_parameters_render_claims_only_what_both_causes_support(
+    output: StringIO,
+) -> None:
+    """The line is true on the raise path too, not only on the mismatch (ADR-0145 §4, §7).
+
+    One member, two causes: every capable candidate reported violations, or an
+    evaluation *raised*. Only the first establishes that the arguments do not fit —
+    on the second, §7 says in terms that "a raise establishes no such fact", and the
+    arguments may have satisfied every schema. One phrase is printed for both, so it
+    has to be the weaker claim; asserting a mismatch would be false half the time,
+    which is ``_step_headline``'s ``INDETERMINATE`` hazard one disposition over.
+    """
+    cli._render_disposition(Disposition.INVALID_PARAMETERS, None)
+    rendered = _flowed(output.getvalue())
+
+    assert "not established as acceptable" in rendered
+    # The claims the raise path cannot support. Spelled out rather than left to the
+    # positive assertion above, because the tempting rewordings are exactly these.
+    for overclaim in ("did not fit", "do not fit", "invalid", "rejected", "does not match"):
+        assert overclaim not in rendered.lower()
 
 
 def test_invalid_parameters_render_carries_no_argument_of_its_own(output: StringIO) -> None:
@@ -3080,6 +3102,42 @@ def _driven(status: StepStatus) -> StepOutcome:
             ),
         ),
     )
+
+
+def test_a_step_refused_for_its_arguments_renders_from_the_disposition(
+    output: StringIO,
+) -> None:
+    """``_render_step`` reaches the verdict for a step whose record says nothing (#1113).
+
+    The sibling of the cases below, taken from the other end. There the disposition
+    is ``EXECUTED`` and the *record* is what has to be read; here the step was
+    refused before anything was committed, so ADR-0145 §4 leaves it ``PENDING`` with
+    no ``bound_tool``, no ``approval_ref`` and no ``failure`` — the record has
+    nothing to say and the verdict is the whole of the news. Built directly rather
+    than driven through a turn for ``_driven``'s reason, and because what makes the
+    runner return this disposition is ``orchestration``'s contract, pinned in
+    ``tests/orchestration/test_runner.py`` where it belongs.
+    """
+    refused = StepOutcome(
+        disposition=Disposition.INVALID_PARAMETERS,
+        step_id="step-1",
+        # ``None`` by construction: ADR-0144 §7's eligibility filter emptied the
+        # candidate set, so no tool was ever bound to the step.
+        tool_id=None,
+        state=ExecutionState(
+            id="exec-1",
+            plan_id="plan-1",
+            updated_at=AT,
+            steps=(StepExecution(step_id="step-1", status=StepStatus.PENDING),),
+        ),
+    )
+
+    # ``False`` is the existing reading of every non-``EXECUTED`` disposition and is
+    # not this change's to revisit: the turn did not fail, it declined to act.
+    assert cli._render_step(refused) is False
+    rendered = _flowed(output.getvalue())
+    assert "not established as acceptable" in rendered
+    assert "Done" not in rendered
 
 
 def test_an_executed_step_that_succeeded_reads_as_done(output: StringIO) -> None:

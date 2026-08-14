@@ -3443,8 +3443,19 @@ def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
     miss prints nothing, which is what a step whose rendering lives elsewhere
     wants.
 
-    **``INVALID_PARAMETERS`` says only that the arguments did not fit** (#1113).
-    Two constraints shape the wording. ADR-0145 §8 forbids any rendering from
+    **``INVALID_PARAMETERS`` says only that nothing established the arguments as
+    acceptable** (#1113), and the hedge is load-bearing rather than cautious prose.
+    ADR-0145 §4 gives the member *one* definition and **two** causes: every capable
+    candidate reported violations, or an evaluation raised. Only the first
+    establishes that the arguments do not fit; on the second §7 is explicit that "a
+    raise establishes no such fact", and the arguments may well have satisfied every
+    schema. A line saying they did not fit would therefore be false on one of the
+    two paths that print it — the same defect as calling an ``INDETERMINATE`` step
+    failed (:func:`_step_headline`), one disposition over. So the wording is
+    ``Disposition.INVALID_PARAMETERS``'s own: *not established as acceptable*, which
+    is true of both.
+
+    Two further constraints shape it. ADR-0145 §8 forbids any rendering from
     carrying an argument value *or key*, so nothing about the parameters is echoed;
     and the violations that would say which constraint was missed stop at
     ``orchestration``'s ``StepDisposition`` — :class:`StepOutcome`, the only thing
@@ -3463,7 +3474,7 @@ def _render_disposition(disposition: Disposition, tool_id: str | None) -> None:
         Disposition.NO_CAPABLE_TOOL: "[dim]No tool is available for this step yet.[/]",
         Disposition.AMBIGUOUS_CAPABILITY: "[dim]Several tools could do this; none was chosen.[/]",
         Disposition.INVALID_PARAMETERS: (
-            "[dim]This step's arguments did not fit the declared schema of any tool that "
+            "[dim]This step's arguments were not established as acceptable to any tool that "
             "could have done it; nothing was run.[/]"
         ),
     }
