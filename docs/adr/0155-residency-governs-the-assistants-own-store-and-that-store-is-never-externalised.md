@@ -30,7 +30,10 @@
 - **§3's first clause is the maximally restrictive interim rule, and it carries no
   time predicate and no exception.** No component introduces into an egress span a
   value it obtained from any store under `Settings.data_dir`, nor the output of an
-  operation *any* component supplied one to — at any moment, by any route, and no
+  operation, or chain of operations, that any component fed such a value into — at any
+  moment, by any route, and to any depth, with a model call carved out because §3's
+  second clause governs it exclusively, which is what keeps that clause's reserved fork
+  reachable. No
   authorisation
   cures it. The ordinary machinery is untouched because nothing on the send path
   *introduces* such a value: ADR-0150 §4 pins a span to a key of the request's own
@@ -409,18 +412,20 @@ checkable direction and the one a reviewer can test a change against.
 
 > **Normative.** No component introduces into a span of an egress call at the
 > designated `tools/` egress seam a value it obtained from **any** store this system
-> keeps under `Settings.data_dir`, nor the output of an operation to which **any**
-> component of this system supplied such a value — **at any moment, by any route**,
-> whether verbatim or as a copy, an
+> keeps under `Settings.data_dir`, nor the output of an operation — or of any chain of
+> operations — where any component of this system supplied to that operation, or to any
+> earlier operation in the chain, such a value or an output governed by this limb;
+> **except a model call, which the clause below governs exclusively**. This holds **at
+> any moment, by any route**, whether the value travels verbatim or as a copy, an
 > excerpt, a re-encoding, a rendering, a summary or a translation. There is no moment
 > before which this is permitted and no read of any such store that is excepted from
 > it, and no authorisation cures it. This clause reaches the **direct** case — a value
-> a component obtained from such a store and introduced, or supplied to an operation
-> whose output any component then introduced — which is its predicate's whole extent;
-> the model-context case is the clause below's and is not governed here. This clause is
-> stated over what a component
-> obtained and what it introduced, never over what a span contains, and no lane reads
-> it as requiring or licensing an inspection of content.
+> a component obtained from such a store and introduced, or fed into a chain of
+> non-model operations whose output any component then introduced — which is its
+> predicate's whole extent; the model-context case is the clause below's and is not
+> governed here. This clause is stated over what a component obtained and what it
+> introduced, never over what a span contains, and no lane reads it as requiring or
+> licensing an inspection of content.
 
 > **Normative.** An egress span may not carry content produced by a model call **any**
 > of whose supplied values carried a value obtained from a store this system keeps
@@ -471,6 +476,27 @@ ADR-0154 §4 was corrected for the identical defect on its own round 6, ADR-0146
 corrected for it twice, and ADR-0098 §3 records the corpus making it and fixing it
 before either. **The pull toward it is a property of writing about this subject**, so
 it is recorded rather than quietly repaired.
+
+**The limb closes over chains, because a prohibition that stops at one hop is a
+laundering instruction.** A limb reaching only an operation *directly* supplied a store
+value is defeated by inserting a second one: supply the record to formatter A, supply
+A's output to formatter B, introduce B's output. Architecture review found exactly that
+on round 19. So the limb propagates — an output it governs is itself a governed input,
+through every non-model transformation and to any depth. The decidability story is
+unchanged and is per-supply-site: each component knows what it supplied to what, which
+is recorded origin rather than an inference about content, and **#1154** remains the
+enforcement gap for all of it.
+
+**The model call is carved out because it has its own clause, and the carve is what
+keeps the reservation reachable.** A model call supplied store content is governed by
+the clause below and by nothing else here. That is deliberate: adversarial review found
+on round 19 that a limb reaching model outputs too would forbid the model-context case
+from *two* clauses, so the fork reserved below could never be relaxed however the owner
+ruled — the relaxation would have had to be written as an exception to every clause that
+otherwise forbade it. Carving the limb answers that by construction instead: **no other
+clause forbids the model case**, so the reservation's arms operate on exactly one clause
+and reach the whole of what they must reach. The carve narrows nothing in practice,
+because the clause below forbids the model case outright today.
 
 **The operation-output limb binds *any* component, and that word was bought by a
 round.** Adversarial review found on round 6 that a two-component split defeated an
@@ -708,9 +734,10 @@ to the turn as JSON.
   component the clause binds. An owner ruling may later ratify that, or commission the
   approval surface under which relaxing it could be considered; a lane may not read
   the reservation as a permission now.
-- **A component that reads a store and introduces the value, or the output of
-  something it commissioned on it, into a span** — any store, at any moment, whether
-  during that step, an earlier step of the same plan, or before any plan existed.
+- **A component that reads a store and introduces the value, or the output of any
+  chain of non-model operations it fed that value into, into a span** — any store, at
+  any moment and to any depth, whether during that step, an earlier step of the same
+  plan, or before any plan existed.
   §3's first clause, forbidden absolutely, and **no code checks it**. That is the gap
   #1154 carries.
 
@@ -886,7 +913,8 @@ one.
 > either: its execution introduces nothing into a span — the runner carries the
 > request's own `parameters`, which ADR-0150 §4 makes the spans themselves, and the
 > binder's connection read reaches the binding and the destination set rather than a
-> span. This statement is about §3's first clause only and does not reach §3's second:
+> span, and it feeds no chain of operations whose output reaches one. This statement is
+> about §3's first clause only and does not reach §3's second:
 > whether a particular call's arguments were produced by a model call supplied store
 > content is a fact about that call, and the registering lane's statement under
 > the clause above addresses it call by call rather than once for the tool. The

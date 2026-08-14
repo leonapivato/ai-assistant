@@ -150,9 +150,11 @@
 
   **And a prohibition this clause never carried is added beside it.** ADR-0155 §3
   forbids any component introducing into an egress span a value it obtained from any
-  store under the data directory, or the output of an operation *any* component
-  supplied such a value to, and no authorisation cures it — not a per-call user
-  decision, not a standing policy, not a configuration or a connected account. It is
+  store under the data directory, or the output of any operation or chain of
+  operations that any component fed such a value into — a model call excepted, since
+  §3's second clause governs that case exclusively — and no authorisation cures it:
+  not a per-call user decision, not a standing policy, not a configuration or a
+  connected account. It is
   deliberately the
   maximally restrictive reading and carries no time predicate and no exception: any
   store under the data directory, at any moment, by any route. The ordinary send path
