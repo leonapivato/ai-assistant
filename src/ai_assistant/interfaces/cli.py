@@ -138,7 +138,7 @@ import shlex
 import sys
 from datetime import UTC, datetime, time, timedelta
 from enum import Enum
-from typing import TYPE_CHECKING, NamedTuple, assert_never, final
+from typing import TYPE_CHECKING, Final, NamedTuple, assert_never, final
 
 import typer
 from pydantic import SecretStr
@@ -160,6 +160,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
+    SECRET_VALUE_MAX_BYTES,
     AnswerKind,
     BeliefBand,
     ClassReach,
@@ -2630,6 +2631,17 @@ def _prompt_for_credential() -> str:
     return typed
 
 
+#: The most this surface reads from standard input for one credential.
+#:
+#: :data:`~ai_assistant.core.types.SECRET_VALUE_MAX_BYTES` plus a two-byte
+#: terminator, which is the widest input that can still be *inside* the bound: a
+#: maximal credential followed by ``\r\n``. A stream still going at that point
+#: cannot be an admissible secret whatever follows, so the refusal is decidable
+#: from what has been read — and reading no further is what keeps a pipe with no
+#: newline in it a refusal rather than an allocation.
+_CREDENTIAL_READ_LIMIT: Final[int] = SECRET_VALUE_MAX_BYTES + 2
+
+
 def _credential_from_stdin() -> str:
     r"""Read the credential from the first line of standard input (I/O; ADR-0042 §6).
 
@@ -2639,13 +2651,50 @@ def _credential_from_stdin() -> str:
     change the value; an integration credential is whatever the service issued, and
     ADR-0125 §3 is explicit that "two spellings of a secret are two different
     secrets" and that helpfully removing a trailing character "would produce an
-    authentication failure nobody could reproduce by inspection". A leading space in
-    a pasted token is admissible and is kept.
+    authentication failure nobody could reproduce by inspection". A leading space
+    in a pasted token is admissible and is kept — and so is a **trailing carriage
+    return**, which is why the terminator is matched as a unit rather than stripped
+    one character at a time. ``sys.stdin`` hands a final ``\r`` through untranslated
+    (there is no following byte to make it a newline), so a chained
+    ``removesuffix("\n").removesuffix("\r")`` would silently shorten a credential
+    that legitimately ends in one.
+
+    **It is read as bytes, and bounded.** Text-mode ``readline`` would decode
+    before this function could measure anything, and an unterminated stream would
+    be materialised whole before :func:`_credential` applied the 1024-byte bound —
+    so a pipe with no newline in it is an allocation rather than a refusal. Reading
+    one byte past the widest admissible line makes the refusal decidable here.
+
+    Decoding is ``surrogateescape`` rather than strict **because a
+    ``UnicodeDecodeError`` is a ``ValueError`` carrying the offending bytes**, and
+    this surface renders the ``ValueError`` it catches. A byte sequence that is not
+    UTF-8 therefore comes back as unencodable text and is refused by
+    :func:`~ai_assistant.core.types.secret_value`, whose message ADR-0125 §6
+    guarantees carries no part of the value.
 
     Returns:
-        The first line, less exactly one ``\\r\\n`` or ``\\n``.
+        The first line, less exactly one ``\r\n`` or ``\n``.
+
+    Raises:
+        ValueError: If the stream is still going past the widest line an
+            admissible credential can occupy. The message names the bound, which
+            ADR-0125 §6 permits, and neither the value nor its length, which it
+            does not.
     """
-    return sys.stdin.readline().removesuffix("\n").removesuffix("\r")
+    chunk = sys.stdin.buffer.readline(_CREDENTIAL_READ_LIMIT)
+    if len(chunk) >= _CREDENTIAL_READ_LIMIT and not chunk.endswith(b"\n"):
+        msg = (
+            f"a secret value must encode to at most {SECRET_VALUE_MAX_BYTES} UTF-8 "
+            "bytes, and this line was still going past that"
+        )
+        raise ValueError(msg)
+    if chunk.endswith(b"\r\n"):
+        line = chunk[:-2]
+    elif chunk.endswith(b"\n"):
+        line = chunk[:-1]
+    else:
+        line = chunk
+    return line.decode("utf-8", errors="surrogateescape")
 
 
 def _credential(plaintext: str) -> SecretStr:

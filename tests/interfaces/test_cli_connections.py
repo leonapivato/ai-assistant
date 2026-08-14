@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+import sys
 from io import StringIO
 from typing import TYPE_CHECKING
 
@@ -34,7 +35,7 @@ from ai_assistant.core.errors import (
     ProvisioningOutcomeUnknownError,
     ResidualCredentialError,
 )
-from ai_assistant.core.types import ProvisioningState
+from ai_assistant.core.types import SECRET_VALUE_MAX_BYTES, ProvisioningState
 from ai_assistant.interfaces import cli
 from ai_assistant.testing import FakeAssistantEngine, FakeConnectionProvisioner
 from ai_assistant.wire import ProtocolError, TransportError
@@ -842,6 +843,161 @@ def test_the_credential_read_from_stdin_is_not_stripped(
     )
     assert result.exit_code == 0
     assert engine.credentials == [" hunter2 "]
+
+
+def test_a_credential_ending_in_a_carriage_return_reaches_the_hub_intact(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A terminator is matched as a unit, never stripped one character at a time.
+
+    ``sys.stdin`` hands a **final** ``\r`` through untranslated — there is no
+    following byte to make it a newline — so a chained
+    ``removesuffix("\n").removesuffix("\r")`` silently shortens a credential that
+    legitimately ends in one. ADR-0125 §3 is explicit that removing a trailing
+    character "would produce an authentication failure nobody could reproduce by
+    inspection", and this is the shape that failure takes here: the value the user
+    piped in and the value the keyring receives differ by one invisible byte.
+
+    Found by adversarial review on this branch; the two cases below are the
+    unterminated one it named and the ``\r\n`` one that must still lose both.
+    """
+    engine = _ScriptedConnectionEngine()
+    _wire(monkeypatch, engine)
+
+    assert (
+        CliRunner()
+        .invoke(cli.app, ["connect", "a@example.com", "--credential-stdin"], input="hunter2\r")
+        .exit_code
+        == 0
+    )
+    assert (
+        CliRunner()
+        .invoke(cli.app, ["connect", "b@example.com", "--credential-stdin"], input="hunter2\r\n")
+        .exit_code
+        == 0
+    )
+    assert engine.credentials == ["hunter2\r", "hunter2"]
+
+
+class _RecordingStdin:
+    """A standard input whose reads are observable, and unbounded if asked for.
+
+    The materialisation this pins is not visible in an end-to-end run — an
+    unbounded read of a 4 KB pipe and a bounded read of the same pipe produce the
+    same refusal — so the assertion has to be on the *request*. This records the
+    limit it was handed and answers with exactly that many bytes, which is what a
+    stream still going at that point does.
+    """
+
+    def __init__(self) -> None:
+        """Create the stub with nothing recorded."""
+        self.limits: list[int | None] = []
+        self.buffer = self
+
+    def readline(self, limit: int | None = None) -> bytes:
+        """Record the bound this read asked for and fill it."""
+        self.limits.append(limit)
+        if limit is None:  # pragma: no cover — the failure this test exists to catch
+            msg = "an unbounded read of standard input"
+            raise AssertionError(msg)
+        return b"x" * limit
+
+
+def test_the_stdin_read_is_bounded_by_the_widest_admissible_line(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The read is bounded, so a pipe with no newline is a refusal and not an allocation.
+
+    ``sys.stdin.readline()`` with no bound reads until a newline or EOF, so a stream
+    that never supplies one is materialised whole *before* ``secret_value`` applies
+    its 1024-byte bound — the check arriving after the cost it exists to avoid.
+    Reading one byte past the widest admissible line makes the refusal decidable
+    from what has been read, and the bound is asserted on the read itself because
+    the two implementations are indistinguishable from their output.
+
+    Found by adversarial review on this branch.
+    """
+    stdin = _RecordingStdin()
+    monkeypatch.setattr(sys, "stdin", stdin)
+
+    with pytest.raises(ValueError, match=str(SECRET_VALUE_MAX_BYTES)):
+        cli._credential_from_stdin()
+
+    assert stdin.limits == [SECRET_VALUE_MAX_BYTES + 2]
+
+
+def test_an_unterminated_stdin_line_is_refused_naming_only_the_bound(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The refusal names the bound and neither the value nor its length.
+
+    ADR-0125 §6 permits naming the constant and forbids a prefix, a suffix, a
+    truncation, a digest **or a length** of what was rejected — the length in
+    particular, because "secret length is 4096" is what a size check naturally
+    reports and it is a derivation of the secret itself.
+    """
+    engine = _ScriptedConnectionEngine()
+    _wire(monkeypatch, engine)
+    oversized = "x" * (SECRET_VALUE_MAX_BYTES * 4)
+
+    result = CliRunner().invoke(
+        cli.app, ["connect", "me@example.com", "--credential-stdin"], input=oversized
+    )
+    assert result.exit_code == 1
+    rendered = _flat(output.getvalue())
+    assert "cannot be used" in rendered
+    assert str(SECRET_VALUE_MAX_BYTES) in rendered
+    assert "xxxx" not in rendered
+    assert str(len(oversized)) not in rendered
+    assert engine.calls == []
+
+
+def test_a_maximal_credential_with_a_full_terminator_is_still_admissible(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The bound is on the *secret*, and the terminator is not part of it.
+
+    A credential at exactly ``SECRET_VALUE_MAX_BYTES`` followed by ``\r\n`` is the
+    widest admissible line, and it is why the read limit is the bound **plus two**
+    rather than the bound: a limit of ``SECRET_VALUE_MAX_BYTES`` would refuse a
+    conforming value for the width of its own line ending.
+    """
+    engine = _ScriptedConnectionEngine()
+    _wire(monkeypatch, engine)
+    maximal = "x" * SECRET_VALUE_MAX_BYTES
+
+    result = CliRunner().invoke(
+        cli.app,
+        ["connect", "me@example.com", "--credential-stdin"],
+        input=f"{maximal}\r\n",
+    )
+    assert result.exit_code == 0
+    assert engine.credentials == [maximal]
+
+
+def test_a_credential_that_is_not_utf_8_is_refused_without_echoing_a_byte(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Decoding is ``surrogateescape`` because a ``UnicodeDecodeError`` discloses bytes.
+
+    It is a ``ValueError``, so a strict decode would be caught by the same handler
+    that renders one — and its message carries the offending bytes, which ADR-0125
+    §6 forbids any refusal on this path from doing. Decoding leniently instead
+    hands ``secret_value`` an unencodable string, and its refusal is the one the
+    corpus already guarantees says nothing about the value.
+    """
+    engine = _ScriptedConnectionEngine()
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(
+        cli.app, ["connect", "me@example.com", "--credential-stdin"], input=b"\xff\xfe\n"
+    )
+    assert result.exit_code == 1
+    rendered = _flat(output.getvalue())
+    assert "UTF-8 encoding" in rendered
+    assert "0xff" not in rendered
+    assert "\\xff" not in rendered
+    assert engine.calls == []
 
 
 def test_a_blank_credential_is_refused_before_anything_is_sent(
