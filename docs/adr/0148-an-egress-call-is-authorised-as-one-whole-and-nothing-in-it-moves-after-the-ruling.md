@@ -531,6 +531,16 @@ exists; the other three travel together in one value the request carries.
 > the sense the clause below gives. An abandoned act rolls nothing back: the record
 > it found belongs to the act that displaced it.
 
+> **Normative.** The **activation is itself a compare-and-swap**, from exactly the
+> *pending* state that act's own first write recorded — its identity, its revision
+> and its slot — to *active*. It takes nothing and confers no ownership: it
+> completes an act that already owns the record, and it lands only if the record
+> still holds that state, writing nothing otherwise. The re-read before it is not
+> what makes it safe: an activation issued after a passing re-read may still be in
+> flight when a displacing act's compare-and-swap lands, and only the activation's
+> own compare-and-swap keeps such a write from marking a **successor's** record
+> active before that successor has written its credential.
+
 > **Normative.** A displaced act's credential write, already in flight when it is
 > displaced, lands in **that act's own slot** — which no live record then names, so
 > no call reads it. `Secrets.set` never refuses and the keyring offers no
@@ -1566,6 +1576,15 @@ form).
 > the identity the record names. An implementation in which two provisioning acts
 > can write one slot fails this test, and a test that exercises the interleaving
 > without asserting which credential the following call reads does not satisfy it.
+
+> **Normative.** That lane also ships the **late-activation** case, which is the
+> late-`set` case moved from the keyring onto the record: an act issues its
+> activation after a passing re-read, a displacing act's compare-and-swap lands
+> before that activation does, and the activation then writes nothing — the
+> reference stays *pending*, and therefore not connectable, until the displacing
+> act's own activation lands after its own credential write. An implementation
+> whose activation is an unconditional write fails this case, and a test that
+> displaces an act only *before* it issues its activation does not reach it.
 
 > **Normative.** That lane also ships the **omitted-span** case, and it covers
 > **both** span kinds in one mixed payload: a payload carrying a described benign
