@@ -612,6 +612,15 @@ exists; the other three travel together in one value the request carries.
 > of nothing else: no clock, no configuration, no store read, no network. Two
 > derivations of the description for one request agree.
 
+> **Normative.** The description covers **every span the call transmits**, and a
+> span transmitted but not covered is a defect rather than a permitted omission.
+> A request whose description does not cover every span it would transmit cannot
+> be completed and is refused **before the ruling** (§1's third clause); a callable
+> that finds itself about to transmit a span the description does not cover
+> refuses instead, and no approver is shown a description narrower than the
+> payload. This is what makes the description an account of the call rather than a
+> summary of part of it.
+
 > **Normative.** The payload description states, for every span it covers, that
 > span's **discloser provenance** (ADR-0146 §1) and its extent; it states **no
 > tier** for a user-authored free-text span (ADR-0146 §5); and it states the tier
@@ -1505,6 +1514,13 @@ form).
 > the identity the record names. An implementation in which two provisioning acts
 > can write one slot fails this test, and a test that exercises the interleaving
 > without asserting which credential the following call reads does not satisfy it.
+
+> **Normative.** That lane also ships the **omitted-span** case: a payload
+> carrying a described benign span *and* an undescribed selected record is refused
+> — before the ruling where the request is built that way, and at the seam where
+> the callable would otherwise transmit it — rather than sent with a description
+> and an audit record that account for one span and not the other. A test that
+> exercises only descriptions which happen to be complete does not satisfy this.
 
 > **Normative.** A test asserting only that the happy path transmits satisfies no
 > clause of this section.
