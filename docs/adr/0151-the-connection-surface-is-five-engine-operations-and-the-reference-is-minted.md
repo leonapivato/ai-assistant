@@ -7,7 +7,7 @@
   ADR-0149's merge met. `AssistantEngine` gains **five** methods —
   `connect_account`, `reprovision_account`, `disconnect_account`,
   `connected_accounts` and `recent_connection_acts` — `core/types.py` gains
-  **three** types and two constants, and `core/errors.py` gains **six** classes.
+  **three** types and two constants, and `core/errors.py` gains **seven** classes.
   It also decides the shape of the Protocol ADR-0149 §10 flags, by which
   `orchestration` reaches the provisioner in `tools/`. No code ships with it.
 - **Flagged as a breaking change under golden rule 5.** The implementing lane
@@ -315,22 +315,22 @@ anyone to". They are declared here rather than left to the lane, with
 >
 > | Method | Declares |
 > | --- | --- |
-> | `connect_account` | `ValueError`, `UnusableIdentityError`, `IncompleteProvisioningError`, `ConnectionStoreError` |
-> | `reprovision_account` | `ValueError`, `UnusableIdentityError`, `UnknownConnectionError`, `DisplacedProvisioningError`, `IncompleteProvisioningError`, `ResidualCredentialError`, `ConnectionStoreError` |
+> | `connect_account` | `ValueError`, `UnusableIdentityError`, `IncompleteProvisioningError`, `ProvisioningOutcomeUnknownError`, `ConnectionStoreError` |
+> | `reprovision_account` | `ValueError`, `UnusableIdentityError`, `UnknownConnectionError`, `DisplacedProvisioningError`, `IncompleteProvisioningError`, `ProvisioningOutcomeUnknownError`, `ResidualCredentialError`, `ConnectionStoreError` |
 > | `disconnect_account` | `ValueError`, `ResidualCredentialError`, `ConnectionStoreError` |
 > | `connected_accounts` | `ConnectionStoreError` |
 > | `recent_connection_acts` | `ValueError`, `ConnectionStoreError` |
 
-> **Normative.** `core/errors.py` gains six classes. `ConnectionStoreError` is a
+> **Normative.** `core/errors.py` gains seven classes. `ConnectionStoreError` is a
 > direct subclass of `AssistantError`, raised when the connection store could not
 > be read or written; `UnknownConnectionError` and `DisplacedProvisioningError` are
 > each a direct subclass of it; and `UnusableIdentityError`,
-> `IncompleteProvisioningError` and `ResidualCredentialError` are each a direct
-> subclass of `AssistantError`.
+> `IncompleteProvisioningError`, `ProvisioningOutcomeUnknownError` and
+> `ResidualCredentialError` are each a direct subclass of `AssistantError`.
 
-> **Normative.** `IncompleteProvisioningError` and `ResidualCredentialError` each
-> carry exactly one member of structured state, `reference: DurableIdentifier`,
-> and no other. Every other class here defines no `__init__` and carries none. No
+> **Normative.** `IncompleteProvisioningError`, `ProvisioningOutcomeUnknownError`
+> and `ResidualCredentialError` each carry exactly one member of structured state,
+> `reference: DurableIdentifier`, and no other. Every other class here defines no `__init__` and carries none. No
 > class on this surface names the supplied identity, the supplied credential, any
 > part or derivation of either, or a filesystem path.
 
@@ -373,9 +373,8 @@ the three points differ in how much the displaced act had already written. No
 operation performs a liveness pre-check to narrow the window, because a pre-check
 narrows and does not close it while inviting a reader to believe it had.
 
-**`IncompleteProvisioningError` and `ResidualCredentialError` are the two outcomes
-in which the act partly landed, and they carry a reference for a reason the mint
-creates.** A provisioning act that leaves a pending record has left durable state
+**The three reference-carrying classes are the outcomes in which the act partly
+landed, and they carry a reference for a reason the mint creates.** A provisioning act that leaves a pending record has left durable state
 the user must act on, and after `connect_account` the caller has no other way to
 name it: the reference was minted inside the act (§3) and no result was returned.
 Matching by identity is not a substitute — two references may carry the same
@@ -756,15 +755,28 @@ that performs the act". §17 records that no sentence of ADR-0124 §6 becomes fa
 > compare-and-swap and the second by being idempotent (ADR-0149 §5). No client
 > reports the call as having changed nothing.
 
-> **Normative.** Which of the two a provisioning act raises turns on **one fact
-> the act itself knows: whether its own first write has returned.** Every failure
-> after that return — a keyring failure at the credential write, a store failure at
-> either of ADR-0148 §6's two re-reads, a store failure at the activation — is
-> `IncompleteProvisioningError` carrying the reference, because the reference is
-> then known to exist and the act is known not to have completed. Every failure
-> **before** that return is `ConnectionStoreError`. No implementation classifies by
-> which call raised, by the exception's own type, or by a phase it infers after the
-> fact.
+> **Normative.** A provisioning act classifies its own failure by **two facts it
+> knows**: whether its own first write has **returned**, and whether its
+> activation has **returned having landed**. The classification is exactly:
+>
+> - **Before the first write returns** — `ConnectionStoreError`, carrying no
+>   reference. Nothing about the act may be asserted.
+> - **After the first write returns, up to and including an activation whose
+>   compare-and-swap is observed not to land** — the reference is known to exist.
+>   A failure of the credential write, of either of ADR-0148 §6's two re-reads, or
+>   an observed non-landing activation is `IncompleteProvisioningError`, except
+>   where what the act observes is that a later act holds the record, which is
+>   `DisplacedProvisioningError`.
+> - **An activation that raises rather than returning** —
+>   `ProvisioningOutcomeUnknownError`, carrying the reference. The store may have
+>   committed the compare-and-swap and failed before saying so, so neither
+>   completion nor incompletion may be asserted.
+> - **After the activation returns having landed** — the act has completed, and
+>   the only failure left is a predecessor-slot deletion, which is
+>   `ResidualCredentialError` (§7).
+>
+> No implementation classifies by which call raised, by the exception's own type,
+> or by a phase it infers after the fact.
 
 > **Normative.** A `ConnectionStoreError` raised by `connect_account` or
 > `reprovision_account` therefore leaves the act's outcome **not known**: the first
@@ -773,6 +785,14 @@ that performs the act". §17 records that no sentence of ADR-0124 §6 becomes fa
 > as not landed — and resolves it by reading `connected_accounts` once the store is
 > readable (ADR-0139 §4). It carries no reference, because there may be none to
 > carry.
+
+> **Normative.** A `ProvisioningOutcomeUnknownError` asserts that the reference it
+> carries **exists** and asserts **nothing else**: the act may have completed or
+> may have left the record pending. The client names the reference, says the
+> outcome is not known, and resolves it by reading `connected_accounts` — never by
+> re-running the act on the assumption it failed, which would rotate a credential
+> that may already be live. Both remedies stay available afterwards, whichever the
+> read shows.
 
 > **Normative.** A `ResidualCredentialError` means the act it was raised by
 > **completed**: after `reprovision_account` the reference is connected at the new
@@ -816,12 +836,29 @@ that performs the act". §17 records that no sentence of ADR-0124 §6 becomes fa
 > `connected_accounts`. A cancelled client starts no new call in order to report,
 > and the `CancelledError` still propagates (ADR-0139 §4, ADR-0060).
 
-**A provisioning act has four outcomes, not two, and a surface that offered two
-would be wrong on half of them.** The act either completed, or left the reference
-pending, or completed while failing to clean up behind itself, or was taken over
-by somebody else — and a client owes the user a different sentence and a different
-next step in each. `ConnectionStoreError` is the fifth and simplest: the store
-itself failed, so nothing about the reference can be asserted at all.
+**A provisioning act has six outcomes, and the count is the reason this surface
+carries seven error classes rather than two.** The test is not how many ways the
+code can fail; it is how many different sentences a client owes the user, and how
+many different next steps follow:
+
+| Outcome | What the user is told | What they do next |
+| --- | --- | --- |
+| completed | connected, at this identity | nothing |
+| `IncompleteProvisioningError` | this reference exists; your credential was not put in use | re-run, or disconnect it |
+| `ProvisioningOutcomeUnknownError` | this reference exists; whether your credential is in use is not known | read what is connected |
+| `DisplacedProvisioningError` | another act took the reference over | read what is connected |
+| `ResidualCredentialError` | connected; an old credential could not be deleted | fix the keyring, or nothing |
+| `ConnectionStoreError` | the store failed; nothing can be said | read again later |
+
+Six sentences, six next steps, and no two of them interchangeable — a surface that
+collapsed any pair would tell a user their credential was unused when it was live,
+or send them to re-run an act that had already worked. The count is the subject's,
+not the design's: ADR-0148 §6 gives the act three writes and three displacement
+points, and ADR-0149 §5 and §8 give it a deletion that can outlive its success.
+
+**A class rather than a field, for each of them**, on §8's argument: the
+distinction a caller must not miss belongs in the type they catch, because a field
+is what an inattentive client renders past.
 
 **Each outcome is read off ADR-0148 §6's own ordering rather than added to it**,
 which is what makes it stateable here rather than in a supersession, and §17
@@ -1297,7 +1334,7 @@ repeating it would be doing exactly that by silence one document later.
 > **Normative.** This decision cannot be implemented without contract surface
 > `core` does not have, all of it flagged here under golden rule 5 and **none of it
 > added by this ADR**: five methods on `AssistantEngine`; one new Protocol (§10);
-> three types and two constants in `core/types.py` (§4, §5, §11); and six classes in
+> three types and two constants in `core/types.py` (§4, §5, §11); and seven classes in
 > `core/errors.py` (§2a).
 
 > **Normative.** All of it lands in **one lane and one PR**: the `AssistantEngine`
@@ -1349,7 +1386,7 @@ anything this ADR adds.
    docstrings; `ConnectionProvisioner` in `core/protocols.py` with §10's five
    signatures; `ProvisioningState`, `ConnectedAccount`, `ConnectionAct` and
    `ACCOUNT_IDENTITY_MAX_BYTES` and `CONNECTION_REFERENCE_MAX_BYTES` in
-   `core/types.py`; and the six classes in
+   `core/types.py`; and the seven classes in
    `core/errors.py`.
 2. **The `AssistantEngine` conformance suite gains a clause per ruling above that a
    store cannot exhibit**, which is the whole of §2a's local refusals, §5, §7, §8
@@ -1387,17 +1424,20 @@ anything this ADR adds.
    > — raises `DisplacedProvisioningError` at all three, with the displacing act's
    > record live in every case.
 
-   > **Normative.** The suite pins §7's first-write rule at **every** point a
-   > provisioning act can fail after its own first write has returned, one
-   > deterministic case each: a store failure at the re-read before the credential
-   > write, a store failure at the re-read before the activation, and a store
-   > failure at the activation itself. All three raise
-   > `IncompleteProvisioningError` whose `reference` the store then holds. It also
-   > pins the two the activation separates, since the activation is a store write
-   > and not a keyring one (§2a): an activation whose compare-and-swap does not
-   > land raises `DisplacedProvisioningError` instead. And it pins the one case on
-   > the other side of the rule — a store failure at the **first** write raises
-   > `ConnectionStoreError` and carries no reference.
+   > **Normative.** The suite pins §7's classification at **every** point a
+   > provisioning act can fail, one deterministic case each. A store failure at the
+   > **first** write raises `ConnectionStoreError` carrying no reference. A store
+   > failure at the re-read before the credential write, one at the re-read before
+   > the activation, and a keyring failure at the credential write each raise
+   > `IncompleteProvisioningError` whose `reference` the store then holds. An
+   > activation whose compare-and-swap is observed not to land raises
+   > `DisplacedProvisioningError`. An activation that **raises** raises
+   > `ProvisioningOutcomeUnknownError`, exercised with the store scripted to
+   > **commit and then fail** — the case that makes the distinction from
+   > `IncompleteProvisioningError` real, since a following `connected_accounts`
+   > then shows that reference `ACTIVE`. And a predecessor-slot deletion failing
+   > **after** the activation returned raises `ResidualCredentialError`, with that
+   > reference `ACTIVE` at the new revision.
 
    > **Normative.** The suite pins both `connect_account` outcomes at the frame
    > floor, against the **wire** implementation: with `hub_max_frame_bytes` at
