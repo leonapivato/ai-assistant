@@ -32,10 +32,11 @@
   the durability form ADR-0100 established and ADR-0149, ADR-0150 and ADR-0151
   each applied. This decision rests most heavily on ADR-0150 and ADR-0148, and on
   ADR-0146 §2 and ADR-0145 §9 and §11.
-- **Reads exactly one thing, and ADR-0148 §6 is what obliges the read.** §10 fixes
-  that this seam performs no network I/O, reads no clock and resolves nothing, and
-  performs exactly one read: the connection record its registration names, for
-  connectability and the account identity. ADR-0148 §11's unmarked "performs no
+- **Reads at most one thing, and ADR-0148 §6 is what obliges the read.** §10 fixes
+  that this seam performs no network I/O, reads no clock and resolves nothing. Its
+  whole read budget is one connection record — **exactly** one where the tool has an
+  egress registration, for connectability and the account identity, and **none**
+  where it has not, since there is then no reference to name one. ADR-0148 §11's unmarked "performs no
   I/O" is read narrowly against ADR-0148 §6's **marked** connectability clause,
   which names seam (b) and forbids carrying connectability over from an earlier
   moment; §8, §10 and §15 carry the whole of that reading.
