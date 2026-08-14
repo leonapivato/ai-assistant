@@ -395,6 +395,28 @@ async def test_a_second_undescribed_span_cannot_borrow_another_spans_extent() ->
         )
 
 
+async def test_a_binding_naming_another_connection_is_refused_on_the_same_identity() -> None:
+    """The reference is compared, not only the identity (ADR-0148 §6).
+
+    Two connectable records can hold one identity — ``BoundAccount``'s own
+    docstring says so, and is why ADR-0148 §6 binds an account by **two** facts.
+    Where they do, a binding for account B's connection checked by identity alone
+    passes against account A's record, and the message goes out under A's
+    credential although the approval named B. The identity comparison cannot see
+    it, because it is comparing the right identity against the wrong record: the
+    record is read *by the registration's* reference.
+
+    Found by adversarial review on round 1, which also named what no case varied —
+    the binding's reference alone. This is that case.
+    """
+    subject, ring = await _refusing()
+
+    with pytest.raises(TransportPinError, match="not registered for"):
+        await subject.transmit(binding(reference="conn-0002"), MESSAGE)
+
+    assert ring.reads == []
+
+
 async def test_a_transport_endpoint_that_moved_is_refused() -> None:
     """The third axis of the same row, and the one ADR-0148 §6 moved into the binding.
 
@@ -618,6 +640,78 @@ async def test_a_non_250_verdict_after_the_payload_is_also_indeterminate() -> No
 
     with pytest.raises(IndeterminateTransmissionError, match="unknown"):
         await subject.transmit(binding(), MESSAGE)
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(ConnectionResetError("the peer reset the connection"), id="reset"),
+        pytest.param(TimeoutError("the read timed out"), id="timeout"),
+        pytest.param(OSError("the socket went away"), id="oserror"),
+    ],
+)
+async def test_a_read_that_raises_after_the_payload_is_indeterminate_too(
+    failure: Exception,
+) -> None:
+    """A socket error after the terminator is not evidence about the far end.
+
+    Found by adversarial review on round 1: only ``EgressTransportError`` was
+    caught, so a ``ConnectionResetError`` from the channel escaped, and the
+    invocation seam classifies an escaped exception as ``FAILED``/``INTERNAL``
+    (ADR-0029 §3) — a possibly-completed disclosure recorded as a call that
+    failed. The exception says this end stopped listening and says nothing about
+    what the endpoint did with the octets it already has.
+
+    Three types because they arrive from three real places and only one of them
+    is obvious; ``TimeoutError`` is a subclass of ``OSError`` and is included so
+    that a later narrowing of the ``except`` clause fails here rather than in
+    production.
+    """
+    channel = ScriptedChannel(*implicit_tls_script()[:-2], on_exhausted=failure)
+    subject = transport(channel, secrets=await keyring())
+
+    with pytest.raises(IndeterminateTransmissionError, match="unknown"):
+        await subject.transmit(binding(), MESSAGE)
+
+    assert channel.payload().endswith("\r\n.\r\n")
+
+
+async def test_a_socket_error_before_the_payload_stays_a_failure() -> None:
+    """The other side of the same asymmetry, which is what makes it a decision.
+
+    Before any octet of the payload is written, a reset is a call that provably
+    did nothing, and ADR-0029 §4's classification of it as a failure is correct.
+    Converting *that* into an indeterminate outcome would make every network blip
+    an unresolvable step, which is the opposite error and is just as expensive.
+    """
+    channel = ScriptedChannel(on_exhausted=ConnectionResetError("reset on the greeting"))
+    subject = transport(channel, secrets=await keyring())
+
+    with pytest.raises(ConnectionResetError):
+        await subject.transmit(binding(), MESSAGE)
+
+    assert channel.payload() == ""
+
+
+async def test_an_unterminated_multi_line_reply_is_refused_rather_than_buffered() -> None:
+    """A far end cannot buy unbounded memory from a client holding a credential.
+
+    Found by adversarial review on round 1. Every line here is well under the
+    per-line octet bound, so that bound does not cover this input at all: what is
+    unbounded is the *count*. The reply never terminates, and an implementation
+    that only limited line length would accumulate until the process died — while
+    the credential sat in hand, one command away from being presented.
+    """
+    channel = ScriptedChannel(
+        "220 mail.example.invalid ESMTP ready",
+        "\n".join(f"250-EXT{index}" for index in range(500)),
+    )
+    subject = transport(channel, secrets=await keyring())
+
+    with pytest.raises(TransportPinError, match="continuation lines"):
+        await subject.transmit(binding(), MESSAGE)
+
+    assert CREDENTIAL not in channel.written.decode("ascii")
 
 
 # --------------------------------------------------------------------------- #

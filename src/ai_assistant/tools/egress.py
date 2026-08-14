@@ -146,6 +146,13 @@ _DEFAULT_PORTS: Final[dict[str, int]] = {IMPLICIT_TLS_SCHEME: 465, STARTTLS_SCHE
 #: 512, and this leaves room for a non-conforming but honest server.
 _MAX_REPLY_LINE_OCTETS: Final = 4096
 
+#: How many lines of one reply this transport will hold. RFC 5321 places no bound
+#: on continuation lines, so this one is ours: the largest real ``EHLO`` responses
+#: run to a couple of dozen extensions, and a far end needing more than this is not
+#: a submission service. See :meth:`_SmtpSession._reply` for why a per-line bound
+#: does not imply this one and why neither is a deadline.
+_MAX_REPLY_LINES: Final = 64
+
 #: RFC 5321 §3.4's two forward-path replies. Both name a mailbox at another host,
 #: and both are refused rather than followed — SMTP's only in-protocol redirect.
 _FORWARD_PATH_REPLIES: Final = frozenset({251, 551})
@@ -671,12 +678,23 @@ class SmtpEgressTransport:
         )
 
     def _pinned(self, binding: EgressBinding) -> SmtpEndpoint:
-        """Refuse a binding whose endpoint is not the configured one (#83).
+        """Refuse a binding this tool is not the registration for (ADR-0148 §6, #83).
 
-        Compared as text **before** it is parsed, so that two spellings of one
-        host are two different endpoints here rather than one: the registration is
-        what the tool is configured to use, and a transmission to an endpoint that
-        merely resolves the same way is a transmission nobody wrote down.
+        **Two of §6's four pre-transmission refusals, and the first is the one an
+        implementation forgets.** That clause requires that "the connection
+        reference the binding carries names the connection record it consults" —
+        so the reference has to be compared against the registration's *before*
+        the record is read, because the record is read **by the registration's**
+        reference. Without it, a binding for account B's connection is checked
+        against account A's record: where the two accounts share an identity, both
+        record checks pass, and the message goes out under A's credential although
+        the approval named B. The identity comparison cannot see it, because it is
+        comparing the right identity against the wrong record.
+
+        The endpoint is compared as text **before** it is parsed, so that two
+        spellings of one host are two different endpoints here rather than one: a
+        transmission to an endpoint that merely resolves the same way is a
+        transmission nobody wrote down.
 
         Args:
             binding: The authorised binding.
@@ -685,9 +703,17 @@ class SmtpEgressTransport:
             The parsed endpoint.
 
         Raises:
-            TransportPinError: If it is not the configured endpoint, or is not a
-                form this seam pins.
+            TransportPinError: If the binding names another connection, is not for
+                the configured endpoint, or names one this seam will not pin.
         """
+        if binding.account.reference != self._registration.reference:
+            msg = (
+                f"{self._registration.tool_id}: the binding names a connection this "
+                f"tool is not registered for, so the record consulted would not be "
+                f"the one the ruling was taken over (ADR-0148 §6). This tool is "
+                f"registered for {self._registration.reference!r}"
+            )
+            raise TransportPinError(msg)
         if binding.transport_endpoint != self._registration.transport_endpoint:
             msg = (
                 f"{self._registration.tool_id}: the bound transport endpoint is not "
@@ -1146,6 +1172,18 @@ class _SmtpSession:
                 successful disclosure" — and it is reported as itself rather than
                 as a failure, so ADR-0014 §4's recovery scan has something true to
                 reconcile.
+
+                **``OSError`` is caught here and nowhere else in this class, and
+                the asymmetry is the decision.** Everywhere before the payload is
+                written, a reset or a timeout is a call that provably did nothing,
+                and ADR-0029 §4's classification of it as a failure is correct.
+                Once the terminator is on the wire the same exception says only
+                that this end stopped listening, which is not evidence about what
+                the far end did with the octets — so letting it escape would have
+                the invocation seam record ``INTERNAL`` for a disclosure that may
+                have happened. That is the exact confusion this window exists to
+                prevent, arriving through the one exception type nobody thinks of
+                as an outcome.
         """
         await self._command("DATA")
         code, _ = await self._reply()
@@ -1155,7 +1193,7 @@ class _SmtpSession:
         await self._channel.write(_dot_stuffed(payload))
         try:
             code, _ = await self._reply()
-        except EgressTransportError as exc:
+        except (EgressTransportError, OSError) as exc:
             msg = (
                 f"{self._tool_id}: the message was written and the endpoint's verdict "
                 f"could not be read, so whether it was accepted is unknown"
@@ -1213,11 +1251,23 @@ class _SmtpSession:
         Returns:
             The reply code and the joined text of every line.
 
+        The line **count** is bounded as well as the line length, and the second
+        bound is not implied by the first: every continuation line can sit under
+        :data:`_MAX_REPLY_LINE_OCTETS` while the reply never terminates, so a far
+        end that answers ``EHLO`` with endless ``250-`` lines buys unbounded memory
+        from a client that is about to present it a credential. Neither bound is a
+        *deadline*, deliberately — ADR-0029 §4 puts the deadline on the invocation
+        seam ("the seam owns the deadline"), and a second watchdog inside a
+        callable is the shape ``tools/invocation.py`` records ADR-0029 §10 warning
+        against. What is closed here is the resource exhaustion, which a deadline
+        would not close anyway: memory grows for as long as the deadline allows.
+
         Raises:
-            TransportPinError: If the stream ended, or a line is not a reply.
+            TransportPinError: If the stream ended, a line is not a reply, or the
+                reply does not terminate inside :data:`_MAX_REPLY_LINES`.
         """
         lines: list[str] = []
-        while True:
+        while len(lines) < _MAX_REPLY_LINES:
             raw = await self._channel.read_line()
             if not raw:
                 msg = f"{self._tool_id}: the endpoint closed the connection mid-reply"
@@ -1229,6 +1279,11 @@ class _SmtpSession:
             lines.append(line[4:])
             if line[3] == " ":
                 return int(line[:3]), "\n".join(lines)
+        msg = (
+            f"{self._tool_id}: the endpoint sent more than {_MAX_REPLY_LINES} "
+            f"continuation lines without terminating the reply"
+        )
+        raise TransportPinError(msg)
 
 
 __all__ = [

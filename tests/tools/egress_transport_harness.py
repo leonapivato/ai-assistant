@@ -206,7 +206,9 @@ class ScriptedChannel:
         tls_upgrades: How many times ``STARTTLS`` succeeded on this channel.
     """
 
-    def __init__(self, *replies: str, secure: bool = True) -> None:
+    def __init__(
+        self, *replies: str, secure: bool = True, on_exhausted: Exception | None = None
+    ) -> None:
         """Arrange the replies this endpoint gives, in order.
 
         Args:
@@ -214,7 +216,12 @@ class ScriptedChannel:
                 line is served CRLF-terminated, as RFC 5321 §4.2 requires.
             secure: Whether TLS was established before the greeting — ``True``
                 for an implicit-TLS endpoint.
+            on_exhausted: Raised once the script runs out, instead of the empty
+                bytes that stand for a clean end of stream. A far end can stop
+                answering either way, and the two arrive at a caller as different
+                types — which is exactly the distinction one case is about.
         """
+        self._on_exhausted = on_exhausted
         self._lines: deque[bytes] = deque(
             line.encode("ascii") + b"\r\n"
             for reply in replies
@@ -240,9 +247,16 @@ class ScriptedChannel:
 
         Returns:
             The line, or empty bytes once the script is exhausted — which is what
-            a far end closing the connection looks like.
+            a far end closing the connection cleanly looks like.
+
+        Raises:
+            Exception: ``on_exhausted``, where one was armed.
         """
-        return self._lines.popleft() if self._lines else b""
+        if self._lines:
+            return self._lines.popleft()
+        if self._on_exhausted is not None:
+            raise self._on_exhausted
+        return b""
 
     async def write(self, data: bytes, /) -> None:
         """Record what the transport sent.
