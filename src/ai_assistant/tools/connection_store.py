@@ -1118,8 +1118,8 @@ def _decoded(row: tuple[str, int, str]) -> ConnectionEntry:
 
     Raises:
         ConnectionStoreError: If the row no longer validates — a corrupted or
-            downgraded database — or if its projected reference or revision
-            disagrees with the entry.
+            downgraded database — if its identity is outside ADR-0149 §4's shape,
+            or if its projected reference or revision disagrees with the entry.
     """
     reference, revision, data = row
     try:
@@ -1127,6 +1127,13 @@ def _decoded(row: tuple[str, int, str]) -> ConnectionEntry:
     except ValidationError as exc:
         msg = f"the connection store holds an entry that no longer validates: {exc}"
         raise ConnectionStoreError(msg) from exc
+    if entry.identity is not None:
+        # The same shape check the append runs, on the way back out. ADR-0149 §4
+        # binds the *store*, and a store that enforced only on write would hand a
+        # caller an identity it would refuse to accept — which is a file edit away
+        # and is exactly the "reported rather than resolved" case the decode above
+        # already covers for a row that no longer validates.
+        printable_identity(entry.identity)
     if entry.reference != reference or entry.revision != revision:
         msg = (
             f"the connection store holds a row projected as {reference!r} at revision "
