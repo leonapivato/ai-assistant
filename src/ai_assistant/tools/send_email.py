@@ -59,7 +59,6 @@ from ai_assistant.core.types import (
 from ai_assistant.tools.destination_arguments import (
     DestinationArgument,
     DestinationDeclaration,
-    select_destinations,
 )
 from ai_assistant.tools.destinations import DestinationProtocol
 from ai_assistant.tools.payload_description import (
@@ -299,11 +298,10 @@ def describe_send_email(
         PayloadDescriptionError: If a span would be transmitted uncovered, or an
             argument is not text.
     """
-    destinations = select_destinations(SEND_EMAIL_DESTINATIONS, parameters)
     return describe_payload(
         SEND_EMAIL_PAYLOAD,
+        SEND_EMAIL_DESTINATIONS,
         parameters,
-        destinations=destinations,
         provenance=provenance,
     )
 
