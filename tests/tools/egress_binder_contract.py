@@ -965,21 +965,44 @@ class EgressBinderContract(ABC):
         conjunction, which is what #1150 records and what §9's closing sentence is
         written against.
 
-        **The gate half is asserted twice over, and the second assertion is the one
-        that means something.** ``CONFIRM`` alone would be satisfiable for reasons
-        having nothing to do with the span, so the ruling is additionally compared
-        against the ruling for the same call with a plain, system-selected body:
-        equal, so the span's provenance and its *absent* tier moved nothing a gate
-        decided. That is "treats it as tier-cleared" stated as a property of the
-        path rather than as one outcome — ADR-0146 §5's fifth clause, which is
-        structural here because ``ThresholdActionPolicy`` reads
-        ``ToolDefinition.discloses`` and no span at all.
+        **The gate half is three assertions, because one outcome is not a
+        property.** ``CONFIRM`` alone would be satisfiable for reasons having
+        nothing to do with the span, so:
 
-        **The real policy, deliberately.** A fake ``ActionPolicy`` would make the
-        clause vacuous: what §9 asks is that *the gate in the path* does not clear
-        the span, and a double that never reads a tier proves only that the double
-        does not. This is the one place the binder's suite reaches out of its own
-        subsystem, and it is the clause's own subject that puts it there.
+        1. the ruling equals the ruling for the same call with a plain,
+           system-selected body — the span's provenance and its *absent* tier moved
+           nothing;
+        2. it equals the ruling for a request carrying **no binding at all** — the
+           gate's answer does not consult the binding, which is the whole of
+           ADR-0146 §5's fifth clause rather than the one field of it §9 names;
+        3. it is ``CONFIRM`` under the most permissive configuration the policy
+           admits — all four thresholds off — so the floor is not something a
+           deployment can turn off and reach ``ALLOW`` through.
+
+        **The real policy, deliberately, and it is the path's.**
+        ``ThresholdActionPolicy`` is the only ``ActionPolicy``
+        ``ai_assistant.app.composition`` wires (its ``StepRunner`` takes
+        ``policy=ThresholdActionPolicy(...)`` with the four thresholds from
+        ``Settings``), so exercising this class across its whole threshold space is
+        exercising the gate in the path for every deployment — which is why 3 above
+        is the assertion that answers "the gate in the path" and not merely "a
+        gate". A fake ``ActionPolicy`` would make the clause vacuous: a double that
+        never reads a tier proves only that the double does not.
+
+        ADR-0154 §4's condition 7 attests the un-configurability as the ground of
+        designation — ``_DISCLOSURE_FLOOR`` is a module constant no constructor
+        argument reaches, and the combination is a maximum over outcomes — so 3 is
+        that attested property held by a test rather than by a reading.
+
+        **What this case does not reach, said rather than implied.** A *different*
+        ``ActionPolicy`` implementation, wired by someone into the runner, is not
+        exercised here and could not be without dragging ``orchestration`` into a
+        suite the canonical fake also runs. What stands behind that today is
+        structural rather than asserted here: nothing under
+        ``src/ai_assistant/permissions/`` or ``src/ai_assistant/orchestration/``
+        reads ``.tier`` or ``.spans`` at all, so there is no gate in the tree that
+        could clear one. This is the one place the binder's suite reaches out of its
+        own subsystem, and it is the clause's own subject that puts it there.
         """
         self.register_egress(binder, SEND_EMAIL)
         recipient: Mapping[str, FrozenJson] = {"to": ["a@example.com"], "subject": "s"}
@@ -1010,6 +1033,8 @@ class EgressBinderContract(ABC):
         # value into the recorded decision the audit trail persists.
         assert CREDENTIAL_LITERAL not in repr(bound.binding)
 
+        # The class the composition root wires, at its own defaults — which are the
+        # ones ``Settings`` reproduces for an unconfigured deployment.
         policy = ThresholdActionPolicy()
         ruling = await policy.decide(
             ActionRequest(
@@ -1023,8 +1048,25 @@ class EgressBinderContract(ABC):
                 tool=plain.tool, parameters=plain.parameters, egress_binding=plain.binding
             )
         )
+        unbound = await policy.decide(ActionRequest(tool=bound.tool, parameters=bound.parameters))
+        # Every threshold off: the most permissive policy this class can be built
+        # as, and the configuration under which an ``ALLOW`` would be reachable if
+        # the disclosure floor were a threshold rather than a constant.
+        permissive = await ThresholdActionPolicy(
+            confirm_at_risk=None,
+            confirm_at_reversibility=None,
+            deny_at_risk=None,
+            deny_at_reversibility=None,
+        ).decide(
+            ActionRequest(
+                tool=bound.tool, parameters=bound.parameters, egress_binding=bound.binding
+            )
+        )
+
         assert ruling.outcome is PermissionOutcome.CONFIRM
         assert ruling == unmarked
+        assert ruling == unbound
+        assert permissive.outcome is PermissionOutcome.CONFIRM
         assert CREDENTIAL_LITERAL not in ruling.reason
 
     # --- ADR-0152 §1: the registry original and the returned pair -----------
