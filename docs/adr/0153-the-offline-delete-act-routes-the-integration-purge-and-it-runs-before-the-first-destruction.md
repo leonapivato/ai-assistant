@@ -4,7 +4,8 @@
 - Date: 2026-08-14
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-14**,
   the durability form ADR-0100 established and ADR-0125, ADR-0126, ADR-0149 and
-  ADR-0151 each followed. ADR-0126 is edited by this change, and ADR-0149 and
+  ADR-0151 each followed. ADR-0126 **will be edited by this change, in its
+  ratification commit** (the records bullet below), and ADR-0149 and
   ADR-0151 were ratified in the last six days; a citation that silently means
   "whatever this ADR says when you read it" is not checkable. Where a later ADR
   changes one of them, this one is read against the text named here until an ADR
