@@ -45,6 +45,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor, SqliteMemoryStore
 from ai_assistant.orchestration import (
+    ConnectionOperations,
     ConversationLifecycle,
     Engine,
     GrantOperations,
@@ -59,6 +60,7 @@ from ai_assistant.planning import InMemoryPlanStore, PlanExecution
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
+    FakeConnectionProvisioner,
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
@@ -296,6 +298,11 @@ async def _engine(now: Clock) -> None:
             id_factory=lambda: "grant-1",
             clock=lambda: _AWARE,
         ),
+        # No clock seam of its own: a connection record carries no instant at all
+        # (ADR-0149 §3, ADR-0151 §4), which is why this module has nothing to assert
+        # about one and why ``recent_connection_acts`` answers in the store's own
+        # order rather than by time.
+        connection_operations=ConnectionOperations(provisioner=FakeConnectionProvisioner()),
         now=now,
     ).purge_expired()
 

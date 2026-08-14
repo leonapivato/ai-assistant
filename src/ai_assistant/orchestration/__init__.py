@@ -60,6 +60,16 @@ narrow ``SourceGrants`` instead — and ``Engine`` delegates its four
 ``AssistantEngine`` methods to be addressable over the socket, and that Protocol is
 provided by this package.
 
+``ConnectionOperations`` is the **connection surface** (ADR-0151 §1, §10):
+connecting an account, replacing its credential, disconnecting it, and the two
+listings that say what is connected now and what was done. It is the only object in
+this package holding a ``ConnectionProvisioner``, and ``Engine`` delegates its five
+``AssistantEngine`` connection methods to it. **Holding that seam is not holding a
+keyring face** (ADR-0149 §8, ADR-0125 §8): it names five members over `core` types
+and cannot name ``set``, ``delete`` or ``get``. It lives here for
+``GrantOperations``' reason exactly — those must be ``AssistantEngine`` methods to
+be addressable over the socket.
+
 ``ConversationLifecycle`` is the **capture/lifecycle stage** (ADR-0074 §9): the
 one layer holding both durable stores, and therefore the owner of every sequence
 that spans them — capturing a turn as an ``EpisodicMemory``, carrying out a
@@ -124,6 +134,7 @@ interruption. It concludes nothing else: no model call, no importance judgement,
 no absence, no disposition, and no cursor (ADR-0111 §11).
 """
 
+from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.consolidation import (
     ConsolidationReport,
     ConsolidationStage,
@@ -171,6 +182,7 @@ __all__ = [
     "MIN_FRAME_BYTES",
     "AssembledHistory",
     "CaptureReport",
+    "ConnectionOperations",
     "ConsolidationReport",
     "ConsolidationStage",
     "ConversationLifecycle",

@@ -49,7 +49,7 @@ import uuid
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
-from ai_assistant.core.types import DEFAULT_PAGE_SIZE
+from ai_assistant.core.types import DEFAULT_PAGE_SIZE, secret_value
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import (
     ENVELOPE_RESERVE_BYTES,
@@ -61,6 +61,7 @@ from ai_assistant.wire.codec import (
     page_argument,
     positive_page_argument,
     project,
+    usable_identity,
 )
 from ai_assistant.wire.errors import (
     ConnectionClosedError,
@@ -84,6 +85,8 @@ if TYPE_CHECKING:
         BeliefBand,
         BeliefSummary,
         Confirmation,
+        ConnectedAccount,
+        ConnectionAct,
         ContinuationToken,
         ConversationDigest,
         ConversationSummary,
@@ -100,6 +103,7 @@ if TYPE_CHECKING:
         NotificationPreferences,
         ObservationReport,
         Question,
+        SecretValue,
         SourceGrant,
         TurnOutcome,
     )
@@ -644,6 +648,166 @@ class HubClient:
             carries no meaning.
         """
         return await self._call("standing_grants")  # type: ignore[no-any-return]
+
+    # --- the five connection operations (ADR-0151 §16 item 5) ---------------
+    #
+    # **The unwrap lives in the two methods below and nowhere else** (ADR-0151 §6,
+    # ADR-0124 §7's shape). ADR-0087's canonical projection is deliberately **not**
+    # extended to ``SecretStr``: ``project`` is a total dispatch that ends in
+    # ``TypeError`` for a type it has no form for, and ``SecretStr`` is not a
+    # ``str`` subclass, so a credential that reached it fails loudly here, before
+    # the socket is opened. Teaching the codec to unwrap one is refused because it
+    # is general where the need is specific — it would silently encode every secret
+    # any promoted value ever came to carry, removing exactly the property ADR-0125
+    # §3 bought, that "a disclosure requires somebody to write the unwrapping call,
+    # which makes it deliberate and reviewable rather than accidental".
+    #
+    # **The hazard the by-hand unwrap forecloses is invisible, which is why it is
+    # written down here.** A ``TypeAdapter`` over ``SecretValue`` serialises to
+    # ``"**********"``. An implementation reaching for pydantic's serialiser rather
+    # than this project's own projection would send ten asterisks as the
+    # credential; the hub would validate them as a well-formed ``SecretValue``, the
+    # provisioner would write them into the keyring, the record would go active,
+    # and **every in-process test would pass**, because the in-process engine never
+    # serialises anything. The failure would surface only at the first egress call,
+    # as an authentication error against a credential nobody could find a fault in
+    # by inspection.
+
+    async def connect_account(
+        self, *, identity: NonBlankEncodableText, credential: SecretValue
+    ) -> ConnectedAccount:
+        """Connect a fresh account, hub-side, under a reference the hub mints.
+
+        **This client takes no reference and offers no way to propose one**
+        (ADR-0151 §3). Every act after the first goes through
+        :meth:`connected_accounts`, which is the price of a reference the corpus
+        licenses to be logged, paid deliberately.
+
+        **The three local refusals are this client's own, not the hub's**
+        (ADR-0085 §9, ADR-0151 §5). They run before the socket is opened, so a
+        credential is never sent for a call the hub would refuse — which is the
+        whole reason the identity's bound lives in ``core`` as one constant both
+        implementations name rather than in the store alone.
+
+        Args:
+            identity: The account's user-recognisable name, sent verbatim.
+            credential: The account's secret. Unwrapped **once**, immediately
+                below, after being revalidated through ``secret_value``.
+
+        Returns:
+            The record the hub wrote, ``ACTIVE`` at its minted reference.
+
+        Raises:
+            ValueError: If ``identity`` is blank or unwritable, or ``credential``
+                is blank, unencodable or oversized.
+            UnusableIdentityError: If ``identity`` is one ADR-0149 §4 does not
+                admit. **No frame is sent and no credential leaves this process.**
+            OversizedValueError: If the arguments exceed the limit the hub
+                published. Nothing is truncated and nothing falls back to another
+                route; raising ``hub_max_frame_bytes`` is the operator's remedy
+                (ADR-0151 §11).
+        """
+        secret = secret_value(credential)
+        named = non_blank_text(identity, name="identity")
+        usable_identity(named, credential=secret)
+        return await self._call(  # type: ignore[no-any-return]
+            "connect_account", identity=named, credential=secret.get_secret_value()
+        )
+
+    async def reprovision_account(
+        self,
+        reference: Identifier,
+        *,
+        identity: NonBlankEncodableText,
+        credential: SecretValue,
+    ) -> ConnectedAccount:
+        """Replace the credential under a reference the hub returned, hub-side.
+
+        Args:
+            reference: The connection to re-provision, validated and normalised
+                here as every id argument on this surface is (ADR-0085 §3c).
+            identity: The account identity for the new revision, sent verbatim.
+            credential: The replacement secret, unwrapped once immediately below.
+
+        Returns:
+            The record the hub wrote, ``ACTIVE`` at the new revision.
+
+        Raises:
+            ValueError: If ``reference`` or ``identity`` is blank or unwritable,
+                or ``credential`` is blank, unencodable or oversized.
+            UnusableIdentityError: On :meth:`connect_account`'s terms.
+            OversizedValueError: On :meth:`connect_account`'s terms.
+        """
+        secret = secret_value(credential)
+        handle = identifier(reference, name="reference")
+        named = non_blank_text(identity, name="identity")
+        usable_identity(named, credential=secret)
+        return await self._call(  # type: ignore[no-any-return]
+            "reprovision_account",
+            reference=handle,
+            identity=named,
+            credential=secret.get_secret_value(),
+        )
+
+    async def disconnect_account(self, reference: Identifier) -> ConnectedAccount | None:
+        """Disconnect a reference hub-side, or report that nothing was removed.
+
+        A ``None`` says one thing — no live record was removed by this call — and
+        is **not** a report of a disconnection, a confirmation that a credential
+        was deleted, or a statement that the reference does not exist
+        (ADR-0151 §8).
+
+        Args:
+            reference: The connection to disconnect.
+
+        Returns:
+            The live record the hub removed, or ``None``.
+
+        Raises:
+            ValueError: If ``reference`` is blank or unwritable.
+            ResidualCredentialError: If the reference **is** disconnected and a
+                credential deletion failed. Never rendered as a failed
+                disconnection.
+        """
+        named = identifier(reference, name="reference")
+        return await self._call("disconnect_account", reference=named)  # type: ignore[no-any-return]
+
+    async def connected_accounts(self) -> tuple[ConnectedAccount, ...]:
+        """Every connection with a live record, read hub-side from the store.
+
+        **Unpaged, so a bare ``_call``.** The refusal that matters is the hub's —
+        a live set too large for the frame is an ``OversizedValueError`` and no set
+        at all, because a truncated answer to "what is connected" is a false answer
+        rather than a partial one (ADR-0151 §9).
+
+        Returns:
+            Every live record, pending ones included and carrying ``PENDING``. No
+            client presents such a record as a working connection.
+        """
+        return await self._call("connected_accounts")  # type: ignore[no-any-return]
+
+    async def recent_connection_acts(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[ConnectionAct, ...]:
+        """One page of what was done to connections, newest first.
+
+        ``limit`` is refused when not strictly positive, locally, on
+        :meth:`recent_grants`' reason (ADR-0151 §2a).
+
+        Args:
+            limit: The most acts to return.
+
+        Returns:
+            Up to ``limit`` acts. **The order carries no timing claim** — there is
+            no instant on a connection record, so a position means only where the
+            store recorded the act (ADR-0151 §9).
+
+        Raises:
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+        """
+        positive_page_argument(limit, name="limit")
+        return await self._call("recent_connection_acts", limit=limit)  # type: ignore[no-any-return]
 
     # --- the wire ----------------------------------------------------------
 

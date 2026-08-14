@@ -9,7 +9,7 @@ are read from :class:`~ai_assistant.core.protocols.AssistantEngine` itself.
 **A transcribed table would be a second vocabulary to keep in step with the
 first**, which is the objection ADR-0085 §4 raises to mapping ``Disposition`` to a
 bare string and §10a raises to a hand-kept error registry. It applies with more
-force here: the Protocol carries nineteen methods and twenty-nine parameters, a
+force here: the Protocol carries dozens of methods and more parameters again, a
 Protocol change costs an ADR and would arrive with no mechanical signal that the
 wire had been left behind, and the divergence would surface as one implementation
 quietly ignoring an argument the other honours. Reading the annotations makes the
@@ -17,11 +17,22 @@ mapping *total by construction* — a method the Protocol grows is a method this
 module already knows about, and one whose type the wire cannot carry fails loudly
 at import rather than silently at the first call.
 
-**ADR-0102 is the evidence that was right.** It put four methods and one error
-class on the surface, and §12 item 5 records the consequence: nothing in this
-module changed, and nothing in ``wire/errors.py`` either, because ``METHODS``, the
-argument and result adapters and the error code are all derived from the contract.
-Only the figures in the paragraph above moved, and only because they are prose.
+**The figures are named by their owner rather than written down** (#1125,
+`CONTRIBUTING.md` -> "No state claims in living documents"). This paragraph read
+"nineteen methods and twenty-nine parameters" against a Protocol that had grown
+past both, which is precisely the failure the module argues against, one level up:
+a transcribed number is a second vocabulary too. ``tests/core/
+test_engine_surface_closure.py`` is what pins the method count, and ``METHODS``
+below is what makes the parameter count unnecessary to state at all.
+
+**ADR-0102 and ADR-0151 are the evidence this was right.** ADR-0102 put four
+methods and one error class on the surface, and §12 item 5 records the
+consequence: nothing in this module changed, and nothing in ``wire/errors.py``
+either. ADR-0151 put **five** methods and seven error classes on it and §11 says
+the same before the fact — "Nothing in ``wire/`` changes but the client's five
+methods" — which held: ``METHODS``, the argument and result adapters and the error
+code are all derived from the contract, so a credential-carrying argument reached
+the wire correctly because its annotation said what it was.
 
 **The annotations are resolved against ``core.types``' namespace** because
 ``core/protocols.py`` imports its types under ``if TYPE_CHECKING``. That is a fact

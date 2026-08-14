@@ -62,24 +62,30 @@ from __future__ import annotations
 import asyncio
 import inspect
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import SecretStr
 
 from ai_assistant.core import errors as error_module
 from ai_assistant.core.errors import (
     AssistantError,
+    IncompleteProvisioningError,
     InvalidGrantError,
     OversizedValueError,
     UngrantableSourceError,
+    UnknownConnectionError,
     UnknownContinuationError,
     UnknownConversationError,
     UnresolvedEvidenceError,
+    UnusableIdentityError,
 )
 from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.types import (
+    ACCOUNT_IDENTITY_MAX_BYTES,
     DEFAULT_PAGE_SIZE,
     AnswerKind,
     BeliefBand,
@@ -90,10 +96,16 @@ from ai_assistant.core.types import (
     FeedbackKind,
     GrantScope,
     MemoryKind,
+    ProvisioningState,
+    secret_value,
 )
+from ai_assistant.testing import Disclosure, SecretMethod
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from ai_assistant.core.types import SecretValue
+    from ai_assistant.testing import FakeConnectionProvisioner
 
 #: A generous per-turn budget: nothing in this suite is about a deadline.
 _PATIENT = timedelta(seconds=30)
@@ -142,6 +154,34 @@ _UNHELD_SOURCE = "journal"
 _OVERFULL_GRANTS = 6
 
 
+#: The account identity every connection case supplies. Deliberately **not** in
+#: canonical form: ADR-0151 §5 forbids stripping, case-folding or Unicode-normalising
+#: a caller-supplied identity anywhere on the path, so an identity that would survive
+#: normalisation unchanged could not tell a conforming implementation from one that
+#: normalises. The leading and trailing spaces are the test.
+_IDENTITY = "  Ada@Example.COM  "
+
+#: A second identity differing from :data:`_IDENTITY` only by case, for the same
+#: clause read the other way.
+_IDENTITY_OTHER_CASE = "  ada@example.com  "
+
+#: A reference no store holds. Well-formed as an ``Identifier`` — the refusal under
+#: test is "this store does not hold it" and not "this is not a reference".
+_UNHELD_REFERENCE = "0f9c2e13-6b4a-4d2f-9f11-5c8a7e3b1d40"
+
+
+def _credential(plaintext: str = "hunter2-correct-horse") -> SecretValue:
+    """One credential, built the only supported way (ADR-0125 §3).
+
+    Through :func:`secret_value` rather than ``SecretStr`` directly, because
+    :data:`~ai_assistant.core.types.SecretValue` is an ``Annotated`` alias whose
+    validator runs only when a model carrying the field is validated — so a
+    directly-constructed holder satisfies every static check while the validator
+    never runs, which is precisely the hazard §3 names.
+    """
+    return secret_value(SecretStr(plaintext))
+
+
 def _feedback(content: str) -> FeedbackEvent:
     """One piece of feedback, as an adapter hands it over."""
     return FeedbackEvent(
@@ -150,6 +190,23 @@ def _feedback(content: str) -> FeedbackEvent:
         content=content,
         created_at=datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class ConnectionSubject:
+    """An engine on the connection surface, and the provisioner standing behind it.
+
+    Attributes:
+        engine: The subject under test, at its ordinary contract limit.
+        provisioner: The canonical fake the engine ultimately delegates to. Read by
+            a case as a **negative control** — ``entries`` says what was written,
+            and an act that must write nothing is checked against it — and driven by
+            one for the single state the surface cannot produce: a live record left
+            ``PENDING`` by a keyring that failed mid-act.
+    """
+
+    engine: AssistantEngine
+    provisioner: FakeConnectionProvisioner
 
 
 class AssistantEngineContract(ABC):
@@ -255,6 +312,35 @@ class AssistantEngineContract(ABC):
         six sources through the surface would need six held readers *and* would run
         each ``grant``'s own result past the same bound, so the setup would be
         refused before the case began.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def connections(self) -> ConnectionSubject:
+        """A subject with **no** connection, paired with the provisioner behind it.
+
+        **Why the provisioner comes with it.** Several of ADR-0151's surface
+        clauses are negative — a refused act "writes nothing", a refusal happens
+        "without reaching the store" — and an assertion that nothing was written is
+        worth nothing unless a case can see the log it was not written to. The
+        canonical fake's ``entries`` is that negative control, and its
+        ``secrets.fail`` is how the one state the surface cannot otherwise reach —
+        a **pending** live record — is produced.
+
+        **The same object stands behind all three bindings**, which is what keeps
+        these clauses shared rather than three parallel sets: the concrete engine
+        wires it through ``ConnectionOperations``, the canonical fake holds one as
+        ``connections``, and the client's hub serves a fake that holds one. So a
+        clause here is judged against one provisioner and three surfaces, which is
+        the split the suite exists to police.
+
+        **What is deliberately not here.** ADR-0151 §16 opens item 2 with "a clause
+        per ruling above that a store cannot exhibit", and §7's classification —
+        which failure becomes which class, at each of ADR-0148 §6's write points —
+        is a ruling a store *can* exhibit and is pinned where it belongs, against
+        every ``ConnectionProvisioner`` in
+        ``tests/tools/connection_provisioner_contract.py``. Restating it here would
+        bind the same subject twice through a longer path and would drift.
         """
 
     @pytest.fixture
@@ -1326,6 +1412,327 @@ class AssistantEngineContract(ABC):
         assert isinstance(await granting_engine.grantable_sources(), tuple)
         assert isinstance(await granting_engine.recent_grants(), tuple)
         assert isinstance(await granting_engine.standing_grants(), tuple)
+
+    # --- the connection surface (ADR-0151 §16 item 2) -----------------------
+    #
+    # **What a store cannot exhibit**, which is §16 item 2's own scoping of this
+    # block: the local refusals ADR-0085 §9 requires of *every* implementation, and
+    # the surface shape clauses of ADR-0151 §5, §8 and §9. ADR-0151 §7's
+    # classification of a provisioning act's failures is a provisioner ruling and is
+    # pinned against every ``ConnectionProvisioner`` in
+    # ``tests/tools/connection_provisioner_contract.py``, where the write points it
+    # classifies actually are.
+
+    async def test_an_identity_equal_to_the_credential_is_refused_without_a_write(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0151 §5: refused locally, before any I/O, with nothing written.
+
+        **The case ADR-0149 §4 exists for**: a person pastes a token into the
+        identity field. Refusing it is what stops a secret being written verbatim
+        into a Tier 1 store that is *not* the keyring — and the comparison is exact
+        string equality, made before the first of ADR-0148 §6's three writes.
+
+        The ``entries`` assertion is the load-bearing half. A refusal after the
+        first write would still raise the right class while having appended a
+        pending entry naming a reference nobody was told about.
+        """
+        pasted = "the-token-itself"
+
+        with pytest.raises(UnusableIdentityError) as caught:
+            await connections.engine.connect_account(
+                identity=pasted, credential=_credential(pasted)
+            )
+
+        assert connections.provisioner.entries == []
+        assert pasted not in str(caught.value)
+
+    @pytest.mark.parametrize(
+        "identity",
+        ["two\nlines", "a\u0000b", "tab\there", "para\u2029break"],
+        ids=["newline", "nul", "tab", "paragraph-separator"],
+    )
+    async def test_an_identity_that_is_not_single_line_printable_is_refused(
+        self, connections: ConnectionSubject, identity: str
+    ) -> None:
+        """ADR-0149 §4, ADR-0151 §5: no control character and no line break.
+
+        Four values rather than one, because the category test and a hand-rolled
+        ``"\n" in identity`` check agree on the first and disagree on the rest —
+        and an identity carrying a NUL or a paragraph separator is one a hub would
+        go on to write into a log line and a client would render.
+        """
+        with pytest.raises(UnusableIdentityError):
+            await connections.engine.connect_account(identity=identity, credential=_credential())
+
+        assert connections.provisioner.entries == []
+
+    async def test_an_identity_over_the_bound_is_refused_without_naming_its_length(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0151 §5: the bound is one ``core`` constant every implementation names.
+
+        **Both halves.** ADR-0085 §9 requires the client and the in-process engine
+        to refuse the same values, which is why the bound is in ``core`` rather than
+        in the store; and ADR-0125 §6's discipline applies to the message — the
+        constant may be named, the rejected value's own measurement may not, because
+        a length is a derivation from a value this layer must not describe.
+        """
+        oversized = "a" * (ACCOUNT_IDENTITY_MAX_BYTES + 1)
+
+        with pytest.raises(UnusableIdentityError) as caught:
+            await connections.engine.connect_account(identity=oversized, credential=_credential())
+
+        assert connections.provisioner.entries == []
+        assert str(ACCOUNT_IDENTITY_MAX_BYTES + 1) not in str(caught.value)
+
+    async def test_a_malformed_credential_is_refused_locally_without_naming_it(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0125 §3 and §6, reached through this surface for the first time.
+
+        A ``ValueError`` rather than an ``AssistantError``, which is ADR-0085 §9's
+        own split: a blank secret is a caller programming error, where an identity
+        is a value a person typed. The message names neither the value nor its
+        length.
+        """
+        # ``SecretStr`` directly, **not** through :func:`_credential`: constructing
+        # the origin satisfies every static check while the ``Annotated`` alias's
+        # validator never runs (ADR-0125 §3), which is exactly the value a seam has
+        # to revalidate rather than trust. If this surface trusted the annotation,
+        # a blank secret would reach the keyring.
+        with pytest.raises(ValueError, match="blank"):
+            await connections.engine.connect_account(identity="ada", credential=SecretStr("   "))
+
+        assert connections.provisioner.entries == []
+
+    async def test_a_connection_is_active_at_its_first_revision_under_a_minted_reference(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0151 §7: it returns only once ADR-0148 §6's third write has landed.
+
+        And ADR-0151 §3: the reference is the hub's, so the caller learns it from
+        the record rather than supplying it. ``connect_account`` takes no reference
+        argument at all, which is what makes "I meant to replace and created a
+        second connection" unreachable rather than merely visible.
+        """
+        record = await connections.engine.connect_account(
+            identity=_IDENTITY, credential=_credential()
+        )
+
+        assert record.state is ProvisioningState.ACTIVE
+        assert record.revision == 1
+        assert record.reference
+
+    async def test_the_identity_crosses_the_surface_byte_for_byte(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0151 §5: nothing strips, case-folds or Unicode-normalises it.
+
+        **Two identities differing only by case, both carrying surrounding
+        whitespace**, which is the pair that separates a conforming implementation
+        from one that normalises somewhere on the path. It is the clause an
+        *annotation* could defeat one layer below itself: ``Identifier`` strips, so
+        had ``identity`` been annotated with it the wire client would have sent a
+        stripped value while the in-process engine kept the caller's — ADR-0084 §4's
+        substitutability failure arriving through a type.
+        """
+        first = await connections.engine.connect_account(
+            identity=_IDENTITY, credential=_credential()
+        )
+        second = await connections.engine.connect_account(
+            identity=_IDENTITY_OTHER_CASE, credential=_credential("another-secret")
+        )
+
+        assert first.identity == _IDENTITY
+        assert second.identity == _IDENTITY_OTHER_CASE
+        assert first.reference != second.reference
+        assert {record.identity for record in await connections.engine.connected_accounts()} == {
+            _IDENTITY,
+            _IDENTITY_OTHER_CASE,
+        }
+
+    async def test_re_provisioning_a_reference_the_store_does_not_hold_is_refused(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0151 §2a: refused before the first write, so nothing is written.
+
+        This is the typo ``connect_account`` cannot make (ADR-0151 §3): with a
+        minted reference, aiming an act at a reference that does not exist is a
+        typed refusal rather than a silent second connection.
+        """
+        with pytest.raises(UnknownConnectionError):
+            await connections.engine.reprovision_account(
+                _UNHELD_REFERENCE, identity=_IDENTITY, credential=_credential()
+            )
+
+        assert connections.provisioner.entries == []
+
+    async def test_disconnecting_a_reference_the_store_never_held_removes_nothing(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0151 §8: ``None``, and **not** a report of a disconnection.
+
+        A mistyped reference leaves no tombstone and creates no revision sequence
+        (ADR-0149 §5), which is why this writes nothing at all rather than appending
+        a removal entry for a reference that never existed.
+        """
+        assert await connections.engine.disconnect_account(_UNHELD_REFERENCE) is None
+        assert connections.provisioner.entries == []
+
+    async def test_disconnecting_twice_removes_a_record_once(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0151 §8: idempotent, and the second ``None`` says only that.
+
+        The two ``None`` returns in this suite mean the same thing and come from
+        different states — a reference the store never held, and one whose latest
+        entry is already a removal — which is exactly why ``None`` may not be
+        rendered as "the reference does not exist".
+        """
+        record = await connections.engine.connect_account(
+            identity=_IDENTITY, credential=_credential()
+        )
+
+        removed = await connections.engine.disconnect_account(record.reference)
+        again = await connections.engine.disconnect_account(record.reference)
+
+        assert removed is not None
+        assert removed.reference == record.reference
+        assert removed.state is ProvisioningState.ACTIVE
+        assert again is None
+        assert await connections.engine.connected_accounts() == ()
+
+    async def test_a_pending_reference_is_listed_with_its_state(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0151 §4: not omitted, not substituted for, not reported as connected.
+
+        **Reachable without anyone doing anything wrong, and repaired by nothing.**
+        ADR-0148 §6 rules an interrupted act "refused rather than reconciled", so a
+        surface showing only active records would answer "what is connected"
+        correctly and leave a user whose hub died mid-act with a reference that
+        exists, is refused at every call, and appears nowhere they can see.
+        """
+        connections.provisioner.secrets.fail(SecretMethod.SET, Disclosure.VERBATIM)
+
+        with pytest.raises(IncompleteProvisioningError) as caught:
+            await connections.engine.connect_account(identity=_IDENTITY, credential=_credential())
+
+        live = await connections.engine.connected_accounts()
+        assert [record.reference for record in live] == [caught.value.reference]
+        assert live[0].state is ProvisioningState.PENDING
+
+    async def test_every_live_record_is_listed_whatever_the_hub_holds(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0139 §1, ADR-0151 §9: answered from the store and from nothing else.
+
+        No tool is registered against any of these references and no integration
+        exists — the tree holds none — so an implementation filtering by what the
+        hub can currently offer would answer with nothing at all. A connection whose
+        integration is not built is still a connection, and the disconnection is the
+        owner's only remedy.
+        """
+        first = await connections.engine.connect_account(
+            identity=_IDENTITY, credential=_credential()
+        )
+        second = await connections.engine.connect_account(
+            identity="second-account", credential=_credential("second-secret")
+        )
+
+        live = await connections.engine.connected_accounts()
+
+        assert {record.reference for record in live} == {first.reference, second.reference}
+
+    async def test_the_history_carries_one_row_per_act_and_marks_a_removal(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0151 §4 and §9: one row per ``(reference, revision)``, newest first.
+
+        ``account`` is ``None`` **exactly when** the act was a disconnection, which
+        is the discriminator ADR-0151 §4 chose over a fourth promoted type: an enum
+        would encode what one optional field already says unambiguously, and would
+        invite the third ``ProvisioningState`` ADR-0149 §5 forbids.
+
+        The store's entry granularity is ``tools``-internal and is **not** exposed —
+        each act writes two entries and shows one row — which this asserts by
+        counting rather than by reading the store.
+        """
+        record = await connections.engine.connect_account(
+            identity=_IDENTITY, credential=_credential()
+        )
+        await connections.engine.reprovision_account(
+            record.reference, identity=_IDENTITY, credential=_credential("rotated")
+        )
+        await connections.engine.disconnect_account(record.reference)
+
+        acts = await connections.engine.recent_connection_acts()
+
+        assert [(act.revision, act.account is None) for act in acts] == [
+            (3, True),
+            (2, False),
+            (1, False),
+        ]
+        assert {act.reference for act in acts} == {record.reference}
+        assert all(
+            act.account is None
+            or (act.account.reference == act.reference and act.account.revision == act.revision)
+            for act in acts
+        )
+
+    async def test_the_history_is_bounded_by_the_limit(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0151 §9: newest first, so a bound keeps the newest rather than the oldest."""
+        for index in range(3):
+            await connections.engine.connect_account(
+                identity=f"account-{index}", credential=_credential(f"secret-{index}")
+            )
+
+        page = await connections.engine.recent_connection_acts(limit=2)
+
+        assert len(page) == 2
+        assert [act.account.identity for act in page if act.account is not None] == [
+            "account-2",
+            "account-1",
+        ]
+
+    @pytest.mark.parametrize("limit", [0, -1])
+    async def test_the_history_refuses_a_non_positive_limit_locally(
+        self, connections: ConnectionSubject, limit: int
+    ) -> None:
+        """ADR-0151 §2a: stricter than ADR-0085 §9's ``[0, 2**63)``, in every implementation.
+
+        ``limit=0`` is well-formed under the surface rule and refused by the store,
+        so §9's "neither is silently more permissive" is satisfied by refusing it
+        one step earlier — locally, before any I/O, which is what the untouched log
+        below asserts.
+        """
+        with pytest.raises(ValueError, match="strictly positive"):
+            await connections.engine.recent_connection_acts(limit=limit)
+
+        assert connections.provisioner.entries == []
+
+    async def test_no_result_on_this_surface_carries_a_credential(
+        self, connections: ConnectionSubject
+    ) -> None:
+        """ADR-0149 §9, ADR-0151 §6: no response carries a credential or a derivation.
+
+        Asserted over every result the surface can produce for an act that really
+        wrote one, rather than over the type declarations — a field could be added
+        that satisfies the annotations and still carried the value.
+        """
+        plaintext = "hunter2-correct-horse"
+        record = await connections.engine.connect_account(
+            identity=_IDENTITY, credential=_credential(plaintext)
+        )
+        live = await connections.engine.connected_accounts()
+        acts = await connections.engine.recent_connection_acts()
+
+        rendered = repr((record, live, acts))
+        assert plaintext not in rendered
+        assert "SecretStr" not in rendered
 
 
 def backwards_clock() -> Callable[[], datetime]:

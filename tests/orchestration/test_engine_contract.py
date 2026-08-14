@@ -34,6 +34,7 @@ from assistant_engine_contract import (
     _UNWRITABLE_LOCATION,
     _UNWRITABLE_SOURCE,
     AssistantEngineContract,
+    ConnectionSubject,
     backwards_clock,
 )
 
@@ -52,6 +53,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration import (
     DEFAULT_MAX_PAYLOAD_BYTES,
+    ConnectionOperations,
     ConversationLifecycle,
     Engine,
     GrantOperations,
@@ -66,6 +68,7 @@ from ai_assistant.orchestration import (
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
+    FakeConnectionProvisioner,
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
@@ -183,13 +186,14 @@ async def _succeeds(parameters: object, *, idempotency_key: str | None) -> None:
     """A tool that does nothing and succeeds."""
 
 
-def _wire(
+def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subject in
     *,
     max_payload_bytes: int = DEFAULT_MAX_PAYLOAD_BYTES,
     parks: bool = False,
     sources: Sequence[HeldSource] = (),
     grants: Sequence[SourceGrant] = (),
     grant_clock: Callable[[], datetime] | None = None,
+    provisioner: FakeConnectionProvisioner | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -279,6 +283,12 @@ def _wire(
             id_factory=_counter("grant"),
             clock=grant_clock if grant_clock is not None else (lambda: AT),
         ),
+        # The canonical provisioner fake, which performs ADR-0148 §6's three writes
+        # rather than short-cutting them — so the suite's provisioning clauses are
+        # exercised against real orderings on this subject too (ADR-0151 §16).
+        connection_operations=ConnectionOperations(
+            provisioner=provisioner if provisioner is not None else FakeConnectionProvisioner()
+        ),
         id_factory=_counter("tok"),
         max_payload_bytes=max_payload_bytes,
     )
@@ -304,6 +314,24 @@ class TestEngineContract(AssistantEngineContract):
         await built.start()
         try:
             yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def connections(self) -> AsyncIterator[ConnectionSubject]:
+        """One wired engine and the provisioner its operations delegate to.
+
+        The provisioner is built here and handed to both, which is the only way the
+        suite's negative controls are expressible: ``ConnectionOperations`` holds
+        the seam and exposes nothing, deliberately (ADR-0151 §10), so a case that
+        must prove nothing was written reads the subject the composition root wired
+        rather than reaching through the engine for it.
+        """
+        provisioner = FakeConnectionProvisioner()
+        built = _wire(provisioner=provisioner)
+        await built.start()
+        try:
+            yield ConnectionSubject(engine=built, provisioner=provisioner)
         finally:
             await built.aclose()
 

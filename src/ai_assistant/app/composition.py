@@ -58,6 +58,7 @@ from ai_assistant.models import (
 )
 from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import (
+    ConnectionOperations,
     ConsolidationStage,
     ConversationLifecycle,
     Engine,
@@ -206,7 +207,9 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
     return build_composition(settings, data_dir=data_dir).engine
 
 
-def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Composition:
+def build_composition(  # noqa: PLR0915 — one statement per resource this root opens or wires
+    settings: Settings, *, data_dir: Path | None = None
+) -> Composition:
     """Wire the production subsystems into a ready :class:`Composition` (ADR-0042 §2).
 
     The one place concrete subsystems are constructed. It discharges the wiring
@@ -633,6 +636,7 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
             ),
         )
         opened.append(outbox.close)
+        connections, connection_operations = _build_connection_operations(directory, opened=opened)
 
         # ADR-0130 §4 and §5's deterministic ruling, built once and held twice: the
         # engine hands it to the store on the reconsideration path, and the write
@@ -1049,6 +1053,13 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
                 id_factory=_uuid,
                 clock=_utcnow,
             ),
+            # The five connection operations (ADR-0151 §1, §10), over the one
+            # provisioner seam. **The engine reaches the provisioner through the
+            # Protocol and never by an injected concrete**, and `orchestration`
+            # imports no module of `tools` (golden rule 1) — the narrowing is the
+            # annotation on ``ConnectionOperations.__init__``, and this is the one
+            # place that knows which implementation satisfies it.
+            connection_operations=connection_operations,
             closers=[
                 _as_async(memory.close),
                 _as_async(trail.close),
@@ -1080,6 +1091,11 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
                 # the drain of the reconsideration job, which the façade has
                 # already waited on by the time any of these run.
                 _as_async(notifications.close),
+                # The connection store, on the same ordering as the other Tier 1
+                # stores (ADR-0149 §3). Nothing constrains its position relative to
+                # them: no other store reads it and it reads none, and the keyring
+                # face beside it owns no connection to close.
+                _as_async(connections.close),
                 # And the outbox immediately after it, which is the one ordering
                 # constraint between the two: a departure dismisses the record
                 # *before* it removes the entry (ADR-0131 §3b), so an outbox still
@@ -1142,6 +1158,73 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
         for close in reversed(opened):
             close()
         raise
+
+
+def _build_connection_operations(
+    directory: Path, *, opened: list[Callable[[], None]]
+) -> tuple[SqliteConnectionStore, ConnectionOperations]:
+    """Open the connection store and wire the five operations over it (ADR-0151 §10).
+
+    Extracted from :func:`build_composition` because the wiring is three
+    constructions and one boundary that each want their reason written down, not
+    because the pieces are reusable — nothing else builds one.
+
+    **This is the wiring ADR-0153 §8's second precondition is about.** Making
+    ``connect_account`` and ``reprovision_account`` reachable in an installation is
+    what puts an ``INTEGRATION`` credential in a keyring, and §8 forbids that
+    "before the routing §3 requires is present in ``ai_assistant/service/purge.py``"
+    — otherwise an installation could acquire a credential its shipped delete act
+    does not reach, which is the state ADR-0126 §6 forbids. Holding the order is the
+    dispatcher's; what this docstring holds is *why*, so a lane reading this file
+    later does not have to rediscover it.
+
+    Args:
+        directory: The resolved data directory. It is both where the store's file
+            goes and the namespace ADR-0125 §2 binds the keyring face to.
+        opened: The build's rollback list. The store registers itself here the
+            statement after it opens, so a *later* construction failing closes it
+            rather than leaking a connection out of a half-built engine (ADR-0042
+            §2). Registering inside rather than at the call site is what makes that
+            true of the window this function owns.
+
+    Returns:
+        The store, so the caller can join it to the engine's **ordered** shutdown —
+        a different list from ``opened``, which is the failure path — and the
+        operations object the engine is wired with.
+    """
+    # ADR-0149 §3's connection store: another connection-owning Tier 1 store — an
+    # entry carries an account identity, which ADR-0149 §3 rules Tier 1 personal
+    # data — under the same data directory and the same owner-only file mode as the
+    # others. ADR-0083 ruling 4's exclusivity needs nothing new for it, on ADR-0102
+    # §12's reasoning: it is inside the directory the instance lock already covers,
+    # opened by this process, and closed in the same ordered shutdown.
+    store = SqliteConnectionStore(path=directory / "connections.db")
+    opened.append(store.close)
+    # **The one ``INTEGRATION``-scoped keyring face in the system** (ADR-0149 §1).
+    # It is constructed *here* and nowhere else: `tools` may not import
+    # :mod:`ai_assistant.secret_store` at all, which ``lint-imports`` holds, and
+    # `orchestration` holds no keyring face and acquires none by carrying a
+    # credential across its surface (ADR-0125 §8, ADR-0151 §6).
+    #
+    # **Bound to the resolved data directory rather than to a setting read again**
+    # (ADR-0125 §2), so two data directories on one machine share no entry — the
+    # keyring is per OS user, not per data directory, and a QA hub overwriting the
+    # owner's real credential is the failure that cannot be noticed. Constructing it
+    # touches no keyring (ADR-0125 §7), so a deployment with no keyring still starts
+    # and only a call that needs one fails.
+    secrets = KeyringSecretStore(scope=SecretScope.INTEGRATION, installation=str(directory))
+    # The provisioner ADR-0149 §1 puts in `tools`. **One object, two faces** —
+    # ``ConnectionProvisioner`` here and ``ConnectionPurger`` for ADR-0126's offline
+    # act — which is ADR-0153 §2's decision and the same structural-typing move the
+    # grant store already makes: what a consumer may name is decided by the
+    # annotation on its constructor rather than by a subset relation between two
+    # Protocols.
+    provisioner = KeyringConnectionProvisioner(store=store, secrets=secrets)
+    # **The engine reaches it through the Protocol and never by an injected
+    # concrete**, and `orchestration` imports no module of `tools` (golden rule 1).
+    # The narrowing is the annotation on ``ConnectionOperations.__init__``; this is
+    # the one place that knows which implementation satisfies it.
+    return store, ConnectionOperations(provisioner=provisioner)
 
 
 def ensure_model_credentials(settings: Settings) -> None:

@@ -1285,6 +1285,10 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
         databases = sorted(path.name for path in tmp_path.glob("*.db"))  # noqa: ASYNC240
         assert databases == [
             "audit.db",
+            # ADR-0149 §3's connection store, the tenth and the ninth that is
+            # Tier 1: an entry carries an account identity, which §3 rules Tier 1
+            # personal data.
+            "connections.db",
             "conversations.db",
             "deferrals.db",
             "grants.db",
@@ -1303,6 +1307,40 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
         assert stat.S_IMODE((tmp_path / "notifications.db").stat().st_mode) == 0o600
         # And the ninth on the same clause (ADR-0131 §3, ADR-0004 §4).
         assert stat.S_IMODE((tmp_path / "outbox.db").stat().st_mode) == 0o600
+        # And the tenth (ADR-0149 §3, ADR-0004 §4): an account identity is the
+        # user's own text, so the file mode is the one every Tier 1 store gets.
+        assert stat.S_IMODE((tmp_path / "connections.db").stat().st_mode) == 0o600
+    finally:
+        await engine.aclose()
+
+
+async def test_the_connection_surface_is_wired_and_answers_from_its_own_store(
+    tmp_path: Path,
+) -> None:
+    """ADR-0151 §10, §15: the composition root wires the one implementation.
+
+    **Asserted through the two operations that read**, and deliberately not through
+    one that writes. ADR-0153 §8's precondition forbids a connect or re-provision
+    operation being *reachable in an installation* before ADR-0126's offline act
+    routes the purge, and a test that provisioned here would also be a test that
+    put an ``INTEGRATION`` credential into the developer's own OS keyring — the
+    real one, since ``build_engine`` wires ``KeyringSecretStore`` and not a fake.
+    Reading answers the wiring question without either.
+
+    The empty answers are the substance rather than a formality: an engine wired
+    with no provisioner could not be built at all (the argument is required), and
+    one wired to a *second* store would answer from a database the disconnection
+    never reaches — which is the failure ADR-0102 §7 names one store over.
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert await engine.connected_accounts() == ()
+        assert await engine.recent_connection_acts() == ()
+        # The local refusal is the engine's own and needs no keyring at all
+        # (ADR-0151 §5), so it is reachable here and proves the surface is live
+        # rather than merely present.
+        with pytest.raises(ValueError, match="strictly positive"):
+            await engine.recent_connection_acts(limit=0)
     finally:
         await engine.aclose()
 

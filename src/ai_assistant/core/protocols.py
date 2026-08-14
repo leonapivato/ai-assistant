@@ -6752,6 +6752,345 @@ class AssistantEngine(Protocol):
         """
         ...
 
+    # --- the connection surface (ADR-0151 §1) --------------------------------
+    #
+    # Five operations, and five is derived rather than preferred (ADR-0151 §1):
+    # ADR-0149 §9 names connecting, re-provisioning, disconnecting and listing,
+    # and ADR-0139 §1 splits the last into *what is connected now* and *what was
+    # done*, which are answered from different halves of the store and neither of
+    # which derives the other. **No other operation on any surface performs, or
+    # reports the outcome of, a provisioning act or a disconnection.**
+    #
+    # **None of them is reachable by a model or a plan** (ADR-0151 §13). No
+    # ``ToolDefinition`` binds one, no plan step reaches one, no model-authored
+    # value becomes an argument to one, and no scheduler job invokes one — a
+    # connection is created, re-provisioned and disconnected only by an explicit
+    # user act through a client. Two limbs of that are already mechanical: `tools`
+    # is a subsystem, subsystems never import `orchestration` and never import one
+    # another. It is written anyway because what it would invert is ADR-0005 §3.
+    #
+    # **No ruling and no trail** (ADR-0151 §12, ADR-0149 §7). No ``ActionPolicy``
+    # ruling is sought for any of these, no ``PermissionDecision`` is synthesised
+    # for one, and no ``AuditTrail`` record is written for one; a connection is not
+    # an authorisation and no surface presents one as permission to act.
+    # :meth:`recent_connection_acts` is what discharges the record half of
+    # ADR-0004 §7 for a provisioning act.
+    #
+    # **No lane exposes these over any transport but ADR-0084 §1's loopback
+    # socket** — in particular not over ADR-0124's remote listener — before a
+    # ratified decision rules the credential's hop from an enrolled device
+    # (ADR-0151 §13). It is a precondition on that lane rather than a check here,
+    # because a method cannot see its transport (ADR-0098 §5).
+
+    async def connect_account(
+        self, *, identity: NonBlankEncodableText, credential: SecretValue
+    ) -> ConnectedAccount:
+        """Connect a fresh account under a reference the hub mints (ADR-0151 §2).
+
+        **It takes no reference argument and no implementation accepts one under
+        another name or through another route** (ADR-0151 §2). The reference is
+        minted by the provisioner as the reference's first record is written, from
+        a source no fresh process resumes; no client, no ``Settings`` value, no
+        configuration file and no model-authored value supplies, proposes,
+        constrains or predicts one (§3). So this call cannot be aimed at an
+        existing record at all, which is what makes "I meant to replace a
+        credential and created a second connection instead" unreachable rather
+        than merely visible — the mistake a user actually makes.
+
+        **It is a separate operation from :meth:`reprovision_account` although
+        ADR-0148 §6 gives both one act**, because the per-method failures differ
+        and ADR-0085 §9 makes those part of the contract: this one cannot fail
+        with an unknown reference and cannot lose a compare-and-swap, since its
+        reference is minted and no other act can be holding it.
+
+        **It returns only when ADR-0148 §6's third write has landed**, carrying
+        ``state=ACTIVE``, the identity supplied in this call, and the reference's
+        first revision. An implementation that returns after the first or second
+        write, or returns a ``PENDING`` record, does not conform (ADR-0151 §7).
+
+        **The identity is refused rather than normalised** (ADR-0151 §5). Nothing
+        strips, case-folds, case-normalises or Unicode-normalises it, at the
+        surface or below, and what is returned is byte-for-byte what was supplied.
+        Every client that accepts an identity displays it to the user as part of
+        the act — an obligation the hub cannot enforce and states anyway, because
+        ADR-0149 §4's third answer to a credential pasted into the identity field
+        is precisely that the value is *seen*.
+
+        **The credential reaches this system by no other route** and comes to rest
+        only in the keyring (ADR-0151 §6). It is named ``credential`` on both
+        operations that take one so ``core/logging.py``'s key-name redaction covers
+        it wherever a payload mapping is logged, and no implementation renames it,
+        aliases it, or nests it under a key redaction does not reach.
+        `orchestration` relays it and does nothing else with it: it does not
+        unwrap it, log it, retain it beyond the call, copy it into any other value,
+        retry a call with it, or read it back. No operation returns one or any
+        value derived from one, and none is recorded in a trace, an ``AuditTrail``,
+        a conversation or a plan.
+
+        **A cancellation propagates unconverted** (ADR-0151 §7, ADR-0060). It is
+        not a failure and no implementation converts one into any class below. A
+        cancelled client reports the outcome as *not known*, states the
+        reference's state as unread, and starts no new call in order to report.
+
+        Args:
+            identity: The user-recognisable name of the account, recorded verbatim.
+            credential: The account's secret, still in its redacting holder.
+
+        Returns:
+            The live record this act wrote, ``ACTIVE`` at the reference's first
+            revision, carrying the minted reference.
+
+        Raises:
+            ValueError: If ``credential`` is blank, unencodable or oversized
+                (ADR-0125 §3) — refused with a message naming neither the value
+                nor its length (ADR-0125 §6).
+            UnusableIdentityError: If ``identity`` exceeds
+                :data:`~ai_assistant.core.types.ACCOUNT_IDENTITY_MAX_BYTES` once
+                UTF-8 encoded, carries a Unicode control character or a line break,
+                or is **equal** to ``credential``'s plaintext. Raised **locally,
+                before any I/O**, by every implementation — the wire client
+                included — so no such call reaches the hub and no credential is
+                sent for one (ADR-0151 §5). The comparison is exact string
+                equality, made before the first of ADR-0148 §6's three writes, and
+                the message names neither value, no part of either, and no length
+                of either.
+            IncompleteProvisioningError: If the act's first write returned and the
+                act did not complete. It carries the minted reference, which the
+                store then holds, and asserts nothing about the reference's live
+                record at the moment it is caught (ADR-0151 §7).
+            ProvisioningOutcomeUnknownError: If the activation **failed rather than
+                returning**, so neither completion nor incompletion may be
+                asserted. It carries the reference, which exists; the resolution is
+                to read :meth:`connected_accounts`, never to re-run the act on the
+                assumption it failed.
+            ConnectionStoreError: If the act's own **first** write did not return.
+                It carries **no** reference, because there may be none to carry,
+                and the act's outcome is therefore not known.
+            OversizedValueError: If the arguments do not fit the configured frame.
+                Nothing is written; no implementation truncates a credential or an
+                identity, splits the act across frames, or falls back to another
+                route, and raising ``hub_max_frame_bytes`` is the operator's only
+                remedy (ADR-0151 §11).
+        """
+        ...
+
+    async def reprovision_account(
+        self,
+        reference: Identifier,
+        *,
+        identity: NonBlankEncodableText,
+        credential: SecretValue,
+    ) -> ConnectedAccount:
+        """Replace the credential under a reference the hub returned (ADR-0151 §2).
+
+        ADR-0148 §6's same three writes, aimed at an existing reference: the record
+        first as *pending* at the incremented revision, the credential second, the
+        record *active* third. The reference is **compared exactly** — no
+        implementation matches one by prefix, by case-insensitive comparison or by
+        any equivalence other than equality (ADR-0151 §3) — and it is one this hub
+        previously returned, because §3's mint means a user has no name of their
+        own to type. A client that offers connecting therefore must offer listing.
+
+        **It refuses a reference the store does not hold**, which is what turns
+        the typo that :meth:`connect_account` cannot make into a typed refusal
+        rather than a silent second connection.
+
+        **Its predecessor's slot is deleted once its own activation has landed**,
+        and never before (ADR-0148 §6). A deletion that fails leaves an
+        unreferenced credential rather than an incorrect one, and the failure is
+        reported and never suppressed — see ``ResidualCredentialError`` below,
+        which means the act **completed**.
+
+        :meth:`connect_account`'s clauses on the identity, on the credential and
+        on cancellation apply here word for word.
+
+        Args:
+            reference: The connection to re-provision, exactly as the hub returned
+                it.
+            identity: The account identity for the new revision, recorded
+                verbatim. It may differ from the previous revision's.
+            credential: The replacement secret, still in its redacting holder.
+
+        Returns:
+            The live record this act wrote, ``ACTIVE`` at the new revision.
+
+        Raises:
+            ValueError: If ``reference`` is blank or unwritable, or ``credential``
+                is blank, unencodable or oversized. Refused locally.
+            UnusableIdentityError: On :meth:`connect_account`'s terms.
+            UnknownConnectionError: If the store holds no entry for ``reference``.
+                Refused before the first write, so nothing is written.
+            DisplacedProvisioningError: If another act took the record over, at any
+                of ADR-0148 §6's three points. It means **no record this act wrote
+                is the reference's live record** — and **not** that this act wrote
+                nothing: the store may hold this act's own pending entry and the
+                keyring a credential in this act's own slot, both named by the
+                store, read by no call, and removed by a disconnection of that
+                reference and by ADR-0149 §8's purge (ADR-0151 §7). No
+                implementation performs a liveness pre-check to narrow the window,
+                because a pre-check narrows without closing it while inviting a
+                reader to believe it had.
+            IncompleteProvisioningError: On :meth:`connect_account`'s terms,
+                carrying this reference.
+            ProvisioningOutcomeUnknownError: On :meth:`connect_account`'s terms.
+            ResidualCredentialError: If the **predecessor-slot deletion** failed
+                after the activation returned having landed. The act
+                **completed** — the reference is connected at the new revision —
+                and what remains is an unreferenced credential the store still
+                names (ADR-0151 §7). No client reports it as a failed connection.
+            ConnectionStoreError: On :meth:`connect_account`'s terms.
+            OversizedValueError: On :meth:`connect_account`'s terms.
+        """
+        ...
+
+    async def disconnect_account(self, reference: Identifier) -> ConnectedAccount | None:
+        """Disconnect a reference and delete its credentials (ADR-0149 §5).
+
+        **Two steps in a fixed order**: the removal entry is appended **first**,
+        after which the reference has no live record; the credential slots are
+        deleted **second**. Deleting the credential first would leave a window in
+        which a live *active* record names a slot holding nothing.
+
+        **Idempotent and re-runnable** (ADR-0149 §5). On a reference the store
+        holds no entry for it writes nothing and deletes nothing, so a mistyped
+        reference leaves no tombstone. It does not reset the reference's revision.
+
+        **It is prospective, and no surface may say otherwise** (ADR-0151 §8). It
+        does not stop a transmission already in flight, does not cancel a
+        provisioning act, and is **not** a guarantee that the keyring holds nothing
+        for that reference — ADR-0149 §5 states the weaker, true guarantee, that no
+        live record names any slot for it.
+
+        **Disconnecting every reference is not ADR-0149 §8's purge** and does not
+        discharge ADR-0004 §6's delete right. No surface presents it as either, and
+        no lane composes one out of the other (ADR-0151 §8).
+
+        Args:
+            reference: The connection to disconnect, compared exactly.
+
+        Returns:
+            The live record removed, as it stood immediately before the removal
+            entry was appended — or ``None`` where the reference had no live record
+            to remove, which covers both a reference the store has never held and
+            one whose latest entry is already a removal. **A ``None`` is not a
+            report of a disconnection**: no client presents it as one, as a
+            confirmation that a credential was deleted, or as a statement that the
+            reference does not exist. It says one thing — no live record was
+            removed by this call (ADR-0151 §8).
+
+        Raises:
+            ValueError: If ``reference`` is blank or unwritable. Refused locally.
+            ResidualCredentialError: If the removal entry **landed** and at least
+                one credential deletion did not. The reference **is** disconnected,
+                the residual credentials stay named by the store, and the remedy is
+                to run this call again. A client reports the reference as
+                disconnected **and** the deletion as incomplete, and never as a
+                failed disconnection (ADR-0151 §8).
+            ConnectionStoreError: If the store could not be read or written.
+            OversizedValueError: If the argument or the record exceeds the limit.
+        """
+        ...
+
+    async def connected_accounts(self) -> tuple[ConnectedAccount, ...]:
+        """What is connected now, from the store's live records alone (ADR-0151 §9).
+
+        **Complete or refused, never truncated.** It takes no argument, is not
+        paged, and admits no ``limit`` and no ``offset``; where the result does not
+        fit the configured frame it raises
+        :class:`~ai_assistant.core.errors.OversizedValueError` and reports nothing.
+        A truncated answer to "what is connected" is a false answer rather than a
+        partial one, and there is no honest way for a client to tell the two apart
+        (ADR-0139 §2).
+
+        **Answered from the store and never from what the hub can currently
+        offer** (ADR-0139 §1). It returns the live record for every reference that
+        has one, whatever tools the hub has registered, whatever integrations
+        exist, and whatever configuration says: a connection whose integration is
+        no longer built is still a connection, and a listing that filtered by what
+        the hub holds would hide from the owner exactly the connections they most
+        need to see — and hide them from the disconnection that is their only
+        remedy.
+
+        **A pending reference is included, with its state** (ADR-0151 §4). It is
+        neither omitted nor substituted for by the previous act's record. **No
+        client presents a ``PENDING`` record as a working connection**: a surface
+        rendering one says the reference is *not connectable* and that the remedy
+        is to run the act again, and never that the connection is being
+        established, is in progress, or will complete on its own. Nothing is
+        running — ADR-0148 §6 rules an interrupted act's state "refused rather than
+        reconciled", and the record is inert until a user acts.
+
+        **Computed from one read of the store**, so it is a snapshot: no reference
+        appears twice, none is missing because another was being written, and the
+        set is internally consistent. It is not a claim that stays true after it is
+        computed, and no client presents it as one.
+
+        Returns:
+            Every live record, in no contractual order.
+
+        Raises:
+            ConnectionStoreError: If the store cannot be read, or holds an entry
+                that no longer validates.
+            OversizedValueError: If the live set does not fit the contract limit.
+        """
+        ...
+
+    async def recent_connection_acts(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[ConnectionAct, ...]:
+        """What was done, newest first, bounded by ``limit`` (ADR-0151 §9).
+
+        **One row per act on a reference** — per ``(reference, revision)`` pair —
+        carrying the furthest provisioning state that act reached, in the store's
+        own append order. The store's entry granularity is `tools`-internal
+        (ADR-0149 §3) and is not exposed: no implementation returns two rows for
+        one act, and no client reads the store's internal shape off this result.
+
+        **It answers a different question from :meth:`connected_accounts` and
+        neither derives the other** (ADR-0139 §1). The unsoundness is structural
+        and it is the page boundary rather than a clock: a reference whose latest
+        act falls outside the page is one a client walking the page would report by
+        an *earlier* act, so a user with several connections and a busy history
+        would see a disconnected account reported as connected — on the deployment
+        with the most history and nowhere else, which is the failure that never
+        shows up in a test. **No client derives a reference's current state from
+        this**, and none presents a row from it as live, as withdrawn, or as the
+        account currently connected under that reference.
+
+        **It carries no instant** (ADR-0151 §9). A connection record has none
+        (ADR-0149 §3), so no client presents this order as a timing claim, an
+        interval, or a statement about when anything happened: its order is the
+        order the store recorded the acts in, and that is the whole of what a
+        position means.
+
+        **This is the surface that discharges the record half of ADR-0004 §7** for
+        a provisioning act (ADR-0151 §12). A Tier 1 store whose only reader is the
+        code that writes it is reviewable by nobody the clause was written for.
+
+        Args:
+            limit: The most rows to return. Refused when **not strictly positive**,
+                locally and before any I/O, in every implementation — stricter than
+                ADR-0085 §9's ``[0, 2**63)`` for :meth:`recent_grants`' reason
+                (ADR-0151 §2a). There is deliberately no ``offset``: an offset over
+                a store that has none is either a store change or an engine-side
+                over-fetch-and-slice, which is a paging surface that lies about its
+                cost (ADR-0102 §10).
+
+        Returns:
+            Up to ``limit`` acts, newest first. ``account`` is ``None`` **exactly
+            when** the act was a disconnection and present exactly when it was a
+            provisioning act; where present, its ``reference`` and ``revision``
+            equal the act's own (ADR-0151 §4).
+
+        Raises:
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+            ConnectionStoreError: If the store cannot be read, or holds an entry
+                that no longer validates.
+            OversizedValueError: If the page exceeds the contract limit.
+        """
+        ...
+
 
 @runtime_checkable
 class Secrets(Protocol):

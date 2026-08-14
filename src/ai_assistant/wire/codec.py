@@ -35,6 +35,7 @@ byte. A divergence fails the gate on the round it is introduced.
 from __future__ import annotations
 
 import json
+import unicodedata
 from datetime import datetime, timedelta
 from enum import Enum
 from math import isfinite
@@ -42,8 +43,9 @@ from typing import TYPE_CHECKING, Any, Final
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from ai_assistant.core.errors import OversizedValueError
+from ai_assistant.core.errors import OversizedValueError, UnusableIdentityError
 from ai_assistant.core.types import (
+    ACCOUNT_IDENTITY_MAX_BYTES,
     GrantScope,
     Identifier,
     NonBlankEncodableText,
@@ -52,6 +54,8 @@ from ai_assistant.core.types import (
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+
+    from ai_assistant.core.types import SecretValue
 
 #: The bytes ADR-0085 §8b reserves for the frame envelope, so a payload at the
 #: contract limit still fits inside ``hub_max_frame_bytes``. §8b computes today's
@@ -519,3 +523,84 @@ def grant_scope(value: Sequence[GrantScope], *, name: str) -> tuple[GrantScope, 
         msg = f"{name} names each use at most once, got {tuple(snapshot)!r} (ADR-0097 §10)"
         raise ValueError(msg)
     return tuple(snapshot)
+
+
+#: The Unicode general categories ADR-0149 §4's "no control character, no line
+#: break" excludes. ``Cc`` is every C0 and C1 control; ``Zl`` and ``Zp`` are the
+#: two separators that are line breaks without being controls.
+_UNPRINTABLE_CATEGORIES: Final = frozenset({"Cc", "Zl", "Zp"})
+
+
+def usable_identity(identity: str, *, credential: SecretValue) -> str:
+    """Refuse an account identity ADR-0149 §4 does not admit (ADR-0151 §5).
+
+    **Raised locally, before any I/O, by every implementation of
+    ``connect_account`` and ``reprovision_account``** — the wire client
+    included — "so both implementations refuse the same values without a round
+    trip and neither is silently more permissive" (ADR-0085 §9). No such call
+    reaches the hub, and **no credential is sent for one**, which is the property
+    that makes this worth duplicating rather than deferring to the store.
+
+    **It is an ``AssistantError`` rather than ADR-0085 §9's ``ValueError``, and
+    the distinction is §9's own** (ADR-0151 §2a). A ``ValueError`` there is "a
+    caller programming error rather than a condition of the system"; an identity
+    is a value the **user typed**, and a person pasting a token into the wrong
+    field has not made a programming error. ``wire/server.py`` converts an
+    ``AssistantError`` into an error frame and lets anything else close the
+    connection — and a dropped socket is the worst available outcome on the one
+    call that carries a credential, because the natural client response to a
+    dropped socket is to retry it.
+
+    **One class for all three refusals, on ADR-0151 §2a's test**: in every case
+    the recourse is to supply a different identity, so one class is right and
+    three would be surface with no consumer.
+
+    **Nothing is normalised.** ADR-0149 §4 forbids stripping, case-folding,
+    case-normalising or Unicode-normalising a caller-supplied identity "at the
+    surface", and this is the surface; the value is returned byte-for-byte.
+
+    Args:
+        identity: The account identity as the caller passed it, already refused
+            blank or unencodable by :func:`non_blank_text`.
+        credential: The secret supplied in the **same call**, still wrapped. It is
+            read here and nowhere else in this module, and its plaintext reaches
+            no message, no log and no return value.
+
+    Returns:
+        The identity, unchanged — never stripped, never case-folded.
+
+    Raises:
+        UnusableIdentityError: If the identity carries a Unicode control character
+            or a line break; if it is **equal**, as exact string comparison, to
+            the credential's plaintext; or if its UTF-8 encoding exceeds
+            :data:`~ai_assistant.core.types.ACCOUNT_IDENTITY_MAX_BYTES`. **The
+            message names neither value, no part of either, and no length of
+            either** (ADR-0151 §5, ADR-0125 §6) — the bound is a constant and may
+            be named; the rejected value's measurement may not.
+    """
+    if any(unicodedata.category(char) in _UNPRINTABLE_CATEGORIES for char in identity):
+        msg = (
+            "an account identity is single-line printable text: no control character "
+            "and no line break (ADR-0149 §4). Nothing was written and no credential "
+            "was sent"
+        )
+        raise UnusableIdentityError(msg)
+    # **Exact equality, and nothing else** (ADR-0151 §5): not a hash, not a prefix,
+    # and never after a write. Reading the plaintext here is the comparison ADR-0149
+    # §4 requires; it is compared and discarded, and the branch below names neither
+    # side of it.
+    if identity == credential.get_secret_value():
+        msg = (
+            "the account identity is the same value as the credential, so the "
+            "credential was very likely pasted into the identity field. Nothing was "
+            "written and no credential was sent (ADR-0149 §4)"
+        )
+        raise UnusableIdentityError(msg)
+    if len(identity.encode("utf-8")) > ACCOUNT_IDENTITY_MAX_BYTES:
+        msg = (
+            f"an account identity encodes to at most {ACCOUNT_IDENTITY_MAX_BYTES} "
+            f"UTF-8 bytes (ADR-0149 §4, ADR-0151 §5). Nothing was written and no "
+            f"credential was sent"
+        )
+        raise UnusableIdentityError(msg)
+    return identity

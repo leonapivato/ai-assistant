@@ -17,7 +17,7 @@ from __future__ import annotations
 from datetime import datetime, time, timedelta
 
 import pytest
-from test_engine import AT, Harness, _grant_operations
+from test_engine import AT, Harness, _connection_operations, _grant_operations
 
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
@@ -49,6 +49,7 @@ def _wired(
     """
     return Engine(
         grant_operations=_grant_operations(),
+        connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,

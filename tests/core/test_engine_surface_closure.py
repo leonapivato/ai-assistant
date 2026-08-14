@@ -77,6 +77,20 @@ _NAMESPACE: Final = {**vars(core_types), **vars(protocols_module)}
 #: nothing it carries crosses the wire", so it is `core` surface that this walk is
 #: right not to reach.
 #:
+#: The last three are ADR-0151 §4's, which the five connection operations name: the
+#: two-member provisioning state, the live record, and the act. §4 fixes the set at
+#: three and says why the fourth was refused — a ``ConnectionActKind`` enum
+#: discriminating a provisioning act from a removal would encode what
+#: ``ConnectionAct.account`` being absent already says unambiguously, on a surface
+#: whose size is a contract clause, and an enum is the shape that invites the third
+#: member ADR-0149 §5 forbids.
+#:
+#: ``SecretValue`` is **not** among them and its absence is the contract rather than
+#: an omission (ADR-0151 §6): it is an ``Annotated`` alias over ``SecretStr``, it is
+#: reached only as an *argument* and never as a field of any promoted model, and
+#: ADR-0087's canonical projection is deliberately not extended to it. No response
+#: on this surface carries a credential value or any value derived from one.
+#:
 #: ``SourceGrant`` and ``GrantScope`` are **not** here and that is not an omission:
 #: they predate this block (ADR-0097 §2) and are ``core`` leaves the walk terminates
 #: at, exactly as :func:`_declared_by_this_change` sorts them.
@@ -116,6 +130,9 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ClassReach",
         "NotificationReach",
         "QuietWindow",
+        "ProvisioningState",
+        "ConnectedAccount",
+        "ConnectionAct",
     }
 )
 
@@ -286,8 +303,18 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     what the number is for is making a *complete* suite something a reader can
     check, since a method nobody bound to the shared contract is a method no
     implementation is held to.
+
+    ADR-0151 §1's five take it to thirty-one: connecting an account,
+    re-provisioning one, disconnecting one, and the two listings ADR-0139 §1 keeps
+    apart because neither derives the other.
+
+    **This assertion is now also #1125's answer.** ``core/types.py`` and
+    ``wire/surface.py`` each carried a prose count of this surface that had gone
+    stale by seven; both now name this check instead of restating a number, which
+    is `CONTRIBUTING.md` -> "No state claims in living documents" applied to a
+    comment in ``src/``.
     """
-    assert len(_method_names()) == 26
+    assert len(_method_names()) == 31
 
 
 def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None:
@@ -318,7 +345,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (26, 6), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (31, 7), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

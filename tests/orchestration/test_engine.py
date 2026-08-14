@@ -76,6 +76,7 @@ from ai_assistant.core.types import (
     band_of,
 )
 from ai_assistant.orchestration import (
+    ConnectionOperations,
     ConversationLifecycle,
     Engine,
     GrantOperations,
@@ -100,6 +101,7 @@ from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
+    FakeConnectionProvisioner,
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
@@ -157,6 +159,19 @@ def _grant_operations(sources: Sequence[HeldSource] = ()) -> GrantOperations:
         id_factory=_grant_ids(),
         clock=lambda: AT,
     )
+
+
+def _connection_operations() -> ConnectionOperations:
+    """The connection collaborator every ``Engine`` needs (ADR-0151 §10).
+
+    Required rather than optional on the façade, on ``_grant_operations``' reason
+    exactly: the five connection methods are on the Protocol, so an engine that
+    could be built without them is one whose surface is conditionally present. The
+    canonical fake is the subject, so a case that wants a live record, a pending
+    one, or a keyring that raises scripts it through the provisioner's own switches
+    rather than through a second double.
+    """
+    return ConnectionOperations(provisioner=FakeConnectionProvisioner())
 
 
 #: Long enough that the fakes' instant tools finish inside it anywhere.
@@ -427,6 +442,7 @@ class Harness:
         self.trace_retention = trace_retention
         self.engine = Engine(
             grant_operations=_grant_operations(),
+            connection_operations=_connection_operations(),
             loop=loop,
             runner=runner,
             plans=self.plans,
@@ -629,6 +645,7 @@ def _fresh_facade(harness: Harness) -> Engine:
     """
     return Engine(
         grant_operations=_grant_operations(),
+        connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -744,6 +761,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
     harness.engine._loop._id_factory = lambda: next(goals)  # fresh goal ids for new turns
     facade = Engine(
         grant_operations=_grant_operations(),
+        connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -804,6 +822,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
     harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     facade_a = Engine(
         grant_operations=_grant_operations(),
+        connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -856,6 +875,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
     harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     facade = Engine(
         grant_operations=_grant_operations(),
+        connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -995,6 +1015,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
 
     facade = Engine(
         grant_operations=_grant_operations(),
+        connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -1740,6 +1761,7 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
     harness = Harness(traces=traces)
     facade = Engine(
         grant_operations=_grant_operations(),
+        connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -2172,6 +2194,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
     harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     engine = Engine(
         grant_operations=_grant_operations(),
+        connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -2240,6 +2263,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
     )
     engine = Engine(
         grant_operations=_grant_operations(),
+        connection_operations=_connection_operations(),
         loop=harness.engine._loop,
         runner=harness.engine._runner,
         plans=harness.plans,
@@ -2274,6 +2298,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
     with pytest.raises(ValueError, match="must be positive"):
         Engine(
             grant_operations=_grant_operations(),
+            connection_operations=_connection_operations(),
             loop=harness.engine._loop,
             runner=harness.engine._runner,
             plans=harness.plans,
@@ -2297,6 +2322,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
     with pytest.raises(TypeError, match="must be an integer"):
         Engine(
             grant_operations=_grant_operations(),
+            connection_operations=_connection_operations(),
             loop=harness.engine._loop,
             runner=harness.engine._runner,
             plans=harness.plans,

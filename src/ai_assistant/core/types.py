@@ -7904,9 +7904,16 @@ class ToolCall(BaseModel):
 
 
 # --- the promoted engine surface (ADR-0084 §4, ADR-0085) ---------------------
-# The twenty-five types :class:`~ai_assistant.core.protocols.AssistantEngine`'s
-# nineteen methods name, and the complete transitive closure of what their fields
-# reach (ADR-0085 §5). ADR-0085 promoted twenty-four for fifteen methods; ADR-0102
+# The types :class:`~ai_assistant.core.protocols.AssistantEngine`'s methods name,
+# and the complete transitive closure of what their fields reach (ADR-0085 §5).
+# **Neither count is written here, and that is the durable form** (#1125,
+# `CONTRIBUTING.md` -> "No state claims in living documents"): both are owned by
+# `tests/core/test_engine_surface_closure.py`, which walks the declared field graph
+# out from every signature on the surface and fails when the promoted set and the
+# reachable set disagree. A figure in a comment goes stale silently at the next
+# method; a figure a check owns cannot. This block carried "twenty-five types …
+# nineteen methods" against a Protocol that had grown past both, which is the drift
+# ADR-0151 §16 assigned to its implementing lane to correct. ADR-0102
 # §3 adds `GrantableSource` for the four grant operations, and §13 records why
 # ADR-0085 §1's "and nothing else" is not thereby falsified — what that exclusion
 # excludes is *lifecycle*, and the closed graph its title claims is preserved
