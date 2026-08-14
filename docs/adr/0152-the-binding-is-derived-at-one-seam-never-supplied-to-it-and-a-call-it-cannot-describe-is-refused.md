@@ -219,9 +219,12 @@ convention.
 
 > **Normative.** Both members **revalidate every argument whose annotation carries
 > validation**, before reading any field of it, and refuse with an
-> `EgressBindingError` chained from the underlying `ValidationError` where
-> revalidation fails. The set is exhaustive per member and no argument is exempt: on
-> `bind` it is `tool`, `parameters` and `provenance`; on `rebind` it is `tool`,
+> `EgressBindingError` chained from the **`ValidationError`** that revalidation
+> raises. That is the whole of what this clause converts: an exception of any other
+> type raised from inside a validator this seam invokes is not turned into an
+> `EgressBindingError` here, and §12 names the one such exception the corpus already
+> records and routes it. The set is exhaustive per member and no argument is exempt:
+> on `bind` it is `tool`, `parameters` and `provenance`; on `rebind` it is `tool`,
 > `parameters` and `approved` where `approved` is not `None`. This is ADR-0029 §2's
 > step 1 at a second seam, whose rule is already written: "a revalidation failure
 > carrying the underlying `ValidationError` as its cause". No lane omits it for any
@@ -1214,6 +1217,36 @@ form).
 > ADR-0149 §8's fourth clause and issue #909 leave open, and no lane cites this ADR
 > toward one.
 
+> **Normative.** A **`RecursionError`** raised by `_deep_freeze` in
+> `core/types.py` while §1's revalidation rebuilds a `FrozenJsonMapping` argument is
+> **not** converted by this seam into an `EgressBindingError`, into
+> `Disposition.EGRESS_UNBINDABLE`, or into any other refusal or disposition. It
+> propagates unconverted, exactly as §9's `ConnectionStoreError` does, and §1's
+> revalidation clause promises the chained refusal for a `ValidationError` and for
+> nothing else. This ADR neither creates that hazard nor fixes it — it is ADR-0145
+> §14's unbounded `_deep_freeze` at the shared frozen-JSON ingress, tracked as
+> **#1107** — so no lane cites this ADR toward a depth bound, a stack-safe
+> revalidation path or a bounded parameter walk, and §13 states no test obligation
+> for the deep-mapping case.
+
+**The depth hazard is one stage earlier than this seam and is unchanged by it.**
+ADR-0145 §6 records that a deep mapping "exhausts the stack on the way in, today,
+with no schema evaluation anywhere in the picture", because `_deep_freeze` runs for
+every `FrozenJsonMapping` — `PlanStep.parameters` and `ToolResult.output` as much as
+`ActionRequest.parameters`. The `parameters` this seam is handed is already such a
+mapping, so a payload deep enough to raise during revalidation raised once already
+at the ingress that built it, and would raise again at the `ActionRequest` this seam
+does not build, with or without the revalidation §1 requires. The exposure is neither
+widened nor narrowed here, which is why the clause routes rather than answers.
+Answering it is a `core`-wide instance bound that ADR-0145 §14 already ruled is its
+own decision — "Changing it reaches `PlanStep`, `ToolResult` and every other holder"
+— and it reaches types §2's authorisation list does not claim and this ADR is
+therefore not authorised to change. It would also be the weaker half of that fix,
+giving one holder of the type
+a tidy refusal while every other holder kept the ugly one: the "second bound that
+runs after the recursion it exists to prevent" ADR-0145 §6 declined for itself, on
+reasoning that transfers here whole.
+
 **The semantic half of PR #1120's eleventh observation stays open, and this ADR
 narrows it without closing it.** The observation is that "nothing anywhere
 establishes that the declaration describes the tool": a declaration naming a body
@@ -1566,7 +1599,7 @@ binding — ADR-0150 §13's own form, "the condition is not made false or over-w
 being answered", read in the negative. §6's recording obligation on the designating
 lane is untouched.
 
-**ADR-0145 §1, §3, §4, §5, §6, §9 and §11 — no record owed.** §1's pre-ruling check
+**ADR-0145 §1, §3, §4, §5, §6, §9, §11 and §14 — no record owed.** §1's pre-ruling check
 is relied on and §10 states that the ordinary path reaches this seam after it —
 as an ordering rather than as a precondition, which is §3's own bypass reasoning
 ("a request built by a bypass reaches the seam") used rather than narrowed. §4's `INVALID_PARAMETERS`
@@ -1580,7 +1613,14 @@ relied on **as true** and is why §6's second clause is needed: the seam adds a
 constraint of its own where the schema declares none, which is an obligation stacked
 beside §9 rather than a re-reading of it. §11's record that a schema
 "permits keys it never described" is likewise relied on as true and is the premise
-of §6's first refusal.
+of §6's first refusal. §14's **depth-bound** bullet — the unbounded `_deep_freeze`
+at the shared frozen-JSON ingress, ruled "a pre-existing hazard this ADR neither
+creates nor fixes" and tracked as #1107 — is relied on **as ruled** and left exactly
+where ADR-0145 put it: §12 above routes this seam's `RecursionError` to that bullet
+rather than answering it, which is a scope-out being honoured rather than narrowed,
+and §6's record of the window it leaves open is neither widened nor closed here. A
+reader holding only ADR-0145 finds the same hazard, at the same ingress, with the
+same issue against it, and acts no differently for this ADR existing.
 
 **ADR-0016 §1, §4, §5 and §7 — no record owed.** §1's declared-not-inferred posture
 is applied to the two facts §3 keeps, and §3 above adds no safety field and no
