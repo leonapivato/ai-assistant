@@ -121,6 +121,8 @@ if TYPE_CHECKING:
         Belief,
         BeliefBand,
         BeliefSummary,
+        BoundEgressCall,
+        CarriedProvenance,
         Confirmation,
         ConnectedAccount,
         ConnectionAct,
@@ -135,12 +137,14 @@ if TYPE_CHECKING:
         DeferralClaim,
         DeferralState,
         DeferredProposal,
+        EgressBinding,
         Embedding,
         EncodableText,
         EpisodicMemory,
         EvaluationTrace,
         ExecutionState,
         FeedbackEvent,
+        FrozenJsonMapping,
         Goal,
         GoalDeletion,
         GrantableSource,
@@ -2372,6 +2376,365 @@ class ToolInvoker(Protocol):
                 from a task being torn down — so committing the step by the same
                 rule the timeout uses, and then re-raising, is the executor's
                 obligation (ADR-0029 §4).
+        """
+        ...
+
+
+@runtime_checkable
+class EgressBinder(Protocol):
+    """Derives an egress call's binding before the ruling, or refuses it (ADR-0152 §1).
+
+    ADR-0148 §11's surface (b): the seam by which `orchestration` obtains an
+    egress binding — together with the call it was derived under — from `tools/`
+    before :meth:`ActionPolicy.decide` is reached. ADR-0150 decided the *value*;
+    this decides how the value is obtained, and the two together are what let
+    ADR-0148 §1's earliness hold, since a request must already carry the whole
+    binding when the policy sees it and every part of that binding is
+    integration-specific knowledge living in `tools/`.
+
+    **Two operations and no others.** :meth:`bind` answers "what binding does this
+    call have", for a call reaching the permission stage for the first time;
+    :meth:`rebind` answers "what binding does this call have, and is it the one
+    that was approved", for a call resuming from a parked ``CONFIRM`` (ADR-0037
+    §4). The alternative — a single member with ``provenance`` and ``approved``
+    both optional and a rule that exactly one is supplied — is four constructible
+    states of which two are ill-formed, policed by a rule rather than by a type;
+    the ill-formed ones are "resume without checking what was approved" and
+    "authorise afresh with a stored binding" (ADR-0152 §1).
+
+    **Nothing about the binding is accepted; all of it is derived.** Neither
+    member takes a destination, a canonical form, a span, an extent, a tier or a
+    binding, and there is no argument through which one could be supplied
+    (ADR-0152 §5). The one thing that cannot be derived is a span's recorded
+    origin, which is **carried** (ADR-0146 §2): on :meth:`bind` in
+    :class:`~ai_assistant.core.types.CarriedProvenance`, and on :meth:`rebind`
+    transcribed from the approved binding.
+
+    **A third Protocol rather than a member on** :class:`ToolRegistry`. ADR-0029
+    §1's argument for splitting :class:`ToolInvoker` off transfers: a binder is a
+    third capability with a third consumer set — the selection stage needs it not
+    at all, and the executor needs it not at all — and adding ``bind`` to a
+    registry would hand every holder of a lookup the ability to materialise an
+    account reference and a transport endpoint (ADR-0017 §8). Whether one object
+    in `tools/` presents all three faces or a second object presents this one is
+    `tools/`-internal and is not contracted here (ADR-0152 §10).
+
+    **Both members are ``async``, and that is not permission to await anything.**
+    The read budget is **at most one** read per call and it is fixed: the
+    connection record the bound tool's egress registration names, read for its
+    connectability and its account identity and for nothing else (ADR-0152 §8,
+    §10). Neither member performs network I/O of any kind, reads a clock, reads
+    configuration or resolves anything, so neither can become the resolution path
+    ADR-0148 §5 governs. Neither reads a keyring, a memory store, a plan store, an
+    audit trail, a grant store, a notification store or a second connection
+    record, and neither performs a write of any kind anywhere.
+
+    **No credential value and no credential slot crosses this seam in either
+    direction.** A :class:`~ai_assistant.core.types.SecretName`, its ``name``, and
+    any string identifying a keyring entry appear in no argument, no return value
+    and no refusal message. An implementation holds no :class:`Secrets` and no
+    :class:`SecretStore` face, and holding this seam is not holding one (ADR-0125
+    §8, ADR-0149 §8).
+
+    **Every clause below is evaluated over the revalidated, detached copy of the
+    argument, never over the caller's object** (ADR-0152 §1). That is ADR-0029
+    §2's step 1 applied whole at a second seam — "the call is **revalidated and
+    detached** — first", and "every subsequent check reads the revalidated copy,
+    never the argument" — and it is what closes the suspension window the one
+    awaited read opens. Without it a caller could hand in a registry-equal
+    definition, let it revalidate and compare, suspend the seam on that read, then
+    replace the declaration with ``object.__setattr__`` (which defeats
+    ``frozen=True``, ADR-0018 §3) and have the binding derived under a declaration
+    no longer equal to the registered original.
+
+    **The seam assumes nothing about what a caller checked before reaching it.**
+    On the ordinary path it is reached after ADR-0145's schema check, which
+    ADR-0144 §7's eligibility filter performs during selection — but that is an
+    ordering of the runner stage and not a precondition: every shape a clause
+    depends on is re-established here from the ``tool`` and the ``parameters``
+    handed over, because a request built by a bypass reaches the seam (ADR-0029
+    §2, ADR-0145 §3). **A conformance suite therefore exercises every refusal
+    directly**, against a subject handed inputs no runner would produce, and an
+    implementation that refuses only what the runner would already have refused
+    does not satisfy this contract (ADR-0152 §10).
+
+    **The declaration this seam reads rides in the tool's ``parameters_schema``,
+    in two keywords and no others** (ADR-0152 §3), each read **only** on the
+    immediate subschema of a key of that schema's top-level ``properties``
+    object: ``x-egress-destination``, whose value is a
+    :class:`~ai_assistant.core.types.DestinationProtocol` member's own string
+    value, present exactly on a destination-bearing argument; and
+    ``x-egress-tier``, whose value is a
+    :class:`~ai_assistant.core.types.DataTier` member's own string value, present
+    exactly where the argument's field *establishes* that tier (ADR-0146 §5). No
+    other keyword declares anything here, no field is added to
+    :class:`~ai_assistant.core.types.ToolDefinition` for either, and nothing in
+    the vocabulary declares whether an argument decomposes, is transmitted or is
+    required — ADR-0150 §4, ADR-0150 §4 again, and JSON Schema's own ``required``
+    each already state one of those.
+
+    **A destination-bearing argument is flat** (ADR-0152 §4): its subschema is
+    ``"type": "string"`` or ``"type": "array"`` whose ``items`` is a subschema
+    whose own ``"type"`` is ``"string"``, and nothing else. A declaration marking
+    any other shape is refused when the declaration is read; a *call* whose
+    declared destination-bearing argument carries a value that is not a JSON
+    string and not a JSON array of JSON strings is refused before the ruling,
+    whether or not the declaration was already refused.
+
+    **No message any refusal raises renders an argument value, a supplied or
+    canonical destination form, an account identity, a credential slot, or any
+    part of a span's content** (ADR-0152 §11). It may name the tool id, an
+    argument name the bound tool's declaration **statically names**, a zero-based
+    index, a count, a field name, an error type, and the **connection reference** —
+    which the connectability refusal does name, ADR-0149 §3's split between a
+    loggable handle and a Tier 1 value. A key of ``parameters`` the declaration
+    does not statically name is never interpolated into a message; a refusal for
+    such a key states the count and the declared names and nothing of the key
+    itself.
+
+    Cancelling either member is governed by this module's cancellation clause
+    (ADR-0060). It has little bite here — nothing is written anywhere — but the
+    one awaited read must not be left holding a store's resource.
+    """
+
+    async def bind(
+        self,
+        tool: ToolDefinition,
+        *,
+        parameters: FrozenJsonMapping,
+        provenance: CarriedProvenance,
+    ) -> BoundEgressCall | None:
+        """Derive the binding for a call reaching the permission stage first time.
+
+        **What is given is the bound tool and the arguments**, which are two of the
+        three things ADR-0148 §6's determinism clause makes the description a
+        function of, plus the third that clause names and the seam cannot derive.
+        No step id, no execution id, no decision, no ruling and no timeout: none of
+        them bears on what this call would transmit or to whom.
+
+        ``tool`` is the **definition** and never a tool id, so the declaration the
+        binding was derived under and the declaration bound into the
+        :class:`~ai_assistant.core.types.ActionRequest` are one object rather than
+        two lookups that must agree — it is the same object the request carries,
+        the policy rules on and the decision embeds verbatim (ADR-0021 §1).
+
+        **``None`` is returned exactly when** the revalidation below succeeded,
+        this seam holds **no egress registration** for ``tool.id`` — that is, no
+        connected account bound to it — **and** ``tool.parameters_schema`` carries
+        neither declaration keyword (ADR-0152 §8). Such a call is not an egress
+        call: it carries no binding, and every refusal below is inapplicable to it.
+        ``None`` never signals a failure, and no caller reads it as one. The caller
+        then builds its request from its own ``tool`` and ``parameters`` with
+        ``egress_binding=None``, and no behaviour of any non-egress call changes.
+
+        What makes a tool an egress tool is the **connected account it is
+        registered against** (ADR-0148 §6) and not the presence of a keyword: a
+        tool bound to an account whose schema carries neither keyword is a
+        well-formed egress call selecting no onward recipient, whose canonical
+        destination set is the account alone. A tool this seam holds no
+        registration for whose schema carries **either** keyword is **refused**
+        rather than answered ``None`` — it is mis-registered, and returning ``None``
+        would silently discard a declaration its author wrote.
+
+        **The revalidation runs ahead of that condition, and the ordering is
+        forced**: evaluating it reads ``tool.id`` and ``tool.parameters_schema``,
+        which are fields of an argument revalidated before any field of it is read.
+        A call whose arguments fail revalidation is therefore refused on this
+        branch exactly as on every other, and never reaches the condition at all.
+
+        **Every argument whose annotation carries validation is revalidated before
+        any field of it is read, and detached** — ``tool``, ``parameters`` and
+        ``provenance``, with no exemption for any of them on the ground that the
+        annotation says the value is valid: ``model_construct`` is a documented
+        escape hatch, ``object.__setattr__`` defeats ``frozen=True`` (ADR-0018 §3),
+        and neither is detectable from a type. A revalidation failure raises
+        :class:`~ai_assistant.core.errors.EgressBindingError` **chained from** the
+        ``ValidationError`` revalidation raised, which is ADR-0029 §2's step 1 rule
+        at a second seam. That is the whole of what is converted: an exception of
+        any other type raised from inside a validator this seam invokes is **not**
+        turned into an ``EgressBindingError`` — in particular a ``RecursionError``
+        from freezing a deep ``parameters`` mapping propagates unconverted, which
+        is ADR-0145 §14's pre-existing hazard at the shared frozen-JSON ingress
+        (issue #1107) and is neither created nor fixed here.
+
+        **The binding is derived whole and no part of it is accepted** (ADR-0152
+        §5). Every :class:`~ai_assistant.core.types.EgressDestination` carries the
+        canonical form **this seam's own canonicaliser for that occurrence's
+        protocol** computed from its supplied form — which discharges ADR-0150
+        §11's correspondence check by construction rather than by comparison, since
+        an occurrence the seam computed cannot disagree with the computation that
+        produced it. For each protocol the seam reaches **one** canonicaliser, and
+        no integration, declaration, configuration or registration supplies a
+        second for a protocol it already canonicalises (ADR-0148 §2). A supplied
+        form for which that canonicaliser asserts no canonical form is refused, and
+        never passed through as its own canonical form.
+
+        The one field not derived is a span's ``provenance``. The seam writes
+        :attr:`~ai_assistant.core.types.DiscloserProvenance.SYSTEM_SELECTED` for
+        every span ``provenance`` does not name — ADR-0146 §2's fail-closed rule
+        discharged by the component building the span rather than by a field
+        default — and **refuses** an entry naming a span this call does not carry,
+        rather than dropping it: a caller and this derivation disagreeing about
+        what the payload is, is exactly what a silent drop would hide.
+
+        Args:
+            tool: The selected tool's definition, positionally, by ADR-0085 §2's
+                convention. Refused if it is not equal to the definition this
+                implementation holds registered under ``tool.id`` — ADR-0029 §1's
+                registry-original check performed one stage earlier and for its
+                stated reason, the seam being the only place the caller's
+                definition and an untampered original meet. It is not a substitute
+                for that check, which still runs at :meth:`ToolInvoker.invoke`.
+                Where this implementation holds no registration for the id, the
+                comparison is not reached and the ``None`` condition above governs.
+            parameters: The arguments the ``ActionRequest`` will carry, unaltered.
+                Nothing is amended, defaulted into them or substituted for them:
+                what comes back on the egress path is the **same** mapping the
+                binding was derived under, carried on the returned value.
+            provenance: The recorded origin of each span the caller holds one for,
+                as a validating carrier rather than a bare mapping. No default: a
+                caller holding none constructs one over an empty mapping and passes
+                it deliberately (ADR-0150 §5).
+
+        Returns:
+            The derived binding beside the **detached** ``tool`` and
+            ``parameters`` it was derived from, or ``None`` where the call is not
+            an egress call. The caller builds its ``ActionRequest`` from **these
+            three fields** and never from objects it retained across the call, and
+            no ``await`` sits between this returning and that construction — the
+            system composes on one event loop, so with no suspension point between
+            them nothing else interleaves and the returned copies cannot be reached
+            or replaced before the request is built.
+
+        Raises:
+            EgressBindingError: On every refusal ADR-0152 §6 states, and refusing
+                is a refusal of the **whole call**: the binding is not produced,
+                the ``ActionRequest`` is not built, and no ruling is sought
+                (ADR-0148 §1). The named ones are: a top-level key of
+                ``parameters`` the bound tool's ``parameters_schema`` does not
+                **statically name** — a key of that schema's top-level
+                ``properties`` object, never one admitted only by
+                ``additionalProperties``, ``patternProperties``, ``propertyNames``
+                or any other open-ended form, however validly the call type-checks
+                against it, and a tool with no schema or no top-level
+                ``properties`` statically names none; a span of an argument the
+                declaration marks destination-bearing carrying no
+                ``EgressDestination``; a declared destination-bearing argument
+                whose value is not a JSON string or a JSON array of JSON strings,
+                and a declaration marking such an argument at all; a declaration
+                breaching the vocabulary — a keyword outside a top-level property's
+                own subschema, a keyword value naming no member of its enum, a
+                protocol this seam holds no canonicaliser for, or a
+                destination-bearing argument stating no tier; a bound tool whose
+                egress registration names a reference that is **not connectable**
+                at the moment the call is bound, its connection record being absent
+                or ``PENDING`` rather than ``ACTIVE`` (ADR-0148 §6, read at this
+                moment and never carried over from registration or an earlier
+                call); and, residually, any other call for which a whole,
+                well-formed binding cannot be produced. A partial binding is never
+                returned, a ``BoundEgressCall`` whose ``tool`` or ``parameters`` is
+                other than the one its binding was derived under is never returned,
+                and ``None`` is never returned to signal a failure.
+            ConnectionStoreError: If the connection record could not be read at
+                all (ADR-0151 §2a). **Never** translated into an
+                ``EgressBindingError`` or into
+                :attr:`~ai_assistant.core.types.Disposition.EGRESS_UNBINDABLE`: a
+                store that could not be read asserts nothing about the call, which
+                may be bindable a second later. It propagates out of the runner
+                stage, which has committed nothing — no ruling requested, no audit
+                record written, no claim made, the step still ``PENDING`` at its
+                stored version. No implementation suppresses it, retries it inside
+                the seam, or falls back to a cached connectability, a cached
+                identity or a previous read.
+            CancelledError: If the calling task is cancelled from outside.
+        """
+        ...
+
+    async def rebind(
+        self,
+        tool: ToolDefinition,
+        *,
+        parameters: FrozenJsonMapping,
+        approved: EgressBinding | None,
+    ) -> BoundEgressCall | None:
+        """Re-derive the binding for a resuming call, and check what was approved.
+
+        ADR-0037 §4's resume sequence rebuilds the ``ActionRequest`` from the
+        confirmation's own embedded ``ToolDefinition`` and the step's parameters,
+        and a second ruling — :meth:`ActionPolicy.resolve` — is taken on it. Under
+        ADR-0148 §1 that request must carry the whole binding before that ruling
+        too, and this is where it is obtained.
+
+        **Everything is re-derived except the provenance**, which is taken from
+        ``approved``, matched to the derived span by
+        :class:`~ai_assistant.core.types.EgressSpanLocator`. Nothing else in
+        ``approved`` is read into the result. Transcribing the provenance is
+        forced: a recorded origin is a fact about an act that happened before the
+        confirmation was parked, plausibly before a restart, so a member that took
+        a fresh ``provenance`` argument would receive an empty one, describe every
+        span as ``SYSTEM_SELECTED``, and compare unequal to an approved binding
+        whose spans said ``USER_AUTHORED`` — refusing every resumed call whose user
+        typed anything.
+
+        **Re-deriving and comparing uses ADR-0148 §6's determinism clause rather
+        than working around it.** That clause forbids a binding being derived
+        *after* the ruling and re-derived *at the seam*; this derivation happens
+        **before** ``resolve``, and "the seam" there is the transmitting seam — the
+        callable reached by :meth:`ToolInvoker.invoke`, which this touches not at
+        all. §6 states the positive form in terms: the description is deterministic
+        so that "the approver, the seam and a later auditor can each re-derive and
+        compare". This is that comparison, performed by the component that has both
+        values.
+
+        **The account, the endpoint and the connectability are re-derived too**, so
+        a registry rebuilt under a different configuration, or a reference that
+        went ``PENDING`` while the ``CONFIRM`` was parked, refuses here rather than
+        at the callable — one stage earlier and before a second ruling is recorded,
+        which is ADR-0148 §1's stated direction of moving facts earlier. ADR-0148
+        §6's four-way refusal at transmission is unchanged and is not made
+        redundant: it is the check that runs after the second ruling, on a fact
+        that can move between the ruling and the transmission.
+
+        Args:
+            tool: The confirmation's own embedded definition, subject to the same
+                registry-original comparison :meth:`bind` describes.
+            parameters: The step's parameters, unaltered, as :meth:`bind`.
+            approved: The binding the parked ``CONFIRM`` carries, or ``None`` where
+                the recorded decision carried none. Revalidated and detached like
+                every other argument when it is not ``None``.
+
+        Returns:
+            The **derived** binding — never the one it was given — beside the
+            detached ``tool`` and ``parameters`` it was derived under, so ADR-0037
+            §4's rebuilt request is built from the same pair on the resuming path
+            as on the first. Or ``None``, on exactly the condition :meth:`bind`
+            states, when ``approved`` is ``None``.
+
+        Raises:
+            EgressBindingError: On every refusal :meth:`bind` states, and on three
+                more this member alone can meet. The derived binding is not
+                **equal** to ``approved`` — equal as ADR-0150 §9 compares a
+                binding, whole and by value — which is what makes ADR-0150 §12's
+                forged-canonical case reachable: a decision read back out of the
+                trail carrying an occurrence whose canonical form is not what this
+                seam's canonicaliser computes is unequal to a freshly derived
+                binding, and is refused before ``resolve``. A ``provenance`` in
+                ``approved`` that cannot be matched — a derived span whose locator
+                names no span of ``approved``, or a span of ``approved`` whose
+                locator names no derived span — each being a refusal, never filled
+                with ``SYSTEM_SELECTED``, since that default is :meth:`bind`'s
+                answer for an origin nobody recorded and using it here would
+                silently convert a disagreement about the payload into an
+                approved-looking description. And ``approved`` not ``None`` for a
+                tool this seam holds **no** egress registration for: a recorded
+                decision stating an egress call and a registry stating a non-egress
+                tool disagree about what was authorised, and the answer to a
+                disagreement is a refusal rather than the weaker of the two
+                readings.
+            ConnectionStoreError: As :meth:`bind`. Connectability is read afresh
+                here too and never carried over from the moment the ``CONFIRM`` was
+                asked.
+            CancelledError: If the calling task is cancelled from outside.
         """
         ...
 

@@ -1379,3 +1379,44 @@ class ResidualCredentialError(AssistantError):
         """
         super().__init__(message)
         self.reference: str = encodable_text(reference)
+
+
+class EgressBindingError(AssistantError):
+    """This call cannot be bound, so no ruling is sought for it (ADR-0152 §9).
+
+    The one refusal class both members of
+    :class:`~ai_assistant.core.protocols.EgressBinder` raise, and ADR-0152 §9 adds
+    no other and no subclass of it. Every refusal ADR-0152 §6, §7 and §8 states
+    ends here: a declaration that cannot describe the call, a destination with no
+    canonical form, an argument the schema never statically named, a reference
+    that is not connectable, a definition unequal to its registered original, a
+    resumed binding unequal to the one that was approved.
+
+    **One class rather than a family, on ADR-0145 §4's argument.** ADR-0151 §2a
+    declares seven classes for five operations because a caller acts differently
+    on each; here it does not. Every refusal ends the turn having disclosed
+    nothing, asked nobody, written nothing and claimed nothing, and every one of
+    them is corrected the same way — by a different call or a corrected
+    declaration. "A second member would be a distinction visible to a client that
+    cannot act on it differently."
+
+    **Raised, never returned** (ADR-0152 §9). The return type carries a
+    :class:`~ai_assistant.core.types.BoundEgressCall` or ``None``, and neither can
+    express "this call cannot be completed"; ``None`` is ADR-0152 §8's answer for
+    a call that is not an egress call at all and never signals a failure.
+
+    **It carries no structured state**: no reference, no argument name, no
+    destination, no tier and no count. What a refusal says is its message, bound
+    by ADR-0152 §11 — which permits the tool id, an argument name the bound tool's
+    declaration statically names, a zero-based index, a count, a field name, an
+    error type and the connection reference, and permits nothing else.
+
+    **A :class:`ConnectionStoreError` is never translated into this class**
+    (ADR-0152 §9). A store that could not be read asserts nothing about the call:
+    it may be perfectly bindable a second later, and the remedy is not a different
+    call. It propagates out of the runner stage unconverted, as
+    :class:`AuditError` and :class:`PlanningError` already do for an
+    infrastructure fault rather than a step outcome. So does a ``RecursionError``
+    raised while an argument is revalidated (ADR-0152 §12, issue #1107): this
+    class is promised for a chained ``ValidationError`` and for nothing else.
+    """

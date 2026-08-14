@@ -823,6 +823,8 @@ def _outcome_of(step: StepOutcome | None) -> str:  # noqa: PLR0911 — one retur
             return "several tools advertised the capability, so none was chosen"
         case Disposition.INVALID_PARAMETERS:
             return "the step's arguments did not fit the declared schema of any capable tool"
+        case Disposition.EGRESS_UNBINDABLE:
+            return "the outbound call could not be described, so nothing was asked or sent"
         case _:  # pragma: no cover - exhaustive
             assert_never(step.disposition)
 
