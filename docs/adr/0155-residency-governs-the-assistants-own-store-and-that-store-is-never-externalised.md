@@ -398,8 +398,10 @@ checkable direction and the one a reviewer can test a change against.
 
 > **Normative.** Where a span's only relation to the assistant's own store runs
 > through a model's context — store content reaching a model by one path, and the
-> model producing an egress argument by another — the clause above does not reach it,
-> and such a send is **permitted or refused by §2's conditions alone**: this ADR adds
+> model producing an egress argument by another — **and the component preparing the
+> span supplied no value from the assistant's own store as an input to the operation
+> that produced the span**, the clause above does not reach it, and such a send is
+> **permitted or refused by §2's conditions alone**: this ADR adds
 > no bar to it and no licence for it. That disposition is an accepted residue rather
 > than a judgement that the send is desirable, and it is the only disposition
 > available: whether such an argument derives from what the model read is the
@@ -459,13 +461,20 @@ this ADR adds neither a bar nor a licence. Naming it an accepted residue is the
 difference between deciding it and leaving it undecided, and it is what makes the
 revisit trigger meaningful rather than decorative.
 
-**The deliberate route into the residue is already forbidden, and it is worth saying
-where.** A component that hands a store value to a model *in order to* take the
-output as an egress span has supplied the value as an input to the operation that
-produced the span, which is the first clause's own words — "a summary or translation
-it computed or **commissioned**". So the residue is what remains when store content
-reached the model by an unrelated path, a turn that recalled and then sent; it is not
-a door a component can walk through on purpose.
+**The deliberate route into the residue is excluded by the carve-out's own words,
+and it had to be excluded there rather than in this paragraph.** A component that
+hands a store value to a model *in order to* take the output as an egress span has
+supplied the value as an input to the operation that produced the span — the first
+clause's own words, "a summary or translation it computed or **commissioned**". An
+earlier draft of the carve-out did not say so, and its antecedent ("the span's only
+relation runs through a model's context") was satisfied by that case too, so the
+commissioned summary was forbidden by one clause and released by the next.
+Adversarial review found it on round 4 and was right that the explanation below a
+clause cannot repair it: under ADR-0089 §3 the marked clauses are the whole of what
+this ADR obligates, and prose "never supplies an obligation". The exclusion is now
+inside the carve-out. So the residue is what remains when store content reached the
+model by a path the span-preparing component did not open — a turn that recalled and
+then sent — and it is not a door a component can walk through on purpose.
 
 **Two wider rules were considered for the residue and both were refused.** Forbidding
 an egress call whose arguments a model produced while store content was in its
