@@ -1165,22 +1165,36 @@ answers differ across these five.
   > wide enough to bust a frame would produce a handle the hub can write and the
   > caller can never receive.
 
-  > **Normative.** The lane sizes `IncompleteProvisioningError`'s message so that
-  > its whole error payload — code, message and the one `details` member — fits
-  > the payload budget `hub_max_frame_bytes` leaves at its 1024-byte floor
-  > (ADR-0085 §8c, §8d). ADR-0085 §10a's reduction **nulls `details` before it
-  > truncates a message**, so a payload that has to be reduced is one that loses
-  > the reference, which is the one thing that error exists to deliver.
+  > **Normative.** The lane sizes the message of **every error class on this
+  > surface that carries a `reference`** so that its whole error payload — code,
+  > message and the one `details` member — fits the payload budget
+  > `hub_max_frame_bytes` leaves at its 1024-byte floor (ADR-0085 §8c, §8d).
+  > ADR-0085 §10a's reduction **nulls `details` before it truncates a message**,
+  > so a payload that has to be reduced is one that arrives without its reference
+  > — and on the two classes `connect_account` raises, that is the only handle
+  > the caller will ever have, because §3 minted it.
+
+  **The bound is stated over the class rather than over a list of names**, so a
+  class added later carrying a reference inherits it instead of needing this
+  clause amended. §2a's three are `IncompleteProvisioningError`,
+  `ProvisioningOutcomeUnknownError` and `ResidualCredentialError`, and the third
+  is inside the bound too although its caller supplied the reference: a rule
+  stated over the class is one a lane applies by reading the class, where one
+  stated over which references are re-suppliable has to be re-derived at every
+  call site and again for every class added after this.
 
   **The arithmetic, at the floor, because that is the only place it is close.**
   The payload budget at a 1024-byte frame is 512 bytes. A `ConnectedAccount`
   encodes as four members and their names — on the order of 60 bytes of
   punctuation and keys — plus a reference at most 64 and an identity bounded by
-  `ACCOUNT_IDENTITY_MAX_BYTES`. An `IncompleteProvisioningError` payload is its
-  code at 28 bytes, the member names, a `details` object carrying one reference at
-  most 64, and its message. Both fit the floor with room for a message and an
-  identity of a couple of hundred bytes, which is the constraint the lane sizes
-  those two values against.
+  `ACCOUNT_IDENTITY_MAX_BYTES`. A reference-carrying error payload is its code,
+  the member names, a `details` object carrying one reference at most 64, and its
+  message; the widest of the three codes is `ProvisioningOutcomeUnknownError`'s at
+  31 bytes, against `IncompleteProvisioningError`'s 27 and
+  `ResidualCredentialError`'s 23, and sizing one message bound against the widest
+  is what lets a single clause serve all three. Both fit the floor with room for a
+  message and an identity of a couple of hundred bytes, which is the constraint
+  the lane sizes those two values against.
 
   **A bounded reference is not the same guarantee as a bounded identity, and the
   asymmetry is the mint.** An oversized *identity* refuses the request the caller
@@ -1454,14 +1468,21 @@ anything this ADR adds.
    > **after** the activation returned raises `ResidualCredentialError`, with that
    > reference `ACTIVE` at the new revision.
 
-   > **Normative.** The suite pins both `connect_account` outcomes at the frame
-   > floor, against the **wire** implementation: with `hub_max_frame_bytes` at
-   > 1024, a maximal minted reference and a maximal identity, a completed
+   > **Normative.** The suite pins the frame floor against the **wire**
+   > implementation, with `hub_max_frame_bytes` at 1024 and a maximal minted
+   > reference throughout. With a maximal identity as well, a completed
    > `connect_account` returns its `ConnectedAccount` rather than raising
-   > `OversizedValueError`, and one whose credential write fails delivers
-   > `IncompleteProvisioningError` with its `reference` intact and
-   > `details_elided` false. A reference the caller cannot receive is the failure
-   > §3's mint makes unrecoverable, and it is reachable only over the wire.
+   > `OversizedValueError`. And **every error class on this surface that carries a
+   > `reference`** is delivered with that `reference` intact and `details_elided`
+   > false, one case per class: §2a's three are `IncompleteProvisioningError` by a
+   > `connect_account` whose credential write fails,
+   > `ProvisioningOutcomeUnknownError` by one whose activation fails, and
+   > `ResidualCredentialError` by a `disconnect_account` whose deletion pass
+   > fails — each reached by the case the clauses above already pin, and each
+   > exercised here over the wire rather than in process. A class added later
+   > carrying a reference is covered by the clause rather than by amending that
+   > list. A reference the caller cannot receive is the failure §3's mint makes
+   > unrecoverable, and it is reachable only over the wire.
 
    > **Normative.** The suite pins the mint's uniqueness where the store can
    > establish it: an append introducing a reference the store already holds is
