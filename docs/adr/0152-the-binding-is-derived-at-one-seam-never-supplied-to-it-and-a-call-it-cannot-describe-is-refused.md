@@ -1514,12 +1514,23 @@ rather than a gap discovered late.
 > alone leaves `rebind`'s untested.
 
 > **Normative.** That lane ships the **pairing** pin §1's return clauses are stated
-> for: the `ActionRequest` the runner builds carries `parameters` **equal** to the
-> returned `BoundEgressCall`'s `parameters` and a `tool` equal to its `tool`, asserted
-> on a call where the runner's own retained objects were **mutated across §10's
-> awaited read** so that they are *unequal* to the returned ones. The divergence is
-> what makes the assertion discriminating: without it, equality holds whichever object
-> the runner used and the test pins nothing.
+> for, over **all three** returned fields: the `ActionRequest` the runner builds
+> carries `parameters` **equal** to the returned `BoundEgressCall`'s `parameters`, a
+> `tool` equal to its `tool`, **and an `egress_binding` equal to its `binding`** —
+> asserted on a call where the runner's own retained objects were **mutated across
+> §10's awaited read** so that they are *unequal* to the returned ones. The divergence
+> is what makes the first two discriminating: without it, equality holds whichever
+> object the runner used and the test pins nothing.
+
+> **Normative.** The binding limb is asserted with a **distinguishable** binding — one
+> whose spans, destinations or account differ from any other binding reachable in the
+> test — so that a request built with `egress_binding=None`, or with a stale or
+> substituted binding, fails it. `egress_binding` is optional and defaults to `None`
+> (ADR-0150 §1), so a pin over `tool` and `parameters` alone passes a runner that
+> carried the right payload and dropped the binding, which would put an apparently
+> non-egress request in front of the policy and hide from it every destination and
+> account the seam derived. That is the same falsehood-in-a-returned-value §9 refuses,
+> reached through an omission rather than a substitution.
 
 > **Normative.** That assertion is **equality, not identity**, and the reason is
 > mechanical rather than stylistic: `FrozenJsonMapping` carries an `AfterValidator`
