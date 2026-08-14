@@ -232,7 +232,8 @@ This section is a classification of the change being made and is not normative
 | `Disposition.EGRESS_UNBINDABLE` | `core/types.py`, changed | One new member of an existing enum, returned when the seam refused (§9). |
 | `EgressBinding`, `EgressSpan`, `EgressDestination`, `CanonicalDestination`, `BoundAccount`, `DestinationProtocol`, `DiscloserProvenance` | — | **Not this ADR's.** ADR-0150 §2 adds them. This ADR consumes each unchanged, adds no field to any, and authorises no change to any. |
 | `ActionRequest`, `PermissionDecision`, `from_request`, `authorises` | — | **Not this ADR's.** ADR-0150 §2's list is the whole of what changes on them. This ADR adds no field, no validator and no conjunct, and reads `ActionRequest.egress_binding` as ADR-0150 §1 defines it. |
-| `ConnectedAccount`, `ConnectionAct`, `ProvisioningState`, `ConnectionProvisioner`, `ACCOUNT_IDENTITY_MAX_BYTES`, `CONNECTION_REFERENCE_MAX_BYTES`, and ADR-0151 §2a's seven `core/errors.py` classes | — | **Not this ADR's.** ADR-0151 §4, §5, §10 and §11 add them. This ADR relies on each unchanged, imports none of them into this surface, and in particular does not substitute `ConnectedAccount` where ADR-0150 §7 names `BoundAccount` (§10). |
+| `ConnectedAccount`, `ConnectionAct`, `ProvisioningState`, `ConnectionProvisioner`, `ACCOUNT_IDENTITY_MAX_BYTES`, `CONNECTION_REFERENCE_MAX_BYTES` | — | **Not this ADR's.** ADR-0151 §4, §5, §10 and §11 add them. This ADR relies on each unchanged, imports none of them into this surface, and in particular does not substitute `ConnectedAccount` where ADR-0150 §7 names `BoundAccount` (§10). |
+| ADR-0151 §2a's seven `core/errors.py` classes | — | **Not this ADR's.** `ConnectionStoreError` is **declared** as a failure of both members (§9), which is using it; no class is added, subclassed, renamed or given a field, and the other six are neither declared nor raised here. |
 | `ToolDefinition`, `ToolRegistry`, `ToolInvoker`, `ToolCall`, `ToolResult` | — | **Unchanged.** No field is added to any, no member is added to either Protocol, and §3 states the constraint that keeps `ToolDefinition` that way. |
 | `SkipReason`, `PermissionRuling`, `PermissionOutcome`, `StepStatus` | — | **Unchanged.** §9 says why the refusal is a `Disposition` member and not a `SkipReason`, and why it writes no state. |
 | `SecretName`, `Secrets`, `SecretStore`, `SecretScope` | — | **Unchanged.** No credential value and no credential slot enters this seam in either direction (§10). |
@@ -652,9 +653,11 @@ carries.
 > tool disagree about what was authorised, and the answer to a disagreement here is
 > a refusal, not the weaker of the two readings.
 
-> **Normative.** `rebind` called with `approved` of `None` for a tool with no
-> egress registration returns `None`, which is the non-egress resume path and is
-> unchanged by this ADR (§8).
+> **Normative.** `rebind` called with `approved` of `None` returns `None` on
+> exactly the condition §8 states for `bind` — no egress registration for `tool.id`
+> **and** neither §3 keyword on its schema — and refuses on §8's other limb. The
+> two members answer the no-registration case identically; §8's partition governs
+> both, and nothing in this section states a second condition for it.
 
 **Re-deriving and comparing is ADR-0148 §6's determinism clause being used, not
 worked around, and the distinction is the one a reviewer should check first.** §6
@@ -815,6 +818,32 @@ user takes to answer, rather than over the life of a registry.
 > argument name, no destination, no tier and no count. What a refusal says is its
 > message, bound by §11.
 
+> **Normative.** Both members additionally declare **`ConnectionStoreError`**
+> (ADR-0151 §2a), raised when the connection record §8 reads could not be read at
+> all. This ADR neither adds that class nor changes it; it declares it, which
+> ADR-0085 §9 makes part of the contract.
+
+> **Normative.** A `ConnectionStoreError` is **never** translated into an
+> `EgressBindingError`, into `Disposition.EGRESS_UNBINDABLE`, or into any other
+> refusal or disposition. It **propagates** out of the runner stage, which has
+> committed nothing at that point: no ruling was requested, no audit record written,
+> no claim made, and the step stays `PENDING` at its stored version. No lane
+> suppresses it, retries it inside the seam, or falls back to a cached
+> connectability, a cached identity or a previous read.
+
+**A store outage is not an unbindable call, and conflating them writes a falsehood
+into a returned value.** `EGRESS_UNBINDABLE` asserts that this call **cannot be
+completed** — a declaration that cannot describe it, a destination with no canonical
+form, a reference that is not connectable. A store that could not be read asserts
+nothing about the call: it may be perfectly bindable a second later, and the remedy
+is not a different call. That is exactly the line ADR-0145 §3 draws between a schema
+mismatch and a `ToolFailure` — "the arguments **are** the ones that would have been
+authorised" — and the corpus already answers this shape by raising: `AuditError` and
+`PlanningError` propagate out of the runner stage for the same reason, an
+infrastructure fault rather than a step outcome. It is also the only answer that
+keeps retryability honest, since a caller cannot tell a transient fault from a
+permanent one through an enum member whose whole meaning is that the call is wrong.
+
 > **Normative.** `Disposition` gains exactly one member, `EGRESS_UNBINDABLE`,
 > returned by the runner stage when this seam refused. It commits nothing: no ruling
 > is requested, no audit record is written, no claim is made, and the step stays
@@ -907,13 +936,16 @@ implementing lane's obligation.
 > remote service what a name denotes is building a resolution call, which is a
 > registered tool with its own declaration, its own request and its own ruling.
 
-> **Normative.** The seam performs **exactly one** read, and it is the connection
-> record §8 names: the record for the reference the tool's egress registration
-> carries, for its connectability and its account identity and for nothing else. It
-> reads no keyring, no memory store, no plan store, no audit trail, no grant store,
-> no notification store and no second connection record, and it performs no write of
-> any kind anywhere. A lane that finds it needs a second read is changing this
-> decision.
+> **Normative.** The seam's read budget is **at most one** read per call, and it is
+> the connection record §8 names: the record for the reference the tool's egress
+> registration carries, for its connectability and its account identity and for
+> nothing else. Where the seam holds an egress registration for `tool.id` it reads
+> **exactly** that one record; where it holds none — §8's `None` path and §8's
+> keyword refusal alike — it reads **none**, because there is no reference to name
+> one. It reads no keyring, no memory store, no plan store, no audit trail, no grant
+> store, no notification store and no second connection record, and it performs no
+> write of any kind anywhere. A lane that finds it needs a second read is changing
+> this decision.
 
 > **Normative.** That read supplies **nothing that enters a span**. The spans,
 > their extents, their tiers, their provenance and every `EgressDestination` are
@@ -1144,10 +1176,19 @@ rather than a gap discovered late.
 > identity has changed since registration carries the **currently recorded**
 > identity. A test that only exercises an `ACTIVE` reference satisfies none of these.
 
-> **Normative.** That lane ships the **single-read** pin: binding one call reads the
-> one connection record its registration names and no other store, and reads no
-> keyring — asserted against instrumented doubles rather than by inspection, and
-> asserted for `rebind` as well as `bind`.
+> **Normative.** That lane ships the **read-budget** pin: binding one egress call
+> reads the one connection record its registration names and no other store, and
+> reads no keyring; binding a **non-egress** call reads **no** connection record at
+> all. Asserted against instrumented doubles rather than by inspection, and asserted
+> for `rebind` as well as `bind`.
+
+> **Normative.** That lane ships the **store-outage** case §9 is stated for: a
+> connection store that raises `ConnectionStoreError` makes `bind` and `rebind` each
+> raise it rather than `EgressBindingError`, the runner stage propagates it, and the
+> assertion is over the **durable state** as well as the exception — no audit record,
+> no claim, and the step still `PENDING` at its stored version. A test asserting only
+> that something raised satisfies neither limb, and one asserting
+> `Disposition.EGRESS_UNBINDABLE` asserts the behaviour this clause forbids.
 
 > **Normative.** That lane ships the **refusal-message** cases §11 is stated for:
 > a refusal for an undescribed key names neither the key nor its value; a refusal
@@ -1408,8 +1449,10 @@ model, taking from it only what ADR-0150 §7's `BoundAccount` carries; §9's two
 listings are relied on unchanged and §9 above cites `connected_accounts` as the
 route by which a client learns a reference is pending, which is that operation
 being used rather than extended. §10's `ConnectionProvisioner` gains no member; §2a's seven
-error classes are untouched and `EgressBindingError` is neither a subclass of nor a
-sibling within that family; §15's normative list of what that ADR authorises is
+error classes are untouched — `ConnectionStoreError` is **declared** by both members
+of `EgressBinder` (§9), which is ADR-0085 §9's per-method declaration using an
+existing class rather than changing it, and `EgressBindingError` is neither a
+subclass of nor a sibling within that family; §15's normative list of what that ADR authorises is
 disjoint from §2 above. A reader holding only ADR-0151 still finds five operations,
 one Protocol, three types, two constants and seven classes, and acts no differently
 for this ADR existing. What they additionally find, here, is a seam that consumes a
