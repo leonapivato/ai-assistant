@@ -568,8 +568,26 @@ def grant_scope(value: Sequence[GrantScope], *, name: str) -> tuple[GrantScope, 
 
 #: The Unicode general categories ADR-0149 §4's "no control character, no line
 #: break" excludes. ``Cc`` is every C0 and C1 control; ``Zl`` and ``Zp`` are the
-#: two separators that are line breaks without being controls.
-_UNPRINTABLE_CATEGORIES: Final = frozenset({"Cc", "Zl", "Zp"})
+#: two separators that are line breaks without being controls; and ``Cf`` is the
+#: **format** controls, which are controls by function even though the name
+#: "control character" is often read as ``Cc`` alone.
+#:
+#: **``Cf`` is here because ADR-0151 §5's display clause depends on it.** That
+#: clause requires every client accepting an identity to display it to the user as
+#: part of the act, and ADR-0149 §4's third answer to a credential pasted into the
+#: identity field is precisely that the value is *seen*. ``U+202E`` RIGHT-TO-LEFT
+#: OVERRIDE and its siblings (``U+202A`` to ``U+202E``, ``U+2066`` to ``U+2069``) exist to
+#: reorder what is rendered, so an identity carrying one is displayed as something
+#: other than what is recorded — which defeats the one ingredient that failure
+#: needs. ``U+FEFF``, ``U+200B`` and ``U+00AD`` are the same class of invisible
+#: differences between two identities that read alike.
+#:
+#: **The cost is named rather than discovered**: an identity containing a zero-width
+#: joiner — an emoji sequence, or some Indic and Persian spellings — is refused too.
+#: That is accepted. An account identity is a handle in a field ADR-0149 §4 already
+#: strips of controls and line breaks, and a rendering that cannot be trusted is
+#: worse than a spelling that cannot be used.
+_UNPRINTABLE_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
 def _refuse_unusable_identity(identity: str, *, plaintext: str) -> None:

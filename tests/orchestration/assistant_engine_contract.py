@@ -1473,18 +1473,44 @@ class AssistantEngineContract(ABC):
 
     @pytest.mark.parametrize(
         "identity",
-        ["two\nlines", "a\u0000b", "tab\there", "para\u2029break"],
-        ids=["newline", "nul", "tab", "paragraph-separator"],
+        [
+            "two\nlines",
+            "a\u0000b",
+            "tab\there",
+            "para\u2029break",
+            "Alice\u202ebob",
+            "zero\u200bwidth",
+            "bom\ufeffed",
+        ],
+        ids=[
+            "newline",
+            "nul",
+            "tab",
+            "paragraph-separator",
+            "bidi-override",
+            "zero-width-space",
+            "byte-order-mark",
+        ],
     )
     async def test_an_identity_that_is_not_single_line_printable_is_refused(
         self, connections: ConnectionSubject, identity: str
     ) -> None:
         """ADR-0149 §4, ADR-0151 §5: no control character and no line break.
 
-        Four values rather than one, because the category test and a hand-rolled
-        ``"\n" in identity`` check agree on the first and disagree on the rest —
-        and an identity carrying a NUL or a paragraph separator is one a hub would
-        go on to write into a log line and a client would render.
+        Seven values rather than one, because a hand-rolled ``"\n" in identity``
+        check agrees on the first and disagrees on every other — and because
+        "control character" is routinely read as the ``Cc`` category alone, which
+        the last three are not.
+
+        **The bidi override is the one that matters most**, and it is a spoof
+        rather than a hygiene case. ADR-0151 §5 requires every client accepting an
+        identity to *display* it as part of the act, and ADR-0149 §4's third answer
+        to a credential pasted into the identity field is precisely that the value
+        is seen. ``U+202E`` reorders what is rendered, so an identity carrying one
+        is shown as something other than what is recorded — the one ingredient that
+        answer needs, removed. The zero-width space and the byte-order mark are the
+        quieter half of the same class: two identities that render identically and
+        are not equal, on a surface where ADR-0151 §3 compares by exact equality.
         """
         with pytest.raises(UnusableIdentityError):
             await connections.engine.connect_account(identity=identity, credential=_credential())
