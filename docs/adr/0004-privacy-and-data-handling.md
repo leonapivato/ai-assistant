@@ -158,10 +158,11 @@
   is untouched because nothing on it *introduces* such a value — ADR-0150 §4 makes a
   span a key of the request's own parameters, so the runner carries what was composed,
   and the binder's connection read reaches the binding rather than a span. Its second
-  clause reserves one question to the owner rather than deciding it: whether a model
-  drafting an argument under a prompt that carried store content is covered, which
-  twelve review rounds could not state a rule for. Both candidate rules and their
-  costs are named there, and the restrictive clause governs until the owner rules.
+  clause forbids the model-context case outright — an egress span may not carry
+  content produced by a model call whose context carried store content, decidable at
+  the component that assembled that context — and reserves to an owner ruling only
+  whether to relax it or ratify it as permanent. Both candidate rules and their costs
+  are named there; until the owner rules, the restrictive reading governs.
   That closes the hole adversarial review of PR #72 identified in
   the reading ADR-0017 declined to adopt: assistant-derived memory written into a
   calendar and excused because "the data now lives in the user's account". ADR-0155
