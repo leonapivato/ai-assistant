@@ -316,6 +316,21 @@ This is PR #1120's third observation:
 > is what keeps two derivations of one request's description in agreement when an
 > argument carries several recipients.
 
+> **Normative.** The decomposition goes **at most one array level deep and never
+> further**. Where an argument's value is a JSON array, its elements are its spans,
+> whatever those elements are; where it is any other JSON value, it is one span.
+> A span's own value is never decomposed: a span whose value is a JSON object or a
+> nested array is one span, and the extent, provenance and tier it states are that
+> whole value's.
+
+> **Normative.** `EgressSpan.extent` is a non-negative integer, and it is the number
+> of **Unicode code points** — in the span's value where that value is a JSON string,
+> and otherwise in that value's canonical JSON encoding, which is ADR-0021 §1's
+> `sort_keys=True`, `separators=(",", ":")`, `ensure_ascii=False` form, the same
+> encoding `parameters_digest` is taken over. It is never a count of bytes, of UTF-16
+> units, of grapheme clusters, or of rendered columns, and no configuration selects
+> between them.
+
 > **Normative.** `EgressBinding` **refuses at construction**, and `ActionRequest`
 > refuses a binding for which any of the following fails against its own
 > `parameters`:
@@ -335,13 +350,11 @@ This is PR #1120's third observation:
 >   the argument's value is a JSON array whose element at `index` is a JSON string, a
 >   destination on that span carries that element as its `supplied` form.
 
-> **Normative.** Where an argument's value nests more deeply than one array level,
-> it is covered as a single span at its top-level argument, and the extents,
-> provenance and tier that span states are the whole value's. A builder holding two
-> values of **differing provenance** inside one such argument cannot describe them
-> and **refuses** rather than choosing one, which is ADR-0148 §1's third clause. No
-> lane satisfies ADR-0146 §1 for that case by labelling the whole span with either
-> answer.
+> **Normative.** A builder holding two values of **differing provenance** inside one
+> undecomposable span — inside a JSON object, or inside a nested array — cannot
+> describe them and **refuses** rather than choosing one, which is ADR-0148 §1's
+> third clause. No lane satisfies ADR-0146 §1 for that case by labelling the whole
+> span with either answer.
 
 **The empty array carries no span because there is nothing to describe, and stating
 it costs a clause rather than an exception.** An argument whose value is `[]`
@@ -353,6 +366,35 @@ are present and empty selects no onward recipient, so its destination set is the
 connected account alone (§3's last clause), and the binding for it is well-formed with
 no destination-carrying span at all. The alternative — an indexless span standing for
 an absent element — would make `to: []` and `to: ""` indistinguishable in the record.
+
+**One array level and no more, because the alternative is a key that recurses and a
+rule with a precedence question in it.** An earlier draft of this section stated the
+per-element rule for arrays and, separately, that a value nesting more deeply than one
+array level was covered as a single span at its top-level argument. Adversarial review
+found on round 2 that `{"recipients": [["a"], ["b"]]}` satisfies both antecedents and
+no binding satisfies both consequents. The repair is to make the depth a property of
+the **decomposition** rather than of the value: an argument decomposes into its
+elements if it is an array, and a span never decomposes at all. `(argument, index)`
+then stays the whole key — the producer's key, and the one PR #1120's third
+observation says anything coarser makes unsatisfiable — instead of growing into a path
+that would need RFC 6901's escaping rules and a rendering for the user. What it costs
+is stated in the clause above and routed in §11: mixed provenance inside one
+undecomposable span is a refusal, not a description.
+
+**Extent is code points, and fixing the unit is not pedantry — an unfixed unit is a
+false mismatch at execution.** `"é"` is one code point, two UTF-8 bytes and, composed,
+two code points again; an emoji with a modifier is one grapheme cluster and several of
+everything else. Two components that measured differently would build unequal bindings
+for one request, `authorises` would answer `False`, and ADR-0021 §1 already named what
+that looks like from the outside: a false mismatch "reads as an attack rather than as a
+bug". Code points are chosen over bytes because the count is shown to a user beside
+their own words (ADR-0146 §5's "the user's own words, verbatim, N characters"), and the
+canonical JSON form is reused for non-strings rather than invented because the codebase
+already has exactly one canonical encoding and a second one would be a second thing to
+get wrong. **Extent discloses a length**, including the length of a span the user may
+have pasted a credential into, and that is accepted rather than overlooked: ADR-0146 §5
+states the honest description in those terms, and a description that withheld the size
+would leave the approver with less to decide on.
 
 **Coverage is checked in `core` because `core` is where both sides are in hand, and
 that is what makes ADR-0148 §14's omitted-span case unconstructable rather than
@@ -825,6 +867,18 @@ lands there whole.
 > **empty-array** case of §4, in which an argument whose value is `[]` carries no
 > span and the binding is still well-formed, and a case asserting that a construction
 > omitting `provenance` **raises**, which is what §5's no-default clause is worth.
+
+> **Normative.** That lane also ships the **extent** boundary cases §4 fixes the unit
+> for: a span whose value is a JSON string containing a character outside the Basic
+> Multilingual Plane, and one containing a combining sequence, each state an extent in
+> **Unicode code points**. A test whose only string is ASCII distinguishes no unit and
+> satisfies neither.
+
+> **Normative.** That lane also ships the **nested** construction cases §4's depth
+> rule fixes: an argument whose value is an array of arrays is described by one span
+> per top-level element, and an argument whose value is a JSON object by one indexless
+> span, each stating that whole value's extent. A binding that decomposes either
+> further is refused.
 
 > **Normative.** The lane that builds an egress `CONFIRM` ships the
 > **duplicate-across-arguments** case §10's third clause is stated for: one recipient
