@@ -1,7 +1,13 @@
 # 155. Residency governs the assistant's own store, and that store is never externalised
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
+- **Note (2026-08-14): ratified.** `Proposed` → `Accepted`, after **both** required
+  reviews came back green on one tree — adversarial **APPROVE with nits** and
+  architecture **APPROVE with no findings**, both at tree `4658c091b5a0`, printed
+  round 23, churn ratio 2.8. Adversarial's one `minor` was a clause ordinal, and it
+  was repaired with the whole ordinal class it belonged to before the flip; both
+  lenses were re-run on the flipped tree, which is what covers those repairs.
 - **This is the answer to #95.** ADR-0017 §1 deferred it at its own ratification;
   five ratified ADRs route to it and none answers it (ADR-0004, ADR-0017,
   ADR-0124, ADR-0146, ADR-0154); ADR-0154 §6's third clause makes it blocking for
@@ -1098,8 +1104,8 @@ change in `CONTRIBUTING.md`'s sense — not because it touches `core/protocols.p
 every egress decision in the corpus is measured against, and gates every integration
 registration at an operational boundary. ADR-0154 §8 declared both lenses for the
 neighbouring decision on the same boundary and ADR-0146's header declared them for
-the classification beneath it. It is drafted, reviewed and revised as `Proposed`, and
-the route is `CONTRIBUTING.md` → "Finishing an ADR PR": the status flips only once
-both required reviews return clean on one tree, and both are re-run on the flipped
-tree for coverage. The ratification note this header will carry records the outcome
-(ADR-0070 §1).
+the classification beneath it. It was drafted, reviewed and revised as `Proposed`, and
+the route is `CONTRIBUTING.md` → "Finishing an ADR PR": the status flipped only once
+both required reviews returned clean on one tree, and both were re-run on the flipped
+tree for coverage. The ratification note in this ADR's header records the set that ran
+and the outcome it got (ADR-0070 §1).
