@@ -32,11 +32,18 @@
   the durability form ADR-0100 established and ADR-0149, ADR-0150 and ADR-0151
   each applied. This decision rests most heavily on ADR-0150 and ADR-0148, and on
   ADR-0146 §2 and ADR-0145 §9 and §11.
+- **Reads exactly one thing, and ADR-0148 §6 is what obliges the read.** §10 fixes
+  that this seam performs no network I/O, reads no clock and resolves nothing, and
+  performs exactly one read: the connection record its registration names, for
+  connectability and the account identity. ADR-0148 §11's unmarked "performs no
+  I/O" is read narrowly against ADR-0148 §6's **marked** connectability clause,
+  which names seam (b) and forbids carrying connectability over from an earlier
+  moment; §8, §10 and §15 carry the whole of that reading.
 - **Records owed on other ADRs: none, and §15 shows the working** rather than
-  asserting it, including the two near misses — ADR-0037 §2's five-step sequence
-  and §4's resume sequence — which a reviewer is entitled to contest by naming the
-  sentence that becomes false. No `Status` line moves and no ratified text is
-  rewritten anywhere.
+  asserting it, including the three near misses — ADR-0037 §2's five-step sequence,
+  §4's resume sequence, and ADR-0148 §11's no-I/O sentence — each of which a
+  reviewer is entitled to contest by naming the sentence that becomes false. No
+  `Status` line moves and no ratified text is rewritten anywhere.
 
 ## Context
 
@@ -172,12 +179,12 @@ convention.
 > than two lookups that must agree.
 
 > **Normative.** Both members **refuse** a `tool` that is not equal to the
-> definition the implementation holds registered under `tool.id`, and refuse a
-> `tool` whose id it holds no registration for. This is ADR-0029 §1's
-> registry-original check performed one stage earlier and for the same stated
+> definition the implementation holds registered under `tool.id`. This is ADR-0029
+> §1's registry-original check performed one stage earlier and for the same stated
 > reason — the seam is the only place the caller's definition and an untampered
 > original meet — and it is not a substitute for that one, which still runs at
-> `invoke`.
+> `invoke`. Where the implementation holds **no** registration for that id, this
+> clause is not reached and §8 governs the answer whole.
 
 > **Normative.** `parameters` is the `FrozenJsonMapping` the `ActionRequest` will
 > carry, unaltered. Neither member returns parameters, amends them, defaults a
@@ -527,7 +534,7 @@ the origin path lands. The lane that first records an origin is the lane that
 closes it; no clause here bounds when, and no lane records this surface as
 carrying real provenance before then.
 
-### 6. The five refusals
+### 6. The six refusals
 
 > **Normative.** `bind` and `rebind` each **refuse** — raising rather than
 > returning, §9 — in each of the following cases, and refusing is a refusal of the
@@ -572,6 +579,13 @@ carrying real provenance before then.
 > declare its reach does not load" at the one seam that reads a declaration the
 > registry does not.
 
+> **Normative. The unconnectable reference.** The seam refuses a call whose bound
+> tool's egress registration names a reference that is not **connectable** at the
+> moment the call is bound — its connection record is absent, or is `pending` rather
+> than `active` (ADR-0148 §6). This is ADR-0148 §6's connectability clause
+> discharged at the moment it names, and §8 and §10 state the read it requires and
+> the whole of what that read is for.
+
 > **Normative. The uncompletable call.** The seam refuses a call for which it
 > cannot produce a whole, well-formed binding for any other reason — a supplied
 > form with no canonical form (§5), a `provenance` entry naming a span the call
@@ -582,12 +596,12 @@ carrying real provenance before then.
 > failure.
 
 **Five named refusals and a residual clause, rather than an enumeration presented
-as closed.** ADR-0150 §3 records why a list of known-bad shapes is not a boundary:
+as closed.** The sixth clause below is the residual one and the boundary; the five
+above it are the instances the corpus has argued for, each with an ADR behind it.
+ADR-0150 §3 records why a list of known-bad shapes is not a boundary:
 "one implementation splits at the final `@` and canonicalises it while another
 refuses it". The same is true one level up — a seam whose refusals were an
-enumeration would let two implementations disagree about a case nobody listed. The
-last clause is the boundary; the four named ones are the instances the corpus has
-argued for, each with an ADR behind it.
+enumeration would let two implementations disagree about a case nobody listed.
 
 **Every one of them fires before a ruling and commits nothing.** That is ADR-0148
 §1's third clause, and it is what makes §9's disposition honest: at the point this
@@ -695,10 +709,11 @@ the ruling and the transmission.
 ### 8. A tool with no connected account is not an egress call, and the non-egress path is untouched
 
 > **Normative.** `bind` returns `None` **exactly when** the seam holds no egress
-> registration for `tool.id` — that is, no connected account bound to it. `None` is
-> the whole answer for such a call: it is not an egress call, it carries no binding,
-> and every refusal in §6 is inapplicable to it. `None` never signals a failure, and
-> no lane reads it as one.
+> registration for `tool.id` — that is, no connected account bound to it — **and**
+> `tool.parameters_schema` carries neither §3 keyword. `None` is the whole answer
+> for such a call: it is not an egress call, it carries no binding, and every
+> refusal in §6 is inapplicable to it. `None` never signals a failure, and no lane
+> reads it as one.
 
 > **Normative.** What makes a tool an egress tool is the **connected account it is
 > registered against** (ADR-0148 §6's one-account clause), and not the presence of a
@@ -711,7 +726,9 @@ the ruling and the transmission.
 > registration but whose `parameters_schema` carries either §3 keyword. A tool
 > declaring destinations or tiers to this seam while registered against no account
 > is mis-registered, and returning `None` would silently discard a declaration its
-> author wrote.
+> author wrote. This clause and the `None` clause above **partition** the
+> no-egress-registration case: exactly one of the two applies to any such tool, and
+> no tool is both returned `None` for and refused.
 
 > **Normative.** A caller receiving `None` builds its `ActionRequest` with
 > `egress_binding=None`, which is ADR-0150 §1's default and its stated `None`
@@ -727,16 +744,59 @@ two answers that must agree, obtained separately, with a window between them in
 which a registration could differ. One call answers both questions from one read,
 and `None` is unambiguous because every failure raises.
 
-**The one-account clause is what makes "no I/O" achievable, and it is worth
-stating why.** ADR-0148 §6 binds a registered tool to at most one connected
-account, so the account, its reference and the transport endpoint are fixed **at
-registration** rather than per call. The seam therefore reads them out of what
-registration captured, in memory, and consults no connection store, no keyring and
-no network — which is §10's clause discharged by where the facts already are
-rather than by discipline. The cost is a snapshot that a re-provisioning can make
-stale, and that cost is already ruled: ADR-0148 §6's fourth clause makes the
-callable refuse unless the identity **currently recorded** for that reference
-equals the identity the binding carries.
+> **Normative.** Where the seam holds an egress registration, it reads the
+> **connection record** the registration's reference names, at the moment the call
+> is bound, and **refuses** unless that reference is **connectable** — its record
+> exists and is `active` (ADR-0148 §6). It takes from that record exactly two
+> things: the connectability, and the account **identity** it puts in the binding's
+> `BoundAccount`. It takes no credential slot, no revision and no state into the
+> binding, and it reads nothing else from any store.
+
+> **Normative.** Connectability is read **at this moment** and never carried over
+> from registration or from an earlier call, which is ADR-0148 §6's connectability
+> clause in its own words. `rebind` reads it afresh too (§7): a reference that went
+> pending while a `CONFIRM` was parked is refused before the resolving ruling, not
+> resumed against a state read before the user was asked.
+
+> **Normative.** The **transport endpoint** and the account **reference** are the
+> registration's and are not read per call: ADR-0148 §6 makes the endpoint the one
+> the tool "is configured to use", and the reference is what the registration
+> names. Only the identity moves, which is why only the identity is re-read.
+
+**The connection-record read is obliged rather than permitted, and it is the one
+place this ADR reads ADR-0148 §11 narrowly.** §11's unmarked prose says (b)
+"performs no I/O (§2's fifth clause), so it cannot become the resolution path §5
+governs", and an earlier draft of this ADR took that as a flat prohibition and
+made the account a registration snapshot. Adversarial review found on round 1 that
+the snapshot design lets a ruling be taken against a reference that has since gone
+pending — and it is right, because ADR-0148 §6 carries a **marked** clause naming
+this seam by name: "A reference that is not connectable takes no part in an egress
+call at any stage: no `ActionRequest` is built against it — **§11's seam (b)
+refuses**, which is §1's third clause — no ruling is sought for one, and no
+callable transmits under it. Connectability is read at each of those moments and is
+never carried over from an earlier one." A seam obliged to read a fact at a moment
+cannot be a seam forbidden to read anything, so the two sentences settle each other
+under ADR-0089 §3: ADR-0148 is in the marked regime, §11's paragraph is unmarked
+prose that "never supplies an obligation" and is read to determine what a marked
+clause means, and §6's clause is marked. §10 states the reading, and §15 records
+why no ADR-0082 §1 record is owed for taking it.
+
+**The narrow reading is also the one §11's own parenthetical directs.** It grounds
+the property in ADR-0148 §2's fifth clause, whose whole subject is a canonicaliser
+"that needs to ask a remote service what a name denotes", and whose stated purpose
+is that the seam cannot become ADR-0148 §5's resolution path. Reading a local
+connection record asks no remote service what any name denotes and resolves no
+destination, so the property §11 was protecting is untouched — §10's clause keeps
+every part of it that bites.
+
+**The one-account clause is still what keeps this to a single record read.**
+ADR-0148 §6 binds a registered tool to at most one connected account, so there is
+exactly one reference per registered egress tool and no lookup, no search and no
+enumeration. The residual staleness is the ruling-to-transmission window, and that
+cost is already ruled: ADR-0148 §6's fourth clause makes the callable refuse
+unless the identity **currently recorded** for that reference equals the identity
+the binding carries — which is now a check over a window measured in the time a
+user takes to answer, rather than over the life of a registry.
 
 ### 9. One failure class, and one `Disposition` member
 
@@ -791,6 +851,19 @@ falsehood into durable state to make a return value tidier is the failure ADR-00
 `INVALID_PARAMETERS` were each minted on that argument, and this is the third
 instance of it.
 
+**The connectability refusal is the strongest case for a second member, and it is
+declined on this family's own rule rather than on ADR-0145 §4's alone.** A call
+refused because its reference went pending has a remedy a client could state — run
+the provisioning act again, which ADR-0151 §4 obliges a surface rendering a pending
+record to say. What makes a second `Disposition` member the wrong place to say it
+is that ADR-0151 §9's `connected_accounts` already answers it, as a first-class
+engine operation returning a `ConnectedAccount` whose `state` **is** `PENDING`
+(ADR-0151 §4). A client that wants the remedy reads the listing that owns the fact;
+a disposition member would be a second, weaker statement of it, arriving on the one
+turn that happened to hit it and silent on every reference that is pending and
+untouched. The refusal's message names the reference (§11), which is what a client
+needs to join the two.
+
 **Distinguishable from a denial is the property PR #1120's eighth observation asked
 for, and the member is where it is cashed.** A `DENY` means the policy refused, is
 recorded in the trail, and moves the step to `SKIPPED`/`APPROVAL_DENIED` naming a
@@ -828,12 +901,32 @@ implementing lane's obligation.
 > of which ADR-0029 §1 states in terms is `tools/`-internal and uncontracted, and
 > which no clause of this ADR narrows.
 
-> **Normative.** Neither member performs I/O of any kind: no network, no
-> filesystem, no keyring read, no connection-store read, no clock and no
-> configuration read. This is ADR-0148 §11's fixed property for (b), and its
-> consequence is the one that clause names: this seam can never become the
-> resolution path ADR-0148 §5 governs, and a lane that finds it needs a lookup here
-> is building a resolution call, which is a registered tool with its own ruling.
+> **Normative.** Neither member performs **network** I/O of any kind, reads a
+> clock, reads configuration, or resolves anything. Neither can become the
+> resolution path ADR-0148 §5 governs, and a lane that finds it needs to ask a
+> remote service what a name denotes is building a resolution call, which is a
+> registered tool with its own declaration, its own request and its own ruling.
+
+> **Normative.** The seam performs **exactly one** read, and it is the connection
+> record §8 names: the record for the reference the tool's egress registration
+> carries, for its connectability and its account identity and for nothing else. It
+> reads no keyring, no memory store, no plan store, no audit trail, no grant store,
+> no notification store and no second connection record, and it performs no write of
+> any kind anywhere. A lane that finds it needs a second read is changing this
+> decision.
+
+> **Normative.** That read supplies **nothing that enters a span**. The spans,
+> their extents, their tiers, their provenance and every `EgressDestination` are
+> derived from the arguments, the declaration and the carried provenance alone,
+> with no store read — which is ADR-0148 §6's determinism clause and ADR-0150 §4's
+> decomposition clause, each of which is stated over the description rather than
+> over the whole binding, and neither of which this section widens or narrows.
+
+> **Normative.** How the seam reaches that record — through the component ADR-0149
+> §1 places, through the store ADR-0151 §10's provisioner holds, or through another
+> object in `tools/` — is `tools/`-internal and **not contracted here**. This ADR
+> adds no holder, no face, no write, no field and no lifecycle to ADR-0149's
+> connection record, and confers no keyring face on anything (ADR-0149 §8).
 
 > **Normative.** No credential value and no credential **slot** crosses this seam
 > in either direction. A `SecretName`, a `SecretName`'s `name`, and any string
@@ -878,10 +971,16 @@ is the populated side of ADR-0008's split, unchanged.
 ### 11. The refusal-message discipline
 
 > **Normative.** No message any refusal on this surface raises renders an argument
-> value, a supplied or canonical destination form, an account identity, a
-> connection reference, a credential slot, or any part of a span's content. It may
-> name the tool id, an argument name **the bound tool's declaration statically
-> names**, a zero-based index, a count, a field name and an error type.
+> value, a supplied or canonical destination form, an **account identity**, a
+> credential slot, or any part of a span's content. It may name the tool id, an
+> argument name **the bound tool's declaration statically names**, a zero-based
+> index, a count, a field name and an error type.
+
+> **Normative.** A refusal **may** name the **connection reference** the tool's
+> egress registration carries, and the connectability refusal (§6) does. That is
+> ADR-0149 §3's split between a loggable handle and a Tier 1 value and ADR-0151
+> §2a's rule for the neighbouring surface — "names the reference where the call
+> carries one, and **never** names the identity" — applied here at both limbs.
 
 > **Normative.** A key of `parameters` that the declaration does **not** statically
 > name is **never** interpolated into a message. A refusal for such a key states
@@ -929,9 +1028,12 @@ form).
 > narrows nor anticipates that.
 
 > **Normative.** Nothing here decides the provisioning act, a keyring face, a
-> connection record's storage, its lifecycle, or how a tool comes to be registered
-> against a connected account. ADR-0149 and ADR-0151 own the first four and §10
-> leaves the fifth `tools/`-internal.
+> connection record's storage, its schema, its lifecycle, or how a tool comes to be
+> registered against a connected account. ADR-0149 and ADR-0151 own the first five
+> and §10 leaves the sixth `tools/`-internal. **Reading** a record is not deciding
+> one: §8 and §10 state what is read and what is taken from it, and no lane cites
+> this ADR toward a field, a holder, a write or a lifecycle ADR-0149 §3 does not
+> already carry.
 
 > **Normative.** Nothing here decides what a **transport endpoint** must be, what a
 > redirect may do, or how a client is constructed. ADR-0150 §7 left that to #83 and
@@ -1031,12 +1133,28 @@ rather than a gap discovered late.
 > demonstrated against the repository's own evaluator rather than against the
 > specification.
 
+> **Normative.** That lane ships the **connectability** cases §6, §8 and §10 are
+> stated for: `bind` refuses where the bound reference's connection record is
+> `PENDING`, and again where it is absent, in each case before an `ActionRequest` is
+> built and with no ruling sought; a record that becomes `PENDING` **after** a
+> registration was built is refused, which is the case a registration snapshot would
+> have passed and is what ADR-0148 §6's "never carried over from an earlier one"
+> demands; `rebind` refuses a resumed call whose reference has gone `PENDING` since
+> the `CONFIRM` was parked; and a binding derived for an `ACTIVE` reference whose
+> identity has changed since registration carries the **currently recorded**
+> identity. A test that only exercises an `ACTIVE` reference satisfies none of these.
+
+> **Normative.** That lane ships the **single-read** pin: binding one call reads the
+> one connection record its registration names and no other store, and reads no
+> keyring — asserted against instrumented doubles rather than by inspection, and
+> asserted for `rebind` as well as `bind`.
+
 > **Normative.** That lane ships the **refusal-message** cases §11 is stated for:
 > a refusal for an undescribed key names neither the key nor its value; a refusal
-> naming an argument names only one the declaration statically names; and no refusal
-> on this surface renders a destination form, an account identity or a connection
-> reference. A test asserting a refusal type without asserting its message satisfies
-> none of these.
+> naming an argument names only one the declaration statically names; no refusal on
+> this surface renders a destination form or an account **identity**; and the
+> connectability refusal **does** name the connection reference. A test asserting a
+> refusal type without asserting its message satisfies none of these.
 
 > **Normative.** That lane ships the **disposition** cases §9 is stated for: a
 > refusal from either member yields `Disposition.EGRESS_UNBINDABLE`, writes no audit
@@ -1125,10 +1243,42 @@ which is the class §4's own step 2 already contains.
 the signature; one that does not is changing this decision". Choosing it is the
 deferral working, the shape ADR-0147 §11 found for ADR-0017 §2's seam-naming and
 ADR-0150 §13 for §11's other half: "that deferral working as designed, not a
-supersession" (ADR-0029 §9). Each of §11's four fixed properties is satisfied and
-none is traded: consulted before the ruling and never after (§1, §7, §10's ordering
-clause); no I/O (§10); refuses rather than guessing (§6); deterministic (§5, and
-§7's comparison is what makes the determinism checkable).
+supersession" (ADR-0029 §9). Three of §11's four fixed properties are satisfied
+without qualification: consulted before the ruling and never after (§1, §7, §10's
+ordering clause); refuses rather than guessing (§6); deterministic (§5, and §7's
+comparison is what makes the determinism checkable).
+
+**The fourth property — "it performs no I/O" — is read narrowly, and no record is
+owed for reading it that way, for two independent reasons.** *First, it is not a
+clause.* ADR-0148 carries marked clauses throughout §11, and the sentence in
+question is in the unmarked paragraph beginning "What is fixed here rather than
+deferred is every property either surface must have". ADR-0089 §3 governs a marked
+ADR: "the marked clauses are the whole of what it obligates" and unmarked text
+"never supplies an obligation". ADR-0082 §1's test is stated over a **clause** being
+amended, and there is no clause here to amend — §11's four marked clauses are about
+the two surfaces existing, each being decided in its own contract ADR, no credential
+value appearing, and neither surface owning the provisioning act, and this ADR
+touches none of the four. *Second, the reading is the one ADR-0148's own marked text
+compels.* §6 carries a marked clause naming this seam by name and obliging it to
+refuse a reference that is not connectable, with connectability "read at each of
+those moments and never carried over from an earlier one". A marked clause and an
+unmarked sentence cannot both be read to their widest extent, and ADR-0089 §3 says
+which one yields: unmarked text is read "to determine what a marked clause
+*means*". §11's own parenthetical points the same way, grounding the property in
+ADR-0148 §2's fifth clause, whose subject is a canonicaliser asking a remote service
+what a name denotes. So a reader holding only ADR-0148 finds the marked clause
+obliging the read, finds the unmarked sentence forbidding the class of read that
+would make this seam a resolution path, and acts exactly as §10 above says. Nothing
+of §11 becomes false or over-wide, and §10's clauses keep every part of the property
+that bites — no network, no clock, no configuration, no resolution, one record read
+and no other.
+
+**Adversarial review found this on round 1 and it is recorded rather than
+smoothed.** An earlier draft made the account a registration snapshot on a flat
+reading of §11's sentence, which would have let a ruling be taken — and a
+confirmation shown — against a reference that had since gone pending. That is
+ADR-0148 §6's connectability clause defeated at the one moment it names, and §16
+records the round.
 
 **ADR-0148 §1, §2 and §6 — no record owed.** §1's third clause is **used** five
 times over, once per refusal in §6, which is that clause operating rather than
@@ -1147,7 +1297,15 @@ answer is that the sentence's "seam" is the transmitting one; §6's own followin
 sentence — the approver, the seam and a later auditor "can each re-derive and
 compare" — is the clause §7 relies on, so §6 is what obliges the comparison rather
 than what forbids it. §6's fourth clause, the callable's four-way refusal, is
-untouched and §7 states in terms that it is not made redundant.
+untouched and §7 states in terms that it is not made redundant. §6's
+**connectability** clause is **used** rather than narrowed: it names §11's seam (b)
+as the component that refuses where no `ActionRequest` may be built, and §6 above is
+that refusal; its "read at each of those moments and never carried over from an
+earlier one" is exactly what §8's per-call read discharges and what an earlier
+draft's registration snapshot would have breached. §6's clauses on the revision, the
+provisioning order, the slot and the compare-and-swap are untouched — this seam
+reads a record, writes nothing anywhere, and carries neither a slot nor a revision
+into a binding.
 
 **ADR-0150 §3, §4, §6 and §11 — no record owed, and every routed obligation is
 discharged rather than narrowed.** §11's clauses are addressed to "(b)'s ADR" by
@@ -1230,9 +1388,26 @@ policy returns a `PermissionRuling` is relied on unchanged: this seam runs befor
 `decide` and hands the policy nothing. §5's floors are untouched and ADR-0148 §8's
 two additional floors are neither relaxed nor restated here.
 
-**ADR-0151 §2a, §4, §10 and §15 — no record owed, and the overlap is one concept
-rather than one name.** §4's `ConnectedAccount` gains no field, loses none and
-means what it meant; §10's `ConnectionProvisioner` gains no member; §2a's seven
+**ADR-0149 §1, §3, §5, §8 and §9 — no record owed, and the record read is the
+paragraph worth showing.** §3's connection record is **read** and nothing about it
+changes: no field is added, no holder is named, no write is performed, no lifecycle
+is touched, and §10 above leaves the route to it `tools/`-internal. A reader holding
+only ADR-0149 finds the same record with the same fields, held by the same
+component, and acts no differently — what they additionally find, here, is a second
+reader inside the same subsystem, which is a stacked addition contradicting no
+sentence ADR-0149 wrote. §3's split between a loggable handle and a Tier 1 value is
+relied on unchanged and is what §11 above cites for naming the reference and never
+the identity. §8's tenth clause — "holding such a seam is not holding a keyring
+face" — is relied on and restated in §10, and this seam holds neither face and reads
+no slot. §9's placement of the act and §5's removal entry are untouched.
+
+**ADR-0151 §2a, §4, §9, §10 and §15 — no record owed, and the overlap is one
+concept rather than one name.** §4's `ConnectedAccount` gains no field, loses none
+and means what it meant — and §8 above reads a **connection record**, not that
+model, taking from it only what ADR-0150 §7's `BoundAccount` carries; §9's two
+listings are relied on unchanged and §9 above cites `connected_accounts` as the
+route by which a client learns a reference is pending, which is that operation
+being used rather than extended. §10's `ConnectionProvisioner` gains no member; §2a's seven
 error classes are untouched and `EgressBindingError` is neither a subclass of nor a
 sibling within that family; §15's normative list of what that ADR authorises is
 disjoint from §2 above. A reader holding only ADR-0151 still finds five operations,
@@ -1255,11 +1430,10 @@ ADR-0150 §11 already states the conclusion — "Surface (b) **is** a seam, so (
 ADR is where the triad obligation lands, and it lands there whole." §3's rule that
 the triad is never split is relied on and restated in §13.
 
-**ADR-0004 §1 and §7, ADR-0125 §2 and §8, ADR-0149, ADR-0084 §4, ADR-0085 §2, §3
+**ADR-0004 §1 and §7, ADR-0125 §2 and §8, ADR-0084 §4, ADR-0085 §2, §3
 and §8, ADR-0102 §2, ADR-0008, ADR-0014 §4, ADR-0144 §6 and §7 — no record owed.**
 Each is used for what it is: `DataTier` as the tier vocabulary; §7's minimisation
-scope untouched; no `SecretName` and no keyring face; ADR-0149's record and
-reference consumed without extension; `StrEnum` additivity on the wire; the
+scope untouched; no `SecretName` and no keyring face; `StrEnum` additivity on the wire; the
 positional-subject convention, the spelled-out annotations and the surface-size
 concern; the near-neighbour naming caution; ADR-0008's populate-inside precedent;
 the transition table, unamended and unreached; and the selection stage's
@@ -1312,6 +1486,13 @@ any finding waived with its rationale.
   forged-canonical test is reachable because `rebind` is the one place an occurrence
   arrives from outside — out of a recorded decision, where a tampered trail row is
   exactly what it is written for.
+- **A pending connection stops a call one stage before the confirmation, which is
+  where ADR-0148 §6 always said it should stop.** The seam reads connectability per
+  call rather than carrying a registration snapshot, so a reference half-provisioned
+  by an interrupted act shows up as a tool that cannot be called until provisioning
+  is re-run — ADR-0148 §6's own stated intent, "rather than as a confirmation the
+  user grants and a send that then fails". The cost is one store read per egress
+  call, and §10 bounds it to exactly one.
 - **A parked `CONFIRM` is now checked against what was approved before the second
   ruling, and not only at the callable.** ADR-0148 §6's four-way refusal at
   transmission is unchanged and unrelaxed; what changes is that a resumed egress
