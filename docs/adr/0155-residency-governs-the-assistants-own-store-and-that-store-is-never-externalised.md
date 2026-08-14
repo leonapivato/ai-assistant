@@ -32,10 +32,13 @@
   `Settings.data_dir`, and the output of any operation — model call or otherwise —
   supplied covered content, propagating through every operation without exception and
   decided at each supply site from recorded origin, never by inspecting content. §3's
-  second clause forbids introducing covered content into an egress span where **no
-  model call is in its chain**; §3's third clause forbids a span carrying covered
-  content where **one is**. Every chain either contains a model call or does not, so
-  the pair is exhaustive and nothing escapes both. No authorisation cures either.
+  second clause forbids introducing covered content into an egress span wherever
+  **any** of its covered paths contains no model call; §3's third clause forbids a span
+  carrying covered content **all** of whose covered paths contain one. Content merging a
+  raw record with model output has a non-model path, so the absolute clause holds it.
+  The two quantifiers are exclusive and exhaustive, so nothing escapes both and no
+  relaxation of the reserved clause can ever carry a direct store record out. No
+  authorisation cures either.
 - **The ordinary machinery is untouched**, because nothing on the send path
   *introduces* covered content: ADR-0150 §4 pins a span to a key of the request's own
   `parameters`, so the runner carries what was composed rather than adding to it, and
@@ -411,20 +414,26 @@ checkable direction and the one a reviewer can test a change against.
 > model call or any other — to which any component of this system supplied covered
 > content, under any parameter and whatever that parameter is named. The class
 > propagates through every operation without exception; what varies below is only which
-> clause governs its reaching an egress span. Membership is decided at each supply site
-> from recorded origin — a component knows whether what it supplies is covered — and
-> never by inspecting content for resemblance, which is the unrecoverable relation
-> ADR-0098 §5 and §12 forbid deciding on.
+> clause governs its reaching an egress span. A **covered path** of a piece of covered
+> content is a path by which it derives from such a store: the value itself, where a
+> component obtained it from the store; and otherwise, for an operation's output, each
+> path continuing back through each covered input that operation was supplied. Content
+> may have several covered paths, and they need not be alike. Membership and the
+> character of each path are decided at each supply site from recorded origin — a
+> component that knows its inputs' membership knows their paths' character, which is
+> three-valued at every supply: covered with a model call on the path, covered with
+> none, or not covered — and never by inspecting content for resemblance, which is the
+> unrecoverable relation ADR-0098 §5 and §12 forbid deciding on.
 
 > **Normative.** No component introduces covered content into a span of an egress call
-> at the designated `tools/` egress seam, where **no model call occurs in that
-> content's derivation chain**. This holds at any moment and by any route, whether the
+> at the designated `tools/` egress seam, wherever **any covered path of that content
+> contains no model call**. This holds at any moment and by any route, whether the
 > content travels verbatim or as a copy, an excerpt, a re-encoding, a rendering, a
 > summary or a translation. No authorisation cures it, and its only exception is the
 > export ADR this section reserves below.
 
-> **Normative.** An egress span may not carry covered content **whose derivation chain
-> includes a model call** — wherever that model call sits in the chain, upstream or
+> **Normative.** An egress span may not carry covered content **all of whose covered
+> paths contain a model call** — wherever on a path that model call sits, upstream or
 > downstream of any other operation. What is reserved to an owner ruling is whether to
 > **(a)** ratify this clause as permanent, or **(b)** commission a later ADR that
 > designs a content-bearing approval surface compatible with ADR-0150 §10 and states
@@ -479,15 +488,25 @@ not reach. Defining **covered content** once, with propagation through every ope
 and no exception, removes the seam rather than patching it: there is no boundary left
 for the class to stop at.
 
-**The two prohibitions partition that class exhaustively, and that is a parity
-argument.** Every derivation chain either contains a model call or it does not. §3's
-second clause governs the chains that do not; §3's third clause governs the chains that
-do. No third case exists, so **no span carrying covered content escapes both**, which
-answers rounds 19 and 20 by construction rather than by another patch. And because the
-partition is drawn on exactly that predicate, the reserved fork in the third clause
-reaches exactly the model-influenced subclass — upstream and downstream variants alike,
-wherever the model call sits — so an owner relaxing it later relaxes the whole of what
-they were asked about and nothing else.
+**The two prohibitions partition that class exhaustively, and the quantifiers are what
+make it a partition.** Content is covered by several paths at once whenever an operation
+merges inputs, so a predicate written over "the" chain would leave the merged case
+claimed by both clauses. Architecture review found that on round 21. Quantified, the
+conditions are mutually exclusive and jointly exhaustive by construction: either **some**
+covered path contains no model call, or **every** covered path contains one, and never
+both. §3's second clause governs the first, §3's third the second, so **no span carrying
+covered content escapes both** — which answers rounds 19, 20 and 21 by construction
+rather than by another patch.
+
+**The overlap falls to the absolute clause, and that is the strict reading.** An
+operation combining a raw memory record with model-produced content yields output with a
+non-model covered path — the record's — so §3's second clause holds it, absolutely and
+with no reservation. That matters for what an owner can later do: because one non-model
+path suffices to keep content under the absolute clause **forever**, a relaxation of the
+reserved clause can never carry a direct store record out with it. The reserved fork
+therefore reaches exactly the model-influenced subclass and nothing adjacent to it —
+upstream and downstream variants alike, wherever on a path the model call sits — so an
+owner relaxing it later relaxes the whole of what they were asked about and only that.
 
 **Decidability is per supply site and unchanged.** A component knows whether what it is
 handing to an operation is covered, because it knows where it got it; nothing here asks
@@ -714,22 +733,25 @@ not confuse them.** `recall_memory` is registered today and returns matching rec
 to the turn as JSON.
 
 - **A turn that recalls and then sends.** `ConversationLoop` supplies the records to
-  the planner's model call, so that call's output is covered content with a model call
-  in its chain, and so is anything a later operation derives from it. §3's **third
-  clause** forbids it reaching a span — no component needed to route an extractable
-  value, which is the point. An owner ruling may later ratify that, or commission the
+  the planner's model call, so that call's output is covered content whose every
+  covered path runs through that call, as is anything a later operation derives from it
+  alone. §3's **third clause** forbids it reaching a span — no component needed to
+  route an extractable value, which is the point. An owner ruling may later ratify that,
+  or commission the
   approval surface under which relaxing it could be considered; a lane may not read
   the reservation as a permission now.
 - **A component that reads a store and introduces the value, or the output of any
-  chain of operations it fed that value into, into a span**, with no model call
-  anywhere in that chain — any store, at any moment and to any depth, whether during
+  chain of operations it fed that value into, into a span**, where some covered path
+  of what it introduces carries no model call — including content merged from a raw
+  record and a model output. Any store, at any moment and to any depth, whether during
   that step, an earlier step of the same plan, or before any plan existed.
   §3's **second clause**, forbidden absolutely, and **no code checks it**. That is the
   gap #1154 carries.
 
-The two differ in **whether a model call sits in the derivation chain**, which is the
-predicate the two clauses partition on, and they are not opposite in disposition
-today: the first is forbidden by the interim clause with its relaxation reserved to
+The two differ in **whether every covered path runs through a model call or some path
+does not**, which is the predicate the two clauses partition on, and they are not
+opposite in disposition today: the first is forbidden by the interim clause with its
+relaxation reserved to
 the owner, the second is forbidden outright with no reservation at all. That is why
 the enforcement point is worth its own issue rather than a note. Nothing in the
 payload path records the fact: `EgressBindingSeam._spans_of` derives spans from
@@ -902,7 +924,8 @@ one.
 > binder's connection read reaches the binding and the destination set rather than a
 > span, and it feeds no chain of operations whose output reaches one. This statement is
 > about §3's second clause only and does not reach §3's third: whether a particular
-> call's arguments are covered content with a model call in their chain is a fact about
+> call's arguments are covered content all of whose covered paths run through a model
+> call is a fact about
 > that call, and the registering lane's statement under the clause above addresses it
 > call by call rather than once for the tool. The
 > statement is about the tool's ordinary operation and its declared arguments; it is
@@ -1010,8 +1033,8 @@ absorbed:
   store value and is produced by no model call carrying store content — so neither
   clause of §3 reaches it. **A recall-then-send turn cannot draft egress arguments
   under the interim**: once recalled records are supplied to the planner's model call,
-  its output is covered content with a model call in its chain, and §3's third clause
-  forbids it reaching a span. A QA send therefore composes from
+  its output is covered content all of whose covered paths run through that call, and
+  §3's third clause forbids it reaching a span. A QA send therefore composes from
   turn content only. That is a real narrowing of what a first integration may do, it
   is what makes the interim restrictive rather than nominal, and it is stated here
   rather than discovered during QA.
