@@ -311,16 +311,18 @@ without needing two classes." Two names for one answer would invite two
 implementations and a drift between them, and a reader comparing the two faces
 would have to check whether the difference in name meant a difference in meaning.
 
-**The decorator is here and not on `ConnectionProvisioner`, and the difference is
-the arrangement rather than a preference.** ADR-0125 §1 made both `Secrets` and
-`SecretStore` `@runtime_checkable` for exactly this shape — two faces over one
-object, handed out separately by a composition root — and ADR-0125 §11 spends two
-suite obligations on the resulting `isinstance` checks. That is the shape here.
-`ConnectionProvisioner` has no sibling face over the same object, so ADR-0151 §10
-needed no such check and this ADR adds none to it. Without the decorator the claim
-below would be false rather than merely unproven: `isinstance` against a bare
-`Protocol` raises `TypeError`, so a suite written to the sentence would not fail,
-it would error.
+**The decorator is on `ConnectionPurger` and the claim it supports reaches that
+face and no other.** ADR-0125 §1 made both `Secrets` and `SecretStore`
+`@runtime_checkable` and ADR-0125 §11 spends two suite obligations on the resulting
+`isinstance` checks, which is the precedent for making a *new* face checkable when
+a suite is going to assert it — and §8's suite asserts exactly one, against
+`ConnectionPurger`. `ConnectionProvisioner` is ADR-0151 §10's declaration, this ADR
+changes nothing about it (§7), and ADR-0151 §16's suite asks for no `isinstance`
+against it; so no clause here may be read as making it checkable, and no lane may
+write `isinstance(subject, ConnectionProvisioner)`, which against a bare `Protocol`
+raises `TypeError` rather than answering. That asymmetry is the reason the decorator
+is stated in a marked clause rather than left to the block: without it, §8's suite
+obligation would not fail, it would error.
 
 **The Protocols are not made to inherit from one another, and that is the point.**
 `SecretStore(Secrets, Protocol)` inherits because the wide face genuinely *is* the
@@ -328,7 +330,8 @@ narrow face plus writes. Here neither face contains the other: the purger has
 `purge`, which the provisioner must not have (or the engine could purge an
 installation from a client), and the provisioner has four members the purger must
 not have. Two disjoint faces over one implementation is the honest declaration, and
-`isinstance` against either answers the question that face exists to ask.
+what a consumer holds is then decided by what the composition root hands it rather
+than by a subset relation between two Protocols.
 
 ### 3. Where the purge sits in the act, and what every interruption leaves
 
