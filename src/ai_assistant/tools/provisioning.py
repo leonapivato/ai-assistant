@@ -63,13 +63,12 @@ from ai_assistant.core.errors import (
     UnknownConnectionError,
 )
 from ai_assistant.core.types import (
-    CONNECTION_REFERENCE_MAX_BYTES,
     ConnectedAccount,
     ProvisioningState,
     SecretName,
     SecretScope,
 )
-from ai_assistant.tools.connection_store import ConnectionEntry
+from ai_assistant.tools.connection_store import ConnectionEntry, receivable
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -277,23 +276,11 @@ class KeyringConnectionProvisioner:
                 returning.
             ConnectionStoreError: If the act's own first write did not return, or
                 if the reference factory produced a value the store already holds
-                or one outside ``CONNECTION_REFERENCE_MAX_BYTES``. It names no
-                reference, because nothing was written and ADR-0151 §7 permits no
-                assertion about the act.
+                or one a caller could never receive (:func:`receivable`). It names
+                no reference, because nothing was written and ADR-0151 §7 permits
+                no assertion about the act.
         """
-        reference = self._mint_reference()
-        encoded = len(reference.encode("utf-8"))
-        if encoded > CONNECTION_REFERENCE_MAX_BYTES:
-            # A factory fault, caught before the first write so that nothing is
-            # written and §7's first bucket is the honest classification. The
-            # reference is not named: §7 permits no assertion about an act whose
-            # first write did not return, and this one never started.
-            msg = (
-                f"the reference factory produced {encoded} bytes, above "
-                f"CONNECTION_REFERENCE_MAX_BYTES ({CONNECTION_REFERENCE_MAX_BYTES}); a handle "
-                f"the caller could never receive is refused before anything is written"
-            )
-            raise ConnectionStoreError(msg)
+        reference = receivable(self._mint_reference())
         return await self._act(
             _Act(
                 reference=reference,

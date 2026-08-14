@@ -118,6 +118,47 @@ async def test_an_entry_that_no_longer_validates_is_reported(
         await store.live()
 
 
+async def test_a_row_whose_projection_disagrees_with_its_entry_is_reported(
+    store: SqliteConnectionStore,
+) -> None:
+    """The duplicate representation is checked rather than trusted.
+
+    ``permissions/grants.py`` states the hazard for its own shadow columns: "two
+    spellings of 'is this source granted' are two answers free to drift apart, and
+    the one that drifted would still pass its own half of the suite". This store
+    keeps ``reference`` and ``revision`` so SQLite can narrow and group, and no
+    ``state`` or ``slot`` column at all — so the only way a projection can decide
+    anything is by selecting rows, and a row whose projection does not describe its
+    own entry is a fault to report rather than an answer to give.
+    """
+    await store.append(entry(), expected_latest=None)
+    conn: sqlite3.Connection = store._conn
+    with conn:
+        conn.execute("UPDATE entries SET revision = 99")
+
+    with pytest.raises(ConnectionStoreError, match="the store is corrupt"):
+        await store.live()
+
+
+async def test_liveness_is_not_decided_by_a_column_a_file_edit_can_flip(
+    store: SqliteConnectionStore,
+) -> None:
+    """An active record stays live however the table beside it is edited.
+
+    An earlier draft projected ``state`` and made ``state IS NOT NULL`` the
+    liveness predicate, so an ``UPDATE`` on that column silently reported a
+    connected account as gone while its JSON payload was still a valid *active*
+    record — a change of meaning rather than a corruption the store reports. There
+    is no such column now, which is what this case pins.
+    """
+    await store.append(entry(state=ProvisioningState.ACTIVE), expected_latest=None)
+    conn: sqlite3.Connection = store._conn
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(entries)")}
+
+    assert columns == {"sequence", "reference", "revision", "data"}
+    assert [record.state for record in await store.live()] == [ProvisioningState.ACTIVE]
+
+
 # --- ADR-0148 §6's compare-and-swap, as one primitive -----------------------
 
 

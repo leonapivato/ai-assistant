@@ -66,12 +66,14 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from ai_assistant.core.errors import ConnectionStoreError
 from ai_assistant.core.types import (
+    CONNECTION_REFERENCE_MAX_BYTES,
     ConnectedAccount,
     ConnectionAct,
     DurableIdentifier,
     NonBlankEncodableText,
     ProvisioningState,
     SecretName,
+    encodable_text,
 )
 from ai_assistant.tools._transactions import transaction
 
@@ -108,17 +110,33 @@ _READ_SCHEMA_VERSION = "SELECT value FROM meta WHERE key = 'schema_version'"
 _WRITE_SCHEMA_VERSION = "INSERT INTO meta(key, value) VALUES ('schema_version', ?)"
 
 # The columns beside the ``data`` blob exist only so SQLite can order, group and
-# narrow; the blob is the entry. ``sequence`` is the append order and the
-# compare-and-swap's token — ``INTEGER PRIMARY KEY`` is the rowid, which SQLite
-# assigns monotonically for an insert that does not supply one. ``state`` is
-# projected because liveness reads it (a removal stores NULL, which is what makes
-# ``state IS NOT NULL`` the liveness predicate rather than a second flag free to
-# disagree), and ``slot`` because ADR-0149 §5's deletion pass and §8's purge each
-# select over it.
+# narrow; **the blob is the entry, and every semantic answer is read off it**.
+# ``sequence`` is the append order and the compare-and-swap's token —
+# ``INTEGER PRIMARY KEY`` is the rowid, which SQLite assigns monotonically for an
+# insert that does not supply one.
+#
+# **There is deliberately no ``state`` column and no ``slot`` column**, and their
+# absence is the rule ``permissions/grants.py`` already states for the same
+# hazard: "two spellings of 'is this source granted' are two answers free to drift
+# apart, and the one that drifted would still pass its own half of the suite". An
+# earlier draft here projected both and made ``state IS NOT NULL`` the liveness
+# predicate — so an ``UPDATE entries SET state = NULL`` on a file left a JSON
+# payload that was still a valid *active* record while ``live`` reported the
+# reference as gone, which is a change of meaning rather than a corruption this
+# store reports. Liveness and slot membership are now decided by
+# :meth:`ConnectionEntry.account` and :attr:`ConnectionEntry.slot` over the
+# decoded entry, which is the one representation every read answers from.
+#
+# ``reference`` and ``revision`` stay, because they choose *which rows* rather
+# than what a row means, and :func:`_decoded` checks each returned row's pair
+# against the entry it decodes — so the projection cannot disagree with the blob
+# without the read failing. What that check cannot see is a row the query never
+# returned, which is why the two filters ADR-0149 §5 and §8 state over revisions
+# run over decoded entries rather than in SQL.
 _CREATE_TABLE = (
     "CREATE TABLE IF NOT EXISTS entries("
     "sequence INTEGER PRIMARY KEY, reference TEXT NOT NULL, revision INTEGER NOT NULL, "
-    "state TEXT, slot TEXT, data TEXT NOT NULL)"
+    "data TEXT NOT NULL)"
 )
 
 _INDEXES = (
@@ -133,12 +151,13 @@ _INDEXES = (
 #: that reference's latest entry".
 _LATEST_PER_REFERENCE = "SELECT MAX(sequence) FROM entries GROUP BY reference"
 
-#: Every live record: the latest entry per reference, less those whose latest is
-#: a removal — "a reference whose latest entry is a removal (§5) has no live
-#: record at all" (ADR-0149 §3).
+#: The latest entry per reference. Which of them are *live* is decided over the
+#: decoded entries — "a reference whose latest entry is a removal (§5) has no live
+#: record at all" (ADR-0149 §3) — rather than by a predicate over a projected
+#: column, for the reason the schema comment gives.
 _LIVE = (
-    f"SELECT data FROM entries WHERE sequence IN ({_LATEST_PER_REFERENCE}) "  # noqa: S608
-    "AND state IS NOT NULL ORDER BY sequence ASC"
+    "SELECT reference, revision, data FROM entries "  # noqa: S608
+    f"WHERE sequence IN ({_LATEST_PER_REFERENCE}) ORDER BY sequence ASC"
 )
 
 #: The furthest entry of each act — each ``(reference, revision)`` pair — newest
@@ -151,11 +170,62 @@ _LIVE = (
 #: each act. Either endpoint is an append order; this one is the one under which
 #: a completed activation reads as more recent than the pending entry of an act
 #: that has not finished.
+#: The grouping is the one place a projected column decides which rows come back
+#: and the check cannot see the rows it excluded: a corrupted ``revision`` would
+#: split or merge two acts here. It is kept in SQL because the alternative is to
+#: over-fetch and slice, which is the paging surface ADR-0102 §10 calls one that
+#: lies about its cost — and the exposure is bounded, because this listing states
+#: nothing about liveness (ADR-0151 §9) and every row it does return is checked.
 _ACTS = (
-    "SELECT data FROM entries WHERE sequence IN "
+    "SELECT reference, revision, data FROM entries WHERE sequence IN "
     "(SELECT MAX(sequence) FROM entries GROUP BY reference, revision) "
     "ORDER BY sequence DESC"
 )
+
+
+def receivable(reference: str) -> str:
+    """Refuse a minted reference the caller could never receive (ADR-0151 §11).
+
+    ADR-0151 §11 fixes :data:`~ai_assistant.core.types.CONNECTION_REFERENCE_MAX_BYTES`
+    here rather than leaving it to the lane, and the asymmetry with the identity's
+    bound is the mint. An oversized *identity* refuses the request the caller sent,
+    and the caller still holds the value and can send a shorter one. An oversized
+    *reference* refuses a **response** carrying a value that exists only in the
+    hub — so the act has landed and its handle is unreachable, recoverable only by
+    matching on an identity nothing makes unique. This is what stops a conforming
+    minting scheme producing that state.
+
+    Checked **before the first write**, so a factory fault leaves nothing behind
+    and ADR-0151 §7's first bucket is the honest classification of it.
+
+    Args:
+        reference: What the factory produced.
+
+    Returns:
+        The reference, unchanged.
+
+    Raises:
+        ConnectionStoreError: If it has no UTF-8 encoding, or if that encoding
+            exceeds the bound. The reference is **not named** in the message: §7
+            permits no assertion about an act whose first write did not return,
+            and this one never started.
+    """
+    try:
+        encoded = len(encodable_text(reference).encode("utf-8"))
+    except ValueError as exc:
+        msg = (
+            "the reference factory produced a value with no UTF-8 encoding; a handle the "
+            "caller could never receive is refused before anything is written"
+        )
+        raise ConnectionStoreError(msg) from exc
+    if encoded > CONNECTION_REFERENCE_MAX_BYTES:
+        msg = (
+            f"the reference factory produced {encoded} bytes, above "
+            f"CONNECTION_REFERENCE_MAX_BYTES ({CONNECTION_REFERENCE_MAX_BYTES}); a handle "
+            f"the caller could never receive is refused before anything is written"
+        )
+        raise ConnectionStoreError(msg)
+    return reference
 
 
 class ConnectionEntry(BaseModel):
@@ -619,34 +689,27 @@ class SqliteConnectionStore:
         """Compare, swap and insert, as one transaction."""
         with self._transaction(f"append to connection {entry.reference!r}") as conn:
             row = conn.execute(
-                "SELECT sequence, revision FROM entries WHERE reference = ? "
+                "SELECT sequence, reference, revision, data FROM entries WHERE reference = ? "
                 "ORDER BY sequence DESC LIMIT 1",
                 (entry.reference,),
             ).fetchone()
             current = None if row is None else int(row[0])
             if current != expected_latest:
                 return None
-            if row is not None and entry.revision < int(row[1]):
+            if row is not None and entry.revision < _decoded(row[1:]).revision:
                 # Not a displacement — a caller that computed a revision below one
                 # the reference already holds. ADR-0148 §6 makes monotonicity the
                 # property a credential read's "unchanged since I looked" rests on,
                 # so the store refuses rather than filing an entry that breaks it.
                 msg = (
-                    f"connection {entry.reference!r} already holds revision {int(row[1])}, so "
-                    f"an entry at revision {entry.revision} would break the monotonicity "
+                    f"connection {entry.reference!r} already holds a higher revision, so an "
+                    f"entry at revision {entry.revision} would break the monotonicity "
                     f"ADR-0148 §6 requires"
                 )
                 raise ConnectionStoreError(msg)
             cursor = conn.execute(
-                "INSERT INTO entries(reference, revision, state, slot, data) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (
-                    entry.reference,
-                    entry.revision,
-                    None if entry.state is None else entry.state.value,
-                    None if entry.slot is None else entry.slot.key,
-                    entry.model_dump_json(),
-                ),
+                "INSERT INTO entries(reference, revision, data) VALUES (?, ?, ?)",
+                (entry.reference, entry.revision, entry.model_dump_json()),
             )
             sequence = int(cursor.lastrowid or 0)
         return StoredEntry(sequence, entry)
@@ -681,34 +744,30 @@ class SqliteConnectionStore:
         """Read the latest entry and append a removal where one is owed."""
         with self._transaction(f"disconnect connection {reference!r}") as conn:
             row = conn.execute(
-                "SELECT revision, state, data FROM entries WHERE reference = ? "
+                "SELECT reference, revision, data FROM entries WHERE reference = ? "
                 "ORDER BY sequence DESC LIMIT 1",
                 (reference,),
             ).fetchone()
             if row is None:
                 return None
-            if row[1] is None:
+            latest = _decoded(row)
+            if latest.state is None:
                 # The latest entry is already a removal: no second one, and the
                 # deletion pass repeats at its revision (ADR-0149 §5).
-                return Removal(None, int(row[0]))
-            removed = _decode(str(row[2]))
-            revision = int(row[0]) + 1
-            conn.execute(
-                "INSERT INTO entries(reference, revision, state, slot, data) "
-                "VALUES (?, ?, NULL, NULL, ?)",
-                (
-                    reference,
-                    revision,
-                    ConnectionEntry(
-                        reference=reference,
-                        revision=revision,
-                        identity=None,
-                        state=None,
-                        slot=None,
-                    ).model_dump_json(),
-                ),
+                return Removal(None, latest.revision)
+            revision = latest.revision + 1
+            removal = ConnectionEntry(
+                reference=reference,
+                revision=revision,
+                identity=None,
+                state=None,
+                slot=None,
             )
-        return Removal(removed, revision)
+            conn.execute(
+                "INSERT INTO entries(reference, revision, data) VALUES (?, ?, ?)",
+                (reference, revision, removal.model_dump_json()),
+            )
+        return Removal(latest, revision)
 
     async def clear(self) -> None:
         """Delete every entry, wholesale (ADR-0149 §8).
@@ -753,20 +812,20 @@ class SqliteConnectionStore:
         """
         async with self._lock:
             row = await _run_to_completion(self._latest_sync, reference)
-        return None if row is None else StoredEntry(row[0], _decode(row[1]))
+        return None if row is None else StoredEntry(row[0], _decoded(row[1:]))
 
-    def _latest_sync(self, reference: str) -> tuple[int, str] | None:
+    def _latest_sync(self, reference: str) -> tuple[int, str, int, str] | None:
         """Read the reference's newest row."""
         try:
             row = self._conn.execute(
-                "SELECT sequence, data FROM entries WHERE reference = ? "
+                "SELECT sequence, reference, revision, data FROM entries WHERE reference = ? "
                 "ORDER BY sequence DESC LIMIT 1",
                 (reference,),
             ).fetchone()
         except sqlite3.Error as exc:
             msg = f"failed to read connection {reference!r}: {exc}"
             raise ConnectionStoreError(msg) from exc
-        return None if row is None else (int(row[0]), str(row[1]))
+        return None if row is None else (int(row[0]), str(row[1]), int(row[2]), str(row[3]))
 
     async def live(self) -> tuple[ConnectedAccount, ...]:
         """Every reference's live record (ADR-0149 §3, ADR-0151 §9).
@@ -784,7 +843,7 @@ class SqliteConnectionStore:
         """
         async with self._lock:
             rows = await _run_to_completion(self._select_sync, _LIVE, (), "read the live records")
-        return tuple(record for row in rows if (record := _decode(row).account()) is not None)
+        return tuple(record for row in rows if (record := _decoded(row).account()) is not None)
 
     async def recent(self, *, limit: int) -> tuple[ConnectionAct, ...]:
         """Up to ``limit`` acts, newest first (ADR-0151 §9).
@@ -816,7 +875,7 @@ class SqliteConnectionStore:
             rows = await _run_to_completion(
                 self._select_sync, f"{_ACTS} LIMIT ?", (bound,), "read the connection acts"
             )
-        return tuple(_decode(row).act() for row in rows)
+        return tuple(_decoded(row).act() for row in rows)
 
     async def entries_for(self, reference: str) -> tuple[ConnectionEntry, ...]:
         """Every entry filed for ``reference``, oldest first.
@@ -838,11 +897,12 @@ class SqliteConnectionStore:
         async with self._lock:
             rows = await _run_to_completion(
                 self._select_sync,
-                "SELECT data FROM entries WHERE reference = ? ORDER BY sequence ASC",
+                "SELECT reference, revision, data FROM entries WHERE reference = ? "
+                "ORDER BY sequence ASC",
                 (reference,),
                 f"read the history of connection {reference!r}",
             )
-        return tuple(_decode(row) for row in rows)
+        return tuple(_decoded(row) for row in rows)
 
     async def slots_below(self, reference: str, revision: int) -> tuple[SecretName, ...]:
         """Every distinct slot named for ``reference`` below ``revision``.
@@ -868,12 +928,16 @@ class SqliteConnectionStore:
         async with self._lock:
             rows = await _run_to_completion(
                 self._select_sync,
-                "SELECT data FROM entries WHERE reference = ? AND revision < ? AND slot "
-                "IS NOT NULL ORDER BY sequence ASC",
-                (reference, revision),
+                "SELECT reference, revision, data FROM entries WHERE reference = ? "
+                "ORDER BY sequence ASC",
+                (reference,),
                 f"read the credential slots of connection {reference!r}",
             )
-        return _distinct(_decode(row).slot for row in rows)
+        # The cutoff runs over the decoded entries rather than in SQL, so every
+        # row it excludes has been checked against its own projection first — a
+        # revision filtered out in the database is one nothing would have read.
+        entries = (_decoded(row) for row in rows)
+        return _distinct(entry.slot for entry in entries if entry.revision < revision)
 
     async def slots(self) -> tuple[SecretName, ...]:
         """Every distinct slot the store names, for ADR-0149 §8's purge.
@@ -893,20 +957,22 @@ class SqliteConnectionStore:
         async with self._lock:
             rows = await _run_to_completion(
                 self._select_sync,
-                "SELECT data FROM entries WHERE slot IS NOT NULL ORDER BY sequence ASC",
+                "SELECT reference, revision, data FROM entries ORDER BY sequence ASC",
                 (),
                 "read the credential slots",
             )
-        return _distinct(_decode(row).slot for row in rows)
+        return _distinct(_decoded(row).slot for row in rows)
 
-    def _select_sync(self, statement: str, parameters: Sequence[object], what: str) -> list[str]:
-        """Run one statement and return its single ``data`` column."""
+    def _select_sync(
+        self, statement: str, parameters: Sequence[object], what: str
+    ) -> list[tuple[str, int, str]]:
+        """Run one statement and return its ``(reference, revision, data)`` rows."""
         try:
             rows = self._conn.execute(statement, tuple(parameters)).fetchall()
         except sqlite3.Error as exc:
             msg = f"failed to {what}: {exc}"
             raise ConnectionStoreError(msg) from exc
-        return [str(row[0]) for row in rows]
+        return [(str(row[0]), int(row[1]), str(row[2])) for row in rows]
 
     def close(self) -> None:
         """Close the underlying database connection."""
@@ -961,19 +1027,46 @@ def _revalidated(entry: ConnectionEntry) -> ConnectionEntry:
         raise ConnectionStoreError(msg) from exc
 
 
-def _decode(data: str) -> ConnectionEntry:
-    """Rebuild a stored entry from its JSON.
+def _decoded(row: tuple[str, int, str]) -> ConnectionEntry:
+    """Rebuild a stored entry from its JSON, refusing a row that disagrees with it.
+
+    The blob is the entry; ``reference`` and ``revision`` are projections SQLite
+    narrows and groups on. A row whose projection does not describe the entry it
+    carries is a file something else has written to, and reading it would answer a
+    question about rows the query never selected — so it is reported rather than
+    resolved, on the same footing as a row that no longer validates.
+
+    Args:
+        row: The ``(reference, revision, data)`` triple every read selects.
+
+    Returns:
+        The decoded entry.
 
     Raises:
-        ConnectionStoreError: If the stored row no longer validates — a corrupted
-            or downgraded database, which is a fault to report rather than a
-            record to hand on.
+        ConnectionStoreError: If the row no longer validates — a corrupted or
+            downgraded database — or if its projected reference or revision
+            disagrees with the entry.
     """
+    reference, revision, data = row
     try:
-        return ConnectionEntry.model_validate_json(data)
+        entry = ConnectionEntry.model_validate_json(data)
     except ValidationError as exc:
         msg = f"the connection store holds an entry that no longer validates: {exc}"
         raise ConnectionStoreError(msg) from exc
+    if entry.reference != reference or entry.revision != revision:
+        msg = (
+            f"the connection store holds a row projected as {reference!r} at revision "
+            f"{revision} carrying an entry for {entry.reference!r} at revision "
+            f"{entry.revision}; the store is corrupt"
+        )
+        raise ConnectionStoreError(msg)
+    return entry
 
 
-__all__ = ["ConnectionEntry", "Removal", "SqliteConnectionStore", "StoredEntry"]
+__all__ = [
+    "ConnectionEntry",
+    "Removal",
+    "SqliteConnectionStore",
+    "StoredEntry",
+    "receivable",
+]
