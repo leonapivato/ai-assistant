@@ -217,14 +217,23 @@ convention.
 > `SecretName` for this reason: `model_construct` builds an instance without running
 > validators, and it is public.
 
-> **Normative.** Both members **revalidate every model they are handed** before
-> reading it — the `tool` and the `provenance` — and refuse with an
+> **Normative.** Both members **revalidate every argument whose annotation carries
+> validation**, before reading any field of it, and refuse with an
 > `EgressBindingError` chained from the underlying `ValidationError` where
-> revalidation fails. This is ADR-0029 §2's step 1 at a second seam, whose rule is
-> already written: "a revalidation failure carrying the underlying `ValidationError`
-> as its cause". No lane omits it on the ground that the annotation says the value is
-> valid: `model_construct` is a documented escape hatch, `object.__setattr__` defeats
+> revalidation fails. The set is exhaustive per member and no argument is exempt: on
+> `bind` it is `tool`, `parameters` and `provenance`; on `rebind` it is `tool`,
+> `parameters` and `approved` where `approved` is not `None`. This is ADR-0029 §2's
+> step 1 at a second seam, whose rule is already written: "a revalidation failure
+> carrying the underlying `ValidationError` as its cause". No lane omits it for any
+> argument on the ground that the annotation says the value is valid:
+> `model_construct` is a documented escape hatch, `object.__setattr__` defeats
 > `frozen=True` (ADR-0018 §3), and neither is detectable from a type.
+
+> **Normative.** `rebind` additionally **detaches** `approved` — it reads no field of
+> the caller's object after revalidating it — so a binding mutated while `rebind` is
+> suspended cannot change what §7 compared against. This is ADR-0018 §3's detachment
+> discipline at the one argument on this seam that arrives from outside and is then
+> compared.
 
 > **Normative.** Past that one revalidation the seam reads the carrier's keys and
 > values **on trust** and performs no `isinstance` check of its own over either. The
@@ -1316,11 +1325,20 @@ rather than a gap discovered late.
 > by `CarriedProvenance.model_construct` over a mapping whose keys and values are
 > neither a locator nor a provenance; a carrier whose `spans` was replaced by
 > `object.__setattr__` after construction; a locator built by `model_construct` with
-> an `argument` its validator would refuse; and a `tool` built the same way. Each is
+> an `argument` its validator would refuse; a `tool` built the same way; a
+> `parameters` mapping carrying a value `FrozenJsonMapping` would refuse; and — on
+> `rebind` — an `approved` binding built by `EgressBinding.model_construct` and one
+> whose field was replaced by `object.__setattr__` after construction. Each is
 > refused with an `EgressBindingError` **chained from** the underlying
 > `ValidationError`, and never with an `AttributeError`, a `TypeError`, a bare
 > `ValidationError` or a binding. A test that constructs its inputs ordinarily
-> reaches none of these.
+> reaches none of these, and one covering `bind`'s arguments alone leaves `rebind`'s
+> untested.
+
+> **Normative.** That lane ships the **detachment** case §1's `approved` clause is
+> stated for: an `object.__setattr__` performed on the caller's `approved` binding
+> while `rebind` is suspended changes neither what it compares against nor what it
+> returns. A test that mutates a copy does not satisfy it.
 
 > **Normative.** That lane ships the **locator** cases §1 is stated for: an
 > `EgressSpanLocator` is hashable and usable as a mapping key; two locators with
@@ -1586,6 +1604,12 @@ second time at a second seam, which is that check being used; the one at `invoke
 is unchanged and §1 above says so. §2's three seam checks are untouched. §7's
 scope-out of designation is honoured by §12. §8's `approval_ref` obligation is
 untouched, and §9 above commits nothing that could reach it.
+
+**ADR-0018 §3 — no record owed.** Its detachment discipline is **applied** at two
+more places — `rebind`'s `approved` argument (§1) and, by ADR-0150 §9, the binding
+`ActionRequest` already detaches — which is that discipline used rather than
+altered, and its own record of what `frozen=True` does not stop is what §1's
+revalidation clause relies on.
 
 **ADR-0021 §1, §3 and §5 — no record owed.** §1's digest still binds the arguments
 while storing none of them, and this seam stores nothing at all. §3's rule that a
