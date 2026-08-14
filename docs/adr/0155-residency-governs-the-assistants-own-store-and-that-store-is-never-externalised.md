@@ -410,9 +410,12 @@ checkable direction and the one a reviewer can test a change against.
 > nothing else the store holds — not another step, not another plan, and no other
 > record. It is an exclusion of the **value**, so both of this clause's limbs are read
 > with it excluded: a component does not obtain a store value by reading back the
-> arguments of the step it is executing, and the output of an operation supplied with
-> those arguments in the ordinary course of executing that step — their binding, their
-> rendering and their transmission — is not an output this clause reaches. What the
+> arguments of the step it is executing, and an operation's output is not an output
+> this clause reaches where those recorded arguments are the **only** value from the
+> assistant's own store supplied to it — their binding, their rendering and their
+> transmission. The exclusion admits no mixture: supply that operation any other value
+> from the store at or after the moment above and the prohibition holds against its
+> output in full, whatever else was supplied alongside. What the
 > exclusion is not is a disposition of how those arguments came to hold what they
 > hold; it neither permits nor excuses that, which is the clause below's question, and
 > §4's first concrete path is the worked case. The prohibition is stated
@@ -557,6 +560,18 @@ system can actually hold, and name what it does not.
   exclusion be laundered after the fact: `ActionPlan` is frozen and `PlanStore`
   contracts `save_plan` and `get_plan` with no update, so no component can place a
   store value into a persisted step's arguments once that step exists to be excluded.
+
+  **Stating the exclusion took three rounds of its own, and each was a composition the
+  first statement left implied.** Round 10 read it as unconditional and round 11 read
+  a repair of that as re-arming the operation-output limb against the ordinary path —
+  the runner supplies the stored arguments to the binder and the transport supplies
+  them to `smtp_message`, so every send became an output of an operation supplied with
+  a store value after persistence, which §6's fourth clause denies. Round 12 then
+  found the mixture: an operation handed both the step's own arguments *and* a memory
+  record read after persistence had two dispositions at once. The clause now states
+  its effect on **each limb**, and states the exclusion as an *only* rather than an
+  *also*, so a mixture restores the prohibition instead of escaping it. That is the
+  #95 injection path arriving through a renderer, and it is forbidden.
 
 **The second clause is the complement of the first and carries no antecedent of its
 own, which is deliberate.** Architecture review on round 3 required the model-context
