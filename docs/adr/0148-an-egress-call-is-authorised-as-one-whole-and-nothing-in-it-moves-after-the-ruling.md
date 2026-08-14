@@ -913,10 +913,20 @@ where an old exclusion gets forgotten.
 
 > **Normative.** An `INTEGRATION`-scoped credential (ADR-0125 §2, §8) is read only
 > from inside a callable reached by `ToolInvoker.invoke` on a `ToolCall`, and only
-> after ADR-0029 §2's three seam checks have passed. No component reads one to
-> decide whether it may be read, to construct a client, to canonicalise a
-> destination (§2), to resolve one (§5), to build a payload description (§6), or
-> on any path a refusal can reach.
+> after ADR-0029 §2's three seam checks have passed. No component reads one
+> **outside that position**: not to decide whether it may be read, not to construct
+> a client for a call not yet ruled on, not to canonicalise a destination (§2), not
+> to resolve one while a request is being built (§5), not to build a payload
+> description (§6), and on no path a refusal can reach.
+
+> **Normative.** A **resolution call's own callable is inside that position**, not
+> an exception to it. §5 makes a resolution a call ruled on like any other, so its
+> credential read is a read from inside a callable whose own `ToolCall` passed the
+> three checks, and an authenticated resolver conforms by being invoked rather than
+> by being exempted. What the clause above forbids is reading a credential to
+> resolve a destination for **another** request — one still being built and not yet
+> ruled on — which is the ungated lookup §2's no-I/O clause and §5's one-route
+> clause each refuse from their own side.
 
 > **Normative.** The decision that authorises an egress call **is** the gate on
 > the credential read that call performs, and is the record ADR-0004 §7 requires
