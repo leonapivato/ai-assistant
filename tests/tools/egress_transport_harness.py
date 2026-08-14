@@ -38,9 +38,10 @@ from ai_assistant.tools.egress import SmtpEgressTransport
 from ai_assistant.tools.egress_binder import EgressRegistration
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from ai_assistant.core.protocols import Secrets
+    from ai_assistant.core.types import FrozenJson
     from ai_assistant.tools.egress import ByteChannel, SmtpEndpoint
 
 #: The registered tool, its connection record and the account it is bound to.
@@ -380,6 +381,42 @@ def starttls_script(*, offers_starttls: bool = True, recipients: int = 1) -> tup
         "250 2.0.0 queued as ABC123",
         "221 2.0.0 closing connection",
     )
+
+
+def arguments(  # noqa: PLR0913 — one keyword per argument the tool declares.
+    *,
+    to: Sequence[str] = ("Alice@Example.Invalid",),
+    cc: Sequence[str] = (),
+    bcc: Sequence[str] = (),
+    subject: str = "quarterly report",
+    body: str = "attached, as promised",
+    extra: Mapping[str, FrozenJson] | None = None,
+) -> dict[str, FrozenJson]:
+    """One call's arguments, as ``invoke`` would hand them to a callable.
+
+    Recipients default to the **supplied** form :func:`binding` carries, not its
+    canonical one, because that is what a user types and what the arguments a
+    decision's digest binds actually hold. A test that pre-canonicalised its own
+    input would hide the very step the transport has to perform — which is how
+    adversarial round 3 found a refusal of a perfectly good call.
+
+    Args:
+        to: Recipients in the ``To`` header.
+        cc: Recipients in the ``Cc`` header.
+        bcc: Recipients that receive the message and appear in no header.
+        subject: The subject text.
+        body: The body text.
+        extra: Further keys, for the cases about arguments this seam refuses.
+
+    Returns:
+        The mapping.
+    """
+    built: dict[str, FrozenJson] = {"to": list(to), "subject": subject, "body": body}
+    if cc:
+        built["cc"] = list(cc)
+    if bcc:
+        built["bcc"] = list(bcc)
+    return built | dict(extra or {})
 
 
 def binding(  # noqa: PLR0913 — one keyword per fact a ruling fixes; grouping them

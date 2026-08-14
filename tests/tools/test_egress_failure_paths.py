@@ -39,6 +39,7 @@ from egress_transport_harness import (
     TOOL_ID,
     Records,
     ScriptedChannel,
+    arguments,
     binding,
     entry,
     implicit_tls_script,
@@ -61,7 +62,6 @@ from ai_assistant.tools.egress import (
     BoundCallChangedError,
     EgressTransportError,
     IndeterminateTransmissionError,
-    OutboundEmail,
     TransportPinError,
 )
 from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail, UndesignatedSeamError
@@ -71,11 +71,10 @@ if TYPE_CHECKING:
 
     from ai_assistant.tools.egress import SmtpEgressTransport
 
-#: The one message the rows send or try to send, so that what differs between them
-#: is the arrangement rather than the payload.
-MESSAGE: Final = OutboundEmail(
-    to=("Alice@example.invalid",), subject="quarterly report", body="attached, as promised"
-)
+#: The arguments the rows send or try to send, so that what differs between them is
+#: the arrangement rather than the payload. The recipient is in its **supplied**
+#: form, which is what a call's arguments carry.
+ARGUMENTS: Final = arguments()
 
 #: A host that is not the pinned one, used wherever a case needs a second host.
 OTHER_HOST: Final = "relay.attacker.invalid"
@@ -161,7 +160,7 @@ async def test_a_bound_endpoint_that_is_not_the_configured_one_is_refused() -> N
     subject, ring = await _refusing()
 
     with pytest.raises(TransportPinError, match=r"not.*configured to use"):
-        await subject.transmit(binding(endpoint=f"smtps://{OTHER_HOST}:465"), MESSAGE)
+        await subject.transmit(binding(endpoint=f"smtps://{OTHER_HOST}:465"), ARGUMENTS)
 
     assert ring.reads == []
 
@@ -187,7 +186,7 @@ async def test_a_cross_host_forward_path_is_refused_and_never_followed() -> None
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(TransportPinError, match="forward path"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
     written = channel.written.decode("ascii")
     assert OTHER_HOST not in written
@@ -213,7 +212,7 @@ async def test_the_other_forward_path_reply_is_refused_the_same_way() -> None:
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(TransportPinError, match="forward path"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
     assert "DATA" not in channel.written.decode("ascii")
 
@@ -277,12 +276,7 @@ async def test_the_wire_carries_the_canonical_form_and_the_record_keeps_the_supp
     subject = transport(channel, secrets=await keyring())
     bound = binding(recipients=(("Alice@Example.Invalid", "Alice@example.invalid"),))
 
-    await subject.transmit(
-        bound,
-        OutboundEmail(
-            to=("Alice@example.invalid",), subject="quarterly report", body="attached, as promised"
-        ),
-    )
+    await subject.transmit(bound, arguments(to=("Alice@Example.Invalid",)))
 
     assert "RCPT TO:<Alice@example.invalid>" in channel.commands()
     assert [span.destination.supplied for span in bound.spans if span.destination] == [
@@ -295,24 +289,26 @@ async def test_the_wire_carries_the_canonical_form_and_the_record_keeps_the_supp
 # --------------------------------------------------------------------------- #
 
 
-async def test_an_unresolved_name_cannot_reach_the_wire_even_in_a_message() -> None:
-    """The seam's half of ADR-0148 §5's third clause.
+async def test_an_unresolved_name_cannot_reach_the_wire_even_in_an_argument() -> None:
+    """The seam's half of ADR-0148 §5's third clause, refused twice over.
 
     Resolution is a registered egress call of its own (§5), so a *failed* one
-    produces no identifier, and a request that would have consumed it is refused
-    before the ruling — which is the binder's half and is tested there. What is
-    left for this seam is the substitution the same clause forbids: "no component
-    substitutes the unresolved name, a cached value, or a default". So a message
-    carrying the unresolved name against a binding that does not is refused, no
-    credential is read, and no connection is opened.
+    produces no identifier, and the request that would have consumed it is refused
+    before the ruling — the binder's half, tested there. What is left for this seam
+    is the substitution the same clause forbids: "no component substitutes the
+    unresolved name, a cached value, or a default".
+
+    An unresolved name is refused here at the **first** of the two gates it would
+    have to pass: it has no canonical form at all, so it never reaches the
+    comparison against the bound set. Both refusals are real and the earlier one
+    is the one that fires, which is worth knowing — an implementation that only
+    compared strings would refuse it too, but would also refuse a *resolved*
+    recipient written in another case, which is the round-3 defect one row up.
     """
     subject, ring = await _refusing()
 
-    with pytest.raises(BoundCallChangedError, match="bound canonical destination set"):
-        await subject.transmit(
-            binding(),
-            OutboundEmail(to=("#team",), subject="quarterly report", body="attached, as promised"),
-        )
+    with pytest.raises(BoundCallChangedError, match="will not canonicalise"):
+        await subject.transmit(binding(), arguments(to=("#team",)))
 
     assert ring.reads == []
 
@@ -326,11 +322,7 @@ async def test_an_unresolved_name_cannot_reach_the_wire_even_in_a_message() -> N
 async def test_a_recipient_added_after_the_ruling_is_refused_rather_than_transmitted() -> None:
     """#93 item 1's substitution, and ADR-0148 §4's third clause at the seam."""
     subject, ring = await _refusing()
-    added = OutboundEmail(
-        to=("Alice@example.invalid", "mallory@example.invalid"),
-        subject="quarterly report",
-        body="attached, as promised",
-    )
+    added = arguments(to=("Alice@Example.Invalid", "mallory@example.invalid"))
 
     with pytest.raises(BoundCallChangedError, match="bound canonical destination set"):
         await subject.transmit(binding(), added)
@@ -356,7 +348,7 @@ async def test_a_recipient_dropped_after_the_ruling_is_refused_too() -> None:
     )
 
     with pytest.raises(BoundCallChangedError, match="bound canonical destination set"):
-        await subject.transmit(bound, MESSAGE)
+        await subject.transmit(bound, ARGUMENTS)
 
     assert ring.reads == []
 
@@ -372,7 +364,7 @@ async def test_a_payload_span_the_description_does_not_cover_is_refused() -> Non
     subject, ring = await _refusing()
 
     with pytest.raises(BoundCallChangedError, match="does not cover"):
-        await subject.transmit(binding(describes=("subject",)), MESSAGE)
+        await subject.transmit(binding(describes=("subject",)), ARGUMENTS)
 
     assert ring.reads == []
 
@@ -391,8 +383,62 @@ async def test_a_second_undescribed_span_cannot_borrow_another_spans_extent() ->
     with pytest.raises(BoundCallChangedError, match="does not cover"):
         await subject.transmit(
             binding(subject=same, body=same, describes=("subject",)),
-            OutboundEmail(to=("Alice@example.invalid",), subject=same, body=same),
+            arguments(subject=same, body=same),
         )
+
+
+async def test_the_payload_is_the_arguments_and_there_is_no_second_copy_to_substitute() -> None:
+    """The round-3 blocker, closed structurally rather than by a better check.
+
+    An earlier signature took a rendered message beside the binding and checked it
+    against the description by **extent**, which two texts of equal length pass
+    identically: a body substituted after the ruling — same length, different
+    words — reached the wire. The repair is not a stronger comparison; it is
+    removing the second copy. The message is derived here from
+    ``ActionRequest.parameters``, which ADR-0021 §1 binds by ``parameters_digest``,
+    ``authorises`` compares, and ADR-0029 §2 re-checks on a revalidated detached
+    copy before the callable is reached — so there is nothing left to substitute.
+
+    Asserted by sending two calls whose payloads differ only in content, and
+    reading what each put on the wire.
+    """
+    for body in ("attached, as promised", "aTTACHED, AS pROMISED"):
+        channel = ScriptedChannel(*implicit_tls_script())
+        subject = transport(channel, secrets=await keyring())
+
+        await subject.transmit(binding(body=body), arguments(body=body))
+
+        assert body in channel.payload()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param({"attachment": "x"}, id="an-argument-this-seam-does-not-transmit"),
+        pytest.param({"to": "alice@example.invalid"}, id="recipients-not-a-list"),
+        pytest.param({"to": [1]}, id="a-recipient-that-is-not-text"),
+        pytest.param({"subject": 7}, id="a-subject-that-is-not-text"),
+        pytest.param({"body": ["a", "b"]}, id="a-body-that-is-not-text"),
+        pytest.param({"to": []}, id="no-recipient-at-all"),
+    ],
+)
+async def test_arguments_that_are_not_a_submission_are_refused(payload: dict[str, object]) -> None:
+    """The seam re-establishes every shape it depends on, rather than assuming it.
+
+    ADR-0145 checks the arguments against the tool's schema at construction, before
+    the ruling, so none of these is reachable on the ordinary path. They are
+    checked anyway because "a request built by a bypass reaches the seam" (ADR-0145
+    §3) — which is ADR-0029 §2's revalidation posture, and is why an argument this
+    seam does not transmit is a refusal rather than a silently ignored key. A key
+    nobody transmits is a span no description covers.
+    """
+    subject, ring = await _refusing()
+    call = {**ARGUMENTS, **payload}
+
+    with pytest.raises(BoundCallChangedError):
+        await subject.transmit(binding(), call)  # type: ignore[arg-type]  # deliberately ill-shaped
+
+    assert ring.reads == []
 
 
 async def test_a_binding_naming_another_connection_is_refused_on_the_same_identity() -> None:
@@ -412,7 +458,7 @@ async def test_a_binding_naming_another_connection_is_refused_on_the_same_identi
     subject, ring = await _refusing()
 
     with pytest.raises(TransportPinError, match="not registered for"):
-        await subject.transmit(binding(reference="conn-0002"), MESSAGE)
+        await subject.transmit(binding(reference="conn-0002"), ARGUMENTS)
 
     assert ring.reads == []
 
@@ -426,7 +472,7 @@ async def test_a_transport_endpoint_that_moved_is_refused() -> None:
     subject, ring = await _refusing()
 
     with pytest.raises(TransportPinError):
-        await subject.transmit(binding(endpoint="smtps://mail.example.invalid:2525"), MESSAGE)
+        await subject.transmit(binding(endpoint="smtps://mail.example.invalid:2525"), ARGUMENTS)
 
     assert ring.reads == []
 
@@ -444,7 +490,7 @@ async def test_a_reprovisioning_landing_inside_the_credential_read_discards_it()
     subject = transport(None, records=records, secrets=ring)
 
     with pytest.raises(BoundCallChangedError, match="changed across the credential read"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
     assert records.reads == [REFERENCE, REFERENCE]
 
@@ -461,7 +507,7 @@ async def test_an_a_to_b_to_a_sequence_across_the_read_is_caught_by_the_revision
     subject = transport(None, records=records, secrets=ring)
 
     with pytest.raises(BoundCallChangedError, match="changed across the credential read"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
 
 async def test_a_second_read_that_cannot_be_answered_is_treated_as_a_change() -> None:
@@ -477,7 +523,7 @@ async def test_a_second_read_that_cannot_be_answered_is_treated_as_a_change() ->
     subject = transport(None, records=records, secrets=ring)
 
     with pytest.raises(BoundCallChangedError, match="changed across the credential read"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
 
 # --------------------------------------------------------------------------- #
@@ -514,11 +560,7 @@ async def test_a_far_end_refusing_one_recipient_fails_the_whole_call() -> None:
     with pytest.raises(BoundCallChangedError, match="authorised whole"):
         await subject.transmit(
             bound,
-            OutboundEmail(
-                to=("Alice@example.invalid", "bob@example.invalid"),
-                subject="quarterly report",
-                body="attached, as promised",
-            ),
+            arguments(to=("Alice@example.invalid", "bob@example.invalid")),
         )
 
     assert "DATA" not in channel.written.decode("ascii")
@@ -550,11 +592,7 @@ async def test_no_narrower_set_is_constructed_from_the_remainder() -> None:
     with pytest.raises(BoundCallChangedError):
         await subject.transmit(
             bound,
-            OutboundEmail(
-                to=("Alice@example.invalid", "bob@example.invalid"),
-                subject="quarterly report",
-                body="attached, as promised",
-            ),
+            arguments(to=("Alice@example.invalid", "bob@example.invalid")),
         )
 
     written = channel.written.decode("ascii")
@@ -583,7 +621,7 @@ async def test_a_send_interrupted_after_the_payload_is_indeterminate() -> None:
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(IndeterminateTransmissionError, match="unknown"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
     assert channel.payload().endswith("\r\n.\r\n")
 
@@ -622,7 +660,7 @@ async def test_a_refused_send_is_distinguishable_from_an_indeterminate_one() -> 
     subject = transport(refusing, secrets=await keyring())
 
     with pytest.raises(BoundCallChangedError, match="nothing was sent"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
     assert refusing.payload() == ""
 
@@ -639,7 +677,7 @@ async def test_a_non_250_verdict_after_the_payload_is_also_indeterminate() -> No
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(IndeterminateTransmissionError, match="unknown"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
 
 @pytest.mark.parametrize(
@@ -671,7 +709,7 @@ async def test_a_read_that_raises_after_the_payload_is_indeterminate_too(
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(IndeterminateTransmissionError, match="unknown"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
     assert channel.payload().endswith("\r\n.\r\n")
 
@@ -703,7 +741,7 @@ async def test_a_write_that_fails_while_sending_the_payload_is_indeterminate(
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(IndeterminateTransmissionError, match="unknown"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
     assert channel.payload().endswith("\r\n.\r\n")
 
@@ -720,7 +758,7 @@ async def test_a_socket_error_before_the_payload_stays_a_failure() -> None:
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(ConnectionResetError):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
     assert channel.payload() == ""
 
@@ -741,7 +779,7 @@ async def test_an_unterminated_multi_line_reply_is_refused_rather_than_buffered(
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(TransportPinError, match="continuation lines"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
     assert CREDENTIAL not in channel.written.decode("ascii")
 
@@ -763,16 +801,9 @@ async def test_no_refusal_message_renders_a_credential_a_recipient_or_a_slot() -
     subject, _ = await _refusing()
 
     for arrangement in (
-        (binding(endpoint=f"smtps://{OTHER_HOST}:465"), MESSAGE),
-        (
-            binding(),
-            OutboundEmail(
-                to=("mallory@example.invalid",),
-                subject="quarterly report",
-                body="attached, as promised",
-            ),
-        ),
-        (binding(describes=()), MESSAGE),
+        (binding(endpoint=f"smtps://{OTHER_HOST}:465"), ARGUMENTS),
+        (binding(), arguments(to=("mallory@example.invalid",))),
+        (binding(describes=()), ARGUMENTS),
     ):
         with pytest.raises(EgressTransportError) as raised:
             await subject.transmit(*arrangement)

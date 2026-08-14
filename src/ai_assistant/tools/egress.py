@@ -120,10 +120,10 @@ from ai_assistant.tools.destinations import DestinationCanonicalisationError, ca
 from ai_assistant.tools.destinations import DestinationProtocol as SeamProtocol
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import Secrets
-    from ai_assistant.core.types import EgressBinding, SecretName
+    from ai_assistant.core.types import EgressBinding, FrozenJson, SecretName
     from ai_assistant.tools.connection_store import ConnectionEntry, StoredEntry
     from ai_assistant.tools.egress_binder import ConnectionRecords, EgressRegistration
 
@@ -622,15 +622,34 @@ class SmtpEgressTransport:
         self._secrets = secrets
         self._connect = connect
 
-    async def transmit(self, binding: EgressBinding, message: OutboundEmail) -> None:
-        """Send ``message`` under ``binding``, or refuse without transmitting.
+    async def transmit(self, binding: EgressBinding, parameters: Mapping[str, FrozenJson]) -> None:
+        """Send the bound call, or refuse without transmitting.
+
+        **It takes the call's arguments, not a message somebody built from them,
+        and that is the decision rather than a convenience.** An earlier signature
+        accepted a rendered :class:`OutboundEmail` beside the binding and checked
+        it against the description by *extent*. Adversarial review found on round 3
+        that two texts of equal length are indistinguishable to such a check, so a
+        message substituted after the ruling — same lengths, different words —
+        passed every one of them. What is actually bound to the decision is
+        ``ActionRequest.parameters``: ADR-0021 §1 binds them by
+        ``parameters_digest``, ``authorises`` compares that digest, and ADR-0029 §2
+        makes ``invoke`` re-run the comparison on a **revalidated, detached** copy
+        before the callable is reached. ADR-0148 §4's third clause rests on exactly
+        that chain and says a later lane "cannot satisfy it by re-deriving the set
+        at the seam". So the message is derived here from the arguments that chain
+        already protects, and there is no second, independently mutable payload for
+        anyone to substitute.
 
         Args:
             binding: The egress binding the authorising decision carries, read
-                back out of the trail by the executor (ADR-0037 §3). Every fact
-                the transmission rests on is taken from here; nothing is
-                re-derived, and nothing is taken from the call's arguments.
-            message: What the integration would send.
+                back out of the trail by the executor (ADR-0037 §3). The account,
+                the endpoint and the authorised destination set are taken from
+                here and re-derived nowhere.
+            parameters: The call's arguments, as ``invoke`` revalidated and
+                detached them (ADR-0029 §2). The payload and the supplied
+                recipient forms come from here, because these are what the
+                decision's digest binds.
 
         Raises:
             TransportPinError: If the endpoint is not the configured one or is not
@@ -638,7 +657,8 @@ class SmtpEgressTransport:
                 with a forward path.
             BoundCallChangedError: If the reference is not connectable, the
                 recorded identity is not the bound one, the record moved across
-                the credential read, or the message departs from the binding.
+                the credential read, or the arguments do not yield the call the
+                binding describes.
             IndeterminateTransmissionError: If the message was written and the
                 server's verdict could not be read.
             ConnectionStoreError: If the **first** record read failed. A store
@@ -646,15 +666,16 @@ class SmtpEgressTransport:
                 *second* read is different, and an unanswerable one there is
                 treated as a change.
         """
-        # Every refusal that is decidable from the binding alone runs first, so a
-        # call that cannot be performed as bound never reaches a credential read
-        # at all. ADR-0148 §6 is explicit that its clauses do not guarantee that —
-        # "they do not guarantee that no credential is ever read for a call that
-        # is then refused" — so this is strictly better than the clause requires
-        # and is here rather than in a docstring claiming a bound nobody has.
+        # Every refusal that is decidable from the binding and the arguments alone
+        # runs first, so a call that cannot be performed as bound never reaches a
+        # credential read at all. ADR-0148 §6 is explicit that its clauses do not
+        # guarantee that — "they do not guarantee that no credential is ever read
+        # for a call that is then refused" — so this is strictly better than the
+        # clause requires, and is here rather than in a docstring claiming a bound
+        # nobody has.
         endpoint = self._pinned(binding)
         sender = self._sender(binding)
-        recipients = self._checked_message(binding, message)
+        message, recipients = self._authorised_message(binding, parameters)
 
         before = await self._records.latest(self._registration.reference)
         slot = self._slot_of(before, binding)
@@ -751,35 +772,51 @@ class SmtpEgressTransport:
             )
             raise _refuse_changed(msg) from exc
 
-    def _checked_message(self, binding: EgressBinding, message: OutboundEmail) -> tuple[str, ...]:
-        """Refuse a message that departs from what was authorised.
+    def _authorised_message(
+        self, binding: EgressBinding, parameters: Mapping[str, FrozenJson]
+    ) -> tuple[OutboundEmail, tuple[str, ...]]:
+        """Derive the message from the arguments and refuse it against the binding.
 
-        Two checks, and they are the seam's half of two different clauses. The
+        The arguments carry **supplied** forms, because that is what a user typed
+        and what ADR-0148 §2's fourth clause keeps in the record. The bound
+        destination set carries **canonical** ones. So the supplied forms are put
+        through the seam's own canonicaliser before the two are compared, which is
+        both what makes the comparison meaningful and what ADR-0148 §2's sixth
+        clause requires — one canonicaliser per protocol, so the answer here is the
+        same answer the binder got. Adversarial review found on round 3 that
+        comparing the raw argument against the canonical set refused a perfectly
+        good call whose recipient was written in another case, and that the alias
+        test had hidden it by pre-canonicalising its own input.
+
+        Two refusals then follow, each the seam's half of a different clause. The
         recipient check is ADR-0148 §4's third clause — "the callable transmits to
         every member of the bound set and to no other recipient" — read as a set
-        equality in both directions, so a member added after the ruling and a
+        equality in **both** directions, so a member added after the ruling and a
         member silently dropped from it fail alike. The span check is §6's
         callable-side clause: "a callable that finds itself about to transmit a
         span the description does not cover refuses instead".
 
-        Spans are matched two ways because the binding holds them two ways. A span
-        carrying a destination is matched by that destination's **canonical** form,
-        which is what the envelope carries. A span carrying none is payload text,
-        whose canonical form is nothing at all, so it is matched by **extent** — as
-        a multiset, so a second undescribed body of the same length as the subject
-        cannot borrow the subject's span.
-
         Args:
             binding: The authorised binding.
-            message: What the integration would send.
+            parameters: The revalidated arguments.
 
         Returns:
-            The envelope recipients, deduplicated and ordered as the message
-            supplied them, which is what ``RCPT TO`` is issued for.
+            The message with every recipient in its canonical form, and the
+            envelope recipients deduplicated in argument order, which is what
+            ``RCPT TO`` is issued for.
 
         Raises:
-            BoundCallChangedError: If the recipients or the spans disagree.
+            BoundCallChangedError: If a recipient has no canonical form, or the
+                recipients or the spans disagree with the binding.
         """
+        supplied = smtp_message(parameters, tool_id=self._registration.tool_id)
+        message = OutboundEmail(
+            to=self._canonical(supplied.to),
+            cc=self._canonical(supplied.cc),
+            bcc=self._canonical(supplied.bcc),
+            subject=supplied.subject,
+            body=supplied.body,
+        )
         bound = {
             member.canonical
             for member in binding.canonical_destination_set
@@ -788,15 +825,41 @@ class SmtpEgressTransport:
         envelope = dict.fromkeys(message.recipients)
         if set(envelope) != bound:
             msg = (
-                f"{self._registration.tool_id}: the message's {len(envelope)} "
-                f"envelope recipient(s) are not the {len(bound)} member(s) of the "
-                f"bound canonical destination set. The set is authorised whole and "
-                f"a member is never added, dropped or substituted after the ruling "
+                f"{self._registration.tool_id}: the call's {len(envelope)} envelope "
+                f"recipient(s) are not the {len(bound)} member(s) of the bound "
+                f"canonical destination set. The set is authorised whole and a "
+                f"member is never added, dropped or substituted after the ruling "
                 f"(ADR-0148 §4)"
             )
             raise _refuse_changed(msg)
-        self._check_spans_cover(binding, message)
-        return tuple(envelope)
+        self._check_spans_cover(binding, supplied)
+        return message, tuple(envelope)
+
+    def _canonical(self, supplied: Sequence[str]) -> tuple[str, ...]:
+        """Every supplied recipient in the one canonical form this seam computes.
+
+        Args:
+            supplied: Recipients as the arguments carry them.
+
+        Returns:
+            Their canonical forms, in the same order.
+
+        Raises:
+            BoundCallChangedError: If any has no canonical form. That cannot
+                happen on the ordinary path — the binder refuses such a call
+                before the ruling (ADR-0148 §1's third clause) — which is exactly
+                why it is checked here too: "a request built by a bypass reaches
+                the seam" (ADR-0145 §3).
+        """
+        try:
+            return tuple(canonicalise(SeamProtocol.SMTP, form).canonical for form in supplied)
+        except DestinationCanonicalisationError as exc:
+            msg = (
+                f"{self._registration.tool_id}: an argument names a recipient this "
+                f"seam will not canonicalise, so it cannot be compared against the "
+                f"bound destination set and nothing is transmitted (ADR-0148 §2)"
+            )
+            raise _refuse_changed(msg) from exc
 
     def _check_spans_cover(self, binding: EgressBinding, message: OutboundEmail) -> None:
         """Refuse a payload span the description does not cover (ADR-0148 §6).
@@ -974,6 +1037,70 @@ def _entry_of(stored: StoredEntry | None) -> ConnectionEntry | None:
         The entry, or ``None`` where the read found nothing.
     """
     return None if stored is None else stored.entry
+
+
+def smtp_message(parameters: Mapping[str, FrozenJson], *, tool_id: str) -> OutboundEmail:
+    """Read an SMTP submission out of a call's arguments, or refuse them.
+
+    **The five fields are SMTP's, not an integration's**, which is what keeps this
+    inside the seam rather than making the seam know a particular tool's schema: a
+    submission has an envelope, a subject and a body, and a transport that spoke
+    some other vocabulary would be a transport for some other protocol. An
+    integration that wants different argument *names* maps them before it reaches
+    here; what it may not do is hand over a payload this seam did not derive from
+    the arguments the decision's digest binds (:meth:`SmtpEgressTransport.transmit`).
+
+    Every refusal here is a defect in the caller rather than a state a user can
+    reach: ADR-0145 checks the arguments against the tool's schema at construction,
+    before the ruling. It is checked again because "a request built by a bypass
+    reaches the seam" (ADR-0145 §3), which is ADR-0029 §2's revalidation posture
+    and the reason this function is total over any mapping at all.
+
+    Args:
+        parameters: The call's revalidated arguments.
+        tool_id: Named in the refusal, and the only identifier that is.
+
+    Returns:
+        The message, with recipients in the **supplied** forms the arguments carry.
+
+    Raises:
+        BoundCallChangedError: If a key is one this seam does not transmit, a
+            recipient list is not a list of strings, a text field is not a string,
+            or no recipient is named. The message renders no value, because every
+            one of them is either a recipient or payload content.
+    """
+    unknown = set(parameters) - {"to", "cc", "bcc", "subject", "body"}
+    if unknown:
+        msg = (
+            f"{tool_id}: the call carries {len(unknown)} argument(s) this seam does "
+            f"not transmit, so a span could reach the wire that no description "
+            f"covers (ADR-0148 §6)"
+        )
+        raise _refuse_changed(msg)
+    recipients: dict[str, tuple[str, ...]] = {}
+    for field in ("to", "cc", "bcc"):
+        value = parameters.get(field, ())
+        if not isinstance(value, tuple | list) or not all(isinstance(one, str) for one in value):
+            msg = f"{tool_id}: the {field!r} argument is not a list of recipient addresses"
+            raise _refuse_changed(msg)
+        recipients[field] = tuple(str(one) for one in value)
+    texts: dict[str, str] = {}
+    for field in ("subject", "body"):
+        text = parameters.get(field, "")
+        if not isinstance(text, str):
+            msg = f"{tool_id}: the {field!r} argument is not text"
+            raise _refuse_changed(msg)
+        texts[field] = text
+    if not recipients["to"] and not recipients["cc"] and not recipients["bcc"]:
+        msg = f"{tool_id}: the call names no recipient, so there is nothing to send it to"
+        raise _refuse_changed(msg)
+    return OutboundEmail(
+        to=recipients["to"],
+        cc=recipients["cc"],
+        bcc=recipients["bcc"],
+        subject=texts["subject"],
+        body=texts["body"],
+    )
 
 
 def _rendered(sender: str, message: OutboundEmail) -> bytes:
@@ -1305,4 +1432,5 @@ __all__ = [
     "TransportPinError",
     "open_smtp_channel",
     "parse_smtp_endpoint",
+    "smtp_message",
 ]
