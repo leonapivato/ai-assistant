@@ -1,8 +1,60 @@
 # 126. Deleting the owner's data destroys the cold data directory, and the enrolment record goes first
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0153 (§3's cross-boundary-injection clause,
+  §6's first and second clauses, §7's "no keyring is reached" limb, §8's
+  `core/protocols.py` limb and §11's "destroying the resolved `data_dir` and
+  nothing else" limb — each only as this act reaches ADR-0149 §8's `INTEGRATION`
+  purge)
 - Date: 2026-08-10
 - Accepted: 2026-08-10
+- Partially superseded: 2026-08-14 by ADR-0153 — **six limbs, one scope,
+  one seam, and the forward clause that asked for this is discharged for
+  `INTEGRATION` alone.** §6's last clause bound "the lane that first gives a
+  component on the hub's machine a Tier 0 keyring entry" to decide how a hub-side
+  delete reaches it. ADR-0149 §1 is that component, ADR-0149 §8 supplied the purge
+  and left the coordinator open, and ADR-0153 routes this act to it.
+
+  **Replaced — §6's first clause, its first two sentences only.** "The act reaches
+  no keyring" and "performs no keyring operation". The act now invokes
+  `ConnectionPurger.purge` (ADR-0153 §2) after the owner's confirmation and before
+  the first destruction of any entry in `data_dir` (ADR-0153 §3).
+
+  **Replaced — §6's second clause.** "No component of this system writes a Tier 0
+  keyring entry on the hub's machine today, so the act misses no keyring entry."
+  Its premise is what ADR-0149 §1 makes false.
+
+  **Replaced — §3's second clause, one limb.** "or across any package boundary for
+  this act". The act receives a `ConnectionPurger` by injection from `app`. Its
+  other limb — "No callback is injected into `Engine`" — stands absolutely, and
+  #903's expected seam is still not built.
+
+  **Replaced — §7's first clause, one limb.** "that no keyring is reached". Every
+  other limb stands, and ADR-0153 §5 extends the statement rather than replacing
+  it: a row per `SecretScope` member, the live connections named by reference and
+  identity, and the sentence that deleting a credential here does not revoke it at
+  the service that issued it.
+
+  **Replaced — §8's first clause, one limb.** "No Protocol in `core/protocols.py`
+  changes". One is added — `ConnectionPurger`, two members. The clause's other
+  limbs stand: nothing is added to `core/types.py` and `PROTOCOL_VERSION` is
+  unchanged.
+
+  **Replaced — §11's second clause, one limb.** "destroying the resolved `data_dir`
+  and nothing else". The act also deletes the `INTEGRATION` credential slots that
+  directory's own store names. The rest of that replacement stands and ADR-0153 §4
+  binds the new step to it — one purpose, one path, no argument that widens it, the
+  operating system's own custody, the kernel's lock, and the owner's confirmation
+  against the resolved path.
+
+  **Not replaced — everything else, which is nearly all of all five sections and
+  the whole of the rest of the ADR.** The act still holds neither face of ADR-0125's
+  seam, still enumerates nothing, and still seeks no exemption under ADR-0125 §2.
+  §6's supersession of ADR-0004 §6 for the environment-held provider credential
+  stands whole, self-limiting clause included, and §6's `ENROLMENT` clause stands.
+  §1's destruction rules, §2's placement and its four prohibitions, §5's ordering
+  and lock, §9's prerequisite, §10's five exclusions and §12's records are all
+  untouched — ADR-0153 §10 applies ADR-0070 §1's test to each and shows why.
+
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-10**,
   the durability form ADR-0100 established and ADR-0125 followed. Four of the ADRs
   this decision rests on — ADR-0004, ADR-0007, ADR-0017 and ADR-0124 — carry
