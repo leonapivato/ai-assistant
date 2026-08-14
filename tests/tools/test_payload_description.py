@@ -342,6 +342,31 @@ def test_spans_are_ordered_by_declaration_then_by_position() -> None:
     ]
 
 
+def test_the_bundled_declaration_checks_its_own_fields_before_using_them() -> None:
+    """Adversarial round 9: the wrapper was added last and the sweep missed it.
+
+    It rendered its own unchecked `tool_id` into the mismatch refusal and
+    dereferenced its unchecked halves, which is the ordering the leaf
+    declarations already keep.
+    """
+    needle = "the secret is swordfish"
+
+    with pytest.raises(PayloadDescriptionError) as raised:
+        EgressToolDeclaration(
+            tool_id=needle.encode(),  # type: ignore[arg-type]
+            payload=_PAYLOAD,
+            recipients=_DESTINATIONS,
+        )
+    assert needle not in str(raised.value)
+
+    with pytest.raises(PayloadDescriptionError, match="a payload half and a recipient half"):
+        EgressToolDeclaration(
+            tool_id="send_email",
+            payload=None,  # type: ignore[arg-type]
+            recipients=_DESTINATIONS,
+        )
+
+
 def test_the_bundled_declaration_is_checked_once_and_then_trusted() -> None:
     """Where the regress stops, asserted as a property rather than left implied.
 

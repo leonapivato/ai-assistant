@@ -65,13 +65,12 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.core.errors import ToolError
 from ai_assistant.core.types import DataTier
-from ai_assistant.tools.destination_arguments import select_destinations
+from ai_assistant.tools.destination_arguments import DestinationDeclaration, select_destinations
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from ai_assistant.core.types import FrozenJson
-    from ai_assistant.tools.destination_arguments import DestinationDeclaration
     from ai_assistant.tools.destinations import Destination
 
 
@@ -299,23 +298,43 @@ class EgressToolDeclaration:
     recipients: DestinationDeclaration
 
     def __post_init__(self) -> None:
-        """Check the two halves against each other, once.
+        """Check each field, then the two halves against each other, once.
+
+        The fields are checked **before any of them is used or rendered**, which
+        is the ordering the leaf declarations already keep and which adversarial
+        review found missing here on round 9 — the wrapper being the type this
+        lane added last, at round 3, and so the one the earlier sweep did not
+        reach. What such a check buys and what it does not is recorded on
+        :func:`_checked_payload_name`; the line this type keeps is the same one:
+        a *declaration* is the tool author's text and may be named once it is
+        known to be text, while a call's arguments and a carried provenance key
+        are not and are never named.
 
         Raises:
-            PayloadDescriptionError: On a mismatched or uncovered pairing.
+            PayloadDescriptionError: If a field is malformed, if the halves are
+                not both this tool's, or if a destination-bearing argument is not
+                covered by the payload declaration.
         """
-        for half, name in (
-            (self.payload.tool_id, "payload"),
-            (self.recipients.tool_id, "recipient"),
+        tool_id: object = self.tool_id
+        if not isinstance(tool_id, str) or not tool_id:
+            msg = "an egress declaration names the tool it describes"
+            raise PayloadDescriptionError(msg)
+        payload: object = self.payload
+        recipients: object = self.recipients
+        if not isinstance(payload, PayloadDeclaration) or not isinstance(
+            recipients, DestinationDeclaration
         ):
-            if half != self.tool_id:
-                msg = f"{self.tool_id}: the {name} declaration is {half}'s, not this tool's"
+            msg = f"{tool_id}: an egress declaration holds a payload half and a recipient half"
+            raise PayloadDescriptionError(msg)
+        for half, name in ((payload.tool_id, "payload"), (recipients.tool_id, "recipient")):
+            if half != tool_id:
+                msg = f"{tool_id}: the {name} declaration is {half}'s, not this tool's"
                 raise PayloadDescriptionError(msg)
-        covered = {argument.name for argument in self.payload.arguments}
-        bearing = {argument.name for argument in self.recipients.arguments}
+        covered = {argument.name for argument in payload.arguments}
+        bearing = {argument.name for argument in recipients.arguments}
         if not bearing <= covered:
             msg = (
-                f"{self.tool_id}: {', '.join(sorted(bearing - covered))} bears destinations "
+                f"{tool_id}: {', '.join(sorted(bearing - covered))} bears destinations "
                 f"and is not covered by the payload declaration"
             )
             raise PayloadDescriptionError(msg)
