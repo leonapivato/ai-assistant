@@ -1104,23 +1104,39 @@ def _revalidated(entry: ConnectionEntry) -> ConnectionEntry:
 
 
 def _sequence(value: object) -> int:
-    """Coerce a row's ``sequence`` column, which is the compare-and-swap's token.
+    """Accept a row's integer column, refusing anything that is not one.
 
-    Separate from :func:`_projection` because the swap reads it without the rest
-    of the row, and a token this code cannot read is a store it cannot swap on.
+    Separate from :func:`_projection` because the compare-and-swap reads the
+    sequence without the rest of the row, and a token this code cannot read is a
+    store it cannot swap on.
+
+    **It refuses rather than coerces, and the difference is a silent corruption.**
+    ``int(...)`` is a *conversion*: it reads ``1.5`` as ``1`` and ``True`` as ``1``,
+    so a hand-edited ``revision = 1.5`` would decode against a JSON revision of 1,
+    pass :func:`_decoded`'s projection check, and be returned as a valid row —
+    while ``recent``'s ``GROUP BY revision`` had already split that one act into
+    two groups, both reported at revision 1. So the test is the *type*, not what
+    the value converts to: SQLite stores an integer as an integer, and anything
+    else in these columns is a file this code did not write. ``bool`` is named
+    because it is an ``int`` in Python, which is the same trap
+    :meth:`SqliteConnectionStore._check_schema_version` names for its own marker.
+
+    Args:
+        value: The column, as ``sqlite3`` handed it back.
+
+    Returns:
+        The value, unchanged.
 
     Raises:
-        ConnectionStoreError: If the value is not an integer this code wrote.
+        ConnectionStoreError: If it is not an integer this code wrote.
     """
-    try:
-        coerced = int(value)  # type: ignore[call-overload]  # sqlite3 hands back Any
-    except (ValueError, TypeError, OverflowError) as exc:
-        msg = f"the connection store holds a row whose position this code cannot read: {exc}"
-        raise ConnectionStoreError(msg) from exc
-    if not isinstance(coerced, int):  # pragma: no cover -- int() answers an int
-        msg = "the connection store holds a row whose position this code cannot read"
+    if isinstance(value, bool) or not isinstance(value, int):
+        msg = (
+            f"the connection store holds a {type(value).__name__} where this code writes an "
+            f"integer; the store is corrupt"
+        )
         raise ConnectionStoreError(msg)
-    return coerced
+    return value
 
 
 def _projection(row: Sequence[object], *, at: int) -> tuple[str, int, str]:
