@@ -320,11 +320,13 @@ This is PR #1120's third observation:
 > refuses a binding for which any of the following fails against its own
 > `parameters`:
 > - every span's `argument` is a top-level key of `parameters`;
-> - every top-level key of `parameters` is the `argument` of at least one span;
-> - for each argument, either exactly one span with `index` absent, or spans whose
->   indices are exactly `0` through `k-1` for some `k ≥ 1`;
-> - where that argument's value is a JSON array of length `n`, the second form holds
->   with `k == n`;
+> - every top-level key of `parameters` whose value is not an **empty JSON array** is
+>   the `argument` of at least one span, and a key whose value **is** an empty JSON
+>   array is the `argument` of **no** span;
+> - for each argument that carries spans, either exactly one span with `index`
+>   absent, or spans whose indices are exactly `0` through `k-1` for some `k ≥ 1`;
+> - where that argument's value is a JSON array of length `n ≥ 1`, the second form
+>   holds with `k == n`;
 > - no two spans share an `(argument, index)` pair;
 > - the spans are ordered by `argument` and then by `index`, absent sorting first,
 >   with `argument` compared by Unicode code point;
@@ -340,6 +342,17 @@ This is PR #1120's third observation:
 > and **refuses** rather than choosing one, which is ADR-0148 §1's third clause. No
 > lane satisfies ADR-0146 §1 for that case by labelling the whole span with either
 > answer.
+
+**The empty array carries no span because there is nothing to describe, and stating
+it costs a clause rather than an exception.** An argument whose value is `[]`
+transmits no value, so a span for it would have to state an extent and a discloser
+provenance for a thing that does not exist — and `SYSTEM_SELECTED`, §5's fail-closed
+answer, would be a disclosure record for nothing disclosed. It is also the shape
+ADR-0148 §2's third clause reaches most naturally: a call whose recipient arguments
+are present and empty selects no onward recipient, so its destination set is the
+connected account alone (§3's last clause), and the binding for it is well-formed with
+no destination-carrying span at all. The alternative — an indexless span standing for
+an absent element — would make `to: []` and `to: ""` indistinguishable in the record.
 
 **Coverage is checked in `core` because `core` is where both sides are in hand, and
 that is what makes ADR-0148 §14's omitted-span case unconstructable rather than
@@ -691,10 +704,13 @@ reach a description that names memory records. Both are decided.
 > destination forms where it is one. It holds no content.
 
 > **Normative.** The confirmation ADR-0148 §8's fourth clause requires additionally
-> names, for each member of the canonical destination set, the **argument** it was
-> selected by. `to` and `bcc` are the same recipient set and a materially different
-> disclosure, and a confirmation that does not distinguish them has not put the
-> question the user is being asked to answer.
+> names, for **every occurrence the binding carries**, the argument that occurrence
+> was selected by. It is stated over occurrences and not over members of the derived
+> set: one recipient named by `to` and again by `bcc` is **one** member and **two**
+> disclosures, and a confirmation naming one argument for that member has
+> understated the call. `to` and `bcc` are the same recipient set and a materially
+> different disclosure, and a confirmation that does not distinguish them has not put
+> the question the user is being asked to answer.
 
 > **Normative.** This surface carries **no rendering**. Two consumers may render one
 > description differently; what neither may do is treat a rendering as the bound
@@ -770,7 +786,7 @@ the exemption ADR-0137 §2 grants for a triad is not the exemption that lane nee
 Surface (b) **is** a seam, so (b)'s ADR is where the triad obligation lands, and it
 lands there whole.
 
-### 12. What the implementing lane owes
+### 12. What the implementing lanes owe
 
 > **Normative.** The lane that lands this surface ships, beyond the ordinary
 > coverage of each field: a **regression pin** that every request and decision
@@ -805,9 +821,17 @@ lands there whole.
 
 > **Normative.** That lane also ships the **`None`-asymmetry** pair in both
 > directions (§9), the **empty destination set** case of §3 — a binding whose spans
-> carry no destination has an empty derived set and is a well-formed binding — and a
-> case asserting that a construction omitting `provenance` **raises**, which is what
-> §5's no-default clause is worth.
+> carry no destination has an empty derived set and is a well-formed binding — the
+> **empty-array** case of §4, in which an argument whose value is `[]` carries no
+> span and the binding is still well-formed, and a case asserting that a construction
+> omitting `provenance` **raises**, which is what §5's no-default clause is worth.
+
+> **Normative.** The lane that builds an egress `CONFIRM` ships the
+> **duplicate-across-arguments** case §10's third clause is stated for: one recipient
+> selected by two arguments produces a confirmation naming **both** arguments beside
+> that recipient's forms. A confirmation that names one argument per member of the
+> derived canonical destination set fails it, and a case built from a call whose
+> recipients are each selected once does not reach it.
 
 > **Normative.** No lane satisfies any clause of this section with a test that
 > exercises only a well-formed binding on a happy path.
