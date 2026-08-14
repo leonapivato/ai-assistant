@@ -1,6 +1,6 @@
 # 150. The egress binding is one validating value, and nothing in it is stated twice
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
 - **Decides surface (a) of ADR-0148 §11** — the **egress binding**: a value
   carried as a field of `ActionRequest`, compared by
@@ -1728,6 +1728,17 @@ gives — it is the ADR that authorises the `core` additions §2 enumerates — 
 run while it stands `Proposed` so that a finding can still change the decision.
 `CONTRIBUTING.md` → "Finishing an ADR PR" owns the sequence; this section points at it
 rather than re-deriving it, and the outcome is recorded here on ratification.
+
+**The outcome.** Both required reviews returned clean on **one** tree while this ADR
+stood `Proposed`, and the status was flipped only then; the required set was re-run on
+the flipped tree, which is that document's step 3 — coverage, not a re-triage. The
+decision was drafted, reviewed and revised across four lane tenures under ADR-0138 §1,
+whose handoffs are recorded on PR #1123 rather than here. Two findings stand
+**contested** rather than folded, each with its grounds in the text above: that `SMTP`'s
+acceptance boundary narrows ADR-0148 §2's second clause (§3 and §13 answer it — §1's
+third clause governs acceptance, §2's second governs rewriting), and that the canonical
+destination set should be stored rather than derived (§3 answers it — materialising is
+the shape that creates the drift ADR-0148 §6 guards against). No finding was waived.
 
 ## Consequences
 
