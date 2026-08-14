@@ -25,9 +25,9 @@
   this ADR says when you read it" is not checkable, and this is the one document
   in the corpus where that would matter most.
 - **Amends no ADR and supersedes none.** ADR-0017 §3 stands exactly as written —
-  it is *satisfied* here, not replaced — and the pair of edits this change makes
-  to ADR-0017 is a `Status` line and one appended dated note (§5). Refs #93,
-  #1096.
+  it is *satisfied* here, not replaced — and the single edit this change makes to
+  ADR-0017 is one appended dated note, its `Status` line being left alone under
+  ADR-0082 §2 (§5). Refs #93, #1096.
 
 ## Context
 
@@ -971,16 +971,33 @@ default, which is why `EgressSpan.provenance` has no default at all.
 > implements against that status change until the merge (ADR-0015 §5, golden rule
 > 5), and an unmerged `Accepted` on this branch designates nothing.
 
-This ADR makes exactly two edits outside its own file, and both are to ADR-0017:
+This ADR makes exactly **one** edit outside its own file: **one appended dated note**
+in ADR-0017's header, recording that §3's fourteen conditions were attested here and
+that the seam is designated. **No accepted text of ADR-0017 is rewritten**, and §3's
+conditions are left exactly as ratified — a reader must still be able to see the list
+as it was written, because that is what this ADR's §4 is an attestation *against*.
 
-- **Its `Status` line** gains the designation, in the append-only spirit ADR-0001
-  requires and without dropping the ADR-0124 partial supersession it already
-  carries.
-- **One appended dated note** in its header, recording that §3's fourteen
-  conditions were attested here and that the seam is designated. **No accepted text
-  of ADR-0017 is rewritten**, and §3's conditions are left exactly as ratified — a
-  reader must still be able to see the list as it was written, because that is what
-  this ADR's §4 is an attestation *against*.
+**ADR-0017's `Status` line is deliberately not touched, and that is ADR-0082 §2 rather
+than an omission.** A first draft of this change added a `;`-joined qualifier after the
+ADR-0124 pair — "`§2's tools/ seam designated by ADR-0154 (…)`" — and adversarial review
+caught it on round 2. ADR-0082 §2's first clause is exactly on point: "Where an ADR's
+`Status` carries the leading `Partially superseded by` token, no amendment qualifier is
+written on that line. The record §1 owes is the appended dated note ADR-0070 §1 already
+requires, and that is the whole of it." ADR-0017's line carries that leading token, and
+ADR-0070 §4's ratified extraction invariant is what makes the qualifier actively wrong
+rather than merely unnecessary: "a scope names a clause, not another ADR: it carries no
+`ADR-NNNN` token, so **every `ADR-NNNN` after the leading `Partially superseded by` is a
+target**." A consumer built on that sentence would have read ADR-0154 as a
+partial-supersession target of ADR-0017 — which it is not, and which this ADR's own
+header denies. ADR-0082's §2 discussion names the construct by shape: "a `;`-joined
+qualifier after the pairs — puts an `ADR-NNNN` after the leading token that is not a
+target."
+
+So the whole record of the designation lives in the dated note, which is where
+ADR-0082 §2 puts it, and the `Status` line keeps the one machine-legible fact it is
+for. Nothing is lost: the note carries more than a qualifier could, and ADR-0017 §7's
+own precedent — "Exactly one line of ADR-0004 was edited" — is a rule about *ADR-0001's
+minimum*, not a requirement that a status line move on every occasion.
 
 **Why ADR-0017 gets a note rather than an amendment.** ADR-0017 §2 says designation
 is "Not a status amendment: a second operational egress boundary is a substantive
@@ -1079,10 +1096,10 @@ and none is closed by designation.
   registration lane is unblocked; the refusal's message names ADR-0017 §2 and will
   need updating by whichever lane registers a tool, which is that lane's edit and
   not this one's.
-- **ADR-0017 gains a `Status` line and one appended dated note**, per §5. Its §3 is
-  left exactly as ratified. No other ADR is edited: the eight that supply the
-  mechanisms are cited, not amended, and a designating ADR that edited its own
-  evidence would be rewriting the record it attests against.
+- **ADR-0017 gains one appended dated note and no `Status` edit**, per §5 and
+  ADR-0082 §2, and its §3 is left exactly as ratified. No other ADR is edited: the
+  eight that supply the mechanisms are cited, not amended, and a designating ADR
+  that edited its own evidence would be rewriting the record it attests against.
 - **§4 becomes the thing a later change is measured against.** Its own marked
   clause makes falsifying a subsection's property a change that either restores it
   or reopens the designation. That is deliberately a heavier obligation than a

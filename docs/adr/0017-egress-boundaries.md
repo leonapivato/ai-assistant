@@ -1,6 +1,6 @@
 # 17. Egress boundaries: `models/` is not the only one
 
-- Status: Partially superseded by ADR-0124 (§1's rule as an exhaustive enumeration of the components that may transmit, and §2's framing of those two as the complete set of boundaries); §2's `tools/` seam designated by ADR-0154 (§3's fourteen conditions attested in code)
+- Status: Partially superseded by ADR-0124 (§1's rule as an exhaustive enumeration of the components that may transmit, and §2's framing of those two as the complete set of boundaries)
 - Date: 2026-07-19
 - Accepted: 2026-07-20
 - **Designated: 2026-08-14 by ADR-0154 — §2's condition met, and §3 is not
