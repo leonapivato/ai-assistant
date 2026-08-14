@@ -192,6 +192,32 @@ async def test_a_persisted_identity_outside_the_shape_is_reported_on_the_way_out
         await store.live()
 
 
+async def test_a_projection_this_code_cannot_read_is_reported_not_coerced(
+    store: SqliteConnectionStore,
+) -> None:
+    """Every read raises from the ``AssistantError`` hierarchy, corruption included.
+
+    ``sqlite3`` hands back whatever the file holds and ``revision`` carries no
+    affinity strong enough to promise otherwise, so a bare ``int(...)`` on a
+    hand-edited row raises ``ValueError`` — which is not an
+    :class:`~ai_assistant.core.errors.AssistantError` and would leave this layer's
+    error boundary through the hole #238 records on the audit trail.
+
+    ``sequence`` is not parametrised beside it because SQLite refuses the same
+    edit outright: it is the table's ``INTEGER PRIMARY KEY``, so the rowid rule
+    rejects a non-integer with a datatype mismatch. Its coercion is kept anyway,
+    on the same footing as every other read of a value this code did not just
+    write.
+    """
+    await store.append(entry(), expected_latest=None)
+    conn: sqlite3.Connection = store._conn
+    with conn:
+        conn.execute("UPDATE entries SET revision = 'not-a-number'")
+
+    with pytest.raises(ConnectionStoreError, match="this code"):
+        await store.latest("ref-1")
+
+
 # --- ADR-0148 §6's compare-and-swap, as one primitive -----------------------
 
 
