@@ -2622,9 +2622,39 @@ def _prompt_for_credential() -> str:
     Tier 0 value must not be left on screen, in a scrollback buffer, or in whatever
     records a terminal session.
 
+    **It refuses a standard input that is not a terminal**, and that is a refusal
+    about what the hidden prompt degenerates into rather than a policy about pipes.
+    ``getpass`` reaches for the controlling terminal first; where there is none — a
+    container, a CI job, a daemon — it falls back to
+    :func:`~getpass.fallback_getpass`, which prints "Password input may be echoed"
+    and then reads ``sys.stdin.readline()`` **unbounded**. Both halves of that are
+    wrong for a Tier 0 value: the echo is the disclosure ``hide_input`` was asked
+    for, and the unbounded read materialises a stream with no newline in it before
+    :func:`_credential` can apply any bound. ``--credential-stdin`` is the door for
+    a value arriving on a pipe and is bounded by construction, so the remedy is
+    named rather than silently substituted.
+
+    The test is on ``sys.stdin`` rather than on whether ``/dev/tty`` opens, which is
+    what ``getpass`` actually branches on. It is the more conservative of the two:
+    it also refuses the case where stdin is redirected *and* a terminal exists,
+    where ``getpass`` would have prompted the human and been perfectly safe. That
+    case is a person who redirected standard input and then expected to be asked
+    anyway, and it costs them one flag.
+
     Returns:
         The line the user typed, without its terminator and otherwise unaltered.
+
+    Raises:
+        ValueError: If standard input is not a terminal. The message names the flag
+            to use instead, and nothing about any value.
     """
+    if not sys.stdin.isatty():
+        msg = (
+            "a credential is prompted for at a terminal, and standard input here is "
+            "not one; pipe it in with --credential-stdin instead, which is bounded "
+            "and never echoed"
+        )
+        raise ValueError(msg)
     # Annotated rather than returned directly: ``typer.prompt`` is typed ``Any``, and
     # a bare return would silently widen this function's declared contract to it.
     typed: str = typer.prompt("Credential", hide_input=True)

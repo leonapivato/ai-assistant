@@ -903,6 +903,42 @@ class _RecordingStdin:
         return b"x" * limit
 
 
+def test_the_hidden_prompt_refuses_a_standard_input_that_is_not_a_terminal(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The prompt is bounded by refusing the case where it stops being a prompt.
+
+    ``getpass`` reaches for the controlling terminal first, and where there is none
+    it falls back to :func:`~getpass.fallback_getpass`, which prints "Password
+    input may be echoed" and reads ``sys.stdin.readline()`` **unbounded**. Both
+    halves are wrong for a Tier 0 value: the echo is the disclosure ``hide_input``
+    was asked for, and the unbounded read is the allocation the bounded path exists
+    to avoid, arriving through the door that did not advertise itself as a pipe.
+
+    Asserted through the real reader rather than the substituted one — this is the
+    only case in the file that exercises
+    :func:`~ai_assistant.interfaces.cli._prompt_for_credential` itself, because it
+    is the only one about what that function does before it prompts.
+
+    Found by adversarial review on this branch.
+    """
+    engine = _ScriptedConnectionEngine()
+
+    async def _open() -> object:
+        return engine
+
+    monkeypatch.setattr(cli, "load_settings", Settings)
+    monkeypatch.setattr(cli, "configure_logging", lambda _settings: None)
+    monkeypatch.setattr(cli, "_open_engine", _open)
+
+    result = CliRunner().invoke(cli.app, ["connect", "me@example.com"], input="hunter2\n")
+    assert result.exit_code == 1
+    rendered = _flat(output.getvalue())
+    assert "--credential-stdin" in rendered
+    assert "hunter2" not in rendered
+    assert engine.calls == []
+
+
 def test_the_stdin_read_is_bounded_by_the_widest_admissible_line(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
