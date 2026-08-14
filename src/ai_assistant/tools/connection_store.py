@@ -194,7 +194,31 @@ _ACTS = (
 #: Stated as categories rather than as a character set because the set is the one
 #: that grows: a rule written as ``"\n" not in value`` passes ``\u2028``, which
 #: ``str.splitlines`` treats as a line break and a terminal renders as one.
-_UNPRINTABLE_CATEGORIES: Final = frozenset({"Cc", "Zl", "Zp"})
+#:
+#: **``Cf`` is here because ADR-0151 \u00a75's display clause depends on it**, and the
+#: set is the same one `orchestration/payloads.py` and `wire/codec.py` hold. \u00a75
+#: requires every client accepting an identity to display it to the user as part of
+#: the act, and ADR-0149 \u00a74's third answer to a credential pasted into the identity
+#: field is precisely that the value is *seen*. ``U+202E`` RIGHT-TO-LEFT OVERRIDE
+#: and its siblings (``U+202A`` to ``U+202E``, ``U+2066`` to ``U+2069``) exist to
+#: reorder what is rendered, so an identity carrying one is displayed as something
+#: other than what is recorded \u2014 which defeats the one ingredient that answer needs.
+#: ``U+FEFF``, ``U+200B`` and ``U+00AD`` are the same class of invisible differences
+#: between two identities that read alike, on a surface ADR-0151 \u00a73 compares by
+#: exact equality.
+#:
+#: **The store holds the same set as the surfaces above it, deliberately.** The two
+#: engine-side validators refuse ``Cf`` before any I/O, so no production path can
+#: put a bidi override into a record; what ADR-0149 \u00a74 asks of *this* function is
+#: that the shape is true of the record "however it got here", and a store admitting
+#: what its surface refuses is a defence that does not hold on its own.
+#:
+#: **The cost is named rather than discovered**: an identity containing a zero-width
+#: joiner \u2014 an emoji sequence, or some Indic and Persian spellings \u2014 is refused too.
+#: That is accepted. An account identity is a handle in a field ADR-0149 \u00a74 already
+#: strips of controls and line breaks, and a rendering that cannot be trusted is
+#: worse than a spelling that cannot be used.
+_UNPRINTABLE_CATEGORIES: Final = frozenset({"Cc", "Cf", "Zl", "Zp"})
 
 
 def printable_identity(identity: str) -> str:

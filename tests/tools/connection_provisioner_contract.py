@@ -193,6 +193,9 @@ class ConnectionProvisionerContract(ABC):
             pytest.param("owner\nadmin", id="line-break"),
             pytest.param("owner\u2028admin", id="unicode-line-separator"),
             pytest.param("owner\x07", id="control-character"),
+            pytest.param("Alice\u202ebob", id="bidi-override"),
+            pytest.param("zero\u200bwidth", id="zero-width-space"),
+            pytest.param("bom\ufeffed", id="byte-order-mark"),
             pytest.param("o" * (ACCOUNT_IDENTITY_MAX_BYTES + 1), id="over-the-bound"),
         ],
     )
@@ -218,6 +221,23 @@ class ConnectionProvisionerContract(ABC):
         The Unicode line separator is parametrised beside the newline because a
         rule written over ``"\n"`` passes it while ``str.splitlines`` and a
         terminal both treat it as a line break.
+
+        **The last three are format controls (``Cf``), not controls (``Cc``)**, and
+        they are here because "control character" is routinely implemented as the
+        ``Cc`` category alone. The bidi override is the one that matters most, and
+        it is a spoof rather than a hygiene case: ADR-0151 §5 requires every client
+        accepting an identity to *display* it as part of the act, and ADR-0149 §4's
+        third answer to a credential pasted into the identity field is precisely
+        that the value is seen. ``U+202E`` reorders what is rendered, so an identity
+        carrying one is shown as something other than what is recorded — the one
+        ingredient that answer needs, removed. The zero-width space and the
+        byte-order mark are the quieter half: two identities that render identically
+        and are not equal, on a surface where ADR-0151 §3 compares by exact
+        equality.
+
+        The suite carries them rather than either implementation's own test file,
+        so the production store and the canonical fake move together: a fake
+        stricter than the store would hide the divergence instead of closing it.
         """
         with pytest.raises(ConnectionStoreError):
             await provisioner.provision(identity=identity, credential=credential())
