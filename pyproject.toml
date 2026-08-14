@@ -1193,3 +1193,101 @@ source_modules = [
     "ai_assistant.testing",
 ]
 forbidden_modules = ["jsonschema"]
+
+[[tool.importlinter.contracts]]
+# ADR-0147 §3's third clause, in the form it asks for: "An `import-linter` contract
+# in `pyproject.toml` forbids, to every module under `ai_assistant.tools` except the
+# seam, an **enumerated** set of modules: at minimum `socket`, `ssl`, `http`,
+# `urllib`, `subprocess`, `asyncio.subprocess`, and every transport-bearing
+# third-party package this repository depends on. The lane that adds any further
+# transport-bearing dependency adds it to that enumeration in the same change."
+#
+# This is ADR-0125 §8's form for `keyring` and the readers' contract's for
+# `icalendar`, applied to a set rather than to one name, and it is what discharges
+# the *describable* half of issue #66: ADR-0017 §2 asked for a seam "precise enough
+# for an import-linter contract to pin the module", and this is that contract.
+#
+# **What it does not claim.** ADR-0147 §3 states the prohibition and this contract as
+# two separate clauses, because a clause claiming a contract pins the *universal*
+# rule would claim exactly the proof ADR-0017 §4 denies: "an import contract is a
+# net, not a proof. It matches module names, so it cannot see a subsystem reaching
+# the network through `urllib`, a raw socket, a library added after the contract was
+# written, or an internal wrapper." The enumeration below names `urllib` and the raw
+# socket module, so §4's first two examples are inside the net; a dependency nobody
+# added to the list stays outside it, and the extension clause above is what makes
+# adding one a change that either updates this list or fails review. Naming the seam
+# does not make the boundary enforceable; it makes it *describable*, which is the
+# condition ADR-0017 §3 actually states.
+#
+# **`ai_assistant.tools.egress` is the one absence, and the absence is the whole
+# point.** It is also why `as_packages` is false here, uniquely among this file's
+# contracts: with the default, naming `ai_assistant.tools` would pull the seam in as
+# a descendant and forbid the seam the very imports it exists to hold, while
+# omitting `ai_assistant.tools` would leave the package's own `__init__` unchecked.
+# False lets both be true — every module named by name, the seam named by nobody.
+#
+# Every module is enumerated rather than relying on the package wholesale, in the
+# discipline the `service`, `wire`, `readers`, `evaluation`, `secret_store`,
+# `keyring` and `jsonschema` contracts established one package at a time: a new
+# module under `tools/` is a deliberate addition here rather than something that
+# silently escapes. `tests/tools/test_egress_seam.py` fails if this list and the
+# modules on disk ever disagree, so forgetting is not one of the ways out.
+#
+# **Direct imports only**, which is the provider-SDK contract's own idiom and means
+# the same thing here: the ban is "do not open a connection; receive a connected
+# channel from the seam". ADR-0147 §3 puts MCP protocol handling *outside* the seam
+# and has it import the seam, so without this flag the contract would forbid the one
+# composition it exists to make the only available one.
+#
+# Two entries of §3's enumeration are not here and cannot be. `asyncio.subprocess` is
+# a subpackage of an external package, which import-linter rejects outright, and the
+# graph squashes it to `asyncio` — which `ai_assistant.tools.invocation` legitimately
+# imports for its deadline, so forbidding the root would forbid ADR-0029 §4's timeout
+# rather than a transport. `os.system` and its neighbours are not a module at all.
+# Both are covered by the source-reading check in `tests/tools/test_egress_seam.py`,
+# which sees the dotted name the graph does not keep; neither is covered by this net,
+# and this comment is where that is written down rather than implied.
+name = "network transports are confined to the tools egress seam"
+type = "forbidden"
+as_packages = "false"
+allow_indirect_imports = "true"
+source_modules = [
+    "ai_assistant.tools",
+    "ai_assistant.tools.builtin",
+    "ai_assistant.tools.invocation",
+    "ai_assistant.tools.registry",
+]
+forbidden_modules = [
+    # The standard library ADR-0147 §3 names. `http` and `urllib` are packages whose
+    # submodules the graph squashes to these roots, so `urllib.request` and
+    # `http.client` are both caught by the name below them.
+    "socket",
+    "ssl",
+    "http",
+    "urllib",
+    "subprocess",
+    # Third-party transport in this repository's resolved dependency set. Where a
+    # package's transport is doubtful it is listed rather than omitted: a wrong entry
+    # costs a review conversation, a missing one costs the property. `h11` and
+    # `certifi` are the deliberate omissions — a sans-I/O protocol state machine and
+    # a certificate bundle open nothing.
+    "anyio",
+    "httpcore",
+    "httpcore2",
+    "httpx",
+    "httpx2",
+    "requests",
+    "urllib3",
+    # The vendor stacks, which carry their own transport. The provider-SDK contract
+    # above already forbids these to `ai_assistant.tools` under golden rule 4, and
+    # they are repeated here on purpose: that contract states where a *vendor SDK*
+    # may be imported, this one states what may open a *connection*, and the second
+    # rule must not weaken on the day the first list changes for a reason of its own.
+    "anthropic",
+    "fastembed",
+    "huggingface_hub",
+    "openai",
+    "pydantic_ai",
+    "tiktoken",
+    "tokenizers",
+]

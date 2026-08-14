@@ -19,6 +19,12 @@ approved and *undesignated* until every §3 condition holds in code and a later
 ADR ratifies that it does; ADR-0029 §7 inherits that list unabridged and
 discharges none of it. An invocation contract reads like permission to call
 things, and it is not.
+
+That seam now exists by name — :mod:`ai_assistant.tools.egress` (ADR-0147 §3,
+issue #66) — and holds nothing but a docstring. Naming it is what lets an
+import-linter contract pin the boundary to one module rather than to this whole
+package; naming is not designating, and none of ADR-0017 §3's fourteen
+conditions is discharged by its existence.
 """
 
 from __future__ import annotations
