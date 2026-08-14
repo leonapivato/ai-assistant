@@ -440,27 +440,36 @@ exists; the other three travel together in one value the request carries.
 
 > **Normative.** The remaining three facts travel together as one value, the
 > **egress binding**: the canonical destination set with the supplied form each
-> member came from (§2), a reference to the **connected account**, the
-> **transport endpoint**, and the **payload description**. It is fixed in the
-> `ActionRequest` before the ruling, is compared by
-> `PermissionDecision.authorises` alongside the tool, the parameters digest and
+> member came from (§2), the **connected account** as both its identity and its
+> credential reference (below), the **transport endpoint**, and the **payload
+> description**. It is fixed in the `ActionRequest` before the ruling, is compared
+> by `PermissionDecision.authorises` alongside the tool, the parameters digest and
 > the step, and is transcribed verbatim into the recorded decision. Nothing in it
 > is derived after the ruling and nothing in it is re-derived at the seam.
+
+> **Normative.** The connected account is bound by **two** non-secret facts, not
+> one: its **identity** — the durable, user-recognisable name of the account
+> itself, recorded when that account was connected — and its **credential
+> reference**, the `SecretName` (ADR-0125 §2) the callable reads under. Neither is
+> a secret and both may be held in a Tier 1 store (ADR-0125 §2). An account whose
+> identity was never recorded is not connectable, no tool is registered against
+> it, and no identity is inferred from a credential, a name or an endpoint.
 
 > **Normative.** A tool registered at the seam is bound to **at most one connected
 > account**. An integration serving several registers one tool per account.
 
-> **Normative.** Before transmitting, the callable refuses unless the account
-> reference and the transport endpoint the binding carries are the ones it is in
-> fact configured to use. A registry rebuilt under a different configuration —
-> across a restart, which is exactly when a parked `CONFIRM` is answered — refuses
-> the call rather than performing it against another account or another endpoint.
+> **Normative.** Before transmitting, the callable refuses unless **all three**
+> hold: the transport endpoint the binding carries is the one it is configured to
+> use; the credential reference the binding carries is the one it reads under; and
+> the account identity **currently recorded for that reference** equals the
+> identity the binding carries. A registry rebuilt under a different configuration
+> — across a restart, which is exactly when a parked `CONFIRM` is answered —
+> refuses the call rather than performing it against another account or another
+> endpoint, and so does a reference re-provisioned for a different account.
 
 > **Normative.** No credential value enters an `ActionRequest`, a
 > `PermissionDecision`, an egress binding, a payload description, an audit record
-> or any value derived from one. The account is bound by a **reference**: the
-> `SecretName` (ADR-0125 §2) the callable reads under, which ADR-0125 §2 rules is
-> not a secret and may be held in a Tier 1 store.
+> or any value derived from one. Only the identity and the reference are bound.
 
 > **Normative.** This section **binds** the transport endpoint; it does not
 > **pin** it. What the endpoint must be, and what a redirect may do, is #83's and
@@ -506,6 +515,33 @@ asserted a binding out of machinery that does not provide it — the shape ADR-0
 is not a stronger claim about the registry; it is putting the reference where
 every other bound fact already is, and adding the callable's own refusal so the
 binding is checked by the party that holds the truth.
+
+**A credential reference is not an account, and the draft that repaired the first
+defect got that wrong too.** That draft bound the account by its `SecretName`
+alone, and adversarial review found on round 2 that a `SecretName` names a
+**keyring slot**, not an account: ADR-0125 §4 rules that `set` "stores `value`
+under `name`, creating the entry or replacing whatever it held" and "never refuses
+on the ground that an entry already exists" — ratified deliberately, because
+"rotation is the case that matters". So a confirmation taken against
+`SecretName(INTEGRATION, "gmail")` while it held account A's token can be resumed
+after that slot is re-provisioned with account B's, with the reference and the
+endpoint both matching. The repair binds the account's own identity beside the
+reference and has the callable compare the identity *currently* recorded for that
+reference — which keeps ADR-0125 §4's rotation case working exactly as it was
+ratified to (same account, new token, same identity, call proceeds) while
+refusing the substitution. This is the same lesson as the first defect one level
+down: a name that resolves to the right thing today is not a binding to that
+thing.
+
+**What that does not close, said rather than glossed.** The identity is recorded
+when the account is connected and is not re-verified against the service on each
+call; verifying it would be a remote lookup, which §5 makes an egress call of its
+own and which would then need one per send. So a party that writes account B's
+credential directly into the keyring under a slot recorded as account A defeats
+the check. That party is the operator or the user, which is ADR-0021 §1's line
+exactly — "a caller falsifying its own audit trail, not a policy subverting a
+gate, and no producer can prevent it" — and stating it is better than a clause
+that reads as though the account were attested.
 
 **The endpoint moved into the binding for the same reason, and the earlier
 draft's version of it was a bound with nothing behind it.** That draft required
@@ -632,8 +668,9 @@ that is not already satisfied, and it may not be cited as satisfying one.
 > be more permissive than these.
 
 > **Normative.** What is put to the user for a `CONFIRM` on an egress call names
-> the connected account, the canonical destination set in both forms (§2), and the
-> payload description (§6). A confirmation that names the tool and not the
+> the connected account's **identity** (§6), the canonical destination set in both
+> forms (§2), and the payload description (§6). It names no credential reference:
+> a keyring slot name is not something a user can recognise an account by. A confirmation that names the tool and not the
 > recipients is not a confirmation of an egress call.
 
 **ADR-0017 §3 asks for "a named approver able to refuse" and gives the reason:
@@ -1049,8 +1086,10 @@ form).
 > (§8); a transmission attempted outside a claimed step is refused (§9); a decision
 > recorded while an id was bound to one connected account is refused after a
 > restart that rebinds the same id, with a byte-identical declaration, to another
-> (§6); and the same for a transport endpoint that differs from the bound one
-> (§6).
+> (§6); the same for a transport endpoint that differs from the bound one (§6);
+> and a credential reference **re-provisioned in place** for a different account
+> between the ruling and the resume, which is refused, while a rotation of the
+> same account's credential at that reference is not (ADR-0125 §4, §6).
 
 > **Normative.** A test asserting only that the happy path transmits satisfies no
 > clause of this section.
@@ -1078,9 +1117,12 @@ after a restart could execute against a second account under a byte-identical
 declaration — and that the **transport endpoint** was required not to move while
 sitting outside the request, where nothing compares it. Both were bounds asserted
 out of machinery that does not provide them, in a document whose §1 argues that
-only what is in the request before the ruling is bound at all. §6 now carries both
-in the egress binding with the callable's own refusal behind them, §11 states the
-surface that costs, and §6's own prose says what the draft got wrong and why.
+only what is in the request before the ruling is bound at all. Round 2 then found that the repair's account half bound a
+**keyring slot** rather than an account, since ADR-0125 §4 lets `set` replace a
+value in place for rotation. §6 now carries the account's identity beside its
+credential reference, the endpoint alongside both, and the callable's own
+three-way refusal behind all of them; §11 states the surface that costs, and §6's
+own prose says what each draft got wrong and why.
 **That is the one worth remembering**: the defect is ADR-0147 §13's — stating a
 hazard and then admitting the thing anyway — reproduced in a draft that quotes
 ADR-0147 §13 approvingly, which is the best evidence available that the pull
