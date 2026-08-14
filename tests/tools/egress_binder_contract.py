@@ -31,6 +31,7 @@ import pytest
 from ai_assistant.core.errors import ConnectionStoreError, EgressBindingError
 from ai_assistant.core.protocols import EgressBinder
 from ai_assistant.core.types import (
+    ActionRequest,
     BoundEgressCall,
     CarriedProvenance,
     CostBasis,
@@ -39,12 +40,14 @@ from ai_assistant.core.types import (
     EgressBinding,
     EgressSpanLocator,
     Idempotency,
+    PermissionOutcome,
     ProvisioningState,
     Reversibility,
     RiskLevel,
     ToolCost,
     ToolDefinition,
 )
+from ai_assistant.permissions.policy import ThresholdActionPolicy
 from ai_assistant.testing.cancellation import held_at_its_first_await
 
 if TYPE_CHECKING:
@@ -117,6 +120,15 @@ SEND_EMAIL: Final = tool_declaring(
 
 #: A tool bound to no account and declaring neither keyword: ADR-0152 §8's ``None``.
 NOT_EGRESS: Final = tool_declaring({"query": {"type": "string"}}, tool_id="recall_memory")
+
+#: A **well-formed credential literal**, for ADR-0146 §9's case (#1150). It names
+#: nothing this repository holds and unlocks nothing; what the clause needs is a
+#: value a reader would classify Tier 0 arriving in a field that establishes no
+#: tier, which is ADR-0017 §3's named attack in its own words — "an implementation
+#: could classify a pasted OAuth token as Tier 1 because it arrived in
+#: conversation, pass inspection, and disclose a credential under weaker policy".
+#: Shaped like a bearer key rather than being one: prefix, dash, high-entropy body.
+CREDENTIAL_LITERAL: Final = "sk-live-B1nQ8xR2vTgW7yZ1pL4mB6dK9sA0fH5jC2"
 
 
 #: Supplied forms **every** implementation must canonicalise, and to what.
@@ -933,6 +945,87 @@ class EgressBinderContract(ABC):
             )
 
         assert "attachment" not in str(raised.value)
+
+    async def test_a_user_authored_credential_in_free_text_is_untiered_and_clears_no_gate(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0146 §9's marked clause, whole and over **one** span (#1150).
+
+        §9: "A lane that implements §5 for a payload description ships a test
+        asserting that a user-authored free-text span carrying a well-formed
+        credential is described with its provenance and **no tier**, and that no
+        gate in the path treats it as tier-cleared. A test asserting only that the
+        span is present does not satisfy this clause."
+
+        **Why the halves are in one case rather than two.** They were in two, over
+        two different spans, with no credential in either — the ``tier is None``
+        assertion sat on a ``SYSTEM_SELECTED`` span and the ``USER_AUTHORED`` case
+        collected ``provenance`` and never asserted ``tier``. Two tests that each
+        hold half of a conjunction over a different subject do not hold the
+        conjunction, which is what #1150 records and what §9's closing sentence is
+        written against.
+
+        **The gate half is asserted twice over, and the second assertion is the one
+        that means something.** ``CONFIRM`` alone would be satisfiable for reasons
+        having nothing to do with the span, so the ruling is additionally compared
+        against the ruling for the same call with a plain, system-selected body:
+        equal, so the span's provenance and its *absent* tier moved nothing a gate
+        decided. That is "treats it as tier-cleared" stated as a property of the
+        path rather than as one outcome — ADR-0146 §5's fifth clause, which is
+        structural here because ``ThresholdActionPolicy`` reads
+        ``ToolDefinition.discloses`` and no span at all.
+
+        **The real policy, deliberately.** A fake ``ActionPolicy`` would make the
+        clause vacuous: what §9 asks is that *the gate in the path* does not clear
+        the span, and a double that never reads a tier proves only that the double
+        does not. This is the one place the binder's suite reaches out of its own
+        subsystem, and it is the clause's own subject that puts it there.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+        recipient: Mapping[str, FrozenJson] = {"to": ["a@example.com"], "subject": "s"}
+        user_authored = CarriedProvenance(
+            spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED}
+        )
+
+        bound = await binder.bind(
+            SEND_EMAIL,
+            parameters={**recipient, "body": CREDENTIAL_LITERAL},
+            provenance=user_authored,
+        )
+        plain = await binder.bind(
+            SEND_EMAIL, parameters={**recipient, "body": "b"}, provenance=_no_provenance()
+        )
+
+        assert bound is not None
+        located = {(span.argument, span.index): span for span in bound.binding.spans}
+        body = located[("body", None)]
+        # Described with its provenance, and with no tier — the two halves §9 wants
+        # on one span. ``subject`` and ``body`` establish none (ADR-0146 §5's own
+        # worked split), so the credential acquires no Tier 1 claim by being typed.
+        assert body.provenance is DiscloserProvenance.USER_AUTHORED
+        assert body.tier is None
+        assert body.extent == len(CREDENTIAL_LITERAL)
+        # ADR-0150 §10: the description holds no content, so the credential is
+        # counted and never carried — a binding that rendered it would put a Tier 0
+        # value into the recorded decision the audit trail persists.
+        assert CREDENTIAL_LITERAL not in repr(bound.binding)
+
+        policy = ThresholdActionPolicy()
+        ruling = await policy.decide(
+            ActionRequest(
+                tool=bound.tool, parameters=bound.parameters, egress_binding=bound.binding
+            )
+        )
+
+        assert plain is not None
+        unmarked = await policy.decide(
+            ActionRequest(
+                tool=plain.tool, parameters=plain.parameters, egress_binding=plain.binding
+            )
+        )
+        assert ruling.outcome is PermissionOutcome.CONFIRM
+        assert ruling == unmarked
+        assert CREDENTIAL_LITERAL not in ruling.reason
 
     # --- ADR-0152 §1: the registry original and the returned pair -----------
 
