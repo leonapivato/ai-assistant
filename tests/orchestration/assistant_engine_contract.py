@@ -1783,15 +1783,40 @@ class AssistantEngineContract(ABC):
 
         assert record.state is ProvisioningState.ACTIVE
 
-    async def test_no_refusal_names_the_credential_or_its_length(
+    async def test_the_size_refusal_discloses_a_recoverable_credential_length(
         self, tiny_connections: ConnectionSubject
     ) -> None:
-        """ADR-0125 §6: not a prefix, not a suffix, not a digest, **not a length**.
+        """**An accepted disclosure, pinned so it stays examined** (#1141).
 
-        The size refusal is the likeliest leak on this surface, because reporting a
-        measurement is what a size check naturally does — and a length is a
-        derivation from the value handed over by the seam's own code rather than by
-        a backend it was wrapping.
+        ADR-0125 §6 forbids a secret's *length* in an exception, and ADR-0151 §2a
+        forbids "any part or derivation" of the credential in a class on this
+        surface. ADR-0085 §10a, meanwhile, ratifies ``OversizedValueError.size`` as
+        a measurement "the far side reconstructs" — and the two collide here,
+        because the overhead around the credential is fixed and publicly derivable
+        from the method name and the identity, both of which the caller supplied.
+        So ``size`` yields the credential's byte length by subtraction.
+
+        **This asserts the leak rather than its absence, deliberately.** The
+        earlier version of this case asserted only that the literal length string
+        was absent, which passes trivially because the number exposed is the
+        *total* — so it read as a guarantee while testing nothing. Adversarial
+        review found that, correctly. Writing the arithmetic down is what turns an
+        unexamined property into a recorded one: if a later change removes the
+        disclosure this fails and someone reads #1141, and if a later change
+        *widens* it this still fails.
+
+        **Waived rather than fixed, on three grounds** carried in #1141: the value
+        reaches only the caller who supplied the credential and therefore already
+        possesses it whole, so no recipient learns anything; §2a's reach over
+        pre-existing `core` surface is under-determined, since its clause sits in
+        the paragraph declaring the seven new classes and ``OversizedValueError``
+        predates it; and the alternative — ``size: int | None`` — is contract
+        surgery on ratified reconstructible surface, owing its own ADR.
+
+        What is **not** waived is the message: it still names neither the value nor
+        any part of it, and the largest-member field names ``credential`` as a
+        *parameter name*, which ADR-0151 §6 requires anyway so that
+        ``core/logging.py``'s key-name redaction covers it.
         """
         plaintext = "s" * _OVERSIZED_CREDENTIAL_BYTES
 
@@ -1800,10 +1825,22 @@ class AssistantEngineContract(ABC):
                 identity="ada", credential=_credential(plaintext)
             )
 
-        rendered = str(caught.value)
+        exposed = caught.value
+        assert exposed.limit == _TINY_LIMIT
+        assert exposed.field == "credential"
+        # The disclosure, stated as arithmetic: the payload is the credential plus a
+        # fixed envelope the caller can compute, so the length falls out.
+        overhead = exposed.size - len(plaintext)
+        assert 0 < overhead < 100, (
+            "the overhead is small and fixed, which is what makes it derivable"
+        )
+        assert exposed.size - overhead == len(plaintext)
+
+        # The message discloses no *part* of the value, which is the half that is
+        # not waived — a prefix or a digest would be a different finding.
+        rendered = str(exposed)
         assert plaintext not in rendered
         assert plaintext[:8] not in rendered
-        assert str(len(plaintext)) not in rendered
 
     async def test_no_result_on_this_surface_carries_a_credential(
         self, connections: ConnectionSubject

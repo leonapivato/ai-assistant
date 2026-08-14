@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+from pydantic import SecretStr
 
 from ai_assistant.core.errors import (
     ConfigurationError,
@@ -60,6 +61,7 @@ from ai_assistant.core.types import (
     ObservedProposal,
     PlanStep,
     Provenance,
+    ProvisioningState,
     QuestionState,
     QueueOutcome,
     Reversibility,
@@ -74,6 +76,7 @@ from ai_assistant.core.types import (
     TurnOutcome,
     Validity,
     band_of,
+    secret_value,
 )
 from ai_assistant.orchestration import (
     ConnectionOperations,
@@ -4243,3 +4246,78 @@ async def test_a_maintenance_report_is_not_measured_against_the_payload_limit() 
     assert report.traces == 0
     (trace,) = harness.trace_sink.recorded
     assert trace.outcome is TraceOutcome.OK
+
+
+# --- ADR-0151 §6: the connection surface is not traced -----------------------
+
+
+async def test_no_connection_operation_is_recorded_in_a_trace() -> None:
+    """ADR-0151 §6: "No provisioning act, and no operation on this surface, is
+    recorded in a trace (ADR-0141), an ``AuditTrail``, a conversation or a plan."
+
+    **The prohibition is categorical rather than credential-scoped**, and that is
+    what makes it easy to get wrong. An ``OPERATION`` trace records the seam, the
+    outcome, the elapsed time and the fault class — never an argument — so nothing
+    about a credential leaks through one, and an implementation reasoning only
+    about disclosure would route these five through ``_tracked``'s default like
+    every other method and pass every other test in this lane.
+
+    What §6 forecloses is the **act being recorded at all**, and the reason is
+    legible in ADR-0151 §18: a connection record deliberately carries *no instant*
+    (ADR-0149 §3), so a trace of ``connect_account`` would reintroduce a
+    timestamped record of the owner's act through a different door — which §18
+    defers to "the first surface that has to answer 'when did I connect this?'".
+
+    **The control is the load-bearing half.** An engine that emitted no traces at
+    all would satisfy the first assertion and break ADR-0119 §8 wholesale, so a
+    traced operation runs in the same harness and must still appear.
+    """
+    harness = Harness()
+
+    record = await harness.engine.connect_account(
+        identity="ada@example.com", credential=secret_value(SecretStr("hunter2-secret"))
+    )
+    await harness.engine.reprovision_account(
+        record.reference,
+        identity="ada@example.com",
+        credential=secret_value(SecretStr("rotated-secret")),
+    )
+    await harness.engine.disconnect_account(record.reference)
+    await harness.engine.connected_accounts()
+    await harness.engine.recent_connection_acts()
+    # The control: an ordinary read, which ADR-0119 §8 requires to be traced.
+    await harness.engine.beliefs()
+
+    seams = [trace.seam for trace in harness.trace_sink.recorded]
+    assert seams == ["beliefs"], (
+        "ADR-0151 §6 forbids a trace for any operation on the connection surface; "
+        f"these were recorded: {seams}"
+    )
+
+
+async def test_the_connection_surface_is_still_drained_though_it_is_not_traced() -> None:
+    """ADR-0042 §2 survives ADR-0151 §6, which is the half a suppression can break.
+
+    Suppressing the trace and suppressing the *tracking* are one line apart, and
+    only the second is forbidden to be kept: the connection store is
+    connection-owning like every other, so an untracked provisioning act would let
+    :meth:`~ai_assistant.orchestration.engine.Engine.aclose` close the store out
+    from under ADR-0148 §6's three writes.
+
+    Asserted through the drain rather than through an attribute: a call in flight
+    when ``aclose`` begins is awaited to completion, so the record it was writing
+    is there afterwards.
+    """
+    harness = Harness()
+
+    running = asyncio.ensure_future(
+        harness.engine.connect_account(
+            identity="ada@example.com", credential=secret_value(SecretStr("hunter2-secret"))
+        )
+    )
+    await asyncio.sleep(0)
+    await harness.engine.aclose()
+    record = await running
+
+    assert record.state is ProvisioningState.ACTIVE
+    assert [trace.seam for trace in harness.trace_sink.recorded] == []
