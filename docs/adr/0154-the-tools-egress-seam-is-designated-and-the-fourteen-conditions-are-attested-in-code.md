@@ -964,6 +964,77 @@ and therefore keeps the recipient-authorisation obligation on us — ADR-0146 §
 fail-closed rule discharged by a component writing the value, never by a field
 default, which is why `EgressSpan.provenance` has no default at all.
 
+#### ADR-0098 §3's two obligations on this lane, decided
+
+ADR-0098 §3 binds this lane twice, and it is the only document outside ADR-0017
+that imposes a *decision* on the designating ADR rather than a mechanism. Both are
+answered here because §3 says they are this lane's, and architecture review was
+right that neither could be left to silence.
+
+**(i) The actuator clause is applied at this seam.** §3's second clause: "The clause
+above binds the later ADR that designates an actuation **or egress** seam" — the
+only clause in the corpus whose subject names an egress seam explicitly, which is
+this one. The clause it binds is: "No actuator is selected, parameterised, or
+confirmed by external content."
+
+> **Normative.** No egress call through the designated seam is selected,
+> parameterised or confirmed by external content, in ADR-0098 §1's sense of a
+> recorded external span. A tool registered at this seam is not chosen by a span
+> this system ingested, its arguments are not set or altered by one, and no
+> confirmation of an egress call is answered by one — a `CONFIRM` is answered by
+> the user through an interface (ADR-0148 §8), never by the turn and never by
+> content the turn read.
+
+What already enforces it, so the clause is not a bound with nothing behind it:
+ADR-0098 §1's first clause makes a recorded external span unable to "select a code
+path, set or alter a parameter, or change a policy decision"; ADR-0148 §3's second
+clause refuses "a destination this system extracted from a span it selected" as an
+authorisation; and the approver is the user by ADR-0148 §8's first clause. This
+clause adds no condition to ADR-0017 §3's list and relaxes none, exactly as
+ADR-0098 §3's second clause requires.
+
+**(ii) The standing-authorisation question, decided rather than routed onward.**
+§3's last clause: "Whether a **standing** authorisation … may cover an action a
+model selected while reading external content is **not settled here**. The lane
+that designates an actuation seam decides it explicitly, and may not inherit an
+answer from a rule written before any actuator existed." ADR-0147 §11 repeats it in
+a marked clause — "still open, still the designating lane's to answer" — and
+ADR-0148 §13 records that it declined for the same reason.
+
+**Two ratified clauses point it at this lane and one points elsewhere.** ADR-0148
+§3's fifth clause routes it to "the ADR that establishes standing grants". The
+tension is real and is resolved by deciding rather than by adjudicating whose it
+was: an answer given here satisfies ADR-0098 §3 and ADR-0147 §11 directly, and does
+not offend ADR-0148 §3's fifth clause, whose prohibition is on the standing-grant
+ADR *inheriting* an answer from **ADR-0148**, its silence, or its limb (b). Nothing
+forbids this ADR from setting the floor, and leaving it unanswered is what two
+marked clauses forbid.
+
+> **Normative.** No standing authorisation — an ADR-0021 §6 standing grant, or a
+> standing user policy in ADR-0017 §3's third condition — covers an egress call
+> through this seam whose destination, or whose payload, was selected by a model
+> while reading external content (ADR-0098 §1). Such a call requires a decision of
+> the user about **that** call, on ADR-0148 §3's route (a), whatever standing
+> authorisation would otherwise reach it.
+
+> **Normative.** The clause above is a **floor**. The ADR that establishes standing
+> grants may state it more finely and may decide the cases this one does not reach;
+> it may not relax it, and a lane that would permit such a call under a standing
+> authorisation supersedes this clause rather than reading around it.
+
+**Why this answer and not the other one.** The alternative — letting a standing
+authorisation cover such a call — is the composition ADR-0098 exists to prevent,
+arriving one seam later: external content cannot select an actuator directly, but a
+standing grant would let it select one *indirectly*, by choosing the recipient of a
+call the grant already covers. ADR-0098 §1's first clause says a recorded external
+span may not "change a policy decision", and a standing authorisation is a policy
+decision whose extent that span would be choosing. The conservative answer costs
+nothing today — ADR-0148 §3's third clause closes route (b) entirely until a
+standing-grant ADR opens it, so there is no standing authorisation for this clause
+to restrict — and it is far cheaper to state now than to retrofit onto a standing-grant
+ADR that has already shipped a store. That is ADR-0098 §3's own stated reason for
+ruling its actuator clause early: "free now and expensive later".
+
 ### 5. The transition, recorded
 
 > **Normative.** `ai_assistant.tools.egress` passes from **approved and
@@ -1034,11 +1105,22 @@ and none is closed by designation.
 - **#83's `models/` half and #89** — the unpinned provider endpoint and the
   unpinned model-artifact fetch, both named by ADR-0017 §2 as pre-existing and both
   unchanged.
-- **#95 — ADR-0004's residency clause.** ADR-0017 §1 declined to read it and sent
-  the question there; a write-capable integration puts data in a remote service by
-  design, and that question is now live in a way it was not while the seam was
-  undesignated. It is not answered here, for ADR-0017 §5's reason: answering it
-  would narrow a ratified clause this ADR does not supersede.
+- **#95 — ADR-0004's residency clause, and where it actually becomes live.**
+  ADR-0017 §1 declined to read it and sent the question to #95: "a write-capable
+  integration puts data in a remote service by design — but answering it here would
+  be narrowing a ratified clause this ADR does not supersede, which is the move §5
+  exists to refuse." That reasoning is unchanged by designation and is not this
+  ADR's to overturn; ADR-0124 §3 took the same route for the analogous question
+  rather than narrowing or widening the clause.
+
+  **Architecture review raised this as a blocker, and the part of it that is right
+  is the timing.** ADR-0017 §1's ground for deferring was "Nothing turns on it yet:
+  no tool transmits, and the seam stays undesignated until §3 holds." Half of that
+  ground is now spent. The other half is not: designation **registers no tool**
+  (§2), so nothing transmits on this merge and no data reaches a remote service.
+  What makes the question live is a **registration**, not a designation — and that
+  is the point at which it is answered, by the lane that reaches it. The clause
+  binding that lane is stated at the end of this section, where a mark is a mark.
 - **#1141 — ADR-0151's credential plaintext site in `orchestration`.** Open, and
   neither relied on nor closed by any row of §4.
 - **#1147 — `parse_smtp_endpoint`'s port grammar.** Three defects, bounded by the
@@ -1070,6 +1152,21 @@ and none is closed by designation.
   but ADR-0017 §3's own sentence governs: "the obligations are the list above — an
   issue can be edited or closed narrowly, and the decision record has to stand
   in-repo (ADR-0001)."
+
+**The one residue that binds a later lane rather than merely being recorded** is
+#95's, because it is the only one whose subject arrives with a registration:
+
+> **Normative.** A lane registering an integration at this seam states in its own
+> change whether that integration's ordinary operation places the owner's data into
+> a third-party service in the sense ADR-0004 §2's residency clause is about, and
+> why. Where the answer is yes, or is unclear on that clause's text, the lane does
+> not register the integration until an ADR has answered #95. No lane infers an
+> answer from this ADR, from ADR-0017 §1's deferral, or from the seam being
+> designated.
+
+This binds the question to the moment it acquires a subject rather than settling it
+here — settling it is what ADR-0017 §5 forbids, and a design fork the corpus has not
+resolved is not one to decide in passing.
 
 ### 7. What is not decided here
 
@@ -1118,8 +1215,11 @@ This ADR is **marked** under ADR-0089: every obligation it imposes is a marked
 clause, and unmarked text supplies none. §3, §4's table and every *Mechanism*,
 *Code*, *Evidence* and *stated limit* paragraph are unmarked deliberately — they are
 an attestation and an argument, which ADR-0089 §1 classifies as non-normative
-however load-bearing they are. What binds is: §1's three clauses, §2's five, §4's
-single clause, §5's one, §6's one and §7's one.
+however load-bearing they are. What binds is sixteen clauses: §1's three, §2's five,
+§4's attestation clause plus the three ADR-0098 §3 decides, §5's one, §6's two, and
+§7's one. Every one of them is a block quote at column 0 preceded by a blank line,
+which ADR-0089 §2 requires — an indented one is not a mark, and one clause was moved
+out of a list item in review for exactly that reason.
 
 **Required reviews: adversarial *and* architecture.** This is a contract-surface
 change in `CONTRIBUTING.md`'s sense — not because it touches `core/protocols.py` or
