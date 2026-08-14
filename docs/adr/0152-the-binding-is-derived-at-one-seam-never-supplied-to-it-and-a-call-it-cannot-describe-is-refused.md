@@ -11,7 +11,7 @@
   `EgressSpan`, `EgressDestination`, `CanonicalDestination`, `BoundAccount`,
   `DestinationProtocol` and `DiscloserProvenance` are ADR-0150's, used exactly as
   it defines them. §2 fixes the `core` names this ADR is authorised to add, and
-  they are four.
+  they are five.
 - **Discharges every obligation ADR-0150 §11 and §6 route here**, each in §5, §6,
   §7 or §9, and §14 maps them one by one so a reader can check the routing was
   spent rather than cited.
@@ -147,7 +147,7 @@ class EgressBinder(Protocol):
         tool: ToolDefinition,
         *,
         parameters: FrozenJsonMapping,
-        provenance: Mapping[EgressSpanLocator, DiscloserProvenance],
+        provenance: CarriedProvenance,
     ) -> EgressBinding | None: ...
 
     async def rebind(
@@ -196,11 +196,26 @@ convention.
 > ADR-0150 §4's parameter-relative invariants exist to refuse, one stage before
 > they can refuse it.
 
-> **Normative.** `provenance` maps a span's locator to the discloser provenance
-> **recorded** for it (ADR-0146 §2). It has **no default**: a caller holding no
-> recorded origin passes an empty mapping deliberately, which is ADR-0150 §5's
-> no-default reasoning applied at the seam that would otherwise inherit the
-> permissive answer for free.
+> **Normative.** `provenance` is a `CarriedProvenance`: a frozen pydantic model in
+> `core/types.py` with `extra="forbid"`, `frozen=True` and
+> `hide_input_in_errors=True`, carrying exactly **one** field, `spans`, an
+> **immutable** mapping from `EgressSpanLocator` to `DiscloserProvenance`. It
+> validates every key and every value **on construction**, refusing a key that is not
+> a well-formed locator and a value that is not one of ADR-0146 §1's two members, and
+> it **detaches** the caller's mapping at validation so that the value it holds
+> cannot be rewritten afterwards (ADR-0018 §3, and the frozen-mapping idiom
+> `core/types.py` already applies to `FrozenJsonMapping`).
+
+> **Normative.** `spans` has **no default** and the `provenance` argument has none
+> either: a caller holding no recorded origin constructs a `CarriedProvenance` over
+> an empty mapping and passes it deliberately. This is ADR-0150 §5's no-default
+> reasoning applied at the seam that would otherwise inherit the permissive answer
+> for free.
+
+> **Normative.** The seam takes a `CarriedProvenance`'s keys and values **on
+> trust**, because the model has already validated them, and performs no `isinstance`
+> check of its own over either. What it still refuses is a **relational** fact the
+> model cannot see: a locator naming a span this call does not carry (§5).
 
 > **Normative.** `EgressBinder` is decorated `@runtime_checkable`, as every
 > Protocol in `core/protocols.py` is. `tests/core/test_protocol_triad.py` reaches a
@@ -232,20 +247,31 @@ convention.
 > one. ADR-0150 §2 fixes `EgressSpan`'s shape and this ADR authorises no change to it
 > (§2).
 
-**A key type rather than a bare tuple, and the duplication objection is answered
-rather than dodged.** The obvious alternative is `Mapping[tuple[str, int | None],
-DiscloserProvenance]`, which mints nothing — and it hands the one seam this corpus
-built validating models for (ADR-0150 §8, PR #1120's tenth observation) an argument
-whose keys validate nothing, on a surface where a malformed key is ADR-0146 §2's
-fail-closed default arriving by a different door. That is the exact hazard PR #1120's
-`_checked_provenance` was written for on round 4, and answering it with `isinstance`
-calls at the seam is what §8 of ADR-0150 exists to stop doing. The objection that the
-locator restates `EgressSpan`'s first two fields is real and is why the clauses above
-bind it to them rather than re-specifying them: there is one definition of what an
+**A validating carrier rather than a bare mapping, and this is ADR-0150 §8's own
+argument arriving at the one argument it did not reach.** Two drafts of this section
+got it wrong in the same direction. The first keyed the provenance by
+`tuple[str, int | None]`, which mints nothing and hands the seam keys that validate
+nothing. The second minted `EgressSpanLocator` and annotated the argument
+`Mapping[EgressSpanLocator, DiscloserProvenance]` — and architecture review found on
+round 2 that an annotation is not a constructor: Python builds no locator for a
+mapping key, so `{object(): object()}` crosses the boundary exactly as before and the
+seam must either re-check by hand or raise something it never declared. ADR-0150 §8
+settles the question in terms, quoting issue #1122: "The shape that would end the
+class rather than move it is **not** more `isinstance` calls: it is making these
+values pydantic models in `core/types.py`, which validate their own fields on
+construction." A mapping cannot be such a model; a model holding the mapping can, and
+`CarriedProvenance` is it. This is also PR #1120's `_checked_provenance` — thirty
+lines of hand-written key and value checks, found necessary on that lane's round 4 —
+replaced by a type rather than inherited, which is what that lane asked (b) to do.
+
+**The locator's duplication objection is answered rather than dodged.** That it
+restates `EgressSpan`'s first two fields is real, and is why the clauses above bind
+it to them rather than re-specifying them: there is one definition of what an
 argument name and an index are, in `EgressSpan`, and the locator is a projection used
-as a key on a seam. It is durable nowhere, so no record can hold a locator that
-disagrees with the span it names — which is the property that makes this unlike the
-duplications ADR-0150 is named against, every one of which was two *stored* shapes.
+as a key. It is durable nowhere — no `ActionRequest`, no `PermissionDecision`, no
+audit row holds one — so no record can hold a locator that disagrees with the span it
+names, which is the property that makes this unlike the duplications ADR-0150 is
+named against, every one of which was two *stored* shapes.
 
 **Two members rather than one, because one member with two modes is the partial
 state this family refuses.** The alternative considered was a single `bind` with
@@ -272,6 +298,7 @@ This section is a classification of the change being made and is not normative
 |---|---|---|
 | `EgressBinder` | `core/protocols.py`, new | The seam, with exactly the two members §1 lists. |
 | `EgressSpanLocator` | `core/types.py`, new | A span's key on this seam: a frozen, hashable model carrying the `argument` and `index` ADR-0150 §4 identifies a span by, with those fields' types and validation taken from `EgressSpan` (§1). |
+| `CarriedProvenance` | `core/types.py`, new | The validating carrier for the recorded origins crossing this seam: one immutable, validated mapping from locator to provenance (§1). |
 | `EgressBindingError` | `core/errors.py`, new | The one refusal class both members raise (§9). |
 | `Disposition.EGRESS_UNBINDABLE` | `core/types.py`, changed | One new member of an existing enum, returned when the seam refused (§9). |
 | `EgressBinding`, `EgressSpan`, `EgressDestination`, `CanonicalDestination`, `BoundAccount`, `DestinationProtocol`, `DiscloserProvenance` | — | **Not this ADR's.** ADR-0150 §2 adds them. This ADR consumes each unchanged, adds no field to any, and authorises no change to any. |
@@ -285,8 +312,9 @@ This section is a classification of the change being made and is not normative
 > **Normative.** The `core` names this ADR authorises a lane to add or change are
 > exactly these and no others: one new Protocol `EgressBinder` in
 > `core/protocols.py`, `@runtime_checkable`, with exactly the two members §1 states;
-> one new type `EgressSpanLocator` in `core/types.py` with exactly the two fields §1
-> states; one new class `EgressBindingError` in
+> two new types in `core/types.py`, `EgressSpanLocator` with exactly the two fields
+> §1 states and `CarriedProvenance` with exactly the one field §1 states; one new
+> class `EgressBindingError` in
 > `core/errors.py`; and one new member `EGRESS_UNBINDABLE` on the existing
 > `Disposition` enum in `core/types.py`. No other `core` name changes: no field is
 > added to `ToolDefinition`, `ActionRequest`, `PermissionDecision`, `ToolCall`,
@@ -303,7 +331,7 @@ This section is a classification of the change being made and is not normative
 > own ADR places.
 
 **The intersection was checked rather than assumed.** Against ADR-0150 §2: every
-name it authorises appears above as a non-authorisation row, and the four names
+name it authorises appears above as a non-authorisation row, and the five names
 this ADR claims appear on none of its lists. Against ADR-0151 §15: it authorises
 five `AssistantEngine` methods, one Protocol, three types, two constants and
 seven error classes, and this ADR claims none of them and adds nothing to any.
@@ -1259,6 +1287,14 @@ rather than a gap discovered late.
 > identity has changed since registration carries the **currently recorded**
 > identity. A test that only exercises an `ACTIVE` reference satisfies none of these.
 
+> **Normative.** That lane ships the **carrier** cases §1 is stated for: a
+> `CarriedProvenance` constructed over a mapping whose key is not a well-formed
+> locator is refused at construction, and so is one whose value is not a
+> `DiscloserProvenance`, each exercised separately; a `CarriedProvenance` built over
+> a caller's mutable mapping does not change when that mapping is mutated afterwards;
+> and a construction omitting `spans` raises. A test that only constructs a
+> well-formed carrier over a non-empty mapping satisfies none of these.
+
 > **Normative.** That lane ships the **locator** cases §1 is stated for: an
 > `EgressSpanLocator` is hashable and usable as a mapping key; two locators with
 > equal fields are equal and hash equally; one carrying an `argument` or an `index`
@@ -1465,8 +1501,11 @@ there in terms. §5's third clause — the origin's path is not decided — is r
 and §12 above restates it as undecided. §7's credential and slot prohibitions are
 restated for this seam by §10, and §7's residue on a caller-authored key is what
 §6's first refusal closes, which is where §7 there routed it. §8's validating-model
-discipline is what makes §1's signature able to take these values on trust, PR
-#1120's tenth observation coming out the way it predicted. §9's whole-value
+discipline is what makes §1's signature able to take these values on trust, and §1
+above applies it to the one argument ADR-0150 could not reach: a `Mapping`
+annotation constructs nothing, so `CarriedProvenance` is that discipline extended to
+a carrier rather than an exception to it, and PR #1120's tenth observation comes out
+the way it predicted. §9's whole-value
 equality is what §7 compares by, unchanged. §10's no-rendering clause is restated as
 out of scope. §12's tests owed by "the lane that lands surface (b)" are restated in
 §13 with the shapes that make each reachable.
