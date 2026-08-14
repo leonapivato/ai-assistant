@@ -1174,10 +1174,26 @@ resolved is not one to decide in passing.
 
 ### 7. What is not decided here
 
-> **Normative.** This ADR decides the seam's designation and nothing else. It
+**This ADR decides three things, and they are worth listing once** — a document
+whose bulk is attestation reads as though it decides only the first. §1's
+**designation** of the seam; §4's **standing-authorisation floor**, which ADR-0098
+§3's last clause and ADR-0147 §11 both assign to the designating lane; and §6's
+**residency gating on registration**, which binds a later lane to face #95 rather
+than answering it. What follows is what this ADR does *not* decide.
+
+> **Normative.** Beyond §1's designation, the three clauses §4 decides under
+> ADR-0098 §3, and §6's three residency clauses, this ADR decides nothing. It
 > registers no tool, adds no `core` name, changes no Protocol, adds no
-> `DestinationProtocol` member, and authorises no dependency. A lane needing any of
-> those needs its own change and, where golden rule 5 reaches it, its own ADR.
+> `DestinationProtocol` member, designates no second seam, and authorises no
+> dependency. A lane needing any of those needs its own change and, where golden
+> rule 5 reaches it, its own ADR.
+
+> **Normative.** No lane reads §4's standing-authorisation floor or §6's residency
+> clauses as deciding anything beyond their own terms. The floor rules on standing
+> authorisation for content-selected egress at this seam and settles no other
+> question about standing grants, which stay ADR-0021 §6's and ADR-0148 §3's; the
+> residency clauses oblige a registering lane to face #95 and answer neither #95
+> nor ADR-0004 §2's residency clause.
 
 - **Who registers `send_email`, against which account, and how.** ADR-0152 §10
   leaves registration `tools/`-internal and uncontracted; the exit-QA registration
@@ -1219,9 +1235,9 @@ This ADR is **marked** under ADR-0089: every obligation it imposes is a marked
 clause, and unmarked text supplies none. §3, §4's table and every *Mechanism*,
 *Code*, *Evidence* and *stated limit* paragraph are unmarked deliberately — they are
 an attestation and an argument, which ADR-0089 §1 classifies as non-normative
-however load-bearing they are. What binds is eighteen clauses: §1's three, §2's five,
+however load-bearing they are. What binds is nineteen clauses: §1's three, §2's five,
 §4's attestation clause plus the three ADR-0098 §3 decides, §5's one, §6's four, and
-§7's one. Every one of them is a block quote at column 0 preceded by a blank line,
+§7's two. Every one of them is a block quote at column 0 preceded by a blank line,
 which ADR-0089 §2 requires — an indented one is not a mark, and one clause was moved
 out of a list item in review for exactly that reason.
 
