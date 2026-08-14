@@ -441,6 +441,37 @@ def test_a_payload_declaration_naming_no_argument_is_refused() -> None:
         PayloadDeclaration(tool_id="send_email", arguments=())
 
 
+def test_a_payload_declaration_holding_a_malformed_member_is_refused() -> None:
+    """Round 8's ordering, applied to the declaration on this side of the pair."""
+    with pytest.raises(PayloadDescriptionError, match="transmitted arguments"):
+        PayloadDeclaration(tool_id="send_email", arguments=(None,))  # type: ignore[arg-type]
+
+    unhashable = PayloadArgument(name=[], establishes_tier=None)  # type: ignore[arg-type]
+    with pytest.raises(PayloadDescriptionError, match="has no name"):
+        PayloadDeclaration(tool_id="send_email", arguments=(unhashable,))
+
+
+def test_a_payload_declaration_establishing_a_non_tier_is_refused() -> None:
+    """ADR-0146 §5 admits a tier or none, and nothing else is a third answer."""
+    forged = PayloadArgument(name="body", establishes_tier="personal")  # type: ignore[arg-type]
+
+    with pytest.raises(PayloadDescriptionError, match="not a data tier"):
+        PayloadDeclaration(tool_id="send_email", arguments=(forged,))
+
+
+def test_a_payload_declaration_naming_no_tool_is_refused_without_rendering_it() -> None:
+    """The tool id opens every other refusal, so it is checked before it is."""
+    needle = "the secret is swordfish"
+
+    with pytest.raises(PayloadDescriptionError) as raised:
+        PayloadDeclaration(
+            tool_id=needle.encode(),  # type: ignore[arg-type]
+            arguments=(PayloadArgument(name="body", establishes_tier=None),),
+        )
+
+    assert needle not in str(raised.value)
+
+
 def test_a_payload_declaration_naming_one_argument_twice_is_refused() -> None:
     """Two entries could establish two tiers for one field."""
     body = PayloadArgument(name="body", establishes_tier=None)
