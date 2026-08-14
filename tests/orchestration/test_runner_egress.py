@@ -26,6 +26,7 @@ from ai_assistant.core.types import (
     DataTier,
     DiscloserProvenance,
     Disposition,
+    EgressBinding,
     Goal,
     Idempotency,
     MemorySource,
@@ -57,6 +58,7 @@ if TYPE_CHECKING:
         BoundEgressCall,
         ExecutionState,
         FrozenJson,
+        PermissionDecision,
         PermissionRuling,
         StepExecution,
     )
@@ -146,14 +148,66 @@ class _LeakyPlans(FakePlanStore):
         return plan
 
 
+def _forged(binding: EgressBinding) -> EgressBinding:
+    """``binding`` with one occurrence's canonical form replaced by a lie.
+
+    Built by ``model_validate`` over a dumped copy, so the result is a *valid*
+    binding carrying a canonical form no canonicaliser would compute from its
+    supplied form — which is what a tampered trail row looks like, and what
+    ADR-0150 §3 says `core` cannot detect on its own.
+    """
+    dumped = binding.model_dump()
+    for span in dumped["spans"]:
+        if span["destination"] is not None:
+            span["destination"]["canonical"] = "mallory@example.com"
+            break
+    return EgressBinding.model_validate(dumped)
+
+
+class _TamperedTrail(FakeAuditTrail):
+    """A trail that hands back one named decision with its binding forged.
+
+    ADR-0152 §7 makes the forged-canonical case reachable on exactly this path:
+    "a decision read back out of the trail carrying a forged occurrence is compared
+    against a freshly derived binding, the two are unequal, and ``rebind`` refuses
+    before ``resolve`` is reached." A trail row is where such an occurrence can
+    exist, so a double is what puts one there — the shape ``SubstitutingTrail`` and
+    ``MislabelledTrail`` already take in ``test_runner.py``.
+
+    Only the named id is forged: the write path reads its own record back
+    (``StepRunner._recorded``), and a trail that lied about every row would break
+    the parking this case depends on.
+    """
+
+    def __init__(self) -> None:
+        """A trail forging nothing until told which id to forge."""
+        super().__init__()
+        self.forge: str | None = None
+
+    async def get(self, decision_id: str) -> PermissionDecision | None:
+        """Answer with the stored decision, its binding forged where asked."""
+        stored = await super().get(decision_id)
+        if stored is None or decision_id != self.forge or stored.egress_binding is None:
+            return stored
+        return stored.model_copy(update={"egress_binding": _forged(stored.egress_binding)})
+
+
 class _RecordingPolicy(FakeActionPolicy):
-    """A policy that keeps every request it was handed, so a case can read it."""
+    """A policy that keeps every request it was handed, so a case can read it.
+
+    Only ``decide`` is overridden. **The resolving half needs no override**:
+    ``FakeActionPolicy`` already records every ``resolve`` call in
+    :attr:`resolutions`, and the cases below assert over *that* rather than over
+    what reached the trail — because "no resolving decision was recorded" and
+    "``resolve`` was never called" are different claims, and ADR-0152 §7 makes the
+    refusal happen **before** the second ruling rather than merely instead of
+    recording one.
+    """
 
     def __init__(self, **kwargs: object) -> None:
         """Rule as the fake does, remembering what was asked."""
         super().__init__(**kwargs)  # type: ignore[arg-type]  # passthrough for the fake's kwargs
         self.decided: list[ActionRequest] = []
-        self.resolved: list[ActionRequest] = []
 
     async def decide(self, request: ActionRequest) -> PermissionRuling:
         """Keep the request, then rule."""
@@ -197,12 +251,13 @@ class _Harness:
         binder: EgressBinder | None,
         plans: FakePlanStore | None = None,
         policy: FakeActionPolicy | None = None,
+        trail: FakeAuditTrail | None = None,
     ) -> None:
         """Wire the stage over canonical fakes and the binder under test."""
         self.plans = plans if plans is not None else FakePlanStore(now=lambda: AT)
         self.invoker = FakeToolInvoker([(tool, _succeeds)])
         self.policy = policy if policy is not None else _RecordingPolicy()
-        self.trail = FakeAuditTrail()
+        self.trail = trail if trail is not None else FakeAuditTrail()
         self.ids = iter(f"d-{n}" for n in range(1, 100))
         self.runner = StepRunner(
             plans=self.plans,
@@ -445,8 +500,86 @@ async def test_a_resumed_call_whose_binding_moved_is_refused_before_the_second_r
     assert resumed.disposition is Disposition.EGRESS_UNBINDABLE
     assert await harness.trail.get("d-2") is None
     assert harness.invoker.invocations == []
+    # Not the same claim as "no decision was recorded": ADR-0152 §7 refuses
+    # **before** the second ruling, so a stage that resolved first and then
+    # declined to record would satisfy the line above and breach the clause.
+    assert harness.policy.resolutions == []
     stored = await _stored(harness.plans, state)
     assert stored.status is StepStatus.AWAITING_APPROVAL
+
+
+async def test_a_forged_canonical_form_in_the_parked_row_is_refused_before_resolve() -> None:
+    """ADR-0150 §12, ADR-0152 §7, §13: the forged-canonical case, through the runner.
+
+    §13 states it in the terms §7 makes reachable — a parked confirmation whose
+    binding carries an occurrence whose canonical form is not what the seam's
+    canonicaliser computes is refused **before** ``resolve`` is reached, and no
+    resolving decision is recorded. Both halves are asserted, because they are
+    different claims: a stage that resolved first and then declined to record
+    would satisfy the second and breach the first.
+
+    The suite already holds ``rebind`` itself to this (``EgressBinderContract``);
+    what is here is the runner obligation, which needs a trail row an occurrence
+    can be forged into.
+    """
+    tool = _tool(egress=True)
+    binder = _bound_binder(tool)
+    trail = _TamperedTrail()
+    harness = _Harness(tool=tool, binder=binder, trail=trail)
+    state = await _an_execution(harness.plans, _step())
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+    assert parked.disposition is Disposition.AWAITING_CONFIRMATION
+    trail.forge = str(parked.decision_id)
+
+    resumed = await harness.runner.resume(
+        parked.state,
+        STEP,
+        confirmation_id=str(parked.decision_id),
+        approved=True,
+        timeout=PATIENT,
+    )
+
+    assert resumed.disposition is Disposition.EGRESS_UNBINDABLE
+    assert harness.policy.resolutions == []
+    assert await harness.trail.get("d-2") is None
+    assert harness.invoker.invocations == []
+    stored = await _stored(harness.plans, state)
+    assert stored.status is StepStatus.AWAITING_APPROVAL
+
+
+async def test_a_store_outage_on_the_resuming_path_propagates_too() -> None:
+    """ADR-0152 §9, §13: the outage clause is stated over ``bind`` **and** ``rebind``.
+
+    A stage catching ``ConnectionStoreError`` on ``resume`` alone would pass the
+    first-ruling case below while turning a store fault into a refusal at exactly
+    the moment a user is waiting on an answer they have already given — and
+    ``EGRESS_UNBINDABLE`` there would assert that the call cannot be completed,
+    which a transient read failure establishes nothing about.
+    """
+    tool = _tool(egress=True)
+    binder = _bound_binder(tool)
+    harness = _Harness(tool=tool, binder=binder)
+    state = await _an_execution(harness.plans, _step())
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+    assert parked.disposition is Disposition.AWAITING_CONFIRMATION
+    before = await _stored(harness.plans, state)
+    binder.fail_next_read()
+
+    with pytest.raises(ConnectionStoreError):
+        await harness.runner.resume(
+            parked.state,
+            STEP,
+            confirmation_id=str(parked.decision_id),
+            approved=True,
+            timeout=PATIENT,
+        )
+
+    assert harness.policy.resolutions == []
+    assert await harness.trail.get("d-2") is None
+    assert harness.invoker.invocations == []
+    after = await _stored(harness.plans, state)
+    assert after.status is StepStatus.AWAITING_APPROVAL
+    assert after.model_dump(mode="json") == before.model_dump(mode="json")
 
 
 async def test_a_store_outage_propagates_rather_than_becoming_a_disposition() -> None:

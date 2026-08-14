@@ -744,6 +744,29 @@ class EgressBinderContract(ABC):
                 provenance=_no_provenance(),
             )
 
+    async def test_a_store_outage_on_the_resuming_path_raises_too(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0152 §9, §13: ``bind`` and ``rebind`` **each** raise it.
+
+        Stated over both members, and asserted over both: an implementation
+        converting the outage on the resuming path alone would satisfy the
+        ``bind`` case above while turning a store fault into a refusal at exactly
+        the moment a user is waiting on an answer they have already given.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+        parameters: dict[str, FrozenJson] = {
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body": "b",
+        }
+        first = await binder.bind(SEND_EMAIL, parameters=parameters, provenance=_no_provenance())
+        assert first is not None
+        self.fail_next_read(binder)
+
+        with pytest.raises(ConnectionStoreError):
+            await binder.rebind(SEND_EMAIL, parameters=parameters, approved=first.binding)
+
     # --- ADR-0152 §1, §5: provenance ----------------------------------------
 
     async def test_a_named_span_carries_its_origin_and_every_other_is_system_selected(
