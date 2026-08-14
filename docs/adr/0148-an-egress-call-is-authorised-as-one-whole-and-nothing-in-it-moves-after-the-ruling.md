@@ -1515,12 +1515,17 @@ form).
 > can write one slot fails this test, and a test that exercises the interleaving
 > without asserting which credential the following call reads does not satisfy it.
 
-> **Normative.** That lane also ships the **omitted-span** case: a payload
-> carrying a described benign span *and* an undescribed selected record is refused
-> — before the ruling where the request is built that way, and at the seam where
-> the callable would otherwise transmit it — rather than sent with a description
-> and an audit record that account for one span and not the other. A test that
-> exercises only descriptions which happen to be complete does not satisfy this.
+> **Normative.** That lane also ships the **omitted-span** case, and it covers
+> **both** span kinds in one mixed payload: a payload carrying a described benign
+> span, an undescribed **selected record**, *and* an undescribed **user-authored
+> free-text argument** is refused — before the ruling where the request is built
+> that way (§1's third clause), and at the seam where the callable would otherwise
+> transmit it — rather than sent with a description and an audit record that
+> account for some of its spans and not the others. The refusal is
+> **deterministic**: the same request refuses on every derivation of its
+> description. An implementation that tracks only one of the two span kinds fails
+> this test, so a case carrying one omission alone does not satisfy it, and neither
+> does a test that exercises only descriptions which happen to be complete.
 
 > **Normative.** A test asserting only that the happy path transmits satisfies no
 > clause of this section.
