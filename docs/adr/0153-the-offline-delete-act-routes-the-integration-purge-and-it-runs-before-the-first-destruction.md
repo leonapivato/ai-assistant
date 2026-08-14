@@ -1,11 +1,12 @@
 # 153. The offline delete act routes the integration purge, and it runs before the first destruction
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
+- Accepted: 2026-08-14
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-14**,
   the durability form ADR-0100 established and ADR-0125, ADR-0126, ADR-0149 and
-  ADR-0151 each followed. ADR-0126 **will be edited by this change, in its
-  ratification commit** (the records bullet below), and ADR-0149 and
+  ADR-0151 each followed. ADR-0126 **is edited by this change, in its ratification
+  commit** (the records bullet below), and ADR-0149 and
   ADR-0151 were ratified in the last six days; a citation that silently means
   "whatever this ADR says when you read it" is not checkable. Where a later ADR
   changes one of them, this one is read against the text named here until an ADR
@@ -1213,18 +1214,17 @@ reverted with it: a `Partially superseded by` token naming a `Proposed` document
 the state claim the records bullet above refuses, and the waiver's own logic is that
 the pair rides with ratification — which is now the second one.
 
-**The route from here is fixed, and this paragraph is written forward because the
-tree carrying it is still `Proposed`.** The required set — adversarial and
-architecture — returns clean on this corrected `Proposed` tree, with adversarial's
-sole outstanding finding standing waived as above, before the status is flipped a
-second time. That ratification commit carries ADR-0126's `Status` line and its dated
-note, as the header bullet requires. Both lenses are then re-run on the flipped tree,
-which step 3 obliges and ADR-0130 §12 and ADR-0136 §7 each record as the route they
-took, so the tree those final re-runs read is the tree that lands the record. **That
-same commit restates this paragraph in the past tense**, as the record of what
-happened rather than the plan for it — the same deferral, for the same reason, as the
-ADR-0126 pair it carries. Nothing implements against this decision until this PR
-merges (ADR-0015 §5, golden rule 5).
+The required set then ran again on the corrected `Proposed` tree: architecture
+returned **APPROVE with no findings**, and adversarial's sole outstanding finding was
+the waived deferral above, re-raised in the same substance and staying waived under
+the same ruling. On that one tree the status was flipped a second time, and this
+commit is that flip — it carries ADR-0126's `Status` line and its dated note, as the
+header bullet requires, and it restates this paragraph as the record rather than the
+plan, which is the form the `Proposed` tree carried it in. Both lenses are then
+re-run on this flipped tree, which step 3 obliges and ADR-0130 §12 and ADR-0136 §7
+each record as the route they took, so the tree those final re-runs read is the tree
+that lands the record. Nothing implements against this decision until this PR merges
+(ADR-0015 §5, golden rule 5).
 
 ## Consequences
 
