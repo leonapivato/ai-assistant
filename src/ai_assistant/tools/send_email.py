@@ -10,30 +10,46 @@ attests how, and records the transition. ADR-0148 supplies mechanisms for nine o
 those conditions and designates nothing; its own header says so, and its
 Consequences close on it: "Nothing here authorises a byte."
 
-**So what is this for?** ADR-0148 §11 defers two `core` surfaces — the egress
-binding (a) and the seam by which it reaches an ``ActionRequest`` (b) — and says
+**So what is this for?** ADR-0148 §11 deferred two `core` surfaces — the egress
+binding (a) and the seam by which it reaches an ``ActionRequest`` (b) — and said
 why: each "wants a producer in hand", ADR-0073 §4's standing test, because "the
 shape it wants depends on what a real integration's canonicaliser and
 description-builder need … and nothing at this seam transmits, so there is no
-producer." This module is that producer, built to the cost ADR-0148's
-Consequences state an integration owes:
+producer." This module was that producer. Both surfaces have since been decided —
+ADR-0150 and ADR-0152 — and what the producer now owes is one **declaration**,
+not a set of machinery:
 
-- **one tool per connected account** — §6's one-account clause. This declaration
-  is therefore a *template* rather than a registration: a registered tool is one
-  bound to a specific connected account, and no connection record exists to bind
-  it to (ADR-0125 §12 and ADR-0148 §13 leave the provisioning surface undecided,
-  and §11's fourth clause forbids this lane naming its owner). That is the
-  second, independent reason nothing here is registered.
-- **declares its destination-bearing arguments** —
-  :data:`SEND_EMAIL_DESTINATIONS`.
+- **one tool per connected account** — ADR-0148 §6's one-account clause. This
+  declaration is therefore a *template* rather than a registration: a registered
+  tool is one bound to a specific connected account, and binding it to one is
+  :class:`~ai_assistant.tools.egress_binder.EgressBindingSeam`'s registration
+  rather than this module's. That is the second, independent reason nothing here
+  is registered.
+- **declares its destination-bearing arguments** — in ADR-0152 §3's
+  ``x-egress-destination``, on the schema below.
+- **declares what each field establishes** — in ADR-0152 §3's ``x-egress-tier``,
+  on the same subschemas.
 - **canonicalises through the seam's per-protocol canonicaliser** —
   :mod:`ai_assistant.tools.destinations`, which owns SMTP's rules for every
-  integration that speaks it, not for this one.
-- **resolves names as first-class gated calls** — §5. Nothing here resolves
-  anything: the arguments carry addresses, and an argument that is not an address
-  is refused rather than looked up.
-- **produces a deterministic description of its own payload** —
-  :func:`describe_send_email`.
+  integration that speaks it, not for this one, and which the binding seam calls
+  rather than this module.
+- **resolves names as first-class gated calls** — ADR-0148 §5. Nothing here
+  resolves anything: the arguments carry addresses, and an argument that is not
+  an address is refused rather than looked up.
+
+**Two keywords rather than five declared facts is ADR-0152 §3's result, not a
+simplification of it.** This module used to carry a ``DestinationDeclaration``
+(``protocol``, ``multiple``, ``required`` per recipient argument), a
+``PayloadDeclaration`` (``establishes_tier``, ``multiple`` per transmitted one),
+the value binding the two, and a description builder over them. ADR-0150 §4 has
+since removed three of the five facts — the decomposition is the value's, the
+coverage is total over the arguments, and requiredness is JSON Schema's own
+``required`` — and ADR-0152 §3 puts the remaining two in the schema the
+definition already carries. Keeping the old declarations beside the keywords
+would be two statements of one fact in one module, which is the duplication
+ADR-0150 is named against; so they are gone rather than deprecated, and the
+description they built is now :class:`~ai_assistant.core.types.EgressBinding`'s
+spans, derived at the seam and accepted from nobody (ADR-0152 §5).
 
 **No credential, no connection, no client.** Nothing in this module reads a
 secret, holds a ``Secrets`` face, names an endpoint or constructs a transport.
@@ -50,39 +66,57 @@ from ai_assistant.core.errors import ToolError
 from ai_assistant.core.types import (
     CostBasis,
     DataTier,
+    DestinationProtocol,
     Idempotency,
     Reversibility,
     RiskLevel,
     ToolCost,
     ToolDefinition,
 )
-from ai_assistant.tools.destination_arguments import (
-    DestinationArgument,
-    DestinationDeclaration,
-)
-from ai_assistant.tools.destinations import DestinationProtocol
-from ai_assistant.tools.payload_description import (
-    EgressToolDeclaration,
-    PayloadArgument,
-    PayloadDeclaration,
-    describe_payload,
-)
+from ai_assistant.tools.egress_declaration import DESTINATION_KEYWORD, TIER_KEYWORD
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from ai_assistant.core.types import FrozenJson
-    from ai_assistant.tools.payload_description import (
-        DiscloserProvenance,
-        PayloadDescription,
-        SpanRef,
-    )
 
 #: The id this declaration would be registered under, once an account exists to
 #: bind it to. One tool per connected account (ADR-0148 §6) means a registered id
 #: names the account as well as the operation; this bare form names neither and is
 #: why the constant is a template rather than a registration.
 SEND_EMAIL_ID: Final = "send_email"
+
+
+def _recipients() -> dict[str, FrozenJson]:
+    """One recipient argument's subschema, built fresh on every call.
+
+    An array of strings, marked destination-bearing and stating the tier its field
+    establishes (ADR-0152 §3). ``to``, ``cc`` and ``bcc`` declare the same three
+    facts, and ``to``'s ``minItems`` is added on top rather than repeated — which
+    is why this is a function rather than a shared constant: ``core`` freezes what
+    a ``ToolDefinition`` ends up holding, but the literal handed to it is an
+    ordinary ``dict``, and one shared mapping would make ``to``'s bound reachable
+    from ``cc``.
+
+    The array form is ADR-0152 §4's **flat declaration**, one of exactly two shapes
+    a destination-bearing argument may take. Not a style choice: it is what makes a
+    supplied form impossible to extract from inside a structured value, so
+    ADR-0150 §4's supplied-form invariant is total rather than checked.
+
+    The keyword *names* are imported from the reader rather than spelled here, and
+    each value is the enum member's own ``value`` as §3 requires — so the producer
+    and the seam that reads it cannot drift apart by a typo.
+
+    Returns:
+        The subschema, owned by the caller.
+    """
+    return {
+        "type": "array",
+        "items": {"type": "string"},
+        DESTINATION_KEYWORD: DestinationProtocol.SMTP.value,
+        TIER_KEYWORD: DataTier.PERSONAL.value,
+    }
+
 
 SEND_EMAIL: Final = ToolDefinition(
     id=SEND_EMAIL_ID,
@@ -100,9 +134,9 @@ SEND_EMAIL: Final = ToolDefinition(
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
-            "to": {"type": "array", "items": {"type": "string"}, "minItems": 1},
-            "cc": {"type": "array", "items": {"type": "string"}},
-            "bcc": {"type": "array", "items": {"type": "string"}},
+            "to": {**_recipients(), "minItems": 1},
+            "cc": _recipients(),
+            "bcc": _recipients(),
             "subject": {"type": "string"},
             "body": {"type": "string"},
         },
@@ -165,73 +199,34 @@ dangerous:
 
 The schema is JSON Schema draft 2020-12, declared rather than assumed (ADR-0145
 §5), with ``additionalProperties: false`` so an argument nobody declared is
-refused at construction — which is also what keeps the payload description's
-coverage check (ADR-0148 §6) from being the only thing standing between an
-undeclared argument and the wire.
-"""
+refused at construction — which is also what keeps ADR-0152 §6's undescribed-key
+refusal from being the only thing standing between an undeclared argument and the
+wire.
 
-SEND_EMAIL_DESTINATIONS: Final = DestinationDeclaration(
-    tool_id=SEND_EMAIL_ID,
-    arguments=(
-        DestinationArgument(
-            name="to", protocol=DestinationProtocol.SMTP, multiple=True, required=True
-        ),
-        DestinationArgument(
-            name="cc", protocol=DestinationProtocol.SMTP, multiple=True, required=False
-        ),
-        DestinationArgument(
-            name="bcc", protocol=DestinationProtocol.SMTP, multiple=True, required=False
-        ),
-    ),
-)
-"""Which arguments select recipients: all three, and nothing else.
+**It also carries the whole egress declaration** (ADR-0152 §3). ``to``, ``cc`` and
+``bcc`` each declare ``x-egress-destination: "smtp"`` and
+``x-egress-tier: "personal"``; ``subject`` and ``body`` declare neither, and the
+absence is the statement rather than an omission:
 
-``subject`` and ``body`` are not destination-bearing — no semantic recipient of
-this call is determined from them — and an address appearing inside a body selects
-nobody, which is why the declaration is read rather than the values. ``bcc`` is
-declared like the other two on purpose: a blind copy is a recipient, and a
-declaration that omitted it would be the mis-declaration ADR-0148 §2's third
-clause names, "a defect in the same class as a mis-declared ``discloses``".
-"""
+- **Destination-bearing.** All three select recipients, and nothing else does. No
+  semantic recipient of this call is determined from a subject or a body, and an
+  address appearing inside a body selects nobody — which is why the *declaration*
+  is read rather than the values. ``bcc`` is marked like the other two on purpose:
+  a blind copy is a recipient, and omitting it would be the mis-declaration
+  ADR-0148 §2's third clause names, "a defect in the same class as a mis-declared
+  ``discloses``".
+- **Tier.** ADR-0146 §5's test applied field by field: a field establishes a tier
+  "only where every value it can hold carries the same tier by what the field is
+  for — a recipient address, an account identifier, a credential reference". A
+  recipient list passes, so ``PERSONAL`` is stated; ``subject`` and ``body`` fail
+  it, carrying "arbitrary text the user supplied … however well the implementation
+  knows what that field is for", which is §5's round-4 repair over this exact pair
+  of fields. Stating a tier for them would assert a fact nobody established.
 
-SEND_EMAIL_PAYLOAD: Final = PayloadDeclaration(
-    tool_id=SEND_EMAIL_ID,
-    arguments=(
-        PayloadArgument(name="to", establishes_tier=DataTier.PERSONAL, multiple=True),
-        PayloadArgument(name="cc", establishes_tier=DataTier.PERSONAL, multiple=True),
-        PayloadArgument(name="bcc", establishes_tier=DataTier.PERSONAL, multiple=True),
-        PayloadArgument(name="subject", establishes_tier=None),
-        PayloadArgument(name="body", establishes_tier=None),
-    ),
-)
-"""Every argument the send transmits, and what each field establishes.
-
-The tier split is ADR-0146 §5's test applied field by field: "a field establishes
-that tier only where every value it can hold carries the same tier by what the
-field is for — a recipient address, an account identifier, a credential
-reference." A recipient list passes — every value it can hold is an address, and
-an address is Tier 1. ``subject`` and ``body`` fail it: they carry "arbitrary text
-the user supplied … however well the implementation knows what that field is
-for", which is §5's round-4 repair stated over this exact pair of fields.
-
-All five are listed because ADR-0148 §6 requires the description to cover **every
-span the call transmits**, and the schema's ``additionalProperties: false`` means
-these five are all there are.
-"""
-
-
-SEND_EMAIL_DECLARATION: Final = EgressToolDeclaration(
-    tool_id=SEND_EMAIL_ID,
-    payload=SEND_EMAIL_PAYLOAD,
-    recipients=SEND_EMAIL_DESTINATIONS,
-)
-"""The two halves bound into the one value a description is derived from.
-
-Built at import, so the checks its construction performs — that both halves are
-this tool's, and that every destination-bearing argument is covered by the
-payload declaration — run when the module loads rather than when a call is
-described. ADR-0016 §1's posture applied to the pair: "a tool that does not
-declare its reach does not load."
+Both keywords are unknown to draft 2020-12, which treats an unrecognised keyword
+as an annotation — so this schema validates exactly as the same schema without
+them, and ADR-0145 §5's one-dialect rule and §6's readability refusal are both
+untouched.
 """
 
 
@@ -284,46 +279,9 @@ class SendEmail:
         raise UndesignatedSeamError(msg)
 
 
-def describe_send_email(
-    parameters: Mapping[str, FrozenJson],
-    *,
-    provenance: Mapping[SpanRef, DiscloserProvenance],
-) -> PayloadDescription:
-    """Derive this send's canonical destinations and its payload description.
-
-    The producer's whole authorisation-time contribution in one call: the
-    destinations both ways round (ADR-0148 §2) and the description that covers
-    every span (§6), computed before any ``ActionRequest`` exists and with nothing
-    left to fill in afterwards — which is §1's earliness, the clause "the whole of
-    this ADR rests on".
-
-    It performs no I/O, reads no clock and consults no store, so two derivations
-    for one call agree (§6's determinism clause).
-
-    Args:
-        parameters: The call's arguments.
-        provenance: The recorded origin of each span (ADR-0146 §2). A span absent
-            from it is system-selected.
-
-    Returns:
-        The description, carrying every destination in both forms.
-
-    Raises:
-        DestinationSelectionError: If a recipient argument is absent, malformed,
-            or carries a form with no canonical version.
-        PayloadDescriptionError: If a span would be transmitted uncovered, or an
-            argument is not text.
-    """
-    return describe_payload(SEND_EMAIL_DECLARATION, parameters, provenance=provenance)
-
-
 __all__ = [
     "SEND_EMAIL",
-    "SEND_EMAIL_DECLARATION",
-    "SEND_EMAIL_DESTINATIONS",
     "SEND_EMAIL_ID",
-    "SEND_EMAIL_PAYLOAD",
     "SendEmail",
     "UndesignatedSeamError",
-    "describe_send_email",
 ]

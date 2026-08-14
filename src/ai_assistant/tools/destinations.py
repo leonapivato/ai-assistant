@@ -40,8 +40,8 @@ string to a pair of strings.
 a refusal message is exactly the string that ends up in a log or in a
 ``ToolFailure``; ``tools/invocation.py`` declines to interpolate ``str(exc)`` for
 the same reason. So a refusal states the rule that was broken and, from
-:mod:`ai_assistant.tools.destination_arguments`, *where* in the arguments it was
-broken — never what was in it.
+:mod:`ai_assistant.tools.egress_binder`, *where* in the arguments it was broken —
+never what was in it.
 """
 
 from __future__ import annotations
