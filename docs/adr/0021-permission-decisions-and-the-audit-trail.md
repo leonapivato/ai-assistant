@@ -293,7 +293,9 @@ nothing leaves the prompt with nothing to say.
 > "the decision binds the payload and holds none of it". For an egress call at
 > the `tools/` seam, ADR-0148 §6 rules that an **egress binding** — the canonical
 > destination set with the supplied form each member came from, the connected
-> account's identity and credential reference, the transport endpoint, and a
+> account's identity and **connection reference** — never a credential slot, which
+> ADR-0148 §6 keeps out of every binding because it is per provisioning act — the
+> transport endpoint, and a
 > payload *description* — is fixed in the `ActionRequest` before the ruling,
 > compared by `authorises`, and **transcribed verbatim into the recorded
 > decision**. A supplied destination form is an argument value, and "a recipient"
