@@ -1,12 +1,11 @@
 # 153. The offline delete act routes the integration purge, and it runs before the first destruction
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-14
-- Accepted: 2026-08-14
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-14**,
   the durability form ADR-0100 established and ADR-0125, ADR-0126, ADR-0149 and
-  ADR-0151 each followed. ADR-0126 **is edited by this change, in its ratification
-  commit** (the records bullet below), and ADR-0149 and
+  ADR-0151 each followed. ADR-0126 **will be edited by this change, in its
+  ratification commit** (the records bullet below), and ADR-0149 and
   ADR-0151 were ratified in the last six days; a citation that silently means
   "whatever this ADR says when you read it" is not checkable. Where a later ADR
   changes one of them, this one is read against the text named here until an ADR
@@ -1138,9 +1137,14 @@ obligation would have errored rather than failed, since `isinstance` against a b
 `Protocol` raises `TypeError` — and §8's second clause, the routing lane's test
 obligations, without which an implementation whose `purge` raised and which then
 destroyed `data_dir` anyway would have satisfied every stated obligation while
-producing the one unrepairable state this ADR exists to prevent. Architecture
-produced the records-for-ratification bullet and the placement of ADR-0126's pair.
-Each is recorded at the clause it changed rather than only here.
+producing the one unrepairable state this ADR exists to prevent, §5's grounding of
+ADR-0149 §3's identity rule on that clause's emitter scope, and §4's cancellation
+clause, without which "raises for any reason" would have swept in an externally
+delivered `CancelledError` and converted it into a classified, reported purge
+failure — relaxing by a report the very thing ADR-0060 forbids and ADR-0151 §7
+carved out one ADR earlier. Architecture produced the records-for-ratification
+bullet and the placement of ADR-0126's pair. Each is recorded at the clause it
+changed rather than only here.
 
 **One `blocker` was waived, and the waiver is recorded rather than smoothed over.**
 Architecture blocked ADR-0126's pair being written while this ADR stood `Proposed`;
@@ -1158,13 +1162,28 @@ full set on the flipped tree that lands them; and that ADR-0149's header bullet 
 the standing precedent one ADR earlier. `CONTRIBUTING.md` → "Triage every finding"
 permits the waiver and requires the rationale, which is in the PR.
 
-The status was flipped only once architecture returned clean and adversarial's
-sole outstanding finding stood waived, on one tree; and both lenses were re-run on
-the flipped tree, which `CONTRIBUTING.md` → "Finishing an ADR PR" step 3 obliges
-and ADR-0130 §12 and ADR-0136 §7 each record as the route they took. The
-ratification commit is also the one carrying ADR-0126's pair, by the header bullet
-above, so the tree those re-runs read is the tree that lands the record. Nothing
-implements against this decision until this PR merges (ADR-0015 §5, golden rule 5).
+**This ADR is ratified on its second flip, and the route is the one
+`CONTRIBUTING.md` names for exactly this case.** The status was first flipped once
+architecture returned clean and adversarial's sole outstanding finding stood waived,
+on one tree, and both lenses were re-run on that flipped tree as step 3 obliges. Two
+corrections then arrived on those re-runs — §5's grounding of ADR-0149 §3's identity
+rule on that clause's emitter scope, and §4's cancellation carve-out, the second of
+them a `blocker` — and each changes what this ADR **decides** rather than how it is
+recorded. So the ADR was **returned to `Proposed` and re-entered at step 1**, which
+is what `CONTRIBUTING.md` → "Finishing an ADR PR" step 3 states for a finding
+arriving on that round, what ADR-0070 §1's third permitted in-place header edit
+allows, and the restoration ADR-0127 §3 invoked on its own PR. ADR-0126's pair was
+reverted with it: a `Partially superseded by` token naming a `Proposed` document is
+the state claim the records bullet above refuses, and the waiver's own logic is that
+the pair rides with ratification — which is now the second one.
+
+The whole required set then returned clean on the corrected `Proposed` tree; the
+status was flipped a second time, carrying ADR-0126's `Status` line and dated note in
+that same commit as the header bullet requires; and both lenses were re-run on that
+flipped tree, which step 3 obliges and ADR-0130 §12 and ADR-0136 §7 each record as
+the route they took. So the tree those final re-runs read is the tree that lands the
+record. Nothing implements against this decision until this PR merges (ADR-0015 §5,
+golden rule 5).
 
 ## Consequences
 
