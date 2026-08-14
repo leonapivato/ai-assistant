@@ -26,6 +26,7 @@ from egress_transport_harness import (
     STARTTLS_ENDPOINT,
     Records,
     ScriptedChannel,
+    arguments,
     binding,
     entry,
     implicit_tls_script,
@@ -37,17 +38,16 @@ from egress_transport_harness import (
 from ai_assistant.core.types import ProvisioningState, SecretName, SecretScope
 from ai_assistant.tools.egress import (
     BoundCallChangedError,
-    OutboundEmail,
     SmtpEndpoint,
     TransportPinError,
     parse_smtp_endpoint,
 )
 
-#: The message every happy-path case sends, so that what differs between them is
-#: the arrangement rather than the payload.
-MESSAGE: Final = OutboundEmail(
-    to=("Alice@example.invalid",), subject="quarterly report", body="attached, as promised"
-)
+#: The arguments every happy-path case sends, so that what differs between them is
+#: the arrangement rather than the payload. The recipient is in its **supplied**
+#: form — the one `binding()` carries the canonical of — because that is what a
+#: call's arguments hold and what the transport has to canonicalise for itself.
+ARGUMENTS: Final = arguments()
 
 
 @pytest.mark.parametrize(
@@ -114,7 +114,7 @@ async def test_a_conforming_exchange_sends_to_exactly_the_bound_recipients() -> 
     channel = ScriptedChannel(*implicit_tls_script())
     subject = transport(channel, secrets=await keyring())
 
-    await subject.transmit(binding(), MESSAGE)
+    await subject.transmit(binding(), ARGUMENTS)
 
     sent = channel.commands()
     assert sent[0] == "EHLO mail.example.invalid"
@@ -137,7 +137,7 @@ async def test_the_credential_is_presented_only_after_the_starttls_upgrade() -> 
     channel = ScriptedChannel(*starttls_script(), secure=False)
     subject = transport(channel, secrets=await keyring(), endpoint=STARTTLS_ENDPOINT)
 
-    await subject.transmit(binding(endpoint=STARTTLS_ENDPOINT), MESSAGE)
+    await subject.transmit(binding(endpoint=STARTTLS_ENDPOINT), ARGUMENTS)
 
     written = channel.written.decode("ascii")
     assert channel.tls_upgrades == 1
@@ -150,7 +150,7 @@ async def test_an_endpoint_that_does_not_offer_starttls_is_refused_in_the_clear(
     subject = transport(channel, secrets=await keyring(), endpoint=STARTTLS_ENDPOINT)
 
     with pytest.raises(TransportPinError, match="STARTTLS"):
-        await subject.transmit(binding(endpoint=STARTTLS_ENDPOINT), MESSAGE)
+        await subject.transmit(binding(endpoint=STARTTLS_ENDPOINT), ARGUMENTS)
 
     assert CREDENTIAL not in channel.written.decode("ascii")
     assert channel.tls_upgrades == 0
@@ -168,7 +168,7 @@ async def test_the_record_is_read_once_before_the_credential_and_once_after() ->
     ring = await keyring()
     subject = transport(ScriptedChannel(*implicit_tls_script()), records=records, secrets=ring)
 
-    await subject.transmit(binding(), MESSAGE)
+    await subject.transmit(binding(), ARGUMENTS)
 
     assert records.reads == [REFERENCE, REFERENCE]
     assert [name.key for name in ring.reads] == ["conn-0001-r1"]
@@ -188,7 +188,7 @@ async def test_a_completed_rotation_of_the_same_account_refuses_nothing() -> Non
     ring = await keyring(slot=rotated)
     subject = transport(ScriptedChannel(*implicit_tls_script()), records=records, secrets=ring)
 
-    await subject.transmit(binding(), MESSAGE)
+    await subject.transmit(binding(), ARGUMENTS)
 
     assert [name.key for name in ring.reads] == ["conn-0001-r7"]
 
@@ -209,15 +209,7 @@ async def test_a_blind_copy_is_an_envelope_recipient_and_appears_in_no_header() 
         )
     )
 
-    await subject.transmit(
-        bound,
-        OutboundEmail(
-            to=("Alice@example.invalid",),
-            bcc=("bob@example.invalid",),
-            subject="quarterly report",
-            body="attached, as promised",
-        ),
-    )
+    await subject.transmit(bound, arguments(bcc=("bob@example.invalid",)))
 
     assert "RCPT TO:<bob@example.invalid>" in channel.commands()
     assert "bob@example.invalid" not in channel.payload()
@@ -237,7 +229,7 @@ async def test_a_body_line_beginning_with_a_dot_is_stuffed() -> None:
 
     await subject.transmit(
         binding(body=body),
-        OutboundEmail(to=("Alice@example.invalid",), subject="quarterly report", body=body),
+        arguments(body=body),
     )
 
     assert "\r\n..hidden\r\n" in channel.payload()
@@ -250,7 +242,7 @@ async def test_the_envelope_sender_is_the_bound_identity_under_the_seams_canonic
     records = Records(entry(identity="Work@Example.Invalid"))
     subject = transport(channel, records=records, secrets=await keyring())
 
-    await subject.transmit(binding(identity="Work@Example.Invalid"), MESSAGE)
+    await subject.transmit(binding(identity="Work@Example.Invalid"), ARGUMENTS)
 
     assert "MAIL FROM:<Work@example.invalid>" in channel.commands()
 
@@ -267,7 +259,7 @@ async def test_an_account_identity_that_is_not_a_mailbox_is_refused() -> None:
     subject = transport(None, records=Records(entry(identity="Work Account")), secrets=ring)
 
     with pytest.raises(BoundCallChangedError, match=r"not.*SMTP mailbox"):
-        await subject.transmit(binding(identity="Work Account"), MESSAGE)
+        await subject.transmit(binding(identity="Work Account"), ARGUMENTS)
 
     assert ring.reads == []
 
@@ -278,7 +270,7 @@ async def test_a_reply_that_is_not_an_smtp_reply_is_refused() -> None:
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(TransportPinError, match="not an SMTP reply"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
 
 async def test_a_pending_record_transmits_nothing_and_reads_no_credential() -> None:
@@ -291,7 +283,7 @@ async def test_a_pending_record_transmits_nothing_and_reads_no_credential() -> N
     subject = transport(None, records=Records(entry(state=ProvisioningState.PENDING)), secrets=ring)
 
     with pytest.raises(BoundCallChangedError, match="not connectable"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
     assert ring.reads == []
 
@@ -309,7 +301,7 @@ async def test_a_keyring_holding_nothing_under_the_named_slot_transmits_nothing(
     subject = transport(channel, secrets=ring)
 
     with pytest.raises(BoundCallChangedError, match="keyring holds nothing"):
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
     assert ring.reads != []
     assert channel.written == b""
@@ -328,7 +320,7 @@ async def test_the_account_identity_is_never_rendered_in_a_refusal() -> None:
     subject = transport(None, records=records, secrets=ring)
 
     with pytest.raises(BoundCallChangedError) as raised:
-        await subject.transmit(binding(), MESSAGE)
+        await subject.transmit(binding(), ARGUMENTS)
 
     assert REFERENCE in str(raised.value)
     assert IDENTITY not in str(raised.value)
