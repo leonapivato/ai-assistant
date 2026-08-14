@@ -24,7 +24,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects these only via a
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
@@ -48,7 +48,7 @@ from ai_assistant.core.types import (
 from ai_assistant.testing.cancellation import held_at_its_first_await
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Awaitable, Callable, Mapping
 
     from ai_assistant.core.types import FrozenJson
     from ai_assistant.testing.cancellation import SuspendedCall
@@ -1177,6 +1177,43 @@ class EgressBinderContract(ABC):
                 parameters=parameters if registered else {"query": "q"},
                 approved=corrupted,
             )
+
+        assert type(raised.value.__cause__).__name__ == "ValidationError"
+
+    @pytest.mark.parametrize("registered", [True, False], ids=["egress-tool", "non-egress-tool"])
+    @pytest.mark.parametrize("argument", ["tool", "parameters", "provenance", "approved"])
+    async def test_a_raw_non_model_argument_is_refused_with_a_chained_error(
+        self, binder: EgressBinder, argument: str, *, registered: bool
+    ) -> None:
+        """ADR-0152 §1: revalidated "before reading any field of it", for **every** argument.
+
+        ``model_dump()`` is a field read, so a seam that called it before
+        validating would let a value that is not a model at all escape as an
+        ``AttributeError`` — never the chained refusal §1 promises, and never a
+        refusal a caller could act on.
+
+        **This case is stated over all four revalidated arguments, not over the two
+        that happened to be broken.** §13's bypass list enumerates model instances
+        only — ``model_construct``ed or ``object.__setattr__``-corrupted — and it
+        illustrates §1's clause rather than closing it. A suite that tracked the
+        list would leave every raw shape outside it to be found by review one
+        variant at a time; this tracks the clause instead, so the next raw shape
+        fails here.
+        """
+        tool = self._bypass_subject(binder, registered=registered)
+        raw: Any = {}
+        unmapped: Any = "not a mapping"
+        calls: dict[str, Callable[[], Awaitable[BoundEgressCall | None]]] = {
+            "tool": lambda: binder.bind(raw, parameters={}, provenance=_no_provenance()),
+            "parameters": lambda: binder.bind(
+                tool, parameters=unmapped, provenance=_no_provenance()
+            ),
+            "provenance": lambda: binder.bind(tool, parameters={}, provenance=raw),
+            "approved": lambda: binder.rebind(tool, parameters={}, approved=raw),
+        }
+
+        with pytest.raises(EgressBindingError) as raised:
+            await calls[argument]()
 
         assert type(raised.value.__cause__).__name__ == "ValidationError"
 
