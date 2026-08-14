@@ -34,6 +34,7 @@ Test-only, and no composition root wires it.
 
 from __future__ import annotations
 
+import unicodedata
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, final
 from uuid import uuid4
@@ -47,6 +48,7 @@ from ai_assistant.core.errors import (
     UnknownConnectionError,
 )
 from ai_assistant.core.types import (
+    ACCOUNT_IDENTITY_MAX_BYTES,
     CONNECTION_REFERENCE_MAX_BYTES,
     ConnectedAccount,
     ConnectionAct,
@@ -293,6 +295,7 @@ class FakeConnectionProvisioner:
     ) -> ConnectedAccount:
         """Perform ADR-0148 §6's three writes in its order, over the in-memory log."""
         reference, revision = plan.reference, plan.revision
+        _printable(identity)
         slot = SecretName(scope=SecretScope.INTEGRATION, key=self._mint_slot())
         self.entries.append(
             FakeConnectionEntry(reference, revision, identity, ProvisioningState.PENDING, slot)
@@ -456,6 +459,42 @@ class FakeConnectionProvisioner:
             return repeated
         self._last_reference = self._mint_reference()
         return self._last_reference
+
+
+#: The Unicode general categories ADR-0149 §4's "no control character, no line
+#: break" excludes. ``Cc`` is every C0 and C1 control; ``Zl`` and ``Zp`` are the
+#: two separators that are line breaks without being controls.
+_UNPRINTABLE_CATEGORIES: Final = frozenset({"Cc", "Zl", "Zp"})
+
+
+def _printable(identity: str) -> str:
+    """Enforce ADR-0149 §4's identity shape at the log, returning it unchanged.
+
+    §4 puts this on the **store** — "a length bound the implementing lane sets and
+    the store enforces" — and ADR-0151 §17 records that fixing the bound's location
+    in ``core`` did not move the enforcement. The engine's own refusal is the one a
+    person sees; this is what makes §4 true of the record however it got here.
+
+    Normalises nothing, and its message names no part of the identity.
+
+    Raises:
+        ConnectionStoreError: If it carries a control character or a line break,
+            or if its UTF-8 encoding exceeds
+            :data:`~ai_assistant.core.types.ACCOUNT_IDENTITY_MAX_BYTES`.
+    """
+    if any(unicodedata.category(char) in _UNPRINTABLE_CATEGORIES for char in identity):
+        msg = (
+            "an account identity is single-line printable text: no control character and "
+            "no line break (ADR-0149 §4). Nothing was written"
+        )
+        raise ConnectionStoreError(msg)
+    if len(identity.encode("utf-8")) > ACCOUNT_IDENTITY_MAX_BYTES:
+        msg = (
+            f"an account identity encodes to at most {ACCOUNT_IDENTITY_MAX_BYTES} UTF-8 "
+            f"bytes (ADR-0149 §4, ADR-0151 §5). Nothing was written"
+        )
+        raise ConnectionStoreError(msg)
+    return identity
 
 
 def _receivable(reference: str) -> str:

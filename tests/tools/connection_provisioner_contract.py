@@ -50,7 +50,12 @@ from ai_assistant.core.errors import (
     ResidualCredentialError,
     UnknownConnectionError,
 )
-from ai_assistant.core.types import ConnectedAccount, ConnectionAct, ProvisioningState
+from ai_assistant.core.types import (
+    ACCOUNT_IDENTITY_MAX_BYTES,
+    ConnectedAccount,
+    ConnectionAct,
+    ProvisioningState,
+)
 from ai_assistant.testing import SecretMethod
 
 if TYPE_CHECKING:
@@ -181,6 +186,44 @@ class ConnectionProvisionerContract(ABC):
         assert await provisioner.connected() == ()
         assert await provisioner.recent_acts(limit=10) == ()
         assert self.keyring_entries(provisioner) == 0
+
+    @pytest.mark.parametrize(
+        "identity",
+        [
+            pytest.param("owner\nadmin", id="line-break"),
+            pytest.param("owner\u2028admin", id="unicode-line-separator"),
+            pytest.param("owner\x07", id="control-character"),
+            pytest.param("o" * (ACCOUNT_IDENTITY_MAX_BYTES + 1), id="over-the-bound"),
+        ],
+    )
+    async def test_the_store_refuses_an_identity_outside_its_shape(
+        self, provisioner: ConnectionProvisioner, identity: str
+    ) -> None:
+        """ADR-0149 §4: bounded, single-line printable text, enforced by the store.
+
+        §4 puts the length bound "and the store enforces" in as many words, and
+        ADR-0151 §17 records that fixing the bound's *location* in ``core`` left
+        the enforcement exactly where §4 had it: "a lane holding only ADR-0149 §4
+        sets a bound and enforces it in the store, which stays exactly what they
+        must do".
+
+        So this is the second of two refusals rather than a duplicate of one. The
+        engine's is the one a person sees, raised locally with nothing sent
+        (ADR-0151 §5) — and it is not this Protocol's, because §10 states that no
+        member here declares
+        :class:`~ai_assistant.core.errors.UnusableIdentityError`. What the seam
+        owes is that a record outside §4's shape never becomes durable state,
+        whatever reached it.
+
+        The Unicode line separator is parametrised beside the newline because a
+        rule written over ``"\n"`` passes it while ``str.splitlines`` and a
+        terminal both treat it as a line break.
+        """
+        with pytest.raises(ConnectionStoreError):
+            await provisioner.provision(identity=identity, credential=credential())
+
+        assert await provisioner.connected() == ()
+        assert await provisioner.recent_acts(limit=10) == ()
 
     # --- ADR-0148 §6: re-provisioning ---------------------------------------
 

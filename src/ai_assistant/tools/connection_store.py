@@ -59,13 +59,15 @@ import asyncio
 import contextlib
 import sqlite3
 import threading
+import unicodedata
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, final
+from typing import TYPE_CHECKING, Any, Final, final
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from ai_assistant.core.errors import ConnectionStoreError
 from ai_assistant.core.types import (
+    ACCOUNT_IDENTITY_MAX_BYTES,
     CONNECTION_REFERENCE_MAX_BYTES,
     ConnectedAccount,
     ConnectionAct,
@@ -181,6 +183,69 @@ _ACTS = (
     "(SELECT MAX(sequence) FROM entries GROUP BY reference, revision) "
     "ORDER BY sequence DESC"
 )
+
+
+#: The Unicode general categories ADR-0149 §4's "no control character, no line
+#: break" excludes: ``Cc`` is every C0 and C1 control, which is where ``\n``,
+#: ``\r``, ``\v``, ``\f``, the file/group/record separators and ``\x85`` all
+#: live, and ``Zl``/``Zp`` are the two separators that are line breaks without
+#: being controls (``\u2028`` and ``\u2029``).
+#:
+#: Stated as categories rather than as a character set because the set is the one
+#: that grows: a rule written as ``"\n" not in value`` passes ``\u2028``, which
+#: ``str.splitlines`` treats as a line break and a terminal renders as one.
+_UNPRINTABLE_CATEGORIES: Final = frozenset({"Cc", "Zl", "Zp"})
+
+
+def printable_identity(identity: str) -> str:
+    """Enforce ADR-0149 §4's identity shape at the store, returning it unchanged.
+
+    §4 rules an identity "**bounded, single-line printable text**: no control
+    character, no line break, and a length bound the implementing lane sets **and
+    the store enforces**", and "a violation refuses the act and writes nothing".
+    ADR-0151 §5 moved the bound's *location* into ``core`` so the wire client and
+    the in-process engine refuse the same values without a round trip; ADR-0151
+    §17 records that this did not move the enforcement — "a lane holding only
+    ADR-0149 §4 sets a bound and enforces it in the store, which stays exactly what
+    they must do".
+
+    So this is the second of two refusals rather than a duplicate of one. The
+    engine's is the one a person sees, raised locally with nothing sent (ADR-0151
+    §5); this one is what makes §4 true of the store however the record got here —
+    including from a caller inside `tools/` that never crossed the engine surface.
+
+    **It normalises nothing.** ADR-0149 §4 forbids stripping, case-folding and
+    Unicode-normalising an identity at any layer, so a violation is refused and
+    never repaired.
+
+    **The message names no part of the identity and no length of it.** The
+    identity is Tier 1 personal data (ADR-0149 §3) and reaches no log line, error
+    message or operator diagnostic; the bound is a constant and may be named.
+
+    Args:
+        identity: The account identity an entry carries.
+
+    Returns:
+        The identity, unchanged and unnormalised.
+
+    Raises:
+        ConnectionStoreError: If it carries a control character or a line break,
+            or if its UTF-8 encoding exceeds
+            :data:`~ai_assistant.core.types.ACCOUNT_IDENTITY_MAX_BYTES`.
+    """
+    if any(unicodedata.category(char) in _UNPRINTABLE_CATEGORIES for char in identity):
+        msg = (
+            "an account identity is single-line printable text: no control character and "
+            "no line break (ADR-0149 §4). Nothing was written"
+        )
+        raise ConnectionStoreError(msg)
+    if len(identity.encode("utf-8")) > ACCOUNT_IDENTITY_MAX_BYTES:
+        msg = (
+            f"an account identity encodes to at most {ACCOUNT_IDENTITY_MAX_BYTES} UTF-8 "
+            f"bytes (ADR-0149 §4, ADR-0151 §5). Nothing was written"
+        )
+        raise ConnectionStoreError(msg)
+    return identity
 
 
 def receivable(reference: str) -> str:
@@ -1016,15 +1081,24 @@ def _revalidated(entry: ConnectionEntry) -> ConnectionEntry:
     subclass could return a mapping that does not describe itself, and the store
     would then file a record different from the one it was handed.
 
+    It is also where ADR-0149 §4's identity shape is enforced, because this is the
+    one function every append passes through — a check on the model itself would
+    raise pydantic's ``ValidationError`` at construction, which is not a failure
+    ADR-0151 §2a declares of any operation on this surface.
+
     Raises:
-        ConnectionStoreError: If the entry does not satisfy its own model.
+        ConnectionStoreError: If the entry does not satisfy its own model, or if
+            its identity is not ADR-0149 §4's bounded single-line printable text.
     """
     fields = dict(object.__getattribute__(entry, "__dict__"))
     try:
-        return ConnectionEntry.model_validate(fields)
+        rebuilt = ConnectionEntry.model_validate(fields)
     except ValidationError as exc:
         msg = f"the connection entry for {fields.get('reference')!r} is not a valid record: {exc}"
         raise ConnectionStoreError(msg) from exc
+    if rebuilt.identity is not None:
+        printable_identity(rebuilt.identity)
+    return rebuilt
 
 
 def _decoded(row: tuple[str, int, str]) -> ConnectionEntry:
