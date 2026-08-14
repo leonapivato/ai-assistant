@@ -332,17 +332,19 @@ def canonicalise(protocol: DestinationProtocol, supplied: str) -> Destination:
             form for. ADR-0148 §1's third clause refuses the whole request rather
             than sending it for a ruling in an incomplete form.
     """
-    canonicaliser = _CANONICALISERS.get(protocol)
+    # Checked **before** it is used as a key: an unhashable value raises from
+    # `Mapping.get` itself, ahead of any branch this function could refuse in
+    # (adversarial round 10), and the round-7 repair below could not reach that.
+    # The member's own value is named where there is one, because an enum member
+    # is the tool author's text; anything else is caller-supplied and could carry
+    # content, so it is described rather than rendered.
+    given: object = protocol
+    if not isinstance(given, DestinationProtocol):
+        raise _refuse("no canonicaliser at this seam for the protocol given")
+    canonicaliser = _CANONICALISERS.get(given)
     if canonicaliser is None:
-        # Named only where the protocol is a member of the enum, which is the
-        # tool author's own text. Anything else is a caller-supplied value that
-        # could carry content, and rendering it would be the leak the module
-        # docstring rules out; it is also the shape a malformed declaration
-        # arrives in, so this branch must not dereference `.value` to build its
-        # own refusal. Adversarial review found it on round 7.
-        named = protocol.value if isinstance(protocol, DestinationProtocol) else "the one given"
-        raise _refuse(f"no canonicaliser at this seam for protocol {named!r}")
-    return Destination(protocol=protocol, supplied=supplied, canonical=canonicaliser(supplied))
+        raise _refuse(f"no canonicaliser at this seam for protocol {given.value!r}")
+    return Destination(protocol=given, supplied=supplied, canonical=canonicaliser(supplied))
 
 
 def canonical_destination_set(destinations: tuple[Destination, ...]) -> tuple[str, ...]:

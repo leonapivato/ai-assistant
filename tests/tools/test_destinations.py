@@ -194,6 +194,18 @@ def test_a_protocol_with_no_canonicaliser_refuses_without_dereferencing_it() -> 
     assert "no canonicaliser" in str(raised.value)
 
 
+def test_an_unhashable_protocol_refuses_before_it_is_used_as_a_key() -> None:
+    """Adversarial round 10: `Mapping.get` raises before any branch is reached.
+
+    The round-7 repair guarded the missing-canonicaliser *branch*, which an
+    unhashable value never reaches — the lookup itself raises `TypeError` first.
+    So the check moved ahead of the lookup, which is the same ordering rule the
+    declarations keep: check a value before using it, not after.
+    """
+    with pytest.raises(DestinationCanonicalisationError, match="no canonicaliser"):
+        canonicalise([], "alice@example.com")  # type: ignore[arg-type]
+
+
 def test_the_refusal_is_in_the_assistant_error_hierarchy() -> None:
     """So a request builder can refuse the whole call with one handler."""
     assert issubclass(DestinationCanonicalisationError, ToolError)
