@@ -496,11 +496,18 @@ exists; the other three travel together in one value the request carries.
 > identity is unchanged and no revision was read yet — while one landing *inside*
 > the read refuses that read.
 
+> **Normative.** A provisioning act landing **after** the post-read check has
+> passed neither retracts the authorisation nor stops a transmission already
+> begun. **No lane holds a lease or a lock from that check across the transport's
+> write**, and no surface presents a re-provisioning as having stopped a send in
+> flight.
+
 > **Normative.** What the clauses above guarantee is that no byte is transmitted
 > under a credential read across any provisioning act on its reference, and none
 > under an identity other than the bound one. They do **not** guarantee that no
-> credential is ever read for a call that is then refused, and no lane states them
-> as guaranteeing that.
+> credential is ever read for a call that is then refused, nor that no byte is
+> transmitted after a provisioning act is recorded, and no lane states them as
+> guaranteeing either.
 
 > **Normative.** No credential value enters an `ActionRequest`, a
 > `PermissionDecision`, an egress binding, a payload description, an audit record
@@ -596,6 +603,38 @@ duration is bounded by a human rather than by I/O". A value that never repeats i
 the standing answer to ABA, and this corpus already uses one: ADR-0014 §5's
 compare-and-swap version, whose whole job is to make "unchanged since I looked"
 answerable. The revision is that, scoped to one reference.
+
+**The chain stops at the post-read check, and stopping there is a decision with
+two ratified precedents behind it.** Adversarial asked on round 5 for a lease
+covering the final check through the transport's first write, on the ground that a
+provisioning act could land in between. It could — and the send that follows is
+still the one that was authorised, because the credential in hand is the bound
+identity's and was verified unchanged across its own read. Nothing about a later
+provisioning act makes an already-authorised send wrong; treating it as though it
+did would be requiring the system to abandon an act the user approved because the
+user subsequently changed an unrelated setting.
+
+**The requested mechanism is one the corpus examined and refused, with its
+reason.** ADR-0097 §5a: "**A lease held across the read was considered and
+refused** … Holding a source-scoped guard from the check until the read released
+it would make a revocation either block or fail while a read is in flight — a
+permission withdrawal waiting on the thing it is withdrawing." Held across a
+*transport write* rather than a file read, on a system that "composes on one event
+loop", it is worse: a re-provisioning would block for as long as a remote service
+takes to answer. ADR-0102 §9 states the same boundary where a user reads it —
+`revoke` "does not wait for, cancel, or report a read already in flight, and no
+client may present a revocation as having stopped one" — and ADR-0097 §12 files
+the linearising mechanism as a deferred item needing its own ADR and a new seam.
+So the clause above states the boundary rather than closing it, which is the
+posture ADR-0146 §7 takes for its own residual: name what is not detected, and do
+not buy a bound from a mechanism that cannot carry it.
+
+**A lock would not close it either, which is the part worth being plain about.**
+The bytes reach the wire before the far end has acted on them, so there is always
+an instant at which a provisioning act is concurrent with a disclosure already
+committed. A mechanism that shrank the window while reading as though it had
+removed it would be exactly the overclaim ADR-0102 §9 forbids a client from
+making, relocated into an ADR.
 
 **The revision is deliberately not part of the binding, and that asymmetry is the
 decision.** Binding it would make every rotation invalidate every parked
@@ -1208,7 +1247,12 @@ only what is in the request before the ruling is bound at all. Round 2 then foun
 value in place for rotation; round 3 that the identity check and the credential
 read are two `await`-separated moments with a window between them; and round 4
 that comparing the identity across that window is defeated by an A → B → A
-re-provisioning.
+re-provisioning. Round 5's finding — a lease from the post-read check across the
+transport's write — was **contested rather than folded**: §6 now states that
+boundary as a decision, on ADR-0097 §5a's refusal of a lease and ADR-0102 §9's
+in-flight rule, because the send that follows an already-passed check is the one
+that was authorised and the requested mechanism is one the corpus examined and
+declined.
 §6 now carries the account's identity beside its credential reference, the
 endpoint alongside both, the callable's three-way refusal behind all of them, and
 ADR-0097 §5a's one-step/re-check/fail-closed discipline over the read, and a
