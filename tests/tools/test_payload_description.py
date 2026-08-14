@@ -484,6 +484,24 @@ def test_a_payload_declaration_establishing_a_non_tier_is_refused() -> None:
         PayloadDeclaration(tool_id="send_email", arguments=(forged,))
 
 
+def test_a_payload_declaration_built_from_a_list_cannot_be_edited_afterwards() -> None:
+    """Round 11's mutation, on the declaration on this side of the pair."""
+    body = PayloadArgument(name="body", establishes_tier=None)
+    mutable = [body]
+    declaration = PayloadDeclaration(tool_id="send_email", arguments=mutable)  # type: ignore[arg-type]
+
+    mutable[0] = PayloadArgument(name="body", establishes_tier=DataTier.SECRET)
+
+    assert declaration.arguments == (body,)
+    assert declaration.arguments[0].establishes_tier is None
+
+
+def test_a_payload_declaration_whose_arguments_are_not_a_sequence_is_refused() -> None:
+    """The snapshot has to be takeable before it can be checked."""
+    with pytest.raises(PayloadDescriptionError, match="a sequence of arguments"):
+        PayloadDeclaration(tool_id="send_email", arguments=None)  # type: ignore[arg-type]
+
+
 def test_a_payload_declaration_naming_no_tool_is_refused_without_rendering_it() -> None:
     """The tool id opens every other refusal, so it is checked before it is."""
     needle = "the secret is swordfish"

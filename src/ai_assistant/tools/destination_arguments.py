@@ -183,6 +183,17 @@ class DestinationDeclaration:
             # with it and a forged one is whatever a caller wrote.
             msg = "a destination declaration names the tool it describes"
             raise DestinationSelectionError(msg)
+        # Snapshotted into a tuple **before** anything is checked, because a
+        # `list` passed where the annotation says `tuple` leaves the caller
+        # holding the container this type validated: replace an entry afterwards
+        # and a declaration checked for one recipient set is used for another,
+        # with no invariant re-run. Frozen protects the field, not the object the
+        # field points at. Adversarial review found it on round 11.
+        given: object = self.arguments
+        if isinstance(given, str) or not isinstance(given, Sequence):
+            msg = f"{tool_id}: a destination declaration holds a sequence of arguments"
+            raise DestinationSelectionError(msg)
+        object.__setattr__(self, "arguments", tuple(given))
         if not self.arguments:
             msg = (
                 f"{tool_id}: a destination declaration names at least one "

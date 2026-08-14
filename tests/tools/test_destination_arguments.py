@@ -208,6 +208,34 @@ def test_a_declaration_holding_a_malformed_member_refuses_before_it_is_used() ->
         DestinationDeclaration(tool_id="send_email", arguments=(unhashable,))
 
 
+def test_a_declaration_built_from_a_list_cannot_be_edited_afterwards() -> None:
+    """Adversarial round 11: frozen protects the field, not what the field points at.
+
+    A ``list`` passed where the annotation says ``tuple`` leaves the caller
+    holding the container this type validated — replace an entry after
+    construction and a declaration checked for one recipient set is used for
+    another, with no invariant re-run. The arguments are snapshotted into a tuple
+    before anything is checked.
+    """
+    mutable = [_TO]
+    declaration = DestinationDeclaration(tool_id="send_email", arguments=mutable)  # type: ignore[arg-type]
+
+    mutable[0] = DestinationArgument(
+        name="body", protocol=DestinationProtocol.SMTP, multiple=False, required=True
+    )
+
+    assert declaration.arguments == (_TO,)
+    assert [one.supplied for one in select_destinations(declaration, {"to": ("a@b.com",)})] == [
+        "a@b.com"
+    ]
+
+
+def test_a_declaration_whose_arguments_are_not_a_sequence_is_refused() -> None:
+    """The snapshot has to be takeable before it can be checked."""
+    with pytest.raises(DestinationSelectionError, match="a sequence of arguments"):
+        DestinationDeclaration(tool_id="send_email", arguments=None)  # type: ignore[arg-type]
+
+
 def test_a_declaration_naming_no_tool_is_refused_without_rendering_it() -> None:
     """Every other refusal opens with the tool id, so it is checked before it is."""
     needle = "the secret is swordfish"
