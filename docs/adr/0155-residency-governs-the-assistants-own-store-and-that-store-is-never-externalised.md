@@ -722,11 +722,19 @@ store reaching an egress payload, today, in code?" is: nothing.** The owner's
 argument, position, extent and discloser provenance — and *not* where the content
 came from. A memory record recited into `body` and a paragraph the model wrote for
 the send are described identically, because ADR-0146's axis does not separate them.
-ADR-0146 §5's third clause compounds it and two ratified ADRs already say so
-(ADR-0150 §6, ADR-0152 §12): a value this system holds as Tier 1, placed into a
-field that establishes no tier, is described with an extent and a provenance and no
-tier, so the owner is not told its tier either. ADR-0154 §6 carries both residues
-and this ADR closes neither.
+ADR-0146 §5's third clause obliges better than that and no mechanism delivers it,
+which is a gap rather than a licence, and two ratified ADRs already record it as one
+(ADR-0150 §6, ADR-0152 §12). That clause rules on this case directly: moving a value
+"into a field that establishes none … does not relieve the implementation of
+describing it at its tier". So a value this system holds as Tier 1, recited into a
+body field, is *owed* a description at its tier — and what the owner is shown today
+states an extent and a provenance and no tier, because the description's determinism
+inputs cannot produce one. ADR-0150 §6 declines to close that and names the lane
+owing the mechanism, a recorded per-span classification carried from selection; and
+ADR-0152 §12's third clause states that nothing since has discharged it. The
+absent machinery is the same recorded-origin machinery **#1154** carries for §3,
+which is why the two residues have one shape and one remedy. ADR-0154 §6 carries
+both and this ADR closes neither.
 
 **Two concrete paths, and §3 answers them differently — a registration lane should
 not confuse them.** `recall_memory` is registered today and returns matching records
