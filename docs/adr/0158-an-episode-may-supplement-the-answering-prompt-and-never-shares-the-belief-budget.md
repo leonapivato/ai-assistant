@@ -1,6 +1,6 @@
 # 158. An episode may supplement the answering prompt, and never shares the belief budget
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-15
 - **Changes no Protocol's *shape* and no `core` type's fields, and widens the
   documented semantics of two — flagged under golden rule 5 rather than smuggled.** The read §1 admits is
@@ -13,12 +13,9 @@
   `TurnResult.memories` share — "then the records retrieved as relevant, best
   first *within that group*" — does not describe a post-tail region holding beliefs
   ahead of episodes. That is a change to a Protocol's and a `core` type's
-  documented meaning, so
-  [ADR-0015](0015-simplify-the-agent-workflow.md) §5 governs and this ADR is what
-  satisfies it: **its own docs-only PR, reviewed while `Proposed` so a finding can
-  still change the decision, merged and flipped to `Accepted` before anything
-  implements against it.** §5 below states both widened contracts and §7 puts the
-  two docstrings in the implementing lane's hands, which is exactly the form
+  documented meaning, so [ADR-0015](0015-simplify-the-agent-workflow.md) §5
+  governs. §5 below states both widened contracts and §7 puts the two docstrings
+  in the implementing lane's hands, which is exactly the form
   [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md) §5
   took for the first widening of this same sequence.
 
@@ -30,6 +27,14 @@
   a ruling *against* surface still binds the implementing lane's surface. **No code
   changes with this ADR**; the implementation is #1163's lane 7, which needs this
   text as its authority.
+- **Ratified on `CONTRIBUTING.md` → "Finishing an ADR PR", which is where that
+  sequence is argued.** Drafted, reviewed and revised as `Proposed`; the required
+  set is adversarial **and** architecture (above), and the status was flipped only
+  once **both returned clean on one tree**. Findings raised after the flip
+  returned this ADR to `Proposed` and were folded there, per that block's step 3,
+  so it records its ratification on its second flip. Both reviews were re-run on
+  the flipped tree. Nothing implements against this ADR until it has merged
+  (ADR-0015 §5, golden rule 5).
 - **Partially supersedes on ratification:**
   [ADR-0022](0022-the-closed-learning-loop.md) §3's Retrieval row, in the scope of
   the episodic supplement's own read. That row assigns one outcome to the retrieval
@@ -742,10 +747,14 @@ The lane pins each of the following as a test, and each is separately owed.
 > **Normative.** The lane pins that a failing episodic read leaves the belief
 > composition intact and `TurnResult.memory_degraded` unset (§4).
 
-> **Normative.** The lane pins the separator case: a turn with a non-empty
-> episodic continuity tail, an empty belief composition and a relevant
+> **Normative.** The lane pins the separator case with a tail: a turn with a
+> non-empty episodic continuity tail, an empty belief composition and a relevant
 > cross-conversation episode, asserting the episode is absent from `memories`
 > (§4).
+
+> **Normative.** The lane pins the separator case without one: a turn with an
+> empty history, an empty belief composition and a relevant cross-conversation
+> episode, asserting the episode is absent from `memories` (§4).
 
 The first three are the ones a refactor would break silently, and they are §2 and
 §3 in executable form. The rest are §4. The band-restriction case is constructible
@@ -753,14 +762,22 @@ from the fixture that already exists —
 `tests/orchestration/test_conversations.py`'s `_foreign_episode` — which is why §3
 pins the band rather than trusting the producer.
 
-**The separator case is called out because the obvious test does not cover it.**
-"The supplement's records follow the belief records" passes with a single belief
-present, while an implementation that appends unconditionally still recreates the
-false-continuity rendering §4 exists to prevent — the empty-belief state is where
-the clause binds and the ordering assertion is silent. It is asserted on
-`memories` rather than on the rendered prompt so the test does not depend on the
-planner's private split, and it is exactly the state a resumed conversation
-reaches when its query matches no belief.
+**The separator cases are called out because the obvious test does not cover
+them.** "The supplement's records follow the belief records" passes with a single
+belief present, while an implementation that appends unconditionally still
+recreates the false-continuity rendering §4 exists to prevent — the empty-belief
+state is where the clause binds and the ordering assertion is silent. Both are
+asserted on `memories` rather than on the rendered prompt, so neither test depends
+on the planner's private split.
+
+**And there are two of them because §4's clause keys on the absence of a
+separator, which two different states produce.** A resumed conversation whose
+query matches no belief has a tail and no separator; a *fresh* conversation has no
+tail either, so the supplement would be the whole of `memories` and the leading
+`EPISODIC` run would be all of it. An implementation that reads the clause as "drop
+when the history is non-empty and the beliefs are empty" passes the first test and
+fails the second, and the state it fails on is the first turn of every new
+conversation.
 
 The lane also owes the retrieval trace's honesty: ADR-0119's `RETRIEVAL` trace is
 emitted per `search` call inside the store, so a supplement is naturally a second
