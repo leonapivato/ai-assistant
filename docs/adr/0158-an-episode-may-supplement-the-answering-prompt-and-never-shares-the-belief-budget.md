@@ -28,13 +28,19 @@
   changes with this ADR**; the implementation is #1163's lane 7, which needs this
   text as its authority.
 - **Ratified on `CONTRIBUTING.md` → "Finishing an ADR PR", which is where that
-  sequence is argued.** Drafted, reviewed and revised as `Proposed`; the required
-  set is adversarial **and** architecture (above), and the status was flipped only
-  once **both returned clean on one tree**. Findings raised after the flip
-  returned this ADR to `Proposed` and were folded there, per that block's step 3,
-  so it records its ratification on its second flip. Both reviews were re-run on
-  the flipped tree. Nothing implements against this ADR until it has merged
-  (ADR-0015 §5, golden rule 5).
+  sequence is argued rather than re-argued here.** The required set is adversarial
+  **and** architecture (above). This ADR is drafted, reviewed and revised as
+  `Proposed`; its status is flipped **only once both return clean on one tree**,
+  and both are re-run on the flipped tree. A finding arriving after a flip returns
+  it to `Proposed` and is folded there, per that block's step 3 — this ADR took
+  that route once, so it records its ratification on its second flip. Nothing
+  implements against it until it has merged (ADR-0015 §5, golden rule 5).
+
+  **The tense is deliberate.** Written prospectively, the bullet is true in both
+  states the document passes through, so the ratifying commit changes the `Status`
+  line and nothing else — which is what makes that block's step 3 round "cheap by
+  construction: the flipped tree differs from the one already judged by a status
+  line".
 - **Partially supersedes on ratification:**
   [ADR-0022](0022-the-closed-learning-loop.md) §3's Retrieval row, in the scope of
   the episodic supplement's own read. That row assigns one outcome to the retrieval
