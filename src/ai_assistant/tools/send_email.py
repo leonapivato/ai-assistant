@@ -104,32 +104,53 @@ if TYPE_CHECKING:
 SEND_EMAIL_ID: Final = "send_email"
 
 
-def _recipients() -> dict[str, FrozenJson]:
+def _recipients(*, minimum: int | None = None) -> dict[str, FrozenJson]:
     """One recipient argument's subschema, built fresh on every call.
 
-    An array of strings, marked destination-bearing and stating the tier its field
-    establishes (ADR-0152 §3). ``to``, ``cc`` and ``bcc`` declare the same three
-    facts, and ``to``'s ``minItems`` is added on top rather than repeated — which
-    is why this is a function rather than a shared constant: ``core`` freezes what
-    a ``ToolDefinition`` ends up holding, but the literal handed to it is an
-    ordinary ``dict``, and one shared mapping would make ``to``'s bound reachable
-    from ``cc``.
+    **Both flat forms at once** — a string, or an array of strings — marked
+    destination-bearing and stating the tier its field establishes (ADR-0152 §3).
+    ``to``, ``cc`` and ``bcc`` declare the same three facts, and ``to``'s
+    ``minItems`` is passed in rather than repeated — which is why this is a
+    function rather than a shared constant: ``core`` freezes what a
+    ``ToolDefinition`` ends up holding, but the literal handed to it is an ordinary
+    ``dict``, and one shared mapping would make ``to``'s bound reachable from
+    ``cc``.
 
-    The array form is ADR-0152 §4's **flat declaration**, one of exactly two shapes
-    a destination-bearing argument may take. Not a style choice: it is what makes a
-    supplied form impossible to extract from inside a structured value, so
-    ADR-0150 §4's supplied-form invariant is total rather than checked.
+    The two-branch ``anyOf`` is ADR-0157 §1's third **flat declaration**, which
+    replaces ADR-0152 §4's enumeration of two shapes with three. It admits no value
+    §4's per-call clause did not admit already; what it changes is that this
+    producer can now *declare* the union, so the singular phrasing a planner
+    composes — ``{"to": "alice@example.com"}``, which #1159 measured as unreachable
+    — validates against this schema instead of being refused before any ruling.
+    Neither branch is structured, which is what keeps a supplied form impossible to
+    extract from inside a value, so ADR-0150 §4's supplied-form invariant stays
+    total rather than checked (ADR-0157 §2).
+
+    ``minItems`` rides on the **array branch** and not beside ``anyOf``, which
+    ADR-0157 §1's fourth clause binds the author to: the two placements admit the
+    same values, and a reader checking the array form's constraints should find
+    them on the array form. Losing it entirely is the one thing the restructuring
+    could silently cost — ``{"to": []}`` would then satisfy the schema and produce
+    **no** span at all, which is ADR-0150 §4's total omission arriving through a
+    declaration rather than being refused by one.
 
     The keyword *names* are imported from the reader rather than spelled here, and
     each value is the enum member's own ``value`` as §3 requires — so the producer
     and the seam that reads it cannot drift apart by a typo.
 
+    Args:
+        minimum: The array branch's ``minItems``, where the argument states one.
+            ``None`` leaves the branch unbounded, which is what ``cc`` and ``bcc``
+            declare: an omitted optional recipient list is not an empty one.
+
     Returns:
         The subschema, owned by the caller.
     """
+    array: dict[str, FrozenJson] = {"type": "array", "items": {"type": "string"}}
+    if minimum is not None:
+        array["minItems"] = minimum
     return {
-        "type": "array",
-        "items": {"type": "string"},
+        "anyOf": [{"type": "string"}, array],
         DESTINATION_KEYWORD: DestinationProtocol.SMTP.value,
         TIER_KEYWORD: DataTier.PERSONAL.value,
     }
@@ -151,7 +172,7 @@ SEND_EMAIL: Final = ToolDefinition(
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
-            "to": {**_recipients(), "minItems": 1},
+            "to": _recipients(minimum=1),
             "cc": _recipients(),
             "bcc": _recipients(),
             "subject": {"type": "string"},

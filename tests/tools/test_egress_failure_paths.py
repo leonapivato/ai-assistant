@@ -443,8 +443,8 @@ async def test_the_payload_is_the_arguments_and_there_is_no_second_copy_to_subst
     "payload",
     [
         pytest.param({"attachment": "x"}, id="an-argument-this-seam-does-not-transmit"),
-        pytest.param({"to": "alice@example.invalid"}, id="recipients-not-a-list"),
         pytest.param({"to": [1]}, id="a-recipient-that-is-not-text"),
+        pytest.param({"to": {"address": "alice@example.invalid"}}, id="a-structured-recipient"),
         pytest.param({"subject": 7}, id="a-subject-that-is-not-text"),
         pytest.param({"body": ["a", "b"]}, id="a-body-that-is-not-text"),
         pytest.param({"to": []}, id="no-recipient-at-all"),
@@ -467,6 +467,34 @@ async def test_arguments_that_are_not_a_submission_are_refused(payload: dict[str
         await subject.transmit(binding(), call)  # type: ignore[arg-type]  # deliberately ill-shaped
 
     assert ring.reads == []
+
+
+async def test_a_string_valued_recipient_argument_transmits_to_exactly_that_recipient() -> None:
+    """ADR-0157 §1 and §7, inverting what this file pinned as ``recipients-not-a-list``.
+
+    ``{"to": "alice@example.invalid"}`` used to be refused here, and the case is
+    **inverted rather than deleted** so the record shows the behaviour changed
+    rather than the test disappearing (ADR-0157 §7). What changed is upstream of
+    this seam: a destination-bearing argument may now declare both flat forms, so a
+    string is a shape the binder admits and the ruling authorises, and a transport
+    refusing it would refuse a call the whole chain had approved.
+
+    The string is read as the one recipient it names. That is a **rendering** of an
+    already-authorised call rather than a re-derivation of one (ADR-0148 §4's third
+    clause): the arguments reach the transport exactly as the decision's digest
+    binds them, and what varies is how SMTP's envelope is built from them. Asserted
+    on the octets, because "it did not raise" is satisfied by a transport that sent
+    to nobody.
+    """
+    channel = ScriptedChannel(*implicit_tls_script())
+    subject = transport(channel, secrets=await keyring())
+    string_valued: dict[str, object] = {**ARGUMENTS, "to": "Alice@Example.Invalid"}
+
+    await subject.transmit(binding(indexed=False), string_valued)  # type: ignore[arg-type]  # a string `to` is the point
+
+    assert [line for line in channel.commands() if line.startswith("RCPT TO:")] == [
+        "RCPT TO:<Alice@example.invalid>"
+    ]
 
 
 @pytest.mark.parametrize(

@@ -429,6 +429,7 @@ def binding(  # noqa: PLR0913 — one keyword per fact a ruling fixes; grouping 
     subject: str = "quarterly report",
     body: str = "attached, as promised",
     describes: Iterable[str] = ("subject", "body"),
+    indexed: bool = True,
 ) -> EgressBinding:
     """One authorised binding, as a ruling fixed it.
 
@@ -448,6 +449,12 @@ def binding(  # noqa: PLR0913 — one keyword per fact a ruling fixes; grouping 
             Named rather than given by value so that a case in which the subject
             and the body are the same text can still describe exactly one of them
             — which is the arrangement the multiset coverage check exists for.
+        indexed: Whether each recipient span carries its position. ``False`` is
+            what the binder derives for a **string-valued** destination argument,
+            which ADR-0157 §1 makes declarable: ADR-0150 §4 gives a string one
+            span with no index, and an array one span per element with its index
+            (ADR-0157 §3). Only meaningful with a single recipient, since a string
+            names exactly one.
 
     Returns:
         A binding a policy could have ruled on.
@@ -468,7 +475,7 @@ def binding(  # noqa: PLR0913 — one keyword per fact a ruling fixes; grouping 
         *(
             EgressSpan(
                 argument="to",
-                index=index,
+                index=index if indexed else None,
                 provenance=DiscloserProvenance.USER_AUTHORED,
                 extent=len(supplied),
                 destination=EgressDestination(

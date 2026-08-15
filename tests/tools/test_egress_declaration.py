@@ -157,6 +157,30 @@ def test_a_protocol_outside_the_seams_canonicaliser_set_is_refused() -> None:
         read_declaration(_schema({"to": _RECIPIENTS}), tool_id="t", canonicalises=frozenset())
 
 
+@pytest.mark.parametrize(
+    "branches",
+    [
+        pytest.param({"type": "string"}, id="a-subschema-rather-than-a-list"),
+        pytest.param("string", id="a-string"),
+        pytest.param(None, id="nothing-at-all"),
+    ],
+)
+def test_an_anyof_that_is_not_a_list_of_branches_is_refused(branches: FrozenJson) -> None:
+    """ADR-0157 §1 read against a caller that checked nothing (ADR-0152 §10).
+
+    ``ToolDefinition`` refuses a schema whose ``anyOf`` is not an array before this
+    reader runs on the ordinary path — draft 2020-12 says what ``anyOf`` holds — so
+    this is only reachable by calling the reader directly, which the contract
+    obliges it to survive. It is here rather than in the shared suite for exactly
+    that reason: the suite arranges a ``ToolDefinition``, and this shape cannot be
+    one.
+    """
+    misshapen = {"anyOf": branches, DESTINATION_KEYWORD: "smtp", TIER_KEYWORD: "personal"}
+
+    with pytest.raises(EgressBindingError, match="anyOf"):
+        read_declaration(_schema({"to": misshapen}), tool_id="t", canonicalises=_ALL)
+
+
 def test_a_non_mapping_property_subschema_declares_nothing_rather_than_raising() -> None:
     """A schema whose property is not an object declares no keyword, so it binds none.
 

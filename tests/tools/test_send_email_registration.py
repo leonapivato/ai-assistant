@@ -59,6 +59,7 @@ from ai_assistant.core.types import (
     PermissionRuling,
     ToolCall,
     ToolOutcome,
+    parameter_violations,
 )
 from ai_assistant.orchestration.selection import Preference, eligible_candidates, select
 from ai_assistant.testing import FakeMemoryStore
@@ -351,6 +352,53 @@ async def test_an_authorised_call_reaches_the_transport_and_the_message_goes_out
     # The credential travels inside AUTH PLAIN base64-encoded; the plaintext must
     # not appear, which is what the transport's own redaction is for.
     assert CREDENTIAL not in written
+
+
+async def test_the_singular_phrasing_validates_binds_and_reaches_the_wire() -> None:
+    """#1160 closed, over the **real** ``SEND_EMAIL`` and the whole chain (ADR-0157 §7).
+
+    §7 puts this obligation on the implementing lane by name, and says why every
+    other test in its list can pass while #1160 stays open: a lane could widen the
+    flatness check, widen the transport, prove both against a *synthetic* tool
+    declaring the third form, leave this tool's own ``to`` array-only, and ship a
+    green suite over the exact call #1159 recorded as refused.
+
+    So the subject here is ``SEND_EMAIL`` itself, and the call is the one leg 12's
+    QA run measured — "send an email to X", which the planner composes as a bare
+    string because it is tool-blind by design (ADR-0044 lineage) and picks the form
+    the sentence's grammar suggests. Three assertions, one per stage that used to
+    stop it: ADR-0145's schema validation reports **no** violation, so the step is
+    no longer refused as ``step_parameters_invalid``; the seam binds it, into the
+    single indexless span ADR-0150 §4 gives a string (ADR-0157 §3); and the octets
+    reach the scripted endpoint.
+    """
+    channel = ScriptedChannel(*implicit_tls_script())
+    integration, ring = await _configured(channel=channel)
+    registry = build_default_registry(memory=FakeMemoryStore(), egress=integration)
+    seam = _seam(integration, registry)
+    parameters: Mapping[str, FrozenJson] = {
+        "to": "Alice@Example.Invalid",
+        "subject": "quarterly report",
+        "body": "attached, as promised",
+    }
+
+    assert parameter_violations(SEND_EMAIL.parameters_schema, parameters) == ()
+
+    bound = await seam.bind(
+        SEND_EMAIL, parameters=parameters, provenance=CarriedProvenance(spans={})
+    )
+    assert bound is not None
+    recipients = [span for span in bound.binding.spans if span.destination is not None]
+    assert [span.index for span in recipients] == [None]
+
+    result = await registry.invoke(
+        _authorised(dict(bound.parameters), bound.binding), timeout=TIMEOUT
+    )
+
+    assert result.outcome is ToolOutcome.SUCCEEDED
+    written = channel.written.decode()
+    assert "RCPT TO:<Alice@example.invalid>" in written
+    assert ring.reads == [SLOT]
 
 
 async def test_a_transport_refusal_comes_back_as_a_classified_failure_not_an_escape() -> None:
