@@ -16,7 +16,32 @@
   and architecture** — a ruling *against* surface still binds the implementing
   lane's surface. It is docs-only and **no code changes with it**; the
   implementation is #1163's lane 7, which needs this text as its authority.
-- **Amends and supersedes nothing.** Applying
+- **Partially supersedes on ratification:**
+  [ADR-0022](0022-the-closed-learning-loop.md) §3's Retrieval row, in the scope of
+  the episodic supplement's own read. That row assigns one outcome to the retrieval
+  stage's failure — *"degrade to no memories, `memory_degraded=True`"* — and §4
+  below gives a failing supplementary read a different one: the belief composition
+  already in hand is kept and the flag is not set. [ADR-0070](0070-amendment-and-supersession-rules.md)
+  §1's test decides the form and decides it against an amendment: the replaced
+  clause is a **rule an implementer obeys** rather than an explanation of one, and
+  a reader holding only ADR-0022 §3 would, on that failure, discard a good belief
+  composition and report an unpersonalised answer that was not one. So it is a
+  partial supersession, taking ADR-0070 §3's form and §4's status vocabulary, and
+  ADR-0022's `Status` line and dated note land **in this same change** — the hazard
+  ADR-0070 §1 guards against, that a `Status` line names an ADR which does not yet
+  exist, does not arise.
+
+  **The scope is one row read against one read, and nothing else.** ADR-0022 §3's
+  rule for the *belief* composition is untouched and still governs
+  `ai_assistant.orchestration.loop`: a failure there degrades to no memories with
+  `memory_degraded=True`, all-or-nothing across the bands, exactly as today. §3's
+  framing sentence — "a stage aborts the turn when continuing would require
+  inventing something; otherwise it degrades and says so" — is not replaced and is
+  what §4's clause obeys: a supplement's absence invents nothing, and the paragraph
+  under §3's table, on why `memory_degraded` is on `TurnResult` at all, is the very
+  reasoning §4 applies to conclude the flag must **not** be set here. Every other
+  row of the table, and every other section of ADR-0022, stands.
+- **Amends and supersedes nothing else.** Applying
   [ADR-0070](0070-amendment-and-supersession-rules.md) §1's test, no clause of a
   prior ADR is replaced here. The contestable case is
   [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md) §6's
@@ -40,7 +65,11 @@
   (episodic memory as multi-channel — read as context, ratified in no part; §4's
   revisit trigger is where its calendar channel would land); ADR-0005 §1
   (`EpisodicMemory`, the four kinds, and `content` as a canonical rendering), §2
-  (`Provenance`, and `evidence` as episode references); ADR-0007 §2 (retention
+  (`Provenance`, and `evidence` as episode references); ADR-0022 §3 (failure
+  behaviour stage by stage — the Retrieval row this ADR partially supersedes, and
+  the framing sentence and `memory_degraded` rationale it does not); ADR-0084 §2
+  (`TurnResult` is `core` contract surface, which is why §4 declines to widen a
+  field of it); ADR-0007 §2 (retention
   enforced at read time), §5 (size caps deferred); ADR-0015 §5 (what a substantive
   contract ADR is); ADR-0028 §7 (batch ingestion declined for want of a consumer);
   ADR-0045 §1 (as-of retrieval declined on the same ground); ADR-0070 §1 (the
@@ -281,7 +310,9 @@ can configure a system that asks for more transcript than belief.
 real rather than an oversight.** ADR-0113 §2 refuses a full-page guarantee
 outright — "a call may return fewer than `limit` records while eligible ones
 exist" — so a query matching two beliefs and five episodes yields an
-episode-majority prompt under any bound at all. That case is **accepted**, because
+episode-majority prompt under any bound at all (a query matching *no* beliefs is
+§4's separator case and drops the supplement entirely, for an unrelated reason).
+That case is **accepted**, because
 it is not the case the ceiling exists for. The hollowing risk §2 identifies is an
 episode *displacing* a belief below a shared cut; a belief that was never
 retrieved was not displaced by anything, and a prompt thin in beliefs is thin
@@ -374,6 +405,46 @@ therefore what the renderer was written to expect. Any other placement is a defe
 rather than a preference: a supplement inserted between the tail and the beliefs
 would extend the leading run, and the planner would render relevance-retrieved
 episodes from other conversations **as this conversation's recent turns**.
+
+**And a prefix split needs a separator, which the belief group only usually
+supplies.** The split ends at the first non-`EPISODIC` record, so any belief at all
+between the tail and the supplement keeps the two groups apart — three beliefs and
+five episodes render correctly. Where the belief composition comes back *empty*,
+there is no separator: the tail and the supplement form one unbroken run of
+`EPISODIC` records, and the whole of it renders under the tail's heading. §3
+accepts a thin or empty belief read as a normal outcome, so this is a reachable
+state and not a corner.
+
+> **Normative.** The supplement is appended only where the records preceding it
+> contain at least one non-`EPISODIC` record. Where they do not, the supplement is
+> dropped.
+
+**This is a renderer constraint, stated as one, and it is narrow.** It is not the
+dynamic cap §3 rejects: that would throttle the supplement in proportion to belief
+richness across its whole range, penalising the sparse case everywhere. This
+withholds it in exactly one degenerate state, and for a reason that is about the
+prompt's group encoding rather than about how much transcript is appropriate.
+
+**The cost of getting it wrong is a fabrication, not a thinner prompt.** An episode
+retrieved by relevance from a conversation three weeks ago, rendered under "recent
+conversation turns", tells the model the user said it moments ago. That is a false
+claim about continuity, produced silently, and it is worse than the supplement
+being absent. Dropping is therefore the conservative direction, and it is where a
+positional encoding has to yield.
+
+> **Normative.** Carrying an explicit tail/retrieved boundary to the planner, which
+> would remove the clause above, is a `Planner` contract change and takes its own
+> ADR.
+
+ADR-0074 §5 refused a `history` parameter on `Planner` because "both groups are
+`MemoryRecord`s the planner already renders and a second channel would split one
+prompt input in two **for a distinction it does not act on**." That premise has
+moved: the renderer now acts on the distinction — it labels the groups
+differently — and a second episodic group is what makes position insufficient to
+carry it. This ADR does not reopen that refusal, because doing so is golden rule 5
+surface and the supplement is deliverable without it; it records that the ground
+the refusal stood on has changed, so the next lane to reach it is not arguing from
+a stale premise.
 
 > **Normative.** An episode already present in the continuity tail is not repeated
 > by the supplement; the tail's copy is kept and the supplement's is dropped.
