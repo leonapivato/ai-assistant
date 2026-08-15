@@ -684,21 +684,36 @@ non-zero initial value a commitment rather than a ratchet.
 > three-group wording. It adds no member, changes no signature, and touches
 > `types.py`, `config.py` and `errors.py` not at all.
 
-> **Normative.** The lane pins, as tests: that the belief composition's `kinds`
-> argument still excludes `EPISODIC`; that the belief budget passed to
-> `assemble_by_band` is unchanged by the supplement's presence or its bound; that
-> the supplement's read is band-restricted, by retrieving nothing for a relevant
-> `EPISODIC` record outside the `DERIVED` band; that the supplement's records
-> follow the belief records in `memories`; that an episode present in the
-> continuity tail is not repeated; that a failing episodic read leaves the belief
-> composition intact and `memory_degraded` unset; and **the separator case** — a
-> turn with a non-empty episodic continuity tail, an empty belief composition and
-> a relevant cross-conversation episode, asserting the episode is absent from
-> `memories` rather than falling inside the planner's tail split.
+The lane pins each of the following as a test, and each is separately owed.
 
-The first three are the ones a refactor would break silently, and they are the
-whole of §2 and §3 in executable form. The rest are §4. The band-restriction case
-is constructible from the fixture that already exists —
+> **Normative.** The lane pins that the belief composition's `kinds` argument
+> still excludes `EPISODIC` (§2).
+
+> **Normative.** The lane pins that the belief budget passed to
+> `assemble_by_band` is unchanged by the supplement's presence and by its bound
+> (§3).
+
+> **Normative.** The lane pins that the supplement's read is band-restricted, by
+> retrieving nothing for a relevant `EPISODIC` record outside the `DERIVED` band
+> (§3).
+
+> **Normative.** The lane pins that the supplement's records follow the belief
+> records in `memories` (§4).
+
+> **Normative.** The lane pins that an episode present in the continuity tail is
+> not repeated by the supplement (§4).
+
+> **Normative.** The lane pins that a failing episodic read leaves the belief
+> composition intact and `TurnResult.memory_degraded` unset (§4).
+
+> **Normative.** The lane pins the separator case: a turn with a non-empty
+> episodic continuity tail, an empty belief composition and a relevant
+> cross-conversation episode, asserting the episode is absent from `memories`
+> (§4).
+
+The first three are the ones a refactor would break silently, and they are §2 and
+§3 in executable form. The rest are §4. The band-restriction case is constructible
+from the fixture that already exists —
 `tests/orchestration/test_conversations.py`'s `_foreign_episode` — which is why §3
 pins the band rather than trusting the producer.
 
