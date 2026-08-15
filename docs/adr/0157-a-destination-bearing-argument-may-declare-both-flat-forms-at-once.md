@@ -24,10 +24,12 @@
   that shape". There is no structure here and no supplied form is located inside
   anything, so §2 below re-states the structural bar rather than spending it, and
   it stays live and unspent for the shape it was written against.
-- **No implementation lands with it.** No `src/`, no `tests/`, no
-  `pyproject.toml`. §7 states what the implementing lane owes and inventories the
-  three edits, so that lane is briefable from this text alone (ADR-0015 §5,
-  golden rule 5).
+- **No implementation lands with it**, by an operating choice this ADR is careful
+  not to dress up as a rule. No `src/`, no `tests/`, no `pyproject.toml`. This
+  decision adds no Protocol and no `core` type, so neither ADR-0015 §5 nor golden
+  rule 5 obliges the separate PR and §7 declines to invent an obligation in their
+  place; what it does instead is inventory the three edits and the tests, so the
+  implementing lane is briefable from this text alone.
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-15**,
   the durability form ADR-0100 established and ADR-0149, ADR-0150, ADR-0151,
   ADR-0152 and ADR-0153 each applied. This decision rests most heavily on
@@ -319,7 +321,22 @@ refuses a declaration that is not one of §1's three forms.
 exactly two edits to ADR-0152 here — its `Status` line, in the leading-token
 partial form ADR-0070 §4 fixes, and an appended dated header note — and ADR-0082
 §2 puts the substance of the record in the note on a line led by `Partially
-superseded by`. Both are made. Its `Accepted: 2026-08-14` line is added alongside,
+superseded by`.
+
+**Both are made in this ADR's ratification commit and not before**, which is
+ADR-0153's precedent against ADR-0126 in terms — "ADR-0126 is edited by this
+change, in its ratification commit". ADR-0070 §1 permits the `Status` edit for
+"a supersession that has landed" and says the permission "presupposes the
+superseding ADR *exists*"; a live decision recorded as partly replaced by a
+proposal that could still be withdrawn would be the unrecorded decision change
+that clause forbids, and it would be wrong in the window that matters most — while
+this ADR is under the review that could still change it. So while this ADR stands
+`Proposed`, ADR-0152 is untouched and the citation checker reports one liveness
+disagreement against this pair; that report is correct, says exactly that the
+supersession has not landed, is Tier 2 and fails nothing, and clears when the
+record is written.
+
+Its `Accepted: 2026-08-14` line is added alongside,
 preserving on the header the ratification fact that leaves the `Status` line when
 the supersession token takes the lead; that changes no decision and follows
 ADR-0126's header exactly. Not one word of ADR-0152's Context, Decision or
@@ -363,14 +380,23 @@ untouched; this ADR authorises no byte and §4 says so normatively.
 
 ### 7. What the implementing lane owes
 
-> **Normative.** This ADR ships as its own PR with no implementation, and the
-> implementation lands in a later lane after this ADR has merged `Accepted`
-> (ADR-0015 §5, golden rule 5). No lane lands the two together.
-
-> **Normative.** The implementing lane's fence is `src/ai_assistant/tools/**` and
-> `tests/tools/**`. No `core/` change is required or authorised by this ADR: no
+> **Normative.** No `core/` change is required or authorised by this ADR: no
 > Protocol, no `core` type, no validator and no `core` invariant moves, because
-> the value set is unchanged (§3).
+> the value set is unchanged (§3). The whole of the implementation lies in
+> `src/ai_assistant/tools/**` and `tests/tools/**`.
+
+**This ADR is delivered ahead of its implementation, and that is an operating
+choice rather than a requirement this decision imposes — the distinction matters
+because a later reader could otherwise cite it as one.** ADR-0015 §5 obliges
+separate delivery of "a substantive contract ADR — one adding or changing a
+Protocol or a `core/` type crossing subsystem boundaries", and golden rule 5
+obliges it of a Protocol change. By the clause above this decision is **neither**,
+so neither rule bites and this ADR asserts no clause of its own in their place.
+What put it in its own PR is the batch that dispatched it as its own lane, under
+the owner's standing rule that a lane delivers exactly one PR — a delivery
+decision, made where delivery decisions are made. A `tools/`-internal decision
+does not acquire a separate-PR obligation by having been written down, and no lane
+cites this ADR for one.
 
 The three edits, inventoried so the lane is briefable from this text:
 
@@ -443,6 +469,12 @@ while this ADR stands `Proposed` so that a finding can still change the decision
 it rather than re-deriving it, and the outcome is recorded here on ratification —
 in the ratification commit itself, not before it, because a paragraph asserting a
 verdict a review has not yet returned is a claim rather than a record.
+
+**That commit carries three things and no others**: this `Status` line moving
+`Proposed` → `Accepted`, the outcome paragraph above it, and ADR-0152's record —
+its `Status` line, its `Accepted` line and its appended dated note (§6). The
+third rides here rather than earlier for the reason §6 gives, and it is why the
+flip touches a second file.
 
 ## Consequences
 
