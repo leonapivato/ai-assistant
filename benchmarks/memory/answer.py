@@ -64,30 +64,73 @@ if TYPE_CHECKING:
     from benchmarks.memory.cases import BenchQuestion
     from benchmarks.memory.wiring import Harness
 
-__all__ = ["ANSWER_SYSTEM_PROMPT", "AnswerAttempt", "answer_question", "render_context"]
+__all__ = [
+    "ABSTENTION_PHRASE",
+    "ANSWER_SYSTEM_PROMPT",
+    "AnswerAttempt",
+    "answer_question",
+    "render_context",
+]
+
+#: The phrase the prompt sanctions for declining, exported so the tie between what the
+#: model is *asked* to say and what :func:`benchmarks.memory.grade.is_abstention`
+#: *detects* is a checkable fact rather than two strings that happen to agree. The
+#: detector is deliberately wider than this literal — it tolerates the near-misses a
+#: model produces anyway — but this is the phrase the instruction names, so it is the
+#: one that must land inside the detector for the measure to hold.
+ABSTENTION_PHRASE: Final = "I don't know"
 
 #: The instruction the answering model is given.
 #:
-#: **It names abstention explicitly**, and that is a decision worth arguing rather
-#: than assuming. #1029's P7 predicts we over-answer because "nothing in the pipeline
-#: currently signals 'retrieval found nothing sufficient'". That prediction is about
-#: the *pipeline*, and a prompt that forbade abstention would confirm it by
-#: construction while a prompt that never mentioned it would leave the result
-#: dependent on the answering model's habits. Naming it makes the measurement about
-#: what retrieval actually supplied: the model is told it may say it does not know,
-#: so an over-answer is the pipeline's, not the prompt's.
+#: **It asks for a best effort and it names abstention, and the balance between those
+#: two is the decision here.** The first version leaned the other way — "do not guess.
+#: If the records do not contain enough information to answer, reply exactly: I don't
+#: know" — reasoning that a prompt forbidding abstention would confirm #1029's P7 by
+#: construction, so naming abstention would keep the measurement about what retrieval
+#: actually supplied. The scored pilot measured what that produced instead: on
+#: LoCoMo's *answerable* questions the system declined 1,320 times out of 1,540, and
+#: 1,309 of those declines were that exact string (#1029's results comment, and the
+#: freeze-relevant follow-up recorded beneath it). The answering model read "do not
+#: guess" as a licence to decline on any uncertainty at all, so the headline
+#: over-abstention was manufactured by this literal rather than observed in the
+#: pipeline. The `deferrals.db` was empty in every case store, which rules the
+#: ``ASK_USER`` path out as a cause.
+#:
+#: So the instruction now asks for the system's best reading of the records and
+#: reserves the decline for the case it was meant for — nothing relevant retrieved.
+#: This does not reintroduce the confirm-by-construction problem the first version
+#: avoided: abstention is still *named*, still sanctioned, and still the instructed
+#: reply where the records are empty of the subject, so a system that cannot answer
+#: retains a way to say so. What changed is the threshold, from "any uncertainty" to
+#: "nothing relevant", which is the threshold the unanswerable populations are built
+#: to test.
+#:
+#: **Two clauses exist for the measure rather than for the answer.** The prompt asks
+#: for :data:`ABSTENTION_PHRASE` verbatim, because ``is_abstention`` reads the answer's
+#: text and the run has no other channel. And it forbids a stated confidence, because
+#: ``is_abstention`` is anchored at the start: a hedged best effort opening "the
+#: records do not clearly say, but ..." is scored as a decline by the detector even
+#: though it answered, which would move the artifact from the prompt into the grader
+#: instead of removing it.
 #:
 #: The literal is exported so a run's manifest can record it. A prompt is a
 #: configuration of the experiment, and a pilot whose prompt is not recoverable from
-#: its artifacts is not reproducible in the only sense a benchmark can be.
+#: its artifacts is not reproducible in the only sense a benchmark can be. Two runs
+#: whose prompts differ are two arms, which is why this change is a re-run under its
+#: own registration and not an amendment to the pilot's numbers.
 ANSWER_SYSTEM_PROMPT: Final = (
     "You are answering a question about a person's past conversations. "
     "The only information available to you is the numbered memory records below, "
     "retrieved from a long-term memory store. Answer from those records alone: do "
-    "not use general knowledge, and do not guess. If the records do not contain "
-    "enough information to answer, reply exactly: I don't know. "
+    "not use general knowledge. "
+    "Give your best answer whenever the records plausibly support one — including "
+    "when it has to be inferred, pieced together from several records, or read "
+    "through wording that differs from the question's, and including when you are "
+    "not certain. A best effort from the records is what is wanted. "
+    "Only if the records hold nothing relevant to the question, reply exactly: "
+    f"{ABSTENTION_PHRASE}. "
     "Otherwise answer as briefly as the question allows — a name, a date, a phrase — "
-    "with no preamble and no explanation."
+    "with no preamble, no explanation, and no statement of how confident you are."
 )
 
 #: What the model is shown when retrieval returned nothing at all. Stated rather than
