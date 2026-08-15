@@ -2871,6 +2871,36 @@ def test_the_retrieval_budget_is_the_depth_the_re_rank_evidence_bought() -> None
     assert composition_module.RETRIEVAL_LIMIT == 15
 
 
+def test_the_episodic_supplement_is_bounded_at_five_and_never_above_the_beliefs() -> None:
+    """ADR-0158 §3's ratified bound, and the ceiling it may never cross.
+
+    Two figures, one test, because the second is what the first means. 5 is a
+    judgement rather than a measured optimum — an episode is a verbatim turn where a
+    belief is a distilled sentence, and nothing has priced five of them — so §6's
+    ablation arm owns it in both directions and states the arithmetic that would take
+    it to zero. The **relation** is not tuning: it is where the product thesis stops
+    being documentation, since whatever the two numbers become, nobody can configure
+    a system that asks for more transcript than belief.
+    """
+    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT == 5
+    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT <= composition_module.RETRIEVAL_LIMIT
+
+
+async def test_the_composed_loop_is_built_with_the_roots_episodic_bound(tmp_path: Path) -> None:
+    """The constant is wired, not decorative (ADR-0158 §3, §5).
+
+    ``orchestration`` carries a default of its own and may not import this module, so
+    the two are held equal for the reader's sake and neither depends on the other.
+    What that leaves unproved — and what this checks — is that the deployment the
+    root builds asks for *this* figure, so moving it here moves what a turn does.
+    """
+    composed = build_composition(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        assert composed.engine._loop._episodic_limit == composition_module.EPISODIC_SUPPLEMENT_LIMIT
+    finally:
+        await composed.engine.aclose()
+
+
 class TestBuildMeasureReader:
     """The composition root's third function (ADR-0120 §9).
 

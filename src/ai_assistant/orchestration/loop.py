@@ -42,6 +42,7 @@ import structlog
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import MemoryStoreError, PlanningError
 from ai_assistant.core.types import (
+    BeliefBand,
     FeedbackKind,
     Goal,
     MemoryKind,
@@ -91,6 +92,53 @@ _FULL_CONFIDENCE = 1.0
 #: 256-id trace cap.
 _DEFAULT_RETRIEVAL_LIMIT = 15
 
+#: How many episodes the turn's **supplementary** read may add (ADR-0158 §3).
+#:
+#: Held equal to ``app/composition.py``'s ``EPISODIC_SUPPLEMENT_LIMIT`` exactly as
+#: the belief budget above is held equal to ``RETRIEVAL_LIMIT``, and for the same
+#: reason: the deployment figure is the root's, passed explicitly, and this one
+#: governs a direct construction.
+#:
+#: **A second budget, never a share of the first.** ADR-0158 §3 refuses the share
+#: because ``RETRIEVAL_LIMIT``'s 5→15 move was bought for beliefs on #1029's
+#: rank-miss measurement, and a share hands part of it back on no measurement —
+#: worst in precisely the deployments where the belief layer is working. Two
+#: budgets cost prompt size, which is the honest cost.
+#:
+#: 5 is a judgement rather than a measured optimum, and is stated as one: an
+#: episode is a verbatim turn against a belief's distilled sentence, so the count
+#: guard is a weaker guard on *bytes* than it looks. ADR-0158 §6's ablation arm
+#: owns the value, in both directions.
+_DEFAULT_EPISODIC_LIMIT = 5
+
+#: The kinds the episodic supplement's read selects (ADR-0158 §3) — ``EPISODIC``
+#: and nothing else, which is the half of the read that keeps a belief out of the
+#: supplement. Widening it to ``None`` would admit *derived beliefs* into a group
+#: appended after the belief group, which is the one way a belief could appear
+#: twice in one prompt; the tail deduplication in :meth:`LearningLoop._supplement`
+#: would not catch it, being scoped to the continuity tail.
+_SUPPLEMENT_KINDS: tuple[MemoryKind, ...] = (MemoryKind.EPISODIC,)
+
+#: The band the episodic supplement's read is pinned to (ADR-0158 §3).
+#:
+#: **Pinned rather than left at ``None``, and that is not an assumption about who
+#: writes.** Capture stamps ``OBSERVED`` unconditionally so every episode *this
+#: system writes* is ``DERIVED`` — but ``EpisodicMemory`` accepts any valid
+#: ``Provenance``, ADR-0074 §3 reserves an id namespace precisely because a foreign
+#: producer taking one is a fault it must contemplate, and ``band_of`` maps
+#: ``EXTERNAL`` to ``ATTESTED``. A band-blind flat read would therefore put an
+#: ``ATTESTED`` record into a bare relevance order beside ``DERIVED`` ones,
+#: bypassing the precedence ADR-0072 §5 exists to impose in the one read that has
+#: no composition to impose it. Pinned, the single call is correct by construction:
+#: an episode outside this band is simply not retrieved, which is the conservative
+#: direction. Making the first such record retrievable is a decision of its own and
+#: takes an ADR settling how the supplement composes across bands (ADR-0158 §3).
+#:
+#: The filter is on the *band* rather than on the source because band is what
+#: precedence is defined over — an ``INFERRED``-sourced episode is ``DERIVED`` and
+#: is retrievable, and nothing about precedence turns on the difference.
+_SUPPLEMENT_BANDS: tuple[BeliefBand, ...] = (BeliefBand.DERIVED,)
+
 #: The kinds a correction's drawer is resolved into (ADR-0122 §3), **fixed by that
 #: clause** and not asked of the processor.
 #:
@@ -137,7 +185,7 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _check_tuning(*, retrieval_limit: int, resolution_limit: int) -> None:
+def _check_tuning(*, retrieval_limit: int, resolution_limit: int, episodic_limit: int) -> None:
     """Reject tuning that would disable a read while looking healthy.
 
     A *silent* misconfiguration, which is why it is refused at construction
@@ -146,6 +194,18 @@ def _check_tuning(*, retrieval_limit: int, resolution_limit: int) -> None:
     unpersonalised with ``memory_degraded`` reading ``False`` — a generic answer
     presented as a healthy personal one, the exact failure
     :attr:`TurnResult.memory_degraded` exists to expose.
+
+    **``episodic_limit`` is checked on a different axis, and zero is allowed
+    there.** ADR-0158 §3's ceiling — the episodic bound never exceeds the belief
+    budget — is the one place the product thesis is stated checkably rather than
+    documented: whatever the numbers become, nobody can configure a system that
+    asks for more transcript than belief, and enforcing it here is what makes that
+    survive whoever tunes it next. A *zero* bound is not the silent failure the
+    paragraph above describes and is refused nowhere: the supplement is
+    non-essential by construction, a turn at a bound of zero is exactly as personal
+    as it would otherwise have been (ADR-0158 §4), and §6's retraction clause
+    explicitly may set it. What is refused is a negative or non-integral one, which
+    is a mistake rather than a decision.
 
     ``resolution_limit`` is checked for the sharper version of the same reason
     (ADR-0122 §3). A non-positive one makes ``search`` match nothing, so **every**
@@ -160,23 +220,32 @@ def _check_tuning(*, retrieval_limit: int, resolution_limit: int) -> None:
     retired.
 
     Raises:
-        TypeError: If either limit is not an integer.
-        ValueError: If either limit is not positive.
+        TypeError: If any limit is not an integer.
+        ValueError: If ``retrieval_limit`` or ``resolution_limit`` is not
+            positive, if ``episodic_limit`` is negative, or if ``episodic_limit``
+            exceeds ``retrieval_limit`` (ADR-0158 §3).
     """
     # `isinstance` rather than a bare `< 1`, which `1.5` and `inf` both survive
     # — and a non-integral limit reaches `MemoryStore.search`, where a store
     # slicing by it raises `TypeError` far from the mistake. `bool` is excluded
     # because it is an `int` subclass and a flag is not a count.
-    for name, value in (
-        ("retrieval_limit", retrieval_limit),
-        ("resolution_limit", resolution_limit),
+    for name, value, floor in (
+        ("retrieval_limit", retrieval_limit, 1),
+        ("resolution_limit", resolution_limit, 1),
+        ("episodic_limit", episodic_limit, 0),
     ):
         if isinstance(value, bool) or not isinstance(value, int):
             msg = f"{name} must be an integer, got {value!r}"
             raise TypeError(msg)
-        if value < 1:
-            msg = f"{name} must be at least 1, got {value}"
+        if value < floor:
+            msg = f"{name} must be at least {floor}, got {value}"
             raise ValueError(msg)
+    if episodic_limit > retrieval_limit:
+        msg = (
+            f"episodic_limit must not exceed retrieval_limit (ADR-0158 §3): "
+            f"{episodic_limit} > {retrieval_limit}"
+        )
+        raise ValueError(msg)
 
 
 class LearningLoop:
@@ -198,6 +267,7 @@ class LearningLoop:
         feedback: FeedbackProcessor,
         retrieval_limit: int = _DEFAULT_RETRIEVAL_LIMIT,
         resolution_limit: int = _DEFAULT_RESOLUTION_LIMIT,
+        episodic_limit: int = _DEFAULT_EPISODIC_LIMIT,
         now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
     ) -> None:
@@ -231,7 +301,15 @@ class LearningLoop:
                 sense, exactly like the writer's above, and a root that wires a
                 processor minting fewer has mis-wired the loop. :meth:`learn` is
                 what stops a breach of it from being silent.
-            retrieval_limit: How many memories a turn retrieves.
+            retrieval_limit: How many memories a turn retrieves. The **belief**
+                budget: it is never reduced, shared or made conditional by the
+                episodic supplement below (ADR-0158 §3).
+            episodic_limit: How many episodes the turn's supplementary read may
+                add, on top of ``retrieval_limit`` and never out of it (ADR-0158
+                §3). ``0`` disables the supplement, which is a supported
+                configuration rather than a misconfiguration — §6's retraction
+                clause is stated in exactly those terms — and is why this one
+                alone admits zero.
             resolution_limit: How wide the single ranked read is that resolves an
                 unpinned correction's drawer (ADR-0122 §3). Deliberately its own
                 knob rather than a reuse of ``retrieval_limit``: the two answer
@@ -248,11 +326,17 @@ class LearningLoop:
             id_factory: Supplies goal ids; injectable for the same reason.
 
         Raises:
-            TypeError: If ``retrieval_limit`` or ``resolution_limit`` is not an
-                integer (see :func:`_check_tuning`).
-            ValueError: If either is below 1 (see :func:`_check_tuning`).
+            TypeError: If any of ``retrieval_limit``, ``resolution_limit`` or
+                ``episodic_limit`` is not an integer (see :func:`_check_tuning`).
+            ValueError: If either of the first two is below 1, if
+                ``episodic_limit`` is negative, or if ``episodic_limit`` exceeds
+                ``retrieval_limit`` (see :func:`_check_tuning`).
         """
-        _check_tuning(retrieval_limit=retrieval_limit, resolution_limit=resolution_limit)
+        _check_tuning(
+            retrieval_limit=retrieval_limit,
+            resolution_limit=resolution_limit,
+            episodic_limit=episodic_limit,
+        )
         self._context = context
         self._memory = memory
         self._writes = writes
@@ -260,6 +344,7 @@ class LearningLoop:
         self._feedback = feedback
         self._retrieval_limit = retrieval_limit
         self._resolution_limit = resolution_limit
+        self._episodic_limit = episodic_limit
         self._clock = checked_clock(now, owner="LearningLoop")
         self._id_factory = id_factory
 
@@ -291,6 +376,16 @@ class LearningLoop:
         (:data:`~ai_assistant.orchestration.conversations.BELIEF_KINDS`,
         ADR-0074 §6), so a captured turn does not compete with beliefs for the
         retrieval budget.
+
+        **An episode may nonetheless reach the prompt, as a supplement with a
+        budget of its own** (ADR-0158). ``memories`` is therefore
+        ``recent + retrieved + supplement``: three groups, in that order, never
+        interleaved. The supplement is a *second* read
+        (:meth:`_supplement`), not a widening of the first — the sentence above
+        stays true and the belief budget is untouched — and position is how this
+        corpus expresses precedence into a prompt, so a distilled belief precedes
+        the raw turn it might have been distilled from even where the episode is
+        the more relevant record.
 
         Args:
             utterance: What the user said. It becomes the goal's statement
@@ -324,7 +419,8 @@ class LearningLoop:
         goal = self._goal_from(utterance)
         context = await self._context.assemble()
         retrieved, degraded = await self._retrieve(goal.statement)
-        memories = recent + retrieved
+        preceding = recent + retrieved
+        memories = preceding + await self._supplement(goal.statement, preceding=preceding)
         plan = await self._planner.plan(goal, context=context, memories=memories)
         return TurnResult(
             goal=goal,
@@ -602,6 +698,114 @@ class LearningLoop:
             _log.warning("memory_retrieval_degraded", stage="retrieve", exc_info=True)
             return (), True
         return tuple(memories), False
+
+    async def _supplement(
+        self, query: str, *, preceding: Sequence[MemoryRecord]
+    ) -> tuple[MemoryRecord, ...]:
+        """Retrieve *episodes* relevant to ``query``, to append after the beliefs.
+
+        ADR-0158 §1 admits the capability #791 held open: a question whose answer
+        was said once and never distilled is answerable from an episode the store
+        already holds, already embeds and already pays for. #1029's error anatomy
+        priced the alternative — 652 of LoCoMo's 1,540 answerable questions, 42%,
+        failed because the fact never became a belief, with the gold turn sitting in
+        the same store and the same index, unreachable only because
+        :meth:`_retrieve` asks for ``BELIEF_KINDS``.
+
+        **A separate read, and everything that keeps it from becoming naive RAG is
+        in this method's arguments.** ``kinds`` is
+        :data:`_SUPPLEMENT_KINDS` and ``bands`` is :data:`_SUPPLEMENT_BANDS`, both
+        pinned; the budget is this loop's own ``episodic_limit``, which never comes
+        out of the belief budget. Merging the two reads instead — one kind-blind
+        call — is what ADR-0158 §2 refuses: every episode is ``DERIVED`` by
+        construction so the band composition would contain nothing, ADR-0128 §1
+        binds ``kinds`` before the KNN cut so an admitted episode spends a candidate
+        slot no downstream pass can give back, and a store holds an episode per turn
+        against a belief per distilled fact — 17 to 42 beliefs from ~300 turns on the
+        pilot's corpus. Under one shared budget the belief layer would be routinely
+        displaced from its own answering prompt, not occasionally outranked.
+
+        **The separator rule, which is a renderer constraint and not a second
+        cap** (ADR-0158 §4). ``planning.planner`` splits ``memories`` into the
+        conversation tail and the retrieved group by taking the **leading run** of
+        ``EPISODIC`` records, so any belief between the two keeps them apart. Where
+        the belief composition is empty there is no separator, the tail and the
+        supplement form one unbroken episodic run, and the whole of it renders under
+        the tail's heading — telling the model that an episode from three weeks ago
+        was said moments ago. That is a fabricated claim about continuity, produced
+        silently, and it is worse than the supplement being absent, so the
+        supplement is dropped wherever nothing before it is non-``EPISODIC``. Two
+        distinct states reach that: a resumed conversation whose query matched no
+        belief, and the first turn of a fresh one, where the supplement would be the
+        whole of ``memories``.
+
+        The check is made *before* the read rather than after it, because dropping
+        the result is the decision either way and an unread store is one fewer round
+        trip and one fewer ``RETRIEVAL`` trace claiming a read whose records nothing
+        used.
+
+        **Deduplication against the tail** (ADR-0158 §4). The tail's records are
+        episodes of this same store with these same ids (ADR-0074 §5, ADR-0086 §6),
+        so a relevance read over ``EPISODIC`` returns them whenever the current
+        conversation is on topic — the common case, not the edge. Without this the
+        supplement's whole budget reprints what the prompt already carries, under a
+        second heading. The **tail's** copy survives because its position carries the
+        conversational order, which the supplement's does not. Deduplicating costs
+        the supplement a slot rather than re-asking for a deeper page, exactly as
+        ``assemble_by_band`` decides the same question: over-requesting against an
+        estimate of duplicates is the headroom decision ADR-0113 §8 declines without
+        #789's measurement.
+
+        The belief group cannot collide here — ``BELIEF_KINDS`` and
+        :data:`_SUPPLEMENT_KINDS` are disjoint — so the comparison over the whole of
+        ``preceding`` is the tail rule with a strictly free extra term, and is
+        written that way so it stays correct if a caller's ``history`` ever carries
+        something else.
+
+        **A failure drops the supplement alone** (ADR-0158 §4), and specifically
+        does **not** set ``memory_degraded``: the beliefs are in hand, the plan is
+        exactly as personal as it would have been at a bound of zero, and that flag
+        is the one signal a user is told to trust for "you got a generic answer".
+        Reporting a false positive on it costs more than the omission. The failure
+        is not thereby silent — the store emits its ``RETRIEVAL`` trace on the fault
+        path (ADR-0119 §8) and this stage logs, as the belief path's failure does.
+        This is the clause of ADR-0158 that partially supersedes ADR-0022 §3's
+        Retrieval row, in the scope of this read alone; the belief path's
+        all-or-nothing degradation is untouched.
+
+        Args:
+            query: The turn's goal statement, the same query the belief
+                composition was read with.
+            preceding: The records already assembled for this turn, in order — the
+                continuity tail and then the retrieved beliefs. Read for the
+                separator rule and for deduplication, never appended to here.
+
+        Returns:
+            Up to ``episodic_limit`` episodes, best first, none of them already
+            present in ``preceding``. Empty where the bound is zero, where the
+            separator is absent, or where the read failed.
+        """
+        if self._episodic_limit <= 0:
+            return ()
+        if all(MemoryKind(record.kind) is MemoryKind.EPISODIC for record in preceding):
+            return ()
+        try:
+            found = await self._memory.search(
+                query,
+                limit=self._episodic_limit,
+                kinds=_SUPPLEMENT_KINDS,
+                bands=_SUPPLEMENT_BANDS,
+            )
+        except MemoryStoreError:
+            # Warned, not raised, and `memory_degraded` deliberately untouched by
+            # the caller: this is the whole of ADR-0158 §4's failure rule.
+            _log.warning("episodic_supplement_degraded", stage="supplement", exc_info=True)
+            return ()
+        # `capped` is unwrapped and not acted on (ADR-0128 §6), as the belief
+        # composition's own read leaves it: a supplement is non-essential, so a
+        # store's candidate ceiling shortening it is not a fact this turn reports.
+        held = {record.id for record in preceding}
+        return tuple(record for record in found.records if record.id not in held)
 
     def _now_utc(self) -> datetime:
         """The guarded clock's reading, as the reading stage's own error.

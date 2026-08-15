@@ -8206,10 +8206,19 @@ class TurnResult(BaseModel):
             utterance.
         context: The situational context assembled for the turn.
         memories: What the pipeline assembled for this turn, in the order the
-            planner is handed it (ADR-0074 §5): the conversation's recent turns
-            **first**, in order, then the records retrieved as relevant, best first
-            within that group. Empty on the first turn of a fresh conversation, and
-            empty for whichever half degraded.
+            planner is handed it (ADR-0074 §5, widened by ADR-0158 §5) — the same
+            sequence and the same **three groups** as ``Planner.plan``'s
+            ``memories``: the conversation's recent turns **first**, in order, then
+            the records retrieved as relevant, best first within that group, then
+            the episodic supplement. Each grouping is meaningful and the sequence is
+            not globally ranked. Empty on the first turn of a fresh conversation
+            whose query retrieved nothing. A degraded read empties **its own group
+            and no other** — except that where nothing before the supplement is
+            non-``EPISODIC``, ADR-0158 §4's separator rule drops the supplement too,
+            for a reason that is about the prompt's group encoding rather than about
+            the failure: rendered after an unbroken episodic run it would be read as
+            this conversation's own recent turns.
+
         plan: What the planner decided to do.
         memory_degraded: Whether assembling those records failed — retrieval, or
             the conversation's history, or both — making :attr:`plan` a *generic*
@@ -8223,7 +8232,10 @@ class TurnResult(BaseModel):
     goal: Goal = Field(description="The objective this turn was planned against.")
     context: CurrentContext = Field(description="The situational context assembled for the turn.")
     memories: tuple[MemoryRecord, ...] = Field(
-        description="History first, then relevance — the order the planner is handed them in."
+        description=(
+            "History, then the retrieved beliefs, then the episodic supplement — "
+            "the order the planner is handed them in."
+        )
     )
     plan: ActionPlan = Field(description="What the planner decided to do.")
     memory_degraded: bool = Field(
