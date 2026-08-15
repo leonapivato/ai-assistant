@@ -592,14 +592,26 @@ initial value a commitment rather than a ratchet.
 > the supplement's read is band-restricted, by retrieving nothing for a relevant
 > `EPISODIC` record outside the `DERIVED` band; that the supplement's records
 > follow the belief records in `memories`; that an episode present in the
-> continuity tail is not repeated; and that a failing episodic read leaves the
-> belief composition intact and `memory_degraded` unset.
+> continuity tail is not repeated; that a failing episodic read leaves the belief
+> composition intact and `memory_degraded` unset; and **the separator case** — a
+> turn with a non-empty episodic continuity tail, an empty belief composition and
+> a relevant cross-conversation episode, asserting the episode is absent from
+> `memories` rather than falling inside the planner's tail split.
 
 The first three are the ones a refactor would break silently, and they are the
-whole of §2 and §3 in executable form. The last three are §4. The
-band-restriction case is constructible from the fixture that already exists —
+whole of §2 and §3 in executable form. The rest are §4. The band-restriction case
+is constructible from the fixture that already exists —
 `tests/orchestration/test_conversations.py`'s `_foreign_episode` — which is why §3
 pins the band rather than trusting the producer.
+
+**The separator case is called out because the obvious test does not cover it.**
+"The supplement's records follow the belief records" passes with a single belief
+present, while an implementation that appends unconditionally still recreates the
+false-continuity rendering §4 exists to prevent — the empty-belief state is where
+the clause binds and the ordering assertion is silent. It is asserted on
+`memories` rather than on the rendered prompt so the test does not depend on the
+planner's private split, and it is exactly the state a resumed conversation
+reaches when its query matches no belief.
 
 The lane also owes the retrieval trace's honesty: ADR-0119's `RETRIEVAL` trace is
 emitted per `search` call inside the store, so a supplement is naturally a second
