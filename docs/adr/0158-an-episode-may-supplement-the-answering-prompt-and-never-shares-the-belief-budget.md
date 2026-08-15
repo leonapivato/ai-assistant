@@ -252,13 +252,13 @@ refuses by name.
 ### 3. The supplement is a second read with a bound of its own, and that bound never exceeds the belief budget
 
 > **Normative.** The episodic supplement is a separate `MemoryStore.search`
-> restricted to `kinds=(MemoryKind.EPISODIC,)`, with a bound of its own. The
-> belief composition's budget is passed to it unchanged and is never reduced,
-> shared, or made conditional on the supplement.
+> restricted to `kinds=(MemoryKind.EPISODIC,)` and to
+> `bands=(BeliefBand.DERIVED,)`, with a bound of its own. The belief
+> composition's budget is passed to it unchanged and is never reduced, shared, or
+> made conditional on the supplement.
 
-> **Normative.** The episodic bound never exceeds the belief budget. A
-> configuration in which an answering prompt could carry more episodes than
-> beliefs is refused.
+> **Normative.** The configured episodic bound never exceeds the configured
+> belief budget. No configuration sets the two the other way round.
 
 > **Normative.** The episodic bound's ratified initial value is **5**, against a
 > belief budget of 15. It moves only on the measurement §6 specifies.
@@ -274,8 +274,28 @@ thesis.
 
 **The ceiling clause is where the thesis is actually expressed.** Every other
 statement of "beliefs are the product" is documentation; this one is checkable and
-survives future tuning by whoever tunes it. Whatever the numbers become, the
-answering prompt can never be majority-transcript by record count.
+survives future tuning by whoever tunes it: whatever the numbers become, nobody
+can configure a system that asks for more transcript than belief.
+
+**It bounds the configuration and not the prompt, and the gap between those is
+real rather than an oversight.** ADR-0113 §2 refuses a full-page guarantee
+outright — "a call may return fewer than `limit` records while eligible ones
+exist" — so a query matching two beliefs and five episodes yields an
+episode-majority prompt under any bound at all. That case is **accepted**, because
+it is not the case the ceiling exists for. The hollowing risk §2 identifies is an
+episode *displacing* a belief below a shared cut; a belief that was never
+retrieved was not displaced by anything, and a prompt thin in beliefs is thin
+because the belief layer had nothing to offer that query. Withholding episodes
+there would withhold them precisely where nothing else can answer.
+
+**A dynamic cap at the number of beliefs actually retrieved was considered and
+rejected for that reason.** It reads as the stricter rule and is the wrong one: it
+zeroes the supplement exactly where the belief layer is emptiest — a new user
+whose store holds no distilled beliefs yet, or a topic the observer never reached
+— which is the population §1 admits the capability for. It is also the count-shaped
+fallback of Alternatives considered 4 with its sign flipped, and it inherits that
+alternative's defect: a count of retrieved beliefs says nothing about whether they
+answer the question.
 
 **And the count bound is a weaker guard on volume than it looks — stated rather
 than glossed over.** An episode is a verbatim turn; a belief is a distilled
@@ -293,20 +313,35 @@ began at 5 with no measurement behind it and moved to 15 with one — and §6 pa
 the initial value with a retraction condition, so the commitment is falsifiable
 rather than one-way.
 
-**One flat call, not a band composition, and the reason it is safe today is
-stated with its expiry.** Every episode is `DERIVED` because capture stamps
-`MemorySource.OBSERVED` unconditionally, so a band-precedence composition over a
-kind set of one would be three calls where one serves, ordering nothing. The band
-filter is therefore left at `None` (ADR-0073 §1: every value).
+**One call rather than a band composition — bought by pinning the band, not by
+assuming it.** Capture stamps `MemorySource.OBSERVED` unconditionally, so every
+episode *this system writes* is `DERIVED` and a band-precedence composition over a
+kind set of one would be three calls where one serves, ordering nothing. But the
+store's episodic namespace is not closed to capture: `EpisodicMemory` accepts any
+valid `Provenance`, ADR-0074 §3 reserves an id namespace precisely because "a
+foreign producer took an id in the reserved namespace" is a fault it has to
+contemplate, and `tests/orchestration/test_conversations.py`'s `_foreign_episode`
+fixture constructs an `EXTERNAL`-sourced episodic record today. `band_of` maps
+`EXTERNAL` to `ATTESTED`, so a band-blind flat read could put an `ATTESTED` record
+into a bare relevance order beside `DERIVED` ones — bypassing the precedence
+ADR-0072 §5 exists to impose, in the one read that has no composition to impose it.
 
-> **Normative.** The first `EPISODIC` record whose provenance source is not
-> `OBSERVED` reopens §3's single-call shape, which assumes every episode is of one
-> band.
+So the band is **pinned**, not left at `None`. The single call is then correct by
+construction rather than by an assumption about who writes: an episode outside the
+`DERIVED` band is simply not retrieved, which is the conservative direction, and
+the shape stays one call. The filter is on the *band* rather than on the source
+because band is what ADR-0072 §5's precedence is defined over; an `INFERRED`-sourced
+episode is `DERIVED` and is retrievable, and nothing about precedence turns on the
+difference.
 
-That is where #545's calendar channel would land if it is ever adopted: an
-`EXTERNAL`-sourced episode is `ATTESTED`, and a flat read would then be silently
-mixing bands that ADR-0072 §5 ordered. Nothing about #545 is ratified here; the
-trigger is recorded so the assumption cannot rot unnoticed.
+> **Normative.** The first `EPISODIC` record this system means to make retrievable
+> from outside the `DERIVED` band is a decision of its own, and takes an ADR that
+> settles how the supplement composes across bands.
+
+That is where #545's calendar channel would land if it is ever adopted. Until such
+an ADR, a non-`DERIVED` episode is out of the supplement's reach rather than
+silently mixed into it — the difference between this clause and a bare revisit
+note, and the reason it is stated as one.
 
 ### 4. Where the supplement sits in the prompt, and what it may not repeat
 
@@ -327,6 +362,19 @@ the two together by relevance would restore §2's displacement in the renderer
 immediately after refusing it in the reader, and would do so invisibly, because
 nothing downstream reports which kind won a position.
 
+**This clause is a compatibility requirement as well as a design choice, and the
+planner already states it.** `ai_assistant.planning.planner` splits the records it
+is handed into the conversation tail and the retrieved group by taking the
+**leading run** of `EPISODIC` records — a prefix split, chosen because ADR-0074 §5
+fixes the order and "a partition by kind could" reorder the sequence. Its docstring
+then names this ADR's case in advance: "If the cross-conversation episodic recall
+§11 defers ever lands, an episode retrieved *by relevance* arrives after the tail
+and stays in the retrieved group, which is the group it belongs to." Appending is
+therefore what the renderer was written to expect. Any other placement is a defect
+rather than a preference: a supplement inserted between the tail and the beliefs
+would extend the leading run, and the planner would render relevance-retrieved
+episodes from other conversations **as this conversation's recent turns**.
+
 > **Normative.** An episode already present in the continuity tail is not repeated
 > by the supplement; the tail's copy is kept and the supplement's is dropped.
 
@@ -342,17 +390,34 @@ which `assemble_by_band` already treats as a fault for the band case, on ADR-011
 The tail's copy is the one kept because its position carries the conversational
 order, which the supplement's does not.
 
-> **Normative.** A failure of the episodic read drops the supplement alone; the
-> belief composition already in hand is kept, and the turn reports
-> `memory_degraded`.
+> **Normative.** A failure of the episodic read drops the supplement alone: the
+> belief composition already in hand is kept, and `TurnResult.memory_degraded` is
+> not set by it. The failure is logged at the stage, as the belief path's is.
 
 The belief path's rule is all-or-nothing — a failure on any band's read discards
 the whole retrieval — and #805 already carries the question of whether that is
 right. This clause neither changes that rule nor waits on it. The supplement is
 non-essential by construction, so discarding a successful belief composition
-because a supplementary read failed would trade a good prompt for no prompt. The
-turn still says so, because a silently short prompt that looks complete is the
-failure `memory_degraded` exists to prevent.
+because a supplementary read failed would trade a good prompt for no prompt.
+
+**And it must not be reported through `memory_degraded`, which is a narrower
+signal than it looks.** `ai_assistant.core.types.TurnResult` documents that field
+as whether assembling the records failed "making :attr:`plan` a *generic* answer
+rather than a personal one", and adds why it exists: "an unpersonalised answer is
+the one failure a user of this system most deserves to be told about." A failed
+supplement produces neither. The beliefs are in hand and the plan is exactly as
+personal as it would have been at a bound of zero — a bound §6 explicitly may set —
+so setting the flag would put a false positive on the single signal the user is
+told to trust, which costs more than the omission. It would also widen the
+documented meaning of a field in `src/ai_assistant/core/types.py`, which §5 forbids
+and which would make this a substantive contract ADR under ADR-0015 §5.
+
+The failure is not thereby silent. The store emits its `RETRIEVAL` trace on the
+fault path as well as the success path (ADR-0119 §8), and the stage logs as
+`ai_assistant.orchestration.loop` already logs `memory_retrieval_degraded`. What is
+absent is a *reported* signal on `TurnResult`, and whether a supplement's
+degradation deserves one is a `core/types.py` question deferred with its consumer
+(§8).
 
 ### 5. The contract surface: none, and no new setting either
 
@@ -453,13 +518,17 @@ initial value a commitment rather than a ratchet.
 > **Normative.** The lane pins, as tests: that the belief composition's `kinds`
 > argument still excludes `EPISODIC`; that the belief budget passed to
 > `assemble_by_band` is unchanged by the supplement's presence or its bound; that
-> the supplement's records follow the belief records in `memories`; that an
-> episode present in the continuity tail is not repeated; and that a failing
-> episodic read leaves the belief composition intact while reporting
-> `memory_degraded`.
+> the supplement's read is band-restricted, by retrieving nothing for a relevant
+> `EPISODIC` record outside the `DERIVED` band; that the supplement's records
+> follow the belief records in `memories`; that an episode present in the
+> continuity tail is not repeated; and that a failing episodic read leaves the
+> belief composition intact and `memory_degraded` unset.
 
-The first two are the ones a refactor would break silently, and they are the whole
-of §2 and §3 in executable form. The last three are §4.
+The first three are the ones a refactor would break silently, and they are the
+whole of §2 and §3 in executable form. The last three are §4. The
+band-restriction case is constructible from the fixture that already exists —
+`tests/orchestration/test_conversations.py`'s `_foreign_episode` — which is why §3
+pins the band rather than trusting the producer.
 
 The lane also owes the retrieval trace's honesty: ADR-0119's `RETRIEVAL` trace is
 emitted per `search` call inside the store, so a supplement is naturally a second
@@ -483,6 +552,13 @@ for that; it is named so the lane does not "helpfully" merge the reads.
   version is measurably dead.
 - **A byte bound on the prompt.** ADR-0007 §5's deferral of size caps stands; §6
   requires the measurement that would inform one.
+- **Whether a degraded *supplement* deserves a reported signal of its own.** §4
+  rules it out of `memory_degraded`, whose meaning is narrower, and adding a second
+  field to `TurnResult` is `core/types.py` surface. Deferred with its consumer,
+  which is a client that would show it; today nothing would.
+- **Whether a non-`DERIVED` episode should be retrievable at all** (§3's clause).
+  Ruled out of the supplement's reach here, and admitted only by an ADR that
+  settles how it composes across bands.
 - **Episodic retrieval anywhere but the answering turn's prompt.** The observer
   (ADR-0077 §1), consolidation, notifications and the correction drawer are
   untouched, and each reads what its own ADR gives it.
@@ -530,7 +606,10 @@ answering path's main road.
 
 - §6's arm, in either direction: it raises the bound, or §6's retraction clause
   takes it to zero and removes the path.
-- The first `EPISODIC` record whose provenance source is not `OBSERVED` (§3).
+- A wish to make episodes outside the `DERIVED` band retrievable (§3) — #545's
+  calendar channel is the live candidate. Until then the band pin holds them out
+  of reach rather than mixing them in, so the trigger is a decision to widen, not
+  a fault waiting to be noticed.
 - A change to `episode_retention`'s default, which changes what the supplement can
   reach without changing a line of retrieval code.
 - Distillation improving enough that the ingestion-loss bucket stops dominating —
