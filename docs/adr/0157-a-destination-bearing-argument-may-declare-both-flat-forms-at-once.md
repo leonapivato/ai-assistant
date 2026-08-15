@@ -323,12 +323,21 @@ authority on extent and ADR-0070 §1 forbids rewriting ratified text: the limb n
 refuses a declaration that is not one of §1's three forms.
 
 **The record's form, and why ADR-0152's body is not edited.** ADR-0070 §1 permits
-exactly two edits to ADR-0152 here — its `Status` line, in the leading-token
-partial form ADR-0070 §4 fixes, and an appended dated header note — and ADR-0082
-§2 puts the substance of the record in the note on a line led by `Partially
-superseded by`.
+exactly three header edits to ADR-0152 here, and all three are made:
 
-**Both are made in the change that proposes this ADR, not deferred to its
+1. its `Status` line, replaced with the leading-token partial form ADR-0070 §4
+   fixes — §1's "recording a supersession that has landed";
+2. an appended dated header note, which is §1's fourth permitted edit and which
+   ADR-0082 §2 makes the place the **substance** of the record lives on a line led
+   by `Partially superseded by`;
+3. an `Accepted: 2026-08-14` line, which is §1's general permission for a header
+   edit that changes no decision — it states a fact that was already true and is
+   argued below.
+
+Nothing else is touched, and none of the three reaches ADR-0152's Context,
+Decision or Consequences.
+
+**All three are made in the change that proposes this ADR, not deferred to its
 ratification commit** — the two files move as one atomic pair, and this ADR says
 so explicitly because the contrary reading is a known and recurring one. ADR-0070
 §1 permits the `Status` edit for "a supersession that has landed" and glosses the
@@ -349,13 +358,18 @@ as skipping review, so the only reviewed artifact would be the one that never
 carried it. The flip therefore moves this ADR's own `Status` line and records its
 review outcome, and nothing else.
 
-ADR-0152's `Accepted: 2026-08-14` line is added alongside,
-preserving on the header the ratification fact that leaves the `Status` line when
-the supersession token takes the lead; that changes no decision and follows
-ADR-0126's header exactly. Not one word of ADR-0152's Context, Decision or
-Consequences is touched, so §4 and §6 stay legible as ratified beside the pointer
-to this ADR — which is what ADR-0070 §2 did to ADR-0001 and ADR-0153 §10 did to
-ADR-0126.
+**Why the third edit is owed rather than optional.** ADR-0070 §4 requires the
+supersession token to **lead** and `Accepted` to be dropped from the line, so that
+a filter prefix-matching `Accepted` cannot read a partially-superseded ADR as
+fully current. The cost is that the header stops recording that ADR-0152 was ever
+ratified, and on what date. The `Accepted:` line puts that fact back where it was,
+changes no decision, and follows ADR-0126's header exactly — which carries `Date`,
+`Accepted` and the dated `Partially superseded` note together after ADR-0153
+partially superseded it.
+
+Not one word of ADR-0152's Context, Decision or Consequences is touched, so §4 and
+§6 stay legible as ratified beside the pointer to this ADR — which is what
+ADR-0070 §2 did to ADR-0001 and ADR-0153 §10 did to ADR-0126.
 
 **ADR-0150 §4 and §11 — no record owed, and this is the nearest miss, so the
 working is explicit.** §11 routed the structural question to ADR-0152 and neither
