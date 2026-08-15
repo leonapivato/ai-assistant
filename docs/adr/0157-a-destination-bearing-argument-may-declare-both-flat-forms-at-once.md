@@ -10,8 +10,13 @@
   exactly those two forms. The set of **values** the seam accepts is not touched
   and cannot be: ADR-0152 §4's per-call clause already admits "a JSON string or a
   JSON array of JSON strings", which is the union this ADR lets an author
-  *declare*. Every refusal in the corpus fires on exactly the calls it fired on
-  before.
+  *declare*. So every refusal **this ADR reaches** — the binding seam's, in
+  ADR-0152 §4 and §6 — fires on exactly the calls it fired on before. One refusal
+  this ADR does not reach does change, and it is the point of the change rather
+  than a side effect: once the implementing lane widens `send_email`'s own schema,
+  ADR-0145's validation stops refusing a bare-string `to` against that tool. That
+  follows from the **producer's** declaration moving, which is a fact about one
+  tool, and not from any rule stated here.
 - **It is a partial supersession, not an amendment, and §6 shows the working.**
   A reader holding only ADR-0152 §4 refuses the three-form declaration; after
   this ADR they admit it. That is ADR-0070 §1's test coming out on the
