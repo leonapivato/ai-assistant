@@ -403,6 +403,23 @@ The three edits, inventoried so the lane is briefable from this text:
 > `recipients-not-a-list`; that case is inverted rather than deleted, so the
 > record shows the behaviour changed rather than the test disappearing.
 
+> **Normative.** At least one of those tests is taken over the **real**
+> `SEND_EMAIL` definition and not a synthetic one: with the schema this section's
+> inventory changes, a call whose `to` is a bare JSON string is reported by
+> ADR-0145's schema validation as carrying **no** violation, binds, and reaches
+> the transport. A suite exercising only a synthetic tool that declares the third
+> form does not discharge this clause.
+
+**That clause is the one a reviewer should press hardest, and it is here because
+every other test in the list can pass while #1160 stays open.** A lane could widen
+the flatness check, widen the transport, prove both against a synthetic tool
+declaring the third form, leave `SEND_EMAIL`'s own `to` array-only, and ship a
+green suite over the exact call #1159 recorded as refused — because nothing else
+in the list requires the *registered producer's* schema to have moved. #1160's
+first sentence is that every per-lane suite was green while the composed act was
+unreachable, and an obligation that could be discharged the same way would be that
+failure restated one level up, in the ADR written to remove it.
+
 > **Normative.** The lane closes #1160 and states in its PR that the
 > feedback-loop half of that issue's title is out of scope and stays with #1105
 > and #1106.
