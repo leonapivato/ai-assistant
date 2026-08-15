@@ -25,6 +25,8 @@ from ai_assistant.core.errors import (
     PlanningError,
 )
 from ai_assistant.core.types import (
+    Attestation,
+    BeliefBand,
     CurrentContext,
     EpisodicMemory,
     FeedbackEvent,
@@ -42,9 +44,12 @@ from ai_assistant.orchestration import (
     LearningLoop,
     MemoryWriteStage,
 )
+from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.loop import (
+    _DEFAULT_EPISODIC_LIMIT,
     _DEFAULT_RESOLUTION_LIMIT,
     _DEFAULT_RETRIEVAL_LIMIT,
+    _SUPPLEMENT_KINDS,
     RESOLUTION_KINDS,
 )
 from ai_assistant.testing import (
@@ -70,7 +75,6 @@ if TYPE_CHECKING:
     )
     from ai_assistant.core.types import (
         ActionPlan,
-        BeliefBand,
         Goal,
         MemoryIngestResult,
         MemoryRecord,
@@ -370,6 +374,12 @@ async def test_a_derived_flood_cannot_displace_an_assertion_from_the_prompt() ->
 
 
 async def test_respond_retrieves_at_most_the_configured_limit() -> None:
+    """The belief budget cuts, and the episodic bound is stated so it cannot.
+
+    ``episodic_limit=0`` is not decoration here: ADR-0158 §3's ceiling refuses a
+    supplement wider than the belief budget, so a loop tuned to 2 beliefs may not
+    keep the default bound of 5 — and this case is about the *belief* cut alone.
+    """
     memory = FakeMemoryStore(now=_clock)
     for index in range(4):
         await memory.add(
@@ -389,6 +399,7 @@ async def test_respond_retrieves_at_most_the_configured_limit() -> None:
         planner=FakePlanner(now=_clock),
         feedback=FakeFeedbackProcessor(),
         retrieval_limit=2,
+        episodic_limit=0,
         now=_clock,
     )
 
@@ -1200,6 +1211,346 @@ async def test_a_pinned_deferred_kind_still_returns_an_empty_outcome() -> None:
 
 
 # --------------------------------------------------------------------------- #
+# respond: the episodic supplement (ADR-0158)                                  #
+# --------------------------------------------------------------------------- #
+
+
+class _FailingEpisodicStore(FakeMemoryStore):
+    """The canonical store with the *supplement's* read broken, and only it.
+
+    ADR-0158 §4's failure rule is about one read of two, so a store that fails every
+    search (:class:`_FailingSearchStore`) cannot express it: what is owed is that the
+    belief composition survives a failing episodic read with ``memory_degraded``
+    still unset.
+    """
+
+    async def search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+    ) -> MemorySearchResult:
+        """Fail an episodic read; answer any other as the fake does."""
+        if kinds is not None and MemoryKind.EPISODIC in tuple(kinds):
+            msg = "fake: the episodic index is unavailable"
+            raise MemoryStoreError(msg)
+        return await super().search(query, limit=limit, kinds=kinds, bands=bands)
+
+
+def _episode(episode_id: str, content: str) -> EpisodicMemory:
+    """A captured turn, as ``orchestration.conversations`` stamps one.
+
+    ``OBSERVED``, which ``band_of`` maps to ``DERIVED`` — the band every episode this
+    system writes lands in, and the band ADR-0158 §3 pins the supplement to.
+    """
+    return EpisodicMemory(
+        id=episode_id, content=content, occurred_at=_NOW, provenance=_observed(0.9)
+    )
+
+
+def _foreign_episode(episode_id: str, content: str) -> EpisodicMemory:
+    """An episodic record some *other* producer wrote (ADR-0074 §3).
+
+    ``EXTERNAL``, which ``band_of`` maps to ``ATTESTED``, so it is exactly the record
+    ADR-0158 §3's band pin holds out of the supplement's reach. The attestation is
+    what that band requires (ADR-0092 §1) and no assertion here reads it.
+    """
+    return EpisodicMemory(
+        id=episode_id,
+        content=content,
+        occurred_at=_NOW,
+        provenance=Provenance(
+            source=MemorySource.EXTERNAL,
+            confidence=0.5,
+            last_updated=_NOW,
+            attestation=Attestation(reported_by="calendar:work", reported_at=_NOW),
+        ),
+    )
+
+
+def _belief(record_id: str, content: str) -> SemanticMemory:
+    """An observed belief — ``DERIVED``, the same band as an episode."""
+    return SemanticMemory(id=record_id, content=content, fact=content, provenance=_observed())
+
+
+def _supplementing_loop(
+    memory: MemoryStore,
+    *,
+    retrieval_limit: int = _DEFAULT_RETRIEVAL_LIMIT,
+    episodic_limit: int = _DEFAULT_EPISODIC_LIMIT,
+) -> LearningLoop:
+    """A loop over ``memory`` with both budgets stated, canonical everything else."""
+    return LearningLoop(
+        context=FakeContextProvider(),
+        memory=memory,
+        writes=_writes(FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock)),
+        planner=FakePlanner(now=_clock),
+        feedback=FakeFeedbackProcessor(),
+        retrieval_limit=retrieval_limit,
+        episodic_limit=episodic_limit,
+        now=_clock,
+        id_factory=lambda: "goal-1",
+    )
+
+
+def _searches(journal: list[object]) -> list[_SearchCall]:
+    return [entry for entry in journal if isinstance(entry, _SearchCall)]
+
+
+def _belief_reads(journal: list[object]) -> list[_SearchCall]:
+    return [call for call in _searches(journal) if call.kinds != _SUPPLEMENT_KINDS]
+
+
+def _supplement_reads(journal: list[object]) -> list[_SearchCall]:
+    return [call for call in _searches(journal) if call.kinds == _SUPPLEMENT_KINDS]
+
+
+async def test_the_belief_composition_still_excludes_episodic() -> None:
+    """§2: ``EPISODIC`` never joins the belief kinds, and never shares their read.
+
+    The supplement is a *second* read. An implementation that reached the same
+    records by widening the first one would pass every ordering test below and still
+    be the design ADR-0158 §2 refuses by name: ``kinds`` binds before the KNN cut
+    (ADR-0128 §1), so an admitted episode spends a candidate slot no downstream pass
+    can give back to the belief it displaced.
+    """
+    journal: list[object] = []
+    memory = _JournallingStore(journal, now=_clock)
+    await memory.add(_belief("belief-1", "dana works on billing"))
+    await memory.add(_episode("episode-1", "dana works on billing"))
+
+    await _supplementing_loop(memory).respond("dana works on billing")
+
+    assert _belief_reads(journal), "the belief composition must still read"
+    for call in _belief_reads(journal):
+        assert call.kinds == BELIEF_KINDS
+        assert MemoryKind.EPISODIC not in (call.kinds or ())
+
+
+async def test_the_supplements_budget_is_never_taken_out_of_the_beliefs() -> None:
+    """§3: two budgets, not a share of one.
+
+    ``RETRIEVAL_LIMIT``'s 5→15 move was bought for beliefs on #1029's rank-miss
+    measurement, so a supplement quietly taking part of it back would undo a measured
+    change with an unmeasured one. Asserted against a loop with the supplement
+    switched *off*, because "the beliefs still asked for 7" is only evidence if the
+    same figure appears when nothing else is asking.
+    """
+    without: list[object] = []
+    with_supplement: list[object] = []
+    for journal, episodic_limit in ((without, 0), (with_supplement, 5)):
+        memory = _JournallingStore(journal, now=_clock)
+        await memory.add(_belief("belief-1", "dana works on billing"))
+        await memory.add(_episode("episode-1", "dana works on billing"))
+        loop = _supplementing_loop(memory, retrieval_limit=7, episodic_limit=episodic_limit)
+        await loop.respond("dana works on billing")
+
+    assert [call.limit for call in _belief_reads(with_supplement)] == [
+        call.limit for call in _belief_reads(without)
+    ]
+    assert max(call.limit for call in _belief_reads(with_supplement)) == 7
+
+
+async def test_the_supplements_read_is_the_one_section_three_pins() -> None:
+    """§3, at the call: one read, ``EPISODIC`` only, ``DERIVED`` only, its own bound.
+
+    Pinned as a *set* rather than by its effects, because the two failures differ:
+    proving only the effects would pass an implementation that read wider and
+    filtered afterwards, which §2's candidate-set argument rules out, and pinning the
+    arguments alone would pass one that computed them and read something else — which
+    is why each filter is separately proved to bite below.
+    """
+    journal: list[object] = []
+    memory = _JournallingStore(journal, now=_clock)
+    await memory.add(_belief("belief-1", "dana works on billing"))
+    await memory.add(_episode("episode-1", "dana works on billing"))
+
+    await _supplementing_loop(memory).respond("dana works on billing")
+
+    assert len(_supplement_reads(journal)) == 1
+    [call] = _supplement_reads(journal)
+    assert call.query == "dana works on billing"
+    assert call.kinds == (MemoryKind.EPISODIC,)
+    assert call.bands == (BeliefBand.DERIVED,)
+    assert call.limit == _DEFAULT_EPISODIC_LIMIT
+
+
+def test_the_episodic_bound_is_five_and_never_exceeds_the_belief_budget() -> None:
+    """§3's ratified initial value, and the ceiling that is the thesis in code.
+
+    The deployment figure lives in ``app/composition.py``, which this subsystem may
+    not import; what is checkable here is the default a direct construction gets and
+    the relation §3 fixes between the two numbers. It moves only on §6's arm.
+    """
+    assert _DEFAULT_EPISODIC_LIMIT == 5
+    assert _DEFAULT_EPISODIC_LIMIT <= _DEFAULT_RETRIEVAL_LIMIT
+
+
+async def test_a_derived_belief_never_reaches_the_supplement() -> None:
+    """§3's ``kinds`` filter, proved to bite rather than merely stated.
+
+    The store holds three equally relevant beliefs against a belief budget of two,
+    so ``belief-3`` is **eligible and unretrieved** — the record §7 asks to be left
+    in reach of a widened read. A supplement reading ``kinds=None`` under the same
+    band pin spends its whole bound on beliefs it either already holds or should
+    never carry, and the episode this turn exists to reach falls off the end.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "dana works on billing"))
+    await memory.add(_belief("belief-2", "dana works on billing"))
+    await memory.add(_belief("belief-3", "dana works on billing"))
+    await memory.add(_episode("episode-1", "dana works on billing"))
+
+    result = await _supplementing_loop(memory, retrieval_limit=2, episodic_limit=2).respond(
+        "dana works on billing"
+    )
+
+    assert [record.id for record in result.memories] == ["belief-1", "belief-2", "episode-1"]
+
+
+async def test_an_episode_outside_the_derived_band_never_reaches_the_supplement() -> None:
+    """§3's ``bands`` filter, proved to bite (ADR-0074 §3's foreign producer).
+
+    ``EpisodicMemory`` accepts any valid ``Provenance``, so the episodic namespace is
+    not closed to capture, and ``band_of`` maps ``EXTERNAL`` to ``ATTESTED``. A
+    band-blind read would put that record into a bare relevance order beside
+    ``DERIVED`` ones — bypassing the precedence ADR-0072 §5 exists to impose, in the
+    one read with no composition to impose it.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "dana works on billing"))
+    await memory.add(_episode("episode-1", "dana works on billing"))
+    await memory.add(_foreign_episode("episode-2", "dana works on billing"))
+
+    result = await _supplementing_loop(memory).respond("dana works on billing")
+
+    assert [record.id for record in result.memories] == ["belief-1", "episode-1"]
+
+
+async def test_the_supplement_follows_the_belief_records() -> None:
+    """§4: tail, then beliefs, then supplement — appended whole, never interleaved.
+
+    Position is how this pipeline expresses precedence into a prompt, so a distilled
+    belief precedes the raw turn even where the episode is the more relevant record.
+    Sorting the two together would restore §2's displacement in the renderer
+    immediately after refusing it in the reader, and invisibly, because nothing
+    downstream reports which kind won a position.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "dana works on billing"))
+    await memory.add(_episode("episode-1", "dana works on billing"))
+    tail = _episode("tail-1", "dana works on billing")
+
+    result = await _supplementing_loop(memory).respond("dana works on billing", history=(tail,))
+
+    assert [record.id for record in result.memories] == ["tail-1", "belief-1", "episode-1"]
+
+
+async def test_an_episode_already_in_the_tail_is_not_repeated_by_the_supplement() -> None:
+    """§4: the tail's copy is kept, the supplement's is dropped.
+
+    Not hypothetical bookkeeping — the tail's records are episodes of this same store
+    with these same ids (ADR-0074 §5, ADR-0086 §6), so a relevance read over
+    ``EPISODIC`` returns them whenever the conversation is on topic, which is the
+    common case. Without the rule the supplement's whole budget reprints what the
+    prompt already carries, under a second heading. The tail's copy survives because
+    its position carries the conversational order, which the supplement's does not.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "dana works on billing"))
+    tail = _episode("tail-1", "dana works on billing")
+    await memory.add(tail)
+    await memory.add(_episode("episode-1", "dana works on billing"))
+
+    result = await _supplementing_loop(memory).respond("dana works on billing", history=(tail,))
+
+    assert [record.id for record in result.memories] == ["tail-1", "belief-1", "episode-1"]
+
+
+async def test_a_failing_episodic_read_costs_the_supplement_and_nothing_else() -> None:
+    """§4: the belief composition is kept, and ``memory_degraded`` stays unset.
+
+    The supplement is non-essential by construction, so discarding a good belief
+    composition because a supplementary read failed would trade a good prompt for no
+    prompt. And the flag is narrower than it looks: it reports an *unpersonalised*
+    answer, which this is not — the plan is exactly as personal as it would have been
+    at a bound of zero, a bound §6 explicitly may set. Setting it here would put a
+    false positive on the one signal a user is told to trust.
+    """
+    memory = _FailingEpisodicStore(now=_clock)
+    await memory.add(_belief("belief-1", "dana works on billing"))
+    await memory.add(_episode("episode-1", "dana works on billing"))
+
+    result = await _supplementing_loop(memory).respond("dana works on billing")
+
+    assert [record.id for record in result.memories] == ["belief-1"]
+    assert not result.memory_degraded
+
+
+async def test_the_supplement_is_dropped_when_a_tail_would_absorb_it() -> None:
+    """§4's separator rule, with a tail: no belief between the two groups.
+
+    ``planning.planner`` splits ``memories`` by the **leading run** of ``EPISODIC``
+    records, so with the belief group empty the tail and the supplement form one
+    unbroken run and the whole of it renders under the tail's heading. An episode
+    retrieved from a conversation three weeks ago would be presented as something the
+    user said moments ago — a fabricated claim about continuity, produced silently,
+    and worse than the supplement being absent.
+
+    The read is not issued at all, since dropping the result is the decision either
+    way and an unread store is one fewer round trip and one fewer ``RETRIEVAL`` trace
+    for records nothing used.
+    """
+    journal: list[object] = []
+    memory = _JournallingStore(journal, now=_clock)
+    await memory.add(_episode("episode-1", "tuesday standup"))
+    tail = _episode("tail-1", "tuesday standup")
+
+    result = await _supplementing_loop(memory).respond("tuesday standup", history=(tail,))
+
+    assert [record.id for record in result.memories] == ["tail-1"]
+    assert _supplement_reads(journal) == []
+
+
+async def test_the_supplement_is_dropped_on_the_first_turn_of_a_fresh_conversation() -> None:
+    """§4's separator rule, without a tail — the state the obvious reading misses.
+
+    An implementation reading the clause as "drop when the history is non-empty and
+    the beliefs are empty" passes the test above and fails this one, and the state it
+    fails on is the first turn of every new conversation: the supplement would be the
+    whole of ``memories``, so the leading episodic run is all of it and every record
+    renders as this conversation's own recent turns.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_episode("episode-1", "tuesday standup"))
+
+    result = await _supplementing_loop(memory).respond("tuesday standup")
+
+    assert result.memories == ()
+
+
+async def test_a_bound_of_zero_issues_no_supplementary_read() -> None:
+    """§6 may take the bound to zero, so zero is a configuration and not a fault.
+
+    It is the one budget on this loop that admits zero: the supplement is
+    non-essential, so a turn at zero is exactly the turn this system answered before
+    ADR-0158 — beliefs in hand, nothing degraded, nothing reported.
+    """
+    journal: list[object] = []
+    memory = _JournallingStore(journal, now=_clock)
+    await memory.add(_belief("belief-1", "dana works on billing"))
+    await memory.add(_episode("episode-1", "dana works on billing"))
+
+    result = await _supplementing_loop(memory, episodic_limit=0).respond("dana works on billing")
+
+    assert [record.id for record in result.memories] == ["belief-1"]
+    assert not result.memory_degraded
+    assert _supplement_reads(journal) == []
+
+
+# --------------------------------------------------------------------------- #
 # Tuning                                                                       #
 # --------------------------------------------------------------------------- #
 
@@ -1253,12 +1604,52 @@ def test_tuning_refuses_a_resolution_limit_that_is_not_an_integer(limit: object)
         _loop_with(resolution_limit=limit)  # type: ignore[arg-type]  # deliberately invalid
 
 
+def test_tuning_refuses_an_episodic_bound_above_the_belief_budget() -> None:
+    """ADR-0158 §3's ceiling, which is where the product thesis is checkable.
+
+    Every other statement of "beliefs are the product" is documentation. This one
+    survives whoever tunes the numbers next: whatever they become, nobody can
+    configure a system that asks for more transcript than belief.
+    """
+    with pytest.raises(ValueError, match="episodic_limit must not exceed retrieval_limit"):
+        _loop_with(retrieval_limit=5, episodic_limit=6)
+
+
+async def test_tuning_accepts_an_episodic_bound_equal_to_the_belief_budget() -> None:
+    """The ceiling is "never exceeds", not "always below" — equality is admitted."""
+    loop = _loop_with(retrieval_limit=5, episodic_limit=5)
+
+    result = await loop.respond("hello")
+
+    assert result.goal.statement == "hello"
+
+
+@pytest.mark.parametrize("episodic_limit", [-1, -5])
+def test_tuning_refuses_a_negative_episodic_bound(episodic_limit: int) -> None:
+    """Zero is a decision (§6 may set it); a negative one is a mistake."""
+    with pytest.raises(ValueError, match="episodic_limit must be at least 0"):
+        _loop_with(episodic_limit=episodic_limit)
+
+
+@pytest.mark.parametrize("limit", [1.5, float("inf"), True, "5"])
+def test_tuning_refuses_an_episodic_bound_that_is_not_an_integer(limit: object) -> None:
+    """Guarded exactly as the other two are, and for the same reason."""
+    with pytest.raises(TypeError, match="episodic_limit must be an integer"):
+        _loop_with(episodic_limit=limit)  # type: ignore[arg-type]  # deliberately invalid
+
+
 def _loop_with(
     *,
     retrieval_limit: int = 5,
     resolution_limit: int = _DEFAULT_RESOLUTION_LIMIT,
+    episodic_limit: int = 0,
 ) -> LearningLoop:
-    """Build a loop with the given tuning and canonical everything else."""
+    """Build a loop with the given tuning and canonical everything else.
+
+    ``episodic_limit`` defaults to 0 rather than to the loop's own default, so a
+    case tuning ``retrieval_limit`` below 5 is not refused by ADR-0158 §3's ceiling
+    for a reason it is not about.
+    """
     memory = FakeMemoryStore(now=_clock)
     return LearningLoop(
         context=FakeContextProvider(),
@@ -1268,6 +1659,7 @@ def _loop_with(
         feedback=FakeFeedbackProcessor(),
         retrieval_limit=retrieval_limit,
         resolution_limit=resolution_limit,
+        episodic_limit=episodic_limit,
         now=_clock,
     )
 

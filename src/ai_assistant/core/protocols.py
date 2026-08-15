@@ -2033,26 +2033,43 @@ class Planner(Protocol):
         personal rather than generic.
 
         **``memories`` is what the pipeline assembled for this turn, not one
-        relevance cut** (ADR-0074 §5). It carries the conversation's recent turns
-        **first**, in order, then the records retrieved as relevant, best first
-        *within that group*. The wording is restated rather than read generously:
-        a conversation tail is usually the most relevant thing the store holds for
-        a continued exchange, but a user who changes the subject mid-conversation
-        is handed prior turns that are not relevant to the new goal at all, so
-        calling the whole sequence "best first" would be a strain. The signature is
-        unchanged and ``Planner`` grows no ``history`` parameter — both groups are
-        ``MemoryRecord``s the planner already renders, and a second channel would
-        split one prompt input in two for a distinction the planner does not act
-        on. The widening is flagged under golden rule 5 rather than smuggled: a
-        planner may rely on the grouping being meaningful, and must not rely on the
-        sequence being globally ranked.
+        relevance cut** (ADR-0074 §5, widened by ADR-0158 §5). It carries **three
+        groups, in order**: the conversation's recent turns **first**, in order;
+        then the records retrieved as relevant, best first *within that group*;
+        then the episodic supplement — episodes retrieved by relevance from other
+        conversations, under a budget of their own. Each grouping is meaningful and
+        the sequence is **not globally ranked**: a planner may rely on the grouping
+        and may not rely on a global relevance order. The wording is restated
+        rather than read generously: a conversation tail is usually the most
+        relevant thing the store holds for a continued exchange, but a user who
+        changes the subject mid-conversation is handed prior turns that are not
+        relevant to the new goal at all, so calling the whole sequence "best first"
+        would be a strain.
+
+        **The third group sits last by decision, not by convenience** (ADR-0158
+        §4). Position is how this pipeline expresses precedence into a prompt, and a
+        distilled belief outranks the raw turn it might have been distilled from:
+        the belief has passed the propose/dispose gate, carries provenance and
+        confidence, is corrigible and is what the user can inspect and kill. An
+        episode is unjudged material. Sorting the two together by relevance would
+        let an episode take a belief's position invisibly, which is exactly what the
+        separate budgets exist to prevent one layer down.
+
+        The signature is unchanged and ``Planner`` grows no ``history`` parameter —
+        all three groups are ``MemoryRecord``s the planner already renders, and a
+        second channel would split one prompt input in two. ADR-0074 §5 refused that
+        channel because the planner did "not act on" the distinction; ADR-0158 §4
+        records that the premise has since moved and that carrying an explicit
+        boundary is now a ``Planner`` contract change taking its own ADR. Both
+        widenings are flagged under golden rule 5 rather than smuggled.
 
         Args:
             goal: The objective to plan for.
             context: The situational context assembled for this request.
             memories: The records the pipeline assembled for this turn — the
                 conversation's recent turns in order, then records retrieved as
-                relevant, best first within that group.
+                relevant, best first within that group, then the episodic
+                supplement (ADR-0158 §4).
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.ActionPlan`.

@@ -119,6 +119,34 @@ if TYPE_CHECKING:
 #: same thing about this deployment.
 RETRIEVAL_LIMIT: Final = 15
 
+#: How many episodes a turn's **supplementary** read may add to the answering
+#: prompt (ADR-0158 §3), beside — never out of — :data:`RETRIEVAL_LIMIT`.
+#:
+#: A composition-root constant rather than a
+#: :class:`~ai_assistant.core.config.Settings` field, and ADR-0158 §5 rules that
+#: placement: the belief budget is a composition constant and this is the same kind
+#: of thing, a cardinality control whose authority is measurement. The contrast
+#: that decides it is ``episode_retention``, which *is* a setting because ADR-0074
+#: §7 makes it a privacy choice the user owns. How many episodes help an answer is
+#: not a preference; it is a fact nobody has measured, and offering it as a knob
+#: would imply a user could know it.
+#:
+#: **5 against a belief budget of 15, and the two never share.** ADR-0158 §3 gives
+#: the supplement a budget of its own precisely so that
+#: :data:`RETRIEVAL_LIMIT`'s 5→15 move — bought for *beliefs* on #1029's rank-miss
+#: measurement — is not handed back to episodes on no measurement at all. The value
+#: is a judgement rather than a measured optimum: an episode is a verbatim turn
+#: where a belief is a distilled sentence, 5 belief records fill roughly 4KB, and
+#: nothing has measured 5 episodes, so 5 is where the count guard and a plausible
+#: *byte* parity roughly meet. ADR-0158 §6's ablation arm owns it in both
+#: directions, and states the arithmetic that would take it to zero.
+#:
+#: **It may never exceed :data:`RETRIEVAL_LIMIT`**, which ``LearningLoop`` enforces
+#: at construction rather than trusting this line. That ceiling is where ADR-0158
+#: §3 puts the product thesis in checkable form: whatever the numbers become,
+#: nobody can configure a system that asks for more transcript than belief.
+EPISODIC_SUPPLEMENT_LIMIT: Final = 5
+
 #: What this layer tunes :class:`MemoryIngestor`'s conflict ceiling to, passed
 #: explicitly for :data:`RETRIEVAL_LIMIT`'s reason.
 CONFLICT_LIMIT: Final = 100
@@ -727,6 +755,11 @@ def build_composition(settings: Settings, *, data_dir: Path | None = None) -> Co
             # ``orchestration/retrieval.py`` fills one budget of this size band by
             # band, so the first band asks for all of it and no band asks for more.
             retrieval_limit=RETRIEVAL_LIMIT,
+            # The episodic supplement's own budget (ADR-0158 §3), passed for the
+            # same reason and never subtracted from the one above: the two are two
+            # budgets, not a share of one, so a turn asks for 15 beliefs *and* up
+            # to 5 episodes. §5 puts this figure here rather than on ``Settings``.
+            episodic_limit=EPISODIC_SUPPLEMENT_LIMIT,
         )
         runner = StepRunner(
             plans=plans,
