@@ -1089,15 +1089,21 @@ def smtp_message(parameters: Mapping[str, FrozenJson], *, tool_id: str) -> Outbo
         parameters: The call's revalidated arguments.
         tool_id: Named in the refusal, and the only identifier that is.
 
+    **A recipient argument may arrive as a string or as a list of them**
+    (ADR-0157 §1), because that is what a destination-bearing argument may now
+    declare. A string is read as the one recipient it names: SMTP's envelope takes
+    a list either way, so the alternative would be a transport refusing a call the
+    binder admitted and the ruling authorised.
+
     Returns:
         The message, with recipients in the **supplied** forms the arguments carry.
 
     Raises:
         BoundCallChangedError: If a key is one this seam does not transmit, a
-            recipient list is not a list of strings, a text field is not a string,
-            a header field carries a line break, or no recipient is named. The
-            message renders no value, because every one of them is either a
-            recipient or payload content.
+            recipient argument is neither a string nor a list of strings, a text
+            field is not a string, a header field carries a line break, or no
+            recipient is named. The message renders no value, because every one of
+            them is either a recipient or payload content.
     """
     unknown = set(parameters) - {"to", "cc", "bcc", "subject", "body"}
     if unknown:
@@ -1109,9 +1115,19 @@ def smtp_message(parameters: Mapping[str, FrozenJson], *, tool_id: str) -> Outbo
         raise _refuse_changed(msg)
     recipients: dict[str, tuple[str, ...]] = {}
     for field in ("to", "cc", "bcc"):
-        value = parameters.get(field, ())
+        supplied = parameters.get(field, ())
+        # ADR-0157 §1: a recipient argument may declare both flat forms, so a
+        # string arrives here as readily as a list. It is canonicalised to the
+        # one-element list SMTP's envelope needs, which is a **rendering** of an
+        # already-authorised call rather than a re-derivation of one — the
+        # arguments reach this seam exactly as the decision's digest binds them,
+        # and what varies is how the message is built from them (ADR-0148 §4).
+        value = (supplied,) if isinstance(supplied, str) else supplied
         if not isinstance(value, tuple | list) or not all(isinstance(one, str) for one in value):
-            msg = f"{tool_id}: the {field!r} argument is not a list of recipient addresses"
+            msg = (
+                f"{tool_id}: the {field!r} argument is neither a recipient address "
+                f"nor a list of recipient addresses"
+            )
             raise _refuse_changed(msg)
         recipients[field] = tuple(str(one) for one in value)
     texts: dict[str, str] = {}

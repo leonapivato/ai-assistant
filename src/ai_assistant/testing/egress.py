@@ -63,6 +63,18 @@ DESTINATION_KEYWORD: Final = "x-egress-destination"
 TIER_KEYWORD: Final = "x-egress-tier"
 _KEYWORDS: Final = (DESTINATION_KEYWORD, TIER_KEYWORD)
 
+#: ADR-0157 §1's third flat form holds exactly two branches, and they are the two
+#: forms admitted before it. Spelled here for the same reason the keywords are.
+_BRANCHES: Final = 2
+_BRANCH_TYPES: Final = ("array", "string")
+
+#: What ADR-0157 §1's second clause refuses beside ``anyOf`` and inside a branch:
+#: a ``"type"``, which would leave which branch applies to the dialect, and every
+#: applicator it names, which would put the shape somewhere a reader of the
+#: subschema does not look.
+_APPLICATORS: Final = ("oneOf", "allOf", "not", "if", "then", "else")
+_REFUSED_BESIDE_ANYOF: Final = ("type", *_APPLICATORS)
+
 _PARAMETERS: Final = TypeAdapter[Mapping[str, "FrozenJson"]](FrozenJsonMapping)
 
 
@@ -231,6 +243,56 @@ def _mappings(node: FrozenJson) -> list[Mapping[str, FrozenJson]]:
     if isinstance(node, Sequence):
         return [found for value in node for found in _mappings(value)]
     return []
+
+
+def _is_typed_flat(subschema: Mapping[str, FrozenJson]) -> bool:
+    """Whether ``subschema`` is one of the two forms that declare a ``type``."""
+    items = subschema.get("items")
+    return subschema.get("type") == "string" or (
+        subschema.get("type") == "array"
+        and isinstance(items, Mapping)
+        and "$ref" not in items
+        and items.get("type") == "string"
+    )
+
+
+def _branch_type(branch: FrozenJson) -> str | None:
+    """The flat form one ``anyOf`` branch declares, or ``None`` where it is none.
+
+    A branch that is itself an applicator or a ``$ref`` declares none: ADR-0157
+    §1's third form is admitted because each branch is self-contained and checkable
+    by the check the two existing forms already get.
+    """
+    if not isinstance(branch, Mapping) or "$ref" in branch:
+        return None
+    if any(name in branch for name in ("anyOf", *_APPLICATORS)):
+        return None
+    declared = branch.get("type")
+    return declared if _is_typed_flat(branch) and isinstance(declared, str) else None
+
+
+def _is_flat_anyof(subschema: Mapping[str, FrozenJson]) -> bool:
+    """Whether ``subschema`` is ADR-0157 §1's third form, and no other spelling.
+
+    A sibling keyword is tolerated (§1's fifth clause) — keywords on one subschema
+    are conjunctive, so it can only narrow — except the ones spelled in
+    :data:`_REFUSED_BESIDE_ANYOF` and ``$ref``, which :func:`_is_flat` reads first.
+    """
+    branches = subschema["anyOf"]
+    if any(name in subschema for name in _REFUSED_BESIDE_ANYOF):
+        return False
+    if not isinstance(branches, tuple | list) or len(branches) != _BRANCHES:
+        return False
+    return tuple(sorted(_branch_type(branch) or "" for branch in branches)) == _BRANCH_TYPES
+
+
+def _is_flat(subschema: Mapping[str, FrozenJson]) -> bool:
+    """Whether ``subschema`` is one of ADR-0157 §1's three flat forms."""
+    if "$ref" in subschema:
+        return False
+    if "anyOf" in subschema:
+        return _is_flat_anyof(subschema)
+    return _is_typed_flat(subschema)
 
 
 class FakeEgressBinder:
@@ -554,21 +616,18 @@ class FakeEgressBinder:
         return _Declared(protocol=protocol, tier=tier)
 
     def _refuse_unflat(self, tool_id: str, name: str, subschema: Mapping[str, FrozenJson]) -> None:
-        """Refuse a destination-bearing argument whose declared shape is not flat."""
-        items = subschema.get("items")
-        flat = "$ref" not in subschema and (
-            subschema.get("type") == "string"
-            or (
-                subschema.get("type") == "array"
-                and isinstance(items, Mapping)
-                and "$ref" not in items
-                and items.get("type") == "string"
-            )
-        )
-        if not flat:
+        """Refuse a destination-bearing argument whose declared shape is not flat.
+
+        ADR-0157 §1's three forms, written out here rather than borrowed from the
+        seam: this module imports ``core`` and nothing else, and two
+        implementations that shared the check would agree by construction instead
+        of by conforming to one suite.
+        """
+        if not _is_flat(subschema):
             msg = (
-                f"{tool_id}: argument {name!r} is marked destination-bearing and is neither "
-                f"a string nor an array whose items is a string (ADR-0152 §4)"
+                f"{tool_id}: argument {name!r} is marked destination-bearing and is none of "
+                f"a string, an array whose items is a string, or an anyOf of exactly "
+                f"those two (ADR-0152 §4, ADR-0157 §1)"
             )
             raise _refuse(msg)
 

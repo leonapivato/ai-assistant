@@ -188,12 +188,32 @@ def _top_level_properties(schema: Mapping[str, FrozenJson]) -> Mapping[str, Froz
     return {}
 
 
+#: How many branches ADR-0157 §1's third form holds: exactly two, one per
+#: existing flat form.
+_BRANCHES: Final = 2
+
+#: The two branch types, sorted, so a pair holding the same form twice is refused
+#: as readily as a pair holding a form this seam does not admit (ADR-0157 §1).
+_BRANCH_TYPES: Final = ("array", "string")
+
+#: Every applicator ADR-0157 §1's second clause names beside ``anyOf`` itself.
+#: Refused wherever one is met rather than interpreted: this reader has no model
+#: of the dialect's applicator vocabulary and deliberately does not grow one, so a
+#: name it cannot read is a refusal and never a keyword it walks past.
+_APPLICATORS: Final = ("oneOf", "allOf", "not", "if", "then", "else")
+
+#: Those, plus ``"type"``, which ADR-0157 §1's second clause refuses beside
+#: ``anyOf`` by name — it would leave which branch applies to be settled by the
+#: dialect model this reader does not have.
+_REFUSED_BESIDE_ANYOF: Final = ("type", *_APPLICATORS)
+
+
 def _untyped_defect(declared: FrozenJson) -> str:
     """Why a ``type`` that is neither ``"string"`` nor ``"array"`` is not flat.
 
     A subschema declaring no type at all, or a union of types, or an applicator in
-    place of one, is not a flat declaration (ADR-0152 §4). Split out so
-    :func:`_flat_defect` stays inside the branch budget rather than growing a
+    place of one, is not a flat declaration (ADR-0152 §4, ADR-0157 §1). Split out
+    so :func:`_flat_defect` stays inside the branch budget rather than growing a
     ``noqa``.
     """
     if declared is None:
@@ -204,28 +224,100 @@ def _untyped_defect(declared: FrozenJson) -> str:
 
 
 def _flat_defect(subschema: Mapping[str, FrozenJson]) -> str | None:
-    """Why ``subschema`` is not ADR-0152 §4's flat declaration, or ``None``.
+    """Why ``subschema`` is not a flat declaration, or ``None`` (ADR-0157 §1).
 
-    Exactly two forms and no other: ``"type": "string"``, or ``"type": "array"``
-    whose ``items`` is a subschema whose own ``"type"`` is ``"string"``. A
-    subschema declaring no type, a union of types, a ``$ref``, or an applicator in
-    place of a type is not flat.
+    Three forms and no other: ``"type": "string"``; ``"type": "array"`` whose
+    ``items`` is a subschema whose own ``"type"`` is ``"string"``; or an ``anyOf``
+    holding exactly those two subschemas, in either order (ADR-0157 §1, replacing
+    ADR-0152 §4's enumeration of two). A subschema declaring no type, a union of
+    types, a ``$ref``, or an applicator in place of a type is not flat, and no
+    other spelling of the union is — not ``"type": ["string", "array"]``, not a
+    ``oneOf``, and not an ``anyOf`` carried beside a ``"type"``.
 
-    What the constraint buys is that two of ADR-0150 §4's three
-    under-representation failures stop being *reachable* for a destination rather
-    than being refused: a destination-bearing argument's value decomposes to
-    exactly one recipient in exactly one span, so a span cannot hold two
-    recipients and a supplied form is never extracted from inside a structured
-    value. `core`'s own supplied-form invariant is then total.
+    **The third form is checked by the check that already exists, applied once per
+    branch**, which is why it costs no model of the dialect: every branch is
+    literally one of the two forms admitted before, and a branch that is itself an
+    applicator or a ``$ref`` is refused for the reason a subschema carrying one is.
+
+    What the constraint buys is unchanged, because the *values* are unchanged
+    (ADR-0157 §2): two of ADR-0150 §4's three under-representation failures stop
+    being *reachable* for a destination rather than being refused — a
+    destination-bearing argument's value decomposes to exactly one recipient in
+    exactly one span, so a span cannot hold two recipients and a supplied form is
+    never extracted from inside a structured value. `core`'s own supplied-form
+    invariant is then total.
     """
     if "$ref" in subschema:
         return "carries a $ref in place of a type"
+    if "anyOf" in subschema:
+        return _anyof_defect(subschema)
+    return _typed_defect(subschema)
+
+
+def _typed_defect(subschema: Mapping[str, FrozenJson]) -> str | None:
+    """Why ``subschema`` is neither of the two forms that declare a ``type``.
+
+    The check ADR-0152 §4 has always run, unchanged and now also applied to each
+    branch of ADR-0157 §1's third form.
+    """
     declared = subschema.get("type")
     if declared == "string":
         return None
     if declared != "array":
         return _untyped_defect(declared)
     return _flat_items_defect(subschema.get("items"))
+
+
+def _anyof_defect(subschema: Mapping[str, FrozenJson]) -> str | None:
+    """Why an ``anyOf`` subschema is not ADR-0157 §1's third form, or ``None``.
+
+    A sibling keyword on the argument's own subschema does **not** bear on
+    flatness (ADR-0157 §1's fifth clause) — keywords on one subschema are
+    conjunctive, so a sibling can only narrow what the subschema admits and cannot
+    reach ADR-0157 §2's structural bar. ``to``'s ``minItems`` therefore loads
+    whether its author put it on the array branch, where the ADR tells them to, or
+    beside ``anyOf``. The exceptions are the names below and ``$ref``, which
+    :func:`_flat_defect` guards before it reads anything else: each of those puts
+    the shape somewhere this reader does not look.
+    """
+    misplaced = next((name for name in _REFUSED_BESIDE_ANYOF if name in subschema), None)
+    if misplaced is not None:
+        return f"carries an anyOf beside a {misplaced}"
+    branches = subschema["anyOf"]
+    if not isinstance(branches, tuple | list) or len(branches) != _BRANCHES:
+        return f"declares an anyOf that does not hold exactly {_BRANCHES} branches"
+    return _branches_defect(branches)
+
+
+def _branches_defect(branches: Sequence[FrozenJson]) -> str | None:
+    """Why an ``anyOf``'s two branches are not the two flat forms, or ``None``."""
+    forms: list[str] = []
+    for branch in branches:
+        if not isinstance(branch, Mapping):
+            return "declares an anyOf branch that is not a subschema"
+        defect = _branch_defect(branch)
+        if defect is not None:
+            return f"declares an anyOf branch that {defect}"
+        forms.append(str(branch.get("type")))
+    if tuple(sorted(forms)) != _BRANCH_TYPES:
+        return "declares an anyOf whose branches are not one string and one array of strings"
+    return None
+
+
+def _branch_defect(branch: Mapping[str, FrozenJson]) -> str | None:
+    """Why one ``anyOf`` branch is not one of the two forms that declare a ``type``.
+
+    A branch that is itself an applicator or a ``$ref`` is refused (ADR-0157 §1's
+    second clause): the third form's whole property is that each branch is
+    self-contained, and a branch reaching its shape through something else is a
+    branch this reader cannot check by the check that already exists.
+    """
+    if "$ref" in branch:
+        return "carries a $ref in place of a type"
+    carried = next((name for name in ("anyOf", *_APPLICATORS) if name in branch), None)
+    if carried is not None:
+        return f"is itself an applicator, carrying a {carried}"
+    return _typed_defect(branch)
 
 
 def _flat_items_defect(items: FrozenJson) -> str | None:
@@ -297,6 +389,9 @@ def read_declaration(
 ) -> EgressDeclaration:
     """Read a tool's egress declaration, refusing every breach of ADR-0152 §3 and §4.
 
+    Read with ADR-0157 §1, which replaces §4's enumeration of the flat forms with
+    three: the two it named, and an ``anyOf`` holding exactly those two.
+
     Called on the **detached** copy of the tool's ``parameters_schema`` and on
     nothing else (ADR-0152 §1).
 
@@ -316,8 +411,9 @@ def read_declaration(
             subschema; on a keyword value naming no member of its enum; on a
             protocol this seam holds no canonicaliser for; on a
             destination-bearing argument stating no tier; and on a
-            destination-bearing argument whose declared shape is neither a string
-            nor an array of strings. A declaration that cannot describe a call
+            destination-bearing argument whose declared shape is none of
+            ADR-0157 §1's three flat forms — a string, an array of strings, or an
+            ``anyOf`` of exactly those two. A declaration that cannot describe a call
             does not bind, which is ADR-0016 §1's "a tool that does not declare its
             reach does not load" at the one seam that reads a declaration the
             registry does not.
@@ -369,8 +465,9 @@ def read_declaration(
             if defect is not None:
                 msg = (
                     f"{tool_id}: argument {name!r} is marked destination-bearing and {defect}. "
-                    f"Only a string, or an array whose items is a string, may be "
-                    f"(ADR-0152 §4); widening that needs its own ratified ADR"
+                    f"Only a string, an array whose items is a string, or an anyOf of "
+                    f"exactly those two, may be (ADR-0152 §4, ADR-0157 §1); widening to a "
+                    f"structured shape needs its own ratified ADR"
                 )
                 raise _refuse(msg)
         arguments[name] = ArgumentDeclaration(name=name, protocol=protocol, tier=tier)

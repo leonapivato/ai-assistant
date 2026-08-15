@@ -2473,13 +2473,22 @@ class EgressBinder(Protocol):
     required — ADR-0150 §4, ADR-0150 §4 again, and JSON Schema's own ``required``
     each already state one of those.
 
-    **A destination-bearing argument is flat** (ADR-0152 §4): its subschema is
-    ``"type": "string"`` or ``"type": "array"`` whose ``items`` is a subschema
-    whose own ``"type"`` is ``"string"``, and nothing else. A declaration marking
-    any other shape is refused when the declaration is read; a *call* whose
-    declared destination-bearing argument carries a value that is not a JSON
-    string and not a JSON array of JSON strings is refused before the ruling,
-    whether or not the declaration was already refused.
+    **A destination-bearing argument is flat** (ADR-0152 §4, ADR-0157 §1): its
+    subschema is ``"type": "string"``; or ``"type": "array"`` whose ``items`` is a
+    subschema whose own ``"type"`` is ``"string"``; or an ``anyOf`` holding
+    **exactly two** branch subschemas, one of them the first form and the other
+    the second, in either order — and nothing else. No other spelling of that
+    union is flat: not ``"type": ["string", "array"]``, not a ``oneOf``, not an
+    ``anyOf`` with one branch or with three or more, not one whose branch is
+    itself an applicator or a ``$ref``, and not one carried beside a sibling
+    ``"type"``. A declaration marking any other shape is refused when the
+    declaration is read; a *call* whose declared destination-bearing argument
+    carries a value that is not a JSON string and not a JSON array of JSON strings
+    is refused before the ruling, whether or not the declaration was already
+    refused. The two rules are not the same width and were never meant to be — the
+    third form is what lets a declaration say what the per-call rule has always
+    said, and it admits **no value** the per-call rule did not admit before
+    (ADR-0157 §2).
 
     **No message any refusal raises renders an argument value, a supplied or
     canonical destination form, an account identity, a credential slot, or any
@@ -2621,7 +2630,8 @@ class EgressBinder(Protocol):
                 declaration marks destination-bearing carrying no
                 ``EgressDestination``; a declared destination-bearing argument
                 whose value is not a JSON string or a JSON array of JSON strings,
-                and a declaration marking such an argument at all; a declaration
+                and a declaration marking an argument whose subschema is none of
+                the three flat forms above (ADR-0157 §1); a declaration
                 breaching the vocabulary — a keyword outside a top-level property's
                 own subschema, a keyword value naming no member of its enum, a
                 protocol this seam holds no canonicaliser for, or a

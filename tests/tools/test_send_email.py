@@ -237,17 +237,51 @@ def test_each_keyword_carries_its_enum_members_own_string_value() -> None:
 
 
 def test_every_recipient_argument_is_declared_flat() -> None:
-    """ADR-0152 §4: a string, or an array whose ``items`` is a string, and no other.
+    """ADR-0157 §1: an ``anyOf`` of exactly the two flat forms, and no other.
 
-    What the constraint buys is structural rather than stylistic: a supplied form
-    is never extracted from inside a structured value, so ADR-0150 §4's
-    supplied-form invariant is total. A recipient argument declared any other way
-    is refused when the declaration is read, before any call is made — so this is
-    the shape that keeps the tool bindable at all.
+    What the constraint buys is structural rather than stylistic and is unchanged
+    by the widening, because the *values* are unchanged (ADR-0157 §2): neither
+    branch is structured, so a supplied form is never extracted from inside a
+    structured value and ADR-0150 §4's supplied-form invariant stays total. A
+    recipient argument declared any other way is refused when the declaration is
+    read, before any call is made — so this is the shape that keeps the tool
+    bindable at all.
+
+    Asserted over the branch **set** rather than by index, because §1 admits the
+    two in either order and a test pinning one order would be pinning a fact the
+    contract does not state.
     """
     for name in _RECIPIENT_ARGUMENTS:
-        assert _subschema(name)["type"] == "array"
-        assert _subschema(name)["items"] == {"type": "string"}
+        branches = _subschema(name)["anyOf"]
+        assert isinstance(branches, tuple)
+        assert {branch["type"] for branch in branches if isinstance(branch, Mapping)} == {
+            "string",
+            "array",
+        }
+        assert "type" not in _subschema(name), "a sibling type is refused beside anyOf (§1)"
+
+
+def test_the_required_arguments_bound_rides_on_the_array_branch() -> None:
+    """ADR-0157 §1's fourth clause: the restructuring is where ``minItems`` is lost.
+
+    Without it ``{"to": []}`` satisfies the schema and ``required``, the binder's
+    decomposition yields **no** span for ``to``, and ADR-0152 §6's
+    omitted-destination refusal does not fire — that refusal is written over a span
+    carrying no destination, not over an argument that produced none. An empty
+    array is ADR-0150 §4's total omission, and ``minItems`` is what keeps it out of
+    this tool.
+
+    Placement binds the author rather than the seam: both placements admit the same
+    values, and the array form's constraints belong on the array form.
+    """
+    array = next(
+        branch
+        for branch in _subschema("to")["anyOf"]  # type: ignore[union-attr]  # asserted above
+        if isinstance(branch, Mapping) and branch["type"] == "array"
+    )
+
+    assert array["minItems"] == 1
+    assert "minItems" not in _subschema("to"), "on the branch, not beside anyOf (ADR-0157 §1)"
 
 
 def test_the_required_arguments_bound_is_not_shared_with_the_optional_two() -> None:
@@ -258,11 +292,46 @@ def test_the_required_arguments_bound_is_not_shared_with_the_optional_two() -> N
     ``ToolDefinition`` holds, so the aliasing hazard lives in the literal the
     module hands it, and its only observable effect is a ``minItems`` stated for
     the required argument silently applying to the optional two — which would
-    refuse a call that omits ``cc``.
+    refuse a call that omits ``cc``. The nesting is what makes it worth restating
+    under ADR-0157 §1: the bound now sits one level down, on a branch, where a
+    shared literal would be shared by two objects rather than one.
     """
-    assert _subschema("to") == {**_subschema("cc"), "minItems": 1}
-    assert "minItems" not in _subschema("cc")
-    assert "minItems" not in _subschema("bcc")
+    assert _subschema("cc") == _subschema("bcc")
+    assert _subschema("to") != _subschema("cc")
+    for name in ("cc", "bcc"):
+        assert all(
+            "minItems" not in branch
+            for branch in _subschema(name)["anyOf"]  # type: ignore[union-attr]  # asserted above
+            if isinstance(branch, Mapping)
+        )
+
+
+@pytest.mark.parametrize(
+    ("value", "violates"),
+    [
+        pytest.param("bob@example.com", False, id="a-bare-string-is-what-the-widening-buys"),
+        pytest.param(("bob@example.com",), False, id="the-array-form-still-validates"),
+        pytest.param((), True, id="an-empty-array-is-still-refused"),
+        pytest.param(("bob@example.com", 7), True, id="an-array-of-non-strings-is-still-refused"),
+        pytest.param(7, True, id="a-number-is-still-refused"),
+        pytest.param({"address": "bob@example.com"}, True, id="a-structure-is-still-refused"),
+    ],
+)
+def test_what_the_widened_schema_accepts_for_to(value: FrozenJson, violates: bool) -> None:
+    """ADR-0157 §1 and §2 at the one place #1160 is actually closed.
+
+    The producer's own declaration is what ADR-0145 validates a composed step
+    against, and the singular phrasing #1159 measured — ``{"to": "alice@..."}`` —
+    was refused there, before any ruling, with ``step_parameters_invalid``. Nothing
+    else in this lane moves that: the seam admitted the value all along.
+
+    The refusals beside it are the other half. No **value** is added by ADR-0157
+    (§2), so an empty array, an array of non-strings, a number and a structure each
+    stay exactly as refused as they were.
+    """
+    parameters: Mapping[str, FrozenJson] = {"to": value, "subject": "s", "body": "b"}
+
+    assert bool(parameter_violations(SEND_EMAIL.parameters_schema, parameters)) is violates
 
 
 def test_the_declaration_the_seam_reads_is_the_one_this_tool_intends() -> None:

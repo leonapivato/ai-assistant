@@ -56,7 +56,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import FrozenJson
     from ai_assistant.testing.cancellation import SuspendedCall
 
-__all__ = ["EgressBinderContract", "recipients", "tool_declaring"]
+__all__ = ["EgressBinderContract", "either", "recipients", "tool_declaring"]
 
 #: The connection reference and identity every case arranges unless it says
 #: otherwise. The identity is a Tier 1 value and is asserted to appear in **no**
@@ -71,6 +71,36 @@ def recipients(*, tier: str = "personal", protocol: str = "smtp") -> dict[str, F
     return {
         "type": "array",
         "items": {"type": "string"},
+        "x-egress-destination": protocol,
+        "x-egress-tier": tier,
+    }
+
+
+#: The two branches ADR-0157 §1's third form holds, spelled once so a case varying
+#: one of them varies exactly one thing.
+STRING_BRANCH: Final[Mapping[str, FrozenJson]] = {"type": "string"}
+ARRAY_BRANCH: Final[Mapping[str, FrozenJson]] = {"type": "array", "items": {"type": "string"}}
+
+
+def _destination_keywords() -> dict[str, FrozenJson]:
+    """The two keywords a destination-bearing argument carries.
+
+    Defined above the suite rather than below it because the declaration cases are
+    parametrised, and a decorator's arguments are evaluated while the class body
+    is.
+    """
+    return {"x-egress-destination": "smtp", "x-egress-tier": "personal"}
+
+
+def either(*, tier: str = "personal", protocol: str = "smtp") -> dict[str, FrozenJson]:
+    """A destination-bearing subschema in ADR-0157 §1's third form: both, at once.
+
+    The union the per-call clause has always admitted, now declarable — an
+    ``anyOf`` holding exactly the two subschemas :func:`recipients` and the string
+    form declare separately.
+    """
+    return {
+        "anyOf": [dict(STRING_BRANCH), dict(ARRAY_BRANCH)],
         "x-egress-destination": protocol,
         "x-egress-tier": tier,
     }
@@ -723,15 +753,117 @@ class EgressBinderContract(ABC):
                 },
                 id="an-array-of-objects",
             ),
+            # ADR-0157 §1's second clause: every *other* spelling of the union the
+            # third form admits. The shorthand first, which §1 refuses most firmly
+            # — under draft 2020-12 ``items`` applies only to an array instance, so
+            # this decides the element type in a sibling keyword rather than in the
+            # type declaration a reader looks at.
+            pytest.param(
+                {
+                    "type": ["string", "array"],
+                    "items": {"type": "string"},
+                    **_destination_keywords(),
+                },
+                id="a-union-of-string-and-array",
+            ),
+            pytest.param(
+                {"oneOf": [dict(STRING_BRANCH), dict(ARRAY_BRANCH)], **_destination_keywords()},
+                id="a-oneof-of-both-forms",
+            ),
+            pytest.param(
+                {"allOf": [dict(STRING_BRANCH)], **_destination_keywords()},
+                id="an-allof",
+            ),
+            pytest.param(
+                {"not": {"type": "object"}, **_destination_keywords()},
+                id="a-not",
+            ),
+            pytest.param(
+                {
+                    "if": {"type": "string"},
+                    "then": dict(STRING_BRANCH),
+                    "else": dict(ARRAY_BRANCH),
+                    **_destination_keywords(),
+                },
+                id="an-if-then-else",
+            ),
+            pytest.param(
+                {"anyOf": [dict(STRING_BRANCH)], **_destination_keywords()},
+                id="an-anyof-with-one-branch",
+            ),
+            pytest.param(
+                {
+                    "anyOf": [dict(STRING_BRANCH), dict(ARRAY_BRANCH), dict(STRING_BRANCH)],
+                    **_destination_keywords(),
+                },
+                id="an-anyof-with-three-branches",
+            ),
+            pytest.param(
+                {
+                    "anyOf": [dict(STRING_BRANCH), dict(STRING_BRANCH)],
+                    **_destination_keywords(),
+                },
+                id="an-anyof-of-two-strings",
+            ),
+            pytest.param(
+                {
+                    "anyOf": [dict(ARRAY_BRANCH), dict(ARRAY_BRANCH)],
+                    **_destination_keywords(),
+                },
+                id="an-anyof-of-two-arrays",
+            ),
+            pytest.param(
+                {
+                    "anyOf": [
+                        {"anyOf": [dict(STRING_BRANCH), dict(ARRAY_BRANCH)]},
+                        dict(ARRAY_BRANCH),
+                    ],
+                    **_destination_keywords(),
+                },
+                id="an-anyof-whose-branch-is-an-applicator",
+            ),
+            pytest.param(
+                {
+                    "$defs": {"r": {"type": "string"}},
+                    "anyOf": [{"$ref": "#/properties/to/$defs/r"}, dict(ARRAY_BRANCH)],
+                    **_destination_keywords(),
+                },
+                id="an-anyof-whose-branch-is-a-ref",
+            ),
+            pytest.param(
+                {
+                    "anyOf": [
+                        dict(STRING_BRANCH),
+                        {"type": "array", "items": {"type": "object"}},
+                    ],
+                    **_destination_keywords(),
+                },
+                id="an-anyof-whose-array-branch-holds-objects",
+            ),
+            pytest.param(
+                {"type": "string", **either()},
+                id="an-anyof-beside-a-sibling-type",
+            ),
+            pytest.param(
+                {"oneOf": [dict(STRING_BRANCH)], **either()},
+                id="an-anyof-beside-a-sibling-applicator",
+            ),
         ],
     )
     async def test_a_non_flat_destination_bearing_declaration_is_refused(
         self, binder: EgressBinder, subschema: Mapping[str, FrozenJson]
     ) -> None:
-        """ADR-0152 §4, §13: only a string, or an array whose items is a string.
+        """ADR-0152 §4, §13 and ADR-0157 §1: three forms, and no other spelling.
 
         Refused when the declaration is read, before any call is made — which is
         why each case here binds a call that would otherwise succeed.
+
+        The ``anyOf`` cases are ADR-0157 §1's second clause, which admits *one*
+        spelling of the union rather than every equivalent one. ``oneOf`` would be
+        equivalent here — no instance is both a string and an array — and is
+        refused anyway, because two spellings of one fact in one vocabulary is the
+        duplication the corpus is named against; the rest are refused because they
+        decide the shape somewhere the seam does not read.
         """
         misshapen = tool_declaring({"to": subschema})
         self.register_egress(binder, misshapen)
@@ -755,6 +887,111 @@ class EgressBinderContract(ABC):
         assert bound is not None
         assert [span.index for span in bound.binding.spans] == [None]
         assert bound.binding.spans[0].destination is not None
+
+    @pytest.mark.parametrize(
+        "branches",
+        [
+            pytest.param((STRING_BRANCH, ARRAY_BRANCH), id="string-first"),
+            pytest.param((ARRAY_BRANCH, STRING_BRANCH), id="array-first"),
+        ],
+    )
+    async def test_the_third_flat_form_is_admitted_in_either_branch_order(
+        self, binder: EgressBinder, branches: tuple[Mapping[str, FrozenJson], ...]
+    ) -> None:
+        """ADR-0157 §1: an ``anyOf`` of exactly the two forms, in either order.
+
+        The declaration half of the change, and the whole of what it adds: a tool
+        author may now state the union the per-call clause already admitted.
+        """
+        union = tool_declaring(
+            {"to": {"anyOf": [dict(branch) for branch in branches], **_destination_keywords()}}
+        )
+        self.register_egress(binder, union)
+
+        bound = await binder.bind(
+            union, parameters={"to": "Alice@Example.COM"}, provenance=_no_provenance()
+        )
+
+        assert bound is not None
+        assert [span.index for span in bound.binding.spans] == [None]
+
+    @pytest.mark.parametrize(
+        ("value", "indices"),
+        [
+            pytest.param("Alice@Example.COM", [None], id="a-string-yields-one-indexless-span"),
+            pytest.param(("Alice@Example.COM",), [0], id="an-array-yields-one-span-per-element"),
+            pytest.param(("a@example.com", "b@example.com"), [0, 1], id="two-elements-two-spans"),
+        ],
+    )
+    async def test_one_union_declaration_binds_both_forms_with_the_locators_of_each(
+        self, binder: EgressBinder, value: FrozenJson, indices: list[int | None]
+    ) -> None:
+        """ADR-0157 §3: the seam's derivation is untouched, and one declaration reaches it.
+
+        The consequence ADR-0157 §3 states rather than leaves to be discovered: the
+        same recipient reaches a **different locator** depending on which form the
+        caller composed — no index for a string, its position for an element — and
+        this ADR is what makes both reachable through one declaration for the first
+        time. Nothing depends on the two agreeing: a decision is bound to its own
+        parameters digest and ``rebind`` re-derives from the same parameters.
+        """
+        union = tool_declaring({"to": either()})
+        self.register_egress(binder, union)
+
+        bound = await binder.bind(union, parameters={"to": value}, provenance=_no_provenance())
+
+        assert bound is not None
+        assert [span.index for span in bound.binding.spans] == indices
+        assert all(span.destination is not None for span in bound.binding.spans)
+
+    async def test_an_array_constraint_beside_anyof_does_not_unflatten_a_declaration(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0157 §1's fifth clause, and one of the two cases it separates.
+
+        A keyword sitting beside ``anyOf`` on the argument's **own** subschema does
+        not bear on flatness. Keywords on one subschema are conjunctive, so a
+        sibling can only *narrow* what the subschema admits and can never reach
+        ADR-0157 §2's structural bar — and refusing a misplaced ``minItems`` would
+        need a model of which keywords constrain arrays, which is exactly the
+        dialect model this seam deliberately does not have.
+
+        Stated in the shared suite because it is where two conforming
+        implementations would otherwise diverge on whether a tool **loads**.
+        """
+        tolerant = tool_declaring({"to": {**either(), "minItems": 1}})
+        self.register_egress(binder, tolerant)
+
+        bound = await binder.bind(
+            tolerant, parameters={"to": "Alice@Example.COM"}, provenance=_no_provenance()
+        )
+
+        assert bound is not None
+
+    async def test_a_sibling_ref_beside_anyof_is_refused(self, binder: EgressBinder) -> None:
+        """ADR-0157 §1's fifth clause, and the other case it separates.
+
+        The two exceptions to the tolerance above are ``"type"`` and ``"$ref"``,
+        and neither is an exception to the conjunctivity that carries it: they are
+        refused because they put the shape somewhere the seam does not read, not
+        because they widen. ``$ref`` has been guarded before every other read since
+        ADR-0152 §4, and ADR-0157 §2's first clause refuses it here too.
+        """
+        indirect = tool_declaring(
+            {
+                "to": {
+                    "$defs": {"r": {"type": "string"}},
+                    "$ref": "#/properties/to/$defs/r",
+                    **either(),
+                }
+            }
+        )
+        self.register_egress(binder, indirect)
+
+        with pytest.raises(EgressBindingError):
+            await binder.bind(
+                indirect, parameters={"to": "a@example.com"}, provenance=_no_provenance()
+            )
 
     # --- ADR-0152 §6, §8, §10: connectability -------------------------------
 
@@ -1656,11 +1893,6 @@ class EgressBinderContract(ABC):
 
         assert await binder.rebind(NOT_EGRESS, parameters={"query": "q"}, approved=None) is None
         assert self.reads(binder) == ()
-
-
-def _destination_keywords() -> dict[str, FrozenJson]:
-    """The two keywords a destination-bearing argument carries."""
-    return {"x-egress-destination": "smtp", "x-egress-tier": "personal"}
 
 
 def _without_destinations(binding: EgressBinding) -> EgressBinding:
