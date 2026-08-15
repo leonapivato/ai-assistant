@@ -740,9 +740,17 @@ The lane pins each of the following as a test, and each is separately owed.
 > `assemble_by_band` is unchanged by the supplement's presence and by its bound
 > (§3).
 
-> **Normative.** The lane pins that the supplement's read is band-restricted, by
-> retrieving nothing for a relevant `EPISODIC` record outside the `DERIVED` band
-> (§3).
+> **Normative.** The lane pins the supplement's read arguments in full, as
+> observed at the call: `kinds` exactly `(MemoryKind.EPISODIC,)`, `bands` exactly
+> `(BeliefBand.DERIVED,)`, and `limit` the composition-root bound (§3).
+
+> **Normative.** The lane pins that the kind filter is *effective*, by leaving a
+> `DERIVED` non-`EPISODIC` record relevant to the query eligible and asserting it
+> does not reach the supplement (§3).
+
+> **Normative.** The lane pins that the band filter is *effective*, by leaving a
+> relevant `EPISODIC` record outside the `DERIVED` band eligible and asserting it
+> does not reach the supplement (§3).
 
 > **Normative.** The lane pins that the supplement's records follow the belief
 > records in `memories` (§4).
@@ -762,11 +770,23 @@ The lane pins each of the following as a test, and each is separately owed.
 > empty history, an empty belief composition and a relevant cross-conversation
 > episode, asserting the episode is absent from `memories` (§4).
 
-The first three are the ones a refactor would break silently, and they are §2 and
-§3 in executable form. The rest are §4. The band-restriction case is constructible
-from the fixture that already exists —
-`tests/orchestration/test_conversations.py`'s `_foreign_episode` — which is why §3
-pins the band rather than trusting the producer.
+The first five are the ones a refactor would break silently, and they are §2 and
+§3 in executable form. The rest are §4. The band case is constructible from the
+fixture that already exists — `tests/orchestration/test_conversations.py`'s
+`_foreign_episode` — which is why §3 pins the band rather than trusting the
+producer.
+
+**The arguments are pinned as a set, and each filter is separately proved to
+bite, because the two failures are different.** Pinning the arguments alone would
+pass an implementation that computed them and then read something else; proving
+only the effects would pass one that reached the right result through a wider
+read and a post-filter, which §2's candidate-set argument rules out. And the two
+filters fail differently: a `kinds` that widened to `None` while `bands` stayed
+`DERIVED` would admit *derived beliefs* into the supplement, appending after the
+belief group records that could already be in it — the one way a belief could
+appear twice in one prompt, which §4's deduplication does not catch because it
+is scoped to the continuity tail. Pinning `kinds` is what closes that, and it is
+why no further deduplication rule is owed.
 
 **The separator cases are called out because the obvious test does not cover
 them.** "The supplement's records follow the belief records" passes with a single
