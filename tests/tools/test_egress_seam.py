@@ -71,7 +71,7 @@ from packaging.requirements import Requirement
 
 from ai_assistant.testing import FakeMemoryStore
 from ai_assistant.tools.builtin import build_default_registry
-from ai_assistant.tools.send_email import SEND_EMAIL_ID, SendEmail, UndesignatedSeamError
+from ai_assistant.tools.send_email import SEND_EMAIL_ID
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _TOOLS = _REPO_ROOT / "src" / "ai_assistant" / "tools"
@@ -376,21 +376,28 @@ def test_the_tree_has_modules_to_check() -> None:
     assert len(_modules()) >= 4
 
 
-def test_no_production_module_outside_the_seam_names_the_transport() -> None:
-    """**No production construction site exists**, which is what makes it inert.
+def test_exactly_one_production_module_outside_the_seam_names_the_transport() -> None:
+    """**One construction site, and it is the factory** (ADR-0017 §3 condition 5, #83).
 
-    This check replaces one that asserted the seam's syntax tree held a single
-    node. That pin was standing in for a property rather than being one: its own
-    docstring gave the reason — a body "would be a shape for a later lane to fill
-    in" — and the property it was buying was that the seam **transmits nothing**,
-    which ADR-0017 §2 states and ADR-0147 §3 restates in a marked clause.
+    This check has now had two lives, and the second is the interesting one. It
+    began as a pin on the seam's syntax tree holding a single node, standing in for
+    "the seam transmits nothing". ADR-0147 §3's designation of that property as a
+    marked clause turned it into "no module outside the seam so much as *names* the
+    transport", which bought the same thing without requiring emptiness.
 
-    Emptiness is one way to buy that and it is not the only one. What actually has
-    to hold is that nothing a running system constructs can reach a socket, and
-    the direct form of that is this: no module under ``src/ai_assistant`` other
-    than the seam so much as *names* the transport, so nothing builds one, nothing
-    imports one, and no composition root wires one. A lane that later wires it is
-    the designating lane, and this test is what it has to come here and change.
+    ADR-0154 §1 designates the seam and the registration lane wires it, so a
+    construction site now exists and "none" is no longer the property to hold. What
+    replaces it is the one issue #83 actually asks for in its third bullet:
+    "whether the client is constructed centrally at the seam so the policy cannot
+    be bypassed per integration. If each integration builds its own client, this is
+    unenforceable by construction." **Exactly one** module outside the seam names a
+    transport, and it is the registry factory — so there is one place a policy
+    could differ, and a second integration wired later has to come through it.
+
+    Note what the tool that actually sends does *not* appear here for:
+    ``send_email.py`` names no transport at all, holding a one-method
+    ``BoundTransport`` Protocol instead. That is the difference between one
+    construction site and one per integration.
 
     The scan reads names, so it shares :func:`_reached_names`'s blind spots — a
     ``getattr``, a name assembled at runtime. That is ADR-0017 §4's "net, not a
@@ -403,7 +410,7 @@ def test_no_production_module_outside_the_seam_names_the_transport() -> None:
         "open_smtp_channel",
         "parse_smtp_endpoint",
     }
-    offenders: dict[str, set[str]] = {}
+    namers: dict[str, set[str]] = {}
     for path in sorted((_REPO_ROOT / "src" / "ai_assistant").rglob("*.py")):
         if path == _modules()[SEAM]:
             continue
@@ -419,14 +426,13 @@ def test_no_production_module_outside_the_seam_names_the_transport() -> None:
             for alias in node.names
         }
         if found & named:
-            offenders[str(path.relative_to(_REPO_ROOT))] = found & named
+            namers[str(path.relative_to(_REPO_ROOT))] = found & named
 
-    assert not offenders, (
-        f"{offenders} name the egress transport. ADR-0017 §2 leaves the tools/ "
-        f"boundary approved and undesignated and ADR-0147 §3 authorises no byte to "
-        f"leave from tools/, so the transport is constructed nowhere in production. "
-        f"The lane that wires it is the one a designating ADR licenses, and it "
-        f"changes this test."
+    assert set(namers) == {"src/ai_assistant/tools/builtin.py"}, (
+        f"{sorted(namers)} name the egress transport. Exactly one production module "
+        f"does — the registry factory, which is the central construction site issue "
+        f"#83's third bullet asks for — so a policy about how a client is built has "
+        f"one place to live and a per-integration bypass has none."
     )
 
 
@@ -459,33 +465,44 @@ def test_exactly_one_place_in_the_seam_opens_a_connection() -> None:
     )
 
 
-def test_the_seam_docstring_records_that_it_is_undesignated() -> None:
+def test_the_seam_docstring_records_which_adr_designated_it() -> None:
     """The one thing a reader of this module must not have to look up.
 
-    A module named ``egress`` in a package a roadmap item is about to grow reads as
-    permission unless it says otherwise in its own text.
+    A module named ``egress`` reads as permission unless its own text says on whose
+    authority. It used to have to say ``undesignated``; now it has to say which ADR
+    designated it and against which conditions, which is the same requirement
+    pointed at the state the corpus is actually in — a reader who finds neither
+    word has to go and look, and that is what this test exists to prevent.
     """
     docstring = ast.get_docstring(ast.parse(_modules()[SEAM].read_text(encoding="utf-8")))
 
     assert docstring is not None
-    assert "undesignated" in docstring
+    assert "ADR-0154" in docstring
     assert "ADR-0017" in docstring
+    assert "undesignated" not in docstring, (
+        "the module described itself as undesignated after ADR-0154 §1 designated "
+        "it — the one sentence a reader would take at face value"
+    )
 
 
-async def test_no_registered_tool_can_reach_the_transport() -> None:
-    """The other half of inertness: nothing an ``invoke`` can reach transmits.
+async def test_an_unconfigured_deployment_has_no_tool_that_can_reach_the_transport() -> None:
+    """A transport is reachable only where a deployment configured one.
 
-    The static scan above says no module *names* the transport; this says the
-    running system has no tool bound to a callable that could. ``send_email`` is
-    the integration a designating ADR would register, and it is deliberately
-    absent from the default registry *and* refuses when called — two independent
-    reasons, which is what ``send_email.py``'s own docstring records.
+    The static scan above says exactly one module *names* the transport; this says
+    the running system has a tool bound to a callable that could reach one only
+    where an operator named the account it sends as and the endpoint it submits to
+    (ADR-0148 §6). The factory's default is no egress integration, so the default
+    registry holds the two local read-only tools and nothing that transmits.
+
+    This is the half that used to be bought by ``send_email`` being absent from the
+    factory unconditionally. It is now bought by the same absence being *derived*
+    from a configuration fact, which is strictly the stronger statement: the tool
+    and its registration come from one value, so there is no state in which one
+    exists without the other.
     """
     registry = build_default_registry(memory=FakeMemoryStore())
 
     assert SEND_EMAIL_ID not in {tool.id for tool in await registry.all_tools()}
-    with pytest.raises(UndesignatedSeamError):
-        await SendEmail()({"to": ["someone@example.invalid"]}, idempotency_key=None)
 
 
 def test_the_contract_exempts_the_seam_and_nothing_else() -> None:

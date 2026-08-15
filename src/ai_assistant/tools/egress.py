@@ -1,4 +1,4 @@
-"""The `tools/` egress seam: named, approved, undesignated, transmitting nothing.
+"""The `tools/` egress seam: named, designated, and the one module here that transmits.
 
 This is the seam ADR-0017 §2 anticipates and ADR-0147 §3 names:
 ``ai_assistant.tools.egress`` — **one module, not a package**, holding outbound
@@ -10,37 +10,42 @@ package the boundary would follow wherever the code grew. Naming it is what issu
 an import-linter contract to pin the module" — and the contract that pins it is
 ``network transports are confined to the tools egress seam`` in ``pyproject.toml``.
 
-**Nothing here authorises a byte to leave this device.** ADR-0147 §3 says so in a
-marked clause: naming the seam is not designating it, that ADR designates nothing
-and attests no condition of ADR-0017 §3, and all fourteen of §3's conditions stand
-exactly as written and undischarged. No lane may cite ADR-0147 — or the existence
-of this module — toward any of them. The seam is **approved and undesignated**, and
-an approved boundary transmits nothing. It becomes designated, and only then
-transmits, when every one of those conditions holds in code *and* a later ADR names
-which, attests how, and records the transition.
+**This module may transmit, and it is the only one under ``ai_assistant.tools``
+that may.** ADR-0154 §1 designates it, and §4 attests all fourteen of ADR-0017 §3's
+conditions in code, row by row and against named tests. That is the event ADR-0147
+§3 described and withheld: naming a seam is not designating it, that ADR attested
+no condition of §3, and no lane could cite it — or this module's existence —
+toward one. ADR-0154 is the ADR that named which module, attested how, and recorded
+the transition, so ADR-0017 §1's rule as ADR-0124 §1 restates it now has all three
+of its boundaries operational rather than two.
 
-**So what is this module, if it may not transmit?** It is the machinery ADR-0017
-§3's conditions 5, 8 and 12 are stated *about*, written so that a designating ADR
-has code to attest against rather than a plan. ADR-0148 §13 scopes transport
-pinning out of itself in terms — "what pins the endpoint to the connected service,
-and what a redirect may do, wants an HTTP client in hand" — and issue #83's own
-third bullet asks "whether the client is constructed centrally at the seam so the
-policy cannot be bypassed per integration. If each integration builds its own
-client, this is unenforceable by construction." That question is answerable only by
-a client existing here, and this is it.
+**What made a designation possible is that this module existed first.** It is the
+machinery ADR-0017 §3's conditions 5, 8 and 12 are stated *about*, written so that
+a designating ADR had code to attest against rather than a plan. ADR-0148 §13
+scopes transport pinning out of itself in terms — "what pins the endpoint to the
+connected service, and what a redirect may do, wants an HTTP client in hand" — and
+issue #83's own third bullet asks "whether the client is constructed centrally at
+the seam so the policy cannot be bypassed per integration. If each integration
+builds its own client, this is unenforceable by construction." That question is
+answerable only by a client existing here, and this is it.
 
-**And it transmits nothing, because nothing in production constructs it.**
-:class:`SmtpEgressTransport` appears in no composition root, in no registry, and in
-no callable any registered tool can reach: :class:`~ai_assistant.tools.send_email.
-SendEmail` still raises :class:`~ai_assistant.tools.send_email.
-UndesignatedSeamError` and is still absent from
-:func:`~ai_assistant.tools.builtin.build_default_registry`. The one function in
-this module that opens a socket, :func:`open_smtp_channel`, is reached only through
-a constructor argument that no production caller supplies because no production
-caller exists. ``tests/tools/test_egress_seam.py`` holds the module to that — it
-used to pin the seam's syntax tree to a single node, and it now pins the properties
-that emptiness was standing in for: no production construction site, no reachable
-callable, and exactly one place a connection is opened.
+**Designation is not a licence this module spends by itself.** A byte leaves only
+where a deployment configured an integration (ADR-0148 §6 binds a registered tool
+to at most one connected account), where the user authorised that specific call
+whole (ADR-0148 §1's single route and §3's route (a), with ADR-0154 §4 admitting no
+standing authorisation at this seam), and where the arguments still yield the call
+the binding describes. What :class:`SmtpEgressTransport` adds on top of all of that
+is the **pin**, described below.
+
+**Exactly one place in production constructs one**, which is issue #83's third
+bullet answered rather than assumed:
+:func:`~ai_assistant.tools.builtin.build_send_email_integration`. The tool that
+sends through it names no transport at all — it holds a one-method
+:class:`~ai_assistant.tools.send_email.BoundTransport` Protocol — so a second
+integration wired later comes through that same factory or through nothing.
+``tests/tools/test_egress_seam.py`` holds the tree to it: one production namer,
+exactly one function here that opens a connection (:func:`open_smtp_channel`), and
+no tool able to reach a transport in a deployment that configured none.
 
 **Why the pin is what it is, for SMTP, stated honestly.** #83 is written about an
 HTTP client — "a configurable API base URL, or … a cross-host redirect" — and SMTP

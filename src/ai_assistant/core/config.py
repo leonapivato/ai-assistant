@@ -2291,6 +2291,59 @@ class Settings(BaseSettings):
             raise ValueError(msg)
         return self
 
+    # --- The registered egress integration (ADR-0152 §10, ADR-0154 §6) ----
+    # **Which connected account `send_email` is registered against, and where it
+    # submits.** Both, or neither: a deployment that names both gets the tool
+    # registered *and* bound to that account; a deployment that names neither does
+    # not get the tool at all. The composition root derives the registry's contents
+    # and the seam's registration table from this one pair, so they cannot disagree
+    # (`ai_assistant.tools.builtin.build_send_email_integration`).
+    #
+    # **Why this is configuration rather than something derived from what is
+    # connected.** Nothing in the tree records which service a connected account is
+    # on. ADR-0151 §18 scopes that out by name — "what an integration *is*: an
+    # endpoint, a service identity, a scope list, an account chooser" — and
+    # ADR-0149 §13 states the consequence: "a connection record carries no endpoint
+    # and no description". So neither the reference nor the endpoint is derivable
+    # from a connection record, and until the ADR §18 says fires with the first
+    # integration lands, an operator states both. That ADR supersedes these two
+    # fields when it does (issue filed alongside this change).
+    #
+    # **The reference names an existing record; it does not propose one.** ADR-0151
+    # §3 is emphatic that "no client, no ``Settings`` value, no configuration file
+    # and no model-authored value supplies, proposes, constrains or predicts" a
+    # connection reference — and that clause governs the **minting** of one at
+    # ``connect_account``, which still mints from its own draw and still takes no
+    # reference argument. Nothing here mints, proposes or predicts: the operator
+    # reads a reference the provisioner already minted out of the connections
+    # listing and states which of them a registration binds. That is selection
+    # among what exists, which ADR-0149 §4's "nothing may create a connection from
+    # configuration" also leaves untouched — a registration creates no connection.
+    #
+    # An unknown or disconnected reference is **not** validated here: what the
+    # store holds is read per call by the binding seam, which refuses an
+    # unconnectable reference at bind time (ADR-0152 §6) rather than at load. A
+    # startup check would be a second, staler answer to a question the seam already
+    # asks with the record in hand.
+    send_email_connection: str | None = Field(
+        default=None,
+        description=(
+            "The connection reference `send_email` is registered against — a handle "
+            "the provisioner minted, read out of the connections listing. Set it "
+            "together with send_email_endpoint, or set neither and the tool is not "
+            "registered."
+        ),
+    )
+    send_email_endpoint: str | None = Field(
+        default=None,
+        description=(
+            "The SMTP submission endpoint `send_email` is configured to use, as "
+            "smtps://host[:port] or smtp+starttls://host[:port] (ADR-0148 §6). The "
+            "transport pins the connection to exactly this text and opens no other "
+            "(#83). Set it together with send_email_connection."
+        ),
+    )
+
     # --- Permissions -----------------------------------------------------
     # The four thresholds ThresholdActionPolicy gates on (ADR-0036 §1). These are
     # the *user's* configuration, not the contract's — ADR-0021 §5 records that
@@ -2343,6 +2396,62 @@ class Settings(BaseSettings):
             "'none' never denies on reversibility."
         ),
     )
+
+    @field_validator("send_email_connection", "send_email_endpoint")
+    @classmethod
+    def _is_not_blank(cls, value: str | None) -> str | None:
+        """Refuse a blank value, which the environment makes easy to produce.
+
+        ``ASSISTANT_SEND_EMAIL_ENDPOINT=`` sets the variable to the empty string,
+        not to nothing, so without this a cleared variable reads as *configured*
+        and only fails much later — at a bind, or at a parse inside the transport.
+        The value is taken **verbatim** otherwise: a reference is compared against
+        the store byte-for-byte and an endpoint is compared as text before it is
+        parsed (ADR-0154's condition 5), so stripping or case-folding here would
+        make two spellings of one endpoint into one and defeat that comparison.
+
+        Raises:
+            ValueError: If the value is present and holds no non-whitespace text.
+        """
+        if value is not None and not value.strip():
+            msg = "must hold text, or be unset entirely"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _the_egress_registration_is_whole_or_absent(self) -> Settings:
+        """Refuse half a registration for ``send_email``.
+
+        The two fields are one fact stated in two variables, and either alone
+        describes a state the system cannot be in: an account with nowhere to
+        submit, or a submission endpoint with no account to submit as. Neither is a
+        thing to fail *later* over, because "later" is a user's send — the operator
+        would learn that half their configuration never took effect at the moment a
+        message did not go out.
+
+        Refused rather than treated as "not configured", because the two readings
+        of a half-set pair are opposite and the safe one is not the quiet one: an
+        operator who set one variable believes the tool is registered, and a
+        deployment that silently registered nothing would leave them believing it
+        while every send failed to select a tool at all. This is ADR-0062 §3's
+        posture for a well-formed but useless configuration, applied one field pair
+        along.
+
+        Raises:
+            ValueError: If exactly one of the two is set.
+        """
+        connection, endpoint = self.send_email_connection, self.send_email_endpoint
+        if (connection is None) == (endpoint is None):
+            return self
+        set_one = "send_email_connection" if endpoint is None else "send_email_endpoint"
+        missing = "send_email_endpoint" if endpoint is None else "send_email_connection"
+        msg = (
+            f"{set_one} is set and {missing} is not; registering send_email needs both "
+            f"the connected account it sends as and the endpoint it submits to "
+            f"(ADR-0148 §6), so set {missing} as well or unset {set_one} to leave the "
+            f"tool unregistered"
+        )
+        raise ValueError(msg)
 
     @field_validator("timezone")
     @classmethod

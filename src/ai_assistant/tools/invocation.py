@@ -10,16 +10,25 @@ ADR-0029 §1 leaves "how the callable is reached" internal to `tools/`, on
 ADR-0008's precedent — a ``ContextProvider`` crosses the boundary while the
 ``ContextSource`` seam that populates it stays inside `context/`. Registration
 is this subsystem's ``ContextSource``.
+
+**There are two callable shapes, not one**, and the second is what that licence
+was being kept for. :class:`ToolImplementation` takes the call's arguments;
+:class:`EgressToolImplementation` takes them and the
+:class:`~ai_assistant.core.types.EgressBinding` the authorising decision carries,
+because a transport may re-derive none of what the ruling fixed (ADR-0148 §4).
+:func:`_awaited` is where a registration's two halves are checked against each
+other, and it refuses both mismatches before the deadline opens.
 """
 
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 import structlog
 from pydantic import ValidationError
 
+from ai_assistant.core.errors import ToolBindingError
 from ai_assistant.core.types import (
     ToolFailure,
     ToolFailureKind,
@@ -28,10 +37,10 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Coroutine, Mapping
     from datetime import timedelta
 
-    from ai_assistant.core.types import FrozenJson, ToolCall, ToolDefinition
+    from ai_assistant.core.types import EgressBinding, FrozenJson, ToolCall, ToolDefinition
 
 _log = structlog.get_logger(__name__)
 
@@ -64,6 +73,117 @@ class ToolImplementation(Protocol):
     ) -> FrozenJson:
         """Perform the call and return its JSON-shaped output."""
         ...
+
+
+@runtime_checkable
+class EgressToolImplementation(Protocol):
+    """The callable an **egress** integration binds to a declaration (ADR-0029 §1).
+
+    :class:`ToolImplementation` with one addition it cannot do without: the
+    :class:`~ai_assistant.core.types.EgressBinding` the authorising decision
+    carries. A transport needs the account, the pinned endpoint and the canonical
+    destination set the ruling fixed; it may re-derive none of them (ADR-0148 §4's
+    third clause, which says a later lane "cannot satisfy it by re-deriving the set
+    at the seam"); and the only holder of them at execution time is the request the
+    executor read back out of the trail (ADR-0037 §3).
+
+    **A second shape rather than a wider first one, for the reason ADR-0029 §1
+    gives for splitting ``ToolInvoker`` off ``ToolRegistry``**: "the surface should
+    not widen to cover a concern its consumers do not have." ``current_time`` and
+    ``recall_memory`` have no business being handed a
+    :class:`~ai_assistant.core.types.BoundAccount` carrying an account identity —
+    Tier 1 personal data (ADR-0149 §3) — merely to satisfy a signature. Widening
+    the one shape would hand every tool in the system that value forever, which is
+    the direction ADR-0017 §8 wants to move away from and which ADR-0152 §10
+    refuses one boundary out.
+
+    **The method is named rather than being a second ``__call__``**, because
+    ``runtime_checkable`` against a ``__call__``-only Protocol matches every
+    callable in the language and so could not tell the two shapes apart at all. A
+    distinct name makes the discrimination structural and total.
+
+    Nothing else moves. ADR-0029 §6 still holds — no credential crosses this seam
+    in either direction, and a binding carries none (ADR-0148 §6's exclusion
+    clause). And choosing this shape is ADR-0029 §1's to give away: "How the
+    callable is reached is `tools/`-internal, and this ADR does not contract it …
+    What signature an integration author writes … is decided by the implementation
+    PR — where it will have implementation contact — not blessed here."
+    """
+
+    async def invoke_bound(
+        self,
+        parameters: Mapping[str, FrozenJson],
+        *,
+        idempotency_key: str | None,
+        egress_binding: EgressBinding,
+    ) -> FrozenJson:
+        """Perform the bound egress call and return its JSON-shaped output."""
+        ...
+
+
+#: Either callable shape a registration may bind. A union rather than a common
+#: base class, because both are structural Protocols: an integration author
+#: satisfies one by writing a method, never by inheriting anything.
+BoundImplementation = ToolImplementation | EgressToolImplementation
+
+
+def _awaited(
+    implementation: BoundImplementation, call: ToolCall
+) -> Coroutine[Any, Any, FrozenJson]:
+    """Pair the call with the callable shape it needs, or refuse before the deadline.
+
+    **Both mismatches are seam faults and both fail closed**, which is why they are
+    checked here rather than left to whichever side would notice first:
+
+    - an **egress** callable reached with no binding would be a tool that transmits
+      being handed no account, no pinned endpoint and no authorised destination
+      set. That is the state a binding seam answering "not an egress call" for a
+      tool whose callable can only make one would produce — the mis-registration
+      ADR-0152 §8 refuses, arriving one stage later.
+    - an **ordinary** callable reached *with* a binding is the mirror image. A
+      ruling was taken over a canonical destination set and a payload description,
+      and the thing about to run can honour neither; ADR-0148 §4's third clause is
+      that what is transmitted is bound to what was authorised, and a callable that
+      never sees the binding is not held to it by anything.
+
+    Neither is reachable through a correctly wired registry, and that is the
+    argument *for* the check rather than against it: which callable a declaration
+    binds is `tools/`-internal and contracted nowhere (ADR-0152 §10), so nothing
+    else in the system would notice a root that paired them wrongly.
+
+    Args:
+        implementation: The registry's callable for the call's tool.
+        call: The revalidated, detached call.
+
+    Returns:
+        The unawaited coroutine, created outside the deadline so that
+        :func:`run_bound_call` starts the clock and the call together.
+
+    Raises:
+        ToolBindingError: If the callable's shape and the call's binding disagree.
+    """
+    binding = call.request.egress_binding
+    if isinstance(implementation, EgressToolImplementation):
+        if binding is None:
+            msg = (
+                f"tool {call.request.tool.id!r} is bound to an egress callable and this call "
+                f"carries no egress binding, so there is no authorised account, endpoint or "
+                f"destination set for it to transmit under (ADR-0148 §4, ADR-0152 §8)"
+            )
+            raise ToolBindingError(msg)
+        return implementation.invoke_bound(
+            call.request.parameters,
+            idempotency_key=call.idempotency_key,
+            egress_binding=binding,
+        )
+    if binding is not None:
+        msg = (
+            f"tool {call.request.tool.id!r} was authorised as an egress call and is bound to a "
+            f"callable that takes no egress binding, so what would run cannot be held to what "
+            f"was authorised (ADR-0148 §4)"
+        )
+        raise ToolBindingError(msg)
+    return implementation(call.request.parameters, idempotency_key=call.idempotency_key)
 
 
 def internal_failure(definition: ToolDefinition, exc: BaseException) -> ToolResult:
@@ -173,7 +293,7 @@ def _interruption(
 
 
 async def run_bound_call(
-    implementation: ToolImplementation,
+    implementation: BoundImplementation,
     *,
     definition: ToolDefinition,
     call: ToolCall,
@@ -208,7 +328,8 @@ async def run_bound_call(
     bypass the failure path it specifies is enforcing nothing.
 
     Args:
-        implementation: The registry's callable for ``definition``.
+        implementation: The registry's callable for ``definition``, of either
+            shape :data:`BoundImplementation` admits.
         definition: The registry's own declaration, used for classification.
         call: The revalidated, detached call.
         timeout: How long to wait; already checked by the caller.
@@ -217,15 +338,21 @@ async def run_bound_call(
         The classified outcome.
 
     Raises:
+        ToolBindingError: If the callable's shape and the call's egress binding
+            disagree (:func:`_awaited`). Raised **before** the deadline opens, so
+            it is a seam fault like the three ``invoke`` performs and never a
+            classified tool failure.
         CancelledError: If the invoking task was cancelled from outside.
     """
+    # Created before the deadline opens, so a pairing fault is a raise out of the
+    # seam rather than an `INTERNAL` result: nothing ran, and reporting that a tool
+    # failed would be a falsehood about a call that was never made.
+    running = _awaited(implementation, call)
     entered_with = _pending_cancellations()
     deadline = asyncio.timeout(timeout.total_seconds())
     try:
         async with deadline:
-            output = await implementation(
-                call.request.parameters, idempotency_key=call.idempotency_key
-            )
+            output = await running
     except asyncio.CancelledError as exc:
         if _pending_cancellations() > entered_with:
             raise
@@ -251,4 +378,10 @@ async def run_bound_call(
         return internal_failure(definition, exc)
 
 
-__all__ = ["ToolImplementation", "internal_failure", "run_bound_call"]
+__all__ = [
+    "BoundImplementation",
+    "EgressToolImplementation",
+    "ToolImplementation",
+    "internal_failure",
+    "run_bound_call",
+]
