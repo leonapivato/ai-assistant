@@ -248,9 +248,12 @@ beliefs the utility bar refuses. It does not, and §6 says what that costs.
 > §2 renders it in**; where it cannot be resolved to a calendar anchor, no time is
 > stated.
 
-> **Normative.** A producer that has not been supplied the zone §2 names states no
-> time at all. It never resolves a relative expression against a UTC calendar as a
-> fallback, and it never resolves one against a zone it chose for itself.
+> **Normative.** A producer that has not been supplied the zone §2 names resolves
+> no relative expression, and never substitutes a UTC calendar or a zone it chose
+> for itself. As the one exception to §2's second clause, such a producer states no
+> time for evidence that establishes one *only* relatively; a time the cited
+> evidence states absolutely needs no calendar and is stated exactly as it would be
+> with a zone in hand.
 
 A stored belief reading *"joined the mentorship programme last weekend"* is worse
 than one with no date at all: it is relative to an anchor the belief does not
@@ -278,9 +281,19 @@ value, not a fourth source of truth.
 **The second clause is a refusal, and it is what keeps the first honest.** A
 producer built without the zone has two tempting fallbacks — UTC, or the host's
 locale — and both would state a calendar date the deployment never authorised, on
-a field a reader takes at face value. Stating nothing is the honest answer over an
+text a reader takes at face value. Stating nothing is the honest answer over an
 unknown calendar, and it is the same posture ADR-0109 §3 takes for an unmeasurable
 currency: unknown is a state, not a reason to invent a value.
+
+**It is scoped to the resolution and not to the anchor, because only the
+resolution needs a calendar.** Evidence reading *"I went to the gym on 7 May
+2026"* establishes a date that no zone is required to carry, and §2's second clause
+requires it to be stated; a blanket "no zone, no time" would make that input
+unsatisfiable under both sections at once. So the refusal reaches exactly the
+inference that would be unsound without a calendar — *"yesterday"* against an
+instant — and reaches nothing else. Where it does bite, §2's third clause is
+already the right outcome by a different route: the producer holds no time it is
+entitled to state.
 
 **One residual is named rather than closed.** The configured zone is the
 deployment's, not a record of where the user was when they spoke, so a user who
