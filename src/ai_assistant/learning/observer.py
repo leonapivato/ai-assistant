@@ -43,10 +43,12 @@ import json
 import uuid
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
     MemorySource,
     MemoryUpdateProposal,
@@ -114,7 +116,17 @@ _EVIDENCE_FLOOR: Final[dict[MemorySource, int]] = {
 #: when it happened (ADR-0077 §2).
 _PROPOSABLE_KINDS: Final = frozenset({"semantic", "preference", "procedural"})
 
-_SYSTEM_PROMPT = """\
+#: How an episode's ``occurred_at`` is written into the prompt once localised: the
+#: weekday, the calendar date and the wall clock. The weekday is there for the
+#: resolution ADR-0156 §3 asks for — *"last Friday"* cannot be worked out against a
+#: date whose day of week the reader has to derive — and the date is ISO-ordered so
+#: it cannot be read the American way round. What the *model* writes is prose and is
+#: its own (ADR-0156 §8's last-but-two clause); this is only what it is shown.
+_INSTANT_FORMAT: Final = "%a %Y-%m-%d %H:%M"
+
+#: The prompt's opening, which says nothing about time and is shared by both
+#: variants below.
+_PROMPT_HEAD: Final = """\
 You are the observation stage of an AI assistant. You are shown a batch of \
 recorded episodes — things that happened — and you propose what the assistant \
 should durably believe about the user as a result.
@@ -130,8 +142,53 @@ Each belief takes one of two epistemic steps:
 different episodes; a generalisation from a single episode will be discarded.
 
 Cite episodes by the labels in brackets, exactly as they appear. Never invent a \
-label, and never cite one that is not in the batch.
+label, and never cite one that is not in the batch."""
 
+#: What a producer holding the zone says about time (ADR-0156 §2, §3). Four things,
+#: in the order they bite: what the rendered instant *is*, when a belief states a
+#: time, that a relative expression is resolved here and never written through, and
+#: when a belief states none. The last paragraph is §2's fourth clause — the anchor
+#: widens the utility bar by nothing.
+_PROMPT_TIME_WITH_ZONE: Final = """\
+Each episode is shown with the local time it was RECORDED, in {zone}. That is \
+when the user spoke, not when the thing they describe happened.
+
+Where the cited episodes establish when something happened — an event the belief \
+asserts, or the onset or change of a state it asserts — say so in the belief's \
+own sentence, as a calendar date: "on 7 May 2023", "in the week before 9 June \
+2023". Where an episode dates it only relatively — "yesterday", "last weekend", \
+"last Friday" — work the date out against that episode's recorded time and write \
+the result. Never write the relative words themselves: the episode they point at \
+will not outlive the belief. Be no more precise than the evidence is; a week or a \
+month is a good answer where that is all the evidence gives.
+
+Where the cited episodes establish no such time, state none. The recorded time is \
+not one on its own: a lasting trait acquires no date from the day it happened to \
+be mentioned, and a date beside one would be read as an event.
+
+A date is never a reason to propose a belief. The bar above is unchanged: if the \
+belief would not be worth holding without its date, it is not worth holding with \
+one."""
+
+#: And what a producer *without* the zone says (ADR-0156 §3's second clause). It is
+#: shown no instants at all — :func:`_render_batch` withholds them — so this asks
+#: for no resolution, and forbids in terms the two fallbacks a model would otherwise
+#: reach for. A date the evidence states outright needs no calendar, so §2's second
+#: clause still applies to it.
+_PROMPT_TIME_NO_ZONE: Final = """\
+The episodes are shown without the times they were recorded, so you cannot know \
+what day any of them falls on. Do not work a date out from context, and do not \
+guess one.
+
+Where a cited episode itself names a calendar date for something the belief \
+asserts, state that date in the belief's own sentence. Otherwise state no time, \
+and never write a relative expression such as "yesterday" or "last week" — it \
+would point at an episode the belief will outlive."""
+
+#: The envelope, and the ban ADR-0156 §7 narrows rather than lifts: the model still
+#: supplies no value for a field the producer computes, and a date it is entitled
+#: to state goes in the sentence, where nothing mechanises it (§1).
+_PROMPT_ENVELOPE: Final = """\
 Reply with a single JSON object and nothing else — no prose, no code fence:
 
 {"beliefs": [
@@ -145,7 +202,8 @@ Reply with a single JSON object and nothing else — no prose, no code fence:
 
 `beliefs` must be a list, and may be empty. `steps` applies to a "procedural" \
 belief only and is otherwise ignored. Do not include ids, confidence values, or \
-timestamps; those are assigned downstream."""
+any timestamp field of your own; those are assigned downstream. A date you are \
+entitled to state belongs in the belief's `content` sentence and nowhere else."""
 
 
 def _uuid() -> str:
@@ -179,12 +237,13 @@ class ModelBackedObserver:
     and counts everything it threw away (ADR-0077).
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — one model, one clock, one id factory, one calendar and the two bounds; each is one knob a deployment sets on its own
         self,
         model: ModelProvider,
         *,
         now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
+        timezone: str | None = None,
         max_batch_size: int = DEFAULT_OBSERVATION_BATCH_SIZE,
         max_proposals: int = DEFAULT_OBSERVATION_MAX_PROPOSALS,
     ) -> None:
@@ -205,6 +264,17 @@ class ModelBackedObserver:
                 :func:`~ai_assistant.core.clock.checked_clock` (ADR-0026 §7).
             id_factory: Mints the id of every proposed record; injectable so tests
                 assert exact ids (ADR-0047 §2). Defaults to random UUIDs.
+            timezone: IANA name of the local calendar each episode's
+                ``occurred_at`` is shown in, and the one a relative expression is
+                resolved against (ADR-0156 §2, §3). ``Settings.timezone``, the same
+                value ADR-0008 §5 gives the temporal context — this producer is a
+                third consumer of it, not a fourth source of truth (ADR-0008 §6).
+                **``None`` withholds the instants entirely**: a producer without a
+                calendar cannot say what day an instant falls on, and ADR-0156 §3's
+                second clause refuses both fallbacks it would otherwise reach for —
+                UTC, and the host's locale — because either states a calendar date
+                the deployment never authorised. Unknown is a state, not a licence
+                to invent (ADR-0109 §3).
             max_batch_size: The largest batch this observer accepts. A longer one
                 is refused, never truncated (ADR-0077 §1).
             max_proposals: The most proposals one call may return. Usable beliefs
@@ -215,12 +285,21 @@ class ModelBackedObserver:
             ValueError: If either bound is below 1. A zero batch bound observes
                 nothing while reporting health; a zero proposal bound could never
                 propose anything.
+            ConfigurationError: If ``timezone`` is not a known IANA zone. Refused
+                at construction, like the bounds and for ADR-0022 §4a's reason:
+                a zone the caller got wrong should fail at startup rather than on
+                the first observation that silently states nothing.
         """
         _check_bound("max_batch_size", max_batch_size)
         _check_bound("max_proposals", max_proposals)
         self._model = model
         self._clock = checked_clock(now, owner="ModelBackedObserver")
         self._id_factory = id_factory
+        self._zone = _zone_of(timezone)
+        # Fixed at construction, because the calendar is: a prompt that promised
+        # recorded times a batch renderer then withheld — or the reverse — would ask
+        # the model to resolve against instants it cannot see.
+        self._system_prompt = _system_prompt(self._zone)
         self._max_batch_size = max_batch_size
         self._max_proposals = max_proposals
 
@@ -289,8 +368,8 @@ class ModelBackedObserver:
         # from `labels` across the model round trip.
         occurred = {record.id: record.occurred_at for record in batch}
         conversation = [
-            Message(role=Role.SYSTEM, content=_SYSTEM_PROMPT),
-            Message(role=Role.USER, content=_render_batch(batch)),
+            Message(role=Role.SYSTEM, content=self._system_prompt),
+            Message(role=Role.USER, content=_render_batch(batch, self._zone)),
         ]
         reply = await self._model.complete(conversation)
         return self._distil(reply.content, labels, occurred, now)
@@ -444,22 +523,75 @@ def _check_batch(batch: Sequence[EpisodicMemory], maximum: int) -> None:
         raise ValueError(msg)
 
 
-def _render_batch(batch: Sequence[EpisodicMemory]) -> str:
+def _zone_of(timezone: str | None) -> ZoneInfo | None:
+    """The local calendar named, or ``None`` where none was supplied (ADR-0156 §3).
+
+    Raises:
+        ConfigurationError: If ``timezone`` names no known IANA zone. ``Settings``
+            validates its own value at load, so this bites only a caller that
+            constructed the producer directly — which is exactly where a silent
+            fallback to UTC would be least visible.
+    """
+    if timezone is None:
+        return None
+    try:
+        return ZoneInfo(timezone)
+    except (ZoneInfoNotFoundError, ValueError) as exc:
+        msg = f"unknown timezone {timezone!r}"
+        raise ConfigurationError(msg) from exc
+
+
+def _system_prompt(zone: ZoneInfo | None) -> str:
+    """The system turn, whose middle section depends on whether a calendar is held.
+
+    Two variants rather than one, because a single text would have to be true both
+    with instants and without them: ADR-0156 §2's first clause has the prompt state
+    each ``occurred_at``, and §3's second clause has a producer lacking the zone
+    render none and resolve nothing. Telling a model to work a date out from
+    recorded times it was never shown invites it to invent one, which is the
+    fallback §3 refuses in terms.
+    """
+    time_section = (
+        _PROMPT_TIME_WITH_ZONE.format(zone=zone.key) if zone is not None else _PROMPT_TIME_NO_ZONE
+    )
+    return "\n\n".join((_PROMPT_HEAD, time_section, _PROMPT_ENVELOPE))
+
+
+def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str:
     """Render the batch as the labelled user turn.
 
-    **The payload is the batch and nothing else** (ADR-0077 §3): each episode's
-    canonical ``content`` (ADR-0005 §1) and the label the model cites it by. Not
-    the user's existing beliefs, not the profile, not a context facet, not a plan
-    — de-duplication is the gate's job, deterministically and locally, and paying
-    for it with a second class of Tier 1 data in the prompt would trade ADR-0004
-    §7's minimisation for something already solved.
+    **The payload is the batch and nothing else** (ADR-0077 §3, as partially
+    superseded by ADR-0156): each episode's canonical ``content`` (ADR-0005 §1),
+    the label the model cites it by, and — since ADR-0156 §2 — that episode's own
+    ``occurred_at``. Still not the user's existing beliefs, not the profile, not a
+    context facet, not a plan: the instant is admitted precisely because it is a
+    field of the very records whose ``content`` is already here rather than a
+    second class of data, so ADR-0004 §7's minimisation is satisfied rather than
+    strained and §3's four refusals stand verbatim. De-duplication remains the
+    gate's job, deterministically and locally.
 
     Not the store ids either, and that is the same rule from the other side: the
     model has no use for an id it is not allowed to cite, and an id in the prompt
     is an id a model can echo back.
+
+    **The instant is localised or it is withheld** (ADR-0156 §3). ``occurred_at``
+    is a ``UtcInstant`` (ADR-0030 §4) while *"yesterday"* is said in the speaker's
+    calendar, so for any deployment west of UTC an evening utterance falls on the
+    following UTC day: rendering the instant in UTC would misdate a fixed fraction
+    of all evidence by one day, always in the same direction. Without a zone the
+    header says the times are withheld and the lines carry none — the state the
+    system prompt's second variant is written against.
     """
-    lines = ["Episodes:"]
-    lines += [f"  [E{index + 1}] {record.content}" for index, record in enumerate(batch)]
+    if zone is None:
+        lines = ["Episodes (recorded times withheld: no local calendar is configured):"]
+        lines += [f"  [E{index + 1}] {record.content}" for index, record in enumerate(batch)]
+        return "\n".join(lines)
+    lines = [f"Episodes (each carries the local time it was recorded, in {zone.key}):"]
+    lines += [
+        f"  [E{index + 1}] {record.occurred_at.astimezone(zone).strftime(_INSTANT_FORMAT)}"
+        f" — {record.content}"
+        for index, record in enumerate(batch)
+    ]
     return "\n".join(lines)
 
 
