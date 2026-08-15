@@ -1,7 +1,16 @@
 # 155. Residency governs the assistant's own store, and that store is never externalised
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-14
+- **Note (2026-08-14): ratified.** `Proposed` → `Accepted` on the repaired tree
+  `953aec450d77`, printed round 25, churn ratio 2.8. Adversarial returned **APPROVE
+  with no findings**, recording that it checked the repaired clause references and
+  the carried-tier account against ADR-0146, ADR-0150, ADR-0152 and ADR-0154.
+  Architecture's `blocker` — that ADR-0154 §6 carries three marked clauses — was
+  **waived on the record**, not complied with: §6 spans ADR-0154's lines 1120–1213
+  and carries four marked clauses, and that ADR's own ratification account binds
+  "§6's four". The waiver and its grounds are recorded on PR #1153. Both lenses were
+  re-run on the flipped tree for coverage.
 - **This is the answer to #95.** ADR-0017 §1 deferred it at its own ratification;
   five ratified ADRs route to it and none answers it (ADR-0004, ADR-0017,
   ADR-0124, ADR-0146, ADR-0154); ADR-0154 §6's third clause makes it blocking for
@@ -1098,8 +1107,10 @@ change in `CONTRIBUTING.md`'s sense — not because it touches `core/protocols.p
 every egress decision in the corpus is measured against, and gates every integration
 registration at an operational boundary. ADR-0154 §8 declared both lenses for the
 neighbouring decision on the same boundary and ADR-0146's header declared them for
-the classification beneath it. It is drafted, reviewed and revised as `Proposed`, and
-the route is `CONTRIBUTING.md` → "Finishing an ADR PR": the status flips only once
-both required reviews return clean on one tree, and both are re-run on the flipped
-tree for coverage. The ratification note this header will carry records the outcome
+the classification beneath it. It was drafted, reviewed and revised as `Proposed`, and
+the route was `CONTRIBUTING.md` → "Finishing an ADR PR", including its route B: an
+earlier flip was returned to `Proposed` because the text had moved after the pair
+that cleared it, and the reviews were re-run on the repaired tree before the status
+flipped again. The ratification note in this ADR's header records the set that ran,
+the outcome it got, and the one finding waived rather than complied with
 (ADR-0070 §1).
