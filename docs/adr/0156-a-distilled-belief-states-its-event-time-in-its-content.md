@@ -52,7 +52,9 @@
   three surviving temporal deferrals, the adjacent question §5 draws the line
   against); #791 (cross-conversation episodic recall, whose budget question is a
   separate ADR's and is not taken here); ADR-0005 §1 (the four kinds, the shared
-  envelope, `content` as the canonical rendering), §2 (`Provenance`); ADR-0045 §1
+  envelope, `content` as the canonical rendering), §2 (`Provenance`); ADR-0008 §5
+  (`Settings.timezone` as the temporal context's local calendar), §6 (no second
+  timezone source); ADR-0030 §4 (`core`'s one UTC canonicaliser); ADR-0045 §1
   (one axis shipped deliberately; as-of deferred), §2 (the `Validity` window, and
   why it sits on the envelope rather than on `Provenance`), §3 (`last_updated` is
   transaction time), §6 (read semantics), §10 (the deferrals #786 carries);
@@ -192,7 +194,9 @@ answers a single question.
 ### 2. What the observation prompt shows, and what a belief may state
 
 > **Normative.** The observation prompt states each episode's `occurred_at`
-> alongside the label and the `content` it already carries for that episode.
+> alongside the label and the `content` it already carries for that episode,
+> rendered in the deployment's configured local calendar — `Settings.timezone`,
+> the value ADR-0008 §5 already gives the temporal context — and naming that zone.
 
 > **Normative.** Where the evidence a proposed belief cites establishes a time —
 > for an event the belief asserts, or for the onset or change of a state it
@@ -240,8 +244,13 @@ beliefs the utility bar refuses. It does not, and §6 says what that costs.
 > **Normative.** A time stated under §2 is stated absolutely — a calendar date, or
 > a range bounded by one — and never as an expression relative to the moment of
 > observation. Where the cited evidence gives the time only relatively, the
-> producer resolves it against that episode's stated `occurred_at`; where it cannot
-> be resolved to a calendar anchor, no time is stated.
+> producer resolves it against that episode's `occurred_at` **in the local calendar
+> §2 renders it in**; where it cannot be resolved to a calendar anchor, no time is
+> stated.
+
+> **Normative.** A producer that has not been supplied the zone §2 names states no
+> time at all. It never resolves a relative expression against a UTC calendar as a
+> fallback, and it never resolves one against a zone it chose for itself.
 
 A stored belief reading *"joined the mentorship programme last weekend"* is worse
 than one with no date at all: it is relative to an anchor the belief does not
@@ -252,6 +261,34 @@ survives the destruction of its evidence with a tombstone rather than a rewrite.
 So an unresolved deixis is a dangling reference of exactly the kind this system
 already refuses to create — and resolving it is cheap and possible only at
 distillation, which is the one moment both halves are in hand.
+
+**The calendar is local, and that is load-bearing rather than cosmetic.**
+`EpisodicMemory.occurred_at` is a `UtcInstant` — `core`'s one canonicaliser
+rebuilds every instant in UTC (ADR-0030 §4) — while *"yesterday"* is said in the
+speaker's calendar and means whatever their local day boundary makes it mean. For
+any deployment west of UTC, every evening utterance sits on the following UTC day,
+so resolving *"yesterday"* against the UTC calendar is wrong by a day for a fixed
+and non-trivial fraction of all evidence, silently and in one direction. Naming
+the local calendar costs nothing: `Settings.timezone` is an IANA name validated at
+load, and `app/composition.py` already hands it to the temporal context and to the
+notification policy under the standing rule that §6 of ADR-0008 "introduces no
+second timezone source". The observer becomes the third consumer of the same
+value, not a fourth source of truth.
+
+**The second clause is a refusal, and it is what keeps the first honest.** A
+producer built without the zone has two tempting fallbacks — UTC, or the host's
+locale — and both would state a calendar date the deployment never authorised, on
+a field a reader takes at face value. Stating nothing is the honest answer over an
+unknown calendar, and it is the same posture ADR-0109 §3 takes for an unmeasurable
+currency: unknown is a state, not a reason to invent a value.
+
+**One residual is named rather than closed.** The configured zone is the
+deployment's, not a record of where the user was when they spoke, so a user who
+travels — or a deployment whose zone is set wrongly — shifts an anchor by up to a
+day. That is the same bounded error the paragraph below admits for a
+mis-resolution, it is strictly smaller than the error UTC resolution guarantees,
+and closing it would need a capture-time zone on the episode, which is contract
+surface with no consumer and is filed in §8 rather than taken here.
 
 **A resolution can be wrong, and that is a distillation error like any other.**
 The producer is reading cited text against a system-supplied instant, which is
@@ -361,7 +398,11 @@ the whole 416 would be measured against a claim it never made.
 ### 7. What the implementing lane owes, and what it may not touch
 
 The lane is `learning`'s: the batch renderer and the system prompt in
-`learning/observer.py`, plus tests.
+`learning/observer.py`, plus tests — and the one wiring line in
+`app/composition.py` that hands the producer `Settings.timezone`, beside the
+injected clock and id factory it is already constructed with. That is the same
+composition-root shape every injected seam in this system takes, and it is named
+here so the lane does not read §1's "no contract surface" as forbidding it.
 
 > **Normative.** The implementing lane changes no file under
 > `src/ai_assistant/core/`. It adds no field, no Protocol and no conformance
@@ -369,10 +410,12 @@ The lane is `learning`'s: the batch renderer and the system prompt in
 > to widen the lane.
 
 > **Normative.** The lane pins, as tests: that the rendered observation batch
-> carries every episode's `occurred_at`; that a value a model emits for any
-> structured temporal field is discarded rather than installed; and that the
-> producer's existing refusals — the evidence floor, the label mapping, the
-> confidence function — are unchanged by the prompt edit.
+> carries every episode's `occurred_at` in the configured zone, including an
+> episode whose UTC and local calendar dates differ; that a producer built without
+> a zone renders none; that a value a model emits for any structured temporal field
+> is discarded rather than installed; and that the producer's existing refusals —
+> the evidence floor, the label mapping, the confidence function — are unchanged by
+> the prompt edit.
 
 **The prompt's existing timestamp ban is narrowed, not lifted, and the narrowing
 is the delicate part.** `learning/observer.py`'s system prompt says *"Do not
@@ -405,8 +448,16 @@ cannot mistake a green suite for a discharged decision.
 - **The episodic retrieval budget** (§5, #791). A separate ADR's.
 - **#786's three deferrals** (§5). Untouched, and this ADR fires none of their
   triggers.
-- **A format for a stated date.** §3 fixes that it is absolute and bounded; the
-  words are the model's, as the rest of the sentence already is.
+- **A format for a stated date.** §3 fixes that it is absolute, bounded and in the
+  configured local calendar; the words are the model's, as the rest of the sentence
+  already is.
+- **A capture-time zone on the episode.** §3's residual — the deployment's zone is
+  not a record of where the user was — would be closed by stamping the speaker's
+  zone at capture, which is a field on `EpisodicMemory` and therefore contract
+  surface. There is no consumer beyond a bounded-by-a-day improvement to this
+  anchor, so it is filed on the same discipline §1 applies to a temporal field:
+  ADR-0045 §1, ADR-0028 §7 and ADR-0072 §7 each declined surface ahead of a
+  consumer, and this ADR does not make an exception for its own convenience.
 - **Whether `SemanticMemory.valid_until` should ever be populated by the
   observer.** No producer sets it today; this ADR adds none.
 
@@ -493,6 +544,15 @@ cannot mistake a green suite for a discharged decision.
   third clause. It states something false about a trait, pays the embedding cost on
   every record rather than on the datable ones, and presents an observation instant
   where a reader will read an event time — the same error §4 refuses one field over.
+- **Resolve relative expressions against the UTC calendar, since `occurred_at` is
+  already UTC.** Rejected in §3, and it is the shape the first draft of this ADR
+  admitted by saying nothing. `occurred_at` is a `UtcInstant` by ADR-0030 §4's
+  canonicalisation, but *"yesterday"* is said in the speaker's calendar: for any
+  deployment west of UTC every evening utterance falls on the next UTC day, so the
+  resolution is wrong by exactly one day for a fixed fraction of all evidence,
+  always in the same direction, and stated as a calendar date a reader will trust.
+  A bounded, systematic error is worse than a random one here, because it is the
+  kind that survives a spot check. `Settings.timezone` closes it at no cost.
 - **Require an ISO-8601 date in the content.** Rejected in §3 and §8. It buys
   machine-readability nothing reads (§1's second clause), reads unnaturally in a
   sentence that a model consumes as prose, and would force a false precision on
