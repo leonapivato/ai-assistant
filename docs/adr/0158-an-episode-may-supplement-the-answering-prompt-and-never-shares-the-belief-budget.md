@@ -51,10 +51,17 @@
   clause is a **rule an implementer obeys** rather than an explanation of one, and
   a reader holding only ADR-0022 §3 would, on that failure, discard a good belief
   composition and report an unpersonalised answer that was not one. So it is a
-  partial supersession, taking ADR-0070 §3's form and §4's status vocabulary, and
-  ADR-0022's `Status` line and dated note land **in this same change** — the hazard
-  ADR-0070 §1 guards against, that a `Status` line names an ADR which does not yet
-  exist, does not arise.
+  partial supersession, taking ADR-0070 §3's form and §4's status vocabulary.
+
+  **ADR-0022's `Status` line and dated note land in this same change, at its
+  *ratifying* commit and not before.** ADR-0070 §1's permitted edit is "recording
+  a supersession **that has landed**", and while this ADR stands `Proposed` the
+  supersession has not: a reader resolving ADR-0022 from an intermediate tree
+  would be pointed at a decision review was still entitled to change or withdraw.
+  So the two move together with the flip. Landing them in one change is what
+  answers the other half of §1 — the superseding ADR *exists*, so the `Status`
+  line never names a document that does not, and if this change does not land,
+  neither does the note.
 
   **The scope is one row read against one read, and nothing else.** ADR-0022 §3's
   rule for the *belief* composition is untouched and still governs
