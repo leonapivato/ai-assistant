@@ -1,6 +1,6 @@
 # 157. A destination-bearing argument may declare both flat forms at once, and nothing else widens
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - Partially supersedes: ADR-0152 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone)
 - **This ADR adds a third admitted declaration shape and admits no new value.**
@@ -636,6 +636,44 @@ while this ADR stands `Proposed` so that a finding can still change the decision
 it rather than re-deriving it, and the outcome is recorded here on ratification —
 in the ratification commit itself, not before it, because a paragraph asserting a
 verdict a review has not yet returned is a claim rather than a record.
+
+**Outcome.** Both required lenses returned **APPROVE with no findings on one
+tree** — `419f1a1fc0da`, reviewed while this ADR stood `Proposed`, which is what
+the paragraph above asks for. The loop ran long and across three holders under
+ADR-0138, and four findings changed the decision rather than its wording:
+
+- **The scope clause was factually wrong, and would have sent this ADR's own
+  implementing lane into a STOP.** §7 once said no `core/` change was required or
+  authorised and that the whole implementation lay in `tools/**`. A conforming
+  implementation must also move `testing/egress.py`, whose canonical fake carries
+  an independent copy of the flat rule, and the `EgressBinder` docstring in
+  `core/protocols.py`, which states that rule as the Protocol's own contract —
+  the one edit golden rule 5 makes a hard STOP for a dispatched lane told it is
+  unauthorised. §7 now authorises three production locations exhaustively and
+  argues one lane from ADR-0137 §1's adaptation clause.
+- **The delivery grounding was inverted, and the correction is not the one the
+  finding that raised it asked for.** An architecture round objected to citing
+  ADR-0015 §5 and golden rule 5 for the separate-PR delivery; its *mechanism*
+  stood — do not cite a rule for something it does not state — but its premise did
+  not, because this ADR does change the rule a Protocol states as its own
+  contract. So the citation returns on corrected grounds. The delivery itself
+  never moved; only whether it was obligatory or an operating preference, and it
+  is obligatory.
+- **§1's third form was silent on keywords sitting beside `anyOf`**, while its
+  fourth clause normatively placed an array constraint on the array branch — so
+  two conforming implementations could have diverged on whether the same tool
+  loads, which is the drift the shared conformance suite exists to prevent. §1's
+  fifth clause settles it, and settles it toward tolerance because the seam is
+  deliberately blind to the dialect and refusing a misplaced constraint would
+  require the model §1's own reasoning says it lacks.
+- **That clause's first form was itself too wide**, admitting a sibling `$ref`
+  that §2's first clause refuses and that the seam has guarded before every other
+  read since ADR-0152 §4. It now names its two exceptions and rests the tolerance
+  on the fact that carries it — keywords on one subschema are conjunctive, so a
+  sibling can only narrow and cannot reach §2's structural bar.
+
+No finding was waived, none is contested, and no issue was deferred out of this
+PR.
 
 **That commit carries two things and no others**: this `Status` line moving
 `Proposed` → `Accepted`, and the outcome paragraph above it. It touches one file.
