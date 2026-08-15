@@ -1,7 +1,30 @@
 # 152. The binding is derived at one seam, never supplied to it, and a call it cannot describe is refused
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0157 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone)
 - Date: 2026-08-14
+- Accepted: 2026-08-14
+- Partially superseded: 2026-08-15 by ADR-0157 — **one enumeration, one limb, and
+  the value set is unchanged.** §4's first normative clause fixed the shapes a
+  destination-bearing argument's subschema may take at "exactly one of two forms
+  and no other"; ADR-0157 §1 makes it three, adding the two-branch `anyOf` whose
+  branches are exactly those two forms. §6's *unshaped destination* refusal reads
+  through to that enumeration in its second limb — "and refuses a declaration that
+  marks such an argument at all" — so that limb now refuses a declaration that is
+  none of ADR-0157 §1's three forms. ADR-0157 §6 applies ADR-0070 §1's test to
+  both and states the extent.
+
+  **What is unchanged, and it is nearly all of §4 and all of the rest.** No
+  **value** is admitted that was not admitted before: §4's per-call clause — a
+  destination-bearing argument's value is a JSON string or a JSON array of JSON
+  strings — is untouched, as are its assumes-nothing clause, its "these clauses
+  are the whole of the constraint" clause, and its widening clause, which stays
+  live and unspent for the structured shape it was written against. §6's five
+  other refusals, its read-binding clause and its residual clause stand, and every
+  other section of this ADR is unaffected.
+
+  **No ratified text of this ADR is rewritten**; this `Status` line, this note and
+  the `Accepted` line above are the whole of the record (ADR-0070 §1, ADR-0082 §1
+  and §2), so §4 and §6 stay legible as ratified beside the pointer to ADR-0157.
 - **Decides surface (b) of ADR-0148 §11** — the seam by which the egress binding
   is obtained from `tools/` before `ActionPolicy.decide` is reached. §11's second
   clause requires that surface to be decided in a contract ADR of its own,
