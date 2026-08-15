@@ -1,6 +1,6 @@
 # 158. An episode may supplement the answering prompt, and never shares the belief budget
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - **Changes no Protocol's *shape* and no `core` type's fields, and widens the
   documented semantics of two — flagged under golden rule 5 rather than smuggled.** The read §1 admits is
