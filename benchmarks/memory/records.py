@@ -251,7 +251,12 @@ class RunManifest(BaseModel):
             ``Settings.timezone``, which is where every consumer of it reads it
             (ADR-0008 §6) — so a manifest naming one is also the record that the
             harness passed one rather than leaving the producer without a calendar
-            (#1171).
+            (#1171). Like ``observer_route`` beside it this is the **configured**
+            value rather than one read back off the producer, which nothing exposes;
+            what makes it the calendar a *scored* run actually distilled under is
+            :func:`~benchmarks.memory.run.refuse_ineligible_scored_run` clause 5,
+            which refuses an injected observer outright for exactly this reason. A
+            smoke run may inject one, and its manifest is already not a measurement.
         episode_retention: The configured horizon, or ``"none"``. **Read this before
             reading a score**: the harness runs on the corpus's clock, so a finite
             horizon expires a session's episodes a horizon after that session's own
