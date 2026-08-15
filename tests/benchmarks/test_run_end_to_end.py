@@ -133,7 +133,7 @@ def _cat_case() -> BenchCase:
     )
 
 
-def _settings(tmp_path: Path) -> Settings:
+def _settings(tmp_path: Path, *, timezone: str = "UTC") -> Settings:
     """Settings a plumbing check may use, and a scored run may not.
 
     `hashing` keeps ONNX out of the test; `episode_retention=None` keeps the first
@@ -142,6 +142,8 @@ def _settings(tmp_path: Path) -> Settings:
 
     Args:
         tmp_path: The test's directory.
+        timezone: The calendar the observation prompt runs under. Named explicitly so
+            a case can choose one no default could produce.
 
     Returns:
         The settings.
@@ -151,20 +153,24 @@ def _settings(tmp_path: Path) -> Settings:
         embedder=EmbedderKind.HASHING,
         episode_retention=None,
         observation_batch_size=BATCH,
+        timezone=timezone,
     )
 
 
-async def _run(tmp_path: Path, *, mode: RunMode = RunMode.SMOKE) -> tuple[RunManifest, Path]:
+async def _run(
+    tmp_path: Path, *, mode: RunMode = RunMode.SMOKE, timezone: str = "UTC"
+) -> tuple[RunManifest, Path]:
     """Execute one run over the fixture case.
 
     Args:
         tmp_path: The test's directory.
         mode: The run mode.
+        timezone: The calendar the run is configured with.
 
     Returns:
         The manifest and the run's output directory.
     """
-    settings = _settings(tmp_path)
+    settings = _settings(tmp_path, timezone=timezone)
     plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH)
     root = tmp_path / "runs"
     manifest = await execute_run(
@@ -222,6 +228,25 @@ async def test_the_manifest_records_the_configuration_rather_than_describing_it(
     assert manifest.answer_prompt.startswith("You are answering a question")
     # The offline grader makes no model call, so there is no judge prompt to record.
     assert manifest.judge_prompt is None
+
+
+async def test_the_manifest_records_the_calendar_the_run_distilled_under(
+    tmp_path: Path,
+) -> None:
+    """Which zone the observation prompt ran under decides what a belief could say
+    about when something happened (ADR-0156 §2, §3), so two runs' temporal categories
+    are comparable only if it is the same one.
+
+    The manifest is the run's self-description, and this is configuration it could not
+    otherwise be asked for afterwards: the databases hold the beliefs, not the calendar
+    they were read in. A zone far from UTC is used so the field could not be passing on
+    the default.
+    """
+    manifest, run_dir = await _run(tmp_path, timezone="Pacific/Kiritimati")
+
+    assert manifest.observer_timezone == "Pacific/Kiritimati"
+    written = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+    assert written["observer_timezone"] == "Pacific/Kiritimati"
 
 
 async def test_a_run_writes_one_record_per_question(tmp_path: Path) -> None:

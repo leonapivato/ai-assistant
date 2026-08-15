@@ -443,6 +443,9 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         conflict_limit=CONFLICT_LIMIT,
         observation_batch_size=resolved.observation_batch_size,
         observation_max_proposals=resolved.observation_max_proposals,
+        # The same `Settings` field `build_harness` hands the producer, so the manifest
+        # cannot name a calendar the observation prompt did not run under.
+        observer_timezone=resolved.timezone,
         episode_retention=(
             "none" if resolved.episode_retention is None else str(resolved.episode_retention)
         ),
