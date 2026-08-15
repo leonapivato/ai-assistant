@@ -334,7 +334,7 @@ exactly two header edits to ADR-0152 here, and both are made:
 Nothing else is touched, and neither reaches ADR-0152's Context, Decision or
 Consequences.
 
-**All three are made in the change that proposes this ADR, not deferred to its
+**Both are made in the change that proposes this ADR, not deferred to its
 ratification commit** — the two files move as one atomic pair, and this ADR says
 so explicitly because the contrary reading is a known and recurring one. ADR-0070
 §1 permits the `Status` edit for "a supersession that has landed" and glosses the
