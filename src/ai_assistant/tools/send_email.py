@@ -1,30 +1,46 @@
-"""The first egress integration, declared in full and wired to nothing.
+"""The first egress integration: declared in full, and registered where it is configured.
 
-**This tool is not registered and cannot transmit.** It is deliberately absent
-from :func:`~ai_assistant.tools.builtin.build_default_registry`, and its callable
-raises :class:`UndesignatedSeamError` rather than sending anything. Both wait on
-the same event: ADR-0017 §2 leaves the `tools/` egress boundary **approved and
-undesignated**, and it becomes designated — and only then transmits — when every
-one of §3's fourteen conditions holds in code *and* a later ADR names the module,
-attests how, and records the transition. ADR-0148 supplies mechanisms for nine of
-those conditions and designates nothing; its own header says so, and its
-Consequences close on it: "Nothing here authorises a byte."
+**This tool transmits.** ADR-0154 §1 designates ``ai_assistant.tools.egress`` and
+§4 attests every one of ADR-0017 §3's fourteen conditions in code; ADR-0155
+answers #95 and so discharges ADR-0154 §6's third-clause bar on registering
+anything at the seam. What was two independent refusals — absence from
+:func:`~ai_assistant.tools.builtin.build_default_registry`, and a callable that
+raised ``UndesignatedSeamError`` — is now one **configuration** fact: a
+deployment that names a connected account and a submission endpoint gets the tool
+registered and bound, and a deployment that names neither gets neither. That
+factory owns both halves, so the two cannot disagree.
 
-**So what is this for?** ADR-0148 §11 deferred two `core` surfaces — the egress
-binding (a) and the seam by which it reaches an ``ActionRequest`` (b) — and said
-why: each "wants a producer in hand", ADR-0073 §4's standing test, because "the
-shape it wants depends on what a real integration's canonicaliser and
+**ADR-0155 §6's statements for this tool, which a registering lane owes.** Its
+ordinary operation places **no** part of the assistant's own store into a
+third-party service in the sense ADR-0004 §2's residency clause is about, on
+ADR-0155 §1's reading: that clause governs the store this system persists under
+``Settings.data_dir`` (§1's first two clauses), this tool declares ``writes=()``
+and persists nothing, and the sent-mail and recipient copies its operation causes
+are §1's third clause — the persistence a connected service performs as the
+ordinary consequence of an owner-directed send under §2. On §3: this module's
+execution path introduces no covered content into any span, because it reads no
+store, calls no model and composes no value (ADR-0155 §6's fourth clause states
+the same for the same tool). The declared arguments through which a store value
+*could* reach a payload are all five below — ``to``, ``cc``, ``bcc``, ``subject``
+and ``body`` — and what keeps one out today is a rule binding whatever composes
+them rather than a mechanism: ADR-0155 §4 names that absence and files it as
+**#1154**.
+
+**So what shaped this declaration?** ADR-0148 §11 deferred two `core` surfaces —
+the egress binding (a) and the seam by which it reaches an ``ActionRequest`` (b) —
+and said why: each "wants a producer in hand", ADR-0073 §4's standing test,
+because "the shape it wants depends on what a real integration's canonicaliser and
 description-builder need … and nothing at this seam transmits, so there is no
 producer." This module was that producer. Both surfaces have since been decided —
-ADR-0150 and ADR-0152 — and what the producer now owes is one **declaration**,
-not a set of machinery:
+ADR-0150 and ADR-0152 — and what the producer owes is one **declaration**, not a
+set of machinery:
 
-- **one tool per connected account** — ADR-0148 §6's one-account clause. This
-  declaration is therefore a *template* rather than a registration: a registered
-  tool is one bound to a specific connected account, and binding it to one is
-  :class:`~ai_assistant.tools.egress_binder.EgressBindingSeam`'s registration
-  rather than this module's. That is the second, independent reason nothing here
-  is registered.
+- **one tool per connected account** — ADR-0148 §6's one-account clause. The
+  declaration below is therefore a *template*: what makes a registration is
+  binding it to a specific connected account, which is
+  :class:`~ai_assistant.tools.egress_binder.EgressRegistration`'s job and not this
+  module's. So this module still registers nothing itself, and
+  :data:`SEND_EMAIL_ID` still names an operation rather than an account.
 - **declares its destination-bearing arguments** — in ADR-0152 §3's
   ``x-egress-destination``, on the schema below.
 - **declares what each field establishes** — in ADR-0152 §3's ``x-egress-tier``,
@@ -52,17 +68,18 @@ description they built is now :class:`~ai_assistant.core.types.EgressBinding`'s
 spans, derived at the seam and accepted from nobody (ADR-0152 §5).
 
 **No credential, no connection, no client.** Nothing in this module reads a
-secret, holds a ``Secrets`` face, names an endpoint or constructs a transport.
-ADR-0148 §7 gates a credential read **by position** — inside a callable reached by
-``ToolInvoker.invoke`` after ADR-0029 §2's three checks — and the callable here
-refuses before it reaches any position at all.
+secret, holds a ``Secrets`` face, names an endpoint or constructs a transport —
+which is still true now that the callable transmits, because it transmits through
+a :class:`BoundTransport` it is handed. ADR-0148 §7 gates a credential read **by
+position**, inside a callable reached by ``ToolInvoker.invoke`` after ADR-0029
+§2's three checks; the read is the transport's, it happens at exactly that
+position, and ADR-0154's condition 4 attests it there.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
-from ai_assistant.core.errors import ToolError
 from ai_assistant.core.types import (
     CostBasis,
     DataTier,
@@ -78,7 +95,7 @@ from ai_assistant.tools.egress_declaration import DESTINATION_KEYWORD, TIER_KEYW
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-    from ai_assistant.core.types import FrozenJson
+    from ai_assistant.core.types import EgressBinding, FrozenJson
 
 #: The id this declaration would be registered under, once an account exists to
 #: bind it to. One tool per connected account (ADR-0148 §6) means a registered id
@@ -230,58 +247,124 @@ untouched.
 """
 
 
-class UndesignatedSeamError(ToolError):
-    """The call reached a callable at a seam that transmits nothing (ADR-0017 §2).
+class BoundTransport(Protocol):
+    """What this tool needs of a transport, and the whole of it.
 
-    ADR-0029's shapes want a ``(definition, callable)`` pair at registration, so a
-    declaration that could not be registered without one gets this: a callable
-    that refuses, names the undesignated seam, and does nothing else. It is not a
-    stub for a later lane to fill in — transport lands in
-    :mod:`ai_assistant.tools.egress` when a designating ADR says so, and this
-    class exists so that the refusal is a typed, testable event rather than a
-    ``NotImplementedError`` some caller might read as a gap.
+    Structural, and satisfied by
+    :class:`~ai_assistant.tools.egress.SmtpEgressTransport`. Named here rather than
+    importing the concrete for the reason ADR-0147 §3 draws the seam at all: the
+    transport is one module the boundary is pinned *around*, and a tool importing
+    it would be a second `tools/` module naming a network client. Nothing in this
+    module names, constructs, imports or configures one — it is handed one, and
+    :func:`~ai_assistant.tools.builtin.build_send_email_integration` is the single
+    place in production that builds it.
 
-    Raised where every ordinary invocation outcome is *returned*, deliberately.
-    ADR-0029 §3's ``FAILED`` result carries a ``failure.kind.retryable`` an
-    executor may act on, and a seam that has never been designated is not a tool
-    failing and is not retryable — the same reasoning
-    :class:`~ai_assistant.core.errors.ToolBindingError` is raised under.
+    One method, so the type states the whole read budget: this tool transmits, and
+    does nothing else with what it holds.
     """
+
+    async def transmit(self, binding: EgressBinding, parameters: Mapping[str, FrozenJson]) -> None:
+        """Send the bound call, or refuse without transmitting."""
+        ...
 
 
 class SendEmail:
-    """The callable half of the declaration, which refuses.
+    """The callable half of the declaration, which transmits (ADR-0154 §1).
 
-    Structurally a :class:`~ai_assistant.tools.invocation.ToolImplementation`, so
-    the pair is the shape ADR-0029 §1 registers — and unregistered, so nothing can
-    reach it through ``invoke``. It takes no credential, no client and no
-    connection reference in its constructor, because ADR-0148 §6's binding is
-    surface (a) and ADR-0125 §12 owns who could supply the rest.
+    Structurally an
+    :class:`~ai_assistant.tools.invocation.EgressToolImplementation`, so the pair
+    is the shape ADR-0029 §1 registers, and the binding the ruling fixed reaches it
+    through the invocation seam rather than by an ambient read.
+
+    **This class used to refuse.** Until ADR-0154 it raised an
+    ``UndesignatedSeamError`` naming ADR-0017 §2, because the `tools/` egress
+    boundary was approved and undesignated and an approved boundary transmits
+    nothing. ADR-0154 §1 designates ``ai_assistant.tools.egress`` and §4 attests
+    ADR-0017 §3's fourteen conditions in code; that ADR's Consequences assign this
+    edit to "whichever lane registers a tool", and this is that edit. The error
+    class is **removed rather than kept**: it named a state the corpus has left,
+    and a refusal that can no longer fire is a shape for a later reader to mistake
+    for a live guard.
+
+    **It holds a transport and nothing else.** No credential, no ``Secrets`` face,
+    no connection reference, no endpoint, no store. Every one of those is the
+    transport's, which is where ADR-0148 §7 puts the credential read *by position*
+    — inside a callable reached by ``ToolInvoker.invoke`` after ADR-0029 §2's three
+    checks — and where ADR-0154's condition 4 attests it.
     """
 
-    async def __call__(
+    __slots__ = ("_transport",)
+
+    def __init__(self, transport: BoundTransport) -> None:
+        """Bind the transport this tool sends through.
+
+        Args:
+            transport: The bound transport for this tool's own registration. One
+                per registered tool, because ADR-0148 §6 binds a registered tool to
+                at most one connected account and a transport is constructed
+                against that registration.
+        """
+        self._transport = transport
+
+    async def invoke_bound(
         self,
-        parameters: Mapping[str, FrozenJson],  # noqa: ARG002 — nothing is read; it refuses.
+        parameters: Mapping[str, FrozenJson],
         *,
         idempotency_key: str | None,  # noqa: ARG002 — NONE, so no key is ever derived.
+        egress_binding: EgressBinding,
     ) -> FrozenJson:
-        """Refuse, without reading an argument, a credential or a configuration.
+        """Transmit the authorised call, or raise without transmitting.
+
+        **Nothing is re-derived here and nothing is assembled here.** The binding
+        is the one the authorising decision carries, and the arguments are the ones
+        ``invoke`` revalidated and detached (ADR-0029 §2); both reach the transport
+        exactly as received, because ADR-0148 §4's third clause binds what is
+        transmitted to what was authorised and says a later lane "cannot satisfy it
+        by re-deriving the set at the seam". A message rendered *here* would be a
+        second, independently mutable payload — the substitution adversarial review
+        found on ADR-0148's round 3 — so the transport takes the arguments and
+        renders the message itself.
+
+        **This introduces no covered content into any span** (ADR-0155 §3). It
+        reads no store, calls no model and composes no value: what it hands on is
+        the request's own ``parameters``, which ADR-0150 §4 makes the spans
+        themselves.
+
+        Args:
+            parameters: The call's arguments, revalidated and detached.
+            idempotency_key: Always ``None`` — the declaration is
+                ``Idempotency.NONE``, because SMTP deduplicates nothing and a retry
+                is a second message (ADR-0016 §4, ADR-0029 §5).
+            egress_binding: The binding the ruling fixed.
+
+        Returns:
+            ``None``. **Deliberately no receipt.** Every fact a send produces that
+            is not already in the audit trail is Tier 1 — a recipient, an account
+            identity, a server's greeting — and the only non-Tier-1 facts available
+            (a count, a boolean) add nothing to the ``ToolOutcome.SUCCEEDED`` the
+            executor already records. What a richer integration result should carry
+            is ADR-0029 §3's deferred failure vocabulary and is not this lane's to
+            invent.
 
         Raises:
-            UndesignatedSeamError: Always. ADR-0017 §3's fourteen conditions are
-                undischarged, and ADR-0148 designates nothing.
+            EgressTransportError: If the endpoint is not the pinned one, the far
+                end declined TLS or answered with a forward path, the connection
+                record moved across the credential read, or the arguments do not
+                yield the call the binding describes. Raised rather than returned:
+                ADR-0029 §3's ``FAILED`` result carries a retryability an executor
+                may act on, this seam has no vocabulary for these yet, and so the
+                seam classifies them ``INTERNAL`` and names only the type.
+            IndeterminateTransmissionError: If the message was written and the
+                server's verdict could not be read.
+            ConnectionStoreError: If the connection record could not be read.
         """
-        msg = (
-            "send_email cannot transmit: ai_assistant.tools.egress is approved and "
-            "undesignated (ADR-0017 §2), and no ADR has named it, attested §3's "
-            "fourteen conditions in code, or recorded the transition"
-        )
-        raise UndesignatedSeamError(msg)
+        await self._transport.transmit(egress_binding, parameters)
+        return None
 
 
 __all__ = [
     "SEND_EMAIL",
     "SEND_EMAIL_ID",
+    "BoundTransport",
     "SendEmail",
-    "UndesignatedSeamError",
 ]

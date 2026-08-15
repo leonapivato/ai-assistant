@@ -1,10 +1,12 @@
-"""The declaration that is complete, registered nowhere, and transmits nothing.
+"""The declaration that is complete, and the callable that transmits through it.
 
 Two properties this file exists to keep apart. The declaration is **honest** —
 ADR-0016 §1's "declared, not inferred", with every safety field stating what a
-send actually risks — and the integration is **inert**: unregistered, and paired
-with a callable that refuses. A lane that later designates the seam changes the
-second and should not need to change the first.
+send actually risks — and the integration is **configured**: present in the
+registry exactly where a deployment named a connected account and an endpoint,
+absent otherwise. The designating lane (ADR-0154) and the registering lane changed
+the second; every case about the first below is untouched, which is what keeping
+them apart bought.
 
 The declaration is now the schema's, in ADR-0152 §3's two keywords, so the cases
 below read it where the binding seam reads it — and one of them reads it *through*
@@ -18,6 +20,7 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING
 
 import pytest
+from egress_transport_harness import binding as _binding
 from pydantic import ValidationError
 
 from ai_assistant.core.errors import ToolError
@@ -38,17 +41,46 @@ from ai_assistant.tools.egress_declaration import (
     TIER_KEYWORD,
     read_declaration,
 )
-from ai_assistant.tools.send_email import (
-    SEND_EMAIL,
-    SEND_EMAIL_ID,
-    SendEmail,
-    UndesignatedSeamError,
-)
+from ai_assistant.tools.send_email import SEND_EMAIL, SEND_EMAIL_ID, SendEmail
 
 if TYPE_CHECKING:
-    from ai_assistant.core.types import FrozenJson
+    from ai_assistant.core.types import EgressBinding, FrozenJson
 
 _RECIPIENT_ARGUMENTS = ("to", "cc", "bcc")
+
+
+class _RecordingTransport:
+    """A :class:`~ai_assistant.tools.send_email.BoundTransport` that keeps what it got.
+
+    It records the **objects**, not copies of them, because what the case checks is
+    that the callable forwarded rather than rebuilt: an equal-but-distinct binding
+    would pass an equality assertion and would still be a second payload nobody's
+    digest covers (ADR-0148 §4).
+    """
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[EgressBinding, Mapping[str, FrozenJson]]] = []
+
+    async def transmit(self, binding: EgressBinding, parameters: Mapping[str, FrozenJson]) -> None:
+        """Record the call instead of making it."""
+        self.sent.append((binding, parameters))
+
+
+class _RefusingTransport:
+    """A transport that refuses, in the class its real refusals belong to."""
+
+    async def transmit(
+        self,
+        binding: EgressBinding,
+        parameters: Mapping[str, FrozenJson],
+    ) -> None:
+        """Refuse without transmitting.
+
+        Raises:
+            ToolError: Always.
+        """
+        msg = "the far end refused the envelope"
+        raise ToolError(msg)
 
 
 def _properties() -> Mapping[str, FrozenJson]:
@@ -72,13 +104,13 @@ _ARGUMENTS = {
 }
 
 
-async def test_the_tool_is_not_registered_in_the_default_registry() -> None:
-    """Nothing may reach a callable that would transmit (ADR-0029 §1).
+async def test_an_unconfigured_deployment_registers_no_send_email() -> None:
+    """No connected account, no tool (ADR-0148 §6, ADR-0029 §1).
 
     Registration is what makes a tool invocable — "invocable if and only if
-    registered" — so leaving it out is the strongest available statement that the
-    seam is undesignated, and it is checked rather than trusted because the factory
-    is one line away from including it.
+    registered" — so a deployment that named no account gets no way to reach a
+    callable that would transmit. Checked rather than trusted, because the factory
+    is one argument away from including it.
     """
     registry = build_default_registry(memory=FakeMemoryStore())
 
@@ -87,19 +119,43 @@ async def test_the_tool_is_not_registered_in_the_default_registry() -> None:
     assert SEND_EMAIL.capability not in await registry.capabilities()
 
 
-async def test_the_callable_refuses_and_names_the_undesignated_seam() -> None:
-    """ADR-0017 §2: the boundary is approved and undesignated, and transmits nothing.
+async def test_the_callable_hands_the_binding_and_the_arguments_on_unchanged() -> None:
+    """It transmits what it was given, and derives nothing (ADR-0148 §4).
 
-    Raised rather than returned as a ``FAILED`` result, because a
-    ``ToolFailure`` carries a retryable flag and there is nothing here to retry
-    (the reasoning ``ToolBindingError`` is raised under).
+    The whole of what this callable does. ADR-0148 §4's third clause binds what is
+    transmitted to what was authorised and says a later lane "cannot satisfy it by
+    re-deriving the set at the seam", so the binding and the arguments reach the
+    transport as the *same objects* — identity, not equality, because a copy made
+    here would be a second payload nobody's digest covers.
     """
-    with pytest.raises(UndesignatedSeamError) as raised:
-        await SendEmail()(_ARGUMENTS, idempotency_key=None)
+    transport = _RecordingTransport()
+    binding = _binding()
 
-    assert "ai_assistant.tools.egress" in str(raised.value)
-    assert "undesignated" in str(raised.value)
-    assert isinstance(raised.value, ToolError)
+    output = await SendEmail(transport).invoke_bound(
+        _ARGUMENTS, idempotency_key=None, egress_binding=binding
+    )
+
+    assert output is None, "a receipt would be Tier 1 or would be nothing (ADR-0029 §3)"
+    assert len(transport.sent) == 1
+    sent_binding, sent_parameters = transport.sent[0]
+    assert sent_binding is binding
+    assert sent_parameters is _ARGUMENTS
+
+
+async def test_a_transport_refusal_reaches_the_caller_rather_than_being_swallowed() -> None:
+    """A refusal is the tool's answer, and the seam classifies it (ADR-0029 §3).
+
+    ``SendEmail`` catches nothing: the transport's own refusals — a moved endpoint,
+    a changed record, an indeterminate write — carry more than this callable could
+    reconstruct, and converting one into a returned result here would be inventing
+    the retryability ADR-0029 §3 defers to a later integration ADR.
+    """
+    transport = _RefusingTransport()
+
+    with pytest.raises(ToolError, match="refused"):
+        await SendEmail(transport).invoke_bound(
+            _ARGUMENTS, idempotency_key=None, egress_binding=_binding()
+        )
 
 
 def test_the_definition_declares_a_world_changing_irreversible_high_risk_act() -> None:

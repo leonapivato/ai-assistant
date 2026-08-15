@@ -83,9 +83,13 @@ from ai_assistant.permissions import (
 from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
 from ai_assistant.readers import CalendarReader, EmailReader
 from ai_assistant.secret_store import KeyringSecretStore
-from ai_assistant.tools import build_default_registry
+from ai_assistant.tools import (
+    build_default_registry,
+    build_send_email_integration,
+    egress_registrations,
+)
 from ai_assistant.tools.connection_store import SqliteConnectionStore
-from ai_assistant.tools.egress_binder import EgressBindingSeam, RegistrationTable
+from ai_assistant.tools.egress_binder import EgressBindingSeam
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
 
 if TYPE_CHECKING:
@@ -93,7 +97,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
-    from ai_assistant.core.protocols import ConnectionPurger, Embedder, Reader, TraceSink
+    from ai_assistant.core.protocols import (
+        ConnectionPurger,
+        Embedder,
+        Reader,
+        Secrets,
+        TraceSink,
+    )
 
 
 #: What this layer tunes :class:`LearningLoop`'s retrieval to, and **passed
@@ -637,7 +647,9 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             ),
         )
         opened.append(outbox.close)
-        connections, connection_operations = _build_connection_operations(directory, opened=opened)
+        connections, connection_operations, integration_secrets = _build_connection_operations(
+            directory, opened=opened
+        )
 
         # ADR-0130 §4 and §5's deterministic ruling, built once and held twice: the
         # engine hands it to the store on the reconsideration path, and the write
@@ -691,11 +703,47 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             ]
         )
 
+        # **The one registered egress integration, where a deployment configured
+        # one** (ADR-0148 §6, ADR-0152 §10, ADR-0154 §6). Built before the registry
+        # because both the registry's contents and the binding seam's registration
+        # table are derived from this single value, which is what stops them from
+        # disagreeing: a `send_email` in the registry with no registration behind it
+        # is a tool the seam refuses on every call (ADR-0152 §8), and a registration
+        # with nothing in the registry names a tool nothing can invoke.
+        #
+        # **Why the two facts are configuration.** Nothing in the tree records which
+        # service a connected account is on: ADR-0151 §18 scopes out "what an
+        # integration *is*: an endpoint, a service identity, a scope list, an
+        # account chooser" and ADR-0149 §13 states the consequence — "a connection
+        # record carries no endpoint and no description". So neither the reference
+        # nor the endpoint is derivable from what is connected, and until the ADR
+        # §18 says fires with the first integration lands, the operator states both.
+        # `Settings` refuses half a pair, so this is whole or absent.
+        #
+        # **`records` and `secrets` are the objects this root already holds**, not
+        # second ones over the same file and namespace. The transport reads the
+        # connection record twice around its credential read (ADR-0148 §6) and the
+        # binding seam reads it once per call (ADR-0152 §10); a second handle would
+        # let a provisioning act commit a revision one of them could not yet see.
+        # The keyring face is the single `INTEGRATION`-scoped one (ADR-0149 §1),
+        # narrowed here to `Secrets` by the parameter's own annotation — a transport
+        # handed the writing face could delete the credential it reads.
+        egress = (
+            None
+            if settings.send_email_connection is None or settings.send_email_endpoint is None
+            else build_send_email_integration(
+                connection=settings.send_email_connection,
+                endpoint=settings.send_email_endpoint,
+                records=connections,
+                secrets=integration_secrets,
+            )
+        )
+
         # One object as both the selecting registry and the acting invoker
         # (ADR-0029 §8). Populated with the first local tools (ADR-0048); the
         # memory-backed `recall_memory` reads the *same* store the loop retrieves
         # from, so a recall sees what the user's memory holds.
-        tools = build_default_registry(memory=memory)
+        tools = build_default_registry(memory=memory, egress=egress)
 
         # The writer persists to the *same* store the loop retrieves from (ADR-0028 §4),
         # and appends its ``MEMORY_WRITE`` traces to the *same* trace store the read
@@ -754,14 +802,16 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # let a provisioning act commit a revision this seam could not yet see —
         # the split ADR-0102 §7 refuses one store over, arriving here.
         #
-        # **`registrations` is empty and that is the honest state**: how a tool comes
-        # to be registered against a connected account is `tools/`-internal and
-        # contracted nowhere (ADR-0152 §10), and nothing registers one yet. What the
-        # empty table buys today is ADR-0152 §8's mis-registration refusal — a tool
-        # declaring either §3 keyword while bound to no connected account is refused
-        # rather than answered ``None`` — which is unreachable in production while
-        # ``binder`` is ``None``, and is the whole reason this wiring is owed before
-        # a tool is registered rather than after.
+        # **`registrations` holds whatever `egress` above does, and nothing else.**
+        # How a tool comes to be registered against a connected account is
+        # `tools/`-internal and contracted nowhere (ADR-0152 §10), so `tools/` owns
+        # both derivations and this root performs neither: `egress_registrations`
+        # is the seam's half of the same value `build_default_registry` took the
+        # registry's half of. An unconfigured deployment still gets an **empty**
+        # table, and that is not an inert value — it is what keeps ADR-0152 §8's
+        # mis-registration refusal reachable, so a tool declaring either §3 keyword
+        # while bound to no connected account is refused rather than quietly
+        # answered ``None``.
         #
         # **`definitions` is the same object injected as ``ToolRegistry`` and
         # ``ToolInvoker``**, so ADR-0152 §1's registry-original comparison and the
@@ -772,7 +822,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # refusals for protocols the seam can in fact canonicalise.
         binder = EgressBindingSeam(
             definitions=tools,
-            registrations=RegistrationTable(),
+            registrations=egress_registrations(egress),
             records=connections,
         )
         runner = StepRunner(
@@ -1198,7 +1248,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
 
 def _build_connection_operations(
     directory: Path, *, opened: list[Callable[[], None]]
-) -> tuple[SqliteConnectionStore, ConnectionOperations]:
+) -> tuple[SqliteConnectionStore, ConnectionOperations, Secrets]:
     """Open the connection store and wire the five operations over it (ADR-0151 §10).
 
     Extracted from :func:`build_composition` because the wiring is three
@@ -1225,8 +1275,15 @@ def _build_connection_operations(
 
     Returns:
         The store, so the caller can join it to the engine's **ordered** shutdown —
-        a different list from ``opened``, which is the failure path — and the
-        operations object the engine is wired with.
+        a different list from ``opened``, which is the failure path; the operations
+        object the engine is wired with; and the one ``INTEGRATION``-scoped keyring
+        face, **narrowed to** :class:`~ai_assistant.core.protocols.Secrets` by this
+        annotation. The face is returned rather than rebuilt at the one other place
+        that needs it, because the comment below is load-bearing: there is exactly
+        one of these in the system, and a second construction would be a second
+        object claiming the same guarantee. Narrowed on the way out because the
+        remaining consumer is a transport, which reads and must not be able to
+        delete (ADR-0125 §8).
     """
     # ADR-0149 §3's connection store: another connection-owning Tier 1 store — an
     # entry carries an account identity, which ADR-0149 §3 rules Tier 1 personal
@@ -1260,7 +1317,7 @@ def _build_connection_operations(
     # concrete**, and `orchestration` imports no module of `tools` (golden rule 1).
     # The narrowing is the annotation on ``ConnectionOperations.__init__``; this is
     # the one place that knows which implementation satisfies it.
-    return store, ConnectionOperations(provisioner=provisioner)
+    return store, ConnectionOperations(provisioner=provisioner), secrets
 
 
 def ensure_model_credentials(settings: Settings) -> None:

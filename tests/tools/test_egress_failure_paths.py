@@ -64,7 +64,7 @@ from ai_assistant.tools.egress import (
     IndeterminateTransmissionError,
     TransportPinError,
 )
-from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail, UndesignatedSeamError
+from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
 
 if TYPE_CHECKING:
     from egress_transport_harness import Keyring
@@ -133,15 +133,43 @@ def test_a_denial_performs_no_credential_read_and_no_network_io() -> None:
         ToolCall(request=request, decision=denied)
 
 
-async def test_the_undesignated_callable_still_refuses_without_reading_anything() -> None:
-    """The other half of the same row: the *registered* path transmits nothing.
+async def test_the_registered_callable_can_read_a_credential_only_through_its_transport() -> None:
+    """The other half of the same row: a denial reads nothing, by *position*.
 
-    ``SendEmail`` is what a registry would bind, and it still refuses — this lane
-    wires no transport into it, because the seam is undesignated and ADR-0017 §2's
-    fourteen conditions are the designating ADR's to attest.
+    This case used to assert that ``SendEmail`` refused outright, on the ground
+    that the seam was undesignated. ADR-0154 §1 designates it and the callable now
+    transmits, so what has to be checked instead is the property the refusal was
+    standing in for: ADR-0148 §7 gates a credential read **by position** — inside a
+    callable reached by ``ToolInvoker.invoke`` after ADR-0029 §2's three checks —
+    and a ``DENY`` constructs no ``ToolCall`` at all (the case above), so no
+    callable runs and no keyring is touched.
+
+    What makes that a property rather than a coincidence is that ``SendEmail``
+    holds *nothing else*: no ``Secrets`` face, no store, no endpoint, no reference.
+    The only object in reach of a keyring is the transport it was handed, so a call
+    that never reaches ``transmit`` cannot read a credential by any route — which
+    is checked here by reaching ``transmit`` and watching the read happen only
+    there.
     """
-    with pytest.raises(UndesignatedSeamError, match="undesignated"):
-        await SendEmail()({"to": ["a@example.invalid"]}, idempotency_key=None)
+    assert SendEmail.__slots__ == ("_transport",), (
+        "a second attribute here would be a second route to a keyring, outside the "
+        "position ADR-0148 §7 gates the read at"
+    )
+
+    subject, ring = await _refusing()
+    tool = SendEmail(subject)
+    assert ring.reads == []
+
+    # Reaching the transport is what reads; the endpoint is wrong, so it refuses
+    # before it gets there, and the keyring is still untouched.
+    with pytest.raises(TransportPinError):
+        await tool.invoke_bound(
+            ARGUMENTS,
+            idempotency_key=None,
+            egress_binding=binding(endpoint=f"smtps://{OTHER_HOST}:465"),
+        )
+
+    assert ring.reads == []
 
 
 # --------------------------------------------------------------------------- #

@@ -33,7 +33,7 @@ from pydantic import ValidationError
 
 from ai_assistant.core.errors import ToolBindingError, ToolRegistrationError
 from ai_assistant.core.types import ToolCall, ToolDefinition
-from ai_assistant.tools.invocation import ToolImplementation, run_bound_call
+from ai_assistant.tools.invocation import BoundImplementation, run_bound_call
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -123,7 +123,7 @@ class _Binding:
     """
 
     definition: ToolDefinition
-    implementation: ToolImplementation
+    implementation: BoundImplementation
 
 
 class InMemoryToolRegistry:
@@ -172,7 +172,7 @@ class InMemoryToolRegistry:
     it, and a lock here would otherwise be cost with no reader.
     """
 
-    def __init__(self, tools: Iterable[tuple[ToolDefinition, ToolImplementation]] = ()) -> None:
+    def __init__(self, tools: Iterable[tuple[ToolDefinition, BoundImplementation]] = ()) -> None:
         """Create a registry, optionally registering ``tools`` in order.
 
         Args:
@@ -190,7 +190,7 @@ class InMemoryToolRegistry:
         for tool, implementation in tools:
             self.register(tool, implementation)
 
-    def register(self, tool: ToolDefinition, implementation: ToolImplementation, /) -> None:
+    def register(self, tool: ToolDefinition, implementation: BoundImplementation, /) -> None:
         """Bind ``tool`` and the callable that satisfies it to its id, permanently.
 
         Re-registering the *same* definition **and the same callable** under a
