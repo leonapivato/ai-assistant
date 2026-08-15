@@ -1,6 +1,6 @@
 # 156. A distilled belief states its event time in its content, and no record type grows a field for it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - **Not a substantive contract ADR; contract-surface only for the review set, and
   the two are different questions.** [ADR-0015](0015-simplify-the-agent-workflow.md)
@@ -34,9 +34,10 @@
   plan) all stand verbatim, as do the named route, the no-fallback rule and the
   on-device direction. The dated note **lands on ADR-0077 in this same change**,
   which is the form ADR-0080 and ADR-0111 each took and the existence condition
-  [ADR-0083](0083-the-hub-is-a-resident-process.md) §15 states; while this ADR
-  stands `Proposed` that note names a decision that is drafted rather than
-  ratified, the form `main` already carries. ADR-0077's `Status` line is **not**
+  [ADR-0083](0083-the-hub-is-a-resident-process.md) §15 states — so the note never
+  names an ADR that does not exist, and is `Accepted` at merge alongside it, which
+  is ADR-0070 §1's hazard answered rather than deferred. ADR-0077's `Status` line
+  is **not**
   edited: it is led by `Partially superseded by`, and
   [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §2 puts
   the record in the note alone on such a line.
