@@ -24,7 +24,7 @@ from observer_contract import (
     episode,
 )
 
-from ai_assistant.core.errors import ModelError
+from ai_assistant.core.errors import ConfigurationError, ModelError
 from ai_assistant.core.types import MemoryKind, Message, Role
 from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.testing import FakeModelProvider, ObservationGate
@@ -75,13 +75,20 @@ def _observer(
     max_proposals: int = _MAX_PROPOSALS,
     max_batch_size: int = _MAX_BATCH,
     now: Callable[[], datetime] = _fixed_now,
+    timezone: str | None = None,
 ) -> tuple[ModelBackedObserver, FakeModelProvider]:
-    """An observer over a scripted provider, and the provider, for assertions."""
+    """An observer over a scripted provider, and the provider, for assertions.
+
+    ``timezone`` defaults to ``None`` — no local calendar — so every case that is
+    not about the temporal anchor drives the producer ADR-0156 §3's second clause
+    describes, and the anchor's own cases are the ones that name a zone.
+    """
     provider = FakeModelProvider(reply=reply)
     observer = ModelBackedObserver(
         provider,
         now=now,
         id_factory=_counting_ids(),
+        timezone=timezone,
         max_proposals=max_proposals,
         max_batch_size=max_batch_size,
     )
@@ -644,3 +651,291 @@ async def test_an_entry_with_blank_content_is_discarded() -> None:
 
     assert outcome.proposals == ()
     assert outcome.discarded_unusable == 1
+
+
+# --- the temporal anchor (ADR-0156 §2, §3, §7) ------------------------------
+
+#: A zone west of UTC, so a late-evening utterance falls on the *following* UTC
+#: day: the error ADR-0156 §3 says a UTC calendar would make "for a fixed fraction
+#: of all evidence, always in the same direction".
+_ZONE: Final = "America/New_York"
+
+#: 21:30 on Sunday 7 May 2023 in :data:`_ZONE`, and 8 May in UTC. The one instant
+#: that separates a producer localising the calendar from one rendering the stored
+#: ``UtcInstant``, which is why the two dates below are asserted as a pair.
+_EVENING: Final = datetime(2023, 5, 8, 1, 30, tzinfo=UTC)
+_EVENING_LOCAL: Final = "Sun 2023-05-07 21:30"
+_EVENING_UTC_DATE: Final = "2023-05-08"
+
+#: A second instant on a different day of the week, so "every episode's" means
+#: more than "the first one's" (§7's first test clause).
+_MORNING: Final = datetime(2023, 6, 9, 14, 5, tzinfo=UTC)
+_MORNING_LOCAL: Final = "Fri 2023-06-09 10:05"
+
+
+def _prompt_of(provider: FakeModelProvider) -> tuple[str, str]:
+    """The system turn and the batch turn of the last observation, in that order."""
+    messages = provider.last_messages
+    return messages[0].content, messages[-1].content
+
+
+async def test_the_batch_states_every_episodes_occurred_at_in_the_configured_zone() -> None:
+    """ADR-0156 §2's first clause, over a batch of two dated on different days.
+
+    The instants are the producer's own — snapshotted off the frozen tuple beside
+    the labels — so this is the whole enabling change of the decision: the model
+    that writes the belief sentence could not previously see when anything was
+    said, and could therefore not resolve *"yesterday"* however it was prompted.
+
+    The weekday is asserted with the date because §3 has the producer resolve a
+    relative expression against that instant, and *"last Friday"* is not resolvable
+    from a calendar date whose day of week the reader has to derive.
+    """
+    observer, provider = _observer(_envelope(), timezone=_ZONE)
+    episodes = [
+        episode("e-evening", occurred_at=_EVENING, content="I went to a support group yesterday"),
+        episode("e-morning", occurred_at=_MORNING, content="the picnic was lovely"),
+    ]
+
+    await observer.observe(episodes)
+
+    _, batch = _prompt_of(provider)
+    assert f"[E1] {_EVENING_LOCAL}" in batch
+    assert f"[E2] {_MORNING_LOCAL}" in batch
+    assert "I went to a support group yesterday" in batch, "the content is still carried"
+    assert "e-evening" not in batch, "and still no store id a model could echo back"
+
+
+async def test_an_episode_whose_utc_and_local_dates_differ_carries_the_local_one() -> None:
+    """ADR-0156 §3's calendar clause, on the instant that separates the two answers.
+
+    ``occurred_at`` is a ``UtcInstant`` (ADR-0030 §4) and this one is 8 May in UTC
+    and 7 May in the configured zone. A producer rendering the stored value would
+    date *"yesterday"* to 7 May where the speaker meant 6 May — wrong by a day,
+    silently, and in one direction for every evening utterance west of UTC.
+    """
+    observer, provider = _observer(_envelope(), timezone=_ZONE)
+
+    await observer.observe([episode("e-evening", occurred_at=_EVENING, content="a quiet evening")])
+
+    _, batch = _prompt_of(provider)
+    assert _EVENING_LOCAL in batch
+    assert _EVENING_UTC_DATE not in batch
+
+
+async def test_the_prompt_names_the_zone_it_rendered_the_instants_in() -> None:
+    """§2's first clause names the zone as well as rendering in it.
+
+    An unnamed local time is an ambiguous one: the model is asked to work a date
+    out from it, and a reader of the transcript cannot check the arithmetic without
+    knowing which calendar it was done in.
+    """
+    observer, provider = _observer(_envelope(), timezone=_ZONE)
+
+    await observer.observe(batch_of(2))
+
+    system, batch = _prompt_of(provider)
+    assert _ZONE in batch
+    assert _ZONE in system
+
+
+async def test_a_producer_built_without_a_zone_renders_no_instant() -> None:
+    """ADR-0156 §3's second clause: no zone, no calendar, so nothing is stated.
+
+    The two fallbacks it names are UTC and a zone the producer chose for itself,
+    and both would put a calendar date the deployment never authorised in front of
+    a model that will write it into a belief. Asserting the absence of *both* dates
+    refuses each fallback separately — the stored UTC value, and the value a
+    host-locale conversion would have produced.
+    """
+    observer, provider = _observer(_envelope())
+
+    await observer.observe([episode("e-evening", occurred_at=_EVENING, content="a quiet evening")])
+
+    system, batch = _prompt_of(provider)
+    assert "2023" not in batch, "no date in any calendar at all"
+    assert "21:30" not in batch
+    assert "01:30" not in batch
+    assert "a quiet evening" in batch, "the batch is still rendered"
+    assert "Do not work a date out from context, and do not guess one" in system
+    assert "work the date out against that episode's recorded time" not in system
+
+
+async def test_a_producer_without_a_zone_still_asks_for_a_date_the_evidence_states() -> None:
+    """§3's second clause is scoped to the *resolution*, not to the anchor.
+
+    Evidence reading "I went to the gym on 7 May 2026" establishes a date no zone is
+    needed to carry, and §2's second clause requires the belief to state it. A
+    blanket "no zone, no time" would make that input unsatisfiable under both
+    sections at once, which is why §3 says so in terms.
+    """
+    observer, provider = _observer(_envelope())
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "names a calendar date" in system
+    assert "state that date in the belief's own sentence" in system
+
+
+async def test_the_zoned_prompt_asks_for_an_absolute_date_and_refuses_a_relative_one() -> None:
+    """§3's first clause, as the instruction the producer actually carries.
+
+    A stored belief reading "joined the mentorship programme last weekend" is worse
+    than one with no date: it points at an episode under a finite retention horizon
+    (ADR-0074 §7, §8) that ADR-0077 §6 expects the belief to outlive. The resolution
+    is possible only here, where both halves are in hand.
+    """
+    observer, provider = _observer(_envelope(), timezone=_ZONE)
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "work the date out against that episode's recorded time" in system
+    assert "Never write the relative words themselves" in system
+
+
+async def test_the_prompt_refuses_a_date_the_recorded_time_alone_would_supply() -> None:
+    """§2's third clause, which is the operative half of that section.
+
+    The cheapest reading of "carry the date" is to append the session's date to
+    every belief, which states a falsehood about a trait, pays the embedding
+    dilution on every record rather than on the datable ones, and puts a date where
+    a reader takes it for an event time.
+    """
+    observer, provider = _observer(_envelope(), timezone=_ZONE)
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "Where the cited episodes establish no such time, state none" in system
+    assert "acquires no date from the day it happened to be mentioned" in system
+
+
+async def test_the_prompt_does_not_let_a_date_widen_what_may_be_proposed() -> None:
+    """§2's fourth clause: ADR-0077 §2's bar is applied unchanged.
+
+    The measured ingestion loss is far larger than the measured anchor loss, and the
+    temptation is to buy some of it back by admitting event-shaped beliefs the
+    utility bar refuses. ADR-0156 §6 says what that would cost, and this pins that
+    the prompt did not quietly do it.
+    """
+    observer, provider = _observer(_envelope(), timezone=_ZONE)
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "A date is never a reason to propose a belief" in system
+    assert "Do not summarise the exchange" in system
+    assert "Do not propose what merely happened" in system
+
+
+@pytest.mark.parametrize("timezone", [None, _ZONE], ids=["no-zone", "zoned"])
+async def test_the_timestamp_ban_is_narrowed_to_fields_and_not_lifted(
+    timezone: str | None,
+) -> None:
+    """ADR-0156 §7's delicate half, in both prompt variants.
+
+    The shipped sentence did two jobs: it correctly forbade the model to supply
+    values for *fields* the producer computes (ADR-0106 §3, ADR-0109 §4 stated to
+    the model) and it incorrectly forbade a date in the belief *sentence*, which no
+    ratified decision requires. The first job survives; the second stops. The
+    superseded blanket wording is asserted absent so that a later edit restoring it
+    fails here rather than silently re-breaking the anchor.
+    """
+    observer, provider = _observer(_envelope(), timezone=timezone)
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "Do not include ids, confidence values, or any timestamp field of your own" in system
+    assert "or timestamps; those are assigned downstream" not in system
+    assert "belongs in the belief's `content` sentence and nowhere else" in system
+
+
+#: Spellings a model might reach for if it decided to state a time as a field
+#: rather than in the sentence ADR-0156 §1 confines it to. ``last_confirmed_at``
+#: and ``valid_until`` are the two that name real fields of the record types, which
+#: is what makes them the hazard rather than the curiosity.
+_TEMPORAL_KEYS: Final = [
+    "occurred_at",
+    "event_at",
+    "last_confirmed_at",
+    "last_updated",
+    "valid_until",
+    "expires_at",
+    "timestamp",
+]
+
+
+@pytest.mark.parametrize("key", _TEMPORAL_KEYS)
+async def test_a_temporal_value_the_model_emits_is_discarded_rather_than_installed(
+    key: str,
+) -> None:
+    """ADR-0156 §7's second test clause, and §1's whole reason for choosing content.
+
+    A prompt instruction is not an enforcement point and never was, so the ban
+    above is verified here independently of the prompt's wording: the envelope
+    schema has no temporal key, ``_record`` builds every record itself from a fixed
+    set of fields, and every instant on the result is the producer's. An
+    unrecognised key is unused, not unusable — the entry is proposed, without it.
+
+    The stimulus value is deliberately far from every instant the producer could
+    have reached for, so "the model's value did not land" is separable from "the
+    producer computed the same thing anyway" (ADR-0109 §10).
+    """
+    stated = "1999-12-31T23:59:00+00:00"
+    observer, _ = _observer(_envelope(_belief(evidence=["E1"], **{key: stated})), timezone=_ZONE)
+    episodes = [episode("e-dated", occurred_at=_EVENING, content="something happened")]
+
+    outcome = await observer.observe(episodes)
+
+    (proposal,) = outcome.proposals
+    assert outcome.discarded_unusable == 0, "an unrecognised key is unused, not unusable"
+    record = proposal.proposed
+    assert record.provenance.last_confirmed_at == _EVENING, "computed over the citations we read"
+    assert record.provenance.last_updated == _WHEN, "the injected clock, not the model"
+    assert record.expires_at is None
+    assert record.validity.valid_until is None
+    assert "1999" not in record.model_dump_json(), "no field on the record took the model's instant"
+
+
+async def test_the_zone_changes_no_refusal_and_no_confidence() -> None:
+    """ADR-0156 §7's fourth test clause: the prompt edit moved nothing else.
+
+    One scripted reply through two producers differing only in the calendar, so the
+    evidence floor (an ``INFERRED`` belief on one episode), the label mapping (a
+    citation outside the batch) and the confidence function are each compared
+    against themselves rather than against a remembered constant. The counts are
+    also asserted absolutely, so a change that broke *both* producers identically
+    still fails.
+    """
+    reply = _envelope(
+        _belief(evidence=["E1"], step="inferred", content="a leap from one episode"),
+        _belief(evidence=["E9"], content="cites nothing real"),
+        _belief(evidence=["E1", "E2"], step="inferred", content="a belief across two"),
+    )
+    zoned, _ = _observer(reply, timezone=_ZONE)
+    bare, _ = _observer(reply)
+
+    with_zone = await zoned.observe(batch_of(2))
+    without_zone = await bare.observe(batch_of(2))
+
+    assert without_zone.discarded_unusable == 2, "the floor and the label mapping both bit"
+    assert with_zone.discarded_unusable == without_zone.discarded_unusable
+    assert [p.proposed.provenance.evidence for p in with_zone.proposals] == [("e0", "e1")]
+    assert [p.proposed.provenance.evidence for p in without_zone.proposals] == [("e0", "e1")]
+    assert (
+        with_zone.proposals[0].proposed.provenance.confidence
+        == without_zone.proposals[0].proposed.provenance.confidence
+    )
+
+
+def test_an_unknown_zone_is_refused_at_construction() -> None:
+    """Like the bounds, and for ADR-0022 §4a's reason.
+
+    Deferred to first use, a mistyped zone would be a producer that silently states
+    no time — health reported, half the decision not implemented.
+    """
+    with pytest.raises(ConfigurationError, match="unknown timezone"):
+        ModelBackedObserver(FakeModelProvider(), timezone="Definitely/Not_A_Zone")

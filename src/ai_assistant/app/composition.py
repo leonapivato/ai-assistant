@@ -919,6 +919,14 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             observation=ObservationStage(
                 observer=ModelBackedObserver(
                     observer_model,
+                    # The calendar a belief's event time is stated in (ADR-0156 §2,
+                    # §3): ``settings.timezone`` again, the same value ADR-0008 §5
+                    # gives the temporal context and ADR-0130 §6 gives the
+                    # notification policy, because §6 of ADR-0008 introduces no
+                    # second timezone source. Withholding it would be a producer
+                    # that resolves no relative expression at all, since UTC is the
+                    # one calendar §3 refuses to substitute.
+                    timezone=settings.timezone,
                     max_batch_size=settings.observation_batch_size,
                     max_proposals=settings.observation_max_proposals,
                 ),
