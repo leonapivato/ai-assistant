@@ -2,7 +2,6 @@
 
 - Status: Partially superseded by ADR-0157 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone)
 - Date: 2026-08-14
-- Accepted: 2026-08-14
 - Partially superseded: 2026-08-15 by ADR-0157 — **one enumeration, one limb, and
   the value set is unchanged.** §4's first normative clause fixed the shapes a
   destination-bearing argument's subschema may take at "exactly one of two forms
@@ -22,9 +21,9 @@
   other refusals, its read-binding clause and its residual clause stand, and every
   other section of this ADR is unaffected.
 
-  **No ratified text of this ADR is rewritten**; this `Status` line, this note and
-  the `Accepted` line above are the whole of the record (ADR-0070 §1, ADR-0082 §1
-  and §2), so §4 and §6 stay legible as ratified beside the pointer to ADR-0157.
+  **No ratified text of this ADR is rewritten**; this `Status` line and this note
+  are the whole of the record (ADR-0070 §1, ADR-0082 §1 and §2), so §4 and §6 stay
+  legible as ratified beside the pointer to ADR-0157.
 - **Decides surface (b) of ADR-0148 §11** — the seam by which the egress binding
   is obtained from `tools/` before `ActionPolicy.decide` is reached. §11's second
   clause requires that surface to be decided in a contract ADR of its own,
