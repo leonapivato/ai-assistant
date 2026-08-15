@@ -1972,3 +1972,76 @@ class TestTheUpcomingEventProducerSFigures:
         """
         with pytest.raises(ValidationError):
             Settings(calendar_reader_path=self._SOURCE, calendar_upcoming_interval=timedelta(0))
+
+
+class TestTheEgressRegistrationSettings:
+    """The one registered integration's two fields (ADR-0148 §6, ADR-0152 §10).
+
+    Together they are one fact — which connected account ``send_email`` sends as,
+    and where it submits — and the composition root derives both the registry's
+    contents and the binding seam's registration table from them. So the states
+    this class is about are the ones a deployment must not be able to reach.
+
+    **Why they are configuration at all** is stated where the fields are: nothing
+    in the tree records which service a connected account is on (ADR-0151 §18,
+    ADR-0149 §13), so neither the reference nor the endpoint is derivable from a
+    connection record. Issue #1156 tracks the ADR that removes them.
+    """
+
+    _ENDPOINT: Final = "smtps://mail.example.invalid:465"
+
+    def test_unset_is_the_ordinary_state_and_configures_nothing(self) -> None:
+        """No deployment is obliged to register an integration."""
+        settings = Settings()
+
+        assert settings.send_email_connection is None
+        assert settings.send_email_endpoint is None
+
+    def test_both_together_load_verbatim(self) -> None:
+        """Without this, every refusal below proves nothing.
+
+        Verbatim matters on both fields. A reference is compared against the store
+        byte-for-byte, and an endpoint is compared as **text** before it is parsed
+        (ADR-0154's condition 5), so a layer that stripped or case-folded either
+        would turn two spellings of one endpoint into one and defeat that
+        comparison.
+        """
+        settings = Settings(send_email_connection="  conn-0001", send_email_endpoint=self._ENDPOINT)
+
+        assert settings.send_email_connection == "  conn-0001"
+        assert settings.send_email_endpoint == self._ENDPOINT
+
+    def test_a_connection_with_no_endpoint_is_refused(self) -> None:
+        """An account with nowhere to submit.
+
+        Refused rather than read as "not configured", because the two readings are
+        opposite and the quiet one is not the safe one: an operator who set one
+        variable believes the tool is registered, and would learn otherwise at a
+        send. The message names the half that is missing, since that is the edit
+        the operator has to make.
+        """
+        with pytest.raises(ValidationError, match="send_email_endpoint"):
+            Settings(send_email_connection="conn-0001")
+
+    def test_an_endpoint_with_no_connection_is_refused(self) -> None:
+        """A submission endpoint with no account to submit as — the mirror image."""
+        with pytest.raises(ValidationError, match="send_email_connection"):
+            Settings(send_email_endpoint=self._ENDPOINT)
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_connection_is_refused_rather_than_read_as_configured(self, blank: str) -> None:
+        """``ASSISTANT_SEND_EMAIL_CONNECTION=`` sets a variable to ``""``, not to nothing.
+
+        Without this the pair is *whole* — both fields present — so the model
+        validator passes, and the empty text travels to a bind that can find no
+        record. The failure has to land on the configuration, which is where the
+        mistake is.
+        """
+        with pytest.raises(ValidationError, match="must hold text"):
+            Settings(send_email_connection=blank, send_email_endpoint=self._ENDPOINT)
+
+    @pytest.mark.parametrize("blank", ["", "   "])
+    def test_a_blank_endpoint_is_refused_rather_than_read_as_configured(self, blank: str) -> None:
+        """The same for the endpoint, where the empty text would reach a parse."""
+        with pytest.raises(ValidationError, match="must hold text"):
+            Settings(send_email_connection="conn-0001", send_email_endpoint=blank)

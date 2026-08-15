@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
 import pytest
+from pydantic import ValidationError
 
 import ai_assistant
 from ai_assistant.app import (
@@ -1394,14 +1395,74 @@ async def test_the_wired_binder_refuses_a_mis_registered_egress_tool(
     Driven through the seam the root wired rather than a fresh one, because a
     freshly constructed seam would prove the class works and say nothing about
     whether this deployment reaches it.
+
+    **The registration table is empty because this deployment configured no
+    integration**, which is now a derived state rather than a hardcoded one: the
+    same absence removes ``send_email`` from the registry, so nothing here can
+    *reach* §8's refusal through a plan either. The case below is the other half.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
         binder = engine._runner._binder
         assert isinstance(binder, EgressBindingSeam)
         assert binder._registrations.registration("send_email") is None
+        assert await engine._runner._registry.get("send_email") is None
     finally:
         await engine.aclose()
+
+
+async def test_a_configured_deployment_wires_the_registry_and_the_table_together(
+    tmp_path: Path,
+) -> None:
+    """The two halves of a registration come from one settings fact (ADR-0148 §6).
+
+    What the root must not be able to produce is either half alone. A registry
+    holding ``send_email`` with no registration behind it is a tool the selection
+    stage offers and the seam refuses on every call (ADR-0152 §8); a registration
+    with nothing in the registry names a tool nothing can invoke. Both are checked
+    on one built engine rather than on the factory, because the factory's own tests
+    already hold the derivation and what is in question here is whether *this
+    deployment* reaches it.
+
+    The reference names no record the store holds, deliberately: registration is
+    not a claim that the account is connected, and the seam refuses an
+    unconnectable reference per call, with the record in hand (ADR-0152 §6).
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        send_email_connection="conn-0001",
+        send_email_endpoint="smtps://mail.example.invalid:465",
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        assert await engine._runner._registry.get("send_email") is not None
+
+        binder = engine._runner._binder
+        assert isinstance(binder, EgressBindingSeam)
+        registration = binder._registrations.registration("send_email")
+        assert registration is not None
+        assert registration.reference == "conn-0001"
+        assert registration.transport_endpoint == "smtps://mail.example.invalid:465"
+    finally:
+        await engine.aclose()
+
+
+def test_half_a_send_email_configuration_is_refused_at_load() -> None:
+    """A registration is whole or absent, and the failure lands early.
+
+    Either field alone describes a state the system cannot be in — an account with
+    nowhere to submit, or an endpoint with no account to submit as. Failing later
+    would mean failing at a user's send, by which point the operator has been told
+    nothing about the half of their configuration that never took effect.
+    """
+    with pytest.raises(ValidationError, match="send_email_endpoint"):
+        Settings(embedder=EmbedderKind.HASHING, send_email_connection="conn-0001")
+
+    with pytest.raises(ValidationError, match="send_email_connection"):
+        Settings(
+            embedder=EmbedderKind.HASHING,
+            send_email_endpoint="smtps://mail.example.invalid:465",
+        )
 
 
 # --- the notification chassis (ADR-0130 §3, §9) ----------------------------
