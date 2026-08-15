@@ -1,0 +1,611 @@
+# 158. An episode may supplement the answering prompt, and never shares the belief budget
+
+- Status: Proposed
+- Date: 2026-08-15
+- **Not a substantive contract ADR, and contract-surface for the review set.**
+  [ADR-0015](0015-simplify-the-agent-workflow.md) §5 defines a substantive
+  contract ADR as "one adding or changing a Protocol or a `core/` type crossing
+  subsystem boundaries", and §5 below adds and changes neither: the read this ADR
+  admits is `MemoryStore.search` called with a different `kinds` argument, which
+  [ADR-0072](0072-the-profile-and-the-inferred-model-are-bands-of-one-store.md) §5
+  already rules is the caller's to choose. So golden rule 5's land-ahead rule is
+  not what governs this PR and the implementing lane owes no triad. What *is* true
+  is narrower: the decision space §5 surveys includes a `MemoryStore` member and a
+  `core.config.Settings` field, and rules against both, so `CONTRIBUTING.md` →
+  "Stop when the required reviews are green" makes the required set **adversarial
+  and architecture** — a ruling *against* surface still binds the implementing
+  lane's surface. It is docs-only and **no code changes with it**; the
+  implementation is #1163's lane 7, which needs this text as its authority.
+- **Amends and supersedes nothing.** Applying
+  [ADR-0070](0070-amendment-and-supersession-rules.md) §1's test, no clause of a
+  prior ADR is replaced here. The contestable case is
+  [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md) §6's
+  sentence *"The turn's relevance retrieval passes a `kinds` filter excluding
+  `EPISODIC`, so a captured turn does not compete with beliefs for the retrieval
+  budget"* — and §2 below **keeps it, verbatim and for its own reason**. The
+  belief composition's `kinds` filter still excludes `EPISODIC`, and an episode
+  still never competes with a belief for the retrieval budget; what §3 adds is a
+  *second* budget the belief composition does not draw on. A reader holding only
+  ADR-0074 §6 would act identically on the clause this ADR touches, which is
+  ADR-0070 §1's own test for an amendment being unnecessary rather than merely
+  available. ADR-0074 §6's other half — the belief listing's default — is not
+  reached at all. What is collected rather than replaced is ADR-0074 §11's
+  **deferral**, which is an open item rather than a ruling, and
+  [ADR-0112](0112-currency-never-ranks-and-retrieval-orders-by-relevance.md) §9's
+  hand-off of its remaining half to **#791** (§1).
+- **Refs:** #791 (the deferral's surviving half, and the framing this ADR takes
+  up); #1029 (the scored pilot, its results comment of 2026-08-14 and its
+  error-anatomy addendum of 2026-08-15 — the measured consumer); #1163 (the batch;
+  lane 7 is the implementation, and the ablation arm is later still); #545
+  (episodic memory as multi-channel — read as context, ratified in no part; §4's
+  revisit trigger is where its calendar channel would land); ADR-0005 §1
+  (`EpisodicMemory`, the four kinds, and `content` as a canonical rendering), §2
+  (`Provenance`, and `evidence` as episode references); ADR-0007 §2 (retention
+  enforced at read time), §5 (size caps deferred); ADR-0015 §5 (what a substantive
+  contract ADR is); ADR-0028 §7 (batch ingestion declined for want of a consumer);
+  ADR-0045 §1 (as-of retrieval declined on the same ground); ADR-0070 §1 (the
+  amend-versus-supersede test); ADR-0072 §1 (one store), §2 (`band_of` is total),
+  §3 (what a derived belief owes), §5 (search is band-neutral and
+  confidence-neutral; precedence is the consumer's and is by band; the flood
+  argument), §6 (confidence is presentation, not ranking), §7 (a read's signature
+  deferred for want of a consumer); ADR-0073 §1 (`None` means every value);
+  ADR-0074 §3 (every turn is an episode), §5 (continuity reaches the planner
+  through `memories`), §6 (retrieval selects the belief kinds; the deferral), §7
+  (the episode horizon, and why its default is finite), §11 (the deferral list);
+  ADR-0077 §1 (the observer reads episodes it is handed), §2 (what it may
+  propose); ADR-0086 §6 (`get_many` is on the contract); ADR-0088 §1 (citation
+  forms); ADR-0089 §1–§3 (what is marked, and what marks bind); ADR-0103 §5
+  (decay parameters deferred to leg 8's measurement); ADR-0112 §1 (no quantity
+  joins the retrieval order), §5 (the band-scoped read), §9 (the ordering half
+  closed, the budget half handed to #791); ADR-0113 §2 (a call may return fewer
+  than `limit` while eligible records exist), §5 (no cross-call consistency; the
+  deduplication obligation), §6 (the budget and the assembly order are the
+  consumer's), §8 (headroom declined without #789's measurement); ADR-0119 §3
+  (`TRACE_RECORD_SET_CAP`); ADR-0128 §1 (every eligibility predicate binds before
+  the ranking cut), §2 (`capped`); ADR-0156 (the temporal anchor, the other half
+  of the pilot's distillation finding).
+
+## Context
+
+### The deferral, and the half of it that survived
+
+ADR-0074 §6 rules that a turn's relevance retrieval passes a `kinds` filter
+excluding `EPISODIC`, "so a captured turn does not compete with beliefs for the
+retrieval budget", and defers cross-conversation episodic recall — *"what did we
+discuss last Tuesday?"* — **with its ranking question**. ADR-0074 §11 lists it as
+due with leg 7's retrieval-under-load work.
+
+ADR-0112 §9 is that lane, and it answered rather than passed on:
+
+> **Its ordering half closes here**: the axis is relevance, kinds are the
+> caller's argument as ADR-0074 §6 already rules, and no quantity joins the
+> order, so "mixing raw turns with distilled beliefs in one relevance cut" is not
+> an ordering question but a *budget* question — how much of a turn's retrieval
+> budget episodes may take, and from which consumer's decision.
+
+It then filed the remainder on **#791**, on the repository's standing discipline:
+"That half has no consumer, and the repository's standing discipline is to defer
+surface until one exists (ADR-0072 §7, ADR-0045 §1, ADR-0028 §7)."
+
+So there is no ranking design left to do. An episode and a belief compete on
+relevance exactly as two beliefs do. What #791 carries is a **budget** question
+and a **consumer** question, and this ADR answers both.
+
+### The consumer arrived, and it is measured
+
+The scored benchmark pilot (#1029) ran both corpora from the frozen ref
+`bench-pilot-1`, with `ASSISTANT_EPISODE_RETENTION=none` — which
+`core.config.Settings.episode_retention` documents as "keep episodes forever", not
+as "capture none of them". Every conversation turn of every dialogue was therefore
+captured as an `EpisodicMemory`, embedded, and still in each case's store when the
+error anatomy read it.
+
+The addendum of 2026-08-15 decomposes LoCoMo's 1,540 answerable questions:
+
+| Bucket | LoCoMo | LongMemEval |
+|---|---|---|
+| correct | 118 | 10 |
+| attempted, wrong (gold in prompt) | 69 | 5 |
+| gold in prompt, declined | 416 | 23 |
+| gold distilled, ranked below cut | 277 | 3 |
+| **gold never distilled into any belief record** | **652** | **9** |
+| no usable gold mapping | 8 | 0 |
+
+**652 of 1,540 — 42% of the answerable set — failed because the fact never became
+a belief.** Ingestion recall was 56.7% on LoCoMo (each ~300-turn dialogue
+distilling to 17–42 beliefs) and 82% on LongMemEval. The addendum's own reading is
+that this residual is structural rather than a tuning miss: "observation is tuned
+for first-person dialogue; LoCoMo is third-person", and the estimated headroom
+from the pilot-2 fix lanes is "roughly +8–14 points LoCoMo — still far below P1's
+predicted range, which is itself a finding".
+
+For every one of those 652 the gold turn sat in the same store, in the same
+embedding index, unreachable only because `orchestration/loop.py` asks for
+`BELIEF_KINDS`. That is the consumer #791 was waiting for: not a hypothetical
+capability, a quantified loss with the evidence already paid for.
+
+### Three facts about the tree that make this a decision rather than a one-line change
+
+**An episode is in the same band as an observed belief.** Capture stamps
+`Provenance(source=MemorySource.OBSERVED, confidence=CAPTURE_CONFIDENCE)` in
+`ai_assistant.orchestration.conversations`, and `ai_assistant.core.types.band_of`
+maps `OBSERVED` to `BeliefBand.DERIVED`. So every episode this system holds is a
+`DERIVED`-band record, sitting in the same band as every belief the observer
+proposed.
+
+**Band composition therefore contains nothing here.**
+`ai_assistant.orchestration.retrieval.assemble_by_band` fills **one** budget in
+`BAND_PRECEDENCE` order — `ASSERTED`, then `ATTESTED`, then `DERIVED` — each call
+asking for whatever remains. Adding `EPISODIC` to its `kinds` would put episodes
+and derived beliefs into the *same* band-scoped call, competing for the same
+remainder. The one containment the assembly has does not apply to the one pair it
+would need to separate.
+
+**`kinds` binds before the cut, so this is not recoverable downstream.**
+ADR-0128 §1 rules that every eligibility predicate becomes a `rowid` restriction
+carried into the KNN itself: "an ineligible row never enters the candidate set and
+never spends a candidate slot the cut is taken from". Read the other way, a row
+made *eligible* does spend such a slot. Admitting episodes to the belief read is
+not a matter of ordering the results afterwards; it changes which records exist to
+be ranked.
+
+### The budget the pilot's other lane just bought
+
+The answering budget moved 5→15 in this same batch, and
+`ai_assistant.app.composition.RETRIEVAL_LIMIT` records why in its own words: of
+the 277 rank misses, "the gold-citing record's median cosine rank was 12, and 114
+of 277 sat at ranks 6 to 10. A budget of 5 cut the answer off above almost all of
+them; 15 covers about 80% of that population". It also prices it: "5 records
+filled roughly 4KB, so this is about three times that in the prompt, per turn."
+
+That budget was bought for *beliefs*, on measurement, days ago. Any design that
+spends part of it on episodes is undoing a measured change with an unmeasured one.
+
+### The thesis tension, stated as the owner states it
+
+The product's claim is an accumulated user model — beliefs that are distilled,
+corrigible, inspectable, and carry their provenance. Retrieval over the raw
+transcript is a different product: retrieval-augmented generation over a chat log,
+which is a solved commodity and is not what the belief layer is for. A system that
+answers from episodes because its distillation is lossy has not fixed its
+distillation; it has stopped depending on it, and the belief layer becomes an
+ornament that no answer needs.
+
+That tension is real, and it is not resolved by refusing the capability outright
+either — a refusal leaves 42% of a measured answerable set permanently
+unanswerable from a fact the system demonstrably holds. It is resolved by *where
+the boundary sits*, which is what this ADR draws.
+
+## Decision
+
+### 1. The capability is admitted: an episode may reach the answering prompt
+
+> **Normative.** An answering turn's prompt may carry `EPISODIC` records
+> retrieved by relevance, subject to §§2–4. #791's budget half and consumer half
+> are answered here and the deferral is not renewed.
+
+The trigger #791 names first — "a user-facing capability that actually wants
+cross-conversation recall" — has fired in the only form this repository can
+currently produce. The benchmark is not a user, but the behaviour it scores is a
+user-facing one: *answer a question about something the user said*. 42% of that
+set fails for want of exactly this read, and the pilot's own reading says the
+distillation loss behind it is structural rather than a tuning defect the
+ingestion lanes will absorb.
+
+The three deferral precedents #791 leans on all turn on the same condition and it
+no longer holds. ADR-0072 §7, ADR-0045 §1 and ADR-0028 §7 each declined surface
+"for want of a consumer"; the consumer is now quantified, and — unusually — the
+substrate it needs is *already fully paid for*. Episodes are already captured
+(ADR-0074 §3), already stored in the one store (ADR-0072 §1), and already
+embedded: `ai_assistant.memory.sqlite_store` embeds every record it is given and
+special-cases no `MemoryKind`. The store carries the write cost, the vector index
+carries the space cost, and the re-embed path carries the migration cost, today,
+for records nothing reads. Declining the read does not save any of that.
+
+**A refusal was considered on its merits and is recorded in Alternatives
+considered**, because "the ADR's job is to decide, not to admit" cuts both ways:
+this section admits the capability, and §§2–4 are what stop the admission from
+being unbounded.
+
+### 2. `EPISODIC` never joins the belief kinds
+
+> **Normative.** `ai_assistant.orchestration.conversations.BELIEF_KINDS` remains
+> the `kinds` argument of the answering turn's belief composition, and
+> `MemoryKind.EPISODIC` is never added to it. No caller passes a kind set to
+> `ai_assistant.orchestration.retrieval.assemble_by_band` that contains both
+> `EPISODIC` and any belief kind.
+
+ADR-0074 §6's sentence is kept whole and for its own reason: a captured turn does
+not compete with beliefs for the retrieval budget. What §3 adds is a second
+budget, not a widening of this one.
+
+**The ground is ADR-0072 §5's flood argument, transposed one level down.** §5
+refuses a band-neutral top-k in terms that need only their nouns changed:
+
+> A band-neutral top-k followed by a post-hoc partition does not implement
+> precedence: a flood of low-confidence inferences can displace an assertion
+> *below the cut*, where no amount of downstream ordering recovers it.
+
+Put raw turns where the inferences are and a distilled belief where the assertion
+is, and the sentence is this section. It is stronger here than there, in three
+ways:
+
+- **The band composition offers no protection.** Every episode is `DERIVED` by
+  construction (Context), so episodes and observed beliefs land in the *same*
+  band-scoped call. The precedence order ADR-0072 §5 built to stop exactly this
+  displacement does not separate the one pair that needs separating.
+- **It is a candidate-set effect, not a sorting effect.** ADR-0128 §1 binds
+  `kinds` before the KNN cut, so an admitted episode spends a candidate slot the
+  cut is drawn from. There is no downstream pass that can put the belief back.
+- **The ratio is not close.** A store holds roughly one belief per distilled fact
+  and one episode per turn. The pilot's own figures: 17–42 beliefs distilled from
+  ~300 turns, an order of magnitude in the episodes' favour, on a corpus whose
+  ingestion recall was 56.7%. Under a shared budget of 15 the belief layer would
+  frequently be absent from its own answering prompt — not occasionally
+  outranked, routinely displaced.
+
+That last figure is the thesis tension made mechanical. "The system becomes naive
+RAG over the transcript" is not a slippery-slope worry about this design; it is a
+prediction about *the one-line version* of it, and it is the version this section
+refuses by name.
+
+### 3. The supplement is a second read with a bound of its own, and that bound never exceeds the belief budget
+
+> **Normative.** The episodic supplement is a separate `MemoryStore.search`
+> restricted to `kinds=(MemoryKind.EPISODIC,)`, with a bound of its own. The
+> belief composition's budget is passed to it unchanged and is never reduced,
+> shared, or made conditional on the supplement.
+
+> **Normative.** The episodic bound never exceeds the belief budget. A
+> configuration in which an answering prompt could carry more episodes than
+> beliefs is refused.
+
+> **Normative.** The episodic bound's ratified initial value is **5**, against a
+> belief budget of 15. It moves only on the measurement §6 specifies.
+
+**Two budgets rather than a share of one.** A share — "episodes may take 20% of
+the budget" — was the shape most obviously available, and it is wrong here for a
+dated reason: `RETRIEVAL_LIMIT`'s 5→15 move was bought days ago on the pilot's
+rank-miss measurement, for beliefs. A share takes part of it back on no
+measurement at all, and takes it precisely in the deployments where the belief
+layer is working and its budget is full. Two budgets cost prompt size, which is
+the honest cost; a share costs belief recall, which is the cost that hollows the
+thesis.
+
+**The ceiling clause is where the thesis is actually expressed.** Every other
+statement of "beliefs are the product" is documentation; this one is checkable and
+survives future tuning by whoever tunes it. Whatever the numbers become, the
+answering prompt can never be majority-transcript by record count.
+
+**And the count bound is a weaker guard on volume than it looks — stated rather
+than glossed over.** An episode is a verbatim turn; a belief is a distilled
+sentence. `RETRIEVAL_LIMIT` prices 5 belief records at roughly 4KB, and there is
+no comparable figure for 5 episodes because nothing has measured one. So 5 is
+chosen as the value at which the count guard and a plausible *byte* parity roughly
+meet, and it is stated as a judgement rather than as a measured optimum. §6 puts
+prompt bytes in the arm's required output for this reason, and §8 leaves a byte
+bound undecided — ADR-0007 §5's deferral of size caps stands untouched.
+
+**Why not zero.** A bound of zero would ship the path dead in every deployment and
+would be a deferral wearing a ruling's clothes. This corpus sets a cardinality
+control to a defensible number and moves it on evidence — `RETRIEVAL_LIMIT` itself
+began at 5 with no measurement behind it and moved to 15 with one — and §6 pairs
+the initial value with a retraction condition, so the commitment is falsifiable
+rather than one-way.
+
+**One flat call, not a band composition, and the reason it is safe today is
+stated with its expiry.** Every episode is `DERIVED` because capture stamps
+`MemorySource.OBSERVED` unconditionally, so a band-precedence composition over a
+kind set of one would be three calls where one serves, ordering nothing. The band
+filter is therefore left at `None` (ADR-0073 §1: every value).
+
+> **Normative.** The first `EPISODIC` record whose provenance source is not
+> `OBSERVED` reopens §3's single-call shape, which assumes every episode is of one
+> band.
+
+That is where #545's calendar channel would land if it is ever adopted: an
+`EXTERNAL`-sourced episode is `ATTESTED`, and a flat read would then be silently
+mixing bands that ADR-0072 §5 ordered. Nothing about #545 is ratified here; the
+trigger is recorded so the assumption cannot rot unnoticed.
+
+### 4. Where the supplement sits in the prompt, and what it may not repeat
+
+> **Normative.** The supplement is appended after the belief composition and is
+> never interleaved with it. The order of `memories` is the continuity tail
+> (ADR-0074 §5), then the retrieved beliefs, then the episodic supplement.
+
+`ai_assistant.orchestration.loop` composes the turn's `memories` as
+`recent + retrieved` today; this makes it `recent + retrieved + supplement`.
+
+Position is how this corpus expresses precedence into a prompt — ADR-0072 §5's
+assembler "fills its budget `ASSERTED` first, then `ATTESTED`, then `DERIVED`",
+and the ordering *is* the precedence. A distilled belief outranks the raw turn it
+was distilled from for the same reasons the belief layer exists: it has passed the
+propose/dispose gate, it carries provenance and confidence, it is corrigible, and
+it is what the user can inspect and kill. An episode is unjudged material. Sorting
+the two together by relevance would restore §2's displacement in the renderer
+immediately after refusing it in the reader, and would do so invisibly, because
+nothing downstream reports which kind won a position.
+
+> **Normative.** An episode already present in the continuity tail is not repeated
+> by the supplement; the tail's copy is kept and the supplement's is dropped.
+
+This is not hypothetical bookkeeping. ADR-0074 §5 puts the conversation's recent
+turns into `memories`, and ADR-0086 §6's `get_many` is how
+`ConversationLifecycle.history` fetches them — they are records of the same store,
+with the same ids, of kind `EPISODIC`. A relevance read over `EPISODIC` returns
+them whenever the current conversation is on topic, which is the common case, not
+the edge. Without this rule the supplement's whole budget is spent reprinting what
+the prompt already carries, and the same record appears twice under two headings —
+which `assemble_by_band` already treats as a fault for the band case, on ADR-0113
+§5's cross-call deduplication obligation and ADR-0072 §6's presentation ground.
+The tail's copy is the one kept because its position carries the conversational
+order, which the supplement's does not.
+
+> **Normative.** A failure of the episodic read drops the supplement alone; the
+> belief composition already in hand is kept, and the turn reports
+> `memory_degraded`.
+
+The belief path's rule is all-or-nothing — a failure on any band's read discards
+the whole retrieval — and #805 already carries the question of whether that is
+right. This clause neither changes that rule nor waits on it. The supplement is
+non-essential by construction, so discarding a successful belief composition
+because a supplementary read failed would trade a good prompt for no prompt. The
+turn still says so, because a silently short prompt that looks complete is the
+failure `memory_degraded` exists to prevent.
+
+### 5. The contract surface: none, and no new setting either
+
+> **Normative.** This decision changes no Protocol in
+> `src/ai_assistant/core/protocols.py` and no type in
+> `src/ai_assistant/core/types.py`.
+
+`MemoryStore.search` already takes `kinds` and `bands`; ADR-0072 §5 and ADR-0113
+already make the kind selection the caller's argument; `MemoryKind.EPISODIC`
+already exists (ADR-0005 §1). The whole of the read this ADR admits is an
+`orchestration` caller passing a different argument to a member that has been on
+the contract since leg 1. Golden rule 5 does not fire, and the implementing lane
+owes no triad.
+
+**A `MemoryStore` member for episodic retrieval is declined.** Nothing here needs
+one: a time-range read is a different capability with a different signature, the
+measured consumer's questions are topical rather than range-scoped, and ADR-0072
+§7's discipline applies to *this* surface as squarely as #791 applied it to the
+capability. Recorded because it is the shape #545 gestures at ("a timeline is
+queried by time range, not by semantic similarity") and a lane could reach for it
+by analogy.
+
+> **Normative.** The episodic bound is a composition-root constant beside
+> `ai_assistant.app.composition.RETRIEVAL_LIMIT`, and no field for it is added to
+> `ai_assistant.core.config.Settings`.
+
+The belief budget is a composition constant, not a setting, and the episodic bound
+is the same kind of thing: a cardinality control whose authority is measurement.
+The contrast that decides it is `episode_retention`, which *is* a setting because
+ADR-0074 §7 makes it a **privacy** choice the user owns — how long their own words
+are kept. How many episodes help an answer is not a preference; it is a fact
+nobody has yet measured, and offering it as a knob would imply a user could know
+it. A setting is also user-facing surface, which this repository defers until a
+consumer exists, and no user has asked for this one.
+
+### 6. What the ablation arm measures, and what would retract this decision
+
+The arm is not part of this lane and not part of `bench-pilot-2`.
+
+> **Normative.** The episodic supplement is not cherry-picked into
+> `bench-pilot-2`. Its effect is measured in a separately registered arm, run
+> after #1163's lane 7 lands, from a ref containing it.
+
+#1029's pilot-2 pre-registration fixes its ref as `bench-pilot-1` plus exactly
+three named fix lanes and commits bucket-level predictions against them. Adding a
+fourth change would make the predicted deltas unattributable, which is the precise
+failure the "one configuration, no ablations" ground rule exists to prevent.
+
+> **Normative.** The arm exercises the production composition path, not a
+> harness-local imitation of it, and imports the episodic bound as
+> `benchmarks/memory/wiring.py` already imports `RETRIEVAL_LIMIT` and
+> `CONFLICT_LIMIT` from `ai_assistant.app.composition`.
+
+`benchmarks/memory/answer.py` performs its own retrieval —
+`assemble_by_band(..., kinds=BELIEF_KINDS)` — so an arm written carelessly would
+measure a harness that resembles the product rather than the product. The
+harness's own stated guard against that drift is importing the cardinality
+controls rather than copying them, and the supplement joins them.
+
+> **Normative.** The arm reports conversion per pilot bucket, not a headline score
+> alone, and reports prompt bytes per answered question.
+
+The buckets are #1029's addendum's own, so the arm's output is comparable to the
+baseline anatomy without reprocessing it.
+
+**What the arm is testing is complementarity, not score.** The capability is
+justified in §1 by one bucket — the 652 questions whose fact never became a
+belief — and a score that rises for any other reason is not evidence for it.
+
+- **Confirming shape.** Conversion concentrated in **ingestion-loss** (LoCoMo 652
+  / LongMemEval 9). Those are the questions no belief could have answered, so an
+  episode answering them adds reach the belief layer did not have.
+- **Substitution, which reads as success and is not.** Conversion concentrated in
+  **lossy-record** (416) or **rank-miss** (277) means the belief layer already
+  held the fact and the episode won anyway. That is the hollowing, arriving as a
+  higher score: the right response to it is to fix distillation (ADR-0156's lane)
+  and the retrieval budget, not to keep the supplement.
+- **Two required cost measures.** `correct` (118) must not shrink and
+  `attempted-wrong` (69) must not grow — a supplement that converts right answers
+  into wrong ones is distracting, not helping. And **cat-5 correct abstention**
+  (446) must be reported: verbatim transcript material is exactly the near-miss
+  content that makes an unanswerable question look answerable, and pilot 2 already
+  predicts that figure degrading for an unrelated reason, so the two effects must
+  be separated rather than netted.
+
+> **Normative.** §3's bound goes to zero and the supplement is removed if the arm
+> shows conversion not dominated by the ingestion-loss bucket, or `correct`
+> falling, or `attempted-wrong` rising.
+
+That is the falsifiable half of this decision, and it is what makes §3's non-zero
+initial value a commitment rather than a ratchet.
+
+### 7. What the implementing lane owes, and what it may not touch
+
+> **Normative.** The implementing lane changes no file under
+> `src/ai_assistant/core/`.
+
+> **Normative.** The lane pins, as tests: that the belief composition's `kinds`
+> argument still excludes `EPISODIC`; that the belief budget passed to
+> `assemble_by_band` is unchanged by the supplement's presence or its bound; that
+> the supplement's records follow the belief records in `memories`; that an
+> episode present in the continuity tail is not repeated; and that a failing
+> episodic read leaves the belief composition intact while reporting
+> `memory_degraded`.
+
+The first two are the ones a refactor would break silently, and they are the whole
+of §2 and §3 in executable form. The last three are §4.
+
+The lane also owes the retrieval trace's honesty: ADR-0119's `RETRIEVAL` trace is
+emitted per `search` call inside the store, so a supplement is naturally a second
+traced read rather than an untraced widening of the first. Nothing needs adding
+for that; it is named so the lane does not "helpfully" merge the reads.
+
+### 8. What this ADR does not decide
+
+- **The bound's value beyond its ratified initial 5.** §6's arm owns it, in both
+  directions.
+- **Retrieval-triggered distillation** — the loop in which an episode that
+  answered a question is fed back to the observer so the fact becomes a belief.
+  This is the shape that would resolve the thesis tension rather than balance it:
+  episodic retrieval that *strengthens* the user model instead of routing around
+  it. It reaches `learning` and `orchestration` together and needs its own ADR;
+  filed rather than sketched here.
+- **A relevance threshold, or any "the belief layer answered thinly" trigger.**
+  Both are new eligibility axes that ADR-0128 §1 would bind before the cut, and
+  neither has a measured value. ADR-0103 §5 and ADR-0112 §9 keep thresholds with
+  leg 8's measurement, and Alternatives considered records why the count-shaped
+  version is measurably dead.
+- **A byte bound on the prompt.** ADR-0007 §5's deferral of size caps stands; §6
+  requires the measurement that would inform one.
+- **Episodic retrieval anywhere but the answering turn's prompt.** The observer
+  (ADR-0077 §1), consolidation, notifications and the correction drawer are
+  untouched, and each reads what its own ADR gives it.
+- **How an answer grounded in an episode is attributed or rendered.** Nothing here
+  changes what a turn reports about where its answer came from.
+- **#545 in any part.** §3's revisit trigger is where a non-`OBSERVED` episode
+  channel would first bind; adopting one is a separate decision.
+- **Symmetric retention of assistant-side turn content** (#1029's P6). Capture
+  records the whole turn and this ADR does not reopen it.
+
+## Consequences
+
+**Easier.** A question whose answer was said once and never distilled becomes
+answerable, from evidence the system already stores, embeds and pays for. The 652
+is the largest single bucket in the pilot's anatomy and the only one none of
+#1163's other lanes reach. #791 closes with both halves answered rather than
+carrying an item whose trigger has already fired.
+
+**Harder, and worth naming precisely.** The answering prompt grows by up to five
+verbatim turns, which is a larger and less predictable increase than five beliefs
+would be, and the answering model has already been shown to be highly sensitive to
+what its context looks like — 1,309 of pilot 1's 1,320 declines were a single
+exact string. There is now a second retrieval read per answering turn, so a
+turn's retrieval latency and its trace count both rise. And the deduplication rule
+is a cross-read obligation invisible to every store conformance case, exactly as
+ADR-0113 §7 says of the band one: it can only be tested at the composition, and it
+will be got wrong by anyone who adds a second episodic consumer without reading
+§4.
+
+**A standing asymmetry this decision deliberately does not remove.** Beliefs are
+retained indefinitely; episodes are not. `episode_retention` defaults to a finite
+30 days and ADR-0074 §7 ratifies that finiteness as "the whole decision", with
+`None` reachable only by the user's own choice — the configuration the pilot ran
+under. So the supplement's reach ends at the retention horizon, and a deployment
+that shortens retention for privacy loses answers for it. That is not a defect to
+engineer around: it is the correct expression of what the two layers are. A belief
+is what survives, because it was judged worth keeping; an episode is evidence with
+an expiry. Any future proposal to make answering *depend* on episodes has to face
+that a default-configured system goes blank about anything older than a month, and
+that the users who most protect their transcripts would be the ones penalised.
+This ADR keeps episodes supplementary partly so that cliff can never become the
+answering path's main road.
+
+**What would trigger revisiting this decision.**
+
+- §6's arm, in either direction: it raises the bound, or §6's retraction clause
+  takes it to zero and removes the path.
+- The first `EPISODIC` record whose provenance source is not `OBSERVED` (§3).
+- A change to `episode_retention`'s default, which changes what the supplement can
+  reach without changing a line of retrieval code.
+- Distillation improving enough that the ingestion-loss bucket stops dominating —
+  at which point the supplement is answering questions the belief layer could have
+  answered, and §6's substitution reading applies to production rather than to an
+  arm.
+
+## Alternatives considered
+
+**1. Refuse outright, and keep `BELIEF_KINDS` as the whole answer.** The strongest
+alternative, and the one the owner's steer most plainly protects. Rejected on
+three grounds. It renews a deferral whose own stated trigger has fired, which
+#791's framing does not license — the discipline was "defer until a consumer
+exists", not "defer indefinitely". Its central argument, that episodes would flood
+the belief cut, is answered by two budgets rather than by refusal; refusing on an
+argument that a bounded design defuses is refusing the one-line version of the
+proposal. And it leaves 42% of a measured answerable set unreachable while the
+system pays every storage and embedding cost of the evidence that would answer
+them. A refusal remains the right outcome if §6's arm reads as substitution, which
+is why §6 states that outcome as a clause rather than as a hope.
+
+**2. Drop `BELIEF_KINDS` — one budget, kind-blind.** The one-line version.
+Rejected in §2: episodes and observed beliefs share the `DERIVED` band so the band
+composition contains nothing, ADR-0128 §1 binds `kinds` before the cut so nothing
+downstream recovers a displaced belief, and the population ratio (17–42 beliefs
+against ~300 turns) says displacement would be routine rather than occasional.
+This is the shape that would make the system naive RAG over the transcript, and it
+is the shape the thesis objection is actually about.
+
+**3. A capped episodic *share* of the one budget.** The shape the brief names, and
+the closest rejected alternative. It bounds the flood correctly, and it is still
+wrong: `RETRIEVAL_LIMIT`'s 5→15 move was bought for beliefs on the pilot's own
+rank-miss measurement, and a share hands part of it straight back on no
+measurement. It also fails worst where the system works best — a deployment with a
+rich belief layer, whose budget is full, loses belief slots to episodes it does not
+need. §3's separate bound costs prompt size instead, which is the cost that does
+not touch belief recall.
+
+**4. Episodes as a fallback when belief retrieval comes back thin, triggered by
+count.** The most attractive shape on its face — zero cost when the user model
+works, episodes only when it is empty — and it is **measurably dead in the exact
+case that motivates this ADR**. `assemble_by_band` returns fewer than `limit`
+records only when the store lacks eligible ones, and each LoCoMo case's store held
+17–42 beliefs against a budget of 15. The composition fills; the remainder is
+zero; the fallback never fires. The 652 failures are not failures of belief
+*quantity* — the prompt was full of beliefs — they are failures of belief
+*content*. A count of retrieved records cannot see that difference, which is the
+general defect the LoCoMo figures happen to make concrete.
+
+**5. The same fallback triggered by a relevance threshold.** Expressible —
+`MemorySearchResult` carries a cosine `score` — and rejected for want of any
+measured value for the threshold. It is a new eligibility axis that ADR-0128 §1
+would bind before the cut, so a wrong value silently removes eligible records
+rather than merely reordering them, and ADR-0103 §5 and ADR-0112 §9 both keep
+threshold questions with leg 8's measurement. Not foreclosed: if §6's arm produces
+per-question relevance data, this becomes answerable rather than guessed.
+
+**6. Episodic-as-corroboration only — episodes reach the prompt solely as the
+evidence cited by a retrieved belief.** Preserves the thesis exactly, needs no new
+read (`Provenance.evidence` names episode ids and ADR-0086 §6 put `get_many` on the
+contract), and is the right shape for *"why do you believe that?"*. It cannot serve
+this consumer: the 652 are by definition questions where **no belief cites the gold
+episode**, because no belief was formed. Recorded because it is a good design for a
+different question and remains fully available — nothing in §§1–5 forecloses it.
+
+**7. A time-range episodic read** (#545's timeline shape). Rejected here as a
+different capability: it needs a `MemoryStore` member this ADR declines (§5), and
+the measured consumer's questions are topical rather than range-scoped. It is the
+natural read for an episodic *timeline* surface, which nothing has asked for.
+
+**8. Fixing ingestion instead.** Not an alternative so much as the other half, and
+it is already in flight: ADR-0156's temporal anchors and the observation lanes both
+target distillation quality, and the pilot's own reading is that a large part of
+LoCoMo's ingestion residual is structural to third-person dialogue rather than
+fixable by tuning. This ADR takes the position that the two are complementary and
+that §6's arm is what keeps them so — an episodic supplement is a reach extension
+where distillation cannot go, and §6's substitution reading is exactly the alarm
+for it becoming an excuse not to go there.
