@@ -33,8 +33,8 @@
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-15**,
   the durability form ADR-0100 established and ADR-0149, ADR-0150, ADR-0151,
   ADR-0152 and ADR-0153 each applied. This decision rests most heavily on
-  ADR-0152 §4 and §6 and on ADR-0150 §4, and ADR-0152 **is edited by this change,
-  in its ratification commit**.
+  ADR-0152 §4 and §6 and on ADR-0150 §4, and ADR-0152 **is edited by this change**,
+  in the same commit that proposes it (§6).
 - **Records owed on other ADRs: one, against ADR-0152, and §6 shows the working**
   ADR by ADR — including the two near misses, ADR-0150 §11's routed question and
   ADR-0145 §5's one-dialect rule, each of which a reviewer is entitled to contest
@@ -323,20 +323,28 @@ partial form ADR-0070 §4 fixes, and an appended dated header note — and ADR-0
 §2 puts the substance of the record in the note on a line led by `Partially
 superseded by`.
 
-**Both are made in this ADR's ratification commit and not before**, which is
-ADR-0153's precedent against ADR-0126 in terms — "ADR-0126 is edited by this
-change, in its ratification commit". ADR-0070 §1 permits the `Status` edit for
-"a supersession that has landed" and says the permission "presupposes the
-superseding ADR *exists*"; a live decision recorded as partly replaced by a
-proposal that could still be withdrawn would be the unrecorded decision change
-that clause forbids, and it would be wrong in the window that matters most — while
-this ADR is under the review that could still change it. So while this ADR stands
-`Proposed`, ADR-0152 is untouched and the citation checker reports one liveness
-disagreement against this pair; that report is correct, says exactly that the
-supersession has not landed, is Tier 2 and fails nothing, and clears when the
-record is written.
+**Both are made in the change that proposes this ADR, not deferred to its
+ratification commit** — the two files move as one atomic pair, and this ADR says
+so explicitly because the contrary reading is a known and recurring one. ADR-0070
+§1 permits the `Status` edit for "a supersession that has landed" and glosses the
+permission as presupposing that "the superseding ADR *exists*". ADR-0082 §7 rules
+on the misreading of that phrase by name, as **#458**, and calls it "not a
+governance gap but a reviewer failure mode":
 
-Its `Accepted: 2026-08-14` line is added alongside,
+> §1's condition is that the superseding ADR **exists**, not that it is ratified —
+> the hazard §1 names is a `Status` line pointing at nothing, and an atomic pair
+> makes that unreachable.
+
+An atomic pair is what this is: no state of `main` carries either half without the
+other, so the hazard has no instance here. Deferring the record would also cost
+something ADR-0082 §7's reasoning implies and this ADR states outright — the scope
+record *is* the substance of the supersession, and moving it into the
+`Proposed` → `Accepted` flip would land it in the one edit `CONTRIBUTING.md` marks
+as skipping review, so the only reviewed artifact would be the one that never
+carried it. The flip therefore moves this ADR's own `Status` line and records its
+review outcome, and nothing else.
+
+ADR-0152's `Accepted: 2026-08-14` line is added alongside,
 preserving on the header the ratification fact that leaves the `Status` line when
 the supersession token takes the lead; that changes no decision and follows
 ADR-0126's header exactly. Not one word of ADR-0152's Context, Decision or
@@ -470,11 +478,11 @@ it rather than re-deriving it, and the outcome is recorded here on ratification 
 in the ratification commit itself, not before it, because a paragraph asserting a
 verdict a review has not yet returned is a claim rather than a record.
 
-**That commit carries three things and no others**: this `Status` line moving
-`Proposed` → `Accepted`, the outcome paragraph above it, and ADR-0152's record —
-its `Status` line, its `Accepted` line and its appended dated note (§6). The
-third rides here rather than earlier for the reason §6 gives, and it is why the
-flip touches a second file.
+**That commit carries two things and no others**: this `Status` line moving
+`Proposed` → `Accepted`, and the outcome paragraph above it. It touches one file.
+ADR-0152's record is **not** in it — §6 states why, and the short of it is that a
+scope record made in an edit that skips review would be the substance of this
+supersession arriving where nobody reviewed it.
 
 ## Consequences
 
