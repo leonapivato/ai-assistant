@@ -117,7 +117,22 @@ if TYPE_CHECKING:
 #: not control. Passing it makes the two the same object of knowledge — a stamp
 #: reading this constant is reading exactly what the loop was built with, and a
 #: later change to ``orchestration``'s own default cannot make the record wrong.
-RETRIEVAL_LIMIT: Final = 5
+#:
+#: **15 rather than 5, on measurement rather than taste** (#1163, #1029's scored
+#: pilot re-rank analysis). Over the retrieval misses whose gold record was
+#: *present in the store* — so a ranking failure, not an ingestion one — the
+#: gold-citing record's median cosine rank was 12, and 114 of 277 sat at ranks
+#: 6 to 10. A budget of 5 cut the answer off above almost all of them; 15 covers
+#: about 80% of that population, and the deeper page is the cheapest lever there
+#: is, because the records are already ranked and already in the store.
+#:
+#: What it costs is answer context: 5 records filled roughly 4KB, so this is
+#: about three times that in the prompt, per turn. That is the trade the
+#: evidence buys, and it is bounded on both sides — ADR-0119 §3's
+#: ``TRACE_RECORD_SET_CAP`` of 256 is still an order of magnitude away, so no
+#: traced read moves nearer to truncating and §9's diagnostic keeps saying the
+#: same thing about this deployment.
+RETRIEVAL_LIMIT: Final = 15
 
 #: What this layer tunes :class:`MemoryIngestor`'s conflict ceiling to, passed
 #: explicitly for :data:`RETRIEVAL_LIMIT`'s reason.
