@@ -566,9 +566,17 @@ the conversation's own recent turns — and that reason does not care why the
 beliefs are absent.
 
 > **Normative.** `TurnResult.memories` carries the same three groups in the same
-> order. A degraded read empties its own group, and where that leaves no
-> non-`EPISODIC` record before the supplement, §4's separator rule empties the
-> supplement as well.
+> order as `Planner.plan`'s `memories`.
+
+> **Normative.** A degraded read empties its own group and no other — except that
+> where the result leaves no non-`EPISODIC` record before the supplement, §4's
+> separator rule applies and the supplement is empty too.
+
+The exception rides inside the second clause rather than becoming a third, because
+it states that clause's scope rather than a further obligation: ADR-0089 §2's form
+is "one obligation, with its scope, conditions and exceptions", and the rule doing
+the emptying is §4's, already marked there. Splitting it out would mark the same
+obligation twice.
 
 This is the same widening ADR-0074 §5 made and the same way it made it: the
 signature is unchanged, `Planner` grows no parameter, and the change is **flagged
