@@ -1,6 +1,6 @@
 # 156. A distilled belief states its event time in its content, and no record type grows a field for it
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-15
 - **Not a substantive contract ADR; contract-surface only for the review set, and
   the two are different questions.** [ADR-0015](0015-simplify-the-agent-workflow.md)
@@ -18,30 +18,59 @@
   code changes with it**, because the implementation is a separate lane — which is
   #1163's wave structure and the plain fact that the lane needs this text as its
   authority, not a rule ADR-0015 §5 imposes.
-- **Amends on ratification:**
+- **Partially supersedes on ratification:**
   [ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) §3, in one named
-  sentence. §3's *"The prompt carries the episodes' canonical `content` (ADR-0005
-  §1) and what the model needs to cite them (§5)"* enumerates the payload
-  exhaustively, and §2 below adds each episode's `occurred_at` to it. Applying
-  [ADR-0070](0070-amendment-and-supersession-rules.md) §1's test to that sentence:
-  a reader holding only ADR-0077 builds the observation prompt without the
-  instants, which is what §2 requires it to carry, so the reader acts differently
-  and the record is owed. It is an **amendment and not a supersession**, because
-  what §3 *decided* is untouched and is in fact the reason the addition is
-  admissible: the bolded ruling is "**The payload is the batch and nothing else**",
-  and an `occurred_at` is a field of the batch rather than a second class of data —
-  §3's refusals (the user's existing beliefs, the profile, the context facet, a
-  plan) all stand verbatim, as do the named route, the no-fallback rule and the
-  on-device direction. The dated note **lands on ADR-0077 in this same change**,
-  which is the form ADR-0080 and ADR-0111 each took and the existence condition
-  [ADR-0083](0083-the-hub-is-a-resident-process.md) §15 states — so the note never
-  names an ADR that does not exist, and is `Accepted` at merge alongside it, which
-  is ADR-0070 §1's hazard answered rather than deferred. ADR-0077's `Status` line
-  is **not**
-  edited: it is led by `Partially superseded by`, and
-  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §2 puts
-  the record in the note alone on such a line.
-- **Amends nothing else.** Applying ADR-0070 §1's test to each decision this one
+  sentence — *"The prompt carries the episodes' canonical `content` (ADR-0005 §1)
+  and what the model needs to cite them (§5)"*. That sentence enumerates the
+  payload exhaustively and §2 below adds each episode's `occurred_at` to it.
+  [ADR-0070](0070-amendment-and-supersession-rules.md) §1's test decides the form
+  and decides it against the softer reading: an amendment is available "only when
+  the amendment changes no decision", such that a reader "would act **identically**
+  before and after", and "**a change to what was decided is anything a reader would
+  act on differently**". A reader holding only ADR-0077 builds the observation
+  prompt without the instants, which is exactly what §2 requires it to carry. So
+  this is a **partial supersession** of that clause, not an amendment, and it takes
+  §3's form and §4's status vocabulary.
+
+  **The discriminator, stated because an earlier draft of this ADR got it wrong.**
+  The corpus separates the two on whether the replaced sentence is a *rule an
+  implementer obeys* or an *explanation of one*: ADR-0128's change to ADR-0045 §6 is
+  recorded as an amendment precisely because the sentence it made false "is stated
+  as the reason the rare end is cheap to honour … not as a rule an implementer
+  obeys", while ADR-0080's replacement of ADR-0045 §4's window-close *instruction*
+  "in that scope" is recorded as a partial supersession. §3's payload sentence is
+  an instruction — it is what a lane building the prompt does — so it takes
+  ADR-0080's form. ADR-0082 §1 warns about exactly the failure the earlier draft
+  committed: "a later ADR that calls its change an amendment of ADR-N without a
+  clause of ADR-N failing §1's test has mis-declared it, and the record is wrong
+  however the declaration reads." Its §1 also defers this classification outright —
+  "or supersedes it — §1 decides which, and this ADR does not touch that line".
+
+  **The scope is that one sentence and nothing more, and the rest of §3 is not
+  merely spared but is what admits the change.** §3's bolded ruling is "**The
+  payload is the batch and nothing else**", and an `occurred_at` is a field of the
+  batch — of the very `EpisodicMemory` records whose `content` §3 already sends —
+  rather than a second class of data. So §3's four refusals stand **verbatim**: no
+  existing beliefs, no profile, no context facet, no plan. So do the observer's own
+  named route and why unset means the conversational one, the no-fallback rule and
+  both its arguments, the on-device direction, and the outcome naming the route
+  that read the episodes. The remainder of ADR-0077 stays accepted, which is what
+  ADR-0070 §3 means by a partial supersession being first-class.
+
+  **ADR-0077's `Status` line accumulates a second pair**, per ADR-0070 §4 — the
+  existing ADR-0084 pair is kept and `and ADR-0156 (…)` is added on the same
+  physical line, since "replacing the whole value would lose the earlier dead
+  scope". The scope text names a clause and carries no `ADR-NNNN` token, so §4's
+  extraction invariant holds. This is the point on which the correction most
+  changes the record:
+  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §2
+  keeps an *amendment* qualifier off a line led by `Partially superseded by`, and a
+  supersession pair is not an amendment qualifier but the line's own content, which
+  ADR-0070 §4 requires. The dated record **lands on ADR-0077 in this same change**,
+  the form ADR-0080 and ADR-0111 each took and the existence condition
+  [ADR-0083](0083-the-hub-is-a-resident-process.md) §15 states — so ADR-0077 never
+  names an ADR that does not exist, the hazard ADR-0070 §1 guards against.
+- **Touches no other decision.** Applying ADR-0070 §1's test to each decision this one
   leans on: **ADR-0077 §2**'s utility bar ("Do not summarise the exchange. Do not
   propose what merely happened") is untouched and §2's fourth clause below says so
   in terms — the anchor rides on beliefs that bar already admits and widens it by
@@ -231,7 +260,7 @@ ADR-0004 §7's minimisation is satisfied rather than strained: this is the minim
 necessary context for the belief the stage asked for, and it is the batch's own
 data rather than a second class of it, which is why §3's ruling ("the payload is
 the batch and nothing else") admits it and only §3's enumerating sentence is
-amended.
+superseded.
 
 **The third clause is what stops the naive implementation.** The cheapest reading
 of "carry the date" is to append the session's date to every belief — *"Caroline
