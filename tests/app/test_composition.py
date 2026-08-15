@@ -2644,6 +2644,24 @@ async def test_the_band_budget_never_asks_for_more_than_the_reported_figure() ->
     assert max(store.limits) == composition_module.RETRIEVAL_LIMIT
 
 
+def test_the_retrieval_budget_is_the_depth_the_re_rank_evidence_bought() -> None:
+    """The figure itself, pinned to the measurement that chose it (#1163).
+
+    Every other test here holds the figure *symbolically* — that the stamp reports
+    what the loop was built with, that the band budget never over-asks — and would
+    pass just as well on a budget of 5 or 1. None of them notices the number going
+    back, which is what this one is for: #1029's scored pilot re-ranked the
+    retrieval misses whose gold record was already in the store, found the
+    gold-citing record's median cosine rank at 12 with 114 of 277 at ranks 6 to 10,
+    and a budget of 15 is where that population comes inside the page.
+
+    Reverting it is allowed — it is tuning, not a ratified bound — but it costs a
+    deliberate edit here rather than passing as a tidy-up, because the evidence
+    lives in a comment and a comment fails nothing.
+    """
+    assert composition_module.RETRIEVAL_LIMIT == 15
+
+
 class TestBuildMeasureReader:
     """The composition root's third function (ADR-0120 §9).
 
