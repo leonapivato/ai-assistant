@@ -2,15 +2,22 @@
 
 - Status: Proposed
 - Date: 2026-08-15
-- **This decides `core` contract surface by refusing to change it.** The decision
-  space it surveys includes a structured temporal field on the record types in
-  `src/ai_assistant/core/types.py`, and §1 rules against one. `CONTRIBUTING.md` →
-  "Stop when the required reviews are green" makes a change contract-surface "when
-  it is the ADR deciding that surface, even though such a PR is prose only", so the
-  required set here is adversarial **and** architecture. It ships as its own
-  docs-only PR and is ratified before anything implements against it (golden rule 5,
-  [ADR-0015](0015-simplify-the-agent-workflow.md) §5). **No code changes with it**,
-  and because it adds no Protocol, the implementing lane owes no triad.
+- **Not a substantive contract ADR; contract-surface only for the review set, and
+  the two are different questions.** [ADR-0015](0015-simplify-the-agent-workflow.md)
+  §5 defines a substantive contract ADR as "one adding or changing a Protocol or a
+  `core/` type crossing subsystem boundaries", and §1 below adds and changes
+  neither — so §5's land-ahead rule and golden rule 5 are **not** what govern this
+  PR, and the implementing lane owes no triad. What *is* true is narrower and is
+  about which lenses review it: the decision space §1 surveys includes a structured
+  temporal field on the record types in `src/ai_assistant/core/types.py` and rules
+  against one, and `CONTRIBUTING.md` → "Stop when the required reviews are green"
+  makes a change contract-surface "when it is the ADR deciding that surface, even
+  though such a PR is prose only". So the required set here is adversarial **and**
+  architecture, on the ground that a ruling *against* a field is still a ruling
+  about it and binds the wave-2 lane's surface either way. It is docs-only and **no
+  code changes with it**, because the implementation is a separate lane — which is
+  #1163's wave structure and the plain fact that the lane needs this text as its
+  authority, not a rule ADR-0015 §5 imposes.
 - **Amends on ratification:**
   [ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) §3, in one named
   sentence. §3's *"The prompt carries the episodes' canonical `content` (ADR-0005
@@ -27,8 +34,8 @@
   plan) all stand verbatim, as do the named route, the no-fallback rule and the
   on-device direction. The dated note **lands on ADR-0077 in this same change**,
   which is the form ADR-0080 and ADR-0111 each took and the existence condition
-  [ADR-0083](0083-a-deferred-decision-is-a-tracked-question.md) §15 states; while
-  this ADR stands `Proposed` that note names a decision that is drafted rather than
+  [ADR-0083](0083-the-hub-is-a-resident-process.md) §15 states; while this ADR
+  stands `Proposed` that note names a decision that is drafted rather than
   ratified, the form `main` already carries. ADR-0077's `Status` line is **not**
   edited: it is led by `Partially superseded by`, and
   [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §2 puts
@@ -512,9 +519,11 @@ cannot mistake a green suite for a discharged decision.
   refusal of a field, and which would be a new ADR under §1's first clause; or if
   #791's episodic retrieval lands and supplies event times by a route that makes
   the anchor redundant.
-- **This ADR merges before the implementing lane is briefed** (golden rule 5,
-  ADR-0015 §5); its merged text is that lane's authority, which is why §7 states
-  the deliverables and §6 states the limits.
+- **This ADR merges before the implementing lane is briefed** — not because
+  ADR-0015 §5 compels it (the header explains why it does not) but because #1163
+  sequences it that way and the lane has no authority for §7's obligations until
+  this text is merged. That is why §7 states the deliverables and §6 states the
+  limits: the merged document is what the lane reads.
 
 ## Alternatives considered
 

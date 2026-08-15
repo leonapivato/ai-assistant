@@ -155,9 +155,9 @@
   supersession target, which is the extraction hazard ADR-0070 §4 guards and which
   the 2026-07-31 note below records this line meeting once before. ADR-0156 lands
   **in the same change as this note**, which is the existence condition
-  [ADR-0083](0083-a-deferred-decision-is-a-tracked-question.md) §15 states; while
-  it stands `Proposed` this note names a decision that is drafted rather than
-  ratified, the form `main` already carries and which the 2026-08-06 notes below
+  [ADR-0083](0083-the-hub-is-a-resident-process.md) §15 states; while it stands
+  `Proposed` this note names a decision that is drafted rather than ratified,
+  the form `main` already carries and which the 2026-08-06 notes below
   worked through for ADR-0111. Appended per ADR-0070 §1: no text below it is
   rewritten, and §3's sentence stands exactly as written. Refs #1029, #1163.
 - Note (2026-08-06): **§8's sentence filing the cursor's ownership with the
