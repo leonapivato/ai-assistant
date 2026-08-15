@@ -561,7 +561,7 @@ belief — and a score that rises for any other reason is not evidence for it.
 - **Confirming shape.** Conversion concentrated in **ingestion-loss** (LoCoMo 652
   / LongMemEval 9). Those are the questions no belief could have answered, so an
   episode answering them adds reach the belief layer did not have.
-- **Substitution, which reads as success and is not.** Conversion concentrated in
+- **Substitution, which reads as success and is not.** Conversion from
   **lossy-record** (416) or **rank-miss** (277) means the belief layer already
   held the fact and the episode won anyway. That is the hollowing, arriving as a
   higher score: the right response to it is to fix distillation (ADR-0156's lane)
@@ -574,12 +574,42 @@ belief — and a score that rises for any other reason is not evidence for it.
   predicts that figure degrading for an unrelated reason, so the two effects must
   be separated rather than netted.
 
-> **Normative.** §3's bound goes to zero and the supplement is removed if the arm
-> shows conversion not dominated by the ingestion-loss bucket, or `correct`
-> falling, or `attempted-wrong` rising.
+**The retraction predicate is stated as arithmetic, because a word like
+"dominated" is not decidable and a condition nobody can settle is not a
+commitment.** Its terms:
 
-That is the falsifiable half of this decision, and it is what makes §3's non-zero
-initial value a commitment rather than a ratchet.
+- **A conversion** is a question that sat in a named baseline bucket and is
+  `correct` in the arm. `I` is the count of conversions from **ingestion-loss**,
+  `L` from **lossy-record**, `R` from **rank-miss**.
+- **The figures are LoCoMo's.** LongMemEval is reported and is not decisive: its
+  ingestion-loss bucket holds 9 questions, which cannot separate the readings this
+  predicate turns on. Saying so in advance is what stops the smaller corpus being
+  reached for after the fact.
+
+> **Normative.** §3's bound goes to zero and the supplement is removed unless
+> **all three** hold on the arm's LoCoMo figures: `I > L + R`; `correct` is not
+> below its baseline of 118; and `attempted-wrong` is not above its baseline of 69.
+
+**Why a strict inequality against the *sum*.** The capability is justified by
+reach the belief layer does not have, so it has to be more complementary than
+substitutive — not merely the largest of three buckets. The reviewer's own worked
+case decides it the way this ADR intends: 40 ingestion-loss against 35 rank-miss
+and 25 lossy-record is the *largest single* bucket and is still 60 conversions the
+belief layer could have made itself, so `40 > 60` fails and the supplement goes.
+
+**Zero and ties fall the same way, deliberately.** With no conversions anywhere,
+`0 > 0` is false and the supplement is removed — which is the right answer, since
+a supplement that converts nothing has bought nothing for the prompt bytes it
+spends. A tie is likewise a failure to clear the bar rather than a pass.
+
+**Magnitude is a separate question and is not this predicate's.** A result clearing
+all three conditions by a small margin keeps the capability and bears on §3's
+bound, which §6's per-bucket figures are what inform; it is not grounds for
+retraction. Folding a size threshold in here would mean inventing a number this
+ADR has no measurement for, which is the defect it would be trying to fix.
+
+That predicate is the falsifiable half of this decision, and it is what makes §3's
+non-zero initial value a commitment rather than a ratchet.
 
 ### 7. What the implementing lane owes, and what it may not touch
 
