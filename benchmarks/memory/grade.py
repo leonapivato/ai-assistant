@@ -101,9 +101,11 @@ class Grading:
 #: "the records do not clearly say, but Ada adopted a dog" has answered, and this
 #: pattern reads it as a decline. That is why
 #: :data:`benchmarks.memory.answer.ANSWER_SYSTEM_PROMPT` asks for the answer with no
-#: stated confidence: the alternative is loosening the anchor, which puts the
-#: classification of a hedged answer inside the grader where it cannot be audited from
-#: a run's artifacts.
+#: stated confidence and no opening caveat: the alternative is loosening the anchor,
+#: which puts the classification of a hedged answer inside the grader where it cannot be
+#: audited from a run's artifacts, and redefines the measure the pilot's published
+#: numbers were computed under. That instruction is not an enforcement, so the residual
+#: is real and tracked as #1168 rather than closed here.
 _ABSTENTION: Final = re.compile(
     r"^\W*(i\s+don'?t\s+know"
     r"|i\s+do\s+not\s+know"
