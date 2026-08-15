@@ -242,6 +242,16 @@ class RunManifest(BaseModel):
         conflict_limit: The ingestor's conflict-probe limit.
         observation_batch_size: Turns per observation pass.
         observation_max_proposals: Beliefs one pass may return.
+        observer_timezone: The IANA calendar the observation prompt showed each
+            episode's ``occurred_at`` in, and the one a relative expression was
+            resolved against (ADR-0156 §2, §3). Recorded because it bounds what the
+            producer could state at all: two runs' temporal categories are comparable
+            only if both distilled under the same calendar, and a zone far from the
+            speaker's dates an evening utterance a day out. The configured
+            ``Settings.timezone``, which is where every consumer of it reads it
+            (ADR-0008 §6) — so a manifest naming one is also the record that the
+            harness passed one rather than leaving the producer without a calendar
+            (#1171).
         episode_retention: The configured horizon, or ``"none"``. **Read this before
             reading a score**: the harness runs on the corpus's clock, so a finite
             horizon expires a session's episodes a horizon after that session's own
@@ -276,6 +286,7 @@ class RunManifest(BaseModel):
     conflict_limit: int
     observation_batch_size: int
     observation_max_proposals: int
+    observer_timezone: str
     episode_retention: str
     answer_prompt: str
     judge_prompt: str | None
