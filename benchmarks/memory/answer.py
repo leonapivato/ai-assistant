@@ -97,21 +97,34 @@ ABSTENTION_PHRASE: Final = "I don't know"
 #: ``ASK_USER`` path out as a cause.
 #:
 #: So the instruction now asks for the system's best reading of the records and
-#: reserves the decline for the case it was meant for — nothing relevant retrieved.
-#: This does not reintroduce the confirm-by-construction problem the first version
-#: avoided: abstention is still *named*, still sanctioned, and still the instructed
-#: reply where the records are empty of the subject, so a system that cannot answer
-#: retains a way to say so. What changed is the threshold, from "any uncertainty" to
-#: "nothing relevant", which is the threshold the unanswerable populations are built
-#: to test.
+#: reserves the decline for the case it was meant for. This does not reintroduce the
+#: confirm-by-construction problem the first version avoided: abstention is still
+#: *named*, still sanctioned, and still the instructed reply where the records do not
+#: support an answer, so a system that cannot answer retains a way to say so. What
+#: changed is the threshold, from "any uncertainty" to "nothing to answer from".
 #:
-#: **Two clauses exist for the measure rather than for the answer.** The prompt asks
+#: **The decline hinges on support, not on relevance, and the difference is the whole
+#: unanswerable population.** A LoCoMo category-5 or LongMemEval ``_abs`` question is
+#: unanswerable because the fact is absent from the conversation, not because the
+#: conversation never touched the subject — and retrieval, searching with the question's
+#: own text, will almost always return records *about* that subject. A threshold phrased
+#: as "nothing relevant retrieved" would therefore almost never fire on exactly the
+#: questions it exists for, instructing the model to answer where abstaining is the
+#: graded-correct behaviour. That would invert the pilot's artifact rather than remove
+#: it, so the prompt names the relevant-but-unsupporting case explicitly instead of
+#: leaving it to be inferred.
+#:
+#: **Three clauses exist for the measure rather than for the answer.** The prompt asks
 #: for :data:`ABSTENTION_PHRASE` verbatim, because ``is_abstention`` reads the answer's
-#: text and the run has no other channel. And it forbids a stated confidence, because
-#: ``is_abstention`` is anchored at the start: a hedged best effort opening "the
-#: records do not clearly say, but ..." is scored as a decline by the detector even
-#: though it answered, which would move the artifact from the prompt into the grader
-#: instead of removing it.
+#: text and the run has no other channel. And it forbids both a stated confidence and
+#: an opening caveat, because ``is_abstention`` is anchored at the start: a hedged best
+#: effort opening "the records do not clearly say, but ..." is scored as a decline by
+#: the detector even though it answered, which would move the artifact from the prompt
+#: into the grader instead of removing it. Those two clauses are an instruction and not
+#: an enforcement — the residual, and the question of whether the detector itself should
+#: read past a caveat, is #1168, deliberately not settled here because narrowing
+#: ``is_abstention`` would redefine the measure the pilot's published numbers were
+#: computed under.
 #:
 #: The literal is exported so a run's manifest can record it. A prompt is a
 #: configuration of the experiment, and a pilot whose prompt is not recoverable from
@@ -127,10 +140,13 @@ ANSWER_SYSTEM_PROMPT: Final = (
     "when it has to be inferred, pieced together from several records, or read "
     "through wording that differs from the question's, and including when you are "
     "not certain. A best effort from the records is what is wanted. "
-    "Only if the records hold nothing relevant to the question, reply exactly: "
-    f"{ABSTENTION_PHRASE}. "
-    "Otherwise answer as briefly as the question allows — a name, a date, a phrase — "
-    "with no preamble, no explanation, and no statement of how confident you are."
+    "Where the records give you nothing to answer from, reply exactly: "
+    f"{ABSTENTION_PHRASE}. That includes the case where they discuss the subject of "
+    "the question but do not contain the fact it asks for — being on the topic is not "
+    "the same as supporting an answer. "
+    "When you do answer, answer as briefly as the question allows — a name, a date, a "
+    "phrase — with no preamble, no explanation, no statement of how confident you are, "
+    "and no opening caveat about the records."
 )
 
 #: What the model is shown when retrieval returned nothing at all. Stated rather than
