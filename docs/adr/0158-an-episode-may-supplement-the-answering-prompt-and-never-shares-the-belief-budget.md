@@ -551,11 +551,24 @@ is stated separately because it is a `core/types.py` field rather than a Protoco
 parameter and a lane could update one and not the other. Its wording carries the
 same two-group description *and* a second clause the third group falsifies:
 "Empty on the first turn of a fresh conversation, and empty for whichever **half**
-degraded." There are no longer two halves, and §4 rules that a failing supplement
-empties the supplement alone while the belief group stands.
+degraded." There are no longer two halves, and a failing supplement empties the
+supplement alone while the belief group stands (§4).
+
+**But group degradation is not fully independent, and the contract must say so
+rather than promise otherwise.** §4's separator rule keys on what *precedes* the
+supplement, so an empty belief group takes the supplement with it whenever the
+tail is non-empty — and a belief read that degrades is one way the belief group
+comes back empty. So a `MemoryStore` failure on the *belief* composition can cost
+both of the last two groups, while a failure on the supplement's read costs only
+the supplement. The asymmetry is the separator's, not the failure handling's: the
+supplement is dropped there for the reason §4 gives — it would otherwise render as
+the conversation's own recent turns — and that reason does not care why the
+beliefs are absent.
 
 > **Normative.** `TurnResult.memories` carries the same three groups in the same
-> order, and a degraded read empties only its own group.
+> order. A degraded read empties its own group, and where that leaves no
+> non-`EPISODIC` record before the supplement, §4's separator rule empties the
+> supplement as well.
 
 This is the same widening ADR-0074 §5 made and the same way it made it: the
 signature is unchanged, `Planner` grows no parameter, and the change is **flagged
