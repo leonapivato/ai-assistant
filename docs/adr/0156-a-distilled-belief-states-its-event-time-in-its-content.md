@@ -490,9 +490,14 @@ cannot mistake a green suite for a discharged decision.
   own re-rank data says ranking is the small tail — 277 of LoCoMo's errors against
   652 ingestion losses, with none of the gold records ranked 1–5 — so the expected
   magnitude is small, but "expected" is the operative word.
-- **Two model-authored dates now coexist per belief in the general case** — the
-  anchor in the content, and `last_confirmed_at` in the provenance, the latter
-  computed by us. §4 keeps them apart at every surface. This is a known cost of
+- **Two dates now coexist per belief in the general case, and they have different
+  authors** — a model-authored anchor in the content, and a system-computed
+  instant in the provenance, `last_confirmed_at` being taken from the citations
+  the producer resolved and never from the model (ADR-0109 §4, §4 above). That
+  split of authorship is the decision, not an accident of it: §1 puts the
+  model's claim where nothing mechanises it, and leaves the mechanised field
+  computed as it always was. §4 keeps the two apart at every surface. This is a
+  known cost of
   not conflating currency with event time, and it is the same shape as the two
   `valid_until` notions ADR-0045 §2 chose to leave coexisting.
 - **A new failure mode is admitted deliberately: a confidently stated wrong date.**
