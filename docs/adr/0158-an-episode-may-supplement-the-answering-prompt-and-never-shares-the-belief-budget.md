@@ -41,7 +41,7 @@
   line and nothing else — which is what makes that block's step 3 round "cheap by
   construction: the flipped tree differs from the one already judged by a status
   line".
-- **Partially supersedes on ratification:**
+- **Partially supersedes:**
   [ADR-0022](0022-the-closed-learning-loop.md) §3's Retrieval row, in the scope of
   the episodic supplement's own read. That row assigns one outcome to the retrieval
   stage's failure — *"degrade to no memories, `memory_degraded=True`"* — and §4
@@ -53,15 +53,40 @@
   composition and report an unpersonalised answer that was not one. So it is a
   partial supersession, taking ADR-0070 §3's form and §4's status vocabulary.
 
-  **ADR-0022's `Status` line and dated note land in this same change, at its
-  *ratifying* commit and not before.** ADR-0070 §1's permitted edit is "recording
-  a supersession **that has landed**", and while this ADR stands `Proposed` the
-  supersession has not: a reader resolving ADR-0022 from an intermediate tree
-  would be pointed at a decision review was still entitled to change or withdraw.
-  So the two move together with the flip. Landing them in one change is what
-  answers the other half of §1 — the superseding ADR *exists*, so the `Status`
-  line never names a document that does not, and if this change does not land,
-  neither does the note.
+  **ADR-0022's `Status` line and dated note land in this same change, with the
+  `Proposed` commits and not deferred to the flip.** That is this corpus's
+  established form rather than a novelty. ADR-0074's own note for ADR-0076 states
+  the protection in terms — the superseding ADR "lands **in the same change as
+  this note**, so this Status line never names an ADR that does not exist — the
+  hazard ADR-0070 §1 guards against — and if that change does not land, neither
+  does this" — and this ADR carries that sentence into ADR-0022's note verbatim in
+  shape. ADR-0042, ADR-0045 and ADR-0073 add the sentence naming the intermediate
+  state directly: while the superseding ADR is still `Proposed`, the line names a
+  supersession that is **drafted rather than ratified**, "the form ADR-0075
+  established", which `main` has carried since ADR-0005 was marked for a
+  still-`Proposed` ADR-0075 (ADR-0076's header records that precedent). ADR-0083
+  §15 rules the objection outright: "**The existence condition is that the naming
+  ADR ships in the same change, not that it has ratified.**" So what protects the
+  reader is the atomicity of the *change*, not of the commit.
+
+  **It is staged with the `Proposed` commits because that is where it is
+  reviewable.** The dated note is not ceremony: it states which clause is replaced
+  and what survives, which is the same substantive determination §4 makes and is
+  reviewable only while the decision can still change. ADR-0070 §1 says the
+  ratifying edit "records that review's outcome, it does not replace it", and
+  `CONTRIBUTING.md` → "Finishing an ADR PR" says of the post-flip round that
+  nothing in it "triages a status line" — so a note staged at the flip would land
+  with its substance never reviewed. The opposite exposure is bounded by
+  comparison: the only tree from which a reader could resolve ADR-0022 to a
+  decision still open is this unmerged branch, and ADR-0070 §1 keeps a repair path
+  even for a supersession that never lands at all — restoring the `Status` line,
+  which changes no decision.
+
+  **The supersession takes effect on ratification, and ratification is this
+  change merging.** The two are one event because the two files are one change: the
+  `Proposed` → `Accepted` flip is the ratifying edit, made in this PR's final
+  commit, and no reader of `main` ever sees ADR-0022 pointing at an unratified
+  ADR-0158.
 
   **The scope is one row read against one read, and nothing else.** ADR-0022 §3's
   rule for the *belief* composition is untouched and still governs
@@ -108,7 +133,13 @@
   enforced at read time), §5 (size caps deferred); ADR-0015 §5 (what a substantive
   contract ADR is); ADR-0028 §7 (batch ingestion declined for want of a consumer);
   ADR-0045 §1 (as-of retrieval declined on the same ground); ADR-0070 §1 (the
-  amend-versus-supersede test); ADR-0072 §1 (one store), §2 (`band_of` is total),
+  amend-versus-supersede test; the permitted header edits, and the ratifying edit
+  recording a review's outcome rather than replacing it); ADR-0074's ADR-0076 note,
+  ADR-0042's, ADR-0045's and ADR-0073's (the in-change supersession note, and the
+  `Proposed`-state sentence ADR-0075 established); ADR-0076's header (ADR-0005
+  carrying a supersession by a still-`Proposed` ADR-0075); ADR-0083 §15 (the
+  existence condition is shipping in the same change, not ratification);
+  ADR-0072 §1 (one store), §2 (`band_of` is total),
   §3 (what a derived belief owes), §5 (search is band-neutral and
   confidence-neutral; precedence is the consumer's and is by band; the flood
   argument), §6 (confidence is presentation, not ranking), §7 (a read's signature
