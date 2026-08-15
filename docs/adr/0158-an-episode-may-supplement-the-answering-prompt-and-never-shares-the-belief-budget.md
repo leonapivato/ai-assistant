@@ -2,23 +2,25 @@
 
 - Status: Proposed
 - Date: 2026-08-15
-- **Changes no Protocol's *shape*, and widens one's documented semantics — flagged
-  under golden rule 5 rather than smuggled.** The read §1 admits is
+- **Changes no Protocol's *shape* and no `core` type's fields, and widens the
+  documented semantics of two — flagged under golden rule 5 rather than smuggled.** The read §1 admits is
   `MemoryStore.search` called with a different `kinds` argument, which
   [ADR-0072](0072-the-profile-and-the-inferred-model-are-bands-of-one-store.md) §5
   already rules is the caller's to choose; no member is added, no signature moves,
-  and no type in `src/ai_assistant/core/types.py` changes. But §4's ordering makes
-  `Planner.plan`'s `memories` carry **three** meaningful groups where it carries
-  two, and its current wording — "then the records retrieved as relevant, best
+  and no field or shape in `src/ai_assistant/core/types.py` changes. But §4's
+  ordering makes the assembled sequence carry **three** meaningful groups where it
+  carries two, and the wording both `Planner.plan`'s `memories` and
+  `TurnResult.memories` share — "then the records retrieved as relevant, best
   first *within that group*" — does not describe a post-tail region holding beliefs
-  ahead of episodes. That is a change to a Protocol's documented meaning, so
+  ahead of episodes. That is a change to a Protocol's and a `core` type's
+  documented meaning, so
   [ADR-0015](0015-simplify-the-agent-workflow.md) §5 governs and this ADR is what
   satisfies it: **its own docs-only PR, reviewed while `Proposed` so a finding can
   still change the decision, merged and flipped to `Accepted` before anything
-  implements against it.** §5 below states the widened contract and §7 puts the
-  docstring in the implementing lane's hands, which is exactly the form
+  implements against it.** §5 below states both widened contracts and §7 puts the
+  two docstrings in the implementing lane's hands, which is exactly the form
   [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md) §5
-  took for the first widening of this same parameter.
+  took for the first widening of this same sequence.
 
   **No triad is owed.** `CONTRIBUTING.md` → "Adding a Protocol" binds a *new*
   Protocol; `Planner` is not new, and its conformance suite and canonical fake
@@ -80,8 +82,9 @@
   (`Provenance`, and `evidence` as episode references); ADR-0022 §3 (failure
   behaviour stage by stage — the Retrieval row this ADR partially supersedes, and
   the framing sentence and `memory_degraded` rationale it does not); ADR-0084 §2
-  (`TurnResult` is `core` contract surface, which is why §4 declines to widen a
-  field of it); #1175 (the `Planner.plan` wording this ADR widens is separately
+  (`TurnResult` is `core` contract surface — why §4 declines to widen
+  `memory_degraded`'s meaning, and why §5 ratifies `memories`' rather than leaving
+  it to a lane); #1175 (the `Planner.plan` wording this ADR widens is separately
   stale against ADR-0113's band composition — filed, not fixed here); ADR-0007 §2
   (retention
   enforced at read time), §5 (size caps deferred); ADR-0015 §5 (what a substantive
@@ -514,11 +517,11 @@ absent is a *reported* signal on `TurnResult`, and whether a supplement's
 degradation deserves one is a `core/types.py` question deferred with its consumer
 (§8).
 
-### 5. The contract surface: one widened docstring, no member, no setting
+### 5. The contract surface: two widened docstrings, no member, no setting
 
 > **Normative.** This decision adds no member to any Protocol in
 > `src/ai_assistant/core/protocols.py`, changes no signature there, and changes no
-> type in `src/ai_assistant/core/types.py`.
+> field, type or shape in `src/ai_assistant/core/types.py`.
 
 `MemoryStore.search` already takes `kinds` and `bands`; ADR-0072 §5 and ADR-0113
 already make the kind selection the caller's argument; `MemoryKind.EPISODIC`
@@ -542,6 +545,17 @@ decision.
 > supplement. Each grouping is meaningful and the sequence is not globally ranked.
 > A `Planner` implementation may rely on the grouping and may not rely on a global
 > relevance order.
+
+**`TurnResult.memories` is the same sequence and takes the same widening**, which
+is stated separately because it is a `core/types.py` field rather than a Protocol
+parameter and a lane could update one and not the other. Its wording carries the
+same two-group description *and* a second clause the third group falsifies:
+"Empty on the first turn of a fresh conversation, and empty for whichever **half**
+degraded." There are no longer two halves, and §4 rules that a failing supplement
+empties the supplement alone while the belief group stands.
+
+> **Normative.** `TurnResult.memories` carries the same three groups in the same
+> order, and a degraded read empties only its own group.
 
 This is the same widening ADR-0074 §5 made and the same way it made it: the
 signature is unchanged, `Planner` grows no parameter, and the change is **flagged
@@ -679,10 +693,11 @@ non-zero initial value a commitment rather than a ratchet.
 
 ### 7. What the implementing lane owes, and what it may not touch
 
-> **Normative.** The implementing lane's only edit under `src/ai_assistant/core/`
-> is `Planner.plan`'s `memories` documentation in `protocols.py`, carrying §5's
-> three-group wording. It adds no member, changes no signature, and touches
-> `types.py`, `config.py` and `errors.py` not at all.
+> **Normative.** The implementing lane's only edits under
+> `src/ai_assistant/core/` are two documentation updates carrying §5's three-group
+> wording — `Planner.plan`'s `memories` in `protocols.py`, and
+> `TurnResult.memories` in `types.py`. It adds no member, changes no signature,
+> changes no field, and touches `config.py` and `errors.py` not at all.
 
 The lane pins each of the following as a test, and each is separately owed.
 
