@@ -109,6 +109,11 @@ _DEFAULT_RETRIEVAL_LIMIT = 15
 #: episode is a verbatim turn against a belief's distilled sentence, so the count
 #: guard is a weaker guard on *bytes* than it looks. ADR-0158 §6's ablation arm
 #: owns the value, in both directions.
+#:
+#: It is a *default*, not a floor: a construction tuning the belief budget below it
+#: and stating nothing episodic gets this figure capped at that budget, which is
+#: §3's ceiling holding rather than yielding. ``LearningLoop.__init__`` is where
+#: that resolution happens, because the cap needs both numbers.
 _DEFAULT_EPISODIC_LIMIT = 5
 
 #: The kinds the episodic supplement's read selects (ADR-0158 §3) — ``EPISODIC``
@@ -185,7 +190,9 @@ def _uuid() -> str:
     return str(uuid.uuid4())
 
 
-def _check_tuning(*, retrieval_limit: int, resolution_limit: int, episodic_limit: int) -> None:
+def _check_tuning(
+    *, retrieval_limit: int, resolution_limit: int, episodic_limit: int | None
+) -> None:
     """Reject tuning that would disable a read while looking healthy.
 
     A *silent* misconfiguration, which is why it is refused at construction
@@ -207,6 +214,14 @@ def _check_tuning(*, retrieval_limit: int, resolution_limit: int, episodic_limit
     explicitly may set it. What is refused is a negative or non-integral one, which
     is a mistake rather than a decision.
 
+    **``None`` is "I did not tune this", and it is checked against nothing.** §3's
+    clause binds the *configured* bound, and a caller who omitted the argument
+    configured none: :class:`LearningLoop` resolves it against the belief budget it
+    was given, which cannot breach the ceiling. Refusing that case instead would
+    make a caller who lowered ``retrieval_limit`` alone — the pre-ADR-0158 shape of
+    every direct construction — fail on an argument they never passed, which is a
+    regression dressed as a guard rather than the clause being enforced.
+
     ``resolution_limit`` is checked for the sharper version of the same reason
     (ADR-0122 §3). A non-positive one makes ``search`` match nothing, so **every**
     unpinned correction would resolve by §5's fallback and land as ``SEMANTIC`` —
@@ -220,27 +235,28 @@ def _check_tuning(*, retrieval_limit: int, resolution_limit: int, episodic_limit
     retired.
 
     Raises:
-        TypeError: If any limit is not an integer.
+        TypeError: If any stated limit is not an integer.
         ValueError: If ``retrieval_limit`` or ``resolution_limit`` is not
-            positive, if ``episodic_limit`` is negative, or if ``episodic_limit``
-            exceeds ``retrieval_limit`` (ADR-0158 §3).
+            positive, if a stated ``episodic_limit`` is negative, or if a stated
+            ``episodic_limit`` exceeds ``retrieval_limit`` (ADR-0158 §3).
     """
     # `isinstance` rather than a bare `< 1`, which `1.5` and `inf` both survive
     # — and a non-integral limit reaches `MemoryStore.search`, where a store
     # slicing by it raises `TypeError` far from the mistake. `bool` is excluded
     # because it is an `int` subclass and a flag is not a count.
-    for name, value, floor in (
+    stated: tuple[tuple[str, object, int], ...] = (
         ("retrieval_limit", retrieval_limit, 1),
         ("resolution_limit", resolution_limit, 1),
-        ("episodic_limit", episodic_limit, 0),
-    ):
+        *((("episodic_limit", episodic_limit, 0),) if episodic_limit is not None else ()),
+    )
+    for name, value, floor in stated:
         if isinstance(value, bool) or not isinstance(value, int):
             msg = f"{name} must be an integer, got {value!r}"
             raise TypeError(msg)
         if value < floor:
             msg = f"{name} must be at least {floor}, got {value}"
             raise ValueError(msg)
-    if episodic_limit > retrieval_limit:
+    if episodic_limit is not None and episodic_limit > retrieval_limit:
         msg = (
             f"episodic_limit must not exceed retrieval_limit (ADR-0158 §3): "
             f"{episodic_limit} > {retrieval_limit}"
@@ -267,7 +283,7 @@ class LearningLoop:
         feedback: FeedbackProcessor,
         retrieval_limit: int = _DEFAULT_RETRIEVAL_LIMIT,
         resolution_limit: int = _DEFAULT_RESOLUTION_LIMIT,
-        episodic_limit: int = _DEFAULT_EPISODIC_LIMIT,
+        episodic_limit: int | None = None,
         now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
     ) -> None:
@@ -309,7 +325,13 @@ class LearningLoop:
                 §3). ``0`` disables the supplement, which is a supported
                 configuration rather than a misconfiguration — §6's retraction
                 clause is stated in exactly those terms — and is why this one
-                alone admits zero.
+                alone admits zero. **``None`` means untuned**, and resolves to
+                :data:`_DEFAULT_EPISODIC_LIMIT` capped at ``retrieval_limit``:
+                §3's ceiling binds what is *configured*, so a caller who tuned
+                only the belief budget gets a supplement that fits inside it
+                rather than a refusal about an argument they never passed. A
+                *stated* bound above ``retrieval_limit`` is still refused, which
+                is where the ceiling has to be un-clampable.
             resolution_limit: How wide the single ranked read is that resolves an
                 unpinned correction's drawer (ADR-0122 §3). Deliberately its own
                 knob rather than a reuse of ``retrieval_limit``: the two answer
@@ -328,9 +350,9 @@ class LearningLoop:
         Raises:
             TypeError: If any of ``retrieval_limit``, ``resolution_limit`` or
                 ``episodic_limit`` is not an integer (see :func:`_check_tuning`).
-            ValueError: If either of the first two is below 1, if
-                ``episodic_limit`` is negative, or if ``episodic_limit`` exceeds
-                ``retrieval_limit`` (see :func:`_check_tuning`).
+            ValueError: If either of the first two is below 1, if a stated
+                ``episodic_limit`` is negative, or if a stated ``episodic_limit``
+                exceeds ``retrieval_limit`` (see :func:`_check_tuning`).
         """
         _check_tuning(
             retrieval_limit=retrieval_limit,
@@ -344,7 +366,14 @@ class LearningLoop:
         self._feedback = feedback
         self._retrieval_limit = retrieval_limit
         self._resolution_limit = resolution_limit
-        self._episodic_limit = episodic_limit
+        # Resolved after the check, and against the *validated* belief budget, so
+        # the untuned bound can never be the thing that breaches ADR-0158 §3's
+        # ceiling and can never be computed from a limit that was itself refused.
+        self._episodic_limit = (
+            min(_DEFAULT_EPISODIC_LIMIT, retrieval_limit)
+            if episodic_limit is None
+            else episodic_limit
+        )
         self._clock = checked_clock(now, owner="LearningLoop")
         self._id_factory = id_factory
 

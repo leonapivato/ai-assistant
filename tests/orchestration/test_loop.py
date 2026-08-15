@@ -374,12 +374,6 @@ async def test_a_derived_flood_cannot_displace_an_assertion_from_the_prompt() ->
 
 
 async def test_respond_retrieves_at_most_the_configured_limit() -> None:
-    """The belief budget cuts, and the episodic bound is stated so it cannot.
-
-    ``episodic_limit=0`` is not decoration here: ADR-0158 §3's ceiling refuses a
-    supplement wider than the belief budget, so a loop tuned to 2 beliefs may not
-    keep the default bound of 5 — and this case is about the *belief* cut alone.
-    """
     memory = FakeMemoryStore(now=_clock)
     for index in range(4):
         await memory.add(
@@ -399,7 +393,6 @@ async def test_respond_retrieves_at_most_the_configured_limit() -> None:
         planner=FakePlanner(now=_clock),
         feedback=FakeFeedbackProcessor(),
         retrieval_limit=2,
-        episodic_limit=0,
         now=_clock,
     )
 
@@ -1624,6 +1617,33 @@ async def test_tuning_accepts_an_episodic_bound_equal_to_the_belief_budget() -> 
     assert result.goal.statement == "hello"
 
 
+@pytest.mark.parametrize("retrieval_limit", [1, 2, 4])
+async def test_a_belief_budget_below_the_default_bound_is_tuning_and_not_an_error(
+    retrieval_limit: int,
+) -> None:
+    """Tuning only the belief budget must not fail on an argument nobody passed.
+
+    ADR-0158 §3's ceiling binds the *configured* bound, and a caller who omitted it
+    configured none — so the default resolves against the budget it was given
+    instead of being refused by it. The ceiling still holds, which is the half that
+    matters: the supplement never asks for more than the beliefs do.
+    """
+    loop = _loop_with(retrieval_limit=retrieval_limit)
+
+    result = await loop.respond("hello")
+
+    assert result.goal.statement == "hello"
+    assert loop._episodic_limit == min(_DEFAULT_EPISODIC_LIMIT, retrieval_limit)
+    assert loop._episodic_limit <= retrieval_limit
+
+
+async def test_an_untuned_bound_above_the_belief_budget_is_the_default_itself() -> None:
+    """Capping is for the small-budget case only; the ordinary one is untouched."""
+    loop = _loop_with(retrieval_limit=_DEFAULT_RETRIEVAL_LIMIT)
+
+    assert loop._episodic_limit == _DEFAULT_EPISODIC_LIMIT
+
+
 @pytest.mark.parametrize("episodic_limit", [-1, -5])
 def test_tuning_refuses_a_negative_episodic_bound(episodic_limit: int) -> None:
     """Zero is a decision (§6 may set it); a negative one is a mistake."""
@@ -1642,13 +1662,13 @@ def _loop_with(
     *,
     retrieval_limit: int = 5,
     resolution_limit: int = _DEFAULT_RESOLUTION_LIMIT,
-    episodic_limit: int = 0,
+    episodic_limit: int | None = None,
 ) -> LearningLoop:
     """Build a loop with the given tuning and canonical everything else.
 
-    ``episodic_limit`` defaults to 0 rather than to the loop's own default, so a
-    case tuning ``retrieval_limit`` below 5 is not refused by ADR-0158 §3's ceiling
-    for a reason it is not about.
+    ``episodic_limit`` is passed through **as given**, ``None`` included, so a case
+    tuning only ``retrieval_limit`` exercises the untuned resolution rather than a
+    figure this helper chose on its behalf.
     """
     memory = FakeMemoryStore(now=_clock)
     return LearningLoop(
