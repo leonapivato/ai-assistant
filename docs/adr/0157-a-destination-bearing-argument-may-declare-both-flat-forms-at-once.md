@@ -162,10 +162,11 @@ the clause is here because the third form puts an applicator on a subschema that
 carries the keywords for the first time, and a rule that is enforced but unstated
 is the kind a later lane relaxes by accident.
 
-> **Normative.** A constraint the argument's array form carries is carried on the
-> array **branch**, and is not dropped in the restructuring. `send_email`'s `to`
-> carries `minItems: 1`; under the third form that keyword belongs on the array
-> branch, where it constrains what it constrained before.
+> **Normative.** A constraint the argument's array form carries is **not dropped**
+> in the restructuring. `send_email`'s `to` carries `minItems: 1`; under the third
+> form it is carried on the array **branch**, where it constrains what it
+> constrained before. Placement binds the author who restructures a declaration;
+> it is not a condition of flatness, and the next clause states what follows.
 
 `minItems: 1` is load-bearing rather than decorative, and the restructuring is
 where it would be lost. Without it `{"to": []}` satisfies the schema and
@@ -177,6 +178,37 @@ of the family §4 says stays reachable, and `minItems` is what keeps it out of
 `send_email`. The string branch needs no counterpart: `{"to": ""}` reaches the
 canonicaliser, which produces no canonical form for it, and ADR-0152 §6's
 uncompletable-call refusal fires.
+
+> **Normative.** Apart from `"type"`, which the second clause refuses, a keyword
+> sitting beside `anyOf` on the argument's own subschema **does not bear on
+> whether that subschema is a flat declaration**. The seam neither reads such a
+> keyword nor refuses a declaration for carrying one, and a declaration is not
+> refused for carrying an array constraint beside `anyOf` rather than on the array
+> branch. The two existing forms already work this way and always have, so the
+> third form inherits the tolerance rather than being granted a new one.
+
+**That clause states what the corpus already does, and the alternative would cost
+the property the third form was chosen for.** `send_email`'s `to` carries
+`minItems: 1` beside `"type": "array"` today and is a flat declaration under
+ADR-0152 §4; the seam's check reads `type`, `items` and `$ref` and is blind to
+every other sibling. To refuse `minItems` beside `anyOf` while admitting it beside
+`"type": "array"`, the seam would have to know that `minItems` is a constraint on
+arrays — a fact about the dialect's applicator vocabulary, which is exactly the
+model `tools/egress_declaration.py` deliberately does not have, and which the
+first clause's own reasoning for preferring `anyOf` over a union of types turns
+on. A rule cannot be justified by that blindness in one clause and require its
+opposite in another.
+
+**And nothing is lost by admitting it, which is why the placement rule above binds
+the author rather than the seam.** Under draft 2020-12 `minItems` applies to an
+instance only when the instance is an array, so on the argument's own subschema it
+constrains the array branch's instances and is vacuously satisfied by the string
+branch's: `{"to": []}` is refused either way, for the same reason. The two
+placements admit the same values, and the array branch is still where the keyword
+belongs — a reader checking the array form's constraints should find them on the
+array form — which makes it an authoring rule that §7 briefs and a reviewer of the
+implementing lane enforces, not a refusal the binder grows a dialect model to
+reach.
 
 ### 2. Nothing structural widens, and ADR-0152 §4's widening clause is untouched
 
@@ -533,7 +565,11 @@ The five edits, inventoried so the lane is briefable from this text:
 > are where the enumeration is stated today, and they are the cases that move.
 
 > **Normative.** The lane ships, at minimum: a declaration test per admitted form
-> and per refused spelling named in §1's second clause; a call-level test that a
+> and per refused spelling named in §1's second clause; a declaration test that the
+> third form is **admitted** while carrying an array constraint beside `anyOf` on
+> the argument's own subschema, which is §1's fifth clause and the one case where
+> two conforming implementations could otherwise diverge on whether a tool loads;
+> a call-level test that a
 > string-valued and an array-valued destination argument each bind, with the
 > locators §3 states; a test that `{"to": []}` is still refused; and a transport
 > test that a string-valued recipient argument transmits to exactly that one
