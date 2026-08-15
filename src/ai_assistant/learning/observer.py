@@ -117,12 +117,23 @@ _EVIDENCE_FLOOR: Final[dict[MemorySource, int]] = {
 _PROPOSABLE_KINDS: Final = frozenset({"semantic", "preference", "procedural"})
 
 #: How an episode's ``occurred_at`` is written into the prompt once localised: the
-#: weekday, the calendar date and the wall clock. The weekday is there for the
-#: resolution ADR-0156 §3 asks for — *"last Friday"* cannot be worked out against a
-#: date whose day of week the reader has to derive — and the date is ISO-ordered so
-#: it cannot be read the American way round. What the *model* writes is prose and is
-#: its own (ADR-0156 §8's last-but-two clause); this is only what it is shown.
-_INSTANT_FORMAT: Final = "%a %Y-%m-%d %H:%M"
+#: weekday, the calendar date, the wall clock and the numeric UTC offset. The
+#: weekday is there for the resolution ADR-0156 §3 asks for — *"last Friday"* cannot
+#: be worked out against a date whose day of week the reader has to derive — and the
+#: date is ISO-ordered so it cannot be read the American way round.
+#:
+#: **The offset is what makes a wall clock in the fold unambiguous.** At a DST
+#: fall-back the same local reading names two instants an hour apart — in
+#: ``America/New_York``, ``2023-11-05T05:30Z`` and ``2023-11-05T06:30Z`` are both
+#: *"Sun 2023-11-05 01:30"* — so a sub-day expression resolved against the bare
+#: reading can land on either side of local midnight. The offset separates them and
+#: costs six characters. What the *model* writes is prose and is its own (ADR-0156
+#: §8's format clause); this is only what it is shown.
+_INSTANT_FORMAT: Final = "%a %Y-%m-%d %H:%M %z"
+
+#: What a line carries where the instant has no representation in the configured
+#: calendar at all — see :func:`_localised`.
+_INSTANT_UNAVAILABLE: Final = "(recorded time unavailable)"
 
 #: The prompt's opening, which says nothing about time and is shared by both
 #: variants below.
@@ -557,6 +568,33 @@ def _system_prompt(zone: ZoneInfo | None) -> str:
     return "\n\n".join((_PROMPT_HEAD, time_section, _PROMPT_ENVELOPE))
 
 
+def _localised(instant: datetime, zone: ZoneInfo) -> str:
+    """``instant`` in ``zone``, or :data:`_INSTANT_UNAVAILABLE` where it has none.
+
+    ``EpisodicMemory.occurred_at`` is bounded only by ``datetime``'s own range and
+    ADR-0092 §3 forbids refusing or rewriting a source instant, so an episode within
+    one UTC offset of ``datetime.max`` or ``datetime.min`` is well-formed and
+    storable while having **no** representation in a zone that shifts it past the
+    boundary: ``9999-12-31T23:59Z`` raises ``OverflowError`` on conversion to
+    ``Pacific/Kiritimati``. Reachable only from a clock reading at the end of the
+    representable calendar, but the alternatives to handling it are an unrelated
+    exception escaping ``observe`` and a batch of otherwise good episodes failing
+    with it.
+
+    **Withheld for that episode, never refused for the batch and never rewritten.**
+    Refusing would let one unrepresentable instant disable observation of the
+    nineteen episodes beside it, and clamping would state a calendar date the
+    evidence does not support — the invention ADR-0156 §3 refuses over an unknown
+    calendar, arriving by a different route. An episode shown no time is one
+    ADR-0156 §2's third clause already governs: the evidence establishes none, so
+    the belief states none.
+    """
+    try:
+        return instant.astimezone(zone).strftime(_INSTANT_FORMAT)
+    except OverflowError:
+        return _INSTANT_UNAVAILABLE
+
+
 def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str:
     """Render the batch as the labelled user turn.
 
@@ -588,8 +626,7 @@ def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str
         return "\n".join(lines)
     lines = [f"Episodes (each carries the local time it was recorded, in {zone.key}):"]
     lines += [
-        f"  [E{index + 1}] {record.occurred_at.astimezone(zone).strftime(_INSTANT_FORMAT)}"
-        f" — {record.content}"
+        f"  [E{index + 1}] {_localised(record.occurred_at, zone)} — {record.content}"
         for index, record in enumerate(batch)
     ]
     return "\n".join(lines)

@@ -664,13 +664,18 @@ _ZONE: Final = "America/New_York"
 #: that separates a producer localising the calendar from one rendering the stored
 #: ``UtcInstant``, which is why the two dates below are asserted as a pair.
 _EVENING: Final = datetime(2023, 5, 8, 1, 30, tzinfo=UTC)
-_EVENING_LOCAL: Final = "Sun 2023-05-07 21:30"
+_EVENING_LOCAL: Final = "Sun 2023-05-07 21:30 -0400"
 _EVENING_UTC_DATE: Final = "2023-05-08"
 
 #: A second instant on a different day of the week, so "every episode's" means
 #: more than "the first one's" (§7's first test clause).
 _MORNING: Final = datetime(2023, 6, 9, 14, 5, tzinfo=UTC)
-_MORNING_LOCAL: Final = "Fri 2023-06-09 10:05"
+_MORNING_LOCAL: Final = "Fri 2023-06-09 10:05 -0400"
+
+#: The two instants either side of :data:`_ZONE`'s 2023 fall-back, an hour apart and
+#: sharing a wall-clock reading of 01:30.
+_BEFORE_FALL_BACK: Final = datetime(2023, 11, 5, 5, 30, tzinfo=UTC)
+_AFTER_FALL_BACK: Final = datetime(2023, 11, 5, 6, 30, tzinfo=UTC)
 
 
 def _prompt_of(provider: FakeModelProvider) -> tuple[str, str]:
@@ -721,6 +726,64 @@ async def test_an_episode_whose_utc_and_local_dates_differ_carries_the_local_one
     _, batch = _prompt_of(provider)
     assert _EVENING_LOCAL in batch
     assert _EVENING_UTC_DATE not in batch
+
+
+async def test_two_instants_sharing_a_wall_clock_across_the_dst_fold_render_apart() -> None:
+    """A repeated local hour is two instants, and the prompt must not merge them.
+
+    At ``America/New_York``'s 2023 fall-back both of these read *"Sun 2023-11-05
+    01:30"*, so a sub-day expression — "two hours ago" — resolves to 4 November from
+    one and 5 November from the other while the model sees identical input. The
+    numeric offset is what separates them, and it is why :data:`_INSTANT_FORMAT`
+    carries one.
+    """
+    observer, provider = _observer(_envelope(), timezone=_ZONE)
+    episodes = [
+        episode("e-edt", occurred_at=_BEFORE_FALL_BACK, content="the earlier one"),
+        episode("e-est", occurred_at=_AFTER_FALL_BACK, content="the later one"),
+    ]
+
+    await observer.observe(episodes)
+
+    _, batch = _prompt_of(provider)
+    assert "[E1] Sun 2023-11-05 01:30 -0400" in batch
+    assert "[E2] Sun 2023-11-05 01:30 -0500" in batch
+
+
+@pytest.mark.parametrize(
+    ("boundary", "zone"),
+    [
+        (datetime(9999, 12, 31, 23, 59, tzinfo=UTC), "Pacific/Kiritimati"),
+        (datetime(1, 1, 1, 0, 1, tzinfo=UTC), "America/New_York"),
+    ],
+    ids=["max-shifted-forward", "min-shifted-back"],
+)
+async def test_an_instant_with_no_local_representation_is_withheld_not_raised(
+    boundary: datetime, zone: str
+) -> None:
+    """Both ends of the representable calendar, from the side that shifts off it.
+
+    ``EpisodicMemory`` accepts either instant and ADR-0092 §3 forbids refusing or
+    rewriting a source instant, but ``astimezone`` cannot express one within an
+    offset of the boundary: an unhandled ``OverflowError`` would escape ``observe``
+    and take the whole batch with it. The good episode beside it is what makes the
+    withholding observable as a *per-episode* answer rather than a refusal, and the
+    model is still called.
+    """
+    observer, provider = _observer(_envelope(), timezone=zone)
+    episodes = [
+        episode("e-boundary", occurred_at=boundary, content="at the edge of the calendar"),
+        episode("e-ordinary", occurred_at=_EVENING, content="an ordinary evening"),
+    ]
+
+    outcome = await observer.observe(episodes)
+
+    assert outcome.discarded_unusable == 0
+    assert provider.call_count == 1, "the batch was observed, not refused"
+    _, batch = _prompt_of(provider)
+    assert "[E1] (recorded time unavailable) — at the edge of the calendar" in batch
+    assert "[E2] " in batch
+    assert "an ordinary evening" in batch
 
 
 async def test_the_prompt_names_the_zone_it_rendered_the_instants_in() -> None:
