@@ -74,7 +74,22 @@ _log = structlog.get_logger(__name__)
 #: carries full confidence (``Provenance`` requires 1.0 for ``USER_ASSERTED``).
 _FULL_CONFIDENCE = 1.0
 
-_DEFAULT_RETRIEVAL_LIMIT = 5
+#: How wide a turn's retrieval reads when no composer tunes it (#1163).
+#:
+#: Held equal to ``app/composition.py``'s ``RETRIEVAL_LIMIT``, which is what every
+#: real deployment is built with — that module passes its own figure explicitly
+#: (ADR-0119 §9) rather than relying on this one, so the two are kept in step for
+#: the reader's sake and neither depends on the other. This default governs a
+#: direct construction: a test, or a composer that has not decided.
+#:
+#: 15 rather than 5 on #1029's scored-pilot re-rank analysis: among retrieval
+#: misses whose gold record was already in the store, the gold-citing record's
+#: median cosine rank was 12 and 114 of 277 fell at ranks 6 to 10, so a budget of 5
+#: discarded records the ranking had already found. Nothing here is validated
+#: from above (``_check_tuning`` imposes no ceiling), so the number is a tuning
+#: judgement and not a bound — it is deliberately far under ADR-0119 §3's
+#: 256-id trace cap.
+_DEFAULT_RETRIEVAL_LIMIT = 15
 
 #: The kinds a correction's drawer is resolved into (ADR-0122 §3), **fixed by that
 #: clause** and not asked of the processor.

@@ -44,6 +44,7 @@ from ai_assistant.orchestration import (
 )
 from ai_assistant.orchestration.loop import (
     _DEFAULT_RESOLUTION_LIMIT,
+    _DEFAULT_RETRIEVAL_LIMIT,
     RESOLUTION_KINDS,
 )
 from ai_assistant.testing import (
@@ -394,6 +395,47 @@ async def test_respond_retrieves_at_most_the_configured_limit() -> None:
     result = await loop.respond("dana")
 
     assert len(result.memories) == 2
+
+
+async def test_an_untuned_loop_reads_the_default_page_and_that_page_is_fifteen() -> None:
+    """The default is a number a turn actually gets, and #1163 moved it to 15.
+
+    Every other retrieval test here passes ``retrieval_limit`` explicitly, so none
+    of them can tell 15 from 5 — and the deployment figure lives in
+    ``app/composition.py``, which this subsystem may not import. What is checkable
+    from here is the pair the constant claims: that an untuned loop fills a budget
+    of ``_DEFAULT_RETRIEVAL_LIMIT`` (so the default is wired, not decorative), and
+    that the budget is the depth #1029's re-rank analysis bought — median gold
+    cosine rank 12, 114 of 277 misses at ranks 6 to 10.
+
+    The store holds more than the budget on purpose. A page equal to the corpus
+    would pass on any limit at or above 20 and prove only that nothing truncates.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    for index in range(20):
+        await memory.add(
+            SemanticMemory(
+                id=f"fact-{index}",
+                content="dana works on billing",
+                fact="dana works on billing",
+                provenance=Provenance(
+                    source=MemorySource.OBSERVED, confidence=0.6, last_updated=_NOW
+                ),
+            )
+        )
+    loop = LearningLoop(
+        context=FakeContextProvider(),
+        memory=memory,
+        writes=_writes(FakeMemoryWriter(store=memory, policy=FakeMemoryPolicy(), now=_clock)),
+        planner=FakePlanner(now=_clock),
+        feedback=FakeFeedbackProcessor(),
+        now=_clock,
+    )
+
+    result = await loop.respond("dana")
+
+    assert _DEFAULT_RETRIEVAL_LIMIT == 15
+    assert len(result.memories) == _DEFAULT_RETRIEVAL_LIMIT
 
 
 async def test_respond_survives_a_retrieval_failure_and_says_so() -> None:
