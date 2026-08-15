@@ -271,9 +271,17 @@ def build_harness(
         observation=ObservationStage(
             observer=observer
             if observer is not None
+            # `timezone` is passed for the same reason the bounds beside it are, and
+            # it is the one argument here whose omission would be silent: ADR-0156 §3's
+            # second clause has a producer handed no calendar render no instants and
+            # resolve no relative expression — correct, deliberate behaviour, and not
+            # the product's. A harness that took the `None` default would ingest with
+            # no event times in the observation prompt while reporting a healthy run,
+            # so the measurement of ADR-0156 would be void rather than negative (#1171).
             else ModelBackedObserver(
                 build_model_provider(settings, observer_route),
                 now=clock,
+                timezone=settings.timezone,
                 max_batch_size=settings.observation_batch_size,
                 max_proposals=settings.observation_max_proposals,
             ),

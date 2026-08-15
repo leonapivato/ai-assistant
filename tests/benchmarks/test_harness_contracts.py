@@ -11,6 +11,7 @@ import hashlib
 import urllib.request
 from typing import TYPE_CHECKING
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 import pytest
 from benchmarks.memory import records
@@ -36,6 +37,7 @@ if TYPE_CHECKING:
 from ai_assistant.app import composition
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
+from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import traces as memory_traces
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
@@ -105,6 +107,37 @@ def test_the_observer_route_falls_back_to_the_default_model(tmp_path: Path) -> N
     )
     try:
         assert harness.observer_route == "anthropic:claude-x"
+    finally:
+        harness.close()
+
+
+def test_the_harness_gives_the_observer_the_configured_timezone(tmp_path: Path) -> None:
+    """The harness builds its own producer, so ADR-0156 §7's wiring line has to be
+    made here too — and its omission is silent (#1171).
+
+    ADR-0156 §3's second clause has a producer handed no calendar render no instants
+    and resolve no relative expression at all. That is deliberate behaviour, not a
+    fault, so nothing raises and nothing degrades: a harness taking the ``None``
+    default would ingest a whole corpus with no event times in the observation prompt
+    and report a healthy run, and a pilot's temporal categories would come back flat
+    for a wiring reason rather than a measured one. This is the one argument in that
+    constructor whose absence no other test could notice.
+
+    The zone is read off the built producer because nothing exposes it — an
+    ``Observer`` holds its calendar and shows nobody, exactly as it holds its
+    provider — which is the same reading ``tests/app/test_composition.py`` takes of
+    the composition root. A zone far from UTC is chosen so the default could not
+    pass. The observer is deliberately **not** injected here: the injected seam is the
+    one this test must not measure.
+    """
+    settings = Settings(
+        data_dir=tmp_path, embedder=EmbedderKind.HASHING, timezone="Pacific/Kiritimati"
+    )
+    harness = build_harness(settings, data_dir=tmp_path / "case", model=FakeModelProvider())
+    try:
+        observer = harness.observation._observer
+        assert isinstance(observer, ModelBackedObserver)
+        assert observer._zone == ZoneInfo("Pacific/Kiritimati")
     finally:
         harness.close()
 
