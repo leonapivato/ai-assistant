@@ -29,20 +29,24 @@
   that shape". There is no structure here and no supplied form is located inside
   anything, so §2 below re-states the structural bar rather than spending it, and
   it stays live and unspent for the shape it was written against.
-- **No implementation lands with it**, by an operating choice this ADR is careful
-  not to dress up as a rule. No `src/`, no `tests/`, no `pyproject.toml`. This
-  decision adds no Protocol and no `core` type, so neither ADR-0015 §5 nor golden
-  rule 5 obliges the separate PR and §7 declines to invent an obligation in their
-  place; what it does instead is inventory the three edits and the tests, so the
-  implementing lane is briefable from this text alone.
+- **No implementation lands with it, and here that is obligatory rather than an
+  operating preference.** This change touches no `src/`, no `tests/` and no
+  `pyproject.toml`. What it does touch is the rule the `EgressBinder` Protocol
+  states as its own contract, so a conforming implementation must move — both of
+  them, the seam and the canonical fake. That is ADR-0015 §5's and golden rule
+  5's condition met, and they require this ADR ratified and merged before the
+  implementation PR. §7 points at those two rules rather than asserting a
+  delivery clause of its own, and inventories the five edits and the tests, so
+  the implementing lane is briefable from this text alone.
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-15**,
   the durability form ADR-0100 established and ADR-0149, ADR-0150, ADR-0151,
   ADR-0152 and ADR-0153 each applied. This decision rests most heavily on
   ADR-0152 §4 and §6 and on ADR-0150 §4, and ADR-0152 **is edited by this change**,
   in the same commit that proposes it (§6).
 - **Records owed on other ADRs: one, against ADR-0152, and §6 shows the working**
-  ADR by ADR — including the two near misses, ADR-0150 §11's routed question and
-  ADR-0145 §5's one-dialect rule, each of which a reviewer is entitled to contest
+  ADR by ADR — including the near misses: ADR-0152's own §1, §2 and §13, which
+  §7's `core/protocols.py` edit puts in a reader's way; ADR-0150 §11's routed
+  question; and ADR-0145 §5's one-dialect rule. Each is a reviewer's to contest
   by naming the sentence that becomes false. No other `Status` line moves.
 
 ## Context
@@ -375,6 +379,17 @@ Not one word of ADR-0152's Context, Decision or Consequences is touched, so §4 
 §6 stay legible as ratified beside the pointer to this ADR — which is what
 ADR-0070 §2 did to ADR-0001 and ADR-0153 §10 did to ADR-0126.
 
+**ADR-0152 §1, §2 and §13 — no record owed, and §7's `core/protocols.py` edit is
+why a reader might expect one.** §1 fixes `EgressBinder`'s two members and §2 the
+six `core` names, and neither moves: §7 authorises the docstring's statement of
+§4's rule and nothing else in the file. The docstring is a **transcription** of
+ADR-0152 §4, not an independent decision, so correcting it records what the record
+against §4 already records rather than a second thing. §13's obligations on the
+implementing lane were discharged and stay discharged — the triad still exists and
+still has all three parts; what §7 asks of the fake and the shared suite is those
+parts tracking a rule that moved, which is ADR-0137 §3 working rather than
+ADR-0152 §13 reopening.
+
 **ADR-0150 §4 and §11 — no record owed, and this is the nearest miss, so the
 working is explicit.** §11 routed the structural question to ADR-0152 and neither
 required nor forbade the answer; §4 states the decomposition and the supplied-form
@@ -411,26 +426,86 @@ untouched; this ADR authorises no byte and §4 says so normatively.
 
 ### 7. What the implementing lane owes
 
-> **Normative.** No `core/` change is required or authorised by this ADR: no
-> Protocol, no `core` type, no validator and no `core` invariant moves, because
-> the value set is unchanged (§3). The whole of the implementation lies in
-> `src/ai_assistant/tools/**` and `tests/tools/**`.
+> **Normative.** The implementation's **production** surface is authorised in
+> exactly three locations and no others: `core/protocols.py`,
+> `src/ai_assistant/testing/egress.py`, and `src/ai_assistant/tools/**`. Inside
+> `core/protocols.py` the authorisation is narrow and exhaustive: the
+> `EgressBinder` docstring's statement of the flat-declaration rule — the
+> class-level sentence enumerating the flat forms, and the `bind` `Raises`
+> entry's declaration limb, which reads through to it — restated to §1's three
+> forms. **No member, no signature, no `core` type, no validator and no `core`
+> invariant moves**, because the value set is unchanged (§3): `core/types.py` is
+> not touched at all, and ADR-0150 §4's supplied-form invariant stays total over
+> the same values it was total over before.
 
-**This ADR is delivered ahead of its implementation, and that is an operating
-choice rather than a requirement this decision imposes — the distinction matters
-because a later reader could otherwise cite it as one.** ADR-0015 §5 obliges
+> **Normative.** The tests these changes require are expected to fall entirely
+> within `tests/tools/**`, which is where every case stating the declaration rule
+> lives today, including the shared conformance suite. No test outside it states
+> that rule; a test elsewhere needing an incidental adjustment is adaptation the
+> lane makes without this clause being read as forbidding it.
+
+**The rule this ADR changes is enforced by two independent implementations and
+stated normatively in a third file, and a scope clause naming only the seam's own
+check would send this ADR's implementing lane into a STOP.** The obvious location
+is `tools/egress_declaration.py`'s `_flat_defect`, the check the seam runs. The
+other two are why the clause above enumerates rather than excludes:
+
+- **`core/protocols.py` states the rule normatively, as `EgressBinder`'s own
+  contract.** Its class docstring reads "A destination-bearing argument is flat
+  (ADR-0152 §4): its subschema is `"type": "string"` or `"type": "array"` whose
+  `items` is a subschema whose own `"type"` is `"string"`, and nothing else." The
+  closing three words are the ones §1 makes false, and that sentence is not a
+  comment about an implementation — under golden rule 1 it is the thing
+  implementations are written against. Leaving it would have `core` asserting a
+  rule the seam no longer enforces, with no lane authorised to correct it.
+- **`testing/egress.py` carries an independent second copy of it.**
+  `FakeEgressBinder._refuse_unflat` re-implements the flat test rather than
+  calling the seam's, and `tests/tools/test_fake_egress_binder.py` holds the fake
+  to the shared suite through `TestFakeEgressBinderContract`. So a suite case for
+  §1's third form fails against the fake until the fake moves, and a fake left
+  behind refuses a declaration the real seam admits — the drift the triad exists
+  to prevent. ADR-0137 §3 forbids splitting a triad, and this is that clause
+  biting on a rule change rather than on a new Protocol.
+
+**All three locations are adaptation in ADR-0137 §1's sense, so the
+implementation stays one lane.** Nothing here is a store, a loop, a codec, a
+producer or a policy; every edit restates one already-implemented rule in a place
+that already states it. §1's own clause settles what follows: "Adaptation does not
+count against the bound in this section. A lane may carry adaptation across any
+number of subsystems." So the at-most-one-subsystem bound is not engaged, and
+whoever dispatches this fences the lane at the three locations above rather than
+splitting `core/`, `testing/` and `tools/` into three.
+
+**This ADR is therefore delivered ahead of its implementation because ADR-0015 §5
+and golden rule 5 require it, not because a dispatcher preferred it.** §5 obliges
 separate delivery of "a substantive contract ADR — one adding or changing a
 Protocol or a `core/` type crossing subsystem boundaries", and golden rule 5
-obliges it of a Protocol change. By the clause above this decision is **neither**,
-so neither rule bites and this ADR asserts no clause of its own in their place.
-What put it in its own PR is the batch that dispatched it as its own lane, under
-the owner's standing rule that a lane delivers exactly one PR — a delivery
-decision, made where delivery decisions are made. A `tools/`-internal decision
-does not acquire a separate-PR obligation by having been written down, and no lane
-cites this ADR for one.
+obliges it of a Protocol change. This decision changes what the `EgressBinder`
+Protocol requires of a conforming implementation — both implementations in the
+tree become non-conforming the moment it is ratified — and it changes the text
+`core/protocols.py` states as that contract. No member and no signature moves, so
+the change is confined to the stated rule; the obligation is the same either way,
+and it is discharged by this PR. **This ADR still asserts no delivery clause of
+its own**: the obligation is those two rules', read against the scope the clause
+above states, and a later lane cites them rather than this section.
 
-The three edits, inventoried so the lane is briefable from this text:
+**One knock-on for the implementing lane's own review.** ADR-0015 §1: "A change
+touching `core/protocols.py` or `core/types.py` must additionally carry the
+architecture lens." The implementation PR touches the first, so its required set
+is adversarial **and** architecture, as this ADR's own is (§8).
 
+The five edits, inventoried so the lane is briefable from this text:
+
+- **`core/protocols.py`** — the `EgressBinder` class docstring's flat-form
+  sentence, restated to §1's three forms, and the `bind` `Raises` entry's
+  declaration limb if the lane judges that it reads over-wide on its own. The
+  per-call limb beside it — "whose value is not a JSON string or a JSON array of
+  JSON strings" — is correct as written and stays (§3). Nothing else in the file.
+- **`testing/egress.py`** — `FakeEgressBinder._refuse_unflat`, the fake's own
+  copy of the rule, moved to §1's three forms and refusing every other spelling
+  §1's second clause names. Its refusal message names the argument and the defect
+  as it does today; ADR-0152 §11's discipline is unchanged and no value is
+  rendered.
 - **`tools/egress_declaration.py`** — the flatness check admits §1's third form
   and refuses every other spelling of the union (§1's second clause). The natural
   shape is to apply the existing per-subschema check to each branch, so the third
@@ -449,6 +524,13 @@ The three edits, inventoried so the lane is briefable from this text:
   re-derivation of one, so ADR-0148 §4's third clause is not engaged: the
   arguments still reach the transport exactly as authorised, and what changes is
   how the message is rendered from them.
+
+> **Normative.** The declaration cases go into the **shared conformance suite**
+> `tests/tools/egress_binder_contract.py` and not into a per-implementation test,
+> so the seam and the canonical fake are held to §1 by one suite (ADR-0152 §13).
+> That suite's `test_a_non_flat_destination_bearing_declaration_is_refused`
+> parametrisation and its `test_a_flat_string_destination_argument_is_admitted`
+> are where the enumeration is stated today, and they are the cases that move.
 
 > **Normative.** The lane ships, at minimum: a declaration test per admitted form
 > and per refused spelling named in §1's second clause; a call-level test that a
@@ -490,11 +572,12 @@ the regime by it.
 
 **The required set is adversarial *and* architecture.** `CONTRIBUTING.md` →
 "Contract ADRs land before their implementation" requires both on an ADR PR, and
-this one earns the architecture lens on its own facts rather than by category: it
-partially supersedes a contract ADR, and the question a reviewer most needs to
-press — whether the value set really is unchanged, and therefore whether ADR-0150
-§4's invariant really does stay total — is an architecture question answerable
-from the prose before an implementation has committed to an answer. Both are run
+this one earns the architecture lens twice over. By category: it partially
+supersedes a contract ADR and changes the rule a Protocol states as its own
+contract (§7). And on its own facts: the question a reviewer most needs to press
+— whether the value set really is unchanged, and therefore whether ADR-0150 §4's
+invariant really does stay total — is an architecture question answerable from
+the prose before an implementation has committed to an answer. Both are run
 while this ADR stands `Proposed` so that a finding can still change the decision.
 `CONTRIBUTING.md` → "Finishing an ADR PR" owns the sequence; this section points at
 it rather than re-deriving it, and the outcome is recorded here on ratification —
@@ -510,9 +593,12 @@ supersession arriving where nobody reviewed it.
 ## Consequences
 
 - **The commonest form of a send becomes reachable, and no mechanism was added to
-  reach it.** The route out of #1160 costs three edits inside `tools/` and no new
-  machinery, no new seam, no new keyword and no new dialect. The alternatives
-  named in #1160 each cost a mechanism; both stay available and neither is spent.
+  reach it.** The route out of #1160 costs five edits — three inside `tools/`, one
+  docstring in `core/protocols.py` and one in the canonical fake — and no new
+  machinery, no new seam, no new keyword and no new dialect. Every one of them
+  restates a rule that already exists, in a place that already states it, which
+  is why §7 can fence them together as one lane. The alternatives named in #1160
+  each cost a mechanism; both stay available and neither is spent.
 - **A tool author gains a choice and a small obligation with it.** Declaring both
   forms is now possible, so an author who wants only one still states only one,
   and an author who takes the third form must put the array form's constraints on
