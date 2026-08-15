@@ -1,6 +1,6 @@
 # 157. A destination-bearing argument may declare both flat forms at once, and nothing else widens
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - Partially supersedes: ADR-0152 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone)
 - **This ADR adds a third admitted declaration shape and admits no new value.**
@@ -502,10 +502,60 @@ in the ratification commit itself, not before it, because a paragraph asserting 
 verdict a review has not yet returned is a claim rather than a record.
 
 **That commit carries two things and no others**: this `Status` line moving
-`Proposed` → `Accepted`, and the outcome paragraph above it. It touches one file.
+`Proposed` → `Accepted`, and the outcome paragraph below. It touches one file.
 ADR-0152's record is **not** in it — §6 states why, and the short of it is that a
 scope record made in an edit that skips review would be the substance of this
 supersession arriving where nobody reviewed it.
+
+**The outcome, recorded on ratification.** The required set is adversarial and
+architecture. Both were run while this ADR stood `Proposed`, both returned
+**APPROVE** with no findings on **one** tree, and the status was flipped only then
+— with both re-run on the flipped tree, which is coverage rather than a re-triage.
+`CONTRIBUTING.md` → "Finishing an ADR PR" owns that sequence and this line points
+at it rather than re-deriving it, as ADR-0130 §12, ADR-0136 §7 and ADR-0152 §16
+each do.
+
+**No finding was waived, none stands contested, and no issue was filed.** Every
+finding was folded. Three are worth naming.
+
+**The first changed what this ADR obliges.** An adversarial `major` held that §7's
+test obligations could all pass while `send_email`'s own `to` stayed array-only —
+a lane could widen the reader and the transport, prove both against a synthetic
+tool, and ship a green suite over the exact call #1159 recorded as refused. The
+finding was right and §7 gained the real-producer clause and the paragraph saying
+why it is the one to press hardest. That the ADR written to remove "every per-lane
+suite is green while the composed act is unreachable" could itself have been
+discharged that way is the finding's whole point.
+
+**The second removed an obligation this ADR had no standing to impose.** An
+architecture `blocker` held that §7's normative "ships as its own PR" mandate
+cited ADR-0015 §5 and golden rule 5 for a rule they do not state: both are scoped
+to a Protocol or a `core/` type crossing subsystem boundaries, and §7's own first
+clause says this decision is neither. The mandate is gone and §7 now records the
+separate PR as the operating decision it is. The finding's **direction** — to land
+this decision together with its `tools/` implementation — was declined, because
+that is a delivery call belonging to whoever dispatches the work rather than to
+this text, and declining a direction while folding its mechanism is not a waiver.
+
+**The third is worth recording because it is a corpus failure mode recurring
+live.** The two lenses returned **opposite blockers** on one question: architecture
+held that ADR-0152's supersession record must wait for this ADR's ratification,
+and adversarial held that deferring it was itself the defect. ADR-0082 §7 settles
+it and needed no adjudication — it rules on exactly this misreading of ADR-0070
+§1's "a supersession that has landed", names it as **#458**, and calls it "not a
+governance gap but a reviewer failure mode": the condition is that the superseding
+ADR **exists**, not that it is ratified, "and an atomic pair makes that
+unreachable". The record is made here in the proposing change, §6 now carries that
+reasoning so the next reader is not left to re-derive it, and the episode is
+evidence that ADR-0082 §7's restatement earns its place — this is the third
+recorded recurrence after PR #478 and #458 itself.
+
+**One further architecture `blocker` was folded on a fact rather than a reading.**
+An added `Accepted: 2026-08-14` line on ADR-0152 was defended here as following
+ADR-0126's header; ADR-0126's own history shows that line was written by *its*
+ratification commit, before ADR-0153 touched it, so no superseding lane has ever
+added one. The line is gone and §6 records why, since the next lane will meet the
+same temptation.
 
 ## Consequences
 
