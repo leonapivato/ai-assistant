@@ -578,11 +578,18 @@ def _refuse_changed(message: str) -> BoundCallChangedError:
 class SmtpEgressTransport:
     """Transmit one bound egress call over SMTP, or refuse it (ADR-0148 §6).
 
-    **Constructed nowhere in production.** The seam is undesignated, so this class
-    has no composition site, no registered callable reaches it, and its default
-    connector is never called outside a designating ADR's future. What it is for
-    is that ADR-0017 §3's conditions 5, 8 and 12 are properties of code, and a
-    designating ADR has to attest them against something.
+    **Constructed in exactly one place, and only where a deployment configured an
+    integration.** ADR-0154 §1 designates this seam, so this class now has a
+    composition site — :func:`~ai_assistant.tools.builtin.build_send_email_integration`,
+    the only one under ``src/ai_assistant``, which is issue #83's third bullet
+    answered rather than assumed. A deployment that named no connected account and
+    no endpoint builds none, registers no tool that could reach one, and opens
+    nothing. The default connector is still the one function here that touches a
+    socket, and a test always passes its own.
+
+    What this class was originally *for* is unchanged, and is why a designation was
+    possible at all: ADR-0017 §3's conditions 5, 8 and 12 are properties of code,
+    and a designating ADR had to attest them against something.
 
     The order in :meth:`transmit` is the decision, not an implementation detail,
     and every step of it is one of ADR-0148 §6's marked clauses:

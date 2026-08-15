@@ -326,6 +326,17 @@ def build_send_email_integration(
     stay two endpoints; the parse here changes nothing about that comparison and
     only decides whether the text is one this seam will ever open.
 
+    **The fail-fast is exactly as strong as that grammar, which is weaker than it
+    reads.** ``parse_smtp_endpoint`` checks the scheme, refuses a path, query,
+    fragment or userinfo, and reads a port — but it does not validate the authority
+    at all, so a doubled port or a non-hostname survives it (**#1158**, the second
+    of the three defects ADR-0154 §6 records for that function; **#1147** is the
+    first). Such an endpoint therefore *does* start a deployment and fails at the
+    connection attempt, after a credential read. Neither is a route to an
+    unintended host — the endpoint is what the operator configured and the
+    transport pins the text against itself — and both are named here rather than
+    left for a reader to infer a guarantee this function does not make.
+
     Args:
         connection: The connection reference this tool is registered against — a
             reference the provisioner already minted (ADR-0151 §3). Selecting among
