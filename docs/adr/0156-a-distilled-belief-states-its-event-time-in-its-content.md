@@ -1,6 +1,6 @@
 # 156. A distilled belief states its event time in its content, and no record type grows a field for it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-15
 - **Not a substantive contract ADR; contract-surface only for the review set, and
   the two are different questions.** [ADR-0015](0015-simplify-the-agent-workflow.md)
