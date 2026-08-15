@@ -1,45 +1,7 @@
 # 22. The closed learning loop in `orchestration`
 
-- Status: Partially superseded by ADR-0084 (§2's placement of `TurnResult` outside `core/types.py`, and its sole graduation trigger) and ADR-0108 (§4's same-id collision resolution) and ADR-0158 (§3's Retrieval row, in the scope of the episodic supplement's own read)
+- Status: Partially superseded by ADR-0084 (§2's placement of `TurnResult` outside `core/types.py`, and its sole graduation trigger) and ADR-0108 (§4's same-id collision resolution)
 - Date: 2026-07-20
-- Partially superseded: 2026-08-15 by ADR-0158 — **§3's Retrieval row no longer
-  states the whole of what a retrieval failure does: a failing *episodic
-  supplement* keeps the belief composition already in hand and does not set
-  `memory_degraded`. The row still governs the belief composition, unchanged.**
-  [ADR-0158](0158-an-episode-may-supplement-the-answering-prompt-and-never-shares-the-belief-budget.md)
-  §1 admits `EPISODIC` records to the answering prompt and §3 gives them a second
-  `MemoryStore.search` with a budget of its own, so the retrieval stage performs
-  two reads where it performed one. §4 rules that a failure of the second drops the
-  supplement alone.
-
-  **Replaced**, in one scope: the Retrieval row's *"degrade to no memories,
-  `memory_degraded=True`"* as applied to a failure of the supplementary episodic
-  read. A reader holding only this ADR would discard a successful belief
-  composition because an optional supplementary read failed, and would report an
-  unpersonalised answer that was not one —
-  [ADR-0070](0070-amendment-and-supersession-rules.md) §1's test for a change to
-  what was decided, on a clause that is a rule an implementer obeys rather than an
-  explanation of one.
-
-  **Not replaced, and it is nearly all of §3.** The row governs the belief
-  composition exactly as before: a failure there degrades to no memories with
-  `memory_degraded=True`, all-or-nothing across the bands. The framing sentence
-  above the table — "a stage aborts the turn when continuing would require
-  inventing something; otherwise it degrades and says so" — stands, and ADR-0158
-  §4 reasons *from* it: a supplement's absence invents nothing. The paragraph below
-  the table, on why `memory_degraded` lives on `TurnResult` rather than only in a
-  log line, stands and is likewise what ADR-0158 §4 applies to conclude the flag
-  must **not** be set for a supplement — the answer is still personalised, so the
-  signal would be a false positive on the one degradation this system tells the
-  user about. Every other row of the table, and every other section of this ADR,
-  are untouched.
-
-  **The three pairs on the `Status` line name different scopes** — ADR-0084 §2's
-  placement of `TurnResult`, ADR-0108's §4 collision resolution, and this row — so
-  they accumulate under ADR-0070 §4 and its overlap-precedence rule does not arise.
-  ADR-0158 lands **in the same change as this note**, so this `Status` line never
-  names an ADR that does not exist. Appended note per ADR-0070 §1; no ratified text
-  below it is rewritten. Refs #791, #1163.
 - Partially superseded: 2026-08-05 by ADR-0108 — **§4's last sentence-pair, that a
   repeated record id resolves last-write-wins because `add` is an upsert, is
   replaced. Everything else §4 decides stands, and so does the reason §4 gave.**
