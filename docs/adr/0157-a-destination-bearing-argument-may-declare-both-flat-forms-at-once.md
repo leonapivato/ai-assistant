@@ -179,15 +179,32 @@ of the family §4 says stays reachable, and `minItems` is what keeps it out of
 canonicaliser, which produces no canonical form for it, and ADR-0152 §6's
 uncompletable-call refusal fires.
 
-> **Normative.** Apart from `"type"`, which the second clause refuses, a keyword
-> sitting beside `anyOf` on the argument's own subschema **does not bear on
-> whether that subschema is a flat declaration**. The seam neither reads such a
-> keyword nor refuses a declaration for carrying one, and a declaration is not
-> refused for carrying an array constraint beside `anyOf` rather than on the array
-> branch. The two existing forms already work this way and always have, so the
-> third form inherits the tolerance rather than being granted a new one.
+> **Normative.** A keyword sitting beside `anyOf` on the argument's own subschema
+> **does not bear on whether that subschema is a flat declaration**, with exactly
+> two exceptions, both of them already refused there by clauses above: `"type"`,
+> which the second clause refuses beside `anyOf` by name, and `"$ref"`, which §2's
+> first clause refuses and which ADR-0152 §4 refused before it. Subject to those
+> two, a declaration is not refused for carrying an array constraint beside
+> `anyOf` rather than on the array branch. The two existing forms already work
+> this way and always have, so the third form inherits the tolerance rather than
+> being granted a new one.
 
-**That clause states what the corpus already does, and the alternative would cost
+**The tolerance is safe because keywords on one subschema are conjunctive, and
+the two exceptions are not exceptions to that.** A sibling beside `anyOf` is
+`AND`-ed with it, so it can only *narrow* what the subschema admits; no sibling
+can admit a value the `anyOf` refuses, and §2's structural bar therefore cannot
+be reached by adding one. `"type"` and `"$ref"` are refused for the other reason
+the first clause's reasoning turns on — not that they widen, but that they put
+the shape somewhere the seam does not read. A sibling `"type"` leaves which
+branch applies to be settled by a model of the dialect's applicator vocabulary;
+a sibling `"$ref"` leaves the shape itself outside the walk, which is why
+`_flat_defect` guards `$ref` before it reads anything else and refuses it for
+both existing forms today. The remaining spellings the second clause names —
+`oneOf`, `allOf`, `not`, `if`/`then`/`else` — are already caught as siblings,
+because that clause refuses a subschema *declaring* one of them however it is
+carried.
+
+**What that leaves is the misplaced array constraint, and refusing it would cost
 the property the third form was chosen for.** `send_email`'s `to` carries
 `minItems: 1` beside `"type": "array"` today and is a flat declaration under
 ADR-0152 §4; the seam's check reads `type`, `items` and `$ref` and is blind to
@@ -565,11 +582,11 @@ The five edits, inventoried so the lane is briefable from this text:
 > are where the enumeration is stated today, and they are the cases that move.
 
 > **Normative.** The lane ships, at minimum: a declaration test per admitted form
-> and per refused spelling named in §1's second clause; a declaration test that the
-> third form is **admitted** while carrying an array constraint beside `anyOf` on
-> the argument's own subschema, which is §1's fifth clause and the one case where
-> two conforming implementations could otherwise diverge on whether a tool loads;
-> a call-level test that a
+> and per refused spelling named in §1's second clause; the two cases §1's fifth
+> clause separates, which are where two conforming implementations could otherwise
+> diverge on whether a tool loads — the third form **admitted** while carrying an
+> array constraint beside `anyOf` on the argument's own subschema, and the third
+> form **refused** while carrying a sibling `"$ref"` there; a call-level test that a
 > string-valued and an array-valued destination argument each bind, with the
 > locators §3 states; a test that `{"to": []}` is still refused; and a transport
 > test that a string-valued recipient argument transmits to exactly that one
