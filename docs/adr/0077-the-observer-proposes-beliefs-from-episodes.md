@@ -109,6 +109,57 @@
   exists and is ratified, and ADR-0070 §1's hazard — a line pointing at nothing —
   does not arise. Appended note per ADR-0070 §1: no text below it is rewritten,
   and the superseded sentences are left standing exactly as written.
+- Note (2026-08-15): **§3's sentence enumerating the observation prompt's payload
+  gains one item; §3's ruling and every one of its refusals are untouched.** The
+  sentence is *"The prompt carries the episodes' canonical `content` (ADR-0005 §1)
+  and what the model needs to cite them (§5)"*, and it enumerates exhaustively.
+  [ADR-0156](0156-a-distilled-belief-states-its-event-time-in-its-content.md) §2
+  adds each episode's `occurred_at` to that payload, so that the producer writing
+  the belief sentence can resolve a relative expression in the cited text —
+  *"yesterday"*, *"last weekend"* — against the instant the episode actually
+  carries. Applying [ADR-0070](0070-amendment-and-supersession-rules.md) §1's test
+  to the sentence: a reader holding only this ADR builds the prompt without the
+  instants, which is what ADR-0156 §2 requires it to carry, so the reader acts
+  differently and
+  [ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §1's
+  first limb is met.
+
+  **This is an amendment and not a supersession** (ADR-0070 §1), and what makes it
+  one is §3's own ruling. The bolded clause is *"**The payload is the batch and
+  nothing else**"*, and an `occurred_at` is a field of the batch — of the very
+  `EpisodicMemory` records whose `content` §3 already sends — rather than a second
+  class of data. So the ruling is honoured rather than narrowed, and §3's four
+  refusals stand **verbatim**: the prompt still carries no existing beliefs, no
+  profile, no context facet and no plan, and ADR-0156's §Context and §2 each rest
+  on that being so. Everything else in §3 is untouched — the observer's own named
+  route and why unset means the conversational one, the no-fallback rule and both
+  arguments for it, the on-device direction stated as a shape rather than a claim,
+  and the outcome naming the route that read the episodes. ADR-0004 §7's
+  minimisation is likewise honoured rather than traded: the addition is one instant
+  per episode already in the prompt, which is the minimum context the belief the
+  stage asked for now needs.
+
+  **Three neighbouring clauses of this ADR were checked and are not amended.** §2's
+  utility bar ("Do not summarise the exchange. Do not propose what merely
+  happened") is untouched, and ADR-0156 §2's fourth clause says so in terms — a
+  date never widens what may be proposed. §5's "Confidence is computed by the
+  producer, and never taken from the model" is a rule about a *field*, and ADR-0156
+  §1 adds no field and takes no field value from the model. §6's lazy citation
+  resolution and its tombstone are relied on rather than changed — they are why
+  ADR-0156 §3 refuses to store a time relative to an episode that will not outlive
+  the belief.
+
+  **The `Status` line is not edited.** It is led by `Partially superseded by`, so
+  ADR-0082 §2 puts the record in this note alone and forbids a qualifier there;
+  writing one would put an `ADR-NNNN` after the leading token that is not a
+  supersession target, which is the extraction hazard ADR-0070 §4 guards and which
+  the 2026-07-31 note below records this line meeting once before. ADR-0156 lands
+  **in the same change as this note**, which is the existence condition
+  [ADR-0083](0083-a-deferred-decision-is-a-tracked-question.md) §15 states; while
+  it stands `Proposed` this note names a decision that is drafted rather than
+  ratified, the form `main` already carries and which the 2026-08-06 notes below
+  worked through for ADR-0111. Appended per ADR-0070 §1: no text below it is
+  rewritten, and §3's sentence stands exactly as written. Refs #1029, #1163.
 - Note (2026-08-06): **§8's sentence filing the cursor's ownership with the
   resident process is narrowed by
   [ADR-0111](0111-a-scheduled-walk-is-chunked-and-resumes-from-a-durable-cursor.md);
