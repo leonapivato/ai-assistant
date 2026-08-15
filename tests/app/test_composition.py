@@ -926,6 +926,30 @@ async def test_build_engine_gives_the_stage_and_the_producer_one_batch_bound(
         await engine.aclose()
 
 
+async def test_build_engine_gives_the_observer_the_one_configured_timezone(
+    tmp_path: Path,
+) -> None:
+    """ADR-0156 §7's wiring line: the producer resolves in ``Settings.timezone``.
+
+    The same value ADR-0008 §5 gives the temporal context and ADR-0130 §6 gives the
+    notification policy — this producer is a third consumer of it, not a fourth
+    source of truth (ADR-0008 §6). It is load-bearing rather than cosmetic:
+    ``EpisodicMemory.occurred_at`` is a ``UtcInstant`` (ADR-0030 §4) while
+    *"yesterday"* is said in the speaker's calendar, so a producer left without this
+    would either resolve against UTC — wrong by a day for every evening utterance
+    west of UTC — or, as ADR-0156 §3's second clause requires instead, resolve
+    nothing at all. A zone far from UTC is chosen so a default could not pass.
+    """
+    settings = Settings(embedder=EmbedderKind.HASHING, timezone="Pacific/Kiritimati")
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        observer = engine._observation._observer
+        assert isinstance(observer, ModelBackedObserver)
+        assert observer._zone == ZoneInfo("Pacific/Kiritimati")
+    finally:
+        await engine.aclose()
+
+
 async def test_build_engine_tells_the_stage_the_route_the_observer_reads_through(
     tmp_path: Path,
 ) -> None:
