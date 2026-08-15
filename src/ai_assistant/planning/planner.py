@@ -522,11 +522,21 @@ def _split_conversation_tail(
     relevance-retrieved records after, and a prefix split is the only reading of
     that order which cannot reorder the sequence. A partition by kind could.
 
-    Today the two coincide — §6 has the turn's relevance retrieval exclude
-    ``EPISODIC``, so no episodic record reaches the second group. If the
-    cross-conversation episodic recall §11 defers ever lands, an episode retrieved
-    *by relevance* arrives after the tail and stays in the retrieved group, which
-    is the group it belongs to.
+    **That case has landed, and this split is what it was written to expect.**
+    ADR-0158 admits an episodic *supplement* — a second relevance read, under its
+    own budget, appended after the retrieved beliefs — so an episode retrieved by
+    relevance now arrives after the tail and stays in the trailing group, which is
+    the group it belongs to. The belief composition still excludes ``EPISODIC``
+    (ADR-0074 §6), so any belief at all between the tail and the supplement is the
+    separator that keeps the two apart.
+
+    Where the belief composition is **empty** there is no separator, and this split
+    would put the supplement's episodes in the tail — rendering conversations weeks
+    old as this one's recent turns. ADR-0158 §4 answers that where it is decidable,
+    in ``orchestration``: the supplement is dropped unless something non-``EPISODIC``
+    precedes it. Nothing is owed here, and nothing here can tell the two apart —
+    which is why the clause lives there and why carrying an explicit boundary
+    instead would be a ``Planner`` contract change taking its own ADR.
 
     Args:
         memories: The records the pipeline assembled for this turn.
