@@ -1,0 +1,466 @@
+# 157. A destination-bearing argument may declare both flat forms at once, and nothing else widens
+
+- Status: Proposed
+- Date: 2026-08-15
+- Partially supersedes: ADR-0152 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone)
+- **This ADR adds a third admitted declaration shape and admits no new value.**
+  ADR-0152 §4 fixed the shapes a destination-bearing argument's subschema may
+  take at "exactly one of two forms and no other" — a JSON string, or an array of
+  JSON strings. §1 below adds a third: the two-branch `anyOf` whose branches are
+  exactly those two forms. The set of **values** the seam accepts is not touched
+  and cannot be: ADR-0152 §4's per-call clause already admits "a JSON string or a
+  JSON array of JSON strings", which is the union this ADR lets an author
+  *declare*. Every refusal in the corpus fires on exactly the calls it fired on
+  before.
+- **It is a partial supersession, not an amendment, and §6 shows the working.**
+  A reader holding only ADR-0152 §4 refuses the three-form declaration; after
+  this ADR they admit it. That is ADR-0070 §1's test coming out on the
+  supersession side, so ADR-0152's ratified text is left unrewritten and its
+  `Status` line and appended dated note are the whole of the record (ADR-0070 §1,
+  ADR-0082 §1 and §2).
+- **It is not the widening ADR-0152 §4's last clause asks for, and does not
+  discharge it.** That clause governs "a **structured** destination-bearing
+  argument" and requires its ADR to state "how a supplied form is located inside
+  that shape". There is no structure here and no supplied form is located inside
+  anything, so §2 below re-states the structural bar rather than spending it, and
+  it stays live and unspent for the shape it was written against.
+- **No implementation lands with it.** No `src/`, no `tests/`, no
+  `pyproject.toml`. §7 states what the implementing lane owes and inventories the
+  three edits, so that lane is briefable from this text alone (ADR-0015 §5,
+  golden rule 5).
+- **Every reference below to ADR-NNNN is to its text as merged on 2026-08-15**,
+  the durability form ADR-0100 established and ADR-0149, ADR-0150, ADR-0151,
+  ADR-0152 and ADR-0153 each applied. This decision rests most heavily on
+  ADR-0152 §4 and §6 and on ADR-0150 §4, and ADR-0152 **is edited by this change,
+  in its ratification commit**.
+- **Records owed on other ADRs: one, against ADR-0152, and §6 shows the working**
+  ADR by ADR — including the two near misses, ADR-0150 §11's routed question and
+  ADR-0145 §5's one-dialect rule, each of which a reviewer is entitled to contest
+  by naming the sentence that becomes false. No other `Status` line moves.
+
+## Context
+
+ADR-0152 §4 took the structural option ADR-0150 §11 left open and constrained a
+destination-bearing argument to a flat shape. The constraint is stated twice — as
+a rule about **declarations** ("an argument may be marked destination-bearing
+**only** where its subschema is a flat declaration") and as a rule about **calls**
+("a call in which a declared destination-bearing argument carries a value that is
+not a JSON string and not a JSON array of JSON strings … is refused"). The two are
+not the same width. The per-call clause admits the union of both forms; the
+declaration clause makes an author pick one of them and forbids expressing the
+union, naming "a union of types" and "an applicator (`allOf`, `anyOf`, `oneOf`,
+`not`, `if`/`then`/`else`) in place of a type" among the shapes that are not flat.
+
+`send_email` picked the array. ADR-0152 §4 recorded the consequence as costless:
+
+> `send_email` declares `to`, `cc` and `bcc` as `{"type": "array", "items": {"type":
+> "string"}}`, so every destination it can name already sits in a span that can carry
+> it and this constraint refuses none of its calls.
+
+**That sentence is true and was read as more than it says.** §4's constraint does
+refuse none of `send_email`'s calls — it never gets the chance, because ADR-0145
+validates the arguments against the schema §4 forced first, and refuses there.
+The gap between the two readings is the whole of this ADR's subject, and it did
+not surface until something composed a call.
+
+**What composed one was the pipeline, and it composes strings.** Leg 12's QA run
+(#1159) drove three natural phrasings through a live hub against a registered
+`send_email` and recorded the result in #1160: both singular phrasings — "send an
+email to X", "Email X saying …" — produced `to` as a bare JSON string and were
+refused with `step_parameters_invalid` before any ruling; the plural phrasing
+produced an array and reached the binder. Two of two singular sends were
+unreachable, and the singular send is the commonest form of the act.
+
+The composition is nobody's defect. `planning/` is deliberately tool-blind — steps
+name abstract capabilities and the model composes parameters with no schema in
+hand (ADR-0044 lineage) — so the model's choice between a string and an array is
+made without knowing which one the declaration picked, and it picks the one the
+sentence's grammar suggests. ADR-0145 then refuses the step exactly as ruled. Each
+piece behaves as its ADR requires and the composition makes the commonest form of
+the act systematically unreachable.
+
+**Three routes were available and two are worse.** Feeding selected tools' schemas
+into planning breaches the capability abstraction on purpose and wants its own
+decision; a bounded replan carrying violation shapes back to the model is ADR-0145
+§13 adjacency and is parked as this arc's successor (#1105, #1106). Both are
+mechanisms. The third is to stop making the author pick — to let the declaration
+say what the per-call clause already says. That is this ADR, and it is the only
+one of the three that adds no mechanism at all.
+
+**The evidence test ADR-0152 §4 decided itself on is what changed.** §4 declined
+the structured shape on ADR-0073 §4's standing test — "the producer in hand wants
+flat, and the producer that wants structured does not exist, so the constraint is
+the decision the evidence supports and the widening is the decision that waits for
+evidence." The producer that wants the union does exist, is in the tree, and is
+measured. That is the evidence arriving, which is the condition §4 itself set for
+revisiting.
+
+## Decision
+
+### 1. The third flat form is the two-branch `anyOf`, and its branches are the two existing forms
+
+> **Normative.** A subschema is a **flat declaration** — ADR-0152 §4's term, and
+> the property an argument must have to be marked destination-bearing — where it
+> takes any one of three forms: `"type": "string"`; `"type": "array"` whose
+> `items` is a subschema whose own `"type"` is `"string"`; or an `anyOf` holding
+> **exactly two** branch subschemas, one of them the first form and the other the
+> second, in either order. This replaces ADR-0152 §4's enumeration of two forms
+> and changes nothing else that clause states.
+
+> **Normative.** The `anyOf` form admits no other spelling of the same union. A
+> subschema declaring a union of types (`"type": ["string", "array"]`), a
+> `oneOf`, an `allOf`, a `not`, an `if`/`then`/`else`, an `anyOf` with one branch
+> or with three or more, an `anyOf` whose branch is itself an applicator or a
+> `$ref`, or an `anyOf` carried beside a sibling `"type"` on the same subschema,
+> is **not** a flat declaration, and a declaration marking such an argument
+> destination-bearing is **refused** when the declaration is read, before any
+> call is made.
+
+**One spelling rather than every equivalent one, and the reason is not tidiness.**
+A union of types would be the shorter form and it is the one refused most firmly,
+because it decides the element type somewhere the reader does not look. Under
+draft 2020-12 `items` applies to an instance only when the instance is an array,
+so `{"type": ["string", "array"]}` with no sibling `items` admits an array of
+numbers, and with one it admits the right thing only because a keyword outside the
+type declaration happened to be present. Reading it correctly means knowing which
+sibling keywords apply to which branch of a type union — a model of the dialect's
+applicator vocabulary, which `tools/egress_declaration.py` deliberately does not
+have and says so: its walk "knows nothing about the dialect", because "an unknown
+applicator is exactly where a mis-declaration would hide". The `anyOf` form keeps
+each branch **self-contained**: every branch is literally one of the two shapes
+already admitted, checkable by the check that already exists, applied once per
+branch.
+
+`oneOf` is refused for a different reason and a weaker one — it would be
+*equivalent* here, since no instance is both a string and an array, so the choice
+between them is free. Two spellings of one fact in one vocabulary is the
+duplication ADR-0150 is named against, and `anyOf` is the one that states the
+weaker claim: a reader confirming a declaration is well-formed does not have to
+establish that the branches are disjoint.
+
+> **Normative.** Both keywords ADR-0152 §3 defines stay on the argument's **own**
+> subschema — beside `anyOf`, where they sit beside `"type"` today — and appear
+> on no branch. ADR-0152 §3's rule stands unchanged and unweakened: a keyword
+> anywhere other than the immediate subschema of a top-level property is refused
+> rather than ignored, and a branch of an `anyOf` is not that subschema. No lane
+> reads the third form as opening a second place a declaration may be written.
+
+That clause adds no machinery. ADR-0152 §3's deep, structure-blind walk already
+refuses either keyword inside any applicator, which is exactly where a branch is;
+the clause is here because the third form puts an applicator on a subschema that
+carries the keywords for the first time, and a rule that is enforced but unstated
+is the kind a later lane relaxes by accident.
+
+> **Normative.** A constraint the argument's array form carries is carried on the
+> array **branch**, and is not dropped in the restructuring. `send_email`'s `to`
+> carries `minItems: 1`; under the third form that keyword belongs on the array
+> branch, where it constrains what it constrained before.
+
+`minItems: 1` is load-bearing rather than decorative, and the restructuring is
+where it would be lost. Without it `{"to": []}` satisfies the schema and
+`required`; the binder's decomposition then yields **no** span for `to` at all,
+and ADR-0152 §6's omitted-destination refusal does not fire, because that refusal
+is written over a span that carries no destination and not over an argument that
+produced no span. An empty array is ADR-0150 §4's total omission, the one member
+of the family §4 says stays reachable, and `minItems` is what keeps it out of
+`send_email`. The string branch needs no counterpart: `{"to": ""}` reaches the
+canonicaliser, which produces no canonical form for it, and ADR-0152 §6's
+uncompletable-call refusal fires.
+
+### 2. Nothing structural widens, and ADR-0152 §4's widening clause is untouched
+
+> **Normative.** This ADR admits no structured destination-bearing argument. An
+> object, an array of objects, an array holding a non-string element, a `$ref`
+> reaching either, or any shape from which a supplied form would have to be
+> located *inside* a value stays refused at the declaration and at the call.
+
+> **Normative.** ADR-0152 §4's widening clause is **not discharged** by this ADR
+> and stays live in full. A later ADR admitting a structured destination-bearing
+> argument still arrives on the terms that clause fixes — with the producer whose
+> recipient shape forces it, stating how a supplied form is located inside that
+> shape and how the check ADR-0150 §4 could not perform is then performed. No
+> lane cites this ADR toward that widening, and no lane widens the shape by
+> building a seam that accepts more.
+
+**Every property ADR-0152 §4 bought survives this change verbatim, and the reason
+is that the value set is identical.** §4's purchase was that two of ADR-0150 §4's
+three under-representation failures stop being *reachable* for a destination: a
+destination-bearing argument's value decomposes to exactly one recipient in
+exactly one span, so partial omission has no instance, and a supplied form is
+never extracted from inside a structured value, so mis-representation has none. A
+string decomposes to exactly one recipient in exactly one span. An array of
+strings decomposes to exactly one recipient per span. Those are the only two
+values the third form admits, and they are the only two the per-call clause
+admitted already. `core`'s own supplied-form invariant — stated over "a JSON
+string" and "a JSON array whose element at `index` is a JSON string" — stays
+total, over the same set it was total over yesterday.
+
+**So the asymmetry ADR-0152 §4 weighed comes out the other way here, on §4's own
+scales.** §4 weighed a recoverable authoring-time error against "a description
+narrower than the payload … reached by a recipient sitting inside a value the
+description could not decompose", and refused the shape because the second cost is
+one ADR-0148 §6 says an approver may never bear. Neither side of that ledger has
+an entry in this change. No description narrows, because no value is admitted that
+was not admitted before; nothing sits inside anything. What is on the ledger
+instead is measured: a form of the act that cannot be performed at all (#1159,
+#1160).
+
+### 3. The per-call clause, the binder and the seam are untouched
+
+> **Normative.** ADR-0152 §4's per-call clause is unchanged and is not widened by
+> this ADR: a call in which a declared destination-bearing argument carries a
+> value that is not a JSON string and not a JSON array of JSON strings is refused
+> before the ruling, whether or not the declaration clause has already refused the
+> declaration. ADR-0152 §6's five other refusals, its read-binding clause and its
+> residual clause are likewise unchanged.
+
+> **Normative.** The binding seam's derivation is unchanged. A destination-bearing
+> argument holding a JSON string is one span whose locator carries no index; one
+> holding an array of JSON strings is one span per element, each locator carrying
+> its index. That is ADR-0150 §4's decomposition applied to the values it already
+> governed, and no lane reads this ADR as changing an extent, a locator, a
+> canonical form, a tier or a provenance.
+
+This section is why the change is narrow enough to be worth making. The seam
+already implements both halves: `tools/egress_binder.py` returns from its
+per-call shape refusal on a string as readily as on a tuple of strings, and its
+decomposition already puts a string in a single indexless span. What made the
+string unreachable was never the seam — it was that no declaration could be
+written that let one arrive.
+
+**One consequence is worth stating rather than discovering.** The same recipient
+reaches a different locator depending on which form the caller composed:
+`{"to": "a@example.com"}` yields a span with no index, `{"to": ["a@example.com"]}`
+yields one with index `0`. This is not created here — both were already admitted
+values, and ADR-0150 §4 already assigned them those locators — but this ADR makes
+both reachable through one declaration for the first time, so a reader comparing
+two decisions over semantically identical calls will now see it. Nothing depends
+on the two agreeing: a decision is bound to its own parameters digest, `rebind`
+re-derives from the same parameters it was recorded against, and no clause
+compares locators across calls.
+
+### 4. What this ADR does not decide
+
+Scoping something out is a decision, so each carries its reason (ADR-0029 §7's
+form).
+
+> **Normative.** Nothing here decides how a planner composes parameters, and no
+> lane cites this ADR toward feeding tool schemas into `planning/`, toward a
+> replan-on-`INVALID_PARAMETERS` loop, or toward any other repair mechanism.
+> #1105 and #1106 carry that territory and it is deliberately unspent: this ADR
+> removes the mismatch rather than building a path to report it.
+
+> **Normative.** Nothing here decides how a violation is reported to a user,
+> which ADR-0145 §11's refusal-message discipline owns, nor relaxes ADR-0145 §5's
+> one-dialect rule: the third form is draft 2020-12 `anyOf`, evaluated by the
+> dialect the repository already reads, and no new dialect, vocabulary or keyword
+> is introduced.
+
+> **Normative.** Nothing here adds a `DestinationProtocol` member, widens `SMTP`'s
+> acceptance boundary, authorises a canonicaliser, designates a seam, attests an
+> ADR-0017 §3 condition, or registers a tool. Each of those needs its own ratified
+> ADR on the terms ADR-0150 §3, ADR-0017 §2 and ADR-0154 fix.
+
+> **Normative.** Nothing here decides whether any other tool's arguments should
+> take the third form. It admits the shape; a tool's author declares what that
+> tool's arguments are, and ADR-0016 §1's "declared, not inferred" is unchanged.
+
+### 5. Why this is one clause of ADR-0152 and not a rewrite of it
+
+ADR-0152 is a large contract ADR and this ADR replaces one enumeration inside one
+of its sections. §6 states the extent formally; this section states what a reader
+of ADR-0152 should still act on, because a partial supersession is only legible if
+the remainder is named.
+
+Everything ADR-0152 decides outside §4's declaration enumeration stands: the seam
+derives the binding whole and accepts no part of it (§5); the six refusals, with
+the one limb §6 below names (§6); `rebind`'s re-derivation and the forged-canonical
+refusal (§7); the non-egress path (§8); the failure class and disposition (§9); the
+seam's placement and its one-record read budget (§10); the refusal-message
+discipline (§11); everything §12 declines to decide; and every obligation §13 puts
+on the implementing lane, all of which have since been discharged. §3's two-keyword
+vocabulary is not merely unchanged but relied on: §1 above puts a clause behind it.
+
+### 6. This ADR classified under ADR-0070 §1 and ADR-0082 §1
+
+ADR-0082 §1 requires the judgement in the later ADR's text and fixes its form: a
+record is owed on an earlier ADR exactly where this ADR **amends a named clause**
+of it — where "a reader holding only the earlier ADR now acts differently, or reads
+one of its clauses more widely than it now holds". ADR-0148 §12, ADR-0150 §13,
+ADR-0152 §15 and ADR-0153 §10 are the worked precedents for this section's form.
+
+**The conclusion first: one record is owed, against ADR-0152, and it is written.**
+What follows is the working, and a disagreement with it takes ADR-0082 §1's own
+form — naming the sentence that does, or does not, become false or over-wide.
+
+**ADR-0152 §4 — record owed, and this is a supersession rather than an
+amendment.** The clause is §4's first normative clause, and the sentence that
+becomes false is exact: "which is exactly one of two forms and no other". After
+this ADR it is three. A reader holding only ADR-0152 refuses a declaration this
+ADR requires them to admit, which is ADR-0070 §1's test — "a change to what was
+decided is anything a reader would act on differently" — coming out on the
+supersession side without ambiguity. It is **partial**: §4's per-call clause, its
+assumes-nothing clause, its "these clauses are the whole of the constraint" clause
+and its widening clause each stay true word for word, and §2 and §3 above rely on
+all four.
+
+**ADR-0152 §6 — record owed, one limb of one refusal.** The *unshaped destination*
+refusal has two limbs in one sentence: "The seam refuses a call in which a declared
+destination-bearing argument carries a value that is not a JSON string or a JSON
+array of JSON strings (§4), and refuses a declaration that marks such an argument
+at all (§4)." The first limb is unchanged — the values are the same values. The
+second reads through to §4's enumeration, so it is over-wide the moment that
+enumeration grows, in exactly ADR-0082 §1's second sense. It is restated **here**
+rather than rewritten there, because ADR-0070 §4 makes the superseding ADR the
+authority on extent and ADR-0070 §1 forbids rewriting ratified text: the limb now
+refuses a declaration that is not one of §1's three forms.
+
+**The record's form, and why ADR-0152's body is not edited.** ADR-0070 §1 permits
+exactly two edits to ADR-0152 here — its `Status` line, in the leading-token
+partial form ADR-0070 §4 fixes, and an appended dated header note — and ADR-0082
+§2 puts the substance of the record in the note on a line led by `Partially
+superseded by`. Both are made. Its `Accepted: 2026-08-14` line is added alongside,
+preserving on the header the ratification fact that leaves the `Status` line when
+the supersession token takes the lead; that changes no decision and follows
+ADR-0126's header exactly. Not one word of ADR-0152's Context, Decision or
+Consequences is touched, so §4 and §6 stay legible as ratified beside the pointer
+to this ADR — which is what ADR-0070 §2 did to ADR-0001 and ADR-0153 §10 did to
+ADR-0126.
+
+**ADR-0150 §4 and §11 — no record owed, and this is the nearest miss, so the
+working is explicit.** §11 routed the structural question to ADR-0152 and neither
+required nor forbade the answer; §4 states the decomposition and the supplied-form
+invariant. The contrary case a reviewer is entitled to press is that §4's
+invariant was made *total* by ADR-0152 §4's constraint, so loosening that
+constraint reads §4's invariant more widely. It does not, and the reason is
+arithmetic rather than argument: §4's invariant is stated over "a JSON string" and
+"a JSON array whose element at `index` is a JSON string", which is the value set
+this ADR leaves bit-for-bit unchanged. Totality is a property of the values a
+destination-bearing argument can hold, and no value is added. §11's routed
+question was answered by ADR-0152 and stays answered; this ADR changes the answer's
+enumeration, not its addressee, which is why the record is owed there and not
+here.
+
+**ADR-0145 §5 and §9 — no record owed.** §5's one-dialect rule requires the
+dialect to be declared rather than assumed and is satisfied unchanged: `anyOf` is
+draft 2020-12's own applicator, evaluated by the evaluator the repository already
+runs, and §4 above states that no keyword or vocabulary is added. §9's "an absent
+schema declares no constraint" is untouched — this ADR is about a schema that is
+present and says more than it did. A reviewer pressing this would need a sentence
+of ADR-0145 that becomes false, and the schema this ADR admits is one ADR-0145
+already evaluates correctly today.
+
+**ADR-0044, ADR-0016 §1, ADR-0148 §2, ADR-0146 §5 — no record owed, each a
+stacked non-change.** The planner stays tool-blind and nothing here reaches
+`planning/`; declarations stay declared rather than inferred, and §1's third form
+is a shape an author writes rather than one anything derives; a mis-declared
+destination-bearing argument stays undetectable in the semantic sense ADR-0152 §12
+names, neither more nor less than before; and which fields establish a tier is
+untouched, since this ADR changes a shape and not a field's meaning.
+
+**ADR-0154 and ADR-0155 — no record owed.** Designation and residency are
+untouched; this ADR authorises no byte and §4 says so normatively.
+
+### 7. What the implementing lane owes
+
+> **Normative.** This ADR ships as its own PR with no implementation, and the
+> implementation lands in a later lane after this ADR has merged `Accepted`
+> (ADR-0015 §5, golden rule 5). No lane lands the two together.
+
+> **Normative.** The implementing lane's fence is `src/ai_assistant/tools/**` and
+> `tests/tools/**`. No `core/` change is required or authorised by this ADR: no
+> Protocol, no `core` type, no validator and no `core` invariant moves, because
+> the value set is unchanged (§3).
+
+The three edits, inventoried so the lane is briefable from this text:
+
+- **`tools/egress_declaration.py`** — the flatness check admits §1's third form
+  and refuses every other spelling of the union (§1's second clause). The natural
+  shape is to apply the existing per-subschema check to each branch, so the third
+  form is checked by the check that already exists rather than by a second one,
+  and to keep the refusal messages naming the argument and the defect as they do
+  today. The message ending "widening that needs its own ratified ADR" is updated
+  to say which widening still needs one (Consequences).
+- **`tools/send_email.py`** — `to`, `cc` and `bcc` take the third form, with
+  `to`'s `minItems: 1` on the array branch (§1's fourth clause). The module's
+  docstring states the array form is "one of exactly two shapes"; that sentence
+  is this lane's to correct, and it is not ratified text.
+- **`tools/egress.py`** — `smtp_message` reads each recipient argument as a list
+  and refuses a string outright, so the transport accepts one form of a pair the
+  seam now admits both of. It canonicalises a string to a one-element list at that
+  point. This is a rendering of an already-authorised call rather than a
+  re-derivation of one, so ADR-0148 §4's third clause is not engaged: the
+  arguments still reach the transport exactly as authorised, and what changes is
+  how the message is rendered from them.
+
+> **Normative.** The lane ships, at minimum: a declaration test per admitted form
+> and per refused spelling named in §1's second clause; a call-level test that a
+> string-valued and an array-valued destination argument each bind, with the
+> locators §3 states; a test that `{"to": []}` is still refused; and a transport
+> test that a string-valued recipient argument transmits to exactly that one
+> recipient. `tests/tools/test_egress_failure_paths.py` currently pins a
+> string-valued `to` as refused at the transport under the id
+> `recipients-not-a-list`; that case is inverted rather than deleted, so the
+> record shows the behaviour changed rather than the test disappearing.
+
+> **Normative.** The lane closes #1160 and states in its PR that the
+> feedback-loop half of that issue's title is out of scope and stays with #1105
+> and #1106.
+
+### 8. Marking, review and ratification
+
+**Marked under ADR-0089**, so this ADR is in the marked regime: its unmarked prose
+supplies no obligation and exists to determine what the marked clauses mean (§3
+there). Marking is forward-only (§5), and nothing ratified before it is drawn into
+the regime by it.
+
+**The required set is adversarial *and* architecture.** `CONTRIBUTING.md` →
+"Contract ADRs land before their implementation" requires both on an ADR PR, and
+this one earns the architecture lens on its own facts rather than by category: it
+partially supersedes a contract ADR, and the question a reviewer most needs to
+press — whether the value set really is unchanged, and therefore whether ADR-0150
+§4's invariant really does stay total — is an architecture question answerable
+from the prose before an implementation has committed to an answer. Both are run
+while this ADR stands `Proposed` so that a finding can still change the decision.
+`CONTRIBUTING.md` → "Finishing an ADR PR" owns the sequence; this section points at
+it rather than re-deriving it, and the outcome is recorded here on ratification —
+in the ratification commit itself, not before it, because a paragraph asserting a
+verdict a review has not yet returned is a claim rather than a record.
+
+## Consequences
+
+- **The commonest form of a send becomes reachable, and no mechanism was added to
+  reach it.** The route out of #1160 costs three edits inside `tools/` and no new
+  machinery, no new seam, no new keyword and no new dialect. The alternatives
+  named in #1160 each cost a mechanism; both stay available and neither is spent.
+- **A tool author gains a choice and a small obligation with it.** Declaring both
+  forms is now possible, so an author who wants only one still states only one,
+  and an author who takes the third form must put the array form's constraints on
+  the array branch. §1's `minItems` clause exists because that is the one place
+  the restructuring silently loses a safety property.
+- **The refusal text a tool author sees stops being the last word.** The message
+  `tools/egress_declaration.py` renders today ends "widening that needs its own
+  ratified ADR", which was accurate and is now half-true: widening to the union of
+  the flat forms has this ADR, and widening to a structured shape still needs one.
+  The implementing lane owes that message an update, and §7 asks for it.
+- **ADR-0152 §4's evidence test is discharged in the direction it pointed, not
+  overruled.** §4 said the widening "waits for evidence" and named ADR-0073 §4.
+  The evidence arrived from a QA run against a live hub rather than from an
+  argument, which is the shape ADR-0073 §4 asks for, and the part of §4 that was
+  never about evidence — the structural bar on shapes with a supplied form buried
+  inside them — is untouched.
+- **A locator now varies with the form the caller composed, for one argument
+  across two calls.** §3 states it. Nothing depends on the two agreeing today, and
+  a later lane that wants them to agree is choosing a canonicalisation this ADR
+  deliberately does not impose: normalising a string to a one-element array at the
+  seam would be the seam accepting one shape and describing another, which is what
+  ADR-0152 §5 forbids.
+- **The corpus gains a precedent for narrowing a structural constraint without
+  reopening it.** ADR-0152 §4 wrote its own conditions for being revisited and
+  this ADR meets them rather than arguing around them; the shape of the record —
+  one enumeration replaced, one limb of one refusal restated in the superseding
+  ADR, no ratified text rewritten — is ADR-0070 §3's partial supersession working
+  as designed.
+- **Nothing here authorises a byte.** No call this seam refused yesterday is
+  admitted today. What changes is which declarations a tool author may write, and
+  until the implementing lane lands, not even that.
