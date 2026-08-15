@@ -96,6 +96,14 @@ class Grading:
 #: that will not follow it precisely rather than an open-ended intent classifier;
 #: anything looser would start deciding, silently, which answers count as abstentions
 #: and that is the measurement P7 is about.
+#:
+#: **The anchor is what obliges the prompt to forbid a hedge.** An answer that opens
+#: "the records do not clearly say, but Ada adopted a dog" has answered, and this
+#: pattern reads it as a decline. That is why
+#: :data:`benchmarks.memory.answer.ANSWER_SYSTEM_PROMPT` asks for the answer with no
+#: stated confidence: the alternative is loosening the anchor, which puts the
+#: classification of a hedged answer inside the grader where it cannot be audited from
+#: a run's artifacts.
 _ABSTENTION: Final = re.compile(
     r"^\W*(i\s+don'?t\s+know"
     r"|i\s+do\s+not\s+know"
