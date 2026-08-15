@@ -2,20 +2,32 @@
 
 - Status: Proposed
 - Date: 2026-08-15
-- **Not a substantive contract ADR, and contract-surface for the review set.**
-  [ADR-0015](0015-simplify-the-agent-workflow.md) §5 defines a substantive
-  contract ADR as "one adding or changing a Protocol or a `core/` type crossing
-  subsystem boundaries", and §5 below adds and changes neither: the read this ADR
-  admits is `MemoryStore.search` called with a different `kinds` argument, which
+- **Changes no Protocol's *shape*, and widens one's documented semantics — flagged
+  under golden rule 5 rather than smuggled.** The read §1 admits is
+  `MemoryStore.search` called with a different `kinds` argument, which
   [ADR-0072](0072-the-profile-and-the-inferred-model-are-bands-of-one-store.md) §5
-  already rules is the caller's to choose. So golden rule 5's land-ahead rule is
-  not what governs this PR and the implementing lane owes no triad. What *is* true
-  is narrower: the decision space §5 surveys includes a `MemoryStore` member and a
-  `core.config.Settings` field, and rules against both, so `CONTRIBUTING.md` →
-  "Stop when the required reviews are green" makes the required set **adversarial
-  and architecture** — a ruling *against* surface still binds the implementing
-  lane's surface. It is docs-only and **no code changes with it**; the
-  implementation is #1163's lane 7, which needs this text as its authority.
+  already rules is the caller's to choose; no member is added, no signature moves,
+  and no type in `src/ai_assistant/core/types.py` changes. But §4's ordering makes
+  `Planner.plan`'s `memories` carry **three** meaningful groups where it carries
+  two, and its current wording — "then the records retrieved as relevant, best
+  first *within that group*" — does not describe a post-tail region holding beliefs
+  ahead of episodes. That is a change to a Protocol's documented meaning, so
+  [ADR-0015](0015-simplify-the-agent-workflow.md) §5 governs and this ADR is what
+  satisfies it: **its own docs-only PR, reviewed while `Proposed` so a finding can
+  still change the decision, merged and flipped to `Accepted` before anything
+  implements against it.** §5 below states the widened contract and §7 puts the
+  docstring in the implementing lane's hands, which is exactly the form
+  [ADR-0074](0074-conversation-is-an-entity-and-every-turn-is-an-episode.md) §5
+  took for the first widening of this same parameter.
+
+  **No triad is owed.** `CONTRIBUTING.md` → "Adding a Protocol" binds a *new*
+  Protocol; `Planner` is not new, and its conformance suite and canonical fake
+  exist. The required review set is **adversarial and architecture**, both because
+  of the widening and because the decision space §5 surveys includes a
+  `MemoryStore` member and a `core.config.Settings` field and rules against both —
+  a ruling *against* surface still binds the implementing lane's surface. **No code
+  changes with this ADR**; the implementation is #1163's lane 7, which needs this
+  text as its authority.
 - **Partially supersedes on ratification:**
   [ADR-0022](0022-the-closed-learning-loop.md) §3's Retrieval row, in the scope of
   the episodic supplement's own read. That row assigns one outcome to the retrieval
@@ -69,7 +81,9 @@
   behaviour stage by stage — the Retrieval row this ADR partially supersedes, and
   the framing sentence and `memory_degraded` rationale it does not); ADR-0084 §2
   (`TurnResult` is `core` contract surface, which is why §4 declines to widen a
-  field of it); ADR-0007 §2 (retention
+  field of it); #1175 (the `Planner.plan` wording this ADR widens is separately
+  stale against ADR-0113's band composition — filed, not fixed here); ADR-0007 §2
+  (retention
   enforced at read time), §5 (size caps deferred); ADR-0015 §5 (what a substantive
   contract ADR is); ADR-0028 §7 (batch ingestion declined for want of a consumer);
   ADR-0045 §1 (as-of retrieval declined on the same ground); ADR-0070 §1 (the
@@ -210,8 +224,10 @@ the boundary sits*, which is what this ADR draws.
 ### 1. The capability is admitted: an episode may reach the answering prompt
 
 > **Normative.** An answering turn's prompt may carry `EPISODIC` records
-> retrieved by relevance, subject to §§2–4. #791's budget half and consumer half
-> are answered here and the deferral is not renewed.
+> retrieved by relevance, subject to §§2–4.
+
+#791's budget half and its consumer half are answered here, and the deferral is
+not renewed.
 
 The trigger #791 names first — "a user-facing capability that actually wants
 cross-conversation recall" — has fired in the only form this repository can
@@ -240,7 +256,9 @@ being unbounded.
 
 > **Normative.** `ai_assistant.orchestration.conversations.BELIEF_KINDS` remains
 > the `kinds` argument of the answering turn's belief composition, and
-> `MemoryKind.EPISODIC` is never added to it. No caller passes a kind set to
+> `MemoryKind.EPISODIC` is never added to it.
+
+> **Normative.** No caller passes a kind set to
 > `ai_assistant.orchestration.retrieval.assemble_by_band` that contains both
 > `EPISODIC` and any belief kind.
 
@@ -282,12 +300,13 @@ refuses by name.
 
 > **Normative.** The episodic supplement is a separate `MemoryStore.search`
 > restricted to `kinds=(MemoryKind.EPISODIC,)` and to
-> `bands=(BeliefBand.DERIVED,)`, with a bound of its own. The belief
-> composition's budget is passed to it unchanged and is never reduced, shared, or
-> made conditional on the supplement.
+> `bands=(BeliefBand.DERIVED,)`, bounded by a budget of its own.
+
+> **Normative.** The belief composition's budget is never reduced, shared with the
+> supplement, or made conditional on it.
 
 > **Normative.** The configured episodic bound never exceeds the configured
-> belief budget. No configuration sets the two the other way round.
+> belief budget.
 
 > **Normative.** The episodic bound's ratified initial value is **5**, against a
 > belief budget of 15. It moves only on the measurement §6 specifies.
@@ -376,9 +395,9 @@ note, and the reason it is stated as one.
 
 ### 4. Where the supplement sits in the prompt, and what it may not repeat
 
-> **Normative.** The supplement is appended after the belief composition and is
-> never interleaved with it. The order of `memories` is the continuity tail
-> (ADR-0074 §5), then the retrieved beliefs, then the episodic supplement.
+> **Normative.** The order of `memories` is the continuity tail (ADR-0074 §5),
+> then the retrieved beliefs, then the episodic supplement — appended whole, never
+> interleaved.
 
 `ai_assistant.orchestration.loop` composes the turn's `memories` as
 `recent + retrieved` today; this makes it `recent + retrieved + supplement`.
@@ -461,9 +480,14 @@ which `assemble_by_band` already treats as a fault for the band case, on ADR-011
 The tail's copy is the one kept because its position carries the conversational
 order, which the supplement's does not.
 
-> **Normative.** A failure of the episodic read drops the supplement alone: the
-> belief composition already in hand is kept, and `TurnResult.memory_degraded` is
-> not set by it. The failure is logged at the stage, as the belief path's is.
+> **Normative.** A failure of the episodic read drops the supplement alone, and
+> the belief composition already in hand is kept.
+
+> **Normative.** A failure of the episodic read does not set
+> `TurnResult.memory_degraded`.
+
+> **Normative.** A failure of the episodic read is logged at the stage, as the
+> belief path's failure is.
 
 The belief path's rule is all-or-nothing — a failure on any band's read discards
 the whole retrieval — and #805 already carries the question of whether that is
@@ -490,18 +514,54 @@ absent is a *reported* signal on `TurnResult`, and whether a supplement's
 degradation deserves one is a `core/types.py` question deferred with its consumer
 (§8).
 
-### 5. The contract surface: none, and no new setting either
+### 5. The contract surface: one widened docstring, no member, no setting
 
-> **Normative.** This decision changes no Protocol in
-> `src/ai_assistant/core/protocols.py` and no type in
-> `src/ai_assistant/core/types.py`.
+> **Normative.** This decision adds no member to any Protocol in
+> `src/ai_assistant/core/protocols.py`, changes no signature there, and changes no
+> type in `src/ai_assistant/core/types.py`.
 
 `MemoryStore.search` already takes `kinds` and `bands`; ADR-0072 §5 and ADR-0113
 already make the kind selection the caller's argument; `MemoryKind.EPISODIC`
-already exists (ADR-0005 §1). The whole of the read this ADR admits is an
+already exists (ADR-0005 §1). The whole of the *read* this ADR admits is an
 `orchestration` caller passing a different argument to a member that has been on
-the contract since leg 1. Golden rule 5 does not fire, and the implementing lane
-owes no triad.
+the contract since leg 1.
+
+**What does move is `Planner.plan`'s documented meaning, and it is ratified here
+rather than left for the lane to notice.** The member reads today:
+
+> **`memories` is what the pipeline assembled for this turn, not one relevance
+> cut** (ADR-0074 §5). It carries the conversation's recent turns **first**, in
+> order, then the records retrieved as relevant, best first *within that group*.
+
+§4 puts a third group after the second, so the post-tail region is no longer one
+group ordered by relevance: a belief precedes an episode that outranks it, by
+decision.
+
+> **Normative.** `Planner.plan`'s `memories` carries three groups, in order — the
+> conversation's recent turns, chronological; the retrieved beliefs; the episodic
+> supplement. Each grouping is meaningful and the sequence is not globally ranked.
+> A `Planner` implementation may rely on the grouping and may not rely on a global
+> relevance order.
+
+This is the same widening ADR-0074 §5 made and the same way it made it: the
+signature is unchanged, `Planner` grows no parameter, and the change is **flagged
+under golden rule 5 rather than smuggled** — which is the docstring's own phrase
+for what ADR-0074 did to it. The clause about grouping-versus-ranking is carried
+over deliberately: it was already the load-bearing caution, and a second retrieved
+group is precisely the case it anticipated.
+
+**Why a third group rather than one relevance cut over both.** Merging them is
+§2's displacement moved into the renderer — an episode outranking a belief would
+take the position, which is the outcome §2 refuses at the reader and §4 refuses at
+the prompt. The Protocol's meaning has to widen because the design genuinely
+demands it, not because a cheaper shape was available.
+
+**A defect in the same sentence, found while ruling this and deliberately not
+fixed here.** "Best first *within that group*" has been inaccurate for the
+retrieved group since ADR-0113: `assemble_by_band` composes band by band, so an
+`ASSERTED` record precedes a more relevant `DERIVED` one. That is a
+description-versus-behaviour mismatch predating this ADR and independent of it, so
+it is filed as **#1175** rather than absorbed into this PR.
 
 **A `MemoryStore` member for episodic retrieval is declined.** Nothing here needs
 one: a time-range read is a different capability with a different signature, the
@@ -512,7 +572,9 @@ queried by time range, not by semantic similarity") and a lane could reach for i
 by analogy.
 
 > **Normative.** The episodic bound is a composition-root constant beside
-> `ai_assistant.app.composition.RETRIEVAL_LIMIT`, and no field for it is added to
+> `ai_assistant.app.composition.RETRIEVAL_LIMIT`.
+
+> **Normative.** No field for the episodic bound is added to
 > `ai_assistant.core.config.Settings`.
 
 The belief budget is a composition constant, not a setting, and the episodic bound
@@ -538,9 +600,11 @@ fourth change would make the predicted deltas unattributable, which is the preci
 failure the "one configuration, no ablations" ground rule exists to prevent.
 
 > **Normative.** The arm exercises the production composition path, not a
-> harness-local imitation of it, and imports the episodic bound as
-> `benchmarks/memory/wiring.py` already imports `RETRIEVAL_LIMIT` and
-> `CONFLICT_LIMIT` from `ai_assistant.app.composition`.
+> harness-local imitation of it.
+
+> **Normative.** The arm imports the episodic bound from
+> `ai_assistant.app.composition`, as `benchmarks/memory/wiring.py` already imports
+> `RETRIEVAL_LIMIT` and `CONFLICT_LIMIT`.
 
 `benchmarks/memory/answer.py` performs its own retrieval —
 `assemble_by_band(..., kinds=BELIEF_KINDS)` — so an arm written carelessly would
@@ -549,7 +613,9 @@ harness's own stated guard against that drift is importing the cardinality
 controls rather than copying them, and the supplement joins them.
 
 > **Normative.** The arm reports conversion per pilot bucket, not a headline score
-> alone, and reports prompt bytes per answered question.
+> alone.
+
+> **Normative.** The arm reports prompt bytes per answered question.
 
 The buckets are #1029's addendum's own, so the arm's output is comparable to the
 baseline anatomy without reprocessing it.
@@ -613,8 +679,10 @@ non-zero initial value a commitment rather than a ratchet.
 
 ### 7. What the implementing lane owes, and what it may not touch
 
-> **Normative.** The implementing lane changes no file under
-> `src/ai_assistant/core/`.
+> **Normative.** The implementing lane's only edit under `src/ai_assistant/core/`
+> is `Planner.plan`'s `memories` documentation in `protocols.py`, carrying §5's
+> three-group wording. It adds no member, changes no signature, and touches
+> `types.py`, `config.py` and `errors.py` not at all.
 
 > **Normative.** The lane pins, as tests: that the belief composition's `kinds`
 > argument still excludes `EPISODIC`; that the belief budget passed to
