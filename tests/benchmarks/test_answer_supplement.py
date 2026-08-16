@@ -29,17 +29,28 @@ itself.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from unittest import mock
 
 import pytest
-from benchmarks.memory.answer import EMPTY_CONTEXT, answer_question
+from benchmarks.memory.answer import (
+    EMPTY_CONTEXT,
+    SUPPLEMENT_BANDS,
+    SUPPLEMENT_KINDS,
+    answer_question,
+)
 from benchmarks.memory.cases import BenchCase, BenchQuestion, BenchSession, BenchTurn
+from benchmarks.memory.corpora.provenance import LOCOMO
 from benchmarks.memory.ingest import ingest_case
+from benchmarks.memory.records import RunMode
+from benchmarks.memory.run import execute_run, plan_run
 from benchmarks.memory.wiring import build_harness
 
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     Attestation,
     EpisodicMemory,
@@ -47,6 +58,7 @@ from ai_assistant.core.types import (
     MemorySource,
     Provenance,
 )
+from ai_assistant.memory import SqliteMemoryStore
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.retrieval import assemble_by_band
 from ai_assistant.testing import FakeModelProvider, FakeObserver
@@ -57,6 +69,8 @@ if TYPE_CHECKING:
 
     from benchmarks.memory.answer import AnswerAttempt
     from benchmarks.memory.wiring import Harness
+
+    from ai_assistant.core.types import BeliefBand, MemorySearchResult
 
 pytestmark = pytest.mark.integration
 
@@ -98,6 +112,24 @@ def _case() -> BenchCase:
     )
 
 
+def _settings(tmp_path: Path) -> Settings:
+    """Settings a plumbing check may use, and a scored run may not.
+
+    Args:
+        tmp_path: The test's directory.
+
+    Returns:
+        The settings — the hashing embedder, and no horizon to expire the episodes
+        this module is entirely about.
+    """
+    return Settings(
+        data_dir=tmp_path / "data",
+        embedder=EmbedderKind.HASHING,
+        episode_retention=None,
+        observation_batch_size=BATCH,
+    )
+
+
 def _harness(tmp_path: Path, *, observer: FakeObserver) -> Harness:
     """Wire one harness over a scratch directory.
 
@@ -109,14 +141,8 @@ def _harness(tmp_path: Path, *, observer: FakeObserver) -> Harness:
     Returns:
         The harness. The caller closes it.
     """
-    settings = Settings(
-        data_dir=tmp_path / "data",
-        embedder=EmbedderKind.HASHING,
-        episode_retention=None,
-        observation_batch_size=BATCH,
-    )
     return build_harness(
-        settings,
+        _settings(tmp_path),
         data_dir=tmp_path / "case",
         model=FakeModelProvider("Juno"),
         observer=observer,
@@ -320,3 +346,101 @@ async def test_an_episode_outside_the_derived_band_is_not_supplemented(tmp_path:
         "the record must be retrievable without the band filter for this to mean anything"
     )
     assert foreign.id not in attempt.retrieved_ids
+
+
+async def test_a_zero_bound_makes_no_episodic_read_at_all(tmp_path: Path) -> None:
+    """The disabled state the manifest's ``episodic_limit`` claims to distinguish.
+
+    ADR-0158 §6 may take the bound to zero on the ablation arm's evidence, and the
+    loop checks it *before* touching the store precisely so that a disabled supplement
+    is a read that never happened rather than an empty one. A manifest reader is told
+    those are different states, so the difference is asserted here: no ``search`` is
+    crossed with the supplement's kinds, which is also what keeps a disabled run's P4
+    count comparable with a pre-ADR-0158 one.
+    """
+    harness = _harness(tmp_path, observer=FakeObserver(max_batch_size=BATCH))
+    asked: list[tuple[MemoryKind, ...]] = []
+    real = SqliteMemoryStore.search
+
+    async def _watched(
+        self: SqliteMemoryStore,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+    ) -> MemorySearchResult:
+        asked.append(tuple(kinds or ()))
+        return await real(self, query, limit=limit, kinds=kinds, bands=bands)
+
+    try:
+        await ingest_case(harness, _case(), batch_size=BATCH)
+        disabled = dataclasses.replace(harness, episodic_limit=0)
+        with mock.patch.object(SqliteMemoryStore, "search", _watched):
+            attempt = await answer_question(disabled, _case().questions[0])
+    finally:
+        harness.close()
+
+    assert MemoryKind.EPISODIC not in _kinds(attempt)
+    assert attempt.retrieved_ids, "the belief composition must still have run"
+    assert tuple(SUPPLEMENT_KINDS) not in asked
+
+
+async def test_a_failed_episodic_read_ends_the_run_rather_than_publishing_belief_only(
+    tmp_path: Path,
+) -> None:
+    """The lane's one deliberate departure from ADR-0158 §4, pinned as behaviour.
+
+    The loop swallows a failed episodic read and keeps the beliefs, because a user's
+    answer is worth more than the supplement. A benchmark's loss function is the
+    opposite: swallowing it would publish a whole run of belief-only prompts as a
+    measurement of a configuration that never ran, with nothing in the artifacts
+    saying so. So the harness lets it propagate, and this asserts the consequence that
+    actually matters — the run stops and **no question record is written** — rather
+    than the exception in isolation.
+
+    The failure is injected on the store's own method and narrowed to the supplement's
+    exact ``kinds`` *and* ``bands``, so the ingestion path's conflict probe and the
+    belief composition both run for real. ``asked`` then records that the belief read
+    was crossed before the episodic one, which is what rules out the trivially passing
+    version of this test: a run that died during ingestion.
+    """
+    asked: list[tuple[MemoryKind, ...]] = []
+    real = SqliteMemoryStore.search
+
+    async def _failing(
+        self: SqliteMemoryStore,
+        query: str,
+        *,
+        limit: int = 10,
+        kinds: Sequence[MemoryKind] | None = None,
+        bands: Sequence[BeliefBand] | None = None,
+    ) -> MemorySearchResult:
+        asked.append(tuple(kinds or ()))
+        if tuple(kinds or ()) == tuple(SUPPLEMENT_KINDS) and tuple(bands or ()) == tuple(
+            SUPPLEMENT_BANDS
+        ):
+            msg = "the episodic read failed"
+            raise MemoryStoreError(msg)
+        return await real(self, query, limit=limit, kinds=kinds, bands=bands)
+
+    root = tmp_path / "runs"
+    plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH)
+    with (
+        mock.patch.object(SqliteMemoryStore, "search", _failing),
+        pytest.raises(MemoryStoreError),
+    ):
+        await execute_run(
+            plan,
+            output_root=root,
+            mode=RunMode.SMOKE,
+            corpus_digests={},
+            settings=_settings(tmp_path),
+            model=FakeModelProvider("Juno"),
+            observer=FakeObserver(max_batch_size=BATCH),
+        )
+
+    assert tuple(BELIEF_KINDS) in asked, "the belief read never happened, so the run died earlier"
+    assert asked[-1] == tuple(SUPPLEMENT_KINDS)
+    written = [path for path in root.rglob("records.jsonl") if path.read_text(encoding="utf-8")]
+    assert not written, "a belief-only question record was published for a broken run"
