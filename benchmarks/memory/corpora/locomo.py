@@ -1,6 +1,6 @@
 """Parse LoCoMo's published format into :mod:`benchmarks.memory.cases` types.
 
-Five modelling choices are made here rather than downstream, and each one moves a
+Four modelling choices are made here rather than downstream, and each one moves a
 score, so each is stated where the code that makes it lives.
 
 **The whole dialogue is material the user supplied, and none of it is the assistant.**
@@ -31,14 +31,22 @@ own headlessness instead of the pipeline. That is a real question about what a u
 pasting someone else's words means (#1162); it is not one this harness should answer
 by picking whichever setting scores better.
 
-**The frame is stated once per session, in the episode text.** Each session's opening
-turn is prefixed with a single line, :data:`_FRAME`, so an observation window spanning
-a session boundary is told what it is reading. It goes in the *data* and never in a
-prompt under ``src/``: tuning the product's own instructions to a corpus would make
-the pilot a measurement of the harness. It is on the opening turn only rather than on
-every turn, because repeating it across all ~5,900 turns would put identical
-boilerplate into every episode's embedding, and ingestion recall is one of the numbers
-this pilot exists to measure.
+**No frame line is added to the episode text, and that is a decision.** A marker such
+as ``"[Transcript the user shared]"`` was written and then removed. Placing it once per
+session is the version that does not work: the observer reads *windows* of the most
+recent ``observation_batch_size`` episodes (ADR-0083 §13) and nothing aligns a window
+to a session boundary, so at the shipped batch of 20 over LoCoMo's ~20-to-30-turn sessions
+roughly a third of passes would carry no frame at all, and the observer's reading of
+who is speaking would vary with tiling alignment rather than with the data. Placing it
+on *every* turn is consistent but costs more than it buys: a LoCoMo turn is ~15 words,
+so a fixed four-word prefix is a fifth of every episode's tokens entering every
+episode's embedding, and ingestion recall is the number this pilot exists to measure.
+
+So the per-episode signal is the speaker label below, which the corpus supplies and
+which is on every turn already. A frame line is a *second* intervention on top of this
+one and belongs to its own pre-registered arm, not bundled into a shape change whose
+effect the addendum has to attribute (#1185). If it is ever added, it goes on every
+episode — a frame present in some windows and not others is a confound, not a frame.
 
 **Speaker labels are kept in the text.** Dropping the names would make "when did
 Caroline go to the support group?" unanswerable from an episode that says only "I went
@@ -73,13 +81,6 @@ if TYPE_CHECKING:
 
 #: How the corpus spells a session's instant, e.g. ``"1:56 pm on 8 May, 2023"``.
 _DATE_FORMAT: Final = "%I:%M %p on %d %B, %Y"
-
-#: The one line that tells an observation window what it is reading — see the
-#: module docstring's third choice. Prefixed to each session's *opening* turn only,
-#: so the frame is stated once per session rather than folded into every episode's
-#: text. It is data the user supplied, not an instruction to the model: the product's
-#: prompts under ``src/`` are untouched by this harness.
-_FRAME: Final = "[Transcript the user shared]"
 
 #: ``session_12`` -> 12. Sessions are keys of one dict, so the numeric order has to
 #: be recovered rather than trusted to insertion order.
@@ -212,14 +213,11 @@ def _session(conversation: dict[str, Any], ordinal: int, *, case_key: str) -> Be
         msg = f"{case_key}: {key} has an unreadable instant {stamp!r}: {exc}"
         raise LocomoFormatError(msg) from exc
 
-    turns = tuple(
-        _turn(entry, case_key=case_key, key=key, opening=index == 0)
-        for index, entry in enumerate(conversation[key])
-    )
+    turns = tuple(_turn(entry, case_key=case_key, key=key) for entry in conversation[key])
     return BenchSession(session_key=key, occurred_at=occurred_at, turns=turns, user_supplied=True)
 
 
-def _turn(entry: Any, *, case_key: str, key: str, opening: bool) -> BenchTurn:
+def _turn(entry: Any, *, case_key: str, key: str) -> BenchTurn:
     """Build one utterance, rendering a shared photo as text.
 
     **Every turn is the user's side** (``user_side=True``), whichever of the two
@@ -241,8 +239,6 @@ def _turn(entry: Any, *, case_key: str, key: str, opening: bool) -> BenchTurn:
         entry: One element of a session's list.
         case_key: For error messages.
         key: For error messages.
-        opening: Whether this is the session's first turn, which carries
-            :data:`_FRAME`.
 
     Returns:
         The turn.
@@ -259,10 +255,9 @@ def _turn(entry: Any, *, case_key: str, key: str, opening: bool) -> BenchTurn:
     if isinstance(caption, str) and caption.strip():
         said = f"{said} [shared a photo: {caption.strip()}]"
     dia_id = entry.get("dia_id")
-    spoken = f"{speaker}: {said}"
     return BenchTurn(
         speaker=speaker,
-        text=f"{_FRAME}\n{spoken}" if opening else spoken,
+        text=f"{speaker}: {said}",
         user_side=True,
         evidence_key=dia_id if isinstance(dia_id, str) and dia_id else None,
     )
