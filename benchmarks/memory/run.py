@@ -408,10 +408,18 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
             pass, because the plan already knows.
         notes: Attached to the manifest.
         keep_stores: Keep every case's databases rather than only its traces.
-        max_model_calls: The most model calls this run may make across every seam, or
-            ``None`` for no ceiling. Read the figure off :func:`plan_run`, which
-            reports the same currency. A run that reaches it stops cleanly, keeps the
+        max_model_calls: The most model calls this run may make across every seam it
+            **builds**, or ``None`` for no ceiling. Read the figure off :func:`plan_run`,
+            which reports the same currency — one logical completion, so a call the retry
+            policy repeats is charged once. A run that reaches it stops cleanly, keeps the
             records it wrote, and records why in the manifest.
+
+            **An injected ``observer`` or ``grader`` spends outside it.** Neither is a
+            ``ModelProvider``, so neither can be wrapped, and a caller supplying one has
+            taken that seam's cost off this budget; ``model`` is the exception, being a
+            provider, and is guarded whether built or injected. Clause 5 of
+            :func:`refuse_ineligible_scored_run` refuses every injected seam on a scored
+            run, so the ceiling covers a scored run whole.
 
     Returns:
         The manifest, already written to ``<output_root>/<run_id>/manifest.json`` —
@@ -465,7 +473,9 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     )
     # One guard for the whole run, because ingestion, answering and judging draw on one
     # account: three per-seam budgets would each be inside their own bound while the
-    # balance went to zero.
+    # balance went to zero. It is created before the judge so both it and every case's
+    # harness take the same instance; what it does *not* reach is an injected `observer`
+    # or `grader`, which the parameter's own documentation states.
     guard = SpendGuard(limit=max_model_calls)
     # Built after the gate, so a scored run's judge is one this function constructed
     # from `Settings` and never one it was handed.

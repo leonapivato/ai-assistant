@@ -33,6 +33,7 @@ from benchmarks.memory.spend import (
     SpendGuard,
     is_credit_exhaustion,
 )
+from benchmarks.memory.wiring import build_harness
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import (
@@ -41,11 +42,15 @@ from ai_assistant.core.errors import (
     ModelUnavailableError,
 )
 from ai_assistant.core.types import Message, Role
+from ai_assistant.learning import ModelBackedObserver
+from ai_assistant.models.retry import RetryingProvider, RetryPolicy
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from ai_assistant.core.protocols import ModelProvider
 
 FIRST = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 BATCH = 2
@@ -58,6 +63,24 @@ CREDIT_400 = (
     "access the Anthropic API. Please go to Plans & Billing to upgrade or purchase "
     "credits.'}"
 )
+
+
+def _guards(provider: ModelProvider) -> SpendGuard | None:
+    """The guard a provider is wrapped in, or ``None`` where it is unwrapped.
+
+    Reads the private field of ``spend._GuardedProvider`` deliberately. The wrapper is
+    not part of any public surface — it is an implementation of ``ModelProvider`` and
+    exposes nothing beyond it — so "is this seam guarded?" has no public answer, and the
+    alternative to reading the field is a behavioural probe that would have to make a
+    model call to find out.
+
+    Args:
+        provider: The seam to inspect.
+
+    Returns:
+        The guard, or ``None``.
+    """
+    return getattr(provider, "_guard", None)
 
 
 def _case() -> BenchCase:
@@ -366,3 +389,97 @@ async def test_an_unrelated_provider_failure_is_still_one_ungraded_question(
     records = read_jsonl(root / manifest.run_id / "records.jsonl", QuestionRecord)
     assert len(records) == 2
     assert any(record.verdict == "ungraded" for record in records)
+
+
+async def test_a_retried_call_is_charged_once() -> None:
+    """The unit is one logical completion, and this is what makes that checkable.
+
+    The guard sits outside `RetryingProvider`, so a transient failure that the policy
+    retries costs one charge rather than two. That is the placement `plan_run` obliges:
+    the plan counts logical calls, so a ceiling set by reading it is only meaningful in
+    the same currency — a guard charging attempts would abort a run at an unpredictable
+    fraction of its plan depending on how flaky the provider was that hour. Attempts are
+    the worse proxy for spend besides, since a provider bills the completion it returned
+    and not the ones a retry replaced.
+
+    `max_attempts` bounds the attempts within a call, which is why that loop needs no
+    ceiling of its own; the backoff is set to its smallest permitted value so the test
+    does not wait for it (`RetryPolicy` refuses a zero).
+    """
+    inner = _FailingProvider(ModelUnavailableError("model completion failed: 503"), before=0)
+    guard = SpendGuard(limit=1)
+    provider = guard.wrap(
+        RetryingProvider(
+            inner,
+            policy=RetryPolicy(
+                timeout_seconds=5.0,
+                max_attempts=3,
+                backoff_base_seconds=0.001,
+                backoff_max_seconds=0.001,
+            ),
+        )
+    )
+
+    with pytest.raises(ModelUnavailableError):
+        await provider.complete([Message(role=Role.USER, content="hello")])
+
+    assert inner.calls == 3, "the policy did not retry, so this proves nothing"
+    assert guard.calls == 1
+
+
+def test_a_built_observer_spends_the_run_budget(tmp_path: Path) -> None:
+    """Ingestion is inside the ceiling in the configuration every real run is in.
+
+    Read off the built producer because nothing exposes it — the same reading
+    `test_the_harness_gives_the_observer_the_configured_timezone` takes, and for the same
+    reason: an `Observer` holds its provider and shows nobody. The observer is
+    deliberately *not* injected here, since the injected seam is the one this must not
+    measure.
+    """
+    settings = Settings(
+        data_dir=tmp_path, embedder=EmbedderKind.HASHING, default_model="anthropic:claude-x"
+    )
+    guard = SpendGuard(limit=7)
+    harness = build_harness(settings, data_dir=tmp_path / "case", guard=guard)
+    try:
+        observer = harness.observation._observer
+        assert isinstance(observer, ModelBackedObserver)
+        assert _guards(observer._model) is guard
+        assert _guards(harness.model) is guard
+    finally:
+        harness.close()
+
+
+def test_an_injected_observer_is_outside_the_run_budget(tmp_path: Path) -> None:
+    """The stated exemption, pinned so it is a decision rather than an oversight.
+
+    An `Observer` is not a `ModelProvider` — it holds its provider behind a surface with
+    no accessor — so there is nothing to wrap, and reaching for one would be the harness
+    widening a subsystem's contract for its own convenience. Closing it the other way,
+    by refusing a ceiling whenever an observer is injected, would refuse the
+    `FakeObserver` every test here injects, which makes no model call at all.
+
+    What bounds the gap is who may inject: `refuse_ineligible_scored_run` clause 5
+    refuses every injected seam on a scored run, so a scored run is covered whole and
+    this is reachable only from a smoke run, whose artifacts are already not a
+    measurement.
+    """
+    settings = Settings(
+        data_dir=tmp_path, embedder=EmbedderKind.HASHING, default_model="anthropic:claude-x"
+    )
+    guard = SpendGuard(limit=7)
+    injected = FakeObserver(max_batch_size=BATCH)
+    harness = build_harness(
+        settings,
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider("a dog"),
+        observer=injected,
+        guard=guard,
+    )
+    try:
+        assert harness.observation._observer is injected
+        # The answering seam is the one injected object the guard *does* cover, so the
+        # exemption above is specific to the observer rather than a blanket one.
+        assert _guards(harness.model) is guard
+    finally:
+        harness.close()
