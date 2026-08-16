@@ -1,15 +1,51 @@
 """Parse LoCoMo's published format into :mod:`benchmarks.memory.cases` types.
 
-Three modelling choices are made here rather than downstream, and each one moves a
+Five modelling choices are made here rather than downstream, and each one moves a
 score, so each is stated where the code that makes it lives.
 
-**Speaker labels are kept in the text.** LoCoMo is a conversation between two named
-third parties, and this system's episode model has a user half and an assistant half.
-Mapping ``speaker_a`` onto the user half and dropping the names would make "when did
-Caroline go to the support group?" unanswerable from an episode that says only "I
-went to a support group" — the name is evidence, not framing. So each utterance is
-prefixed with its speaker. This is also the corpus's own convention: LoCoMo's
-published baselines render the dialogue with speaker names.
+**The whole dialogue is material the user supplied, and none of it is the assistant.**
+LoCoMo is a conversation between two named third parties. Neither of them is this
+system's user, and the assistant said none of it — so mapping ``speaker_a`` onto the
+user half of an exchange and ``speaker_b`` onto the *assistant* half, as this loader
+did until #1177, asserted two things the corpus does not contain, and the observer's
+first-person contract (ADR-0077 §3 — beliefs about "the user ... or their world") was
+being scored against them. The honest frame is the one the questions themselves
+assume: **the user is the person who handed the assistant this transcript and is now
+asking about it.** So every turn is the user's own side (``user_side=True``), the
+session is marked :attr:`~benchmarks.memory.cases.BenchSession.user_supplied` so each
+corpus turn becomes one exchange with no assistant half, and the two people in the
+transcript are people in the user's *world* rather than the user. What "Caroline: I
+went to a support group" then justifies is a belief about Caroline — which lands in
+the belief's own sentence and not in ``about_person``, because ADR-0100 §5 forbids an
+observer to state a subject at all.
+
+**It is captured as the user's own turn: ``CAPTURE_CONFIDENCE``, and untainted.** The
+user told the assistant this, in the ordinary way a user tells it anything, so the
+episode carries what every captured turn carries (ADR-0074 §4) and nothing marks it as
+recorded external content (ADR-0106 §1). The alternative was considered and is
+deliberately *deferred*, not answered here: treating a shared transcript as external
+content would make every derived belief resting on it tainted, and an unconfirmed
+tainted derived belief is an ``ASK_USER`` by ADR-0106 §6 — so a headless benchmark run
+would defer essentially every proposal the corpus produced and measure the harness's
+own headlessness instead of the pipeline. That is a real question about what a user
+pasting someone else's words means (#1162); it is not one this harness should answer
+by picking whichever setting scores better.
+
+**The frame is stated once per session, in the episode text.** Each session's opening
+turn is prefixed with a single line, :data:`_FRAME`, so an observation window spanning
+a session boundary is told what it is reading. It goes in the *data* and never in a
+prompt under ``src/``: tuning the product's own instructions to a corpus would make
+the pilot a measurement of the harness. It is on the opening turn only rather than on
+every turn, because repeating it across all ~5,900 turns would put identical
+boilerplate into every episode's embedding, and ingestion recall is one of the numbers
+this pilot exists to measure.
+
+**Speaker labels are kept in the text.** Dropping the names would make "when did
+Caroline go to the support group?" unanswerable from an episode that says only "I went
+to a support group" — the name is evidence, not framing, and under the frame above it
+is also the only thing telling the reader which of two third parties spoke. This is
+the corpus's own convention: LoCoMo's published baselines render the dialogue with
+speaker names.
 
 **Photo turns become text.** ~1,200 of the ~5,900 turns carry a ``blip_caption``: the
 speaker shared an image and the corpus supplies a caption for it. This harness is
@@ -37,6 +73,13 @@ if TYPE_CHECKING:
 
 #: How the corpus spells a session's instant, e.g. ``"1:56 pm on 8 May, 2023"``.
 _DATE_FORMAT: Final = "%I:%M %p on %d %B, %Y"
+
+#: The one line that tells an observation window what it is reading — see the
+#: module docstring's third choice. Prefixed to each session's *opening* turn only,
+#: so the frame is stated once per session rather than folded into every episode's
+#: text. It is data the user supplied, not an instruction to the model: the product's
+#: prompts under ``src/`` are untouched by this harness.
+_FRAME: Final = "[Transcript the user shared]"
 
 #: ``session_12`` -> 12. Sessions are keys of one dict, so the numeric order has to
 #: be recovered rather than trusted to insertion order.
@@ -92,10 +135,11 @@ def _case(sample: Any) -> BenchCase:
     if not isinstance(conversation, dict):
         msg = f"{case_key}: 'conversation' is not an object"
         raise LocomoFormatError(msg)
-    speaker_a = _string(conversation, "speaker_a")
-
+    # `speaker_a` is deliberately no longer read. It existed only to decide which
+    # speaker took the user half, and under the honest framing every speaker does, so
+    # requiring the key would be a parsing precondition for a decision nobody makes.
     sessions = tuple(
-        _session(conversation, ordinal, speaker_a=speaker_a, case_key=case_key)
+        _session(conversation, ordinal, case_key=case_key)
         for ordinal in _session_ordinals(conversation)
     )
     if not sessions:
@@ -137,15 +181,17 @@ def _session_ordinals(conversation: dict[str, Any]) -> list[int]:
     return sorted(found)
 
 
-def _session(
-    conversation: dict[str, Any], ordinal: int, *, speaker_a: str, case_key: str
-) -> BenchSession:
-    """Build one session.
+def _session(conversation: dict[str, Any], ordinal: int, *, case_key: str) -> BenchSession:
+    """Build one session, marked as the user-supplied transcript it is.
+
+    ``user_supplied=True`` is the session-level half of the framing decision: it is
+    what makes each corpus turn one exchange with no assistant half, instead of the
+    fold in :func:`~benchmarks.memory.ingest.exchanges_of` joining a whole session of
+    same-side utterances into a single episode.
 
     Args:
         conversation: The sample's conversation object.
         ordinal: Which session.
-        speaker_a: The speaker whose turns take the user half of an exchange.
         case_key: For error messages.
 
     Returns:
@@ -167,13 +213,18 @@ def _session(
         raise LocomoFormatError(msg) from exc
 
     turns = tuple(
-        _turn(entry, speaker_a=speaker_a, case_key=case_key, key=key) for entry in conversation[key]
+        _turn(entry, case_key=case_key, key=key, opening=index == 0)
+        for index, entry in enumerate(conversation[key])
     )
-    return BenchSession(session_key=key, occurred_at=occurred_at, turns=turns)
+    return BenchSession(session_key=key, occurred_at=occurred_at, turns=turns, user_supplied=True)
 
 
-def _turn(entry: Any, *, speaker_a: str, case_key: str, key: str) -> BenchTurn:
+def _turn(entry: Any, *, case_key: str, key: str, opening: bool) -> BenchTurn:
     """Build one utterance, rendering a shared photo as text.
+
+    **Every turn is the user's side** (``user_side=True``), whichever of the two
+    named people spoke it: the user is the person who supplied the transcript, not a
+    participant in it, and the assistant is neither. See the module docstring.
 
     **``dia_id`` is kept, and it is the same id space the questions cite.** A qa
     entry's ``evidence`` is a list of ``dia_id`` values (``["D1:1"]``), so carrying
@@ -188,9 +239,10 @@ def _turn(entry: Any, *, speaker_a: str, case_key: str, key: str) -> BenchTurn:
 
     Args:
         entry: One element of a session's list.
-        speaker_a: The speaker whose turns take the user half.
         case_key: For error messages.
         key: For error messages.
+        opening: Whether this is the session's first turn, which carries
+            :data:`_FRAME`.
 
     Returns:
         The turn.
@@ -207,10 +259,11 @@ def _turn(entry: Any, *, speaker_a: str, case_key: str, key: str) -> BenchTurn:
     if isinstance(caption, str) and caption.strip():
         said = f"{said} [shared a photo: {caption.strip()}]"
     dia_id = entry.get("dia_id")
+    spoken = f"{speaker}: {said}"
     return BenchTurn(
         speaker=speaker,
-        text=f"{speaker}: {said}",
-        user_side=speaker == speaker_a,
+        text=f"{_FRAME}\n{spoken}" if opening else spoken,
+        user_side=True,
         evidence_key=dia_id if isinstance(dia_id, str) and dia_id else None,
     )
 
