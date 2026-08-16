@@ -2871,18 +2871,20 @@ def test_the_retrieval_budget_is_the_depth_the_re_rank_evidence_bought() -> None
     assert composition_module.RETRIEVAL_LIMIT == 15
 
 
-def test_the_episodic_supplement_is_bounded_at_five_and_never_above_the_beliefs() -> None:
-    """ADR-0158 §3's ratified bound, and the ceiling it may never cross.
+def test_the_episodic_supplement_is_bounded_at_fifteen_and_never_above_the_beliefs() -> None:
+    """ADR-0160 §1's bound, and the ceiling it may never cross.
 
-    Two figures, one test, because the second is what the first means. 5 is a
-    judgement rather than a measured optimum — an episode is a verbatim turn where a
-    belief is a distilled sentence, and nothing has priced five of them — so §6's
-    ablation arm owns it in both directions and states the arithmetic that would take
-    it to zero. The **relation** is not tuning: it is where the product thesis stops
+    Two figures, one test, because the second is what the first means. 15 rests on a
+    measurement where 5 rested on a judgement: #1029's pilot-3 anatomy puts episode
+    recall@5 at 55.3% against recall@15 at 72.7%, and ADR-0160 §3 retires the
+    ablation arm that used to own the value in favour of post-hoc attribution on a
+    scored run. The **relation** is not tuning: it is where the product thesis stops
     being documentation, since whatever the two numbers become, nobody can configure
-    a system that asks for more transcript than belief.
+    a system that asks for more transcript than belief. It holds as an equality now,
+    which ADR-0160 §2 admits rather than tolerates — so the second assertion pins the
+    deployed parity and no longer records slack.
     """
-    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT == 5
+    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT == 15
     assert composition_module.EPISODIC_SUPPLEMENT_LIMIT <= composition_module.RETRIEVAL_LIMIT
 
 

@@ -1370,14 +1370,17 @@ async def test_the_supplements_read_is_the_one_section_three_pins() -> None:
     assert call.limit == _DEFAULT_EPISODIC_LIMIT
 
 
-def test_the_episodic_bound_is_five_and_never_exceeds_the_belief_budget() -> None:
-    """§3's ratified initial value, and the ceiling that is the thesis in code.
+def test_the_episodic_bound_is_fifteen_and_never_exceeds_the_belief_budget() -> None:
+    """ADR-0160 §1's value, and the ceiling that is the thesis in code.
 
     The deployment figure lives in ``app/composition.py``, which this subsystem may
     not import; what is checkable here is the default a direct construction gets and
-    the relation §3 fixes between the two numbers. It moves only on §6's arm.
+    the relation ADR-0158 §3 fixes between the two numbers. The value moves on the
+    post-hoc attribution ADR-0160 §3 requires, read off a scored run — there is no
+    ablation arm left to wait for. The relation now holds as an equality, which
+    ADR-0160 §2 admits: "never exceeds" is met at parity, not breached.
     """
-    assert _DEFAULT_EPISODIC_LIMIT == 5
+    assert _DEFAULT_EPISODIC_LIMIT == 15
     assert _DEFAULT_EPISODIC_LIMIT <= _DEFAULT_RETRIEVAL_LIMIT
 
 
@@ -1637,8 +1640,15 @@ async def test_a_belief_budget_below_the_default_bound_is_tuning_and_not_an_erro
     assert loop._episodic_limit <= retrieval_limit
 
 
-async def test_an_untuned_bound_above_the_belief_budget_is_the_default_itself() -> None:
-    """Capping is for the small-budget case only; the ordinary one is untouched."""
+async def test_an_untuned_bound_at_the_belief_budget_is_the_default_itself() -> None:
+    """Capping is for the small-budget case only; the ordinary one is untouched.
+
+    Renamed on ADR-0160 §7's instruction: the two numbers are equal now, so a name
+    stating that one sits above the other describes nothing. What is proved is
+    unchanged — ``LearningLoop.__init__``'s cap fires only where a *stated* belief
+    budget is below the default, and at the default budget the untuned bound
+    resolves whole.
+    """
     loop = _loop_with(retrieval_limit=_DEFAULT_RETRIEVAL_LIMIT)
 
     assert loop._episodic_limit == _DEFAULT_EPISODIC_LIMIT
