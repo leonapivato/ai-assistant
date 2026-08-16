@@ -72,9 +72,16 @@ class RetrievalTelemetry(BaseModel):
         search_calls: How many times ``MemoryStore.search`` was crossed. This is
             #1029's P4 figure. Expect one to four: ``assemble_by_band`` reads one
             band at a time and stops once the budget is full, which is up to three,
-            and ADR-0158's episodic supplement is a fourth read of its own — made
-            unless the belief composition came back empty, which is the one state
-            that drops it (``benchmarks.memory.answer._supplement``).
+            and ADR-0158's episodic supplement is a fourth read of its own.
+
+            **The fourth read happens only where the episodic bound is positive and
+            the belief composition came back non-empty**, and both conditions are
+            checked before the store is touched (``benchmarks.memory.answer._supplement``).
+            The second is the one a run meets or misses per question; the first is a
+            property of the whole run, which ADR-0158 §6's ablation arm may set to
+            ``0`` — and a manifest whose ``episodic_limit`` is ``0`` is a run where one
+            to *three* calls is the healthy count and a fourth would be the anomaly
+            (#1186).
         returned_ids: Every record id any of those calls returned, in trace order,
             deduplicated. A superset of what reached the prompt, because
             ``assemble_by_band`` deduplicates and cuts to the budget.
