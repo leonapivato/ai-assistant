@@ -37,13 +37,17 @@ if TYPE_CHECKING:
     from benchmarks.memory.cases import BenchQuestion
 
 __all__ = [
+    "JUDGE_PROMPT",
     "MODEL_JUDGE_PREFIX",
     "ExactGrader",
     "Grader",
     "Grading",
     "ModelGrader",
     "Verdict",
+    "grading_from_reply",
+    "grading_without_a_call",
     "is_abstention",
+    "judge_messages",
 ]
 
 #: What a model judge's :attr:`Grader.name` begins with.
@@ -209,6 +213,101 @@ JUDGE_PROMPT: Final = (
 )
 
 
+def grading_without_a_call(question: BenchQuestion, answer: str, *, judge: str) -> Grading | None:
+    """The verdict abstention alone settles, or ``None`` where a judge must read it.
+
+    **Lifted out of :meth:`ModelGrader.grade` so the batch path cannot drift from
+    the synchronous one.** A batch run has to make this same decision *before* it
+    assembles its judge batch — an abstention that costs no call must cost no batch
+    *item* either, or the run pays for ~1,300 gradings whose answer is already
+    known and #1029's judge-call figure stops meaning what ``plan_run`` says it
+    means. Two copies of a rule this load-bearing would be two measures.
+
+    Args:
+        question: The question, carrying whether abstaining is correct here.
+        answer: What the system said.
+        judge: The judge label to record, whichever grader is asking.
+
+    Returns:
+        The grading, or ``None`` when the answer must actually be judged.
+    """
+    abstained = is_abstention(answer)
+    if question.unanswerable:
+        return Grading(
+            verdict=Verdict.CORRECT if abstained else Verdict.INCORRECT,
+            abstained=abstained,
+            judge=judge,
+            detail="abstention expected",
+        )
+    if abstained:
+        return Grading(
+            verdict=Verdict.INCORRECT,
+            abstained=True,
+            judge=judge,
+            detail="declined to answer an answerable question",
+        )
+    return None
+
+
+def judge_messages(question: BenchQuestion, answer: str) -> tuple[Message, ...]:
+    """The exact conversation a model judge is shown.
+
+    One function so that a judge batch's item and a synchronous judge call carry
+    the *same bytes*: a manifest recording :data:`JUDGE_PROMPT` is only true of both
+    phases if both assemble the prompt here.
+
+    Args:
+        question: The question, carrying the reference answer.
+        answer: What the system said.
+
+    Returns:
+        The system turn and the user turn, in order.
+    """
+    return (
+        Message(role=Role.SYSTEM, content=JUDGE_PROMPT),
+        Message(
+            role=Role.USER,
+            content=(
+                f"Question: {question.question}\n"
+                f"Reference answer: {question.answer}\n"
+                f"Answer to grade: {answer}"
+            ),
+        ),
+    )
+
+
+def grading_from_reply(reply: str, *, judge: str) -> Grading:
+    """Read one judge reply, however it arrived.
+
+    **The whole reply must be the token, not merely start with it.** A prefix test
+    reads "CORRECTLY ANSWERED" and "CORRECT, but uncertain" as verdicts, and the
+    second is a judge expressing doubt being recorded as certainty — a false
+    benchmark result produced by the grader rather than by the system. Surrounding
+    punctuation and whitespace are forgiven because the prompt asks for one bare
+    word and a model will add a full stop; nothing else is.
+
+    Args:
+        reply: The judge's text, from a completion or from a batch outcome.
+        judge: The judge label to record.
+
+    Returns:
+        The grading. ``UNGRADED`` where the reply is not one of the two words —
+        recorded rather than guessed, because a judge that cannot be parsed has not
+        graded.
+    """
+    said = reply.strip().strip(".!,;:'\"*` ").upper()
+    if said == "CORRECT":
+        return Grading(verdict=Verdict.CORRECT, abstained=False, judge=judge)
+    if said == "INCORRECT":
+        return Grading(verdict=Verdict.INCORRECT, abstained=False, judge=judge)
+    return Grading(
+        verdict=Verdict.UNGRADED,
+        abstained=False,
+        judge=judge,
+        detail=f"unparseable judge reply: {reply[:200]!r}",
+    )
+
+
 class ModelGrader:
     """The LLM judge both benchmarks' published protocols use.
 
@@ -248,35 +347,11 @@ class ModelGrader:
             something other than the two words it was asked for — recorded rather
             than guessed, because a judge that cannot be parsed has not graded.
         """
-        abstained = is_abstention(answer)
-        if question.unanswerable:
-            return Grading(
-                verdict=Verdict.CORRECT if abstained else Verdict.INCORRECT,
-                abstained=abstained,
-                judge=self.name,
-                detail="abstention expected",
-            )
-        if abstained:
-            return Grading(
-                verdict=Verdict.INCORRECT,
-                abstained=True,
-                judge=self.name,
-                detail="declined to answer an answerable question",
-            )
+        settled = grading_without_a_call(question, answer, judge=self.name)
+        if settled is not None:
+            return settled
         try:
-            reply = await self._model.complete(
-                [
-                    Message(role=Role.SYSTEM, content=JUDGE_PROMPT),
-                    Message(
-                        role=Role.USER,
-                        content=(
-                            f"Question: {question.question}\n"
-                            f"Reference answer: {question.answer}\n"
-                            f"Answer to grade: {answer}"
-                        ),
-                    ),
-                ]
-            )
+            reply = await self._model.complete(list(judge_messages(question, answer)))
         except ModelError as error:
             # A judge outage is not evidence about the system under test, and a run of
             # ~2,000 paid questions must not die on one. The class name is recorded and
@@ -288,23 +363,7 @@ class ModelGrader:
                 judge=self.name,
                 detail=f"judge failed: {type(error).__name__}",
             )
-        # **The whole reply must be the token, not merely start with it.** A prefix
-        # test reads "CORRECTLY ANSWERED" and "CORRECT, but uncertain" as verdicts,
-        # and the second is a judge expressing doubt being recorded as certainty —
-        # a false benchmark result produced by the grader rather than by the system.
-        # Surrounding punctuation and whitespace are forgiven because the prompt asks
-        # for one bare word and a model will add a full stop; nothing else is.
-        said = reply.content.strip().strip(".!,;:'\"*` ").upper()
-        if said == "CORRECT":
-            return Grading(verdict=Verdict.CORRECT, abstained=False, judge=self.name)
-        if said == "INCORRECT":
-            return Grading(verdict=Verdict.INCORRECT, abstained=False, judge=self.name)
-        return Grading(
-            verdict=Verdict.UNGRADED,
-            abstained=False,
-            judge=self.name,
-            detail=f"unparseable judge reply: {reply.content[:200]!r}",
-        )
+        return grading_from_reply(reply.content, judge=self.name)
 
 
 def _normalised(text: str) -> str:

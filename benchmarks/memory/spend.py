@@ -228,6 +228,44 @@ class SpendGuard:
             raise RunAbortedError(msg)
         self.calls += 1
 
+    def charge_many(self, count: int) -> None:
+        """Account for ``count`` model calls about to be made as one submission.
+
+        **All or nothing, because a batch is.** ``BatchCompleter.submit`` refuses or
+        accepts the whole set and never the well-formed subset (ADR-0143 §3), so a
+        guard that charged item by item until it met the ceiling would leave the run
+        having spent N against a batch it never sent. Checked once for the whole
+        count instead: either the submission fits under the bound or the run stops
+        without making it.
+
+        The currency is unchanged — one logical completion, one charge — so a
+        ceiling read off :func:`~benchmarks.memory.run.plan_run` means the same
+        number of answers whichever phase spends it. That is the property that lets
+        ``--max-model-calls`` be set from the plan without knowing which phase will
+        run.
+
+        Args:
+            count: How many calls the submission carries. Zero is legal and charges
+                nothing — a judge batch is empty whenever every answer was settled
+                by abstention, and that is a real run rather than an error.
+
+        Raises:
+            ValueError: If ``count`` is negative.
+            RunAbortedError: If the ceiling cannot cover the whole submission. The
+                run has made exactly ``calls`` calls and sent nothing further.
+        """
+        if count < 0:
+            msg = f"count must not be negative, got {count}"
+            raise ValueError(msg)
+        if self.limit is not None and self.calls + count > self.limit:
+            msg = (
+                f"a batch of {count} model calls would take the run past its ceiling "
+                f"of {self.limit} ({self.calls} already made); stopped before "
+                f"submitting it"
+            )
+            raise RunAbortedError(msg)
+        self.calls += count
+
     def wrap(self, provider: ModelProvider) -> ModelProvider:
         """Put ``provider`` behind this guard.
 

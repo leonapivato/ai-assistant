@@ -140,8 +140,11 @@ __all__ = [
     "SUPPLEMENT_BANDS",
     "SUPPLEMENT_KINDS",
     "AnswerAttempt",
+    "RetrievedContext",
+    "answer_messages",
     "answer_question",
     "render_context",
+    "retrieve_for",
 ]
 
 #: The kinds the episodic supplement's read selects (ADR-0158 §3).
@@ -504,6 +507,200 @@ def _standing_evidence(record: MemoryRecord) -> tuple[str, ...]:
     return (record.id, *(identifier for identifier in cited if identifier != record.id))
 
 
+@dataclass(frozen=True, slots=True)
+class RetrievedContext:
+    """One question's two reads, assembled into a prompt no model has seen yet.
+
+    **This exists because the batch phase answers hours after it retrieves**, and
+    everything #1029 computes about retrieval has to be captured at the moment the
+    reads happen rather than at the moment an answer comes back. A synchronous run
+    could keep the two together; a batched one cannot, so the split is made once,
+    here, and both phases go through it.
+
+    What that buys is that the phases cannot diverge on the thing being measured.
+    The reads, their order, the separator rule, the rendering and the correlation
+    scope are all in :func:`retrieve_for`, which is the only way either phase gets a
+    prompt — so ``retrieved_ids``, ``retrieved_kinds``, ``retrieved_evidence`` and
+    the ``RETRIEVAL`` traces behind ``correlation_id`` mean exactly the same thing in
+    a ``--phase batch`` run as in a ``--phase sync`` one.
+
+    **The one real difference between the phases, stated rather than left to be
+    discovered.** A synchronous answer's model call happens *inside* the correlation
+    scope and a batched one happens outside it, long after the scope closed. Nothing
+    recorded moves: the model seam emits no trace at all — ``TraceKind`` has five
+    members and none of them is a completion — and
+    :meth:`~benchmarks.memory.records.TraceCursor.collect` keeps only ``RETRIEVAL``
+    traces carrying this id. So the P4 count and the P8 split are computed over the
+    same events either way.
+
+    Attributes:
+        correlation_id: The scope every ``RETRIEVAL`` trace for this question
+            carries, opened and closed around the reads alone.
+        messages: The exact conversation to send, system turn first. Held rather
+            than rebuilt so a batch item and a synchronous call carry the same bytes.
+        retrieved_ids: The records placed in the prompt, in prompt order.
+        retrieved_kinds: Each record's ``kind``, aligned with ``retrieved_ids``.
+        retrieved_evidence: The episode ids standing behind each retrieved record.
+        retrieved_evidence_elided: ``provenance.evidence_elided`` per record.
+        context: The rendered context block, exactly as the model will see it.
+        asked_at: The instant the clock was set to while retrieving.
+    """
+
+    correlation_id: str
+    messages: tuple[Message, ...]
+    retrieved_ids: tuple[str, ...]
+    retrieved_kinds: tuple[str, ...]
+    retrieved_evidence: tuple[tuple[str, ...], ...]
+    retrieved_evidence_elided: tuple[int, ...]
+    context: str
+    asked_at: str
+
+    def answered(self, *, answer: str, failure: str | None = None) -> AnswerAttempt:
+        """Pair this retrieval with whatever the model eventually said.
+
+        Args:
+            answer: The model's reply, stripped, or ``""`` where none came back.
+            failure: The class name of what stopped it, or ``None``.
+
+        Returns:
+            The attempt, carrying this retrieval's own ids and telemetry scope.
+        """
+        return AnswerAttempt(
+            correlation_id=self.correlation_id,
+            answer=answer,
+            retrieved_ids=self.retrieved_ids,
+            retrieved_kinds=self.retrieved_kinds,
+            retrieved_evidence=self.retrieved_evidence,
+            retrieved_evidence_elided=self.retrieved_evidence_elided,
+            context=self.context,
+            asked_at=self.asked_at,
+            failure=failure,
+        )
+
+
+def answer_messages(context: str, question: str) -> tuple[Message, ...]:
+    """The exact conversation the answering model is shown.
+
+    One function so a batch item and a synchronous call carry the same bytes, which
+    is what makes the manifest's recorded ``answer_prompt`` true of both phases.
+
+    Args:
+        context: The rendered context block.
+        question: The question as asked.
+
+    Returns:
+        The system turn and the user turn, in order.
+    """
+    return (
+        Message(role=Role.SYSTEM, content=ANSWER_SYSTEM_PROMPT),
+        Message(
+            role=Role.USER,
+            # No "Memory records:" line above the block any more: since #1189 the
+            # block opens with the product's own heading, and a second heading over
+            # it would be a section the product never emits — reintroducing, one line
+            # smaller, exactly the divergence that change removed.
+            content=f"{context}\n\nQuestion: {question}",
+        ),
+    )
+
+
+async def _read_for(harness: Harness, question: BenchQuestion) -> tuple[MemoryRecord, ...]:
+    """The two reads, in the product's order, with no scope of their own.
+
+    Called only from inside a correlation scope the caller opened, because the
+    traces these emit are what that scope exists to collect.
+
+    Args:
+        harness: The wired pipeline.
+        question: The question to read for.
+
+    Returns:
+        The belief composition, then the episodic supplement (ADR-0158 §4).
+    """
+    beliefs = tuple(
+        await assemble_by_band(
+            harness.store,
+            question.question,
+            limit=harness.retrieval_limit,
+            kinds=BELIEF_KINDS,
+        )
+    )
+    return beliefs + await _supplement(harness, question.question, preceding=beliefs)
+
+
+def _moved_clock(harness: Harness, question: BenchQuestion) -> str:
+    """Set the benchmark clock to the question's instant, and report where it is.
+
+    Args:
+        harness: The wired pipeline.
+        question: The question, carrying an instant where its corpus states one.
+
+    Returns:
+        The clock's reading, ISO-8601.
+    """
+    if question.asked_at is not None:
+        harness.clock.set(question.asked_at)
+    return harness.clock().isoformat()
+
+
+def _assembled(
+    correlation_id: str,
+    records: Sequence[MemoryRecord],
+    question: BenchQuestion,
+    asked_at: str,
+) -> RetrievedContext:
+    """Turn what the reads returned into the prompt and the record of them.
+
+    Args:
+        correlation_id: The scope the reads ran under.
+        records: What they returned, in prompt order.
+        question: The question.
+        asked_at: The clock's reading.
+
+    Returns:
+        The assembled context.
+    """
+    context = render_context(records)
+    return RetrievedContext(
+        correlation_id=correlation_id,
+        messages=answer_messages(context, question.question),
+        retrieved_ids=tuple(record.id for record in records),
+        retrieved_kinds=tuple(record.kind for record in records),
+        retrieved_evidence=tuple(_standing_evidence(record) for record in records),
+        retrieved_evidence_elided=tuple(record.provenance.evidence_elided for record in records),
+        context=context,
+        asked_at=asked_at,
+    )
+
+
+async def retrieve_for(harness: Harness, question: BenchQuestion) -> RetrievedContext:
+    """Do everything :func:`answer_question` does except ask the model.
+
+    The batch phase's entry point, and the reason the split exists: an answer batch
+    is assembled from thousands of these, submitted once, and read back hours later.
+    Its retrieval is this function's, not a copy of it.
+
+    A *retrieval* failure is deliberately not caught here, on either read, for the
+    reason :func:`answer_question` gives: ``MemoryStoreError`` is not a per-question
+    outcome, and a run whose store is failing should stop rather than assemble a
+    batch of empty prompts and pay to have them answered.
+
+    Args:
+        harness: The wired pipeline.
+        question: The question to retrieve for.
+
+    Returns:
+        The assembled prompt and everything the post-hoc analysis reads.
+
+    Raises:
+        MemoryStoreError: If either read failed, deliberately unhandled.
+    """
+    asked_at = _moved_clock(harness, question)
+    with correlated_operation() as correlation_id:
+        records = await _read_for(harness, question)
+        return _assembled(correlation_id, records, question, asked_at)
+
+
 async def answer_question(harness: Harness, question: BenchQuestion) -> AnswerAttempt:
     """Retrieve for one question and answer it from what came back.
 
@@ -542,50 +739,23 @@ async def answer_question(harness: Harness, question: BenchQuestion) -> AnswerAt
     Returns:
         The attempt, carrying :attr:`AnswerAttempt.failure` where the provider failed.
     """
-    if question.asked_at is not None:
-        harness.clock.set(question.asked_at)
-    asked_at = harness.clock().isoformat()
+    asked_at = _moved_clock(harness, question)
 
+    # The completion stays *inside* the scope, which is why this does not simply call
+    # `retrieve_for`. It costs nothing recorded — the model seam emits no trace — but
+    # the scope is also what the failure handling below sits in, and that placement is
+    # load-bearing: retrieval has already emitted its traces by the time a provider
+    # fails, and a failure caught outside the scope would lose the id those traces
+    # carry while the cursor walked past them for good.
     with correlated_operation() as correlation_id:
-        beliefs = tuple(
-            await assemble_by_band(
-                harness.store,
-                question.question,
-                limit=harness.retrieval_limit,
-                kinds=BELIEF_KINDS,
-            )
-        )
-        records = beliefs + await _supplement(harness, question.question, preceding=beliefs)
-        context = render_context(records)
+        records = await _read_for(harness, question)
+        prepared = _assembled(correlation_id, records, question, asked_at)
         failure: str | None = None
         answer = ""
         try:
-            reply = await harness.model.complete(
-                [
-                    Message(role=Role.SYSTEM, content=ANSWER_SYSTEM_PROMPT),
-                    Message(
-                        role=Role.USER,
-                        # No "Memory records:" line above the block any more: since
-                        # #1189 the block opens with the product's own heading, and a
-                        # second heading over it would be a section the product never
-                        # emits — reintroducing, one line smaller, exactly the
-                        # divergence that change removed.
-                        content=f"{context}\n\nQuestion: {question.question}",
-                    ),
-                ]
-            )
+            reply = await harness.model.complete(list(prepared.messages))
         except ModelError as error:
             failure = type(error).__name__
         else:
             answer = reply.content.strip()
-    return AnswerAttempt(
-        correlation_id=correlation_id,
-        answer=answer,
-        retrieved_ids=tuple(record.id for record in records),
-        retrieved_kinds=tuple(record.kind for record in records),
-        retrieved_evidence=tuple(_standing_evidence(record) for record in records),
-        retrieved_evidence_elided=tuple(record.provenance.evidence_elided for record in records),
-        context=context,
-        asked_at=asked_at,
-        failure=failure,
-    )
+    return prepared.answered(answer=answer, failure=failure)
