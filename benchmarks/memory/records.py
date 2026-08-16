@@ -249,14 +249,22 @@ class RunManifest(BaseModel):
             **A manifest carrying a positive value here is a run that made the
             supplementary read**, which is why it is recorded rather than left
             implicit in the code the run happened to be cut from. Three states, and
-            they are distinguishable: the pilot's earlier runs predate ADR-0158 and
-            their manifests have no such key at all; a ``0`` is a run whose supplement
-            was **disabled** and never read, because the bound is checked before the
-            store is touched, exactly as ``LearningLoop._supplement`` checks it
-            (ADR-0158 §6 may take the value there in both directions); anything
-            positive is a run that made the read on every question whose belief
-            composition came back non-empty. Imported from the composition root like
-            the budget above, so it cannot name a bound the product does not use.
+            they are distinguishable:
+
+            * ``None`` — the key is **absent**, which is the pilot's earlier runs:
+              their harness predates ADR-0158 and made the belief read alone. It is
+              optional for exactly this reason and no other. Every run this code
+              writes states a number, so a ``None`` is always an older artifact and
+              never a gap in a current one; that is what keeps the comparison this
+              field exists for loadable at all, since the artifact a reader most needs
+              to tell apart from a new one is the one written before the field existed.
+            * ``0`` — the supplement was **disabled** and never read. The bound is
+              checked before the store is touched, exactly as
+              ``LearningLoop._supplement`` checks it, so this is not an empty read
+              (ADR-0158 §6 may take the value there in both directions).
+            * Positive — the read was made, on every question whose belief composition
+              came back non-empty. Imported from the composition root like the budget
+              above, so it cannot name a bound the product does not use.
         conflict_limit: The ingestor's conflict-probe limit.
         observation_batch_size: Turns per observation pass.
         observation_max_proposals: Beliefs one pass may return.
@@ -306,7 +314,7 @@ class RunManifest(BaseModel):
     embedder_kind: str
     embedder_model_id: str
     retrieval_limit: int
-    episodic_limit: int
+    episodic_limit: int | None = None
     conflict_limit: int
     observation_batch_size: int
     observation_max_proposals: int

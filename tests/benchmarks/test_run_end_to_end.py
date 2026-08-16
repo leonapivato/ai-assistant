@@ -29,6 +29,7 @@ from benchmarks.memory.run import case_dir_name, execute_run, plan_run
 from benchmarks.memory.select import first_questions, first_sessions
 from benchmarks.memory.wiring import build_harness
 
+from ai_assistant.app import composition
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError, ModelUnavailableError
 from ai_assistant.core.types import Message, Role
@@ -228,6 +229,31 @@ async def test_the_manifest_records_the_configuration_rather_than_describing_it(
     assert manifest.answer_prompt.startswith("You are answering a question")
     # The offline grader makes no model call, so there is no judge prompt to record.
     assert manifest.judge_prompt is None
+
+
+async def test_a_manifest_written_before_the_episodic_supplement_still_loads(
+    tmp_path: Path,
+) -> None:
+    """The one reason `episodic_limit` is optional, asserted rather than asserted about.
+
+    The field's whole purpose is telling a supplemented run apart from a
+    pre-ADR-0158 one, and the artifacts on the other side of that comparison were
+    written before the key existed. A required field would raise on exactly those,
+    which is the analysis the field exists to make possible. The legacy shape is
+    produced by deleting the key from a real manifest rather than by hand-writing
+    one, so this cannot drift from what the model actually emits.
+    """
+    manifest, run_dir = await _run(tmp_path)
+    written = json.loads((run_dir / "manifest.json").read_text(encoding="utf-8"))
+
+    assert manifest.episodic_limit == composition.EPISODIC_SUPPLEMENT_LIMIT
+    assert written["episodic_limit"] == composition.EPISODIC_SUPPLEMENT_LIMIT
+
+    del written["episodic_limit"]
+    legacy = RunManifest.model_validate(written)
+
+    assert legacy.episodic_limit is None
+    assert legacy.retrieval_limit == manifest.retrieval_limit
 
 
 async def test_the_manifest_records_the_calendar_the_run_distilled_under(
