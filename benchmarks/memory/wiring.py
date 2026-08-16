@@ -153,25 +153,32 @@ class Harness:
         :func:`build_harness` so it also covers a harness derived with
         ``dataclasses.replace``, which is how a test varies these bounds.
 
-        **The type half of the loop's own check is deliberately not mirrored.**
-        ``_check_tuning`` rejects a non-integral or ``bool`` limit because
-        ``LearningLoop`` takes those from a caller; these two are module constants of
-        the composition root, read under ``mypy --strict``, so the equivalent mistake
-        is not reachable without defeating the type checker first — and a runtime
-        ``isinstance`` on a typed constant is a check that can only ever pass.
+        **The type check is mirrored too, and ``bool`` is why.** It looks redundant
+        against ``mypy --strict`` — a ``float`` or a string cannot reach these fields
+        without defeating the checker first — but ``bool`` is an ``int`` subclass, so
+        ``True`` type-checks here and would run the whole supplement at a bound of
+        one. That is the case ``_check_tuning`` calls out in as many words, "a flag is
+        not a count", and it is the one a type annotation cannot hold. The rest of the
+        check comes free once that line is written, and a benchmark's numbers are
+        worth the four lines.
 
         Raises:
+            TypeError: If either bound is not an integer, ``bool`` included.
             ValueError: If ``retrieval_limit`` is not positive, if ``episodic_limit``
                 is negative, or if ``episodic_limit`` exceeds ``retrieval_limit``
                 (ADR-0158 §3). Zero is legal for the episodic bound and disables the
                 supplement, which is a value ADR-0158 §6's arm may choose.
         """
-        if self.retrieval_limit < 1:
-            msg = f"retrieval_limit must be at least 1, got {self.retrieval_limit}"
-            raise ValueError(msg)
-        if self.episodic_limit < 0:
-            msg = f"episodic_limit must be at least 0, got {self.episodic_limit}"
-            raise ValueError(msg)
+        for name, value, floor in (
+            ("retrieval_limit", self.retrieval_limit, 1),
+            ("episodic_limit", self.episodic_limit, 0),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int):
+                msg = f"{name} must be an integer, got {value!r}"
+                raise TypeError(msg)
+            if value < floor:
+                msg = f"{name} must be at least {floor}, got {value}"
+                raise ValueError(msg)
         if self.episodic_limit > self.retrieval_limit:
             msg = (
                 f"episodic_limit must not exceed retrieval_limit (ADR-0158 §3): "
