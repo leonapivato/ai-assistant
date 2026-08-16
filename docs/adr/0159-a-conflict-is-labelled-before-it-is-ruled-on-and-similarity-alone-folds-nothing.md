@@ -507,9 +507,17 @@ every `USER_ASSERTED` proposal, which takes the asserted path and never reaches 
 reconciler at all. And the population that does make one arrives from the observation
 stage, which ADR-0077 §8 already puts on a scheduled job rather than in a turn,
 precisely so that a model round trip on this path is not a latency tax on the user.
-An interactive `learn` or `answer` write is asserted and is unaffected. If a
-deployment finds the queueing material anyway, the answer available to it without a
-new ADR is to run with no reconciler and take §6's floor.
+An interactive `learn` or `answer` write is asserted, so it never
+spends a request of its own — but it is **not** immune to the queue, and the
+distinction is worth stating rather than glossing. An asserted ingest arriving while
+an observed one is mid-request waits on the same lock for as long as that request
+takes. What bounds it is a bound on the *other* ingest: one request, under
+`model_timeout_seconds` × `model_max_attempts`. No priority or isolation scheme is
+ruled here; a lock that let an asserted write overtake a reconciling one would have
+to reason about whether the overtaken conflict snapshot is still good, which is the
+lost-update question ADR-0038 and issue #248 already own and which this ADR is not
+the place to reopen. If a deployment finds the queueing material, the answer
+available to it without a new ADR is to run with no reconciler and take §6's floor.
 
 The degraded behaviour is worth stating as a decision rather than leaving to
 inference, because it is what makes the reconciler *optional machinery*. A
@@ -655,7 +663,18 @@ The lane owes:
   model call; a set holding both a `RESTATES` and a `CONTRADICTS` member rules
   `ACCEPT`; a `SUPERSEDE` on a labelled contradiction leaves an `ADDS` sibling live;
   an unavailable reconciler reproduces §6's floor exactly; and an `EXTERNAL` member
-  is named by neither arm.
+  is named by neither arm while still counting in both purity conditions.
+- Tests pinning the two boundaries §2 and §3 draw, **counted against a recording
+  double rather than inferred from a ruling**, because every ruling they govern is
+  reachable without them and a test that only reads the ruling passes on an
+  implementation that violates both:
+  - **zero** reconciler invocations and **zero** provider requests for a
+    `USER_ASSERTED` proposal, and again for a non-asserted proposal whose conflict
+    set holds a `USER_ASSERTED` member (§2's invocation condition);
+  - **exactly one** provider request for a non-asserted proposal whose conflict set
+    holds several members the `agrees` rung did not settle, and **zero** for one
+    whose members it settled entirely (§3's one-request clause);
+  - the request covers no member beyond `reconciler_max_conflicts` in rank order.
 
 ### 11. What this records against earlier ADRs, under ADR-0082 §1
 
