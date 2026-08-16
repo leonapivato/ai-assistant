@@ -1,7 +1,38 @@
 # 50. Contradiction resolution retires the full conflict set, and defers assertion-vs-assertion
 
-- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause), ADR-0092 (§1's `EXTERNAL` hold-out from the retirement widening) and ADR-0121 (§2's scope over a conflict set whose asserted members all *agree* with the proposal)
+- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause), ADR-0092 (§1's `EXTERNAL` hold-out from the retirement widening), ADR-0121 (§2's scope over a conflict set whose asserted members all *agree* with the proposal) and ADR-0159 (§1's extensional definition of the retirement set, as it reaches a conflict labelled a restatement or an addition)
 - Date: 2026-07-23
+- Partially superseded: 2026-08-16 by ADR-0159 — **§1's extensional definition of
+  the retirement set no longer holds for a conflict a reconciler labelled a
+  restatement or an addition; everything §1 says about why a supersession retires
+  more than its named target stands.** §1 defines the set "precisely" as the named
+  `target` plus "every other detected conflict whose `provenance.source` is in
+  `{OBSERVED, INFERRED}`", and rests that definition on a stated premise: "Every
+  entry in the conflict set the detector surfaced is a same-kind,
+  at-or-above-threshold contradiction of the proposal; they are all the belief being
+  corrected, restated." The pilot-3 anatomy (#1188, #1029) measures that premise
+  false at the ratified threshold — at 0.75 the set is routinely a mixture of
+  restatements, additions and contradictions, with distinct surviving facts pairing
+  at 0.77–0.80.
+  [ADR-0159](0159-a-conflict-is-labelled-before-it-is-ruled-on-and-similarity-alone-folds-nothing.md)
+  §5 therefore excludes from every retirement set any conflict labelled `RESTATES`
+  or `ADDS`, enforced at the writer. Left standing, §1 would have turned the one
+  fact a fold loses into up to `conflict_limit` facts a correction loses, on the
+  observed path ADR-0159 §4 opens.
+
+  **What stands.** §1's ruling that a `SUPERSEDE` names a relation and not a record,
+  and that the applier therefore retires more than the named target, is the whole
+  reason ADR-0159 §5 is a narrowing rather than a repeal. §1's two hold-outs stand:
+  `USER_ASSERTED` conflicts are never swept in — ADR-0159's arm is unreachable with
+  an asserted member present — and the `EXTERNAL` clause stands as ADR-0092 §4 left
+  it, ADR-0159 §4 excluding `EXTERNAL` from its *policy* target classes without
+  touching what a policy that names one explicitly retires. §1's bounded-honesty
+  paragraph, its `conflict_limit` reasoning and its refusal to grow `target_id` are
+  untouched, as are §§2 and 3 and every earlier partial supersession, whose pairs keep
+  their places on the line (ADR-0070 §4's accumulation rule). ADR-0159 §11 applies
+  ADR-0070 §1's test and records this ruling; ADR-0159 lands in the same change, so
+  this line never names an ADR that does not exist, and under ADR-0082 §2 no
+  amendment qualifier joins it. Refs #1188, #1029.
 - Partially superseded: 2026-08-09 by ADR-0121 — **§2's rule is narrowed to
   conflict sets holding an asserted member that *disagrees* with the proposal;
   everything §2 says about a genuine self-contradiction stands.** §2 states its
