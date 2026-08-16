@@ -183,6 +183,22 @@ distinction between what is true of the records and what we have decided to do.
 > probe has resolved the conflict set and before `MemoryPolicy.decide` is called.
 > The relations it returns are passed to `decide` as an argument (§8).
 
+> **Normative.** A reconciler is invoked **exactly when** the proposed record's
+> `provenance.source` is not `USER_ASSERTED` **and** no member of the conflict set
+> is `USER_ASSERTED`. On every other ingest none is invoked, no relation is
+> computed, and `decide` is called with none.
+
+The invocation condition is normative rather than left to a reconciler's own
+economics, because it is a **correctness boundary and not a cost heuristic**. The
+two populations it excludes are already owned: a `USER_ASSERTED` proposal is
+ADR-0121 §2's arm, and a conflict set holding a `USER_ASSERTED` member is the
+`ASK_USER` arm §4 leaves untouched. Neither reads a relation, so computing one there
+would buy nothing and would spend a model request inside the ingest lock on the two
+paths a user waits on — the `learn` and `answer` direct seams, whose proposals are
+asserted. What is left to the reconciler's own economics is only whether a request
+is worth making about the members the `agrees` rung did not settle (§3), which is
+the decision that is unobservable in the ruling.
+
 > **Normative.** No implementation of `MemoryPolicy` consults a `ModelProvider`, a
 > `BatchCompleter`, a store, a clock or a network. `decide` returns the same ruling
 > for the same `proposal`, the same `conflicts` and the same relations, and every
@@ -223,13 +239,27 @@ holding the `ModelProvider` Protocol is not itself an egress boundary; `models/`
 `memory` importing `core.protocols.ModelProvider` is precisely the sanctioned form,
 and `lint-imports` passes it today.
 
-**What ADR-0155 §3 makes of the reconciler's output.** A relation is the output of
-an operation supplied covered content — the stored conflict records — so it is
-covered content, and every covered path of it contains a model call. That is a fact
-about what may cross the `tools/` egress seam and it is recorded here so a later
-lane does not have to re-derive it. It bears on nothing in this ADR: a relation
-never leaves `memory`, and §3's prohibitions are stated over "a span of an egress
-call at the designated `tools/` egress seam", which this is not.
+**What ADR-0155 §3 makes of the reconciler's output, and it is not one answer.**
+Every relation is covered content: it is the output of an operation supplied the
+stored conflict records. But §3's classification is "three-valued at every supply:
+covered with a model call on the path, covered with none, or not covered", and a
+reconciler produces relations in **two** of those classes, not one.
+
+- A relation the model labelled has a model call on every covered path, so §3's
+  *third* clause governs its reaching an egress span.
+- A relation the `agrees` rung labelled (§3) has a covered path with **no** model
+  call — the rung is a string comparison over stored records and nothing else — so
+  §3's *second* clause governs it, which is the absolute prohibition no
+  authorisation cures.
+
+Recording the two as one would put a syntactically-derived relation on the softer
+branch, and a later relaxation of that branch — which §3's third clause explicitly
+reserves to an owner ruling and a commissioned ADR — would then externalise a value
+derived from the store by no model at all. That is the direction §3 exists to
+forbid, so the distinction is written down here rather than left for the lane that
+would get it wrong. It bears on nothing this ADR does: a relation never leaves
+`memory`, and both clauses are stated over "a span of an egress call at the
+designated `tools/` egress seam", which no path here reaches.
 
 **Why not the bulk seam.** ADR-0143 §8 rules that "no subsystem is given a
 `BatchCompleter` by this ADR" and that "a batch runs in the process that submits it
@@ -275,16 +305,16 @@ only where certainty already failed, and it can never overturn a certain answer.
 That is also what bounds the spend: a verbatim restatement costs nothing, and the
 model is asked only about the residue that a string comparison cannot settle.
 
-**The spend condition lives in the reconciler and nowhere else**, which is what
-keeps §2's placement honest. `MemoryIngestor` calls the reconciler once, always,
-without knowing whether a model will be reached; the reconciler decides from record
-facts it can read — the proposal's source, the members' sources, the `agrees`
-result — whether a call is worth making. This matters because a mis-scoped spend is
-**unobservable in the ruling**: consulting the model about a set the policy will not
-read costs money and changes no outcome, and failing to consult it where the policy
-would have read the label degrades to §6's safe default. A reconciler cannot make a
-ruling wrong by getting its own economics wrong, and that is why the economics may
-live there rather than leaking into the ingestor or the policy.
+**What is left to the reconciler's own economics, once §2 has drawn the boundary.**
+`MemoryIngestor` decides *whether a reconciler runs at all*, on §2's normative
+condition, because that is a correctness boundary. Inside it the reconciler decides
+*whether the request is worth making* — whether the `agrees` rung settled every
+member within the bound, whether anything is left to ask about — and that decision
+stays there because a mis-scoped one is **unobservable in the ruling**: asking about
+a member the policy will not read costs money and changes no outcome, and not asking
+where the policy would have read the label degrades to §6's safe default. A
+reconciler cannot make a ruling wrong by getting its own economics wrong. That
+asymmetry is the whole reason the two halves live in different places.
 
 **The temporal clause is not a nicety, it is the pilot's central case.** The 0.77
 pair that opens the Context is exactly two dated facts about one person's
@@ -552,10 +582,16 @@ mapping records which record the reconciler made its statement about, which is t
 one thing a sequence of relations detached from the records could not say.
 
 **The parameter has a default, and the default is what keeps the blast radius
-finite.** Every existing caller compiles unchanged and every existing policy rules
-as it does today when handed nothing. The breaking half is structural conformance:
-an implementation of `MemoryPolicy` must accept the parameter. That is golden rule
-5's breaking change and it is flagged as one; it is also the whole of it.
+finite.** The compatibility it buys is at the **call signature**: every existing
+call site compiles unchanged, and a policy that ignores the parameter is still
+conforming. It is emphatically **not** behavioural compatibility for
+`DefaultMemoryPolicy`, which rules differently when handed no relations than it does
+today — §6 states that degraded behaviour and it is a decision, not a fallback. An
+implementer reading this paragraph as licence to keep the blind fold alive on the
+no-relations path has read it exactly backwards. The breaking half of the contract
+change is structural conformance: an implementation of `MemoryPolicy` must accept
+the parameter. That is golden rule 5's breaking change and it is flagged as one; it
+is also the whole of the *contract* movement.
 
 ### 9. What this does to the measures
 
