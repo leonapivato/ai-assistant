@@ -920,6 +920,13 @@ def test_every_integer_setting_is_discovered() -> None:
         "email_max_messages",
         "email_max_bytes",
         "email_max_content_bytes",
+        # ADR-0159 §3's spend bound, acknowledged here with the same `bool`
+        # argument the caps above carry: `reconciler_max_conflicts=True` is a
+        # bound of one, which asks the model about the best-ranked conflict alone
+        # and leaves every other member unlabelled — a ruling that looks like a
+        # conforming reconciler answering honestly, and is a flag loaded where a
+        # count belongs.
+        "reconciler_max_conflicts",
     }
 
 
