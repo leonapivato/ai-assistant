@@ -26,6 +26,7 @@ rule 4 confines to here.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Final
@@ -743,8 +744,10 @@ async def anthropic_batch_completer(
     residue is not bounded by §11, either, whatever a first reading suggests: §11
     defers wiring a ``BatchCompleter`` into a *subsystem*, and says nothing about
     how long an external consumer's process lives. So the pool is closed on the way
-    out of the block, including when the body raises and when the completer's own
-    construction does.
+    out of the block, including when the body raises, when the completer's own
+    construction does, and when the block is *cancelled* while the close is already
+    in flight — the one exit where a plain ``await client.close()`` would leave the
+    pool held with nothing running that could release it (ADR-0060 §1).
 
     **Scoping it does not cost the resumption story**, which is the objection worth
     answering because §2 is built on a handle outliving the run that made it. It
@@ -791,7 +794,37 @@ async def anthropic_batch_completer(
             max_items=max_items,
         )
     finally:
-        await client.close()
+        # A cancellation arriving *here* must not take the pool with it. The caller
+        # holds no reference to this client — the completer exposes no accessor —
+        # so a close interrupted midway leaves the pool held with nothing running
+        # that could ever release it, which is the exact shape ADR-0060 §1 forbids.
+        # The close therefore runs as a task of its own and is awaited through a
+        # shield: a cancellation delivered while it is in flight is deferred and
+        # re-raised once it has finished ("a method may defer delivery while it
+        # makes its resources safe, but it re-raises"). The wait loops because a
+        # second cancellation may arrive while the first is being absorbed — the
+        # same loop `planning/sqlite_store.py` runs around its worker.
+        #
+        # The deferral is **unbounded**, which §1 permits so long as it is said:
+        # what is waited on is the transport releasing its sockets, and there is no
+        # shorter wait that ends with the pool closed.
+        #
+        # A close that *fails* propagates instead, and on a raising body it replaces
+        # that exception rather than being swallowed under it — keeping it as
+        # ``__context__``. That is what ``await client.close()`` in this ``finally``
+        # has always done, and it is kept deliberately: a pool that would not close
+        # is the news this block exists to deliver, and the body's own failure is
+        # still in the traceback. Where a cancellation and a failed close are both in
+        # hand the cancellation wins, as it does in `sqlite_store`.
+        closing = asyncio.create_task(client.close())
+        cancellation: asyncio.CancelledError | None = None
+        while not closing.done():
+            try:
+                await asyncio.shield(closing)
+            except asyncio.CancelledError as exc:
+                cancellation = exc
+        if cancellation is not None:
+            raise cancellation
 
 
 def _snapshot(items: Sequence[BatchRequest]) -> tuple[BatchRequest, ...]:
