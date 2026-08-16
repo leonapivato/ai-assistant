@@ -19,6 +19,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import pytest
+from benchmarks.memory.answer import answer_question
 from benchmarks.memory.cases import BenchCase, BenchQuestion, BenchSession, BenchTurn
 from benchmarks.memory.corpora.provenance import LOCOMO
 from benchmarks.memory.ingest import ingest_case
@@ -27,6 +28,7 @@ from benchmarks.memory.run import case_dir_name, execute_run, plan_run
 from benchmarks.memory.wiring import build_harness
 
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.core.types import MemoryKind
 from ai_assistant.orchestration.conversations import CaptureReport
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
@@ -263,3 +265,116 @@ async def test_the_split_is_decidable_from_the_records_with_the_stores_deleted(
     # a question whose evidence maps to nothing intersects nothing.
     uncited = records[1]
     assert not {episode for pointers in uncited.evidence_episode_ids for episode in pointers}
+
+
+async def test_a_retrieved_episode_stands_on_its_own_id(tmp_path: Path) -> None:
+    """#1187: the supplement's episodes carry evidence, so ADR-0158 is attributable.
+
+    An episode cites nothing — capture writes ``evidence`` empty on purpose, because an
+    episode is the terminal citation and requiring it to cite something would demand a
+    regress. Read literally, that gave every supplemented episode an empty tuple here,
+    and the pilot-3 partial recorded 6,735 of them: the intersection ADR-0158's
+    attribution is *defined as* was zero by construction, so no rescue could ever be
+    credited however many the supplement made.
+
+    The store is filled by ingestion and then read exactly as ``answer_question`` reads
+    it, so the episode under test is one capture actually minted and its id is one
+    ``evidence_episodes`` could have mapped a pointer to.
+    """
+    harness = build_harness(
+        _settings(tmp_path),
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider("a dog"),
+        observer=FakeObserver(max_batch_size=BATCH),
+    )
+    try:
+        await ingest_case(harness, _case(), batch_size=BATCH)
+        attempt = await answer_question(harness, _case().questions[0])
+    finally:
+        harness.close()
+
+    episodic = {
+        record_id: evidence
+        for record_id, kind, evidence in zip(
+            attempt.retrieved_ids,
+            attempt.retrieved_kinds,
+            attempt.retrieved_evidence,
+            strict=True,
+        )
+        if MemoryKind(kind) is MemoryKind.EPISODIC
+    }
+    assert episodic, "the supplement contributed nothing, so this proves nothing"
+    for record_id, evidence in episodic.items():
+        assert evidence[0] == record_id
+        assert len(set(evidence)) == len(evidence)
+
+
+async def test_the_split_credits_an_answer_the_supplement_alone_supported(
+    tmp_path: Path,
+) -> None:
+    """The attribution #1187 unblocks, computed the one way P8 is computed.
+
+    The gold set is the episodes this question's corpus pointers became; the retrieved
+    set is the union of ``retrieved_evidence``. Restricted to the *episodic* rows, that
+    intersection is now non-empty for a question whose evidence turn was retrieved as
+    an episode — which is exactly "the ADR-0158 supplement put the evidence in context",
+    and was unrepresentable before.
+    """
+    harness = build_harness(
+        _settings(tmp_path),
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider("a dog"),
+        observer=FakeObserver(max_batch_size=BATCH),
+    )
+    try:
+        summary = await ingest_case(harness, _case(), batch_size=BATCH)
+        attempt = await answer_question(harness, _case().questions[0])
+    finally:
+        harness.close()
+
+    gold = {episode for key in ("D1:1",) for episode in summary.evidence_episodes.get(key, ())}
+    from_episodes = {
+        episode
+        for kind, evidence in zip(attempt.retrieved_kinds, attempt.retrieved_evidence, strict=True)
+        if MemoryKind(kind) is MemoryKind.EPISODIC
+        for episode in evidence
+    }
+    assert gold
+    assert gold & from_episodes
+
+
+async def test_a_belief_still_reports_only_the_episodes_it_cites(tmp_path: Path) -> None:
+    """The other half of #1187: nothing was added to the belief rows.
+
+    A belief's own id is a *generated belief* id and belongs to no evidence space, so
+    putting it here would inject ids that can never intersect a gold set and would
+    inflate any count taken over this field. The rule is per kind, and this is the kind
+    it does not touch.
+    """
+    harness = build_harness(
+        _settings(tmp_path),
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider("a dog"),
+        observer=FakeObserver(max_batch_size=BATCH),
+    )
+    try:
+        await ingest_case(harness, _case(), batch_size=BATCH)
+        attempt = await answer_question(harness, _case().questions[0])
+        held = await harness.store.get_many(list(attempt.retrieved_ids))
+    finally:
+        harness.close()
+
+    beliefs = [
+        (record_id, evidence)
+        for record_id, kind, evidence in zip(
+            attempt.retrieved_ids,
+            attempt.retrieved_kinds,
+            attempt.retrieved_evidence,
+            strict=True,
+        )
+        if MemoryKind(kind) is not MemoryKind.EPISODIC
+    ]
+    assert beliefs, "the belief composition contributed nothing, so this proves nothing"
+    for record_id, evidence in beliefs:
+        assert record_id not in evidence
+        assert evidence == tuple(held[record_id].provenance.evidence)

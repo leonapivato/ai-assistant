@@ -308,14 +308,31 @@ class AnswerAttempt:
             a right answer whose supporting episode no retrieved belief cites — this
             says how much of any improvement the supplement bought, per question,
             without a second run.
-        retrieved_evidence: The **episode ids** each retrieved record cites, aligned
-            with ``retrieved_ids``. This is the retrieval half of #1074's join: the
-            corpus names its evidence by turn, ingestion records which episode each
-            cited turn became, and this says which episodes stand behind the beliefs
-            that actually reached the prompt. Read off ``provenance.evidence``, the
+        retrieved_evidence: The **episode ids standing behind** each retrieved record,
+            aligned with ``retrieved_ids``. This is the retrieval half of #1074's join:
+            the corpus names its evidence by turn, ingestion records which episode each
+            cited turn became, and this says which episodes stand behind what actually
+            reached the prompt. For a belief it is ``provenance.evidence``, the
             producer's own citation list, which outlives the episode it names — so the
             join survives a finite ``episode_retention`` that already expired the
             episode itself.
+
+            **For an episode it is the episode's own id, and that is #1187.** An
+            episode cites nothing — capture leaves ``evidence`` empty deliberately,
+            because "an episode is the terminal citation ... so requiring it to cite
+            something would demand a regress"
+            (``orchestration.conversations.ConversationLifecycle._episode``). Reading
+            the field literally therefore gave every supplemented episode an empty
+            tuple, and the pilot-3 partial recorded 6,735 of them: the intersection
+            ADR-0158's attribution is defined as was zero *by construction*, so the
+            supplement could not be credited with a single rescue however many it made.
+            Naming the record itself is not a workaround for that — it is what the
+            field already means. ``evidence_episode_ids`` holds generated **episode
+            ids** (``IngestionSummary.evidence_episodes`` maps a corpus pointer to the
+            ``conv:<conversation>:<ordinal>`` id capture minted), and a retrieved
+            episode's own id is drawn from that same space, so
+            ``gold ∩ retrieved_evidence`` needs no special case for kind and the
+            post-hoc split reads one rule over both groups.
         retrieved_evidence_elided: ``provenance.evidence_elided`` per retrieved
             record, aligned with ``retrieved_ids``. Non-zero means the belief has
             **stopped carrying** some of its citations (ADR-0086 §4), so an empty
@@ -458,6 +475,35 @@ async def _supplement(
     return tuple(record for record in found.records if record.id not in held)
 
 
+def _standing_evidence(record: MemoryRecord) -> tuple[str, ...]:
+    """The episode ids standing behind one retrieved record (#1187).
+
+    A belief stands on the episodes it cites. An **episode stands on itself**: it is
+    the terminal citation, so capture writes it with an empty ``evidence`` on purpose,
+    and reading that field literally made every supplemented episode contribute nothing
+    to the join ADR-0158's attribution is computed from. Both ids come from the same
+    space — ``evidence_episode_ids`` holds captured episode ids, and a retrieved
+    episode's ``id`` is one — so this makes ``gold ∩ retrieved_evidence`` a single rule
+    over both kinds rather than two rules and a branch in every reader.
+
+    The record's own citations are kept after its id rather than replaced by it: an
+    episode this harness writes carries none, but ``EpisodicMemory`` does not forbid
+    them, and dropping a citation that was there would lose evidence to make a shape
+    tidy. The id is filtered out of the tail so a self-citation cannot appear twice and
+    inflate a count someone takes over this tuple.
+
+    Args:
+        record: A record that reached the prompt.
+
+    Returns:
+        The ids, the record's own first where it is an episode.
+    """
+    cited = tuple(record.provenance.evidence)
+    if MemoryKind(record.kind) is not MemoryKind.EPISODIC:
+        return cited
+    return (record.id, *(identifier for identifier in cited if identifier != record.id))
+
+
 async def answer_question(harness: Harness, question: BenchQuestion) -> AnswerAttempt:
     """Retrieve for one question and answer it from what came back.
 
@@ -537,7 +583,7 @@ async def answer_question(harness: Harness, question: BenchQuestion) -> AnswerAt
         answer=answer,
         retrieved_ids=tuple(record.id for record in records),
         retrieved_kinds=tuple(record.kind for record in records),
-        retrieved_evidence=tuple(tuple(record.provenance.evidence) for record in records),
+        retrieved_evidence=tuple(_standing_evidence(record) for record in records),
         retrieved_evidence_elided=tuple(record.provenance.evidence_elided for record in records),
         context=context,
         asked_at=asked_at,
