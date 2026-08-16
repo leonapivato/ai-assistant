@@ -1075,9 +1075,14 @@ async def test_the_prompt_asks_a_belief_to_keep_the_particulars_the_evidence_giv
     await observer.observe(batch_of(1))
 
     system, _ = _prompt_of(provider)
-    assert "keep the concrete particulars the evidence gives" in system
-    assert "the proper names, places, organisations and quantities involved" in system
-    assert "State a trait alone only where the evidence gives no particular" in system
+    assert "keep the concrete particulars the belief is about" in system
+    assert (
+        "the proper names, places, organisations and quantities that identify or qualify" in system
+    )
+    assert (
+        "Where the evidence gives no particular the belief is about, state the trait alone"
+        in system
+    )
 
 
 async def test_the_specificity_paragraph_reopens_nothing_the_bar_refuses() -> None:
@@ -1117,6 +1122,9 @@ async def test_a_belief_that_names_a_particular_reaches_the_record_unaltered() -
     would defeat the prompt edit above without touching it.
     """
     content = "the user climbs at Boulder Barn in Leeds on Tuesdays, and has since 7 May 2023"
+    # Every particular in it is one the belief is *about* — the venue, the city, the
+    # recurrence — so this is the shape the paragraph above asks for, not a case of
+    # the incidental detail it excludes.
     observer, _ = _observer(_envelope(_belief(evidence=["E1"], content=content)), timezone=_ZONE)
 
     outcome = await observer.observe(
@@ -1160,10 +1168,40 @@ async def test_keeping_the_particulars_never_dates_a_belief_the_time_rule_undate
     await observer.observe(batch_of(1))
 
     system, _ = _prompt_of(provider)
-    assert "dates and quantities" not in system, "the enumeration must not name dates"
+    assert "quantities, dates" not in system, "the enumeration must not name dates"
+    assert "organisations, dates" not in system, "the enumeration must not name dates"
     assert "Times are the one exception" in system
     assert "keeping the particulars is never a reason to date a belief" in system
     assert _UNDATED_TRAIT_REFUSAL[timezone] in system
     assert system.index("keep the concrete particulars") < system.index(
         _UNDATED_TRAIT_REFUSAL[timezone]
     ), "the section it defers to has to come after it"
+
+
+@pytest.mark.parametrize("timezone", [None, _ZONE], ids=["no-zone", "zoned"])
+async def test_the_particulars_kept_are_scoped_to_the_belief_and_not_the_exchange(
+    timezone: str | None,
+) -> None:
+    """Specificity is not a licence to retain whoever else was in the room.
+
+    On *"at Acme's dinner with Priya I realised I prefer vegan meals"*, the durable
+    belief is the preference; Acme and Priya identify nothing about it and qualify
+    nothing about it. An unscoped instruction would keep them, which is ADR-0077 §2's
+    transcript failure mode arriving one belief at a time — third-party personal data
+    at indefinite retention because it shared a sentence with something durable — and
+    more than ADR-0004 §7's minimisation allows.
+
+    The prompt therefore scopes by the particular's *role* rather than by its
+    category, which is the only test that separates the two: the same proper name is
+    kept where it is the thing believed and dropped where it merely attended. Both
+    halves are pinned, because the scoping sentence without the exclusion sentence
+    still reads as "keep the names".
+    """
+    observer, provider = _observer(_envelope(), timezone=timezone)
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "that identify or qualify the thing believed" in system
+    assert "whoever happened to be present" in system
+    assert "are the exchange, not the belief, and are left out" in system
