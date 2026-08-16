@@ -1079,10 +1079,7 @@ async def test_the_prompt_asks_a_belief_to_keep_the_particulars_the_evidence_giv
     assert (
         "the proper names, places, organisations and quantities that identify or qualify" in system
     )
-    assert (
-        "Where the evidence gives no particular the belief is about, state the trait alone"
-        in system
-    )
+    assert "where it gives no particular the belief is about, state the trait alone" in system
 
 
 async def test_the_specificity_paragraph_reopens_nothing_the_bar_refuses() -> None:
@@ -1205,3 +1202,37 @@ async def test_the_particulars_kept_are_scoped_to_the_belief_and_not_the_exchang
     assert "that identify or qualify the thing believed" in system
     assert "whoever happened to be present" in system
     assert "are the exchange, not the belief, and are left out" in system
+
+
+@pytest.mark.parametrize("timezone", [None, _ZONE], ids=["no-zone", "zoned"])
+async def test_the_prompt_asks_for_no_particular_the_evidence_does_not_give(
+    timezone: str | None,
+) -> None:
+    """The failure mode specific to asking for concreteness: inventing it.
+
+    An instruction to name the thing is an invitation to name more than the evidence
+    names — to read one climbing session into *"goes to the Tuesday session every
+    week"*. That would be a fabricated routine wearing an ``OBSERVED`` label, and the
+    citation check cannot catch it: it verifies that the cited episodes exist and were
+    in the batch (ADR-0077 §3), never what they support.
+
+    Three things are pinned, because the clause alone is not the whole defence. The
+    prohibition itself; that the example does not model the error — it names the venue
+    without asserting a recurrence, so *"Tuesday"* must not appear in it; and that the
+    paragraph still sits directly above the two epistemic steps, which is where the
+    mechanism takes over from the wording. A model that labels its leap honestly is
+    refused by the evidence floor rather than by this paragraph
+    (``test_an_inferred_entry_below_the_evidence_floor_is_discarded``).
+    """
+    observer, provider = _observer(_envelope(), timezone=timezone)
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "Add nothing the evidence does not give" in system
+    assert "a particular you cannot point to in a cited episode is an invention" in system
+    assert "one occasion is not a routine" in system
+    assert "Tuesday" not in system, "the worked example must not model a recurrence claim"
+    assert system.index("Add nothing the evidence does not give") < system.index(
+        "a generalisation from a single episode will be discarded"
+    )
