@@ -1,7 +1,64 @@
 # 158. An episode may supplement the answering prompt, and never shares the belief budget
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0160 (§3's value clause, §6's arm mandate and retraction predicate, and §8's first bullet)
 - Date: 2026-08-15
+- Partially superseded: 2026-08-16 by ADR-0160 — **the bound's *value* moves from
+  5 to 15, the separately registered ablation arm is retired in favour of post-hoc
+  attribution on a scored run, and §6's 118/69 baselines and retraction predicate
+  are restated. §3's ceiling — the clause this ADR calls the thesis in checkable
+  form — is untouched, and so is every other clause of §3.**
+  [ADR-0160](0160-the-episodic-bound-meets-the-belief-budget-and-post-hoc-attribution-replaces-the-ablation-arm.md)
+  §1 sets the bound to 15 on #1029's pilot-3 partial anatomy (run `8a8f7a033b3c`):
+  episode recall@5 55.3% against recall@15 72.7%, with the gold episode's presence
+  in the prompt worth 78–81% correct against 36.6% for a belief citing the same
+  fact, while belief recall is saturated at its 63.1% ceiling. §§3–4 record the
+  owner's rulings of 2026-08-15 (no per-fix arms, on cost) and 2026-08-16 (the
+  beliefs-vs-episodes arm "given up in favour of post-hoc attribution — weaker, and
+  said so"), both on #1029 and both predating that ADR.
+
+  **Replaced**, in three scopes. First, §3's value clause — *"The episodic bound's
+  ratified initial value is **5**, against a belief budget of 15. It moves only on
+  the measurement §6 specifies"* — and with it §8's first bullet, *"The bound's
+  value beyond its ratified initial 5. §6's arm owns it, in both directions"*. A
+  reader holding only this ADR would configure 5 and would wait for a measurement
+  nobody will take. Second, §6's arm mandate — the second sentence of its first
+  clause, *"Its effect is measured in a separately registered arm, run after
+  #1163's lane 7 lands, from a ref containing it"* — together with the four
+  reporting clauses whose subject is that arm, which ADR-0160 §3 re-states with the
+  scored run as their subject rather than dropping. Third, §6's retraction
+  predicate and its baselines of 118 `correct` and 69 `attempted-wrong`: those were
+  measured on `bench-pilot-1`, which declined 85.7% of answerable LoCoMo questions
+  because of a harness prompt artifact since fixed, so a literal application to any
+  later run retracts this decision for a change it does not measure — pilot-3's
+  partial already shows `wrong-with-gold-in-prompt` at 121. Each of the three is a
+  rule a reader obeys rather than an explanation of one, which is
+  [ADR-0070](0070-amendment-and-supersession-rules.md) §1's test for a change to
+  what was decided.
+
+  **Not replaced, and it is most of this ADR.** §3's ceiling clause — *"The
+  configured episodic bound never exceeds the configured belief budget"* — stands
+  exactly as ratified; ADR-0160 §2 rules that meeting it is not exceeding it, which
+  reads the clause no more widely than its text, and notes that at 15 against 15 the
+  clause binds for the first time. §3's other clauses — the separate `kinds` and
+  `bands`-restricted read, the refusal to reduce or share the belief budget, and the
+  non-`DERIVED` revisit clause — are untouched, as are §1, §2, §4, §5, §7 in whole,
+  the first sentence of §6's first clause (obeyed: the supplement went into
+  `bench-pilot-3`, not `bench-pilot-2`), and every bullet of §8 but the first —
+  including the byte bound, which ADR-0160 §5 deliberately leaves open.
+
+  **The `Status` line takes its first pair.** It was plain `Accepted`, so the
+  leading-token form of ADR-0070 §4 replaces it and the scope names the clauses
+  rather than another ADR, keeping every `ADR-NNNN` on the line a target. ADR-0160
+  lands **in the same change as this note**, so this line never names an ADR that
+  does not exist — the hazard ADR-0070 §1 guards against — and if that change does
+  not land, neither does this. While ADR-0160 is still `Proposed`, the line names a
+  supersession that is **drafted rather than ratified**, the form ADR-0075
+  established and which
+  [ADR-0083](0083-the-hub-is-a-resident-process.md) §15 rules outright: *"the
+  existence condition is that the naming ADR ships in the same change, not that it
+  has ratified"*. Appended note per ADR-0070 §1; no ratified text below it is
+  rewritten — §3's "5 against a belief budget of 15" prose and §6's predicate stay
+  as written, and this note records that they no longer govern. Refs #1190, #1029.
 - **Changes no Protocol's *shape* and no `core` type's fields, and widens the
   documented semantics of two — flagged under golden rule 5 rather than smuggled.** The read §1 admits is
   `MemoryStore.search` called with a different `kinds` argument, which
