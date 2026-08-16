@@ -102,20 +102,24 @@ def test_the_harness_episodic_budget_is_the_composition_root_s(tmp_path: Path) -
 
 
 @pytest.mark.parametrize(
-    "bound",
+    ("bound", "error"),
     [
-        pytest.param(composition.RETRIEVAL_LIMIT + 1, id="above-the-belief-budget"),
-        pytest.param(-1, id="negative"),
+        pytest.param(composition.RETRIEVAL_LIMIT + 1, ValueError, id="above-the-belief-budget"),
+        pytest.param(-1, ValueError, id="negative"),
+        # `True` is the case the annotation cannot hold: `bool` is an `int` subclass,
+        # so this type-checks and would run the supplement at a bound of one.
+        pytest.param(True, TypeError, id="a-flag-is-not-a-count"),
+        pytest.param(1.5, TypeError, id="non-integral"),
     ],
 )
 def test_a_harness_may_not_carry_an_episodic_bound_the_product_would_refuse(
-    tmp_path: Path, bound: int
+    tmp_path: Path, bound: object, error: type[Exception]
 ) -> None:
-    """ADR-0158 §3's ceiling, held by construction rather than by provenance.
+    """ADR-0158 §3's ceiling and the loop's own tuning check, held by construction.
 
-    The bound `build_harness` sets is always the composition root's, so this is not
-    reachable from a run — but a harness derived with `dataclasses.replace`, which is
-    how a test varies the bound, would otherwise measure a configuration
+    The bound `build_harness` sets is always the composition root's, so none of this
+    is reachable from a run — but a harness derived with `dataclasses.replace`, which
+    is how a test varies the bound, would otherwise measure a configuration
     `LearningLoop.__init__` refuses to start under. Zero is *not* in this list because
     zero is legal and disables the supplement.
     """
@@ -126,8 +130,25 @@ def test_a_harness_may_not_carry_an_episodic_bound_the_product_would_refuse(
         observer=FakeObserver(),
     )
     try:
-        with pytest.raises(ValueError, match="episodic_limit"):
-            dataclasses.replace(harness, episodic_limit=bound)
+        with pytest.raises(error, match="episodic_limit"):
+            dataclasses.replace(harness, episodic_limit=bound)  # type: ignore[arg-type]
+    finally:
+        harness.close()
+
+
+def test_a_harness_may_not_carry_a_belief_budget_the_product_would_refuse(
+    tmp_path: Path,
+) -> None:
+    """The same check on the budget beside it, which `LearningLoop` requires positive."""
+    harness = build_harness(
+        Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING),
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider(),
+        observer=FakeObserver(),
+    )
+    try:
+        with pytest.raises(ValueError, match="retrieval_limit"):
+            dataclasses.replace(harness, retrieval_limit=0, episodic_limit=0)
     finally:
         harness.close()
 
