@@ -270,15 +270,16 @@ async def test_every_record_carries_its_correlation_id(tmp_path: Path) -> None:
 async def test_the_traces_report_the_retrieval_calls_each_answer_made(
     tmp_path: Path,
 ) -> None:
-    """#1029's P4. One to three, because `assemble_by_band` reads band by band and
-    stops once the budget is full — and above zero, which is what proves the
-    correlation scope actually reaches the store's emitter."""
+    """#1029's P4. One to four: `assemble_by_band` reads band by band and stops once
+    the budget is full, which is up to three, and ADR-0158's episodic supplement is a
+    fourth read of its own. Above zero is what proves the correlation scope actually
+    reaches the store's emitter."""
     _, run_dir = await _run(tmp_path)
 
     records = read_jsonl(run_dir / "records.jsonl", QuestionRecord)
 
     for record in records:
-        assert 1 <= record.telemetry.search_calls <= 3
+        assert 1 <= record.telemetry.search_calls <= 4
         assert record.telemetry.outcomes == ("ok",) * record.telemetry.search_calls
         assert len(record.telemetry.limit) == record.telemetry.search_calls
 
@@ -318,18 +319,36 @@ async def test_beliefs_distilled_from_the_conversation_reach_the_prompt(
 ) -> None:
     """The end-to-end property: capture wrote episodes, observation distilled them
     into the store, and retrieval found them. A run where this is empty is a run
-    whose scores would be about an empty memory."""
+    whose scores would be about an empty memory.
+
+    Since ADR-0158 the prompt legitimately carries episodes too, so the belief half is
+    read off the leading run rather than off the whole set — and the split doubles as
+    §4's ordering asserted where it is observable from the artifact a reader has: an
+    episode ahead of a belief here would be the interleaving the ADR forbids."""
     _, run_dir = await _run(tmp_path)
 
     records = read_jsonl(run_dir / "records.jsonl", QuestionRecord)
 
     assert records[0].retrieved_ids
     assert records[0].context_chars > 0
-    assert set(records[0].retrieved_kinds) <= {"semantic", "preference", "procedural"}
+    kinds = records[0].retrieved_kinds
+    beliefs = tuple(kind for kind in kinds if kind != "episodic")
+    assert beliefs, "no belief reached the prompt, so the distillation half proved nothing"
+    assert set(beliefs) <= {"semantic", "preference", "procedural"}
+    assert kinds[: len(beliefs)] == beliefs, "an episode was placed ahead of a belief"
 
 
 async def test_the_answer_reads_only_retrieved_context(tmp_path: Path) -> None:
-    """The corpus is not reachable from the answering path; only the record list is."""
+    """The corpus is not reachable from the answering path; only the record list is.
+
+    **The witness had to change with ADR-0158 and the property did not.** A verbatim
+    corpus turn now reaches the prompt legitimately, as an episode the supplement
+    retrieved, so "this turn's text is absent" stopped being evidence of anything. What
+    still holds — and is what the module claims — is that the corpus reaches the model
+    *only* through records the store returned: the turn appears inside a rendered
+    record and nowhere else in what was sent, and the corpus fields no record can carry
+    (the answer key, the evidence pointer, the case's other question) appear nowhere at
+    all."""
     settings = _settings(tmp_path)
     model = FakeModelProvider("a dog")
     plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH)
@@ -345,7 +364,17 @@ async def test_the_answer_reads_only_retrieved_context(tmp_path: Path) -> None:
     )
 
     sent = "\n".join(message.content for message in model.calls[0].messages)
-    assert "Bo: Lovely name." not in sent
+    block = sent.split("Memory records:\n", 1)[1].split("\n\nQuestion:", 1)[0]
+    rendered = [json.loads(line.split("] ", 1)[1]) for line in block.splitlines() if line]
+
+    assert any("Bo: Lovely name." in json.dumps(record) for record in rendered), (
+        "the fixture no longer puts a corpus turn in the prompt, so this proves nothing"
+    )
+    assert "Bo: Lovely name." not in sent.replace(block, ""), (
+        "a corpus turn reached the prompt outside the retrieved records"
+    )
+    for withheld in ("No such information", "D1:1", "Did Ada adopt a cat?"):
+        assert withheld not in sent, f"{withheld!r} is corpus material no record carries"
     assert "Question: What did Ada adopt?" in sent
 
 
@@ -559,7 +588,7 @@ async def test_a_failed_answer_keeps_the_retrieval_it_actually_made(
 
     assert failed.answer == ""
     assert failed.retrieved_ids
-    assert 1 <= failed.telemetry.search_calls <= 3
+    assert 1 <= failed.telemetry.search_calls <= 4
     assert failed.telemetry.returned_ids
 
 

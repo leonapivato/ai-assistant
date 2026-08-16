@@ -19,11 +19,12 @@ decides what lands in memory is the production object: the same
 ``DefaultMemoryPolicy``, the same ``MemoryIngestor``, the same
 ``SqliteTraceStore``.
 
-**The two cardinality controls are imported, not copied.** ``RETRIEVAL_LIMIT`` and
-``CONFLICT_LIMIT`` come from ``ai_assistant.app.composition`` itself, so a benchmark
-cannot silently measure a retrieval budget the product does not use. That is the one
-guard against this module drifting from the composition root it mirrors, and it is
-worth more than a comment asking a reader to keep them in step.
+**The three cardinality controls are imported, not copied.** ``RETRIEVAL_LIMIT``,
+``EPISODIC_SUPPLEMENT_LIMIT`` and ``CONFLICT_LIMIT`` come from
+``ai_assistant.app.composition`` itself, so a benchmark cannot silently measure a
+retrieval budget the product does not use. That is the one guard against this module
+drifting from the composition root it mirrors, and it is worth more than a comment
+asking a reader to keep them in step.
 
 **Two deliberate deviations, both recorded because they move a number.**
 
@@ -45,7 +46,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from ai_assistant.app.composition import CONFLICT_LIMIT, RETRIEVAL_LIMIT
+from ai_assistant.app.composition import (
+    CONFLICT_LIMIT,
+    EPISODIC_SUPPLEMENT_LIMIT,
+    RETRIEVAL_LIMIT,
+)
 from ai_assistant.core.config import EmbedderKind
 from ai_assistant.evaluation import SqliteTraceStore
 from ai_assistant.learning import ModelBackedObserver
@@ -108,6 +113,12 @@ class Harness:
             a pilot that changed one without recording it would be uninterpretable.
         retrieval_limit: The budget ``assemble_by_band`` fills, straight from the
             composition root.
+        episodic_limit: The budget the answering turn's **episodic supplement** fills
+            (ADR-0158 §3), straight from the composition root and never a share of
+            ``retrieval_limit`` — the two are two budgets, so a question asks for 15
+            beliefs *and* up to 5 episodes. Held beside the belief budget rather than
+            derived from it because §3's ceiling clause is what the composition root
+            already enforces; the harness reads both numbers and invents neither.
         data_dir: Where this case's databases live.
     """
 
@@ -121,6 +132,7 @@ class Harness:
     model_route: str
     observer_route: str
     retrieval_limit: int
+    episodic_limit: int
     data_dir: Path
     #: Held only so :meth:`close` can reach them; nothing else names either. They are
     #: injected into the stages above, which is where the rest of the harness meets
@@ -299,6 +311,7 @@ def build_harness(
         model_route=model_route,
         observer_route=observer_route,
         retrieval_limit=RETRIEVAL_LIMIT,
+        episodic_limit=EPISODIC_SUPPLEMENT_LIMIT,
         data_dir=data_dir,
         conversations=conversations,
         deferrals=deferrals,

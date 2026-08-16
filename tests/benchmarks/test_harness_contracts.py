@@ -1,8 +1,9 @@
-"""The three places the harness copies or mirrors something the package owns.
+"""The four places the harness copies or mirrors something the package owns.
 
 Each of them is a silent-staleness hazard: a literal that stops matching, a limit that
-stops tracking the composition root, a refusal that stops being enforced. None is
-caught by a type check, so each has a test.
+stops tracking the composition root, a refusal that stops being enforced, a read whose
+shape drifts from the one the product performs. None is caught by a type check, so each
+has a test.
 """
 
 from __future__ import annotations
@@ -14,7 +15,7 @@ from unittest import mock
 from zoneinfo import ZoneInfo
 
 import pytest
-from benchmarks.memory import records
+from benchmarks.memory import answer, records
 from benchmarks.memory.corpora import fetch as fetch_module
 from benchmarks.memory.corpora.fetch import (
     CorpusFetchError,
@@ -39,6 +40,7 @@ from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import traces as memory_traces
+from ai_assistant.orchestration import loop as orchestration_loop
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
 
@@ -76,6 +78,41 @@ def test_the_harness_retrieval_budget_is_the_composition_root_s(tmp_path: Path) 
         assert harness.retrieval_limit == composition.RETRIEVAL_LIMIT
     finally:
         harness.close()
+
+
+def test_the_harness_episodic_budget_is_the_composition_root_s(tmp_path: Path) -> None:
+    """ADR-0158 §3's supplement budget, imported like the belief budget beside it.
+
+    The ceiling is asserted here as well as in the product, because it is the clause
+    §3 puts the thesis in: whatever the numbers become, nobody can configure a system
+    that asks for more transcript than belief — and a harness measuring one would
+    publish it as this system's behaviour."""
+    harness = build_harness(
+        Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING),
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider(),
+        observer=FakeObserver(),
+    )
+    try:
+        assert harness.episodic_limit == composition.EPISODIC_SUPPLEMENT_LIMIT
+        assert harness.episodic_limit <= harness.retrieval_limit
+    finally:
+        harness.close()
+
+
+def test_the_supplement_reads_the_kinds_and_bands_the_loop_reads() -> None:
+    """The equivalence guard on ADR-0158's read, and the reason it is a test.
+
+    ``answer.py`` mirrors ``LearningLoop._supplement`` by hand — the harness must not
+    run the engine — and the loop's two constants are *private*, so they are copied
+    rather than imported: a benchmark does not get to widen a subsystem's public
+    surface for its own convenience. This is what makes the copy honest. Widening
+    either side alone is the failure it exists for, and both are the kind of edit that
+    looks harmless: `EPISODIC` joining the belief kinds is exactly what §2 forbids,
+    and a `None` band is the flat read §3 refuses by name.
+    """
+    assert answer.SUPPLEMENT_KINDS == orchestration_loop._SUPPLEMENT_KINDS
+    assert answer.SUPPLEMENT_BANDS == orchestration_loop._SUPPLEMENT_BANDS
 
 
 def test_the_harness_reports_the_routes_the_settings_name(tmp_path: Path) -> None:
