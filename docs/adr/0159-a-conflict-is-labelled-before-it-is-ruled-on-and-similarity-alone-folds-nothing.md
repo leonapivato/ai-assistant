@@ -630,16 +630,38 @@ and one is not, and the corpus is owed the arithmetic rather than the conclusion
 > **Normative.** `MemoryPolicy.decide`'s docstring states the determinism obligation
 > §2 ratifies, in the terms `NotificationPolicy`'s already uses.
 
+> **Normative.** The value passed as `relations` is a **runtime** read-only mapping
+> — `types.MappingProxyType` over the caller's mapping, or an equivalent that no
+> `isinstance(..., dict)` narrowing turns back into a mutable object. A caller never
+> passes the mutable mapping it holds.
+
+> **Normative.** §5's `RESTATES`/`ADDS` exclusion is evaluated against a mapping the
+> writer holds and has handed to no policy. A relation the writer reads to determine
+> what a `SUPERSEDE` retires is never one a `MemoryPolicy` was given the opportunity
+> to change.
+
 **The type is spelled out because a conformance obligation cannot substitute for
-it.** `Mapping` rather than `dict`, so the callee is handed a read-only view and no
-policy can mutate what the ingestor holds. `str` keys, because they are
-`MemoryRecord.id` values and `target_id` is one. And `| None = None` rather than an
-empty default for two reasons: a mutable literal default is not available anyway,
-and the two states are genuinely different — `None` says no reconciler ran at all
-(§2's condition excluded this ingest, or none is injected), `{}` says one ran and
-labelled nothing. Both rule identically under §4, since every member is unlabelled
-either way, but only one of them is a fact a `reason` or a later trace can report,
-and erasing the distinction at the contract would make it unrecoverable.
+it.** `Mapping` rather than `dict`, because the annotation is what makes a mutating
+policy a type error rather than a conforming implementation. What the annotation is
+**not** is a runtime guarantee: it is erased at run time, `isinstance(relations,
+dict)` recovers a mutable object from a parameter typed this way, and a foreign
+policy that narrowed and wrote would be changing the very mapping the ingestor
+holds. The two clauses above are what actually close that, and they are not
+interchangeable. The read-only view is defence in depth — it makes the mutation fail
+where it is attempted. The writer's untouched mapping is the guarantee: §5 requires
+its exclusion to hold "at the writer, from the writer's own relations, never trusted
+from the ruling", which is ADR-0038 §2a's shape, and if the writer's relations and
+the policy's were one object that safety property would rest on the untrusted policy
+— precisely the failure §5 exists to avoid. Stated this way a mutation of whatever
+the policy was handed cannot reach the writer at all, whatever the policy does with
+it. `str` keys, because they are `MemoryRecord.id` values and `target_id` is one.
+And `| None = None` rather than an empty default for two reasons: a mutable literal
+default is not available anyway, and the two states are genuinely different —
+`None` says no reconciler ran at all (§2's condition excluded this ingest, or none
+is injected), `{}` says one ran and labelled nothing. Both rule identically under
+§4, since every member is unlabelled either way, but only one of them is a fact a
+`reason` or a later trace can report, and erasing the distinction at the contract
+would make it unrecoverable.
 
 **Keying by id, against ADR-0121 §2's instinct, and why it is right here.**
 ADR-0121's implementation states set membership "over the records rather than over a
@@ -710,10 +732,13 @@ The lane owes:
   the spend condition, the bound, the route, the temporal clause and the
   never-raises clause (§3); `DefaultMemoryPolicy`'s non-asserted arm (§4), with the
   class docstring's numbered rules renumbered to match; `MemoryIngestor`'s
-  invocation between the probe and the ruling (§2) and the retirement exclusion
-  (§5).
-- `ai_assistant.testing` — the same seam and the same exclusion on the canonical
-  `MemoryWriter` fake, duplicated rather than imported.
+  invocation between the probe and the ruling (§2), the read-only mapping it passes
+  to `decide` and the unhanded mapping it rules the retirement set from (§8), and
+  the retirement exclusion (§5).
+- `ai_assistant.testing` — the same seam, the same read-only hand-off to `decide`
+  and the same exclusion on the canonical `MemoryWriter` fake, which holds its own
+  policy and computes its own retirement set and so carries §8's second clause in
+  its own right, duplicated rather than imported.
 - The shared `MemoryWriter` conformance suite — the `agrees` and `ADDS` halves of
   §5's exclusion, and the standing refusals it does not disturb.
 - The `MemoryPolicy` conformance suite — the parameter's presence and the
@@ -742,6 +767,13 @@ The lane owes:
     test reading only the request cannot see;
   - a malformed `reconciler_model` is refused where `Settings` is built, not at the
     first ingest that would have used it.
+- A test pinning §8's two mapping clauses, which no test reading only the ruling can
+  see: an injected policy that narrows `relations` with `isinstance(..., dict)`,
+  relabels an `ADDS` member `CONTRADICTS`, and returns a `SUPERSEDE` naming a
+  different member — assert the `ADDS` sibling stays live **and** that the mapping
+  the writer rules the retirement set from is unchanged after `decide` returns,
+  whether the attempted mutation raised or landed on something the writer does not
+  read. The rest of the list exercises no cross-seam mutation.
 
 ### 11. What this records against earlier ADRs, under ADR-0082 §1
 
