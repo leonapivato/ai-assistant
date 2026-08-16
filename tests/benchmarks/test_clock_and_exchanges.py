@@ -8,6 +8,7 @@ import pytest
 from benchmarks.memory.cases import BenchSession, BenchTurn
 from benchmarks.memory.clock import BenchmarkClock
 from benchmarks.memory.ingest import exchanges_of
+from pydantic import ValidationError
 
 WHEN = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 
@@ -265,9 +266,13 @@ def test_an_empty_supplied_session_yields_nothing() -> None:
     assert exchanges_of(_supplied()) == ()
 
 
-def test_a_supplied_session_still_reads_user_led_off_the_turn() -> None:
-    """`user_led` is not asserted `True` for the shape: the loader marks every turn
-    user-side, and reading the turn keeps `assistant_led_turns` honest if one did not."""
-    built = exchanges_of(_supplied(("stray", False, None)))
+def test_a_supplied_session_refuses_a_turn_that_is_not_the_users() -> None:
+    """The contradiction has nowhere honest to land, so it is unconstructible.
 
-    assert built[0].user_led is False
+    Capture takes one `content`, so such a turn would be *stored* as the user's half
+    whatever the flag said, while `assistant_led_turns` counted it as the assistant's.
+    Refusing it at construction is what lets the fold assert `user_led=True` for the
+    shape instead of reading a field that could disagree with the session.
+    """
+    with pytest.raises(ValidationError, match="every turn must be user-side"):
+        _supplied(("stray", False, None))

@@ -11,13 +11,20 @@ did until #1177, asserted two things the corpus does not contain, and the observ
 first-person contract (ADR-0077 §3 — beliefs about "the user ... or their world") was
 being scored against them. The honest frame is the one the questions themselves
 assume: **the user is the person who handed the assistant this transcript and is now
-asking about it.** So every turn is the user's own side (``user_side=True``), the
+asking about it.** So every turn is the user's own side (``user_side=True``), and the
 session is marked :attr:`~benchmarks.memory.cases.BenchSession.user_supplied` so each
-corpus turn becomes one exchange with no assistant half, and the two people in the
-transcript are people in the user's *world* rather than the user. What "Caroline: I
-went to a support group" then justifies is a belief about Caroline — which lands in
-the belief's own sentence and not in ``about_person``, because ADR-0100 §5 forbids an
-observer to state a subject at all.
+corpus turn becomes one exchange with no assistant half.
+
+What that entitles the observer to is a belief **about the owner's world**, naming the
+third party in the belief's own sentence and stating no subject — precisely the shape
+ADR-0100 §4 rules *correct* rather than a shortfall, in its ruling on
+``CalendarReader``: "Calendar entry 'Coffee with Marta', Tuesday 3pm" is a durable fact
+about the owner's world, "which is the case ADR-0077 §2's 'or their world' already
+covers". ``about_person`` therefore stays ``None`` throughout, and must: §5 forbids an
+observer to state a subject at all, and §4 forbids *any* producer to infer one from
+content. Nothing here asks for either. This loader changes what the episodes say about
+who spoke; it widens no producer's warrant, which ADR-0100 §4's closing clause forbids
+outright and §5's first clause leaves word-for-word as ADR-0077 §2 wrote it.
 
 **It is captured as the user's own turn: ``CAPTURE_CONFIDENCE``, and untainted.** The
 user told the assistant this, in the ordinary way a user tells it anything, so the

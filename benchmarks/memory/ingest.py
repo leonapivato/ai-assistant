@@ -239,11 +239,12 @@ def exchanges_of(session: BenchSession) -> tuple[Exchange, ...]:
     episode they become (#1074).
 
     Where it is a transcript the user supplied, there is no fold: one turn is one
-    exchange, carrying that turn's own key and no assistant half. ``user_led`` still
-    comes off the turn rather than being asserted ``True`` — the loader marks every
-    turn of such a session user-side, and reading the turn keeps the summary honest
-    if one ever did not, instead of counting an assistant-side utterance as the
-    user's.
+    exchange, carrying that turn's own key and no assistant half. ``user_led`` is
+    ``True`` for every one of them, and that is a guarantee rather than an
+    assumption — :class:`~benchmarks.memory.cases.BenchSession` refuses to construct
+    a supplied session holding a turn that is not user-side, so there is no state
+    here in which the summary could call an utterance assistant-led while capture
+    stored it as the user's.
 
     Args:
         session: The session.
@@ -256,7 +257,7 @@ def exchanges_of(session: BenchSession) -> tuple[Exchange, ...]:
             Exchange(
                 content=turn.text,
                 outcome=None,
-                user_led=turn.user_side,
+                user_led=True,
                 evidence_keys=() if turn.evidence_key is None else (turn.evidence_key,),
             )
             for turn in session.turns
