@@ -73,6 +73,14 @@ all three land in the manifest:
   distilled through a different route. Both are recorded; a pilot that moved one
   without recording it is uninterpretable.
 
+**The judge is a fourth route, and it is a flag rather than a setting.** `--judge-model`
+picks the route the model judge grades on; omitted, it is `ASSISTANT_DEFAULT_MODEL`,
+which is what it always silently was. A judge is a measuring instrument and not part of
+the system under test, so it is legitimate — and often cheaper — for it to be a
+different model from the one answering; what was not legitimate was that being
+unstateable. Whichever route grades lands in the manifest's `judge` field, read off the
+grader that graded rather than declared beside it.
+
 ### Corpora, provenance and licences
 
 `memory/corpora/provenance.py` is the record: source URL, immutable upstream revision,

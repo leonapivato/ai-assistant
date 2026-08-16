@@ -140,7 +140,12 @@ class QuestionRecord(BaseModel):
         answer: What the system said.
         verdict: The grader's ruling.
         abstained: Whether the answer declined to answer.
-        judge: What graded it.
+        judge: What graded it — ``"exact"``, or ``model:<provider>:<model>`` naming the
+            route the judge actually ran on. Read off the grader that graded rather
+            than from a setting beside it, so a run that chose a judge route
+            (``--judge-model``) records the one it used and a run that did not records
+            the answering route it fell back to. The two are legitimately different: a
+            judge is an instrument, not part of the system under test.
         judge_detail: The judge's own words, where it produced any.
         correlation_id: Ties this answer to its traces in ``traces.db``.
         retrieved_ids: The records placed in the prompt, in prompt order.
