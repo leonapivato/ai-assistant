@@ -16,8 +16,9 @@ answer path and neither owns it.
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class BenchTurn(BaseModel):
@@ -99,6 +100,29 @@ class BenchSession(BaseModel):
     occurred_at: datetime
     turns: tuple[BenchTurn, ...]
     user_supplied: bool = False
+
+    @model_validator(mode="after")
+    def _every_supplied_turn_is_the_users(self) -> Self:
+        """Refuse a supplied session holding a turn that is not the user's side.
+
+        The two fields would otherwise be able to contradict each other, and the
+        contradiction has nowhere honest to land: capture takes one ``content``, so
+        the utterance would be *stored* as the user's half whatever the flag said,
+        while :attr:`~benchmarks.memory.ingest.IngestionSummary.assistant_led_turns`
+        counted it as the assistant's. One input cannot be both, and a fold cannot
+        decide which — so the state is refused where it is constructed rather than
+        resolved downstream by whichever field the fold happens to read.
+
+        Returns:
+            The session.
+
+        Raises:
+            ValueError: If any turn of a user-supplied session is not user-side.
+        """
+        if self.user_supplied and not all(turn.user_side for turn in self.turns):
+            msg = "a user-supplied session has no assistant side: every turn must be user-side"
+            raise ValueError(msg)
+        return self
 
 
 class BenchQuestion(BaseModel):
