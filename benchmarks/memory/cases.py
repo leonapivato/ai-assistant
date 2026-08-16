@@ -32,6 +32,10 @@ class BenchTurn(BaseModel):
             corpus turn belongs on decides what the episode text looks like — and
             #1029's P6 is precisely the open question of whether assistant-side
             content survives ingestion symmetrically with user assertions.
+
+            Under :attr:`BenchSession.user_supplied` every turn is the user's side,
+            because the user supplied all of it; the field is still per turn because
+            a genuine user↔assistant corpus needs it per turn.
         evidence_key: The corpus's own pointer to **this turn**, in the *same id
             space* as :attr:`BenchQuestion.evidence` — LoCoMo's ``dia_id``
             (``"D1:1"``), LongMemEval's answering session id. It is carried on the
@@ -65,6 +69,28 @@ class BenchSession(BaseModel):
             sessions span months is the entire point of a long-term-memory benchmark
             and collapsing them onto "now" would erase the axis being measured.
         turns: The utterances, in order.
+        user_supplied: Whether this whole session is material the *user handed the
+            assistant*, rather than a conversation between the user and the
+            assistant.
+
+            **It changes the shape of what capture records, which is why it is a
+            field and not a comment.** A user↔assistant session folds into exchanges
+            — a user half answered by an assistant half — and consecutive same-side
+            utterances join into one half so a double turn is not lost
+            (:func:`~benchmarks.memory.ingest.exchanges_of`). A supplied transcript
+            has no assistant half at all: every utterance is the user's side, so that
+            same fold would join an entire session into a *single* episode, collapse
+            the observation windows it should have tiled, and destroy the per-turn
+            resolution #1074's evidence join depends on. So a supplied session yields
+            **one exchange per turn**, each with ``outcome=None``.
+
+            It is stated per session rather than per corpus because it is a fact
+            about the material, and per session rather than derived from "every turn
+            is user-side" because those are different claims: a user↔assistant
+            session that happens to contain no assistant turn is still not a supplied
+            transcript, and reading the shape off the turns would silently make it
+            one. ``False`` — a conversation the user actually had — is the default
+            that every corpus but LoCoMo takes.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -72,6 +98,7 @@ class BenchSession(BaseModel):
     session_key: str
     occurred_at: datetime
     turns: tuple[BenchTurn, ...]
+    user_supplied: bool = False
 
 
 class BenchQuestion(BaseModel):

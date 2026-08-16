@@ -19,15 +19,30 @@ ingest a conversation and distil nothing from it. The overlap is therefore taken
 it is a real token cost and a real second chance for the observer to propose the same
 belief twice.
 
-**A benchmark turn is not always an exchange.** Capture records one episode per
-turn, with a user half and an assistant half. LoCoMo alternates between two named
-humans and LongMemEval between a user and an assistant, but neither guarantees strict
-alternation — a speaker can take two turns running, and five of LongMemEval's oracle
-sessions open on the assistant. So consecutive same-side utterances are joined into
-one half, and a session that opens on the assistant side has that run recorded as a
-turn of its own with no user half. Neither case is silently smoothed: both are
-counted in the summary, because a corpus where they were common would be one whose
-ingestion is not saying what a reader assumes.
+**A benchmark turn is not always an exchange, and it depends on what the session
+is.** Capture records one episode per turn, with a user half and an assistant half.
+Two shapes reach it, and :attr:`~benchmarks.memory.cases.BenchSession.user_supplied`
+says which:
+
+*A conversation the user actually had* — LongMemEval — folds into exchanges. It does
+not guarantee strict alternation: a speaker can take two turns running, and five of
+LongMemEval's oracle sessions open on the assistant. So consecutive same-side
+utterances are joined into one half, and a session that opens on the assistant side
+has that run recorded as a turn of its own with no user half. Neither case is
+silently smoothed: both are counted in the summary, because a corpus where they were
+common would be one whose ingestion is not saying what a reader assumes.
+
+*A transcript the user supplied* — LoCoMo, under #1177's framing — has no assistant
+half anywhere in it, so there is nothing to pair and the fold above would join a
+whole session into one episode. It yields **one exchange per corpus turn**, each with
+``outcome=None``, and the pairing is bypassed rather than coincidentally producing
+that result: it is the session's declared shape, not an accident of every turn
+sharing a side. Three things follow, and all three are the point. The observation
+windows still tile over *turns*, so ``observation_batch_size`` means what it meant.
+#1074's evidence join stays one corpus turn to one episode, which is the finest
+resolution it can have. And ``assistant_led_turns`` is 0 for such a corpus by
+construction — the summary says the assistant led none of it, which is true, where
+the old ``speaker_b``-as-assistant mapping made it say the assistant led half.
 
 **Ingestion is the only place a corpus evidence pointer and a captured episode id are
 both in hand, so this is where the two are written down** (#1074). A question's
@@ -69,7 +84,9 @@ class Exchange:
     Attributes:
         content: The user half. Never blank — capture refuses a blank one, and the
             builder below never produces one.
-        outcome: The assistant half, or ``None`` where the session ended on the user.
+        outcome: The assistant half, or ``None`` where the session ended on the user
+            — or, for a session the user *supplied*, where there is no assistant half
+            at all and every exchange takes ``None``.
         user_led: Whether ``content`` is genuinely the user's side. ``False`` marks
             the orphan case: an assistant run with no user turn before it, recorded
             in the user half because that is the only half capture requires.
@@ -78,7 +95,9 @@ class Exchange:
             consecutive same-side utterances join into one half, and the two halves
             are two runs, so one episode can be several cited turns at once. Every
             one of them maps to the single episode this exchange becomes, which is
-            the honest resolution — the harness cannot cite half an episode.
+            the honest resolution — the harness cannot cite half an episode. Where
+            the session was supplied by the user there is no fold, so this holds at
+            most the one turn's own pointer.
     """
 
     content: str
@@ -96,7 +115,8 @@ class IngestionSummary:
         turns_captured: Exchanges capture accepted.
         turns_degraded: Exchanges capture reported as unrecorded. Non-zero here means
             the run's memory is missing episodes and any score from it is suspect.
-        assistant_led_turns: Orphan runs — see this module's docstring.
+        assistant_led_turns: Orphan runs — see this module's docstring. Zero for a
+            corpus of user-supplied transcripts, where the assistant led nothing.
         observation_passes: Calls to ``ObservationStage.observe``, which is also the
             number of model calls distillation made.
         episodes_read: Episodes those passes were shown, summed.
@@ -210,9 +230,20 @@ class IngestionSummary:
 def exchanges_of(session: BenchSession) -> tuple[Exchange, ...]:
     """Fold a session's utterances into the exchanges capture records.
 
-    Each exchange carries the evidence keys of **every** turn that went into it, both
-    halves included: the fold is many-to-one, so a citation to any of those turns is a
-    citation to the one episode they become (#1074).
+    Two shapes, chosen by :attr:`~benchmarks.memory.cases.BenchSession.user_supplied`
+    — see this module's docstring.
+
+    Where the session is a conversation the user had, each exchange carries the
+    evidence keys of **every** turn that went into it, both halves included: the fold
+    is many-to-one, so a citation to any of those turns is a citation to the one
+    episode they become (#1074).
+
+    Where it is a transcript the user supplied, there is no fold: one turn is one
+    exchange, carrying that turn's own key and no assistant half. ``user_led`` still
+    comes off the turn rather than being asserted ``True`` — the loader marks every
+    turn of such a session user-side, and reading the turn keeps the summary honest
+    if one ever did not, instead of counting an assistant-side utterance as the
+    user's.
 
     Args:
         session: The session.
@@ -220,6 +251,17 @@ def exchanges_of(session: BenchSession) -> tuple[Exchange, ...]:
     Returns:
         The exchanges, in order. Empty for a session with no turns.
     """
+    if session.user_supplied:
+        return tuple(
+            Exchange(
+                content=turn.text,
+                outcome=None,
+                user_led=turn.user_side,
+                evidence_keys=() if turn.evidence_key is None else (turn.evidence_key,),
+            )
+            for turn in session.turns
+        )
+
     runs: list[_Run] = []
     for turn in session.turns:
         if runs and runs[-1].user_side == turn.user_side:

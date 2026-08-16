@@ -197,3 +197,77 @@ def test_an_exchange_has_no_keys_where_the_corpus_supplies_none() -> None:
     built = exchanges_of(_session(("hello", True), ("hi", False)))
 
     assert built[0].evidence_keys == ()
+
+
+def _supplied(*turns: tuple[str, bool, str | None]) -> BenchSession:
+    """Build a *user-supplied* session from (text, user_side, evidence_key) triples.
+
+    Args:
+        turns: The utterances.
+
+    Returns:
+        The session.
+    """
+    return BenchSession(
+        session_key="s",
+        occurred_at=WHEN,
+        user_supplied=True,
+        turns=tuple(
+            BenchTurn(speaker="u" if user else "a", text=text, user_side=user, evidence_key=key)
+            for text, user, key in turns
+        ),
+    )
+
+
+def test_a_supplied_session_yields_one_exchange_per_turn() -> None:
+    """The transcript is material the user handed over, not a conversation they had:
+    every turn is one episode, and there is no assistant half to pair it with (#1177)."""
+    built = exchanges_of(
+        _supplied(
+            ("Ada: I adopted a dog.", True, "D1:1"),
+            ("Bo: What is its name?", True, "D1:2"),
+            ("Ada: Juno.", True, "D1:3"),
+        )
+    )
+
+    assert len(built) == 3
+    assert [exchange.content for exchange in built] == [
+        "Ada: I adopted a dog.",
+        "Bo: What is its name?",
+        "Ada: Juno.",
+    ]
+    assert all(exchange.outcome is None for exchange in built)
+    assert all(exchange.user_led for exchange in built)
+
+
+def test_a_supplied_session_joins_no_runs() -> None:
+    """The regression this shape exists to prevent: every turn is user-side, so the
+    paired fold would collapse a whole session into one episode."""
+    built = exchanges_of(_supplied(("one", True, None), ("two", True, None), ("three", True, None)))
+
+    assert [exchange.content for exchange in built] == ["one", "two", "three"]
+
+
+def test_a_supplied_exchange_carries_its_own_turn_key_alone() -> None:
+    """#1074's join at its finest resolution: one corpus turn, one episode."""
+    built = exchanges_of(_supplied(("one", True, "D1:1"), ("two", True, "D1:2")))
+
+    assert [exchange.evidence_keys for exchange in built] == [("D1:1",), ("D1:2",)]
+
+
+def test_a_supplied_turn_without_a_key_carries_none() -> None:
+    built = exchanges_of(_supplied(("one", True, None), ("two", True, "D1:2")))
+
+    assert [exchange.evidence_keys for exchange in built] == [(), ("D1:2",)]
+
+
+def test_an_empty_supplied_session_yields_nothing() -> None:
+    assert exchanges_of(_supplied()) == ()
+
+
+def test_a_supplied_session_still_reads_user_led_off_the_turn() -> None:
+    """`user_led` is not asserted `True` for the shape: the loader marks every turn
+    user-side, and reading the turn keeps `assistant_led_turns` honest if one did not."""
+    built = exchanges_of(_supplied(("stray", False, None)))
+
+    assert built[0].user_led is False
