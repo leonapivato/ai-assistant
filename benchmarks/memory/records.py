@@ -310,6 +310,24 @@ class RunManifest(BaseModel):
         judge_prompt: The judging system prompt, in full, or ``None`` where the
             grader made no model call.
         notes: Anything the operator wants attached to this run.
+        model_call_ceiling: The run-level bound on model calls, or ``None`` where none
+            was asked for. Recorded beside ``aborted`` because the two are read
+            together: a ceiling with no abort is a run that came in under budget, and a
+            ceiling with an abort naming it is a run that did not.
+        aborted: Why the run stopped before finishing, or ``None`` where it ran to
+            completion.
+
+            **``None`` on an old artifact and ``None`` on a finished run mean the same
+            thing here, and that is deliberate.** Every other optional field on this
+            model distinguishes the two; this one does not need to, because a run that
+            predates the field could not have aborted *cleanly* — it died with a
+            traceback and left no manifest claim either way. So the honest reading of
+            ``None`` is "this manifest does not record a clean stop", which is true of
+            both.
+
+            The field is written by rewriting ``manifest.json`` at the end of an
+            aborted run. That is the only rewrite: the file is otherwise written once,
+            before any case runs, so an interrupted run still says what it was.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -341,6 +359,8 @@ class RunManifest(BaseModel):
     answer_prompt: str
     judge_prompt: str | None
     notes: str = ""
+    model_call_ceiling: int | None = None
+    aborted: str | None = None
 
 
 class TraceCursor:

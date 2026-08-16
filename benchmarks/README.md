@@ -116,6 +116,17 @@ Under `.runs/<run_id>/`:
   a path cannot carry replaced, plus a digest of the whole key — the readable half is
   for you, the digest is what stops two keys that sanitise alike from sharing a store.
 
+**A run has a spend ceiling, and it stops itself rather than dying.** `--max-model-calls`
+bounds how many model calls the run may make across ingestion, answering and judging
+together — read the figure off `plan`, which reports the same currency. Reaching it stops
+the run cleanly: the records written so far stay, `manifest.json` gains an `aborted` line
+saying why, and the command exits non-zero so nothing downstream mistakes a partial
+record set for a finished one. The same clean stop covers the failure that voided two
+earlier pilots — a provider refusing a call because the account's credit is exhausted,
+which arrives as a `400` the harness recognises by its text, since nothing at the
+`ModelProvider` seam exposes a balance. Both are recorded in the manifest rather than
+only logged.
+
 A provider failure on one question is recorded as `ungraded` — keeping the retrieval it
 had already made, ids and telemetry intact — and stepped over rather than allowed to end
 the run — dying at question 400 of a paid 2,000-question run loses

@@ -151,6 +151,10 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
         bool, typer.Option(help="Confirm #1029 ground rule 1 is discharged.")
     ] = False,
     keep_stores: Annotated[bool, typer.Option(help="Keep each case's databases.")] = False,
+    max_model_calls: Annotated[
+        int | None,
+        typer.Option(help="Stop the run cleanly after this many model calls; see `plan`."),
+    ] = None,
     notes: Annotated[str, typer.Option(help="Attached to the manifest.")] = "",
     output: Annotated[Path | None, typer.Option(help="Where run directories go.")] = None,
     cache: Annotated[Path | None, typer.Option(help="Cache root.")] = None,
@@ -188,6 +192,7 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
             max_sessions=max_sessions,
             notes=notes,
             keep_stores=keep_stores,
+            max_model_calls=max_model_calls,
         )
     )
     root = output if output is not None else DEFAULT_RUNS
@@ -199,6 +204,16 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
             "[yellow]Smoke run.[/yellow] Its outputs validate plumbing and are not scores "
             "(issue #1029, ground rule 1)."
         )
+    if manifest.aborted is not None:
+        # Non-zero, and after the path is printed: an aborted run's records are usable
+        # and the operator needs to be told where they are. What the status carries is
+        # that the run is *incomplete*, so nothing downstream — a shell wrapper, a
+        # later aggregation step — treats a partial record set as a finished one.
+        console.print(f"[red]Run aborted.[/red] {manifest.aborted}")
+        console.print(
+            "The records written before the stop are complete and readable; the run is not."
+        )
+        raise typer.Exit(code=1)
 
 
 def _select(

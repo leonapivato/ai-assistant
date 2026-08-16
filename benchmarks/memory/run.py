@@ -43,6 +43,7 @@ from benchmarks.memory.records import (
     write_jsonl_line,
 )
 from benchmarks.memory.select import CaseSelection
+from benchmarks.memory.spend import RunAbortedError, SpendGuard
 from benchmarks.memory.wiring import build_embedder, build_harness, build_model_provider
 
 if TYPE_CHECKING:
@@ -216,7 +217,13 @@ def plan_run(corpus: Corpus, cases: Sequence[BenchCase], *, batch_size: int) -> 
     )
 
 
-def build_grader(settings: Settings, *, kind: str, route: str | None = None) -> Grader:
+def build_grader(
+    settings: Settings,
+    *,
+    kind: str,
+    route: str | None = None,
+    guard: SpendGuard | None = None,
+) -> Grader:
     """Build the grader named by ``kind``.
 
     **The judge is a route of its own, and defaults to the answering one.** It was
@@ -242,6 +249,8 @@ def build_grader(settings: Settings, *, kind: str, route: str | None = None) -> 
         route: The ``"provider:model"`` spec to judge on, or ``None`` for
             ``settings.default_model``. Ignored by the exact grader, which makes no
             model call at all.
+        guard: The run's spend guard, shared with the answering and distillation seams.
+            Ignored by the exact grader for the same reason: it spends nothing.
 
     Returns:
         The grader.
@@ -253,7 +262,7 @@ def build_grader(settings: Settings, *, kind: str, route: str | None = None) -> 
         return ExactGrader()
     if kind == "model":
         spec = route if route is not None else settings.default_model
-        return ModelGrader(build_model_provider(settings, spec), route=spec)
+        return ModelGrader(build_model_provider(settings, spec, guard=guard), route=spec)
     msg = f"unknown grader {kind!r}; expected 'exact' or 'model'"
     raise ValueError(msg)
 
@@ -334,6 +343,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     max_sessions: int | None = None,
     notes: str = "",
     keep_stores: bool = False,
+    max_model_calls: int | None = None,
 ) -> RunManifest:
     """Run the plan, writing a manifest and one JSONL record per question.
 
@@ -398,9 +408,17 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
             pass, because the plan already knows.
         notes: Attached to the manifest.
         keep_stores: Keep every case's databases rather than only its traces.
+        max_model_calls: The most model calls this run may make across every seam, or
+            ``None`` for no ceiling. Read the figure off :func:`plan_run`, which
+            reports the same currency. A run that reaches it stops cleanly, keeps the
+            records it wrote, and records why in the manifest.
 
     Returns:
-        The manifest, already written to ``<output_root>/<run_id>/manifest.json``.
+        The manifest, already written to ``<output_root>/<run_id>/manifest.json`` —
+        and rewritten there if the run aborted, carrying
+        :attr:`~benchmarks.memory.records.RunManifest.aborted`. The caller decides
+        what an abort means for its own exit status; this returns rather than raises,
+        because the records written before the stop are the point of stopping cleanly.
     """
     resolved = settings if settings is not None else Settings()
     # Normalised here as well as inside the gate, so the manifest and the gate cannot
@@ -445,12 +463,16 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         if plan.max_sessions is not None
         else (max_sessions if max_sessions is not None else 0)
     )
+    # One guard for the whole run, because ingestion, answering and judging draw on one
+    # account: three per-seam budgets would each be inside their own bound while the
+    # balance went to zero.
+    guard = SpendGuard(limit=max_model_calls)
     # Built after the gate, so a scored run's judge is one this function constructed
     # from `Settings` and never one it was handed.
     judge = (
         grader
         if grader is not None
-        else build_grader(resolved, kind=grader_kind, route=judge_route)
+        else build_grader(resolved, kind=grader_kind, route=judge_route, guard=guard)
     )
     check_credentials_for(
         resolved,
@@ -503,106 +525,128 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         answer_prompt=ANSWER_SYSTEM_PROMPT,
         judge_prompt=JUDGE_PROMPT if isinstance(judge, ModelGrader) else None,
         notes=notes,
+        model_call_ceiling=max_model_calls,
     )
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "manifest.json").write_text(manifest.model_dump_json(indent=1), encoding="utf-8")
 
-    for case in plan.cases:
-        case_dir = run_dir / "cases" / case_dir_name(case.case_key)
-        harness = build_harness(resolved, data_dir=case_dir, model=model, observer=observer)
-        try:
-            summary = await ingest_case(harness, case, batch_size=resolved.observation_batch_size)
-            ingestion: dict[str, int | float | str | list[str]] = {
-                "conversation_id": summary.conversation_id,
-                "turns_captured": summary.turns_captured,
-                "turns_degraded": summary.turns_degraded,
-                "assistant_led_turns": summary.assistant_led_turns,
-                "observation_passes": summary.observation_passes,
-                "episodes_read": summary.episodes_read,
-                "episodes_reobserved": summary.episodes_reobserved,
-                "proposals": summary.proposals,
-                "discarded_unusable": summary.discarded_unusable,
-                "discarded_over_limit": summary.discarded_over_limit,
-                "dropped_unsupported": summary.dropped_unsupported,
-                # The harness's own headlessness, reported beside the run's records so
-                # a depressed P3/P5 is attributable to it rather than to retrieval: a
-                # deferred proposal is a question nobody will answer, so the belief is
-                # never written and no retrieval can find it.
-                "proposals_deferred": summary.proposals_deferred,
-                "proposals_ruled": summary.proposals_ruled,
-                "ask_rate": summary.ask_rate,
-                # The denominator for `QuestionRecord.evidence_episode_ids`: how many
-                # of this case's corpus pointers became an episode at all.
-                "evidence_keys_captured": summary.evidence_keys_captured,
-                "observation_routes": sorted(summary.observation_routes),
-            }
-            cursor = TraceCursor(harness.traces)
-            for question in case.questions:
-                # A per-question provider failure is recorded and stepped over rather
-                # than allowed to end the run. On a ~2,000-question paid run, dying at
-                # question 400 loses the 1,586 after it *and* every later case, which
-                # is a far worse outcome than a handful of `ungraded` rows a reader can
-                # exclude. `ensure_model_credentials` above is what keeps this from
-                # papering over a misconfiguration: a bad credential fails at startup,
-                # so what reaches here is a transient fault or a refused prompt.
-                #
-                # The failure is caught in `answer_question`, inside the correlation
-                # scope, so the retrieval that had already happened keeps its ids and
-                # its telemetry. Grading is skipped rather than asked to judge an
-                # answer that does not exist.
-                attempt = await answer_question(harness, question)
-                grading = (
-                    Grading(
-                        verdict=Verdict.UNGRADED,
-                        abstained=False,
-                        judge=judge.name,
-                        detail=f"answering failed: {attempt.failure}",
+    # The abort is caught here rather than allowed out, because the records written
+    # before it are the whole point of stopping cleanly: a run that dies at question
+    # 400 of 2,000 should leave 399 usable rows and a manifest saying why there are no
+    # more, not a traceback and an artifact that describes a run which did not happen.
+    # A `MemoryStoreError` is deliberately *not* caught with it — a failing store is not
+    # a budget decision, and `answer._supplement` argues at length why that one ends the
+    # run with nothing published.
+    aborted: str | None = None
+    try:
+        for case in plan.cases:
+            case_dir = run_dir / "cases" / case_dir_name(case.case_key)
+            harness = build_harness(
+                resolved, data_dir=case_dir, model=model, observer=observer, guard=guard
+            )
+            try:
+                summary = await ingest_case(
+                    harness, case, batch_size=resolved.observation_batch_size
+                )
+                ingestion: dict[str, int | float | str | list[str]] = {
+                    "conversation_id": summary.conversation_id,
+                    "turns_captured": summary.turns_captured,
+                    "turns_degraded": summary.turns_degraded,
+                    "assistant_led_turns": summary.assistant_led_turns,
+                    "observation_passes": summary.observation_passes,
+                    "episodes_read": summary.episodes_read,
+                    "episodes_reobserved": summary.episodes_reobserved,
+                    "proposals": summary.proposals,
+                    "discarded_unusable": summary.discarded_unusable,
+                    "discarded_over_limit": summary.discarded_over_limit,
+                    "dropped_unsupported": summary.dropped_unsupported,
+                    # The harness's own headlessness, reported beside the run's records so
+                    # a depressed P3/P5 is attributable to it rather than to retrieval: a
+                    # deferred proposal is a question nobody will answer, so the belief is
+                    # never written and no retrieval can find it.
+                    "proposals_deferred": summary.proposals_deferred,
+                    "proposals_ruled": summary.proposals_ruled,
+                    "ask_rate": summary.ask_rate,
+                    # The denominator for `QuestionRecord.evidence_episode_ids`: how many
+                    # of this case's corpus pointers became an episode at all.
+                    "evidence_keys_captured": summary.evidence_keys_captured,
+                    "observation_routes": sorted(summary.observation_routes),
+                }
+                cursor = TraceCursor(harness.traces)
+                for question in case.questions:
+                    # A per-question provider failure is recorded and stepped over rather
+                    # than allowed to end the run. On a ~2,000-question paid run, dying at
+                    # question 400 loses the 1,586 after it *and* every later case, which
+                    # is a far worse outcome than a handful of `ungraded` rows a reader can
+                    # exclude. `ensure_model_credentials` above is what keeps this from
+                    # papering over a misconfiguration: a bad credential fails at startup,
+                    # so what reaches here is a transient fault or a refused prompt.
+                    #
+                    # The failure is caught in `answer_question`, inside the correlation
+                    # scope, so the retrieval that had already happened keeps its ids and
+                    # its telemetry. Grading is skipped rather than asked to judge an
+                    # answer that does not exist.
+                    attempt = await answer_question(harness, question)
+                    grading = (
+                        Grading(
+                            verdict=Verdict.UNGRADED,
+                            abstained=False,
+                            judge=judge.name,
+                            detail=f"answering failed: {attempt.failure}",
+                        )
+                        if attempt.failure is not None
+                        else await judge.grade(question, attempt.answer)
                     )
-                    if attempt.failure is not None
-                    else await judge.grade(question, attempt.answer)
-                )
-                write_jsonl_line(
-                    records_path,
-                    QuestionRecord(
-                        run_id=run_id,
-                        corpus=case.corpus_key,
-                        case_key=case.case_key,
-                        question_id=question.question_id,
-                        category=question.category,
-                        unanswerable=question.unanswerable,
-                        question=question.question,
-                        reference_answer=question.answer,
-                        answer=attempt.answer,
-                        verdict=str(grading.verdict),
-                        abstained=grading.abstained,
-                        judge=grading.judge,
-                        judge_detail=grading.detail,
-                        correlation_id=attempt.correlation_id,
-                        retrieved_ids=attempt.retrieved_ids,
-                        retrieved_kinds=attempt.retrieved_kinds,
-                        retrieved_evidence=attempt.retrieved_evidence,
-                        retrieved_evidence_elided=attempt.retrieved_evidence_elided,
-                        evidence=question.evidence,
-                        # #1074's join, projected onto this question's own pointers.
-                        # The case's whole mapping is thousands of entries wide on a
-                        # LoCoMo dialogue and would be denormalised onto all ~199 of
-                        # its records; the slice a question's own analysis reads is
-                        # this one, and it is small.
-                        evidence_episode_ids=tuple(
-                            tuple(summary.evidence_episodes.get(pointer, ()))
-                            for pointer in question.evidence
+                    write_jsonl_line(
+                        records_path,
+                        QuestionRecord(
+                            run_id=run_id,
+                            corpus=case.corpus_key,
+                            case_key=case.case_key,
+                            question_id=question.question_id,
+                            category=question.category,
+                            unanswerable=question.unanswerable,
+                            question=question.question,
+                            reference_answer=question.answer,
+                            answer=attempt.answer,
+                            verdict=str(grading.verdict),
+                            abstained=grading.abstained,
+                            judge=grading.judge,
+                            judge_detail=grading.detail,
+                            correlation_id=attempt.correlation_id,
+                            retrieved_ids=attempt.retrieved_ids,
+                            retrieved_kinds=attempt.retrieved_kinds,
+                            retrieved_evidence=attempt.retrieved_evidence,
+                            retrieved_evidence_elided=attempt.retrieved_evidence_elided,
+                            evidence=question.evidence,
+                            # #1074's join, projected onto this question's own pointers.
+                            # The case's whole mapping is thousands of entries wide on a
+                            # LoCoMo dialogue and would be denormalised onto all ~199 of
+                            # its records; the slice a question's own analysis reads is
+                            # this one, and it is small.
+                            evidence_episode_ids=tuple(
+                                tuple(summary.evidence_episodes.get(pointer, ()))
+                                for pointer in question.evidence
+                            ),
+                            telemetry=await cursor.collect(attempt.correlation_id),
+                            asked_at=attempt.asked_at,
+                            context_chars=len(attempt.context),
+                            ingestion=ingestion,
                         ),
-                        telemetry=await cursor.collect(attempt.correlation_id),
-                        asked_at=attempt.asked_at,
-                        context_chars=len(attempt.context),
-                        ingestion=ingestion,
-                    ),
-                )
-        finally:
-            harness.close()
-        if not keep_stores:
-            for name in ("memory.db", "conversations.db", "deferrals.db"):
-                (case_dir / name).unlink(missing_ok=True)
+                    )
+            finally:
+                harness.close()
+            if not keep_stores:
+                for name in ("memory.db", "conversations.db", "deferrals.db"):
+                    (case_dir / name).unlink(missing_ok=True)
+    except RunAbortedError as stop:
+        aborted = stop.reason
+        # The aborted case keeps its databases whichever way `keep_stores` was set:
+        # the deletion sits after the per-case `finally` and is skipped, which is the
+        # right direction — the one case that did not finish is the one whose store
+        # someone may want to look at.
+        manifest = manifest.model_copy(update={"aborted": aborted})
+        (run_dir / "manifest.json").write_text(manifest.model_dump_json(indent=1), encoding="utf-8")
     return manifest
 
 
