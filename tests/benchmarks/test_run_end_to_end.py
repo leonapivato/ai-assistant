@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
+from benchmarks.memory.answer import RETRIEVED_HEADING
 from benchmarks.memory.cases import BenchCase, BenchQuestion, BenchSession, BenchTurn
 from benchmarks.memory.corpora.provenance import LOCOMO
 from benchmarks.memory.grade import ExactGrader
@@ -374,7 +375,12 @@ async def test_the_answer_reads_only_retrieved_context(tmp_path: Path) -> None:
     *only* through records the store returned: the turn appears inside a rendered
     record and nowhere else in what was sent, and the corpus fields no record can carry
     (the answer key, the evidence pointer, the case's other question) appear nowhere at
-    all."""
+    all.
+
+    Since #1189 the block is the product's own bullets rather than a dump of each
+    record's JSON, so the witness is read off the rendered line instead of off a
+    parsed record — the property is the same one and the text it is read from is the
+    text the model was actually shown."""
     settings = _settings(tmp_path)
     model = FakeModelProvider("a dog")
     plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH)
@@ -390,14 +396,24 @@ async def test_the_answer_reads_only_retrieved_context(tmp_path: Path) -> None:
     )
 
     sent = "\n".join(message.content for message in model.calls[0].messages)
-    block = sent.split("Memory records:\n", 1)[1].split("\n\nQuestion:", 1)[0]
-    rendered = [json.loads(line.split("] ", 1)[1]) for line in block.splitlines() if line]
+    block = sent.split(RETRIEVED_HEADING, 1)[1].split("\n\nQuestion:", 1)[0]
+    rendered = [line for line in block.splitlines() if line.startswith("  - [")]
 
-    assert any("Bo: Lovely name." in json.dumps(record) for record in rendered), (
+    # A *user-side* turn, because since #1189 the block is the product's bullets and
+    # the product renders `content` alone: an episode's `outcome` — the assistant half
+    # of the captured turn — no longer reaches the prompt at all. That withholding is
+    # `planner._render_record` showing through the mirror rather than a harness
+    # decision, and is filed as its own issue; the assertion below pins it so it cannot
+    # change here unnoticed.
+    witness = "Ada: Her name is Juno."
+    assert any(witness in line for line in rendered), (
         "the fixture no longer puts a corpus turn in the prompt, so this proves nothing"
     )
-    assert "Bo: Lovely name." not in sent.replace(block, ""), (
+    assert witness not in sent.replace(block, ""), (
         "a corpus turn reached the prompt outside the retrieved records"
+    )
+    assert "Bo: Lovely name." not in sent, (
+        "an episode's assistant half reached the prompt, which the product's renderer does not show"
     )
     for withheld in ("No such information", "D1:1", "Did Ada adopt a cat?"):
         assert withheld not in sent, f"{withheld!r} is corpus material no record carries"

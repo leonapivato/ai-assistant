@@ -30,9 +30,31 @@ one undifferentiated list — so a supplemented episode is shown beside the beli
 after them, under the same heading (``planning.planner._split_conversation_tail``, and
 ADR-0158 §4 quoting it: the episode "arrives after the tail and stays in the retrieved
 group, which is the group it belongs to"). Giving the supplement a labelled section of
-its own here would be a prompt the product never builds, so :func:`render_context` is
-unchanged: the episodes are simply the last entries of the numbered block, and their
-kind is legible in each record's own JSON.
+its own here would be a prompt the product never builds, so :func:`render_context`
+gives it none: the episodes are simply the last lines of the one block, under the
+retrieved group's own heading, and their kind is legible in each line's own tag.
+
+**A record is rendered the way the product renders it, one line, and that is the whole
+of :func:`render_context`.** It used to dump each record's ``model_dump_json`` — id,
+provenance with its entire evidence list, validity window, scores — on the stated
+ground that the model should see "what the store holds". That ground was wrong about
+the thing the harness exists to mirror: the product shows the answering model one line
+per memory, ``  - [kind/source] content`` (``planning.planner._render_record``), and
+never the record's machinery. The cost was measured on the pilot-3 partial and it is
+not small — a median answer context of 15,922 characters for 15 beliefs and 5
+one-line episodes, roughly 800 characters per record against ~150 characters of
+content — but the size is the lesser half of it (#1189). The larger half is that a
+prompt carrying UUIDs, confidence scores and validity bounds is a *different* prompt
+from the product's, so a score computed under it is a score for a system nobody ships.
+
+**Everything the product's line omits is omitted here too, including where the omission
+costs the harness something.** ``occurred_at`` is the case worth naming: an episode
+carries the instant it happened and ``_render_record`` does not show it, so neither
+does this — a harness that added it back would be answering LoCoMo's temporal category
+from a field the shipped prompt withholds, which is #1029's P2 measured on the wrong
+system. ``outcome`` — the assistant half of a captured episode — is dropped for the
+same reason and by the same line, which is a real limitation of the product's renderer
+rather than of this mirror, and is filed as its own issue rather than patched here.
 
 **Which of ADR-0158 §4's rules are live in the harness, and which are vacuous.** The
 loop composes ``recent + retrieved + supplement``; this harness has no continuity tail
@@ -50,7 +72,8 @@ nothing else. Rule by rule:
   thing before it, to "drop the supplement where the belief read came back empty". Its
   stated *reason* — the planner rendering an unbroken episodic run under the tail's
   heading, fabricating continuity — has no analogue in :func:`render_context`, which
-  labels no groups at all. The rule is kept regardless, because the *behaviour* is the
+  renders one group and never the conversation tail's heading. The rule is kept
+  regardless, because the *behaviour* is the
   product's in the product's own matching state: a benchmark question is a fresh
   conversation's first turn, where ``history`` is empty and the loop drops the
   supplement on exactly this condition. A harness that appended there would score a
@@ -113,6 +136,7 @@ if TYPE_CHECKING:
 __all__ = [
     "ABSTENTION_PHRASE",
     "ANSWER_SYSTEM_PROMPT",
+    "RETRIEVED_HEADING",
     "SUPPLEMENT_BANDS",
     "SUPPLEMENT_KINDS",
     "AnswerAttempt",
@@ -201,6 +225,12 @@ ABSTENTION_PHRASE: Final = "I don't know"
 #: ``is_abstention`` would redefine the measure the pilot's published numbers were
 #: computed under.
 #:
+#: **One clause tracks the renderer rather than the measure.** The instruction names
+#: the shape of what follows it, so it says "listed" where it said "numbered":
+#: :func:`render_context` renders the product's bullets and numbers nothing (#1189). A
+#: prompt describing a format the prompt does not carry is drift the harness cannot
+#: detect from its own artifacts, since both are recorded and neither is compared.
+#:
 #: The literal is exported so a run's manifest can record it. A prompt is a
 #: configuration of the experiment, and a pilot whose prompt is not recoverable from
 #: its artifacts is not reproducible in the only sense a benchmark can be. Two runs
@@ -208,7 +238,7 @@ ABSTENTION_PHRASE: Final = "I don't know"
 #: own registration and not an amendment to the pilot's numbers.
 ANSWER_SYSTEM_PROMPT: Final = (
     "You are answering a question about a person's past conversations. "
-    "The only information available to you is the numbered memory records below, "
+    "The only information available to you is the memory records listed below, "
     "retrieved from a long-term memory store. Answer from those records alone: do "
     "not use general knowledge. "
     "Give your best answer whenever the records plausibly support one — including "
@@ -227,7 +257,33 @@ ANSWER_SYSTEM_PROMPT: Final = (
 #: What the model is shown when retrieval returned nothing at all. Stated rather than
 #: sending an empty section, because an empty section reads as a formatting error and
 #: this is a real, and predicted, outcome.
+#:
+#: The product has its own line for this state — ``planning.planner._render_request``
+#: emits "No stored memories were retrieved for this goal." — and this one is
+#: deliberately *not* a copy of it. That sentence names a goal, and a benchmark
+#: question is not one; the equivalence the harness owes is over the rendering of the
+#: records it has, which is what :data:`RETRIEVED_HEADING` and :func:`render_context`
+#: hold. Nothing downstream reads this literal except ``context_chars``.
 EMPTY_CONTEXT: Final = "(no memory records were retrieved)"
+
+#: The heading the product puts the relevance-retrieved group under, copied verbatim
+#: from ``planning.planner._render_request``.
+#:
+#: Copied rather than imported, under the discipline :data:`SUPPLEMENT_KINDS` is copied
+#: under: it is a literal inside a private function and the harness does not get to
+#: widen a subsystem's surface for its own convenience. The copy is held honest by
+#: ``tests/benchmarks/test_render_context.py``, which renders the same records through
+#: the planner's own request renderer and asserts this block appears in it verbatim —
+#: an equivalence over behaviour rather than over a string, so it also catches the
+#: bullet's shape moving.
+#:
+#: **It is always the retrieved group's heading and never the tail's**, because the
+#: harness cannot produce a tail: ``answer_question`` appends the supplement after the
+#: beliefs and ADR-0158 §4's separator rule drops it where the beliefs came back empty,
+#: so ``planner._split_conversation_tail`` over these records always returns an empty
+#: leading episodic run. A benchmark question is a fresh conversation's first turn and
+#: there is no recent conversation to head.
+RETRIEVED_HEADING: Final = "Relevant memories about the user:"
 
 
 @dataclass(frozen=True, slots=True)
@@ -286,20 +342,44 @@ class AnswerAttempt:
     failure: str | None = None
 
 
-def render_context(records: Sequence[MemoryRecord]) -> str:
-    """Render retrieved records as the numbered block the model reads.
+def _render_record(record: MemoryRecord) -> str:
+    """Render one record as the product's prompt bullet.
 
-    Every record is rendered through its own ``model_dump_json``, which is blunt and
-    deliberate: a hand-written renderer per kind would be a place for the harness to
-    decide what the model gets to see, and the whole point is that it sees what the
-    store holds. The one thing dropped is the embedding, which no store returns on a
-    record anyway.
+    A hand-copy of ``ai_assistant.planning.planner._render_record``, character for
+    character, for the reason :data:`RETRIEVED_HEADING` is copied: it is private, and
+    an equivalence test rather than an import is what keeps a copy honest here.
+
+    ``record.kind`` is interpolated as it stands rather than through
+    :class:`~ai_assistant.core.types.MemoryKind`, because that is what the product's
+    line does — the discriminator is a ``Literal`` str, so the two are the same
+    characters, and taking the enum's ``.value`` would be a second way to spell it that
+    could drift.
+
+    Args:
+        record: The record to render.
+
+    Returns:
+        The bullet, with the product's two-space indent.
+    """
+    return f"  - [{record.kind}/{record.provenance.source.value}] {record.content}"
+
+
+def render_context(records: Sequence[MemoryRecord]) -> str:
+    """Render retrieved records as the block the product's answering prompt shows.
+
+    One heading and one line per record — :data:`RETRIEVED_HEADING`, then
+    :func:`_render_record` for each — which is exactly what
+    ``planning.planner._render_request`` builds for a turn whose memories are all
+    relevance-retrieved. That is the whole of the change #1189 asked for, and the
+    module docstring holds the argument: a prompt carrying each record's ``id``,
+    provenance, validity window and scores is a prompt the product never assembles, so
+    a benchmark scored under it scores a system nobody ships.
 
     **The supplement needs nothing here**, which is a finding rather than an omission.
     ADR-0158 §4's groups are carried by *position*, and the product's own renderer
     shows the retrieved beliefs and the supplemented episodes as one undifferentiated
-    list in that order; dumping each record whole already tells the model which is
-    which, in the store's words rather than the harness's.
+    list in that order; each line's ``[kind/source]`` tag already tells the model which
+    is which, in the same words the product uses.
 
     Args:
         records: What retrieval returned — the beliefs, best first, then the
@@ -310,9 +390,7 @@ def render_context(records: Sequence[MemoryRecord]) -> str:
     """
     if not records:
         return EMPTY_CONTEXT
-    return "\n".join(
-        f"[{index}] {record.model_dump_json()}" for index, record in enumerate(records, start=1)
-    )
+    return "\n".join([RETRIEVED_HEADING, *(_render_record(record) for record in records)])
 
 
 async def _supplement(
@@ -441,7 +519,12 @@ async def answer_question(harness: Harness, question: BenchQuestion) -> AnswerAt
                     Message(role=Role.SYSTEM, content=ANSWER_SYSTEM_PROMPT),
                     Message(
                         role=Role.USER,
-                        content=f"Memory records:\n{context}\n\nQuestion: {question.question}",
+                        # No "Memory records:" line above the block any more: since
+                        # #1189 the block opens with the product's own heading, and a
+                        # second heading over it would be a section the product never
+                        # emits — reintroducing, one line smaller, exactly the
+                        # divergence that change removed.
+                        content=f"{context}\n\nQuestion: {question.question}",
                     ),
                 ]
             )

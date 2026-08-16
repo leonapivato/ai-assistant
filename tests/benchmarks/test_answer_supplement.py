@@ -30,7 +30,6 @@ itself.
 from __future__ import annotations
 
 import dataclasses
-import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from unittest import mock
@@ -177,21 +176,28 @@ def _episodic_ids(attempt: AnswerAttempt) -> tuple[str, ...]:
     )
 
 
-def _rendered_ids(context: str) -> tuple[str, ...]:
-    """The record ids of the rendered block, in the order the model reads them.
+def _rendered_kinds(context: str) -> tuple[str, ...]:
+    """The kinds of the rendered block, in the order the model reads them.
 
-    Parsed out of each entry's own JSON rather than searched for in the text: a
-    belief's ``provenance.evidence`` cites the episode ids it was distilled from, so a
-    substring search finds an episode's id inside the *belief* that cites it and
-    reports an order the model was never shown.
+    Kinds and not ids, because since #1189 the block is the product's own bullets and
+    an id never reaches the prompt at all — which is the change, not a loss for this
+    test: the group boundary ADR-0158 §4 carries by position is a boundary *between
+    kinds*, so it is exactly what the rendered order has to preserve.
+
+    The heading line is skipped and the tag is read off each bullet's ``[kind/source]``
+    prefix.
 
     Args:
         context: The rendered block.
 
     Returns:
-        One id per numbered entry.
+        One kind per bullet.
     """
-    return tuple(json.loads(line.split("] ", 1)[1])["id"] for line in context.splitlines() if line)
+    return tuple(
+        line.split("[", 1)[1].split("/", 1)[0]
+        for line in context.splitlines()
+        if line.startswith("  - [")
+    )
 
 
 def _leading_beliefs(kinds: Sequence[MemoryKind]) -> int:
@@ -214,8 +220,9 @@ async def test_the_supplement_appends_episodes_after_the_beliefs(tmp_path: Path)
 
     The prompt is checked as well as the record, because position is the *only* thing
     carrying the group boundary — the harness's block, like the product's renderer,
-    labels nothing — so an ordering held in `retrieved_ids` and lost in the rendered
-    text would be a correct artifact over a wrong experiment.
+    puts both groups under one heading and labels neither — so an ordering held in
+    `retrieved_kinds` and lost in the rendered text would be a correct artifact over a
+    wrong experiment.
     """
     harness = _harness(tmp_path, observer=FakeObserver(max_batch_size=BATCH))
     try:
@@ -231,7 +238,7 @@ async def test_the_supplement_appends_episodes_after_the_beliefs(tmp_path: Path)
     assert all(kind is MemoryKind.EPISODIC for kind in kinds[boundary:]), (
         "a belief was rendered after an episode, which is the interleaving §4 forbids"
     )
-    assert _rendered_ids(attempt.context) == attempt.retrieved_ids
+    assert _rendered_kinds(attempt.context) == attempt.retrieved_kinds
 
 
 async def test_the_supplement_takes_nothing_from_the_belief_budget(tmp_path: Path) -> None:
