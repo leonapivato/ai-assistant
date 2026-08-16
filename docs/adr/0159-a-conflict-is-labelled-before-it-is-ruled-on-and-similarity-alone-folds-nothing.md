@@ -183,15 +183,40 @@ distinction between what is true of the records and what we have decided to do.
 > probe has resolved the conflict set and before `MemoryPolicy.decide` is called.
 > The relations it returns are passed to `decide` as an argument (§8).
 
-> **Normative.** A reconciler is invoked **exactly when** the proposed record's
-> `provenance.source` is not `USER_ASSERTED` **and** no member of the conflict set
-> is `USER_ASSERTED`. On every other ingest none is invoked, no relation is
-> computed, and `decide` is called with none.
+> **Normative.** A reconciler is invoked **exactly when** all three hold: the
+> proposed record's `provenance.source` is not `USER_ASSERTED`; no member of the
+> conflict set is `USER_ASSERTED`; and the proposal clears the **admissibility
+> floor** — it is not `DataTier.SECRET`, it is not a derived belief citing no
+> evidence, and its warrant does not rest on unconfirmed recorded external content.
+> On every other ingest none is invoked, no relation is computed, no model request
+> is made, and `decide` is called with none.
+
+> **Normative.** The floor named above is `_rule_on_admissibility`'s rulings read as
+> properties of the proposal alone, and this exclusion **tracks** that floor rather
+> than restating it: a ruling later added to the floor excludes its population here
+> too, without amending this ADR. It binds `MemoryIngestor` whatever `MemoryPolicy`
+> it holds — it is not a prediction about how a policy will rule, and an injected
+> policy carrying no such floor does not lift it.
+
+**The admissibility floor is in the invocation condition because the ruling is too
+late.** ADR-0078 §5a states that the floor's rulings "precede any conflict
+reasoning", and a relation *is* conflict reasoning — it is a statement about the
+proposal against a named member of the conflict set. `_rule_on_admissibility` runs
+*inside* `decide`, so a reconciler sited before `decide` on §2's other two
+conditions alone would run ahead of it. For two of the floor's populations that
+costs a model request on a proposal about to be rejected or deferred. For the third
+it is not recoverable at all: a `DataTier.SECRET` proposal whose conflict set holds
+no assertion would put tier-0 content into a model request before the gate ADR-0004
+§3 exists to enforce had run, and the `ASK_USER` that follows recalls nothing. The
+exclusion therefore sits where the invocation decision is made, in `MemoryIngestor`,
+rather than in a policy that runs after the request has gone. It is stated over the
+whole floor and not over the secret rule alone for ADR-0078 §5a's own reason — "a
+floor that holds only while a coincidence holds is not a floor".
 
 The invocation condition is normative rather than left to a reconciler's own
 economics, because it is a **correctness boundary and not a cost heuristic**. The
-two populations it excludes are already owned: a `USER_ASSERTED` proposal is
-ADR-0121 §2's arm, and a conflict set holding a `USER_ASSERTED` member is the
+two `USER_ASSERTED` populations it excludes are already owned: a `USER_ASSERTED`
+proposal is ADR-0121 §2's arm, and a conflict set holding one is the
 `ASK_USER` arm §4 leaves untouched. Neither reads a relation, so computing one there
 would buy nothing and would spend a model request inside the ingest lock on the two
 paths a user waits on — the `learn` and `answer` direct seams, whose proposals are
@@ -740,11 +765,14 @@ The lane owes:
   clause in its docstring (§8, §2).
 - `memory` — the reconciler behind a `memory`-internal seam, with the `agrees` rung,
   the spend condition, the bound, the route, the temporal clause and the
-  never-raises clause (§3); `DefaultMemoryPolicy`'s non-asserted arm (§4), with the
-  class docstring's numbered rules renumbered to match; `MemoryIngestor`'s
-  invocation between the probe and the ruling (§2), the read-only mapping it passes
-  to `decide` and the unhanded mapping it rules the retirement set from (§8), and
-  the retirement exclusion (§5).
+  never-raises clause and its cancellation exception (§3);
+  `DefaultMemoryPolicy`'s non-asserted arm (§4), with the class docstring's numbered
+  rules renumbered to match; `MemoryIngestor`'s invocation between the probe and the
+  ruling and behind the admissibility floor (§2), sharing `policy.py`'s floor
+  predicates rather than restating them — both modules are `memory`'s, so a
+  duplicate that could drift is avoidable here and is not to be written; the
+  read-only mapping it passes to `decide` and the unhanded mapping it rules the
+  retirement set from (§8); and the retirement exclusion (§5).
 - `ai_assistant.testing` — the same seam, the same read-only hand-off to `decide`
   and the same exclusion on the canonical `MemoryWriter` fake, which holds its own
   policy and computes its own retirement set and so carries §8's second clause in
@@ -768,6 +796,13 @@ The lane owes:
   - **zero** reconciler invocations and **zero** provider requests for a
     `USER_ASSERTED` proposal, and again for a non-asserted proposal whose conflict
     set holds a `USER_ASSERTED` member (§2's invocation condition);
+  - **zero** of each again for a `DataTier.SECRET` proposal, for a derived belief
+    citing no evidence, and for an unconfirmed belief whose warrant rests on
+    recorded external content — each given a non-asserted conflict set that would
+    otherwise have reconciled, so the test fails on an implementation that invokes
+    ahead of the floor (§2). The secret case is the one that must assert on the
+    **provider**: a ruling-only assertion passes whether or not tier-0 content was
+    sent;
   - **exactly one** provider request for a non-asserted proposal whose conflict set
     holds several members the `agrees` rung did not settle, and **zero** for one
     whose members it settled entirely (§3's one-request clause);
@@ -887,6 +922,22 @@ otherwise.
   in this ADR's own terms rather than in ADR-0077's: `conflict_limit` still bounds
   the set, and §3's `reconciler_max_conflicts` bounds the spend. No producer-side
   bound moves.
+- **ADR-0078 §5a, and the floor it names — ADR-0004 §3, ADR-0077 §5, ADR-0106 §6.**
+  §2's invocation condition puts the reconciler *behind* the admissibility floor and
+  moves, widens and narrows none of it. Each of the floor's rulings fires on exactly
+  the population it fired on before, and §5a's "precede any conflict reasoning"
+  reaches one further component — which is the reading it already had, since a
+  relation is a statement about the proposal against a conflict-set member. Nothing
+  here makes the floor a reconciler rule: §2's second clause states the exclusion
+  over the proposal's own properties, so it holds whatever `MemoryPolicy` is
+  injected and does not become a prediction about one.
+- **ADR-0060 §1.** §3's cancellation clause adds no obligation of its own. It says
+  which of §1's two kinds each arm of the never-raises clause is about — a
+  cancellation delivered from outside, which §1 requires be delivered onward, versus
+  one `models/` issues against its own deadline, which §1 lets a method classify
+  into a return value. §1 binds this path already, through `MemoryWriter`; what §3
+  does is stop a marked clause of *this* ADR from reading as a licence §1 does not
+  grant.
 
 ### 12. What this ADR does not decide
 
