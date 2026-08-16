@@ -96,6 +96,35 @@ DEFAULT_MAX_BATCH_ITEMS: Final = 100_000
 #: implementation rather than of the seam.
 DEFAULT_MAX_TOKENS: Final = 4096
 
+#: How many times the vendor SDK may repeat a request of its own accord. **Zero,
+#: and the zero is load-bearing on the batch seam in a way it is not on the
+#: per-request one.**
+#:
+#: The client's own default is two retries, and it applies them to ``POST`` as
+#: readily as to ``GET`` while transmitting no idempotency key: the base client
+#: mints one per request and only sends it where ``_idempotency_header`` names a
+#: header, which for this vendor is ``None`` and is never set. So a ``create``
+#: whose response is lost after the provider accepted it is repeated, and each
+#: repeat is **another paid batch** — measured, not assumed: one ``submit`` over a
+#: transport that fails after accepting sends three ``POST``s at the default and
+#: one at zero.
+#:
+#: That is a different loss from the one ADR-0143 §2 states and accepts. §2 narrows
+#: the orphaning window to "exactly one round trip" and says the residue is a batch
+#: "created but unreported"; silent SDK retries make it up to three round trips and
+#: up to two *extra* batches, and §2 withdrew its idempotency promise precisely
+#: because "the vendor transmits no idempotency key" — which is the same fact one
+#: layer down. A composition root that left the default on would hand the seam a
+#: weaker guarantee than its own contract claims.
+#:
+#: What it gives up is small and is already the tree's judgement: ``poll`` and
+#: ``fetch`` are ``GET``s whose retry the caller's own loop supplies anyway (§2
+#: makes the wait the caller's), and ``tests/models/anthropic_batch_stack.py``
+#: already constructs at zero for the second reason — with retries on, "what got
+#: classified would be the SDK's last attempt" rather than the failure that
+#: happened.
+_SDK_RETRIES: Final = 0
+
 #: How the vendor's per-item error types map onto ADR-0143 §5's seven kinds.
 #: Exhaustive over what the SDK's ``ErrorObject`` union can discriminate to; a
 #: type outside it is deliberately ``UNKNOWN`` rather than guessed at, because
@@ -649,6 +678,13 @@ async def anthropic_batch_completer(
     :class:`~ai_assistant.core.protocols.BatchCompleter` on why the wait is
     never hidden).
 
+    **The one thing it does configure is :data:`_SDK_RETRIES`, and that is not a
+    default worth inheriting.** The client would otherwise repeat a failed
+    ``create`` twice on its own, with no idempotency key on the wire, so a response
+    lost after the provider accepted the batch buys a second paid batch the caller
+    never hears about — a worse residue than the one ADR-0143 §2 states. The
+    constant carries the measurement and the argument.
+
     **The credential is resolved by the SDK here, locally, and this is a presence
     check and never a validity one.** ``AsyncAnthropic()`` runs the vendor's own
     resolution chain: ``ANTHROPIC_API_KEY`` and ``ANTHROPIC_AUTH_TOKEN`` from the
@@ -740,7 +776,7 @@ async def anthropic_batch_completer(
             at the first submission.
     """
     try:
-        client = AsyncAnthropic()
+        client = AsyncAnthropic(max_retries=_SDK_RETRIES)
     except Exception as exc:
         msg = f"the Anthropic client could not be configured: {exc}"
         raise ConfigurationError(msg) from exc

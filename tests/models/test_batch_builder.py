@@ -217,8 +217,12 @@ class TestTheCompleterWorksOverTheWire:
         """
         http_client = httpx.AsyncClient(transport=httpx.MockTransport(server))
 
-        def _client_over_the_scripted_endpoint(**_: Any) -> AsyncAnthropic:
-            return AsyncAnthropic(api_key=DUMMY_KEY, http_client=http_client, max_retries=0)
+        def _client_over_the_scripted_endpoint(**configured: Any) -> AsyncAnthropic:
+            # `**configured`, never discarded: a substitution that dropped the
+            # builder's own arguments would be testing a client the builder never
+            # asks for, and would conceal exactly the configuration these tests
+            # exist to pin (round 4's blocker, which a kwarg-discarding double hid).
+            return AsyncAnthropic(api_key=DUMMY_KEY, http_client=http_client, **configured)
 
         monkeypatch.setattr(batch_module, "AsyncAnthropic", _client_over_the_scripted_endpoint)
         return http_client
@@ -283,11 +287,11 @@ class TestItClosesTheClientItOwns:
         """Record every client constructed, so the test can ask whether it closed."""
         clients: list[AsyncAnthropic] = []
 
-        def _recorded(**_: Any) -> AsyncAnthropic:
+        def _recorded(**configured: Any) -> AsyncAnthropic:
             client = AsyncAnthropic(
                 api_key=DUMMY_KEY,
                 http_client=httpx.AsyncClient(transport=httpx.MockTransport(BatchServer())),
-                max_retries=0,
+                **configured,
             )
             clients.append(client)
             return client
@@ -321,3 +325,56 @@ class TestItClosesTheClientItOwns:
                 pass  # pragma: no cover - the refusal is the point
 
         assert built[0].is_closed()
+
+
+class TestItDoesNotLetTheSdkRepeatAPaidSubmission:
+    """The client is built with the vendor's own retries **off**, and that is checked.
+
+    ``messages.batches.create`` is a ``POST`` that mints a billable job, and the SDK
+    sends no idempotency key with it — the base client generates one but only
+    transmits it where ``_idempotency_header`` names a header, which this vendor
+    leaves ``None``. So a retry of an accepted create is a *second batch*, paid for
+    and never named to the caller, which is a worse residue than the one ADR-0143 §2
+    states and accepts.
+
+    Asserted by counting requests rather than by reading ``max_retries`` off the
+    client, because the count is the thing that costs money.
+    """
+
+    class _AcceptsThenLosesTheResponse:
+        """A transport that fails *after* the provider would have taken the job.
+
+        From the client's side this is indistinguishable from a create the provider
+        accepted and whose response never arrived — which is the case that makes a
+        retry expensive rather than merely wasteful.
+        """
+
+        def __init__(self) -> None:
+            self.posts = 0
+
+        def __call__(self, request: httpx.Request) -> httpx.Response:
+            self.posts += 1
+            msg = "the response never came back"
+            raise httpx.ConnectError(msg)
+
+    async def test_a_response_lost_after_acceptance_sends_exactly_one_create(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        transport = self._AcceptsThenLosesTheResponse()
+        http_client = httpx.AsyncClient(transport=httpx.MockTransport(transport))
+
+        def _client(**configured: Any) -> AsyncAnthropic:
+            return AsyncAnthropic(api_key=DUMMY_KEY, http_client=http_client, **configured)
+
+        monkeypatch.setattr(batch_module, "AsyncAnthropic", _client)
+
+        async with (
+            http_client,
+            anthropic_batch_completer(issuer=ISSUER, default_model=MODEL) as completer,
+        ):
+            with pytest.raises(ModelError):
+                await completer.submit("run-1", [a_request("q1")])
+
+        # One, not three. At the SDK's own default this is 3, and two of them would
+        # be batches the caller holds no handle for.
+        assert transport.posts == 1
