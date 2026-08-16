@@ -146,21 +146,27 @@ RETRIEVAL_LIMIT: Final = 15
 #: not a preference; it is a fact nobody has measured, and offering it as a knob
 #: would imply a user could know it.
 #:
-#: **5 against a belief budget of 15, and the two never share.** ADR-0158 §3 gives
-#: the supplement a budget of its own precisely so that
+#: **15 against a belief budget of 15, and the two still never share.** ADR-0158 §3
+#: gives the supplement a budget of its own precisely so that
 #: :data:`RETRIEVAL_LIMIT`'s 5→15 move — bought for *beliefs* on #1029's rank-miss
-#: measurement — is not handed back to episodes on no measurement at all. The value
-#: is a judgement rather than a measured optimum: an episode is a verbatim turn
-#: where a belief is a distilled sentence, 5 belief records fill roughly 4KB, and
-#: nothing has measured 5 episodes, so 5 is where the count guard and a plausible
-#: *byte* parity roughly meet. ADR-0158 §6's ablation arm owns it in both
-#: directions, and states the arithmetic that would take it to zero.
+#: measurement — is not handed back to episodes. What has changed is the evidence,
+#: not the separation: the bound began at 5 as a judgement standing in for a
+#: measurement, and ADR-0160 §1 replaces it with one. #1029's pilot-3 anatomy
+#: re-ranked every question against its whole store and put episode recall@5 at
+#: 55.3% against recall@15 at 72.7% — seventeen points on records the ranking had
+#: already found — where a gold episode reaching the prompt is worth 78 to 81% correct
+#: against 36.6% for a belief citing the same fact. Recall@20 and @30 measure higher
+#: still; 15 is the largest value the ceiling below admits without also moving the
+#: belief budget, which is a separate decision on evidence pointing the other way.
 #:
 #: **It may never exceed :data:`RETRIEVAL_LIMIT`**, which ``LearningLoop`` enforces
 #: at construction rather than trusting this line. That ceiling is where ADR-0158
 #: §3 puts the product thesis in checkable form: whatever the numbers become,
-#: nobody can configure a system that asks for more transcript than belief.
-EPISODIC_SUPPLEMENT_LIMIT: Final = 5
+#: nobody can configure a system that asks for more transcript than belief. At 15
+#: against 15 it is *met* rather than exceeded, which ADR-0160 §2 admits explicitly
+#: — so the clause now binds in both directions, and this constant cannot rise
+#: unless the belief budget rises first.
+EPISODIC_SUPPLEMENT_LIMIT: Final = 15
 
 #: What this layer tunes :class:`MemoryIngestor`'s conflict ceiling to, passed
 #: explicitly for :data:`RETRIEVAL_LIMIT`'s reason.

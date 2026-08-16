@@ -105,16 +105,24 @@ _DEFAULT_RETRIEVAL_LIMIT = 15
 #: worst in precisely the deployments where the belief layer is working. Two
 #: budgets cost prompt size, which is the honest cost.
 #:
-#: 5 is a judgement rather than a measured optimum, and is stated as one: an
-#: episode is a verbatim turn against a belief's distilled sentence, so the count
-#: guard is a weaker guard on *bytes* than it looks. ADR-0158 §6's ablation arm
-#: owns the value, in both directions.
+#: 15 on a measurement rather than a judgement (ADR-0160 §1). The value began at 5
+#: with nothing behind it; #1029's pilot-3 anatomy puts episode recall@5 at 55.3%
+#: against recall@15 at 72.7%, while the belief layer is saturated at 63.1% because
+#: that is the ceiling of what its distilled records cite at all. The count guard is
+#: still a weaker guard on *bytes* than it looks — an episode is a verbatim turn
+#: against a belief's distilled sentence — which is what ADR-0158 §8's deferred byte
+#: bound is for. The value now moves on the post-hoc attribution ADR-0160 §3
+#: requires, read off a scored run; no ablation arm is owed for it.
 #:
 #: It is a *default*, not a floor: a construction tuning the belief budget below it
 #: and stating nothing episodic gets this figure capped at that budget, which is
 #: §3's ceiling holding rather than yielding. ``LearningLoop.__init__`` is where
-#: that resolution happens, because the cap needs both numbers.
-_DEFAULT_EPISODIC_LIMIT = 5
+#: that resolution happens, because the cap needs both numbers. At parity with
+#: ``_DEFAULT_RETRIEVAL_LIMIT`` that cap is a no-op for an untuned construction and
+#: bites for every belief budget tuned below it, which is more of the range than it
+#: used to be — ADR-0160 §2 admits the equality, and ADR-0158 §3 still refuses a
+#: *stated* bound above the budget.
+_DEFAULT_EPISODIC_LIMIT = 15
 
 #: The kinds the episodic supplement's read selects (ADR-0158 §3) — ``EPISODIC``
 #: and nothing else, which is the half of the read that keeps a belief out of the
