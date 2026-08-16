@@ -328,10 +328,19 @@ not available and is not sought.
 > covering every member it consults about, and makes none where the rung above
 > labelled every member it would have consulted about.
 
-> **Normative.** A reconciler never raises and never refuses an ingest. A model
-> error, a timeout, an unreadable reply, an unroutable request or the absence of a
-> reconciler altogether yields **unlabelled** for every member it could not label,
-> and the write proceeds on the relations it does hold.
+> **Normative.** A reconciler never raises and never refuses an ingest, save for the
+> cancellation the clause below excepts. A model error, a timeout, an unreadable
+> reply, an unroutable request or the absence of a reconciler altogether yields
+> **unlabelled** for every member it could not label, and the write proceeds on the
+> relations it does hold.
+
+> **Normative.** A `CancelledError` **delivered from outside the ingest** is not
+> absorbed by the clause above. It is delivered onward out of `MemoryIngestor` under
+> ADR-0060 §1's second clause, never converted into an unlabelled member and never
+> allowed to stand as a completed write, and the ingest lock is released as it
+> unwinds. A deadline `models/` issues against its **own** request is not such a
+> cancellation — it is the self-issued kind ADR-0060 §1 distinguishes, and the clause
+> above classifies it into unlabelled like any other timeout.
 
 The first clause is the whole architecture of the thing in one sentence:
 **ADR-0121 §1's predicate is itself a reconciler answer.** The syntactic test and
@@ -363,8 +372,9 @@ it. This clause is what makes that anchor load-bearing at the one seam that read
 two beliefs against each other. It also raises the stakes of #1169 (§12).
 
 **Why a bound of three, and why `Settings` rather than a constant.** The conflict
-set is already bounded by `conflict_limit` (default 5, refused if disabled), so the
-bound here is a *cost* bound rather than a safety one: three is where the measured
+set is already bounded by `conflict_limit` — `memory/ingest.py`'s
+`_DEFAULT_CONFLICT_LIMIT` is 100, and a value below 1 is refused — so that ceiling
+is nowhere near a cost bound and this one is: three is where the measured
 distribution puts the records a proposal could plausibly restate or contradict, and
 a fourth is nearly always a topical neighbour. It is a `Settings` field for the
 reason `observation_max_proposals` is one (ADR-0077 §2) — it is a knob an operator
