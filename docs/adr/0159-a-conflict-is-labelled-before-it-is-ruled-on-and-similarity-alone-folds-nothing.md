@@ -258,6 +258,10 @@ not available and is not sought.
 > incompatible **at one time**. Two true statements about one subject at different
 > times are `ADDS`.
 
+> **Normative.** A reconciler makes **at most one model request per ingest**,
+> covering every member it consults about, and makes none where the rung above
+> labelled every member it would have consulted about.
+
 > **Normative.** A reconciler never raises and never refuses an ingest. A model
 > error, a timeout, an unreadable reply, an unroutable request or the absence of a
 > reconciler altogether yields **unlabelled** for every member it could not label,
@@ -300,6 +304,14 @@ a fourth is nearly always a topical neighbour. It is a `Settings` field for the
 reason `observation_max_proposals` is one (ADR-0077 §2) — it is a knob an operator
 tunes against their own corpus, and its right value is an empirical question this
 ADR does not pretend to have settled.
+
+**One request, not one per member, and the reason is not only cost.** A relation is a
+statement about a pair, but the *set* is what disambiguates it: shown the three
+records together, a labeller can see that two of them are a sequence and the third is
+the claim being restated, where the same three judged in isolation invite three
+independent guesses. Bundling them is also what makes §6's latency statement a
+statement — one request under one deadline, rather than up to
+`reconciler_max_conflicts` of them under `model_max_attempts` retries each.
 
 ### 4. The non-asserted arm: three outcomes, each with a purity condition
 
@@ -369,10 +381,20 @@ integrating system's idempotency key, and the next routine sync overwrites the f
 so a fold onto an import is futile whatever the incoming source is. A `SUPERSEDE`
 onto an import is worse than futile: the sync restores the record, and a
 model-judged contradiction is not a claim an observation is entitled to make against
-the system that reported the fact. An `EXTERNAL` member is therefore never named by
-either exception and never blocks either, whatever it is labelled; the proposal
-lands beside the import under (c). ADR-0092 §4's "the user outranks the calendar" is
-about a *user assertion* and is untouched — an observation is not the user.
+the system that reported the fact.
+
+**The exclusion is from the target classes and from nothing else.** An `EXTERNAL`
+member is never *named* by either exception, and it counts in both purity conditions
+exactly as any other member does: an `EXTERNAL` member labelled `CONTRADICTS` blocks
+(a), and one labelled `RESTATES` blocks (b). That asymmetry is deliberate and it is
+the conservative direction. The reason `EXTERNAL` may not be a target is about what a
+*write* at an imported id would do — it is futile, and a supersession is a claim an
+observation may not make. It is not a reason to disregard what the reconciler said
+about the record. A proposal that contradicts an import is a contested proposal
+whoever holds the import, and the ruling for a contested proposal is (c): the belief
+lands beside what it contests and nothing is destroyed. ADR-0092 §4's "the user
+outranks the calendar" is about a *user assertion* and is untouched — an observation
+is not the user.
 
 ### 5. What a supersession on a labelled contradiction retires
 
@@ -432,9 +454,32 @@ this ADR can hold a model call where ADR-0121 could not.
 > `agrees` under ADR-0121 §1 and otherwise falls to the confidence arm. That is the
 > ratified behaviour of this ADR in the degraded case, not a fallback outside it.
 
-> **Normative.** No ingest is refused, delayed past the model deadline `models/`
-> already imposes, or ruled differently because a reconciler was unavailable, other
-> than by the relations it therefore does not hold.
+> **Normative.** No ingest is refused or ruled differently because a reconciler was
+> unavailable, other than by the relations it therefore does not hold. An ingest
+> whose reconciler makes no request is not delayed by one at all, and an ingest
+> whose reconciler makes one is delayed by that request alone, under `models/`'s own
+> deadline and retry budget (`model_timeout_seconds`, `model_max_attempts`).
+
+**The request is inside `MemoryIngestor`'s lock, and that is a cost this ADR pays
+knowingly rather than a consequence it overlooked.** `MemoryIngestor.ingest`
+serialises "the whole sequence … on a lock held by this ingestor", because the
+conflict snapshot and the write it feeds are one read-modify-write and an interleaved
+pair silently discards a correction. The reconciler reads that snapshot, so it is
+inside the lock by construction: moving it outside would reintroduce exactly the
+lost-update race the lock closes, on a path where the discarded write may now be a
+supersession. So a second ingest arriving during a reconciliation waits for it, and
+the delays queue rather than overlap.
+
+Three things bound what that costs, and none of them is a promise that it is free.
+The clause above holds the per-ingest addition to **one** request. Most ingests make
+none — a proposal with an empty conflict set, one whose set `agrees` settles, and
+every `USER_ASSERTED` proposal, which takes the asserted path and never reaches a
+reconciler at all. And the population that does make one arrives from the observation
+stage, which ADR-0077 §8 already puts on a scheduled job rather than in a turn,
+precisely so that a model round trip on this path is not a latency tax on the user.
+An interactive `learn` or `answer` write is asserted and is unaffected. If a
+deployment finds the queueing material anyway, the answer available to it without a
+new ADR is to run with no reconciler and take §6's floor.
 
 The degraded behaviour is worth stating as a decision rather than leaving to
 inference, because it is what makes the reconciler *optional machinery*. A
@@ -747,6 +792,11 @@ otherwise.
 - **The observed path gets a supersession for the first time**, so a belief the
   assistant held and later found false can be corrected without the user saying
   anything. `decisions_supersede` leaves zero.
+- **The write path acquires a network round trip, inside a lock.** An ingest that
+  reconciles is serialised behind one model request, and concurrent ingests queue
+  behind it (§6). The observation stage is a scheduled job and the interactive seams
+  are asserted, so this is not a turn-latency cost; it is a throughput cost on batch
+  ingestion, and it is the price of the judgement.
 - **`memory` acquires a model dependency**, and it is the first. The subsystem that
   has never called a provider now optionally does. §6 is what keeps that from being a
   hard dependency, and the conformance suites are what keep the fake honest about it.
