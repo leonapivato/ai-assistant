@@ -144,14 +144,16 @@ async def test_every_episode_is_stored_as_the_users_own_turn(
     assert not any(rests_on_recorded_external_content(episode.provenance) for episode in episodes)
 
 
-async def test_the_frame_reaches_the_episode_text(case_file: Path, tmp_path: Path) -> None:
-    """Stated once per session, in the data — never in a prompt under `src/`."""
+async def test_every_episode_the_observer_reads_names_its_own_speaker(
+    case_file: Path, tmp_path: Path
+) -> None:
+    """The observer's payload is each episode's `content` and nothing else — `outcome`
+    is never rendered (`learning/observer.py::_render_batch`) — and it reads *windows*
+    that nothing aligns to a session boundary. So the third-party signal has to be on
+    every episode, which is what the corpus's own speaker labels already are."""
     episodes = await _episodes(case_file, tmp_path)
 
-    framed = [episode for episode in episodes if "[Transcript the user shared]" in episode.content]
-
-    assert len(framed) == 2
-    assert all(episode.content.startswith("[Transcript the user shared]\n") for episode in framed)
+    assert all(episode.content.split(":", 1)[0] in {"Caroline", "Melanie"} for episode in episodes)
 
 
 def _settings(tmp_path: Path) -> Settings:

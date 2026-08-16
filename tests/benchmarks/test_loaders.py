@@ -119,19 +119,13 @@ def test_locomo_keeps_speaker_names_in_the_text(locomo_file: Path) -> None:
     assert second.text == "Bo: What is its name?"
 
 
-def test_locomo_frames_each_session_opening_as_user_supplied(locomo_file: Path) -> None:
-    """The observer is told what it is reading, in the data and never in a prompt."""
+def test_locomo_adds_no_frame_line_to_the_episode_text(locomo_file: Path) -> None:
+    """The speaker label is the per-episode signal; a frame marker present in some
+    observation windows and not others would be a confound, not a frame (#1185)."""
     sessions = locomo.load(locomo_file)[0].sessions
 
-    assert sessions[0].turns[0].text == "[Transcript the user shared]\nAda: I adopted a dog."
-    assert sessions[1].turns[0].text == "[Transcript the user shared]\nAda: She is settling in."
-
-
-def test_locomo_frames_only_the_opening_turn(locomo_file: Path) -> None:
-    """Repeating it on all ~5,900 turns would put boilerplate in every embedding."""
-    turns = locomo.load(locomo_file)[0].sessions[0].turns
-
-    assert [turn.text.startswith("[Transcript") for turn in turns] == [True, False, False]
+    assert sessions[0].turns[0].text == "Ada: I adopted a dog."
+    assert sessions[1].turns[0].text == "Ada: She is settling in."
 
 
 def test_locomo_puts_every_speaker_on_the_user_side(locomo_file: Path) -> None:
