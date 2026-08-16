@@ -186,9 +186,13 @@ _INSTANT_UNAVAILABLE: Final = "(recorded time unavailable)"
 #: check cannot catch, since that check verifies the episodes exist and not what
 #: they support. Two things answer it. The paragraph says it in terms — a particular
 #: not in a cited episode is an invention, and one occasion is not a routine — and
-#: the example was chosen so it does not model the error: *"climbs at Boulder Barn
-#: in Leeds"* names the venue the evidence names without asserting a recurrence it
-#: may not. Beyond the prompt, the mechanism still bites where the model labels the
+#: the example was chosen so that it cannot model the error at all: *"drives a 2012
+#: Honda Civic"* is a possession, which one episode can establish outright, so no
+#: reading of it turns a single occasion into an ongoing habit. Any example shaped
+#: like a habit can be re-read as one visit generalised, whatever the evidence
+#: beside it is stipulated to be, and the worked example is the one line of a prompt
+#: a model imitates rather than reasons about. Beyond the prompt, the mechanism
+#: still bites where the model labels the
 #: leap honestly: ``INFERRED`` from a single episode is refused by the evidence
 #: floor (§5, and ``_EVIDENCE_FLOOR`` above), which is why the paragraph sits
 #: directly above the two epistemic steps rather than anywhere else.
@@ -205,8 +209,8 @@ already recorded. Proposing nothing is a perfectly good answer.
 When you do propose a belief, keep the concrete particulars the belief is about — \
 the proper names, places, organisations and quantities that identify or qualify \
 the thing believed — rather than abstracting over them. A belief that names the \
-thing is worth more than the trait it illustrates: "climbs at Boulder Barn in \
-Leeds" beats "enjoys climbing". Keep only those: whoever happened to be present, \
+thing is worth more than the trait it illustrates: "drives a 2012 Honda Civic" \
+beats "owns a car". Keep only those: whoever happened to be present, \
 wherever the conversation happened and whatever else was going on are the \
 exchange, not the belief, and are left out. Add nothing the evidence does not \
 give — a particular you cannot point to in a cited episode is an invention, and \
