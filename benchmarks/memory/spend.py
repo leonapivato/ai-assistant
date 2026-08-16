@@ -19,6 +19,18 @@ harness *knows*, where tokens would be an estimate over prompts it has not built
 money would be a vendor's price list this tree has no business carrying. It is checked
 before each call, so the bound is never exceeded rather than merely detected afterwards.
 
+**The unit is one *logical completion*, not one HTTP request, and the difference is a
+choice.** The guard sits outside ``RetryingProvider``, so a call retried twice is charged
+once. Two reasons, and the first is what makes the ceiling usable at all: ``plan_run``
+counts logical calls, so a bound set by reading the plan is only meaningful in the same
+currency — a ceiling that charged attempts would abort a run at an unpredictable
+fraction of its plan, depending on how flaky the provider happened to be that hour. The
+second is that attempts are the worse proxy for *spend* anyway: a provider bills a
+completion it returned, and the attempts a retry replaces are the ones that failed. The
+runaway a ceiling exists to stop is the number of questions, not the number of retries
+within one — ``RetryPolicy.max_attempts`` already bounds those, per call, so that loop
+cannot run away on its own.
+
 *The credit signature* is the case the ceiling cannot predict, because it is a fact about
 an account and not about this run — another process spending the same balance, a
 top-up that did not land, a price that moved. **The harness cannot read the balance**:
@@ -142,19 +154,35 @@ class SpendGuard:
     bound while the account went to zero. One instance is created per
     :func:`~benchmarks.memory.run.execute_run` and handed to every provider it wires.
 
-    **Calls, not tokens and not money.** The call count is a figure the harness knows and
-    ``plan_run`` already prints, so a ceiling in the same currency is one an operator can
-    set by reading the plan. Tokens would be an estimate over prompts not yet built, and
-    money would put a vendor's price list in this tree.
+    **It covers every seam the run builds, and that is the exact extent of it.** A caller
+    may inject the answering seam, the distillation seam or the grader, and only the
+    first of the three is a ``ModelProvider`` this can wrap. An injected ``Observer`` or
+    ``Grader`` holds its own provider behind a surface with no accessor, so a run given
+    one spends outside this budget — see
+    :func:`~benchmarks.memory.wiring.build_harness` and
+    :func:`~benchmarks.memory.run.build_grader`. The gap is bounded by who may inject:
+    ``refuse_ineligible_scored_run`` clause 5 refuses every injected seam outright, so a
+    *scored* run is covered entirely, and a smoke run's artifacts are already not a
+    measurement. It is stated rather than closed because closing it would mean either
+    refusing the ``FakeObserver`` every test injects — which makes no call at all — or
+    widening the ``Observer`` contract for the harness's convenience, and a benchmark
+    does not get to do that.
+
+    **Calls, not tokens and not money, and one logical completion is one call.** The call
+    count is a figure the harness knows and ``plan_run`` already prints, so a ceiling in
+    the same currency is one an operator can set by reading the plan; the module
+    docstring argues why a retried call is charged once. Tokens would be an estimate over
+    prompts not yet built, and money would put a vendor's price list in this tree.
 
     Attributes:
         limit: The most model calls this run may make, or ``None`` for no ceiling —
             which is the default, so the behaviour of every existing caller is unchanged
             and the guard is a counter until somebody asks for a bound.
-        calls: How many have been charged. Counted at the attempt rather than at the
-            reply, so a call that fails still spends: it may well have been billed, and a
-            guard that only counted successes would be defeated by exactly the failing
-            run it exists to stop.
+        calls: How many have been charged — one per logical completion asked for,
+            counted before the request rather than after the reply, so a call that fails
+            outright still spends. A guard that only counted successes would be defeated
+            by exactly the failing run it exists to stop, and a bound checked afterwards
+            is one the run has already crossed.
     """
 
     limit: int | None = None
@@ -222,7 +250,8 @@ class _GuardedProvider:
     and a figure the driver modelled would be a model of the run rather than the run. It
     sits *outside* ``RetryingProvider`` where the harness builds one, so a retried call is
     charged once — which is what ``plan_run`` counts and therefore what a ceiling read off
-    the plan means.
+    the plan means. The module docstring holds the argument for that placement and names
+    what it gives up.
     """
 
     _inner: ModelProvider

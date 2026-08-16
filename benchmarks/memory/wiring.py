@@ -288,9 +288,17 @@ def build_harness(
             It is applied to the answering seam whether that seam was built here or
             **injected** — the one place the guard covers a caller's own object, because
             an injected provider stands in for a call the run would otherwise have made
-            and a budget nothing can drive is a budget nothing exercises. The
-            distillation seam is guarded only where it is built: an injected ``Observer``
-            is not a provider and there is nothing to wrap.
+            and a budget nothing can drive is a budget nothing exercises.
+
+            **An injected ``observer`` is not covered, and a caller passing one has moved
+            distillation outside the run's budget.** An ``Observer`` is not a
+            ``ModelProvider``: it holds its own provider behind a surface with no
+            accessor, so there is nothing here to wrap, and reaching for one would be the
+            harness widening a subsystem's contract for its own convenience. Built here,
+            the observer's provider *is* guarded, which is the case every real run is in —
+            and ``refuse_ineligible_scored_run`` clause 5 refuses an injected seam on a
+            scored run outright, so the gap is reachable only from a smoke run, whose
+            artifacts are already not a measurement.
 
     Returns:
         The wired harness. The caller owns it and must :meth:`Harness.close` it.
