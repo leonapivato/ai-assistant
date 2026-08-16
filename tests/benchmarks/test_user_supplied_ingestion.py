@@ -147,10 +147,17 @@ async def test_every_episode_is_stored_as_the_users_own_turn(
 async def test_every_episode_the_observer_reads_names_its_own_speaker(
     case_file: Path, tmp_path: Path
 ) -> None:
-    """The observer's payload is each episode's `content` and nothing else — `outcome`
-    is never rendered (`learning/observer.py::_render_batch`) — and it reads *windows*
-    that nothing aligns to a session boundary. So the third-party signal has to be on
-    every episode, which is what the corpus's own speaker labels already are."""
+    """Every turn reaches the observer, which is the change that matters most here.
+
+    `_render_batch` gives the observer each episode's `content` and nothing else, so
+    under the old mapping `speaker_b`'s lines went into `outcome` and were shown to
+    it in no window at all. This pins that all five turns are now `content`, each
+    naming its own speaker.
+
+    It pins the *payload*, not the reading: whether the observer takes "Caroline" for
+    a third party or for the user naming themself is not settled by this loader and
+    is not asserted anywhere in it (#1185).
+    """
     episodes = await _episodes(case_file, tmp_path)
 
     assert all(episode.content.split(":", 1)[0] in {"Caroline", "Melanie"} for episode in episodes)
