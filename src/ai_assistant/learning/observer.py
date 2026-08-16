@@ -178,6 +178,20 @@ _INSTANT_UNAVAILABLE: Final = "(recorded time unavailable)"
 #: *role*, not its category: a named person who is the thing believed (*"the user's
 #: manager is Priya"*) is kept by the first sentence, and the same name as a fellow
 #: diner is dropped by the third.
+#:
+#: **And the paragraph adds no particulars, which is the failure mode specific to
+#: asking for them.** An instruction to be concrete is an invitation to be concrete
+#: beyond the evidence — to read one climbing session into *"goes every Tuesday"*,
+#: which would be a fabricated routine wearing an ``OBSERVED`` label the citation
+#: check cannot catch, since that check verifies the episodes exist and not what
+#: they support. Two things answer it. The paragraph says it in terms — a particular
+#: not in a cited episode is an invention, and one occasion is not a routine — and
+#: the example was chosen so it does not model the error: *"climbs at Boulder Barn
+#: in Leeds"* names the venue the evidence names without asserting a recurrence it
+#: may not. Beyond the prompt, the mechanism still bites where the model labels the
+#: leap honestly: ``INFERRED`` from a single episode is refused by the evidence
+#: floor (§5, and ``_EVIDENCE_FLOOR`` above), which is why the paragraph sits
+#: directly above the two epistemic steps rather than anywhere else.
 _PROMPT_HEAD: Final = """\
 You are the observation stage of an AI assistant. You are shown a batch of \
 recorded episodes — things that happened — and you propose what the assistant \
@@ -191,15 +205,17 @@ already recorded. Proposing nothing is a perfectly good answer.
 When you do propose a belief, keep the concrete particulars the belief is about — \
 the proper names, places, organisations and quantities that identify or qualify \
 the thing believed — rather than abstracting over them. A belief that names the \
-thing is worth more than the trait it illustrates: "goes to the Tuesday climbing \
-session at Boulder Barn" beats "enjoys climbing". Keep only those: whoever \
-happened to be present, wherever the conversation happened and whatever else was \
-going on are the exchange, not the belief, and are left out. Where the evidence \
-gives no particular the belief is about, state the trait alone. Times are the one \
-exception: the section below decides which of them a belief states, and keeping \
-the particulars is never a reason to date a belief it says states none. This \
-governs how a belief is written, never whether: the bar above still decides that, \
-and a retelling of what happened is refused however specific it is.
+thing is worth more than the trait it illustrates: "climbs at Boulder Barn in \
+Leeds" beats "enjoys climbing". Keep only those: whoever happened to be present, \
+wherever the conversation happened and whatever else was going on are the \
+exchange, not the belief, and are left out. Add nothing the evidence does not \
+give — a particular you cannot point to in a cited episode is an invention, and \
+one occasion is not a routine — and where it gives no particular the belief is \
+about, state the trait alone. Times are the one exception: the section below \
+decides which of them a belief states, and keeping the particulars is never a \
+reason to date a belief it says states none. This governs how a belief is \
+written, never whether: the bar above still decides that, and a retelling of what \
+happened is refused however specific it is.
 
 Each belief takes one of two epistemic steps:
 - "observed" — the cited episodes directly show it. One episode may be enough.
