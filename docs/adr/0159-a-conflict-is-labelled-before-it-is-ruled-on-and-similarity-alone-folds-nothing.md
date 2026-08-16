@@ -279,9 +279,16 @@ branch, and a later relaxation of that branch — which §3's third clause expli
 reserves to an owner ruling and a commissioned ADR — would then externalise a value
 derived from the store by no model at all. That is the direction §3 exists to
 forbid, so the distinction is written down here rather than left for the lane that
-would get it wrong. It bears on nothing this ADR does: a relation never leaves
-`memory`, and both clauses are stated over "a span of an egress call at the
-designated `tools/` egress seam", which no path here reaches.
+would get it wrong.
+
+It bears on nothing this ADR does, and the reason is **not** that a relation stays
+inside `memory` — §2's second clause hands it to every `MemoryPolicy`
+implementation, wherever that lives. The reason is that both clauses are stated over
+"a span of an egress call at the designated `tools/` egress seam", and no path this
+ADR opens reaches one: the reconciler writes its relations to the ingestor, the
+ingestor passes them to `decide`, and a `MemoryPolicy` may consult no network at all
+(§2). A relation reaching an egress span would take a component this ADR does not
+create, doing something §2 forbids the one recipient it names.
 
 **Why not the bulk seam.** ADR-0143 §8 rules that "no subsystem is given a
 `BatchCompleter` by this ADR" and that "a batch runs in the process that submits it
