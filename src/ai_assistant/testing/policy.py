@@ -31,9 +31,9 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
-    from ai_assistant.core.types import MemoryRecord, MemoryUpdateProposal
+    from ai_assistant.core.types import ConflictRelation, MemoryRecord, MemoryUpdateProposal
 
 _DEFAULT_TTL = timedelta(days=1)
 
@@ -51,10 +51,16 @@ class PolicyCall:
             snapshotted. Both are deep-copied on record, so neither reassigning
             the caller's list nor mutating a record inside it can reach what was
             recorded.
+        relations: What the caller determined about members of ``conflicts``
+            (ADR-0159 §8), copied into a plain ``dict`` on record so a test reads
+            what was passed rather than a live view of the caller's mapping.
+            ``None`` where the caller determined nothing at all, which §8
+            distinguishes from an empty mapping.
     """
 
     proposal: MemoryUpdateProposal
     conflicts: tuple[MemoryRecord, ...]
+    relations: Mapping[str, ConflictRelation] | None
 
 
 class FakeMemoryPolicy:
@@ -128,12 +134,22 @@ class FakeMemoryPolicy:
         proposal: MemoryUpdateProposal,
         *,
         conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
-        """Record the call and return the configured decision."""
+        """Record the call and return the configured decision.
+
+        ``relations`` is **recorded and never read** (ADR-0159 §8). A double that
+        ruled on them would be encoding one policy's reasoning, which is exactly
+        what this fake exists not to do — and the ``MemoryPolicy`` conformance suite
+        is explicit that it does not assert which relation maps to which ruling. A
+        test that wants "the policy reinforced" says so through ``kind``; a test
+        that wants to see what its writer determined reads :attr:`calls`.
+        """
         self.calls.append(
             PolicyCall(
                 proposal=proposal.model_copy(deep=True),
                 conflicts=tuple(c.model_copy(deep=True) for c in conflicts),
+                relations=None if relations is None else dict(relations),
             )
         )
 

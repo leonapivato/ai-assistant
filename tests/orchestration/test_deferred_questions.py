@@ -62,10 +62,11 @@ from ai_assistant.testing import (
 from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import MemoryPolicy
     from ai_assistant.core.types import (
+        ConflictRelation,
         DeferralAdmission,
         DeferralClaim,
         DeferredProposal,
@@ -540,7 +541,11 @@ class _DefersThenRules:
         self._kind = kind
 
     async def decide(
-        self, proposal: MemoryUpdateProposal, *, conflicts: Sequence[MemoryRecord]
+        self,
+        proposal: MemoryUpdateProposal,
+        *,
+        conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
         """Defer until a confirmation arrives, then rule the configured kind."""
         if proposal.confirmation is None:

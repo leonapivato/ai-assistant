@@ -180,9 +180,10 @@ from ai_assistant.core.types import (
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
+    from ai_assistant.core.types import ConflictRelation
 
     #: Mints the id a ``SUPERSEDE`` writes its correction at (ADR-0045 §4).
     type IdFactory = Callable[[], str]
@@ -671,6 +672,7 @@ class _FoldToAbsentTargetPolicy:
         proposal: MemoryUpdateProposal,
         *,
         conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
         """Name a target the writer was never offered."""
         return MemoryDecision(kind=self._kind, target_id="ghost", reason="contract: misdirection")
@@ -694,6 +696,7 @@ class _SupersedeNamingPolicy:
         proposal: MemoryUpdateProposal,
         *,
         conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
         """Supersede, naming the conflict this policy was built to name."""
         self.calls += 1
@@ -786,6 +789,7 @@ class _SuspendingPolicy:
         proposal: MemoryUpdateProposal,
         *,
         conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
         """Capture what is being ruled on, rule, then hold the writer here."""
         self.ruled_on = proposal.model_copy(deep=True)
@@ -931,7 +935,11 @@ class _RulesExactly:
         self._kind = kind
 
     async def decide(
-        self, proposal: MemoryUpdateProposal, *, conflicts: Sequence[MemoryRecord]
+        self,
+        proposal: MemoryUpdateProposal,
+        *,
+        conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
         """Rule the configured kind, naming a target where the kind requires one."""
         if self._kind in {MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE}:

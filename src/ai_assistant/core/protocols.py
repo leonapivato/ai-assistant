@@ -124,6 +124,7 @@ if TYPE_CHECKING:
         BoundEgressCall,
         CarriedProvenance,
         Confirmation,
+        ConflictRelation,
         ConnectedAccount,
         ConnectionAct,
         ContinuationToken,
@@ -1259,8 +1260,41 @@ class MemoryPolicy(Protocol):
         proposal: MemoryUpdateProposal,
         *,
         conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
         """Rule on a proposed memory update.
+
+        **A ruling is a total function of its arguments** (ADR-0159 §2, ratifying
+        ADR-0005 §3 rather than relaxing it). No implementation consults a
+        ``ModelProvider``, a ``BatchCompleter``, a store, a clock or a network.
+        ``decide`` returns the same ruling for the same ``proposal``, the same
+        ``conflicts`` and the same ``relations``, and every input its ruling
+        depends on is an argument or a construction-time property of the
+        implementation. This is the standing
+        :class:`NotificationPolicy` already states in the same terms and cites this
+        method as the shape it copies: an implementation that awaits anything
+        outside its arguments has already broken the clause.
+
+        **``relations`` is what a fold may rest on, and similarity is not**
+        (ADR-0159 §1, §4). A member of ``conflicts`` is surfaced by *topical
+        similarity*, which ADR-0038 §2 and ADR-0045 §5 have long ruled is neither
+        contradiction nor agreement; a
+        :class:`~ai_assistant.core.types.ConflictRelation` is a statement about how
+        the proposal stands to one *named* member, made by something entitled to
+        make it. A member absent from the mapping is **unlabelled** — nothing was
+        determined about it, and it supplies ground for nothing.
+
+        A policy **ignores any entry whose key is not the id of a member of
+        ``conflicts``**, and treats a member absent from the mapping as unlabelled.
+        The existing target-coherence obligation is unchanged: a target-carrying
+        ruling still names one of the records ``decide`` was handed (ADR-0040 §5).
+
+        ``None`` and an empty mapping rule identically — every member is unlabelled
+        either way — and they are still different facts: ``None`` says nothing
+        determined relations for this ingest at all, ``{}`` says something did and
+        labelled nothing. The caller's mapping is a **runtime read-only** view
+        (ADR-0159 §8), so narrowing it with ``isinstance(relations, dict)`` and
+        writing recovers no mutable object a caller holds.
 
         **A tainted derived proposal is never committed unconfirmed** (ADR-0106
         §6, giving ADR-0098 §4's fourth clause its enforcement point). No policy
@@ -1304,6 +1338,12 @@ class MemoryPolicy(Protocol):
             proposal: The candidate memory and why it was proposed.
             conflicts: Existing records the proposal contradicts, already
                 resolved from the store (the proposal carries their ids).
+            relations: How the proposal stands to named members of ``conflicts``,
+                keyed by :attr:`~ai_assistant.core.types.MemoryRecord.id`
+                (ADR-0159 §8). ``None`` where nothing determined any — no
+                reconciler ran, or the ingest was one where none may. Read-only;
+                a policy never mutates it and is never handed a mapping its caller
+                still reads.
 
         Returns:
             The decision to accept, reject, reinforce or supersede a named
@@ -1436,6 +1476,16 @@ class MemoryWriter(Protocol):
         with the correction. The two standing refusals are unchanged: nothing folds
         onto a ``USER_ASSERTED`` target under either ruling, and ``USER_ASSERTED``
         and ``EXTERNAL`` *siblings* are never swept in.
+
+        **A conflict the writer holds a ``RESTATES`` or ``ADDS`` relation for is
+        never retired, by any ruling** (ADR-0159 §5, narrowing the obligation
+        above). It is not in the retirement set of a ``SUPERSEDE`` naming another
+        member, and a ``SUPERSEDE`` naming *it* is refused rather than performed.
+        The relation is one the **writer** holds and determined for itself, never
+        one read off the ruling — ADR-0038 §2a's shape, at the boundary that
+        performs the write. Where a writer holds no relation for a member, the
+        obligation above binds it exactly as ADR-0079 §3 states it, so a writer
+        that determines none conforms unchanged.
 
         **A retirement clamps, and never resurrects** (ADR-0080 §1). Each record a
         supersession retires is written back with its window closed at the

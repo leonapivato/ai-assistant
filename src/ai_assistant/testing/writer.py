@@ -32,7 +32,8 @@ import asyncio
 import unicodedata
 import uuid
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, assert_never
+from types import MappingProxyType
+from typing import TYPE_CHECKING, Protocol, assert_never
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
@@ -45,6 +46,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
     BeliefBand,
+    ConflictRelation,
     DataTier,
     MemoryDecisionKind,
     MemoryIngestResult,
@@ -58,7 +60,7 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
@@ -130,9 +132,135 @@ def _utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+#: The relations that put a conflict **beyond retirement**, by any ruling
+#: (ADR-0159 §5). Mirrors ``MemoryIngestor``'s constant and is contract, not tuning:
+#: a fake that retired a restatement where production refuses would certify a
+#: consumer against state the real writer never produces (ADR-0026 §7).
+_UNRETIRABLE_RELATIONS = frozenset({ConflictRelation.RESTATES, ConflictRelation.ADDS})
+
+
 #: How many attested beliefs one absence-reconciliation page enumerates
 #: (ADR-0110 §6). Mirrors ``memory/ingest.py``'s constant; tuning, not contract.
 _ABSENCE_PAGE = 50
+
+
+class StubConflictReconciler(Protocol):
+    """The reconciler seam :class:`FakeMemoryWriter` accepts (ADR-0159 §2, §10).
+
+    **Duplicated from ``memory`` rather than imported**, like every other behaviour
+    this fake owes (golden rule 1): the reconciler is a ``memory``-internal seam and
+    no Protocol for it goes in ``core/protocols.py``, so a fake that mirrors the
+    seam has to state its own. The shape is the same one ``MemoryIngestor`` accepts,
+    which is what lets one stub drive both writers through the shared conformance
+    suite.
+
+    This fake ships **no** implementation of it. A reconciler that determines
+    relations is a model-backed component and belongs to the subsystem that owns the
+    write path; what a canonical fake owes is the *seam*, so a consumer's test can
+    inject a stub and see the writer honour ADR-0159 §5's exclusion. With none
+    injected the fake still holds ADR-0121 §1's certain agreements — the ``agrees``
+    half every writer can compute with no model — which is exactly what ADR-0159 §5
+    requires the shared suite to pin.
+
+    An implementation owes ADR-0159 §3's never-raises contract; this fake guards
+    against one that does not, as ``MemoryIngestor`` does, so a stub that throws
+    cannot make a consumer's write fail in a way production would not.
+    """
+
+    async def reconcile(
+        self,
+        proposal: MemoryUpdateProposal,
+        conflicts: Sequence[MemoryRecord],
+    ) -> Mapping[str, ConflictRelation]:
+        """Label what can be labelled, keyed by ``MemoryRecord.id``.
+
+        Args:
+            proposal: The proposal being ingested.
+            conflicts: The resolved conflict set, best-ranked first.
+
+        Returns:
+            A relation for each member a determination was made about; a member
+            absent from the mapping is unlabelled.
+        """
+        ...
+
+
+def _may_reconcile(proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]) -> bool:
+    """ADR-0159 §2's invocation condition, mirroring ``MemoryIngestor``'s.
+
+    All three of: the proposed record's source is not ``USER_ASSERTED``; no member
+    of the conflict set is ``USER_ASSERTED``; and the proposal clears the
+    admissibility floor — secret tier, a derived belief citing no evidence, and an
+    unconfirmed derived belief resting on recorded external content.
+
+    **The floor is restated here rather than shared**, unlike in ``memory`` where
+    ADR-0159 §10 forbids the duplicate: the predicate this fake would share lives in
+    ``ai_assistant.memory.policy``, which golden rule 1 puts out of reach. The
+    duplication is the same one every other refusal in this module carries, and for
+    the same reason — a fake that reconciled where production does not would let a
+    consumer's test pass on a request production never makes.
+
+    Args:
+        proposal: The proposal being ingested.
+        conflicts: The resolved conflict set.
+
+    Returns:
+        Whether relations may be determined for this ingest.
+    """
+    record = proposal.proposed
+    provenance = record.provenance
+    if record.provenance.source is MemorySource.USER_ASSERTED:
+        return False
+    if any(c.provenance.source is MemorySource.USER_ASSERTED for c in conflicts):
+        return False
+    if proposal.sensitivity is DataTier.SECRET:
+        return False
+    if (
+        MemoryKind(record.kind) is not MemoryKind.EPISODIC
+        and band_of(provenance.source) is BeliefBand.DERIVED
+        and not provenance.evidence
+    ):
+        return False
+    return not (
+        band_of(provenance.source) is BeliefBand.DERIVED
+        and provenance.derived_from_external
+        and proposal.confirmation is None
+    )
+
+
+def _refuse_retiring_a_related_conflict(
+    target: MemoryRecord,
+    kind: MemoryDecisionKind,
+    relations: Mapping[str, ConflictRelation],
+) -> None:
+    """Refuse a ``SUPERSEDE`` that would retire a ``RESTATES`` or ``ADDS`` conflict.
+
+    ADR-0159 §5, mirroring ``MemoryIngestor``. A ``SUPERSEDE`` naming another member
+    simply leaves such a conflict out of the retirement set; a ``SUPERSEDE`` naming
+    *this* one has nowhere to leave it, so the write is refused. Read from **this
+    writer's own** relations, handed to no policy — ADR-0038 §2a's shape, and
+    ADR-0159 §8's second clause, which this fake carries in its own right because it
+    holds its own policy and computes its own retirement set.
+
+    Args:
+        target: The conflict the ruling names.
+        kind: The ruling being applied.
+        relations: The relations this writer determined.
+
+    Raises:
+        MemoryStoreError: If the ruling is a ``SUPERSEDE`` naming a conflict this
+            writer holds a ``RESTATES`` or ``ADDS`` relation for.
+    """
+    if kind is not MemoryDecisionKind.SUPERSEDE:
+        return
+    relation = relations.get(target.id)
+    if relation in _UNRETIRABLE_RELATIONS:
+        msg = (
+            f"refusing to supersede {target.id!r}: this writer determined the proposal "
+            f"{relation} that record, and a conflict so related is never retired, by any "
+            f"ruling (ADR-0159 §5)"
+        )
+        raise MemoryStoreError(msg)
 
 
 class FakeMemoryWriter:
@@ -154,6 +282,7 @@ class FakeMemoryWriter:
         conflict_limit: int = _DEFAULT_CONFLICT_LIMIT,
         now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
+        reconciler: StubConflictReconciler | None = None,
     ) -> None:
         """Create the fake writer.
 
@@ -182,6 +311,12 @@ class FakeMemoryWriter:
                 Guarded at its output by :func:`_checked_id`, the same guard
                 ``MemoryIngestor`` carries, so this fake refuses a malformed factory
                 exactly as the production writer does. Defaults to random UUIDs.
+            reconciler: A stub determining ADR-0159 §1 relations, invoked between
+                conflict resolution and the ruling on the ingests
+                :func:`_may_reconcile` admits. Optional, with the same ruled, safe
+                absence the production writer has (ADR-0159 §6): with none injected
+                the relations this writer holds are ADR-0121 §1's certain agreements
+                and nothing else, and ``decide`` is handed ``None``.
         """
         self._store = store
         self._policy = policy
@@ -189,6 +324,7 @@ class FakeMemoryWriter:
         self._conflict_limit = conflict_limit
         self._clock = checked_clock(now, owner="FakeMemoryWriter")
         self._id_factory = id_factory
+        self._reconciler = reconciler
         # Mirrors `MemoryIngestor`'s lock (#262). A fake that skipped it would let
         # `ingest_reading` claim ADR-0115 §3's guarantee without providing it, and a
         # conformance suite cannot tell the difference — so the fake provides it.
@@ -252,10 +388,23 @@ class FakeMemoryWriter:
         # ``question_key`` from — comparing against the live set would refuse every
         # honest answer.
         ruled = observed.model_copy(update={"conflicts": resolved})
-        decision = await self._policy.decide(ruled, conflicts=conflicts)
+        # Between the probe and the ruling, behind the admissibility floor
+        # (ADR-0159 §2), mirroring ``MemoryIngestor``. What crosses the policy seam
+        # is a read-only view over a **copy**, so nothing a policy does with what it
+        # was handed can reach the mapping ``_retirement_set`` rules from (§8).
+        relations = await self._relations_for(ruled, conflicts)
+        decision = await self._policy.decide(
+            ruled,
+            conflicts=conflicts,
+            relations=None
+            if relations is None or self._reconciler is None
+            else MappingProxyType(dict(relations)),
+        )
         _refuse_secret_write(decision, observed)
         _refuse_self_consuming_write(decision, observed, resolved=resolved)
-        record_id = await self._apply(decision, observed, conflicts, resolved=resolved)
+        record_id = await self._apply(
+            decision, observed, conflicts, resolved=resolved, relations=relations or {}
+        )
         # The resolved ids come back on **every** ruling (ADR-0078 §4), exactly as
         # they do from ``MemoryIngestor``: a fake that dropped them would let a
         # consumer's test pass while the real writer's caller enqueues a question
@@ -367,6 +516,51 @@ class FakeMemoryWriter:
                 return candidates
             offset += _ABSENCE_PAGE
 
+    async def _relations_for(
+        self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+    ) -> dict[str, ConflictRelation] | None:
+        """The relations **this writer** holds for one ingest, or ``None``.
+
+        Mirrors ``MemoryIngestor``. ``None`` means ADR-0159 §2's condition excluded
+        this ingest, which §8 distinguishes from an empty mapping. Two sources, in
+        one order: ADR-0121 §1's certain predicate, computed here whether or not a
+        reconciler is injected and winning over anything one says about the same
+        pair (ADR-0159 §3's first rung is unconditional); then the stub's
+        determination, restricted to members of this conflict set.
+
+        **It never fails the ingest** (ADR-0159 §6), so a stub that raises degrades
+        to the relations already held rather than making a consumer's write fail in
+        a way the production writer would not. A ``CancelledError`` delivered from
+        outside is a ``BaseException`` and passes the guard untouched, as ADR-0060
+        §1 requires.
+
+        Args:
+            proposal: The proposal, carrying this ingest's resolved conflict ids.
+            conflicts: The resolved conflict set, best-ranked first.
+
+        Returns:
+            The relations determined, or ``None`` where none may be.
+        """
+        if not _may_reconcile(proposal, conflicts):
+            return None
+        record = proposal.proposed
+        own = {
+            conflict.id: ConflictRelation.RESTATES
+            for conflict in conflicts
+            if _agrees(conflict, record)
+        }
+        if self._reconciler is None:
+            return own
+        try:
+            determined = await self._reconciler.reconcile(proposal, conflicts)
+        except Exception:
+            return own
+        return {
+            conflict.id: determined[conflict.id]
+            for conflict in conflicts
+            if conflict.id not in own and conflict.id in determined
+        } | own
+
     async def _require_resolvable_evidence(self, record: MemoryRecord) -> None:
         """Refuse a ``DERIVED`` proposal citing a record the store does not hold.
 
@@ -443,6 +637,7 @@ class FakeMemoryWriter:
         conflicts: list[MemoryRecord],
         *,
         resolved: tuple[str, ...],
+        relations: Mapping[str, ConflictRelation],
     ) -> str | None:
         proposed = proposal.proposed
         # Every installing arm passes through `_installed` (ADR-0086 §2), so the
@@ -463,9 +658,18 @@ class FakeMemoryWriter:
                     msg = f"fold target {decision.target_id!r} is not among the conflicts"
                     raise MemoryStoreError(msg)
                 _refuse_unsafe_fold(target, proposal, decision.kind, resolved=resolved)
+                # ADR-0159 §5, beside the standing refusals and never in place of
+                # one.
+                _refuse_retiring_a_related_conflict(target, decision.kind, relations)
                 if decision.kind is MemoryDecisionKind.SUPERSEDE:
                     return await self._apply_supersede(
-                        _retirement_set(target, conflicts, proposal=proposal, resolved=resolved),
+                        _retirement_set(
+                            target,
+                            conflicts,
+                            proposal=proposal,
+                            resolved=resolved,
+                            relations=relations,
+                        ),
                         proposed,
                     )
                 # The clock reading is taken here, not inside `_merge`: `_now_utc`
@@ -981,6 +1185,7 @@ def _retirement_set(
     *,
     proposal: MemoryUpdateProposal,
     resolved: tuple[str, ...],
+    relations: Mapping[str, ConflictRelation],
 ) -> list[MemoryRecord]:
     """The full set of beliefs a ``SUPERSEDE`` retires (ADR-0050 §1, ADR-0079 §3).
 
@@ -1005,11 +1210,28 @@ def _retirement_set(
     into the ``MemoryWriter`` contract precisely because a fake retiring one record
     where production retires N let a consumer's test pass on state production would
     never produce.
+
+    **ADR-0159 §5 narrows the widening.** A conflict this writer holds a
+    ``RESTATES`` or ``ADDS`` relation for is never retired, by any ruling: it is not
+    the belief being corrected, it is a restatement of one or a distinct fact
+    similarity surfaced beside it. Where this writer holds no relation for a member,
+    the obligation binds exactly as ADR-0079 §3 states it.
+
+    Args:
+        target: The conflict the ruling names, which leads the returned list.
+        conflicts: The full resolved set, best-ranked first.
+        proposal: The proposal as handed to ``ingest``, for the confirmation checks.
+        resolved: The conflict ids this ingest resolved.
+        relations: The relations this writer determined, keyed by record id.
+
+    Returns:
+        The named target followed by every other conflict warranted for retirement.
     """
     others = [
         conflict
         for conflict in conflicts
         if conflict.id != target.id
+        and relations.get(conflict.id) not in _UNRETIRABLE_RELATIONS
         and (
             conflict.provenance.source in _RETIREMENT_CLASS
             or (
