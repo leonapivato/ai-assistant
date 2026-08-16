@@ -166,6 +166,18 @@ _INSTANT_UNAVAILABLE: Final = "(recorded time unavailable)"
 #: A date the belief *is* entitled to state is not lost by the carve-out: §2's
 #: second clause requires it, in the section that decides it, and that section is
 #: more precise about which date than this paragraph could be.
+#:
+#: **The particulars are scoped to the belief, and the incidental ones are excluded
+#: in terms, for the same reason at a different seam.** An unscoped "keep the
+#: particulars the evidence gives" would, on *"at Acme's dinner with Priya I
+#: realised I prefer vegan meals"*, retain Acme and Priya inside a belief neither
+#: identifies nor qualifies — third-party personal data kept at indefinite retention
+#: because it shared a sentence with something durable. That is ADR-0077 §2's
+#: transcript failure mode arriving one belief at a time instead of twenty, and it
+#: is more than ADR-0004 §7's minimisation allows. The test is the particular's
+#: *role*, not its category: a named person who is the thing believed (*"the user's
+#: manager is Priya"*) is kept by the first sentence, and the same name as a fellow
+#: diner is dropped by the third.
 _PROMPT_HEAD: Final = """\
 You are the observation stage of an AI assistant. You are shown a batch of \
 recorded episodes — things that happened — and you propose what the assistant \
@@ -176,16 +188,18 @@ a preference, a durable fact about them or their world, a workflow they follow. 
 Do not summarise the exchange. Do not propose what merely happened; that is \
 already recorded. Proposing nothing is a perfectly good answer.
 
-When you do propose a belief, keep the concrete particulars the evidence gives — \
-the proper names, places, organisations and quantities involved — rather than \
-abstracting over them. A belief that names the thing is worth more than the trait \
-it illustrates: "goes to the Tuesday climbing session at Boulder Barn" beats \
-"enjoys climbing". State a trait alone only where the evidence gives no \
-particular. Times are the one exception: the section below decides which of them \
-a belief states, and keeping the particulars is never a reason to date a belief \
-it says states none. This governs how a belief is written, never whether: the bar \
-above still decides that, and a retelling of what happened is refused however \
-specific it is.
+When you do propose a belief, keep the concrete particulars the belief is about — \
+the proper names, places, organisations and quantities that identify or qualify \
+the thing believed — rather than abstracting over them. A belief that names the \
+thing is worth more than the trait it illustrates: "goes to the Tuesday climbing \
+session at Boulder Barn" beats "enjoys climbing". Keep only those: whoever \
+happened to be present, wherever the conversation happened and whatever else was \
+going on are the exchange, not the belief, and are left out. Where the evidence \
+gives no particular the belief is about, state the trait alone. Times are the one \
+exception: the section below decides which of them a belief states, and keeping \
+the particulars is never a reason to date a belief it says states none. This \
+governs how a belief is written, never whether: the bar above still decides that, \
+and a retelling of what happened is refused however specific it is.
 
 Each belief takes one of two epistemic steps:
 - "observed" — the cited episodes directly show it. One episode may be enough.
