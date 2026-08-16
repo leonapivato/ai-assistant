@@ -145,8 +145,11 @@ class QuestionRecord(BaseModel):
         correlation_id: Ties this answer to its traces in ``traces.db``.
         retrieved_ids: The records placed in the prompt, in prompt order.
         retrieved_kinds: Their kinds, aligned with ``retrieved_ids``.
-        retrieved_evidence: The episode ids each retrieved record cites, aligned with
-            ``retrieved_ids``.
+        retrieved_evidence: The episode ids standing behind each retrieved record,
+            aligned with ``retrieved_ids`` — the episodes a belief cites, and for an
+            episode its own id, so the join below is one rule over both groups
+            (#1187, and :attr:`~benchmarks.memory.answer.AnswerAttempt.retrieved_evidence`
+            for why an episode cites nothing to begin with).
         retrieved_evidence_elided: How many citations each retrieved record no longer
             carries (ADR-0086 §4), aligned with ``retrieved_ids``. Non-zero turns an
             empty join below into "cannot tell" rather than "never retrieved".
@@ -162,7 +165,10 @@ class QuestionRecord(BaseModel):
             episodes carrying the link live in a ``memory.db`` a default run deletes.
             With it the split is a set intersection over this file alone: an evidence
             episode appearing somewhere in ``retrieved_evidence`` was in context and
-            the reader failed; one appearing nowhere in it was never retrieved.
+            the reader failed; one appearing nowhere in it was never retrieved. Since
+            #1187 that intersection also sees the episodes ADR-0158's supplement put in
+            the prompt directly — they carry no citations of their own, so before it
+            they could never satisfy the test however often they were retrieved.
 
             An **empty tuple** for a pointer says that pointer never became an episode
             in this run — it named a turn outside the ingested slice
