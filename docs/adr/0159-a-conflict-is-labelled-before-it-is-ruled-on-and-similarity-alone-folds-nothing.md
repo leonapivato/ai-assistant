@@ -1,6 +1,6 @@
 # 159. A conflict is labelled before it is ruled on, and similarity alone folds nothing
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-16
 - **This is a contract change under golden rule 5.** `MemoryPolicy.decide` gains a
   keyword-only parameter and `core/types.py` gains one enum (§8). It also narrows a
@@ -819,6 +819,16 @@ The lane owes:
   the writer rules the retirement set from is unchanged after `decide` returns,
   whether the attempted mutation raised or landed on something the writer does not
   read. The rest of the list exercises no cross-seam mutation.
+
+**This ADR's own ratification.** The required set is adversarial **and**
+architecture (ADR-0015 §1, `CONTRIBUTING.md` → "Stop when the required reviews are
+green"), because §8 decides a contract surface. ADR-0015 §5's ratify-after-review
+sequencing is taken as ADR-0130 §12 and ADR-0136 §7 took it: drafted, reviewed and
+revised as `Proposed`, with the status flipped only once both required reviews
+returned clean on **one** tree, and both re-run on the flipped tree.
+`CONTRIBUTING.md` → "Finishing an ADR PR" holds that sequence and the reason for it,
+and is pointed at rather than re-argued here. The PR carries the round record;
+nothing implements against §8 until this has merged.
 
 ### 11. What this records against earlier ADRs, under ADR-0082 §1
 
