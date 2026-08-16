@@ -200,6 +200,23 @@ def _proposal(record: MemoryRecord) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(proposed=record, rationale="because")
 
 
+#: The policy the fold cases below drive their ``REINFORCE`` from.
+#:
+#: **Injected rather than provoked out of ``DefaultMemoryPolicy``, since ADR-0159.**
+#: These cases are about the *applier's* fold semantics, and they used to reach the
+#: arm through the default policy's rule 5, which folded whenever the conflict set
+#: was non-empty. ADR-0159 §4 replaced that rule with one resting on a *relation*,
+#: and §12 records the consequence for exactly this shape: "§4 excludes ``EXTERNAL``
+#: from both target classes, so ``DefaultMemoryPolicy`` no longer reaches the
+#: ``DERIVED``→``ATTESTED`` fold at all on the observed path. The contradiction is
+#: between two ADRs about how such a fold folds and **survives untouched for any
+#: policy that does reach it**." Both writers take rulings from any injected
+#: ``MemoryPolicy`` (ADR-0040 §3), so this is the seam and not a workaround — and it
+#: makes what these cases always meant explicit: the fold, not the ruling.
+def _folding_policy() -> FakeMemoryPolicy:
+    return FakeMemoryPolicy(MemoryDecisionKind.REINFORCE)
+
+
 async def _fold(
     make_writer: WriterFactory,
     *,
@@ -218,7 +235,7 @@ async def _fold(
     await _plant_episodes(store, _episode(_EPISODE, _JANUARY))
     await store.add(_target(last_confirmed_at=target_at, corroborating=corroborating))
 
-    writer = make_writer(store, DefaultMemoryPolicy(), _fixed_now)
+    writer = make_writer(store, _folding_policy(), _fixed_now)
     result = await writer.ingest(_proposal(_incoming(last_confirmed_at=incoming_at)))
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
@@ -365,7 +382,7 @@ async def test_a_future_instant_is_not_promoted_when_the_clock_passes_it(
     await _plant_episodes(store, _episode(_EPISODE, _JANUARY))
     await store.add(_target(last_confirmed_at=_FUTURE, corroborating=corroborating))
 
-    writer = make_writer(store, DefaultMemoryPolicy(), lambda: later)
+    writer = make_writer(store, _folding_policy(), lambda: later)
     result = await writer.ingest(_proposal(_incoming(last_confirmed_at=_JANUARY)))
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE
@@ -409,7 +426,7 @@ async def test_the_citation_bound_displaces_citations_and_not_the_instant(
     await _plant_episodes(store, *episodes)
     await store.add(_target(last_confirmed_at=None, corroborating=False))
 
-    writer = make_writer(store, DefaultMemoryPolicy(), _fixed_now)
+    writer = make_writer(store, _folding_policy(), _fixed_now)
     result = await writer.ingest(
         _proposal(
             _incoming(

@@ -15,11 +15,17 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ai_assistant.app import build_engine, composition
-from ai_assistant.app.composition import _build_model_provider, _model_specs, _observer_spec
+from ai_assistant.app.composition import (
+    _build_model_provider,
+    _model_specs,
+    _observer_spec,
+    _reconciler_spec,
+)
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError, ModelError, ModelUnavailableError
 from ai_assistant.core.types import Message, Role
 from ai_assistant.learning import ModelBackedObserver
+from ai_assistant.memory import MemoryIngestor, ModelBackedReconciler
 from ai_assistant.models import PydanticAIProvider, RetryingProvider, RoutingProvider
 from ai_assistant.planning import ModelBackedPlanner
 
@@ -382,6 +388,106 @@ def test_an_uninstalled_observer_vendor_stops_the_build(tmp_path: Path) -> None:
     least likely to make while they still remember changing the setting.
     """
     settings = Settings(default_model="anthropic:claude-x", observer_model="groq:llama-3")
+
+    with pytest.raises(ConfigurationError, match="groq:llama-3"):
+        build_engine(settings, data_dir=tmp_path)
+
+
+# --- the reconciler's route (ADR-0159 §3) -----------------------------------
+
+
+def _reconciler_of(engine: Engine) -> ModelBackedReconciler:
+    """The reconciler the composed engine's writer holds.
+
+    Reached through the observation stage's write stage, which is the *one* write
+    stage every producer shares (ADR-0078 §3) and therefore holds the one writer.
+    """
+    writer = engine._observation._writes._writer
+    assert isinstance(writer, MemoryIngestor)
+    reconciler = writer._reconciler
+    assert isinstance(reconciler, ModelBackedReconciler)
+    return reconciler
+
+
+def _reconciler_provider(engine: Engine) -> ModelProvider:
+    """The provider the composed engine's writer will actually label through.
+
+    The same deliberate reach-in the observer's uses: the composition root's
+    obligations are about *which object ends up where*, and no public surface
+    exposes that — a writer holds its reconciler and shows nobody, which is the
+    whole of ADR-0159 §2's "``memory``-internal seam".
+    """
+    return _reconciler_of(engine)._model
+
+
+def test_the_reconciler_labels_through_the_conversational_route_when_unset() -> None:
+    """Unset means ``default_model``, which widens no recipient set (ADR-0159 §3)."""
+    settings = Settings(default_model="anthropic:claude-x", fallback_models=("openai:gpt-5",))
+    assert _reconciler_spec(settings) == "anthropic:claude-x"
+
+
+def test_a_named_reconciler_model_is_the_route_that_labels() -> None:
+    """Set, it names the route — and the answers' route is untouched."""
+    settings = Settings(default_model="anthropic:claude-x", reconciler_model="openai:gpt-5")
+    assert _reconciler_spec(settings) == "openai:gpt-5"
+    assert _model_specs(settings)[0] == "anthropic:claude-x"
+
+
+async def test_the_reconcilers_seam_is_a_retrying_provider_and_never_a_router(
+    tmp_path: Path,
+) -> None:
+    """The no-fallback property, structurally (ADR-0159 §3, ADR-0013 §4).
+
+    A reconciler's prompt is two of the user's own stored beliefs. Fallback would
+    buy reliability by widening the set of providers that see them — and reliability
+    buys nothing here, because ADR-0159 §3 converts a failed request into an
+    unlabelled member and §6 ratifies the ruling that follows. A cost with no
+    benefit is exactly the trade ADR-0004 §7's minimisation rule settles.
+
+    Retry is deliberately kept: it re-sends to the *same* provider, so it widens no
+    recipient set.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-x",
+        fallback_models=("openai:gpt-5",),
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        model = _reconciler_provider(engine)
+        assert isinstance(model, RetryingProvider)
+        assert not isinstance(model, RoutingProvider)
+    finally:
+        await engine.aclose()
+
+
+async def test_the_reconcilers_bound_reaches_the_component(tmp_path: Path) -> None:
+    """``reconciler_max_conflicts`` is a knob an operator tunes, so it has to arrive.
+
+    A setting the composition root read and dropped would leave the ADR-0159 §3
+    bound at its default however it was configured, and nothing in a ruling would
+    show it.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-x",
+        reconciler_max_conflicts=7,
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        assert _reconciler_of(engine)._max_conflicts == 7
+    finally:
+        await engine.aclose()
+
+
+def test_an_uninstalled_reconciler_vendor_stops_the_build(tmp_path: Path) -> None:
+    """Vendor-checked at startup (ADR-0062 §2), like every other route.
+
+    Without it the failure lands on the first ingest that would have reconciled —
+    where ADR-0159 §3's never-raises clause swallows it into an unlabelled member
+    and the write proceeds, so the operator would never learn the route is unusable.
+    """
+    settings = Settings(default_model="anthropic:claude-x", reconciler_model="groq:llama-3")
 
     with pytest.raises(ConfigurationError, match="groq:llama-3"):
         build_engine(settings, data_dir=tmp_path)

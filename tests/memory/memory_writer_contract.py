@@ -160,6 +160,7 @@ from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
     Attestation,
     BeliefBand,
+    ConflictRelation,
     DataTier,
     EpisodicMemory,
     MemoryDecision,
@@ -183,10 +184,31 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
-    from ai_assistant.core.types import ConflictRelation
 
     #: Mints the id a ``SUPERSEDE`` writes its correction at (ADR-0045 §4).
     type IdFactory = Callable[[], str]
+
+
+class StubReconciler(Protocol):
+    """The reconciler seam ADR-0159 §5's ``ADDS`` half is driven through.
+
+    Stated here rather than imported from either writer, for the reason ADR-0159 §2
+    gives for keeping it out of ``core/protocols.py`` at all: it is a
+    ``memory``-internal seam, and the canonical fake carries its own copy (golden
+    rule 1). A shared suite needs a shape both writers accept, and this is it.
+
+    The suite never asserts what a reconciler answers — that is ADR-0159 §3's
+    contract and is pinned per implementation. What it asserts is what a *writer*
+    does with the relations it ends up holding.
+    """
+
+    async def reconcile(
+        self,
+        proposal: MemoryUpdateProposal,
+        conflicts: Sequence[MemoryRecord],
+    ) -> Mapping[str, ConflictRelation]:
+        """Label what can be labelled, keyed by ``MemoryRecord.id``."""
+        ...
 
 
 class WriterFactory(Protocol):
@@ -205,6 +227,14 @@ class WriterFactory(Protocol):
       suite sets a limit to make a boundary observable; it asserts **nothing**
       about what the value should be, so the limit stays tuning.
 
+    * ``reconciler`` — ADR-0159 §5's ``ADDS`` half is not observable without one:
+      that relation is a *model's* determination, and a writer computes only the
+      ``agrees`` half for itself. The suite injects a stub rather than a model, so
+      no obligation here turns on a provider being reachable, and it asserts
+      nothing about what a reconciler should answer — only what a writer does with
+      what it holds. ``None`` leaves the writer with the certain rung alone, which
+      is the state every ``agrees``-half case below runs in.
+
     No clock seam is exposed — the suite deliberately does not pin clock handling
     (a writer with no clock at all conforms). The obligations below are stated so
     they need none: an inequality for the clamp, an observable disjunction for the
@@ -219,6 +249,7 @@ class WriterFactory(Protocol):
         *,
         id_factory: IdFactory | None = None,
         conflict_limit: int | None = None,
+        reconciler: StubReconciler | None = None,
     ) -> MemoryWriter: ...
 
 
@@ -579,6 +610,22 @@ def _fold_is_refused(
     nothing to it**, for ADR-0092 §5's reason: the next routine sync overwrites the
     fold whether or not the user's words matched the import's. Every other pairing
     is permitted, on either agreement axis.
+
+    **ADR-0159 §5 adds one refusal, and it is a ``SUPERSEDE``'s** — a conflict the
+    writer holds a ``RESTATES`` or ``ADDS`` relation for "is **never retired**, by
+    any ruling, at any writer… and a writer that would retire it refuses the write
+    instead". A writer determines ADR-0121 §1's agreement for itself with no model
+    (§5's ``agrees`` half), on the ingests ADR-0159 §2 admits — a non-asserted
+    proposal, no asserted member, and the admissibility floor clear. So an
+    *agreeing* supersession from a non-asserted proposal is refused, whatever the
+    target's source: superseding a record that says the same thing retires a live
+    belief on the strength of a restatement, which is what §5 exists to stop.
+
+    **The asserted rows are untouched**, and that is ADR-0159 §2's invocation
+    condition rather than a carve-out here: a ``USER_ASSERTED`` proposal determines
+    no relations at all, so the writer holds none and ADR-0079 §3 binds it exactly
+    as it always did. A ``USER_ASSERTED`` *target* is likewise outside the
+    condition, and clause 1 already refuses every fold onto one.
     """
     if target is MemorySource.USER_ASSERTED:
         return not (
@@ -586,6 +633,12 @@ def _fold_is_refused(
             and kind is MemoryDecisionKind.REINFORCE
             and incoming is MemorySource.USER_ASSERTED
         )
+    if (
+        kind is MemoryDecisionKind.SUPERSEDE
+        and agrees
+        and incoming is not MemorySource.USER_ASSERTED
+    ):
+        return True  # ADR-0159 §5
     return (
         kind is MemoryDecisionKind.REINFORCE
         and incoming is MemorySource.USER_ASSERTED
@@ -602,6 +655,36 @@ def _fold_is_refused(
 #: of the ranking, and a refusal case that fell below the threshold would exercise
 #: an empty conflict set instead of the predicate.
 _DISAGREEING = "prefers concise formal emails"
+
+
+def _correcting(
+    record_id: str,
+    *,
+    source: MemorySource = MemorySource.OBSERVED,
+    evidence: tuple[str, ...] = (),
+) -> MemoryRecord:
+    """A proposal carrying :data:`_DISAGREEING` — a *correction*, not a restatement.
+
+    **Why the supersession cases below need it, since ADR-0159 §5.** A conflict a
+    writer holds a ``RESTATES`` relation for is never retired, by any ruling, and a
+    writer determines ADR-0121 §1's agreement for itself with no model. So a
+    ``SUPERSEDE`` whose proposal carries :data:`_CONTENT` — the target's own content
+    — is now *refused*, and the cases that only ever needed a conflict to exist
+    would have been measuring that refusal instead of the mechanic each is about
+    (the minted id, the fresh window, the clamp, the re-mint loop).
+
+    Those cases always meant a correction; the agreeing content was how they got a
+    conflict detected, and ``_DISAGREEING`` gets one just as well while saying what
+    the fixture means. The refusal itself is pinned where it belongs — in
+    :func:`_fold_is_refused`'s matrix and in the two ADR-0159 §5 cases of their own.
+    """
+    return _preference(
+        record_id,
+        _DISAGREEING,
+        source=source,
+        evidence=evidence,
+    )
+
 
 #: The same belief as :data:`_CONTENT`, differing only in the case and whitespace
 #: ADR-0121 §1's four transformations are chosen to absorb. Used where a case must
@@ -659,6 +742,27 @@ _FOLD_MATRIX = [
     for target in MemorySource
     for agrees in (True, False)
 ]
+
+
+class _LabellingReconciler:
+    """A stub answering with fixed ADR-0159 §1 relations, keyed by record id.
+
+    The suite asserts nothing about what a reconciler *should* answer — that is
+    ADR-0159 §3's contract, pinned per implementation — so the stub is deliberately
+    inert: no model, no rungs, no economics. What it makes observable is the half of
+    §5's exclusion a writer cannot compute for itself.
+    """
+
+    def __init__(self, labels: Mapping[str, ConflictRelation]) -> None:
+        self._labels = dict(labels)
+
+    async def reconcile(
+        self,
+        proposal: MemoryUpdateProposal,
+        conflicts: Sequence[MemoryRecord],
+    ) -> Mapping[str, ConflictRelation]:
+        """Answer with this stub's fixed labels."""
+        return dict(self._labels)
 
 
 class _FoldToAbsentTargetPolicy:
@@ -1485,7 +1589,7 @@ class MemoryWriterContract:
         store = FakeMemoryStore(now=_after_close)
         await _cite(store)
         await store.add(_preference("existing", source=MemorySource.INFERRED))
-        proposed = _preference("new", evidence=(_CITED,)).model_copy(
+        proposed = _correcting("new", evidence=(_CITED,)).model_copy(
             update={"validity": proposal_window}
         )
         writer = make_writer(
@@ -1521,7 +1625,7 @@ class MemoryWriterContract:
             store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("corrected")
         )
 
-        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+        result = await writer.ingest(_proposal(_correcting("new", evidence=(_CITED,))))
 
         assert result.record_id == "corrected"
         # The record at the proposal's id is untouched — not clobbered.
@@ -1550,7 +1654,7 @@ class MemoryWriterContract:
             id_factory=_scripted("taken", "free"),
         )
 
-        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+        result = await writer.ingest(_proposal(_correcting("new", evidence=(_CITED,))))
 
         assert result.record_id == "free"  # the first mint collided, re-minted
         collided = await store.get("taken")
@@ -1582,7 +1686,7 @@ class MemoryWriterContract:
             id_factory=_scripted("existing", "corrected"),
         )
 
-        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+        result = await writer.ingest(_proposal(_correcting("new", evidence=(_CITED,))))
 
         assert result.record_id == "corrected"  # re-minted past the target's own id
         assert await store.get("existing") is None  # target retired, not clobbered
@@ -1612,7 +1716,7 @@ class MemoryWriterContract:
             store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("new")
         )
 
-        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+        result = await writer.ingest(_proposal(_correcting("new", evidence=(_CITED,))))
 
         assert result.record_id == "new"  # permitted: nothing was stored at "new"
         assert await store.get("existing") is None  # target retired
@@ -2258,6 +2362,131 @@ class MemoryWriterContract:
             assert live is not None
             assert live.validity.valid_until is None
 
+    # --- ADR-0159 §5: what a supersession may not retire ---------------------
+
+    async def test_an_agreeing_conflict_is_never_retired_and_needs_no_model(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0159 §5's ``agrees`` half — the one every writer computes with no model.
+
+        A conflict a writer holds a ``RESTATES`` relation for "is **never retired**,
+        by any ruling, at any writer… and a writer that would retire it refuses the
+        write instead". ADR-0121 §1's predicate is syntactic and certain, so a
+        writer determines this half for itself on the ingests ADR-0159 §2 admits —
+        no reconciler is injected here, and none is needed.
+
+        Superseding a record that says the same thing retires a live belief on the
+        strength of a *restatement*, which is what §5 exists to stop. Refused rather
+        than silently narrowed, because retiring the named target is what the ruling
+        means: there is nothing to leave out of the set.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(_preference("existing", source=MemorySource.INFERRED))
+        writer = make_writer(store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE))
+        before = await store.export()
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+
+        # Nothing written and nothing retired: a writer that closed the window and
+        # *then* raised is caught, not only one that stored the correction.
+        assert await store.export() == before
+
+    async def test_a_supersede_leaves_an_adds_sibling_live(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0159 §5's ``ADDS`` half, driven by an injected stub reconciler.
+
+        The clause on which ADR-0159 §4(b) may exist at all. ADR-0050 §1 defines the
+        retirement set on the premise that "every entry in the conflict set the
+        detector surfaced is a same-kind, at-or-above-threshold contradiction of the
+        proposal", which #1188 measured false: at the ratified threshold the set is
+        routinely a mixture of restatements, additions and contradictions. Left
+        standing, a supersession arm on the observed path would turn one lost fact
+        per fold into up to ``conflict_limit`` lost facts per correction.
+
+        So the widening skips a member the writer holds an ``ADDS`` relation for —
+        it is not the belief being corrected, it is a distinct fact similarity
+        surfaced beside it — while the ordinary supersedable sibling is still swept
+        in, which is what keeps ADR-0079 §3 otherwise unchanged.
+
+        **From the writer's own relations, never trusted from the ruling** (ADR-0038
+        §2a, ADR-0159 §8): the ruling below names one member and says nothing about
+        the other two.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(_preference("target", source=MemorySource.INFERRED))
+        await store.add(_preference("distinct", source=MemorySource.INFERRED))
+        await store.add(_preference("swept", source=MemorySource.INFERRED))
+        writer = make_writer(
+            store,
+            _SupersedeNamingPolicy("target"),
+            id_factory=_scripted("corrected"),
+            conflict_limit=_ROOMY_CEILING,
+            reconciler=_LabellingReconciler({"distinct": ConflictRelation.ADDS}),
+        )
+
+        result = await writer.ingest(_proposal(_correcting("new", evidence=(_CITED,))))
+
+        assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+        retained = {record.id: record for record in await store.export()}
+        assert retained["target"].validity.valid_until is not None, "the named target is retired"
+        assert retained["swept"].validity.valid_until is not None, "an ordinary sibling still is"
+        assert retained["distinct"].validity.valid_until is None, "an ADDS sibling is not"
+
+    async def test_a_supersede_naming_an_adds_conflict_is_refused(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """The other limb: the exclusion cannot be an omission when *this* is the target.
+
+        A ``SUPERSEDE`` naming another member simply leaves such a conflict out of
+        the set; one naming this member has nowhere to leave it, so ADR-0159 §5
+        refuses the write. Nothing is retired on the way out.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(_preference("existing", source=MemorySource.INFERRED))
+        writer = make_writer(
+            store,
+            FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
+            reconciler=_LabellingReconciler({"existing": ConflictRelation.ADDS}),
+        )
+        before = await store.export()
+
+        with pytest.raises(MemoryStoreError):
+            await writer.ingest(_proposal(_correcting("new", evidence=(_CITED,))))
+
+        assert await store.export() == before
+
+    async def test_a_contradicting_conflict_is_retired_exactly_as_before(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0159 §5 narrows and does not invert: a labelled contradiction is retired.
+
+        ``CONTRADICTS`` is deliberately outside the exclusion — a labelled
+        contradiction is precisely what a correction is warranted to retire, and the
+        retirement class still decides whether it may be. Without this case the
+        exclusion could be implemented as "any relation blocks", which would make
+        ADR-0159 §4(b)'s supersession arm unreachable at the writer.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(_preference("existing", source=MemorySource.INFERRED))
+        writer = make_writer(
+            store,
+            FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE),
+            id_factory=_scripted("corrected"),
+            reconciler=_LabellingReconciler({"existing": ConflictRelation.CONTRADICTS}),
+        )
+
+        result = await writer.ingest(_proposal(_correcting("new", evidence=(_CITED,))))
+
+        assert result.record_id == "corrected"
+        retained = {record.id: record for record in await store.export()}
+        assert retained["existing"].validity.valid_until is not None
+
     # --- the retirement clamp (ADR-0080 §7) ---------------------------------
 
     async def test_a_retirement_never_extends_the_targets_own_window(
@@ -2294,7 +2523,7 @@ class MemoryWriterContract:
             store, FakeMemoryPolicy(MemoryDecisionKind.SUPERSEDE), id_factory=_scripted("corrected")
         )
 
-        result = await writer.ingest(_proposal(_preference("new", evidence=(_CITED,))))
+        result = await writer.ingest(_proposal(_correcting("new", evidence=(_CITED,))))
 
         assert result.record_id == "corrected"
         retained = {record.id: record for record in await store.export()}
@@ -2784,7 +3013,7 @@ class MemoryWriterContract:
         )
 
         result = await writer.ingest(
-            _proposal(_preference("new", source=MemorySource.EXTERNAL, evidence=(_CITED_FREE,)))
+            _proposal(_correcting("new", source=MemorySource.EXTERNAL, evidence=(_CITED_FREE,)))
         )
 
         assert result.record_id == "corrected"  # re-minted past the cited id
@@ -2865,7 +3094,7 @@ class MemoryWriterContract:
         )
 
         result = await writer.ingest(
-            _proposal(_preference("new", source=MemorySource.OBSERVED, evidence=("existing",)))
+            _proposal(_correcting("new", source=MemorySource.OBSERVED, evidence=("existing",)))
         )
 
         assert result.record_id == "corrected"

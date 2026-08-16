@@ -13,7 +13,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from memory_writer_contract import MemoryWriterContract, WriterFactory
+from memory_writer_contract import MemoryWriterContract, StubReconciler, WriterFactory
 
 from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
 from ai_assistant.testing import FakeTraceSink
@@ -39,6 +39,7 @@ class TestMemoryIngestorContract(MemoryWriterContract):
             *,
             id_factory: Callable[[], str] | None = None,
             conflict_limit: int | None = None,
+            reconciler: StubReconciler | None = None,
         ) -> MemoryWriter:
             # Each `None` leaves the ingestor's own default, which is what the
             # suite's seams mean by "this obligation does not drive it".
@@ -47,6 +48,8 @@ class TestMemoryIngestorContract(MemoryWriterContract):
                 seams["id_factory"] = id_factory
             if conflict_limit is not None:
                 seams["conflict_limit"] = conflict_limit
+            if reconciler is not None:
+                seams["reconciler"] = reconciler
             # A sink per writer, and one the suite never sees: ADR-0119 §7 makes it
             # a required constructor argument, and the shared suite is deliberately
             # not asked to assert that anything is emitted — emission is a property

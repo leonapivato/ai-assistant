@@ -12,7 +12,7 @@ from datetime import UTC, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from memory_writer_contract import MemoryWriterContract, WriterFactory
+from memory_writer_contract import MemoryWriterContract, StubReconciler, WriterFactory
 
 from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
@@ -84,6 +84,7 @@ class TestFakeMemoryWriterContract(MemoryWriterContract):
             *,
             id_factory: Callable[[], str] | None = None,
             conflict_limit: int | None = None,
+            reconciler: StubReconciler | None = None,
         ) -> MemoryWriter:
             # Each `None` leaves the fake's own default, which is what the suite's
             # seams mean by "this obligation does not drive it".
@@ -92,6 +93,8 @@ class TestFakeMemoryWriterContract(MemoryWriterContract):
                 seams["id_factory"] = id_factory
             if conflict_limit is not None:
                 seams["conflict_limit"] = conflict_limit
+            if reconciler is not None:
+                seams["reconciler"] = reconciler
             return FakeMemoryWriter(store=store, policy=policy, now=_fixed_now, **seams)
 
         return build
