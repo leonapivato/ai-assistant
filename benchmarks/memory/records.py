@@ -246,13 +246,16 @@ class RunManifest(BaseModel):
             second, ``EPISODIC``-only read appended after the beliefs, whose budget is
             never a share of ``retrieval_limit`` above.
 
-            **A manifest carrying this field is a run that made the supplementary
-            read**, which is why it is recorded rather than left implicit in the code
-            the run happened to be cut from. The pilot's earlier runs predate ADR-0158
-            and their manifests have no such key at all, so "was the supplement on?"
-            is answerable from the artifact in both directions; a future ``0`` would
-            be a run that made the read and could place nothing from it, which is a
-            third state and a different one. Imported from the composition root like
+            **A manifest carrying a positive value here is a run that made the
+            supplementary read**, which is why it is recorded rather than left
+            implicit in the code the run happened to be cut from. Three states, and
+            they are distinguishable: the pilot's earlier runs predate ADR-0158 and
+            their manifests have no such key at all; a ``0`` is a run whose supplement
+            was **disabled** and never read, because the bound is checked before the
+            store is touched, exactly as ``LearningLoop._supplement`` checks it
+            (ADR-0158 §6 may take the value there in both directions); anything
+            positive is a run that made the read on every question whose belief
+            composition came back non-empty. Imported from the composition root like
             the budget above, so it cannot name a bound the product does not use.
         conflict_limit: The ingestor's conflict-probe limit.
         observation_batch_size: Turns per observation pass.
