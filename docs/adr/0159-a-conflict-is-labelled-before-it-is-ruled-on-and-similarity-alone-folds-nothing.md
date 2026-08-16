@@ -848,10 +848,13 @@ otherwise.
   assistant held and later found false can be corrected without the user saying
   anything. `decisions_supersede` leaves zero.
 - **The write path acquires a network round trip, inside a lock.** An ingest that
-  reconciles is serialised behind one model request, and concurrent ingests queue
-  behind it (§6). The observation stage is a scheduled job and the interactive seams
-  are asserted, so this is not a turn-latency cost; it is a throughput cost on batch
-  ingestion, and it is the price of the judgement.
+  reconciles is serialised behind one model request, and every concurrent ingest
+  queues behind it (§6). Principally that is a throughput cost on batch ingestion,
+  which is where the reconciling population lives — but it is **not only** that: an
+  interactive `learn` or `answer` write spends no request of its own and can still
+  wait out one in flight, so the cost reaches turn latency by way of the queue. That
+  is the price of the judgement, it is bounded by one request under `models/`'s
+  deadline and retries, and §6 names the only lever a deployment has against it.
 - **`memory` acquires a model dependency**, and it is the first. The subsystem that
   has never called a provider now optionally does. §6 is what keeps that from being a
   hard dependency, and the conformance suites are what keep the fake honest about it.
