@@ -83,6 +83,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import Embedder, ModelProvider, Observer
+    from benchmarks.memory.spend import SpendGuard
 
 __all__ = ["Harness", "build_embedder", "build_harness", "build_model_provider"]
 
@@ -230,7 +231,9 @@ def build_embedder(settings: Settings) -> Embedder:
     return BoundedEmbedder.from_settings(inner, settings)
 
 
-def build_model_provider(settings: Settings, spec: str) -> ModelProvider:
+def build_model_provider(
+    settings: Settings, spec: str, *, guard: SpendGuard | None = None
+) -> ModelProvider:
     """One route, with retry and without routing.
 
     ``ensure_vendor_available`` is called first, exactly as
@@ -243,6 +246,9 @@ def build_model_provider(settings: Settings, spec: str) -> ModelProvider:
     Args:
         settings: Loaded application settings — the resilience knobs only.
         spec: The ``"provider:model"`` spec to use.
+        guard: The run's spend guard, or ``None`` for an unguarded provider. Applied
+            **outside** the retry, so a retried call is charged once — which is what
+            ``plan_run`` counts, and therefore what a ceiling read off the plan means.
 
     Returns:
         The provider.
@@ -252,7 +258,10 @@ def build_model_provider(settings: Settings, spec: str) -> ModelProvider:
             optional package is not installed.
     """
     ensure_vendor_available(spec)
-    return RetryingProvider(PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings))
+    built: ModelProvider = RetryingProvider(
+        PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings)
+    )
+    return built if guard is None else guard.wrap(built)
 
 
 def build_harness(
@@ -261,6 +270,7 @@ def build_harness(
     data_dir: Path,
     model: ModelProvider | None = None,
     observer: Observer | None = None,
+    guard: SpendGuard | None = None,
 ) -> Harness:
     """Wire one case's pipeline over ``data_dir``.
 
@@ -274,6 +284,13 @@ def build_harness(
         model: Override the answering and grading seam. Supplied by tests, which must
             make no live model call; ``None`` builds the configured route.
         observer: Override the distillation seam, for the same reason.
+        guard: The run's spend guard, shared with every other case and with the judge.
+            It is applied to the answering seam whether that seam was built here or
+            **injected** — the one place the guard covers a caller's own object, because
+            an injected provider stands in for a call the run would otherwise have made
+            and a budget nothing can drive is a budget nothing exercises. The
+            distillation seam is guarded only where it is built: an injected ``Observer``
+            is not a provider and there is nothing to wrap.
 
     Returns:
         The wired harness. The caller owns it and must :meth:`Harness.close` it.
@@ -285,6 +302,11 @@ def build_harness(
     model_route = settings.default_model
     observer_route = (
         settings.observer_model if settings.observer_model is not None else settings.default_model
+    )
+    answering = (
+        build_model_provider(settings, model_route, guard=guard)
+        if model is None
+        else (model if guard is None else guard.wrap(model))
     )
 
     traces = SqliteTraceStore(path=data_dir / "traces.db")
@@ -337,7 +359,7 @@ def build_harness(
             # no event times in the observation prompt while reporting a healthy run,
             # so the measurement of ADR-0156 would be void rather than negative (#1171).
             else ModelBackedObserver(
-                build_model_provider(settings, observer_route),
+                build_model_provider(settings, observer_route, guard=guard),
                 now=clock,
                 timezone=settings.timezone,
                 max_batch_size=settings.observation_batch_size,
@@ -351,7 +373,7 @@ def build_harness(
         ),
         store=store,
         traces=traces,
-        model=model if model is not None else build_model_provider(settings, model_route),
+        model=answering,
         clock=clock,
         embedder_model_id=embedder.model_id,
         model_route=model_route,

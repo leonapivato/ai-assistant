@@ -29,6 +29,8 @@ What the modules do:
 * :mod:`benchmarks.memory.answer` — the retrieval-only answering path, through the
   ``ModelProvider`` seam.
 * :mod:`benchmarks.memory.grade` — how an answer is judged.
+* :mod:`benchmarks.memory.spend` — the run-level model-call ceiling, and the clean
+  stop when a provider refuses a call for want of credit.
 * :mod:`benchmarks.memory.records` — the per-question record and the run manifest.
 * :mod:`benchmarks.memory.run` — the loop that composes all of the above.
 """
