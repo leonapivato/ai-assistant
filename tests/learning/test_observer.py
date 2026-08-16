@@ -893,6 +893,49 @@ async def test_the_prompt_does_not_let_a_date_widen_what_may_be_proposed() -> No
     assert "Do not propose what merely happened" in system
 
 
+async def test_the_zoned_prompt_states_that_clause_in_both_directions() -> None:
+    """§2's fourth clause is symmetric, and shipped it read as a brake only.
+
+    "Applied unchanged" constrains the anchor in both directions: a date is no
+    reason to propose a belief the bar refuses, and having none is no reason to
+    withhold a belief the bar admits. Only the first half was said, at the end of a
+    section that had already said "state none", "acquires no date" and "not worth
+    holding with one", after a head that had already said "proposing nothing is a
+    perfectly good answer" — and the measurement says a model reads the stack
+    cumulatively (conv-26 re-ingested three times per tree: {28, 26, 25} beliefs
+    before the anchor against {19, 22, 24} after, preferences 6/7/5 against 2/5/4,
+    the time section the only prompt text that differs). This pins the restored
+    half without letting the refusing half go: both are asserted here.
+    """
+    observer, provider = _observer(_envelope(), timezone=_ZONE)
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "The bar above is unchanged, in both directions" in system
+    assert "the absence of one is never a reason to withhold one" in system
+    assert "a belief that clears the bar is proposed whether or not the evidence" in system
+
+
+@pytest.mark.parametrize("timezone", [None, _ZONE], ids=["no-zone", "zoned"])
+async def test_neither_time_section_asks_for_fewer_beliefs(timezone: str | None) -> None:
+    """The counterbalance is carried by both variants, in each one's own terms.
+
+    The unzoned variant never carried §2's fourth clause — nothing in it invites a
+    date the bar would refuse — but it is denser in prohibitions than the zoned one
+    and reaches the same reader, so the half of the clause that is true whatever
+    calendar the producer holds is stated there too. Pinning it in both is what
+    stops the two texts drifting on the point.
+    """
+    observer, provider = _observer(_envelope(), timezone=timezone)
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "is never a reason to withhold" in system
+    assert "not how many you propose" in system
+
+
 @pytest.mark.parametrize("timezone", [None, _ZONE], ids=["no-zone", "zoned"])
 async def test_the_timestamp_ban_is_narrowed_to_fields_and_not_lifted(
     timezone: str | None,
@@ -1002,3 +1045,83 @@ def test_an_unknown_zone_is_refused_at_construction() -> None:
     """
     with pytest.raises(ConfigurationError, match="unknown timezone"):
         ModelBackedObserver(FakeModelProvider(), timezone="Definitely/Not_A_Zone")
+
+
+# --- how a belief is phrased once it clears the bar (ADR-0077 §2) -----------
+
+
+@pytest.mark.parametrize("timezone", [None, _ZONE], ids=["no-zone", "zoned"])
+async def test_the_prompt_asks_a_belief_to_keep_the_particulars_the_evidence_gives(
+    timezone: str | None,
+) -> None:
+    """The dominant loss the void run measured, addressed where it happens.
+
+    A belief that clears ADR-0077 §2's bar and is then written as the trait it
+    illustrates — *"Caroline is passionate about supporting the LGBTQ+ community"*
+    out of an episode naming the group, the speech and the day — keeps its citation
+    and loses everything a later question could match on, so the answerer correctly
+    declines (62 of 149 records on #1029's paired prefix; 416 of 1,540 in pilot 1).
+    ADR-0156 §6's first bullet names that loss and scopes it out of the anchor
+    decision as an ingestion question; this paragraph is that question, and it is
+    prompt prose rather than machinery because ADR-0156 §1 puts the whole sentence
+    in the model's hands.
+
+    Asserted in both variants because the paragraph is in the shared head: what a
+    belief says about *time* depends on the calendar, what it says about a name or
+    a place does not.
+    """
+    observer, provider = _observer(_envelope(), timezone=timezone)
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "keep the concrete particulars the evidence gives" in system
+    assert "the proper names, places, organisations, dates and quantities involved" in system
+    assert "State a trait alone only where the evidence gives no particular" in system
+
+
+async def test_the_specificity_paragraph_reopens_nothing_the_bar_refuses() -> None:
+    """It governs *how* a belief is written, never *whether* — and says so.
+
+    The failure mode of asking for particulars is a model that starts logging
+    events, which is the one thing ADR-0077 §2 refuses in terms and the thesis
+    ADR-0158 keeps out of the belief store. Three things hold the line, and all
+    three are pinned: the paragraph opens on "when you do propose", it hands the
+    decision back in its last sentence, and it sits *after* the paragraph that
+    makes that decision and before the epistemic steps. The ordering assertion is
+    the one a re-flow of the prompt would break silently.
+    """
+    observer, provider = _observer(_envelope(), timezone=_ZONE)
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "This governs how a belief is written, never whether" in system
+    assert "a retelling of what happened is refused however specific it is" in system
+    assert "Do not propose what merely happened; that is already recorded" in system
+    assert (
+        system.index("Proposing nothing is a perfectly good answer")
+        < system.index("When you do propose a belief")
+        < system.index("Each belief takes one of two epistemic steps")
+    )
+
+
+async def test_a_belief_that_names_a_particular_reaches_the_record_unaltered() -> None:
+    """The instruction is only worth issuing if the pipeline preserves the answer.
+
+    ``content`` is wholly model-authored (ADR-0156 §1) and nothing between the reply
+    and the record rewrites it — no truncation, no normalisation, no summarising
+    second pass — so a proper name, a place and a date survive distillation exactly
+    as written. Pinned directly rather than assumed, because everything else on the
+    record *is* recomputed by the producer, and a later lane adding a content step
+    would defeat the prompt edit above without touching it.
+    """
+    content = "the user climbs at Boulder Barn in Leeds on Tuesdays, and has since 7 May 2023"
+    observer, _ = _observer(_envelope(_belief(evidence=["E1"], content=content)), timezone=_ZONE)
+
+    outcome = await observer.observe(
+        [episode("e-climbing", occurred_at=_EVENING, content="I climb at Boulder Barn on Tuesdays")]
+    )
+
+    (proposal,) = outcome.proposals
+    assert proposal.proposed.content == content
