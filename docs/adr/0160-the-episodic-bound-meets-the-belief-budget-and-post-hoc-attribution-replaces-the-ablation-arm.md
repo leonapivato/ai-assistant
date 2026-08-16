@@ -267,14 +267,28 @@ cross-pilot comparison as evidence rather than as arithmetic.
 > over populations partitioned by what reached the answering prompt, and not across
 > runs by raw counts.
 
-> **Normative.** The episodic bound goes to zero and the supplement is removed if,
-> on the scored run's LoCoMo figures, the questions whose gold episode reached the
-> prompt with **no** belief citing the gold present are answered no more accurately
-> than the questions where neither reached the prompt.
+> **Normative.** The run's pre-registration fixes, before the run executes, the
+> minimum size of each compared population and any threshold on the *magnitude* of
+> the gap between them. Neither is chosen once the figures are known.
 
-> **Normative.** Any threshold on the *magnitude* of that gap is fixed in the run's
-> pre-registration, before the run executes, and is not chosen once the figures are
-> known.
+> **Normative.** Where either compared population falls below its pre-registered
+> minimum, the run does not discharge §3's measurement and the episodic bound does
+> not move on it.
+
+> **Normative.** Where both populations meet their minimum, the retraction test is
+> met when, on the scored run's LoCoMo figures, the questions whose gold episode
+> reached the prompt with **no** belief citing the gold present are answered no more
+> accurately than the questions where neither reached the prompt — or, where the
+> pre-registration set a magnitude threshold, when the gap falls short of it. A
+> pre-registered threshold may only raise that bar and never lower it.
+
+> **Normative.** A run that meets the retraction test takes the episodic bound to
+> zero and removes the supplement, unless a controlled arm over the same questions
+> with and without the supplement is run first and does not meet it.
+
+> **Normative.** The observational partition is never on its own evidence *for* the
+> size of the supplement's effect. A claim that the supplement caused a measured
+> gain rests on a controlled arm.
 
 **The old baselines are not retired for convenience; applying them would retract
 ADR-0158 for a reason that has nothing to do with the supplement.** 118 and 69 were
@@ -311,7 +325,28 @@ it ruled that zero and ties both fail. Pilot-3's partial suggests the floor will
 cleared comfortably (78–81% against 19.7% for the coarser partition it can compute),
 but that partition mixes episode-only with episode-and-belief, so the figure that
 decides this predicate does not yet exist. That is precisely why the magnitude
-threshold is pre-registered rather than set here.
+threshold and the minimum populations are pre-registered rather than set here.
+
+**The two compared populations are not exchangeable, and the predicate is built
+asymmetrically because of it.** Retrieval succeeding is not independent of the
+question: the episode-only group is selected for questions whose gold episode was
+findable, and the neither group for questions where nothing was. So a gap can be
+small — or inverted — while the episode is still doing real work, which is exactly
+the causal claim §3 says this instrument cannot make. Three properties answer that
+rather than wishing it away. The comparison **triggers** a removal instead of
+*being* one, and the trigger is escapable by the better instrument: a controlled arm
+over the same questions settles it, and the burden of paying for one falls on
+whoever wants to keep a capability its cheap evidence no longer supports. The
+asymmetry runs one way only — the partition can condemn the supplement and can never
+on its own vindicate it — which is the conservative direction ADR-0158 §6 already
+chose when it ruled that zero and ties both fail. And the minimum populations stop
+the whole test being decided by a handful of questions, which is the shape the
+confound does most damage in.
+
+**This does not quietly re-impose the arm §3 retired.** No arm is owed, and none
+needs to exist for the bound to stand: the escape is a route available to whoever
+contests a removal, not an obligation on whoever runs the benchmark. What it buys is
+that a removal is never final on evidence this ADR has already called weaker.
 
 **Pre-registration is what keeps the substitution honest.** The one property an arm
 had that post-hoc attribution lacks is that its comparison was fixed before the data
@@ -404,7 +439,8 @@ practice that happens to be what the runs do.
 
 **Harder.** The ceiling clause now binds, so the two cardinality controls are
 coupled and neither moves alone. The evidence for the supplement is permanently
-weaker than an arm would have made it, and §3 obliges anyone citing it to say so.
+weaker than an arm would have made it, and §4's last clause forbids citing the
+partition as if it measured an effect size.
 And the retraction predicate now depends on a harness capability (#1187) that did
 not exist when ADR-0158 was written — a run that ships without it cannot discharge
 §3, which is a new way for a scored run to fail to answer the question it was run
