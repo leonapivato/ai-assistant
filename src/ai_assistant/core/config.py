@@ -1607,6 +1607,51 @@ class Settings(BaseSettings):
         description="The most beliefs one observation pass may propose; excess is discarded.",
     )
 
+    # --- The conflict reconciler (ADR-0159) -------------------------------
+    # Two knobs for the component that labels how a proposal stands to the records
+    # a similarity search surfaced beside it — the seam that decides whether a fold
+    # destroys a distinct fact.
+    #
+    # `reconciler_max_conflicts` is how many members of the conflict set, in rank
+    # order, one ingest may ask a model about; members beyond it are left unlabelled
+    # (ADR-0159 §3). It is **not** a second `conflict_limit`: that ceiling is 100 and
+    # is a circuit breaker on a runaway store (ADR-0079 §1), nowhere near a cost
+    # bound, where this one is exactly that. Three is where the measured
+    # distribution puts the records a proposal could plausibly restate or
+    # contradict, and a fourth is nearly always a topical neighbour. It is a
+    # `Settings` field for the reason `observation_max_proposals` is one (ADR-0077
+    # §2) — a knob an operator tunes against their own corpus, whose right value is
+    # an empirical question ADR-0159 does not pretend to have settled.
+    #
+    # `reconciler_model` is the route the reconciler **names** rather than
+    # inheriting, typed as the same validated spec `observer_model` carries so a
+    # malformed route is refused where `Settings` is built and not at the first
+    # ingest that would have used it. Unset means the route already configured for
+    # conversation (`default_model`), which is what makes the setting cost nothing
+    # to have: it names no provider the operator did not already configure, so
+    # ADR-0004 §2's property cannot be breached by leaving it unset. Like the
+    # observer's, the composition root builds it as a route of its own that **never
+    # falls back** (ADR-0013 §4, §6) — a reconciler's failure buys nothing by
+    # reaching a second provider, because ADR-0159 §3 degrades it to an unlabelled
+    # member rather than a failed write, and widening the set of providers shown two
+    # stored beliefs is exactly the cost ADR-0004 §7's minimisation rule weighs.
+    reconciler_max_conflicts: _IntegerSetting = Field(
+        default=3,
+        ge=1,
+        description=(
+            "The most conflict-set members, in rank order, one ingest may ask a model "
+            "about when labelling how a proposal stands to them."
+        ),
+    )
+    reconciler_model: _ModelSpec | None = Field(
+        default=None,
+        description=(
+            "Model that labels how a proposed belief stands to the beliefs it conflicts "
+            "with, in pydantic-ai 'provider:model' form. Unset means the same route "
+            "conversation uses. Never falls back, whichever route it names."
+        ),
+    )
+
     # --- Deferred questions (ADR-0078) -----------------------------------
     # The two tunings the deferral queue is built with. Both reach the store's
     # **constructor** and are validated there in the `_check_tuning` shape

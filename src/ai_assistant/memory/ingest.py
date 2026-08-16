@@ -20,6 +20,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from math import isfinite
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, assert_never
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
@@ -33,6 +34,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     MAX_EVIDENCE_CITATIONS,
     BeliefBand,
+    ConflictRelation,
     DataTier,
     MemoryDecisionKind,
     MemoryIngestResult,
@@ -49,6 +51,15 @@ from ai_assistant.core.types import (
 from ai_assistant.memory import traces
 from ai_assistant.memory._agreement import agrees
 
+# `memory`'s own policy module, for its floor predicate alone (ADR-0159 §2, §10).
+# The dependency is on a *predicate over the proposal*, not on the injected policy:
+# `MemoryIngestor` still takes rulings from whatever `MemoryPolicy` it was given,
+# and this import is what stops the invocation condition becoming a second copy of
+# the floor that could drift from the one that rules. ADR-0159 §10 forbids the
+# duplicate in as many words — "both modules are `memory`'s, so a duplicate that
+# could drift is avoidable here and is not to be written".
+from ai_assistant.memory.policy import clears_admissibility_floor
+
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
 
@@ -61,6 +72,7 @@ if TYPE_CHECKING:
         ReadCoverage,
         SourceReading,
     )
+    from ai_assistant.memory._reconciler import ConflictReconciler
 
 _DEFAULT_CONFLICT_THRESHOLD = 0.75
 
@@ -154,6 +166,26 @@ _WRITE_PRODUCING_KINDS = frozenset(MemoryDecisionKind) - {
     MemoryDecisionKind.ASK_USER,
     MemoryDecisionKind.REJECT,
 }
+
+#: The relations that put a conflict **beyond retirement**, by any ruling
+#: (ADR-0159 §5). A member the writer holds one of these for is not in the
+#: retirement set of a ``SUPERSEDE`` naming another member, and a ``SUPERSEDE``
+#: naming *it* is refused rather than performed.
+#:
+#: **This is where ADR-0159 would otherwise have destroyed most.** ADR-0050 §1
+#: defines the retirement set on an explicit premise — "every entry in the conflict
+#: set the detector surfaced is a same-kind, at-or-above-threshold contradiction of
+#: the proposal; they are all the belief being corrected, restated". #1188 measures
+#: that premise false at the ratified threshold: the set is routinely a mixture of
+#: restatements, additions and contradictions. Left standing, giving the observed
+#: path a supersession arm would have turned one lost fact per fold into up to
+#: ``conflict_limit`` lost facts per correction. The narrowing is not a refinement of
+#: ADR-0050 §1; it is the condition on which ADR-0159 §4(b) may exist at all.
+#:
+#: ``CONTRADICTS`` is deliberately absent: a labelled contradiction is exactly what a
+#: correction is warranted to retire, and the retirement class still decides whether
+#: it may be.
+_UNRETIRABLE_RELATIONS = frozenset({ConflictRelation.RESTATES, ConflictRelation.ADDS})
 
 
 def _utcnow() -> datetime:
@@ -318,6 +350,100 @@ def _refuse_unsafe_fold(
             f"{target.provenance.source} record, whose id it would inherit and the next sync "
             f"overwrite — only OBSERVED and INFERRED beliefs may be reinforced this way "
             f"(ADR-0038 §2a, narrowed to REINFORCE by ADR-0045 §5b)"
+        )
+        raise MemoryStoreError(msg)
+
+
+def _may_reconcile(proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]) -> bool:
+    """ADR-0159 §2's invocation condition, in full and in one place.
+
+    A reconciler is invoked **exactly when** all three hold: the proposed record's
+    ``provenance.source`` is not ``USER_ASSERTED``; no member of the conflict set is
+    ``USER_ASSERTED``; and the proposal clears the admissibility floor
+    (:func:`~ai_assistant.memory.policy.clears_admissibility_floor`). On every other
+    ingest none is invoked, **no relation is computed**, no model request is made,
+    and ``decide`` is called with ``None``.
+
+    **It is normative rather than left to a reconciler's own economics, because it
+    is a correctness boundary and not a cost heuristic** (§2).
+
+    - The two ``USER_ASSERTED`` populations are already owned. A ``USER_ASSERTED``
+      proposal is ADR-0121 §2's arm and a conflict set holding one is the
+      ``ASK_USER`` arm ADR-0159 §4 leaves untouched; neither reads a relation, so
+      computing one there would buy nothing and would spend a model request *inside
+      the ingest lock* on the two paths a user waits on — the ``learn`` and
+      ``answer`` direct seams, whose proposals are asserted.
+    - The floor is here because the ruling is too late. It runs inside ``decide``,
+      so a reconciler sited on the other two conditions alone would run ahead of it:
+      for two of the floor's populations that costs a request on a proposal about to
+      be rejected or deferred, and for the third it is unrecoverable — a
+      ``DataTier.SECRET`` proposal would put tier-0 content into a model request
+      before ADR-0004 §3's gate had run, and the ``ASK_USER`` that follows recalls
+      nothing.
+
+    **It binds this writer whatever ``MemoryPolicy`` it holds.** Every condition is
+    a property of the proposal and the set alone, so it is not a prediction about
+    how a policy will rule, and an injected policy carrying no floor of its own does
+    not lift it.
+
+    Args:
+        proposal: The proposal being ingested.
+        conflicts: The resolved conflict set.
+
+    Returns:
+        Whether relations may be determined for this ingest.
+    """
+    return (
+        proposal.proposed.provenance.source is not MemorySource.USER_ASSERTED
+        and all(c.provenance.source is not MemorySource.USER_ASSERTED for c in conflicts)
+        and clears_admissibility_floor(proposal)
+    )
+
+
+def _refuse_retiring_a_related_conflict(
+    target: MemoryRecord,
+    kind: MemoryDecisionKind,
+    relations: Mapping[str, ConflictRelation],
+) -> None:
+    """Refuse a ``SUPERSEDE`` that would retire a ``RESTATES`` or ``ADDS`` conflict.
+
+    ADR-0159 §5's exclusion at the one place it cannot be expressed as an omission.
+    A ``SUPERSEDE`` naming another member simply leaves such a conflict out of the
+    retirement set (:func:`_retirement_set`); a ``SUPERSEDE`` naming *this* one has
+    nowhere to leave it, because retiring the named target is what the ruling means
+    — so the write is refused instead.
+
+    **Enforced from the writer's own relations, never trusted from the ruling** —
+    ADR-0038 §2a's shape, at the boundary that performs the write. ``MemoryIngestor``
+    takes rulings from *any* injected ``MemoryPolicy``, and ``DefaultMemoryPolicy``
+    never asks for this fold (ADR-0159 §4(b) names a ``CONTRADICTS`` member), so the
+    refusal exists for the policies this seam admits rather than for the one it
+    ships with.
+
+    **Nothing here is a ``_refuse_unsafe_fold`` exception, and ADR-0159 opens
+    none** (§5). The labels only ever *narrow* what happens: they withhold a fold
+    the old rule performed and a retirement ADR-0050 §1 permitted. That asymmetry is
+    why ADR-0159 can hold a model call where ADR-0121 §5 could not — a safety
+    property that can only be tightened by an untrusted input needs no verification
+    of the input, which is #868's objection landing on a different ADR.
+
+    Args:
+        target: The conflict the ruling names.
+        kind: The ruling being applied.
+        relations: The relations **this writer** determined, handed to no policy.
+
+    Raises:
+        MemoryStoreError: If the ruling is a ``SUPERSEDE`` naming a conflict this
+            writer holds a ``RESTATES`` or ``ADDS`` relation for.
+    """
+    if kind is not MemoryDecisionKind.SUPERSEDE:
+        return
+    relation = relations.get(target.id)
+    if relation in _UNRETIRABLE_RELATIONS:
+        msg = (
+            f"refusing to supersede {target.id!r}: this writer determined the proposal "
+            f"{relation} that record, and a conflict so related is never retired, by any "
+            f"ruling (ADR-0159 §5)"
         )
         raise MemoryStoreError(msg)
 
@@ -695,6 +821,7 @@ def _retirement_set(
     *,
     proposal: MemoryUpdateProposal,
     resolved: tuple[str, ...],
+    relations: Mapping[str, ConflictRelation],
 ) -> list[MemoryRecord]:
     """The full set of conflicting beliefs a ``SUPERSEDE`` retires (ADR-0050 §1, #244).
 
@@ -759,11 +886,39 @@ def _retirement_set(
     matched by ``FakeMemoryWriter``. Nothing here changed with the promotion — and
     nothing is discarded before this function any more either (ADR-0079 §1), so the
     "full set" it retires is now the full set retrieval surfaced.
+
+    **ADR-0159 §5 narrows the widening, and it is the second hold-out.** A conflict
+    this writer holds a ``RESTATES`` or ``ADDS`` relation for is **never retired**,
+    by any ruling: it is not the belief being corrected, it is a restatement of one
+    or a distinct fact that similarity surfaced beside it. ADR-0050 §1's own premise
+    — that every entry in the set "is a same-kind, at-or-above-threshold
+    contradiction of the proposal" — is what #1188 measured false, and without this
+    exclusion a supersession arm on the observed path would turn one lost fact per
+    fold into up to ``conflict_limit`` lost facts per correction. Where this writer
+    holds no relation for a member, the obligation binds exactly as ADR-0079 §3
+    states it, so an ingest ADR-0159 §2 excludes retires precisely what it always
+    did.
+
+    The relations are **this writer's own**, handed to no policy (ADR-0159 §8): if
+    the writer's mapping and the policy's were one object, a safety property
+    ADR-0038 §2a requires the *writer* to hold would rest on the untrusted ruling —
+    exactly the failure §5 exists to avoid.
+
+    Args:
+        target: The conflict the ruling names, which leads the returned list.
+        conflicts: The full resolved set, best-ranked first.
+        proposal: The proposal as handed to ``ingest``, for the confirmation checks.
+        resolved: The conflict ids this ingest resolved.
+        relations: The relations this writer determined, keyed by record id.
+
+    Returns:
+        The named target followed by every other conflict warranted for retirement.
     """
     others = [
         conflict
         for conflict in conflicts
         if conflict.id != target.id
+        and relations.get(conflict.id) not in _UNRETIRABLE_RELATIONS
         and (
             conflict.provenance.source in _RETIREMENT_CLASS
             or (
@@ -1372,6 +1527,7 @@ class MemoryIngestor:
         conflict_limit: int = _DEFAULT_CONFLICT_LIMIT,
         now: Clock = _utcnow,
         id_factory: Callable[[], str] = _uuid,
+        reconciler: ConflictReconciler | None = None,
     ) -> None:
         """Initialise the ingestor.
 
@@ -1415,6 +1571,16 @@ class MemoryIngestor:
                 :func:`_checked_id`, for the same reason the clock is: the id is
                 installed with ``model_copy(update=...)``, so a non-``str`` or empty
                 reading would reach the store unchecked. Defaults to random UUIDs.
+            reconciler: Determines ADR-0159 §1 relations between the proposal and
+                the members of its conflict set, between the probe and the ruling
+                (:func:`_may_reconcile`). **Optional with a ruled, safe absence**
+                (ADR-0159 §6): with none injected the relations this writer holds
+                are ADR-0121 §1's certain agreements and nothing else, and
+                ``decide`` is handed ``None`` — which ``DefaultMemoryPolicy`` rules
+                on as §6 ratifies, folding where two strings are identical and
+                duplicating where they are not. That is what makes a reconciler
+                *optional machinery*: no deployment is forced to acquire a provider,
+                and no test of this write path needs one.
 
         Raises:
             TypeError: If ``conflict_limit`` is not an integer, or
@@ -1439,6 +1605,7 @@ class MemoryIngestor:
             owner="MemoryIngestor write traces",
         )
         self._id_factory = id_factory
+        self._reconciler = reconciler
         # Guards the read-modify-write in `ingest` (issue #248). Constructed
         # here rather than lazily because since Python 3.10 an `asyncio.Lock`
         # binds no loop until it is first awaited, so an ingestor may be built
@@ -1513,10 +1680,23 @@ class MemoryIngestor:
            set holds a record whose window cannot be closed representably raises
            ``MemoryStoreError`` before the atomic batch (:func:`_close_window`).
 
-        And one **refusal at the fold** (ADR-0045 §5, narrowed by ADR-0078 §5b): a
-        fold onto a ``USER_ASSERTED`` target raises unless the proposal carries a
-        confirmation that genuinely covers that target
-        (:func:`_confirmation_covers`).
+        And **two refusals at the fold**: a fold onto a ``USER_ASSERTED`` target
+        raises unless the proposal carries a confirmation that genuinely covers that
+        target (ADR-0045 §5, narrowed by ADR-0078 §5b and ADR-0121 §5,
+        :func:`_confirmation_covers`); and a ``SUPERSEDE`` naming a conflict this
+        writer determined the proposal ``RESTATES`` or ``ADDS`` to raises, because
+        such a conflict is never retired by any ruling (ADR-0159 §5,
+        :func:`_refuse_retiring_a_related_conflict`).
+
+        **Between the conflict probe and the ruling sits the reconciler**
+        (ADR-0159 §2), on the invocation condition :func:`_may_reconcile` states —
+        which is where the admissibility floor is read, because inside ``decide`` it
+        would be too late. Its request is inside this ingest's lock, knowingly: the
+        reconciler reads the conflict snapshot, so moving it outside would
+        reintroduce the lost-update race the lock closes, on a path where the
+        discarded write may now be a supersession. A second ingest arriving during a
+        reconciliation waits for it, and the delays queue rather than overlap
+        (ADR-0159 §6).
 
         Args:
             proposal: The memory update to rule on and persist.
@@ -1531,8 +1711,10 @@ class MemoryIngestor:
                 ingestor will resolve in one ingest, if a write-producing ruling
                 landed on a ``DataTier.SECRET`` proposal, if a ruling would install
                 the proposal at an id it cites, if a fold onto a ``USER_ASSERTED``
-                target is not covered by a confirmation, if a retirement's window
-                cannot be closed, or on any other store or applier failure.
+                target is not covered by a confirmation, if a ``SUPERSEDE`` names a
+                conflict this writer holds a ``RESTATES`` or ``ADDS`` relation for,
+                if a retirement's window cannot be closed, or on any other store or
+                applier failure.
         """
         # One observation of the caller's proposal, taken on this coroutine's
         # first executed line — before the lock, which is `ingest`'s first await
@@ -1896,7 +2078,19 @@ class MemoryIngestor:
         # would refuse every honest answer (ADR-0078 §7's "no asserted conflict
         # ever confirmable").
         ruled = observed.model_copy(update={"conflicts": resolved})
-        decision = await self._policy.decide(ruled, conflicts=conflicts)
+        # Between the probe and the ruling, and behind the admissibility floor
+        # (ADR-0159 §2). The relations this writer determines are its own; what
+        # crosses the policy seam is a read-only view over a **copy**, so nothing
+        # the ruling does with what it was handed can reach the mapping
+        # `_retirement_set` rules from (ADR-0159 §8).
+        relations = await self._relations_for(ruled, conflicts)
+        decision = await self._policy.decide(
+            ruled,
+            conflicts=conflicts,
+            relations=None
+            if relations is None or self._reconciler is None
+            else MappingProxyType(dict(relations)),
+        )
         # Check 0, between the ruling and the write dispatch (ADR-0078 §5b): it
         # gates every write-producing ruling and no ruling that writes nothing, so
         # it belongs neither inside `_refuse_unsafe_fold` (which `ACCEPT` never
@@ -1908,7 +2102,9 @@ class MemoryIngestor:
         # write set and before the dispatch that performs it. `SUPERSEDE`'s minted
         # destination does not exist yet and is tested in `_apply_supersede` (§2).
         _refuse_self_consuming_write(decision, observed, resolved=resolved)
-        applied = await self._apply(decision, observed, conflicts, resolved=resolved)
+        applied = await self._apply(
+            decision, observed, conflicts, resolved=resolved, relations=relations or {}
+        )
         # The resolved ids come back on **every** ruling (ADR-0078 §4). ADR-0028 §3
         # declined this and named the exact condition for revisiting — a consumer
         # that needs to *show* the user what a proposal contradicted — and a
@@ -1927,6 +2123,77 @@ class MemoryIngestor:
             ),
             superseded=applied.superseded,
         )
+
+    async def _relations_for(
+        self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+    ) -> dict[str, ConflictRelation] | None:
+        """The relations **this writer** holds for one ingest, or ``None``.
+
+        ``None`` means no relation was determined at all — ADR-0159 §2's condition
+        excluded this ingest — and it is the value ADR-0159 §8 distinguishes from an
+        empty mapping, which says something ran and labelled nothing. Both rule
+        identically under §4; only one of them is a fact a ``reason`` or a later
+        trace can report, and erasing the distinction at the seam would make it
+        unrecoverable.
+
+        Two sources, in one order:
+
+        1. **ADR-0121 §1's certain predicate**, computed here whether or not a
+           reconciler is injected. It is ADR-0159 §3's first rung, and computing it
+           at the writer is what ADR-0159 §5 means by "the ``agrees`` half, which
+           every writer can compute with no model": the retirement exclusion holds
+           against a restatement in a deployment with no provider at all. It also
+           wins over anything a reconciler says about the same pair, which is
+           ADR-0038 §2a's recompute-at-the-boundary shape rather than a distrust of
+           the injected component — §3 already rules that a reconciler answering
+           differently on a pair ``agrees`` admits is not conforming.
+        2. **The reconciler's determination**, restricted to members of this
+           conflict set. An id it invented names nothing, and is dropped here rather
+           than left for the policy's own ignore rule to absorb (ADR-0159 §8).
+
+        **It never fails the ingest** (ADR-0159 §3, §6). A reconciler owes a
+        never-raises contract, and this guard is the boundary honouring §6's
+        stronger promise — "no ingest is refused or ruled differently because a
+        reconciler was unavailable, other than by the relations it therefore does
+        not hold" — against a non-conforming one as well as an absent one.
+
+        Args:
+            proposal: The proposal, carrying this ingest's resolved conflict ids.
+            conflicts: The resolved conflict set, best-ranked first.
+
+        Returns:
+            The relations determined, or ``None`` where none may be.
+
+        Raises:
+            asyncio.CancelledError: Where one was delivered from **outside** this
+                ingest. It is delivered onward under ADR-0060 §1's second clause,
+                never converted into an unlabelled member and never allowed to stand
+                as a completed write; the lock releases as it unwinds. The guard
+                below is stated over ``Exception``, and ``CancelledError`` is a
+                ``BaseException``, so this holds by construction. A deadline
+                ``models/`` issues against its **own** request is not such a
+                cancellation — it is the self-issued kind ADR-0060 §1 distinguishes
+                — and is classified into unlabelled like any other timeout.
+        """
+        if not _may_reconcile(proposal, conflicts):
+            return None
+        record = proposal.proposed
+        own = {
+            conflict.id: ConflictRelation.RESTATES
+            for conflict in conflicts
+            if agrees(conflict, record)
+        }
+        if self._reconciler is None:
+            return own
+        try:
+            determined = await self._reconciler.reconcile(proposal, conflicts)
+        except Exception:
+            return own
+        return {
+            conflict.id: determined[conflict.id]
+            for conflict in conflicts
+            if conflict.id not in own and conflict.id in determined
+        } | own
 
     async def _require_resolvable_evidence(self, record: MemoryRecord) -> None:
         """Refuse a ``DERIVED`` proposal citing a record this store does not hold.
@@ -2034,6 +2301,7 @@ class MemoryIngestor:
         conflicts: list[MemoryRecord],
         *,
         resolved: tuple[str, ...],
+        relations: Mapping[str, ConflictRelation],
     ) -> _Applied:
         proposed = proposal.proposed
         # Every arm below that *installs* passes its record through `_installed`
@@ -2060,6 +2328,12 @@ class MemoryIngestor:
                     msg = f"fold target {decision.target_id!r} is not among the conflicts"
                     raise MemoryStoreError(msg)
                 _refuse_unsafe_fold(target, proposal, decision.kind, resolved=resolved)
+                # ADR-0159 §5, beside the standing refusals and never in place of
+                # one: a `SUPERSEDE` naming a conflict this writer determined the
+                # proposal restates or adds to is refused, because retiring the
+                # named target is what the ruling means and there is nothing to
+                # leave out.
+                _refuse_retiring_a_related_conflict(target, decision.kind, relations)
                 # Past the refusal, the ruling names the relation, so the ingestor
                 # no longer reads provenance to recover it (ADR-0040 §3): SUPERSEDE
                 # retires the contradicted belief (window-close) and writes the
@@ -2071,7 +2345,11 @@ class MemoryIngestor:
                     # correction contradicts, and ADR-0119 §8 wants the ids that
                     # were actually closed rather than the one that was named.
                     retiring = _retirement_set(
-                        target, conflicts, proposal=proposal, resolved=resolved
+                        target,
+                        conflicts,
+                        proposal=proposal,
+                        resolved=resolved,
+                        relations=relations,
                     )
                     return _Applied(
                         await self._apply_supersede(retiring, proposed),

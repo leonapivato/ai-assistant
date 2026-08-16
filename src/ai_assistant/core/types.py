@@ -2203,6 +2203,46 @@ class MemoryDecisionKind(StrEnum):
 _TARGET_CARRYING_KINDS = frozenset({MemoryDecisionKind.REINFORCE, MemoryDecisionKind.SUPERSEDE})
 
 
+class ConflictRelation(StrEnum):
+    """How a proposed record stands to **one named record** of the conflict set.
+
+    ADR-0159 §1's vocabulary, and the input a policy reads before choosing a
+    ruling. Exactly three values, and the middle one carries the finding the whole
+    ADR rests on:
+
+    - ``RESTATES`` — the proposed record says what the named record already says.
+    - ``ADDS`` — the proposed record says something the named record does not say
+      and does not deny. Two dated facts about one person's employment are this —
+      neither a restatement nor a contradiction — and naming the case explicitly is
+      what lets a policy do the correct thing with them, which is nothing at all.
+    - ``CONTRADICTS`` — the two cannot both be true of the same subject at the
+      same time.
+
+    **A member for which no relation was determined is *unlabelled*, and that is
+    the absence of a statement rather than a fourth value** (§1). It is never
+    asserted, it supplies ground for nothing, and it deliberately has no name here:
+    a name invites a rule written over it, at which point a reconciler failure
+    starts changing rulings — which ADR-0159 §6 forbids.
+
+    **A relation is a property of the two records' ``kind`` and ``content`` and of
+    nothing else** (§1). Never a retrieval score, a rank, a :class:`Provenance`
+    field, a band, a validity window or an embedding distance. A relation derived
+    from any of those is not one, whatever it is called.
+
+    **This is not a :class:`MemoryDecisionKind` and does not become one** (§1).
+    ADR-0040 §1 fixed that a ruling "names the relation the policy asserts, never
+    the write it causes"; this vocabulary sits one layer below that — a statement
+    about a *pair of records*, made before any ruling exists. Two proposals with
+    identical relations may still be ruled differently, by confidence, by the taint
+    ceiling or by the secret gate, so collapsing the two would lose the distinction
+    between what is true of the records and what we have decided to do.
+    """
+
+    RESTATES = "restates"
+    ADDS = "adds"
+    CONTRADICTS = "contradicts"
+
+
 class MemoryDecision(BaseModel):
     """A policy's ruling on a :class:`MemoryUpdateProposal`."""
 

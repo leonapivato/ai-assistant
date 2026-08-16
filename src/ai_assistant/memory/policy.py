@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.core.types import (
     BeliefBand,
+    ConflictRelation,
     DataTier,
     MemoryDecision,
     MemoryDecisionKind,
@@ -24,7 +25,7 @@ from ai_assistant.core.types import (
 from ai_assistant.memory._agreement import agrees
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from ai_assistant.core.types import MemoryRecord, MemoryUpdateProposal, UserConfirmation
 
@@ -72,6 +73,33 @@ _RETIREMENT_CLASS = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED, Mem
 _AGREEMENT_FOLDABLE = frozenset(
     {MemorySource.OBSERVED, MemorySource.INFERRED, MemorySource.USER_ASSERTED}
 )
+
+# The target source classes ADR-0159 §4's two exceptions may name — the **derived**
+# sources, and only those. A third allow-list rather than a reuse of either above,
+# for ADR-0092 §5's reason applied a third time: a set that answers two questions
+# answers neither once the questions come apart.
+#
+# **`EXTERNAL` is in neither target class, and the reason is ADR-0121 §3's,
+# unchanged** (ADR-0159 §4). A `REINFORCE` folds at the *target's* id, an imported
+# record's id is the integrating system's idempotency key, and the next routine sync
+# overwrites the fold — futile whatever the incoming source is. A `SUPERSEDE` onto an
+# import is worse than futile: the sync restores the record, and a model-judged
+# contradiction is not a claim an observation is entitled to make against the system
+# that reported the fact.
+#
+# **`USER_ASSERTED` is absent because it is unreachable, not because it was
+# weighed.** ADR-0159 §4's arm runs only for a non-asserted proposal whose conflict
+# set holds no asserted member, so an asserted target cannot appear. Listing it would
+# state a permission this arm can never exercise.
+#
+# **The exclusion is from the target classes and from nothing else** (§4). An
+# `EXTERNAL` member still *counts* in both purity conditions exactly as any other
+# does: one labelled `CONTRADICTS` blocks the reinforce exception, and one labelled
+# `RESTATES` blocks the supersede exception. That asymmetry is the conservative
+# direction — the reason `EXTERNAL` may not be a *target* is about what a write at an
+# imported id would do, which is no reason to disregard what was said about the
+# record.
+_RELATION_TARGETS = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
 
 
 def _rule_on_admissibility(proposal: MemoryUpdateProposal) -> MemoryDecision | None:
@@ -126,6 +154,42 @@ def _rule_on_admissibility(proposal: MemoryUpdateProposal) -> MemoryDecision | N
             ),
         )
     return None
+
+
+def clears_admissibility_floor(proposal: MemoryUpdateProposal) -> bool:
+    """Whether :func:`_rule_on_admissibility` leaves ``proposal`` admissible.
+
+    ADR-0159 §2's invocation condition reads the floor **through this predicate**
+    rather than restating it, and the sharing is normative rather than tidy: "a
+    ruling later added to the floor excludes its population here too, without
+    amending this ADR". Both modules are ``memory``'s, so a duplicate that could
+    drift is avoidable and is not to be written.
+
+    **Why a reconciler sits behind the floor at all.** ADR-0078 §5a states that the
+    floor's rulings "precede any conflict reasoning", and a relation *is* conflict
+    reasoning — a statement about the proposal against a named member of the
+    conflict set. :func:`_rule_on_admissibility` runs *inside* ``decide``, which is
+    too late: for two of the floor's populations a reconciler ahead of it costs a
+    model request on a proposal about to be rejected or deferred, and for the third
+    it is not recoverable at all — a ``DataTier.SECRET`` proposal whose conflict set
+    holds no assertion would put tier-0 content into a model request before the gate
+    ADR-0004 §3 exists to enforce had run, and the ``ASK_USER`` that follows recalls
+    nothing.
+
+    **It is a property of the proposal alone**, which is what lets a caller read it
+    without holding this policy: it binds ``MemoryIngestor`` whatever
+    ``MemoryPolicy`` was injected, and an injected policy carrying no such floor
+    does not lift it. Stated over the whole floor rather than the secret rule alone
+    for ADR-0078 §5a's own reason — "a floor that holds only while a coincidence
+    holds is not a floor".
+
+    Args:
+        proposal: The proposal about to be ingested.
+
+    Returns:
+        Whether no floor ruling fires on it.
+    """
+    return _rule_on_admissibility(proposal) is None
 
 
 def _rests_on_external_content_unconfirmed(proposal: MemoryUpdateProposal) -> bool:
@@ -408,6 +472,143 @@ def _rule_on_agreement(
     )
 
 
+def _effective_relations(
+    record: MemoryRecord,
+    conflicts: Sequence[MemoryRecord],
+    relations: Mapping[str, ConflictRelation] | None,
+) -> dict[str, ConflictRelation]:
+    """The relations this arm rules on: the certain rung, then what it was handed.
+
+    Two sources, and the order between them is ADR-0159 §3's first clause read from
+    the policy's end: a pair that ``agrees`` under ADR-0121 §1 **is** ``RESTATES``,
+    always, and a reconciler reaching a different answer on such a pair "is not
+    conforming". So the certain predicate is computed here and wins, which costs
+    nothing where a conforming reconciler ran and is what makes the arm's ruling
+    independent of one that did not.
+
+    **It is also how ADR-0159 §6's floor is reached.** With no reconciler injected
+    ``relations`` is ``None``, and §6 ratifies that this arm still rules
+    ``REINFORCE`` onto a member that agrees and otherwise falls to the confidence
+    arm. That is the decided behaviour of the degraded case, not a fallback outside
+    it: it folds where the two strings are identical and duplicates where they are
+    not, where the rule this ADR replaces folded on similarity alone.
+
+    **Entries keyed on a non-member are ignored** (ADR-0159 §8), structurally: the
+    mapping is read *through* ``conflicts`` rather than iterated, so an id the
+    caller invented names nothing this arm can act on.
+
+    **Nothing here reads a score, a rank or a threshold** (§4). ``agrees`` reads
+    ``kind`` and normalised ``content``; the mapping is a determination already made
+    about a named record. The conflict set supplies candidates and nothing else.
+
+    Args:
+        record: The proposed record.
+        conflicts: The conflict set, best-ranked first.
+        relations: What the caller determined, or ``None`` where nothing did.
+
+    Returns:
+        A relation per member one is held for. Members absent from it are
+        unlabelled, which supplies ground for nothing.
+    """
+    supplied = relations if relations is not None else {}
+    effective: dict[str, ConflictRelation] = {}
+    for conflict in conflicts:
+        if agrees(conflict, record):
+            effective[conflict.id] = ConflictRelation.RESTATES
+            continue
+        given = supplied.get(conflict.id)
+        if given is not None:
+            effective[conflict.id] = given
+    return effective
+
+
+def _rule_on_relations(
+    record: MemoryRecord,
+    conflicts: Sequence[MemoryRecord],
+    relations: Mapping[str, ConflictRelation] | None,
+) -> MemoryDecision | None:
+    """ADR-0159 §4's two exceptions, or ``None`` to fall to the confidence arm.
+
+    ``ACCEPT`` is the default and **each write is the exception**, which is the
+    whole substance of ADR-0159. Before it, a non-empty conflict set was
+    *sufficient* for a fold — the pilot measured 385 of 765 proposals folded, and
+    the folds were routinely distinct facts scoring 0.77 to 0.80 against each other.
+    Now a fold requires an affirmative, record-specific statement that the two say
+    the same thing, and a retirement requires an affirmative statement that they
+    cannot both be true. Everything else lands as its own belief, which destroys
+    nothing and is what the store is for.
+
+    In order:
+
+    **(a) ``REINFORCE``** at the best-ranked member labelled ``RESTATES`` whose
+    source is in :data:`_RELATION_TARGETS`, exactly when such a member exists *and*
+    **no** member is labelled ``CONTRADICTS``.
+
+    **(b) ``SUPERSEDE``** at the best-ranked member labelled ``CONTRADICTS`` whose
+    source is in :data:`_RELATION_TARGETS`, exactly when such a member exists *and*
+    **no** member is labelled ``RESTATES``. This is the observed path's first
+    supersession arm: a belief the assistant held and later found false can now be
+    corrected without the user saying anything.
+
+    **The purity conditions are ADR-0121 §2's second condition, read one source
+    class over.** ADR-0121 refuses to reinforce onto an agreeing record while a
+    *disagreeing* assertion sits live in the same set, because that leaves two live
+    contradictory records. The same hazard is here in both directions: a set holding
+    both a ``RESTATES`` and a ``CONTRADICTS`` member is a set in which the *stored
+    records disagree with each other*, and no ruling on this proposal resolves that
+    — reinforcing one leaves the contradiction live, superseding the other leaves
+    the reinforced record's own contradiction live. So neither exception fires, the
+    proposal lands beside them, and nothing is destroyed on the strength of a
+    conflict the proposal did not create. It is deliberately **not** ``ASK_USER``:
+    an observation is not something the user should be interrogated about (#869),
+    and the question would be about two records neither of which they wrote.
+
+    **Unlabelled members block nothing, and this is the right sign** (§4). An
+    unlabelled member could be anything, a contradiction included. Letting it block
+    would mean one reconciler failure downgrades a *certain* ``agrees`` restatement
+    to a duplicate — a regression against ADR-0121 for no gain. Letting it pass
+    means a ``RESTATES`` fold may occur while an unexamined member contradicts,
+    which is strictly better than the rule this replaces, where every member folded
+    unexamined. The asymmetry is the destroy-nothing rule applied twice: an
+    unlabelled member neither authorises a write nor withdraws one a certain answer
+    authorised.
+
+    **Rank is read only to break a tie the relations already selected** (§4).
+    ``conflicts[0]`` is never the target by position; the scans below run over the
+    members the labels chose, in the order the set arrived.
+
+    Args:
+        record: The proposed record — non-asserted, its caller having established
+            that, and its conflict set holding no assertion either.
+        conflicts: The conflict set, best-ranked first.
+        relations: What the caller determined about members of that set.
+
+    Returns:
+        The ruling, or ``None`` for ADR-0159 §4(c) — the confidence arm.
+    """
+    effective = _effective_relations(record, conflicts, relations)
+    restating = [c for c in conflicts if effective.get(c.id) is ConflictRelation.RESTATES]
+    contradicting = [c for c in conflicts if effective.get(c.id) is ConflictRelation.CONTRADICTS]
+
+    if restating and not contradicting:
+        target = next((c for c in restating if c.provenance.source in _RELATION_TARGETS), None)
+        if target is not None:
+            return MemoryDecision(
+                kind=MemoryDecisionKind.REINFORCE,
+                target_id=target.id,
+                reason="this restates a belief already held; recorded as agreement (ADR-0159 §4)",
+            )
+    if contradicting and not restating:
+        target = next((c for c in contradicting if c.provenance.source in _RELATION_TARGETS), None)
+        if target is not None:
+            return MemoryDecision(
+                kind=MemoryDecisionKind.SUPERSEDE,
+                target_id=target.id,
+                reason="this contradicts a belief already held, which it corrects (ADR-0159 §4)",
+            )
+    return None
+
+
 def _rule_on_assertion(record: MemoryRecord, conflicts: Sequence[MemoryRecord]) -> MemoryDecision:
     """Rule on a user-asserted proposal: agree, defer, supersede stale beliefs, or accept.
 
@@ -551,11 +752,21 @@ class DefaultMemoryPolicy:
     9. A user-asserted proposal with nothing to supersede is trusted and
        accepted — which, since rule 8 took ``EXTERNAL``, means nothing conflicted
        with it at all.
-    10. A proposal that conflicts with an existing (non-asserted) record rules
-        ``REINFORCE`` over it, folding into it (ADR-0040 §4).
-    11. Weak evidence (below ``min_confidence``) is stored temporarily, with an
+    10. A non-asserted proposal whose conflict set holds a member labelled
+        ``RESTATES`` — and **no** member labelled ``CONTRADICTS`` — rules
+        ``REINFORCE`` at the best-ranked such member whose source is
+        ``OBSERVED``/``INFERRED`` (ADR-0159 §4a). A *relation*, never the conflict
+        set being non-empty: ``conflicts[0]`` is no longer a target by position.
+    11. Otherwise, a member labelled ``CONTRADICTS`` — and **no** member labelled
+        ``RESTATES`` — rules ``SUPERSEDE`` at the best-ranked such member of the
+        same two sources (ADR-0159 §4b). This is the observed path's first
+        supersession: a belief we held and later found false is corrected without
+        the user saying anything.
+    12. Weak evidence (below ``min_confidence``) is stored temporarily, with an
         expiry, rather than committed.
-    12. Otherwise the proposal is accepted.
+    13. Otherwise the proposal is accepted — with a ``reason`` distinguishing "no
+        conflict" from "conflicts, none restating and none contradicting", so the
+        two are legible apart in the trace stream (ADR-0159 §4).
 
     Rules 5 and 8 are the same asymmetry read in both directions: an assertion
     outranks an inference, and never the reverse. Rule 4 is the one ratified way
@@ -564,6 +775,22 @@ class DefaultMemoryPolicy:
     resolve a conflict in the user's favour, it determines that there was no
     conflict to resolve, which is the third thing ADR-0045 §7 did not enumerate
     (ADR-0121 §1).
+
+    **Rules 10 and 11 are what ADR-0159 replaced rule 5 of ADR-0040 §4 with**, and
+    the inversion is the substance of it: ``ACCEPT`` is the default and each write
+    is the exception. The rule they replace folded a proposal into ``conflicts[0]``
+    whenever the set was non-empty — a *similarity* ranking, chosen without reading
+    the proposal at all — and the pilot measured it folding half of everything the
+    observer proposed, at scores where the pairs were routinely two different true
+    facts about one person. ADR-0040 §4 labelled that ruling honestly and disowned
+    it in the same breath ("calling the ruling ``REINFORCE`` asserts they agree, and
+    sometimes they will not"), and filed the question these two rules answer.
+
+    **With no relations at all the two rules still hold ADR-0121 §1's floor**
+    (ADR-0159 §6): rule 10 fires on a member that ``agrees``, which this policy
+    computes for itself and which no reconciler can overturn, and everything else
+    falls to rule 13. There is no configuration of this system in which the rule
+    ADR-0159 replaced is the better one.
     """
 
     def __init__(
@@ -598,8 +825,16 @@ class DefaultMemoryPolicy:
         proposal: MemoryUpdateProposal,
         *,
         conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
-        """Rule on a proposed memory update. See the class docstring for rules."""
+        """Rule on a proposed memory update. See the class docstring for rules.
+
+        A total function of its three arguments and this policy's two
+        construction-time knobs — no store, no clock, no model, no network
+        (ADR-0159 §2). ``relations`` is read by rules 10 and 11 alone and is never
+        mutated; the caller hands over a read-only view (ADR-0159 §8), and this
+        policy would have no reason to write to it if it did not.
+        """
         # Rules 1 to 3: properties of the proposal alone, ruled on before any
         # conflict is read (:func:`_rule_on_admissibility`).
         inadmissible = _rule_on_admissibility(proposal)
@@ -617,12 +852,15 @@ class DefaultMemoryPolicy:
             if confirmed is not None:
                 return confirmed
 
-        return self._rule_on_conflicts(proposal, conflicts)
+        return self._rule_on_conflicts(proposal, conflicts, relations)
 
     def _rule_on_conflicts(
-        self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+        self,
+        proposal: MemoryUpdateProposal,
+        conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None,
     ) -> MemoryDecision:
-        """Rules 5 to 12: the ordinary conflict and confidence rules.
+        """Rules 5 to 13: the ordinary conflict and confidence rules.
 
         The ruling a proposal gets when the admissibility floor let it through and
         no confirmation settled it — which is *every* proposal today except a
@@ -645,18 +883,32 @@ class DefaultMemoryPolicy:
         if is_asserted:
             return _rule_on_assertion(record, conflicts)
 
-        if conflicts:
-            return MemoryDecision(
-                kind=MemoryDecisionKind.REINFORCE,
-                target_id=conflicts[0].id,
-                reason="updates an existing memory",
-            )
+        # Rules 10 and 11: ADR-0159 §4's two exceptions, each resting on an
+        # affirmative statement about a *named* record rather than on the conflict
+        # set being non-empty. `None` falls through to the confidence arm, which is
+        # §4(c) and is now reachable with a non-empty set.
+        related = _rule_on_relations(record, conflicts, relations)
+        if related is not None:
+            return related
 
         if record.provenance.confidence < self._min_confidence:
             return MemoryDecision(
                 kind=MemoryDecisionKind.STORE_TEMPORARY,
                 ttl=self._temporary_ttl,
                 reason="low-confidence evidence, stored tentatively",
+            )
+
+        # ADR-0159 §4's second clause: the two ways to reach `ACCEPT` are legible
+        # apart in the trace stream, because "no conflict" and "conflicts, none
+        # restating and none contradicting" are different facts about the store and
+        # only one of them is recoverable from the ruling afterwards.
+        if conflicts:
+            return MemoryDecision(
+                kind=MemoryDecisionKind.ACCEPT,
+                reason=(
+                    "sufficient confidence; similar beliefs exist but none restates "
+                    "or contradicts this one (ADR-0159 §4)"
+                ),
             )
 
         return MemoryDecision(

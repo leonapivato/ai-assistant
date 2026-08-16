@@ -342,9 +342,14 @@ async def test_only_the_named_route_is_reached_when_an_observation_fails(
     built: dict[str, _FailingProvider] = {}
 
     def _double(spec: str) -> _FailingProvider:
-        provider = _FailingProvider(ModelUnavailableError(f"{spec} is down"))
-        built[spec] = provider
-        return provider
+        # **One double per spec, shared by every consumer of it.** Since ADR-0159
+        # the build constructs three single-route providers, and two of them name
+        # `default_model` when neither is configured separately — the observer's and
+        # the reconciler's. Keyed per construction rather than per spec, the later
+        # build would replace the earlier one in `built` and the observer's call
+        # count would vanish. Sharing aggregates instead, which is what the
+        # assertion below actually wants: exactly one *spec* was ever reached.
+        return built.setdefault(spec, _FailingProvider(ModelUnavailableError(f"{spec} is down")))
 
     monkeypatch = pytest.MonkeyPatch()
     monkeypatch.setattr(composition, "PydanticAIProvider", _double)

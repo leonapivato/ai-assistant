@@ -17,6 +17,14 @@ naming the ``lint-imports`` edit; ADR-0130 §9 mints none.
 :class:`DefaultNotificationPolicy` sits beside the store it rules for, exactly as
 :class:`DefaultMemoryPolicy` does.
 
+Since ADR-0159 it also holds the **conflict reconciler**
+(:class:`ModelBackedReconciler`) — a ``memory``-internal seam, deliberately not a
+Protocol in ``core``, that labels how a proposal stands to the records a
+similarity search surfaced beside it. It is the first component in this subsystem
+to hold a ``ModelProvider``, which ADR-0017 §1 permits because egress is a rule
+about which package opens the socket and ``models/`` is still the package that
+does.
+
 Implements: ``MemoryStore``, ``MemoryPolicy``, ``MemoryWriter``,
 ``ConversationStore``, ``DeferralStore``, ``NotificationStore`` and
 ``NotificationPolicy``.
@@ -24,6 +32,7 @@ Implements: ``MemoryStore``, ``MemoryPolicy``, ``MemoryWriter``,
 
 from __future__ import annotations
 
+from ai_assistant.memory._reconciler import ModelBackedReconciler
 from ai_assistant.memory.deferral_store import SqliteDeferralStore
 from ai_assistant.memory.ingest import MemoryIngestor
 from ai_assistant.memory.notification_outbox import SqliteNotificationOutbox
@@ -38,6 +47,7 @@ __all__ = [
     "DefaultNotificationPolicy",
     "InMemoryMemoryStore",
     "MemoryIngestor",
+    "ModelBackedReconciler",
     "SqliteDeferralStore",
     "SqliteMemoryStore",
     "SqliteNotificationOutbox",

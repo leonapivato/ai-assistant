@@ -37,6 +37,7 @@ from ai_assistant.memory import (
     DefaultMemoryPolicy,
     DefaultNotificationPolicy,
     MemoryIngestor,
+    ModelBackedReconciler,
     SqliteDeferralStore,
     SqliteMemoryStore,
     SqliteNotificationOutbox,
@@ -425,6 +426,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # first observation.
     observer_route = _observer_spec(settings)
     observer_model = _build_observer_provider(settings, observer_route)
+    # The reconciler's route, on the observer's shape and for the observer's reasons
+    # (ADR-0159 §3, ADR-0077 §3): one route, named rather than inherited, and no
+    # fallback. Built up here so a spec naming an uninstalled vendor fails the build
+    # rather than the first ingest that would have used it.
+    reconciler_route = _reconciler_spec(settings)
+    reconciler_model = _build_reconciler_provider(settings, reconciler_route)
     # The read-only sources, if this deployment configured one (ADR-0093 §7).
     # **Three reader instances rather than one**, and ADR-0096 §5 decides it here
     # rather than
@@ -810,6 +817,15 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             policy=DefaultMemoryPolicy(),
             traces_sink=traces,
             conflict_limit=CONFLICT_LIMIT,
+            # ADR-0159's reconciler, wired because this deployment has a model seam
+            # to give it. Its absence is ruled and safe (§6) — the writer would then
+            # hold ADR-0121 §1's certain agreements alone — so this line buys the
+            # judgement rather than enabling the write path.
+            reconciler=ModelBackedReconciler(
+                model=reconciler_model,
+                route=reconciler_route,
+                max_conflicts=settings.reconciler_max_conflicts,
+            ),
         )
         # **One** write stage, over that writer and that deferral queue, shared by
         # every producer's stage (ADR-0078 §3). Two of the three composition-root
@@ -1591,6 +1607,70 @@ def _build_observer_provider(settings: Settings, spec: str) -> RetryingProvider:
             first observation. It is checked even when it repeats ``default_model``:
             the check is cheap, and a helper that trusted a caller to have checked
             already would break the day the two stop coinciding.
+    """
+    ensure_vendor_available(spec)
+    return RetryingProvider(PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings))
+
+
+def _reconciler_spec(settings: Settings) -> str:
+    """The one ``"provider:model"`` spec the reconciler labels through (ADR-0159 §3).
+
+    ``reconciler_model`` when the operator named one; otherwise ``default_model``.
+    The same shape :func:`_observer_spec` has, and the same argument: the default
+    names no provider the operator did not already configure, so ADR-0004 §2's
+    property cannot be breached by leaving it unset, while the setting still makes
+    the choice *nameable and separable* — an operator who wants two stored beliefs
+    weighed by a smaller or locally-hosted model changes one value and does not
+    touch the route their answers come from.
+
+    Args:
+        settings: Loaded application settings.
+
+    Returns:
+        The spec, never empty: ``default_model`` stands behind it.
+    """
+    return (
+        settings.reconciler_model
+        if settings.reconciler_model is not None
+        else settings.default_model
+    )
+
+
+def _build_reconciler_provider(settings: Settings, spec: str) -> RetryingProvider:
+    """Build the reconciler's model seam: **retry, and no routing** (ADR-0159 §3).
+
+    The observer's shape (:func:`_build_observer_provider`), reached by the same
+    argument. Fallback's cost is that *more providers may see a given prompt*, and a
+    reconciler's prompt is two of the user's own stored beliefs. What it would buy
+    is reliability, and reliability buys nothing here: ADR-0159 §3's never-raises
+    clause converts a failed request into an unlabelled member, and §6 ratifies the
+    ruling that follows — ADR-0121 §1's certain agreements plus ``ACCEPT``, which is
+    strictly better than the rule ADR-0159 replaced. So a second recipient is a cost
+    with no benefit, which is exactly the trade ADR-0004 §7's minimisation rule
+    settles.
+
+    **Retry is not fallback**: it re-sends to the *same* provider, so it widens no
+    recipient set, and the route requires its own credential (ADR-0013 §6) — nothing
+    stands behind it, so a provider this deployment cannot authenticate to leaves
+    the members unlabelled rather than quietly diverting the beliefs somewhere it
+    can.
+
+    Args:
+        settings: Loaded application settings — the resilience knobs every other
+            route gets, because how patient this deployment is is not a property of
+            which vendor answered.
+        spec: The reconciler's ``"provider:model"`` spec (:func:`_reconciler_spec`).
+
+    Returns:
+        The provider the reconciler labels through.
+
+    Raises:
+        ConfigurationError: If ``spec`` names a vendor unknown to pydantic-ai or
+            whose optional package is not installed — checked here for ADR-0062 §2's
+            reason, so an operator learns at startup rather than on the first ingest
+            that would have reconciled. Checked even when it repeats
+            ``default_model``: the check is cheap, and a helper trusting a caller to
+            have checked already would break the day the two stop coinciding.
     """
     ensure_vendor_available(spec)
     return RetryingProvider(PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings))

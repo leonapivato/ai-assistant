@@ -36,11 +36,11 @@ from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeTraceSink
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
     from pathlib import Path
 
     from ai_assistant.core.protocols import MemoryStore
-    from ai_assistant.core.types import MemoryIngestResult, MemoryKind
+    from ai_assistant.core.types import ConflictRelation, MemoryIngestResult, MemoryKind
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -1054,6 +1054,7 @@ class _MergeEverythingPolicy:
         proposal: MemoryUpdateProposal,
         *,
         conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
         """Fold into the first conflict, or accept when there is none."""
         if not conflicts:
@@ -1195,6 +1196,7 @@ class _RecordingPolicy:
         proposal: MemoryUpdateProposal,
         *,
         conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
         self.conflicts.append([record.id for record in conflicts])
         return MemoryDecision(kind=MemoryDecisionKind.REJECT, reason="test recording")
@@ -1275,6 +1277,7 @@ class _MergeToAbsentTargetPolicy:
         proposal: MemoryUpdateProposal,
         *,
         conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
         return MemoryDecision(
             kind=MemoryDecisionKind.REINFORCE, target_id="ghost", reason="test misdirection"
@@ -1304,6 +1307,7 @@ class _MaxTtlPolicy:
         proposal: MemoryUpdateProposal,
         *,
         conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
     ) -> MemoryDecision:
         return MemoryDecision(
             kind=MemoryDecisionKind.STORE_TEMPORARY, ttl=timedelta.max, reason="test overflow"
