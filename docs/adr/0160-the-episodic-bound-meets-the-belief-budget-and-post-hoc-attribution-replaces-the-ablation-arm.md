@@ -1,6 +1,6 @@
 # 160. The episodic bound meets the belief budget, and post-hoc attribution replaces the ablation arm
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-16
 - **Partially supersedes:**
   [ADR-0158](0158-an-episode-may-supplement-the-answering-prompt-and-never-shares-the-belief-budget.md)
