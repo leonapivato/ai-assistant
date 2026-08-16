@@ -136,7 +136,24 @@ _INSTANT_FORMAT: Final = "%a %Y-%m-%d %H:%M %z"
 _INSTANT_UNAVAILABLE: Final = "(recorded time unavailable)"
 
 #: The prompt's opening, which says nothing about time and is shared by both
-#: variants below.
+#: variants below. Three paragraphs after the framing: the utility bar ADR-0077 §2
+#: states as a producer-side rule, **how a belief that has cleared that bar is
+#: phrased**, and the two epistemic steps.
+#:
+#: **The specificity paragraph is about wording, not about the bar**, and the order
+#: is what keeps it so: it opens on "when you do propose a belief", it sits after
+#: the paragraph that decides whether, and it closes by handing that decision back.
+#: It is there because the void run's dominant loss is a belief that cleared the
+#: bar and then abstracted the evidence away — *"Caroline is passionate about
+#: supporting the LGBTQ+ community"* distilled from an episode naming the group,
+#: the speech and the day, citation intact and every particular gone, so the
+#: answerer correctly declines a question the evidence could have answered
+#: (62 of 149 records on #1029's paired prefix; 416 of 1,540 in pilot 1). ADR-0156
+#: §6's first bullet names that loss and scopes it out of *that* decision as an
+#: ingestion question — which is what this paragraph is, and why it changes no
+#: ratified clause: ADR-0077 §2's bar is untouched, and a `content` sentence is
+#: wholly model-authored prose (ADR-0156 §1), so what is written here is guidance
+#: on writing it, not a new field, predicate or licence.
 _PROMPT_HEAD: Final = """\
 You are the observation stage of an AI assistant. You are shown a batch of \
 recorded episodes — things that happened — and you propose what the assistant \
@@ -146,6 +163,15 @@ Propose a belief only when it is ABOUT THE USER and would change a later answer:
 a preference, a durable fact about them or their world, a workflow they follow. \
 Do not summarise the exchange. Do not propose what merely happened; that is \
 already recorded. Proposing nothing is a perfectly good answer.
+
+When you do propose a belief, keep the concrete particulars the evidence gives — \
+the proper names, places, organisations, dates and quantities involved — rather \
+than abstracting over them. A belief that names the thing is worth more than the \
+trait it illustrates: "goes to the Tuesday climbing session at Boulder Barn" \
+beats "enjoys climbing". State a trait alone only where the evidence gives no \
+particular. This governs how a belief is written, never whether: the bar above \
+still decides that, and a retelling of what happened is refused however specific \
+it is.
 
 Each belief takes one of two epistemic steps:
 - "observed" — the cited episodes directly show it. One episode may be enough.
@@ -160,6 +186,22 @@ label, and never cite one that is not in the batch."""
 #: time, that a relative expression is resolved here and never written through, and
 #: when a belief states none. The last paragraph is §2's fourth clause — the anchor
 #: widens the utility bar by nothing.
+#:
+#: **That last paragraph is stated symmetrically, and the symmetry is a fix rather
+#: than a softening.** §2's fourth clause says the bar is applied *unchanged*, and
+#: unchanged cuts both ways: a date is no reason to propose a belief the bar
+#: refuses, and the want of one is no reason to withhold a belief the bar admits.
+#: Shipped as a brake alone, the section reads as four restraints in a row —
+#: "state none", "acquires no date", "not worth holding with one" — arriving after
+#: a head that has already said "do not summarise", "do not propose what merely
+#: happened" and "proposing nothing is a perfectly good answer". The measurement
+#: says the cumulative reading is the one a model takes: re-ingesting LoCoMo
+#: conv-26 three times per tree, the pre-anchor tree distilled {28, 26, 25} beliefs
+#: against this tree's {19, 22, 24} — non-overlapping ranges, about 18% fewer, with
+#: preferences hit hardest (6/7/5 against 2/5/4) — and the time section is the only
+#: prompt text that differs. The proposal cap binds equally on both and is not the
+#: cause. So this restores the bar the anchor accidentally narrowed; it does not
+#: move it, which §2's fourth clause and ADR-0156 §6 would both forbid.
 _PROMPT_TIME_WITH_ZONE: Final = """\
 Each episode is shown with the local time it was RECORDED, in {zone}. That is \
 when the user spoke, not when the thing they describe happened.
@@ -177,15 +219,29 @@ Where the cited episodes establish no such time, state none. The recorded time i
 not one on its own: a lasting trait acquires no date from the day it happened to \
 be mentioned, and a date beside one would be read as an event.
 
-A date is never a reason to propose a belief. The bar above is unchanged: if the \
+A date is never a reason to propose a belief, and the absence of one is never a \
+reason to withhold one. The bar above is unchanged, in both directions: if the \
 belief would not be worth holding without its date, it is not worth holding with \
-one."""
+one — and a belief that clears the bar is proposed whether or not the evidence \
+lets you date it. These instructions change what a belief says, not how many you \
+propose."""
 
 #: And what a producer *without* the zone says (ADR-0156 §3's second clause). It is
 #: shown no instants at all — :func:`_render_batch` withholds them — so this asks
 #: for no resolution, and forbids in terms the two fallbacks a model would otherwise
 #: reach for. A date the evidence states outright needs no calendar, so §2's second
 #: clause still applies to it.
+#:
+#: This variant carries the same counterbalance as the zoned one, for the same
+#: reason and in its own terms. It has no fourth-clause paragraph to restate —
+#: nothing here invites a date the bar would refuse — but it is *more* restraint per
+#: word than the zoned text, not less: three prohibitions and no permission. The
+#: measured sparsity was not run against this variant and could not have been:
+#: ``Settings.timezone`` is a non-optional field defaulting to ``"UTC"``, so the
+#: composition root and the benchmark harness both build the zoned producer and only
+#: a direct construction reaches this text. The counterbalance here is therefore
+#: prophylactic — it states the half of §2's fourth clause that holds whatever
+#: calendar the producer has, so the two variants cannot drift on the point.
 _PROMPT_TIME_NO_ZONE: Final = """\
 The episodes are shown without the times they were recorded, so you cannot know \
 what day any of them falls on. Do not work a date out from context, and do not \
@@ -194,7 +250,11 @@ guess one.
 Where a cited episode itself names a calendar date for something the belief \
 asserts, state that date in the belief's own sentence. Otherwise state no time, \
 and never write a relative expression such as "yesterday" or "last week" — it \
-would point at an episode the belief will outlive."""
+would point at an episode the belief will outlive.
+
+Stating no time is never a reason to withhold a belief. These instructions change \
+what a belief says, not how many you propose: propose exactly what you would have \
+proposed without them."""
 
 #: The envelope, and the ban ADR-0156 §7 narrows rather than lifts: the model still
 #: supplies no value for a field the producer computes, and a date it is entitled
