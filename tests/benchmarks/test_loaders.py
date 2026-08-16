@@ -114,17 +114,49 @@ def test_locomo_reads_the_stated_instant_as_utc(locomo_file: Path) -> None:
 
 def test_locomo_keeps_speaker_names_in_the_text(locomo_file: Path) -> None:
     """The name is evidence — "when did Ada…" is unanswerable without it."""
-    first = locomo.load(locomo_file)[0].sessions[0].turns[0]
-
-    assert first.text == "Ada: I adopted a dog."
-    assert first.user_side is True
-
-
-def test_locomo_puts_speaker_b_on_the_assistant_side(locomo_file: Path) -> None:
     second = locomo.load(locomo_file)[0].sessions[0].turns[1]
 
-    assert second.speaker == "Bo"
-    assert second.user_side is False
+    assert second.text == "Bo: What is its name?"
+
+
+def test_locomo_frames_each_session_opening_as_user_supplied(locomo_file: Path) -> None:
+    """The observer is told what it is reading, in the data and never in a prompt."""
+    sessions = locomo.load(locomo_file)[0].sessions
+
+    assert sessions[0].turns[0].text == "[Transcript the user shared]\nAda: I adopted a dog."
+    assert sessions[1].turns[0].text == "[Transcript the user shared]\nAda: She is settling in."
+
+
+def test_locomo_frames_only_the_opening_turn(locomo_file: Path) -> None:
+    """Repeating it on all ~5,900 turns would put boilerplate in every embedding."""
+    turns = locomo.load(locomo_file)[0].sessions[0].turns
+
+    assert [turn.text.startswith("[Transcript") for turn in turns] == [True, False, False]
+
+
+def test_locomo_puts_every_speaker_on_the_user_side(locomo_file: Path) -> None:
+    """Neither named third party is the user and the assistant said none of it: the
+    user is whoever supplied the transcript, so all of it is their side (#1177)."""
+    session = locomo.load(locomo_file)[0].sessions[0]
+
+    assert [turn.speaker for turn in session.turns] == ["Ada", "Bo", "Ada"]
+    assert all(turn.user_side for turn in session.turns)
+
+
+def test_locomo_marks_every_session_user_supplied(locomo_file: Path) -> None:
+    """The session-level half of the framing: one exchange per turn, no assistant half."""
+    assert all(session.user_supplied for session in locomo.load(locomo_file)[0].sessions)
+
+
+def test_locomo_loads_a_sample_that_names_no_speaker_a(tmp_path: Path) -> None:
+    """`speaker_a` decided which speaker took the user half, and nothing decides that
+    now, so requiring the key would be a parsing precondition for an absent choice."""
+    sample = _locomo_sample()
+    del sample[0]["conversation"]["speaker_a"]
+    path = tmp_path / "locomo10.json"
+    path.write_text(json.dumps(sample), encoding="utf-8")
+
+    assert len(locomo.load(path)[0].sessions) == 2
 
 
 def test_locomo_renders_a_shared_photo_as_text(locomo_file: Path) -> None:
@@ -279,6 +311,15 @@ def test_longmemeval_adds_no_speaker_prefix(longmemeval_file: Path) -> None:
 
     assert late.text == "I bought a bicycle."
     assert late.user_side is True
+
+
+def test_longmemeval_is_not_user_supplied(longmemeval_file: Path) -> None:
+    """#1177 re-framed LoCoMo and left this corpus alone: it is a real user↔assistant
+    chat, so it keeps the paired fold and its assistant halves."""
+    case = longmemeval.load(longmemeval_file, corpus_key=CLEANED)[0]
+
+    assert not any(session.user_supplied for session in case.sessions)
+    assert any(not turn.user_side for session in case.sessions for turn in session.turns)
 
 
 def test_longmemeval_keys_every_turn_by_its_own_session(longmemeval_file: Path) -> None:
