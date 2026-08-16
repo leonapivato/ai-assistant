@@ -29,7 +29,13 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Final
 
-from anthropic import APIConnectionError, APIStatusError, APITimeoutError, AsyncAnthropic
+from anthropic import (
+    AnthropicError,
+    APIConnectionError,
+    APIStatusError,
+    APITimeoutError,
+    AsyncAnthropic,
+)
 from anthropic.types import TextBlock
 from pydantic import TypeAdapter, ValidationError
 
@@ -639,7 +645,7 @@ def build_anthropic_batch_completer(
     tree §8 was written for. So the one line such a consumer cannot write is
     written here, once, on the legal side of the rule.
 
-    **It composes, and does nothing else.** No credential is read, no request is
+    **It composes, and does nothing else.** Nothing is contacted, no request is
     made, and nothing is wired into ``ai_assistant.app`` or
     ``ai_assistant.service``: §8's third clause and §11's deferral are untouched,
     and no subsystem is given a ``BatchCompleter`` by this function existing. The
@@ -647,29 +653,58 @@ def build_anthropic_batch_completer(
     :class:`~ai_assistant.core.protocols.BatchCompleter` on why the wait is
     never hidden).
 
-    **The credential stays the SDK's to resolve, at request time rather than
-    here.** ``AsyncAnthropic()`` reads ``ANTHROPIC_API_KEY`` from the environment
-    itself, so no credential crosses this seam and a build with none configured
-    succeeds — failing on the first exchange instead, as a ``ModelError``. A
-    caller that wants that failure at startup calls
-    :func:`~ai_assistant.models.ensure_credential_available` for its route, which
-    is deliberately where that check lives: its own docstring records that the hub
-    asks it at startup and "**nothing else does**". Folding it in here would have a
-    composition helper decide a policy the sibling seam leaves to the caller, and
-    for a batch consumer the right answer is not obvious — the harness of #1029
-    ingests for an hour before it submits anything, so it wants the check far
-    earlier than this call.
+    **The credential is resolved by the SDK here, locally, and this is a presence
+    check and never a validity one.** ``AsyncAnthropic()`` runs the vendor's own
+    resolution chain: ``ANTHROPIC_API_KEY`` and ``ANTHROPIC_AUTH_TOKEN`` from the
+    environment, and then, where one is configured, a named profile or
+    workload-identity federation — which reads the SDK's config directory **from
+    disk**. So "this touches no credential material" is precisely what the
+    function does not promise, and the tests hold it to the weaker claim that is
+    true. What it does not do is contact anything: the resolution is local, this
+    call opens no socket, and a credential that is absent, wrong, revoked or
+    rate-limited still fails at the first exchange as a ``ModelError``.
+
+    That is the posture ``provider.py`` already takes rather than a new one.
+    :func:`~ai_assistant.models.ensure_credential_available` *constructs* the
+    vendor provider precisely because that "is what reads the credential out of
+    the environment", and pins the boundary at "nothing in startup may block
+    indefinitely on a network". This builder does not pre-empt that check: a
+    caller wanting an explicit early failure calls it for its own route, which is
+    where that docstring deliberately leaves it — "the hub asks this at startup;
+    **nothing else does**". For a batch consumer the difference is not academic:
+    the harness of #1029 ingests for an hour before it submits anything, so it
+    wants the check far earlier than this call, not folded into it.
+
+    **A broken credential *configuration* is translated, so no vendor exception
+    reaches the caller.** An explicitly selected profile that does not exist makes
+    the SDK raise ``anthropic.AnthropicError`` out of its constructor, and letting
+    that travel would hand a vendor type to the consumer outside this package that
+    this function exists to keep vendor-free — the same rule, one level up from
+    the import. It becomes a
+    :class:`~ai_assistant.core.errors.ConfigurationError`: the class both
+    ``ensure_vendor_available`` and ``ensure_credential_available`` raise for a
+    fault of this kind, for their stated reason that a ``ModelError``'s
+    ``retryable`` and ``routable`` say nothing about a config file that is not
+    there. The SDK's own message is quoted rather than paraphrased, as
+    ``provider.py`` quotes pydantic-ai's, because it names the exact variable to
+    set.
 
     **The transport's lifetime becomes the caller's process's**, which is the one
     thing this shape gives up and it is stated rather than hidden.
     :class:`AnthropicBatchCompleter` exposes no accessor for the client it was
     handed — deliberately, since that client is not part of the seam — so a caller
-    that did not build one cannot close it either. That is affordable exactly
-    because §8's third clause and §11 keep a ``BatchCompleter`` out of the hub and
-    out of every subsystem: the consumers this exists for build one per process and
-    exit, so nothing accumulates. A consumer building many in one long-lived
-    process wants the constructor and a client of its own, and is inside this
-    package by §11's own condition if it exists at all.
+    that did not build one cannot close it either. Three things bound what that
+    costs, and they are worth naming because the shape looks worse than it is.
+    Nothing is held until a request is made, so every failure path here, the
+    refusals below included, releases a pool that is empty. ADR-0060's rule is
+    about a resource orphaned *under cancellation* by one of the four
+    resource-owning Protocols (§3), and a synchronous builder is not in its scope.
+    And §8's third clause and §11's deferral keep a ``BatchCompleter`` out of the
+    hub and out of every subsystem, so the consumers this exists for build one per
+    process and exit. A consumer that must release the pool while its process keeps
+    running is, by §11's own condition, inside this package — and uses the
+    constructor with a client it owns, which is what that argument already
+    documents: "Its lifetime is the caller's; nothing here closes it".
 
     Args:
         issuer: The non-secret account label stamped on every handle this
@@ -687,12 +722,19 @@ def build_anthropic_batch_completer(
         The completer, over a client built here.
 
     Raises:
-        ConfigurationError: If ``issuer`` is blank or has no UTF-8 encoding —
-            raised by the constructor, so the failure still lands where the
-            operator's mistake was made rather than at the first submission.
+        ConfigurationError: If the SDK cannot resolve the credential
+            *configuration* it was pointed at — a named profile with no config
+            file behind it — or if ``issuer`` is blank or has no UTF-8 encoding.
+            One class for both, because both are an operator's configuration
+            being wrong, and both land here rather than at the first submission.
     """
+    try:
+        client = AsyncAnthropic()
+    except AnthropicError as exc:
+        msg = f"the Anthropic client could not be configured: {exc}"
+        raise ConfigurationError(msg) from exc
     return AnthropicBatchCompleter(
-        client=AsyncAnthropic(),
+        client=client,
         issuer=issuer,
         default_model=default_model,
         max_tokens=max_tokens,
