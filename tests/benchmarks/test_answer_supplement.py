@@ -77,7 +77,12 @@ FIRST = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 BATCH = 2
 #: Turns enough that capture writes more episodes than the supplement's budget, which
 #: is what makes the bound observable rather than vacuously satisfied.
-TURNS = 16
+#:
+#: **Turns, not episodes, and capture halves them** — one ``EpisodicMemory`` per
+#: user/assistant exchange — so this figure buys 16 episodes against ADR-0160 §1's
+#: bound of 15. It was 16 when that bound was 5; at 15 it would have yielded 8 and
+#: the assertion below would have been the fixture failing rather than the read.
+TURNS = 32
 
 
 def _case() -> BenchCase:
