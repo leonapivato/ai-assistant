@@ -205,10 +205,32 @@ the decision that is unobservable in the ruling.
 > input its ruling depends on is an argument or a construction-time property of the
 > implementation.
 
-> **Normative.** The reconciler is a `memory`-internal seam. No Protocol for it is
-> added to `core/protocols.py`, and no subsystem outside `memory` holds one,
-> constructs one, or is handed relations. `learning`, `orchestration` and
-> `interfaces` propose and consume exactly as they do today.
+> **Normative.** The **reconciler** is a `memory`-internal seam. No Protocol for it
+> is added to `core/protocols.py`; no subsystem outside `memory` holds one,
+> constructs one or invokes one; and no component outside `memory` determines a
+> relation. `learning`, `orchestration` and `interfaces` propose and consume exactly
+> as they do today.
+
+> **Normative.** The **relations** are not internal. They are contract data at the
+> existing `MemoryPolicy` seam, so *every* implementation of `MemoryPolicy` receives
+> them, wherever it lives, and `MemoryIngestor` passes them to whatever policy it
+> was injected with without branching on which one that is.
+
+The two clauses draw one line and it is worth naming, because collapsing them is the
+easy mistake: what stays inside `memory` is the machinery that *makes* a relation,
+not the value it makes. A `MemoryPolicy` implementation may live anywhere — that is
+what the injected seam is for, and ADR-0040 §3 is explicit that "the ingestor takes
+rulings from *any* injected `MemoryPolicy`" — so an argument to `decide` reaches
+outside `memory` by construction. A boundary that tried to withhold it from a
+foreign policy would have to test which implementation it held, which is exactly the
+dependency-inversion failure golden rule 1 exists to prevent. What no foreign
+component may do is *determine* a relation, and that is what §2's first clause and
+§3's rungs bind.
+
+**Nothing in the tree implements `MemoryPolicy` outside `memory` today**, and that
+is a fact about the tree rather than a property of the contract: `learning` and
+`orchestration` reach the write path through `MemoryWriter`, which "holds its own
+`MemoryPolicy` and its own store, and exposes neither".
 
 **Why not inside `decide`.** ADR-0005 §3 is the sentence the whole corpus cites —
 "a **deterministic** `MemoryPolicy` decides the outcome" — and it is the property
@@ -578,9 +600,15 @@ and one is not, and the corpus is owed the arithmetic rather than the conclusion
 > field or shape in `core/types.py` changes, and no member is added to
 > `MemoryDecisionKind`.
 
-> **Normative.** `MemoryPolicy.decide` gains one keyword-only parameter carrying the
-> relations, keyed by the conflict record's id, defaulting to none. No other
-> Protocol in `core/protocols.py` gains a member or changes a signature.
+> **Normative.** `MemoryPolicy.decide`'s signature becomes exactly:
+>
+> `async def decide(self, proposal: MemoryUpdateProposal, *, conflicts: Sequence[MemoryRecord], relations: Mapping[str, ConflictRelation] | None = None) -> MemoryDecision`
+>
+> — one added keyword-only parameter named `relations`, typed
+> `Mapping[str, ConflictRelation] | None`, defaulting to `None`, keyed by
+> `MemoryRecord.id`. No other Protocol in `core/protocols.py` gains a member or
+> changes a signature, and no other parameter of `decide` changes name, kind,
+> annotation or order.
 
 > **Normative.** A policy ignores any entry whose key is not the id of a member of
 > `conflicts`, and treats a member absent from the mapping as unlabelled. The
@@ -594,6 +622,17 @@ and one is not, and the corpus is owed the arithmetic rather than the conclusion
 
 > **Normative.** `MemoryPolicy.decide`'s docstring states the determinism obligation
 > §2 ratifies, in the terms `NotificationPolicy`'s already uses.
+
+**The type is spelled out because a conformance obligation cannot substitute for
+it.** `Mapping` rather than `dict`, so the callee is handed a read-only view and no
+policy can mutate what the ingestor holds. `str` keys, because they are
+`MemoryRecord.id` values and `target_id` is one. And `| None = None` rather than an
+empty default for two reasons: a mutable literal default is not available anyway,
+and the two states are genuinely different — `None` says no reconciler ran at all
+(§2's condition excluded this ingest, or none is injected), `{}` says one ran and
+labelled nothing. Both rule identically under §4, since every member is unlabelled
+either way, but only one of them is a fact a `reason` or a later trace can report,
+and erasing the distinction at the contract would make it unrecoverable.
 
 **Keying by id, against ADR-0121 §2's instinct, and why it is right here.**
 ADR-0121's implementation states set membership "over the records rather than over a
