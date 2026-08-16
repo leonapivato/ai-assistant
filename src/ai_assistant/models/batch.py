@@ -19,7 +19,9 @@ break a second surface — and accepts it.
 third clause keeps a batch in the process that submits it; §11 leaves wiring a
 ``BatchCompleter`` into ``ai_assistant.app`` or any subsystem deferred until a
 subsystem — not a harness — asks for bulk inference. A consumer constructs this
-class in a composition root it owns.
+class in a composition root it owns, and
+:func:`build_anthropic_batch_completer` is how a consumer *outside* this package
+does so without naming a vendor type golden rule 4 confines to here.
 """
 
 from __future__ import annotations
@@ -27,7 +29,7 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING, Final
 
-from anthropic import APIConnectionError, APIStatusError, APITimeoutError
+from anthropic import APIConnectionError, APIStatusError, APITimeoutError, AsyncAnthropic
 from anthropic.types import TextBlock
 from pydantic import TypeAdapter, ValidationError
 
@@ -63,7 +65,6 @@ from ai_assistant.models.provider import _classify_status
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from anthropic import AsyncAnthropic
     from anthropic.types import MessageParam
     from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
     from anthropic.types.messages import (
@@ -613,6 +614,90 @@ class AnthropicBatchCompleter:
                 raise ModelError(msg)
             seen.add(item.item_id)
             _refuse_malformed_history(item)
+
+
+def build_anthropic_batch_completer(
+    *,
+    issuer: str,
+    default_model: str,
+    max_tokens: int = DEFAULT_MAX_TOKENS,
+    max_items: int | None = DEFAULT_MAX_BATCH_ITEMS,
+) -> AnthropicBatchCompleter:
+    """Build the vendor client and the completer over it, for a caller that cannot.
+
+    **This is the third option ADR-0143 §8 says a consumer outside this package
+    has.** §8 has such a consumer obtain an instance "by construction in a
+    composition root it owns ... its own root for a consumer outside
+    ``ai_assistant``", and the ADR's Consequences bank the result: that consumer
+    now "has a legal edge to the capability", where before it had "a choice
+    between a golden-rule-4 violation" and paying the undiscounted price. The edge
+    was not in fact reachable. :class:`AnthropicBatchCompleter` takes its client as
+    a required argument, nothing in this package has ever constructed one, and naming
+    ``AsyncAnthropic`` to do so is a provider-SDK import — which golden rule 4
+    confines to this package, and which the benchmark harness's own AST check
+    (``tests/benchmarks/test_import_discipline.py``) enforces on precisely the
+    tree §8 was written for. So the one line such a consumer cannot write is
+    written here, once, on the legal side of the rule.
+
+    **It composes, and does nothing else.** No credential is read, no request is
+    made, and nothing is wired into ``ai_assistant.app`` or
+    ``ai_assistant.service``: §8's third clause and §11's deferral are untouched,
+    and no subsystem is given a ``BatchCompleter`` by this function existing. The
+    caller holds what it built and still writes its own poll loop (ADR-0060, and
+    :class:`~ai_assistant.core.protocols.BatchCompleter` on why the wait is
+    never hidden).
+
+    **The credential stays the SDK's to resolve, at request time rather than
+    here.** ``AsyncAnthropic()`` reads ``ANTHROPIC_API_KEY`` from the environment
+    itself, so no credential crosses this seam and a build with none configured
+    succeeds — failing on the first exchange instead, as a ``ModelError``. A
+    caller that wants that failure at startup calls
+    :func:`~ai_assistant.models.ensure_credential_available` for its route, which
+    is deliberately where that check lives: its own docstring records that the hub
+    asks it at startup and "**nothing else does**". Folding it in here would have a
+    composition helper decide a policy the sibling seam leaves to the caller, and
+    for a batch consumer the right answer is not obvious — the harness of #1029
+    ingests for an hour before it submits anything, so it wants the check far
+    earlier than this call.
+
+    **The transport's lifetime becomes the caller's process's**, which is the one
+    thing this shape gives up and it is stated rather than hidden.
+    :class:`AnthropicBatchCompleter` exposes no accessor for the client it was
+    handed — deliberately, since that client is not part of the seam — so a caller
+    that did not build one cannot close it either. That is affordable exactly
+    because §8's third clause and §11 keep a ``BatchCompleter`` out of the hub and
+    out of every subsystem: the consumers this exists for build one per process and
+    exit, so nothing accumulates. A consumer building many in one long-lived
+    process wants the constructor and a client of its own, and is inside this
+    package by §11's own condition if it exists at all.
+
+    Args:
+        issuer: The non-secret account label stamped on every handle this
+            completer mints and compared against every handle it is handed
+            (ADR-0143 §2). **Never** a credential or any part of one — handles are
+            written to disk.
+        default_model: The ``"provider:model"`` spec used when a call does not
+            override it. A bare vendor model name is also accepted.
+        max_tokens: What each item may generate. Configuration of this
+            implementation; the seam has no such parameter.
+        max_items: The item count to refuse above, or ``None`` to declare no
+            bound, which ADR-0143 §7 permits.
+
+    Returns:
+        The completer, over a client built here.
+
+    Raises:
+        ConfigurationError: If ``issuer`` is blank or has no UTF-8 encoding —
+            raised by the constructor, so the failure still lands where the
+            operator's mistake was made rather than at the first submission.
+    """
+    return AnthropicBatchCompleter(
+        client=AsyncAnthropic(),
+        issuer=issuer,
+        default_model=default_model,
+        max_tokens=max_tokens,
+        max_items=max_items,
+    )
 
 
 def _snapshot(items: Sequence[BatchRequest]) -> tuple[BatchRequest, ...]:
