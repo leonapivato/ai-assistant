@@ -40,6 +40,7 @@ rather than on one the tests wired by hand.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING, Any
 
 import httpx
@@ -55,7 +56,7 @@ from ai_assistant.models import batch as batch_module
 from ai_assistant.models.batch import DEFAULT_MAX_TOKENS, anthropic_batch_completer
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
     from pathlib import Path
 
 #: The account label these tests build with. A label and never a credential —
@@ -273,30 +274,106 @@ class TestTheCompleterWorksOverTheWire:
             assert all(outcome.kind is BatchOutcomeKind.SUCCEEDED for outcome in outcomes)
 
 
+class _ParkedClose:
+    """A ``close()`` held open, so a test can cancel the task that is awaiting it.
+
+    ``entered`` fires once the close has begun and suspended; ``release`` lets it
+    finish. Between the two, the exiting task sits in the only window where a
+    cancellation can orphan the pool, which is the window ADR-0060 §1 is about.
+    """
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+        self.clients: list[AsyncAnthropic] = []
+
+
+def _recording(
+    clients: list[AsyncAnthropic], build: Callable[..., AsyncAnthropic]
+) -> Callable[..., AsyncAnthropic]:
+    """Stand in for ``AsyncAnthropic``, recording every client ``build`` returns.
+
+    The transport is the scripted stack, so what the builder gets is a *real* client
+    owning a real connection pool — ``is_closed()`` is then the SDK's own answer
+    rather than a double's record of a call — while reaching no socket.
+    """
+
+    def _recorded(**configured: Any) -> AsyncAnthropic:
+        client = build(
+            api_key=DUMMY_KEY,
+            http_client=httpx.AsyncClient(transport=httpx.MockTransport(BatchServer())),
+            **configured,
+        )
+        clients.append(client)
+        return client
+
+    return _recorded
+
+
 class TestItClosesTheClientItOwns:
     """The reason this is a context manager rather than a builder.
 
     ``AnthropicBatchCompleter`` exposes no accessor for its client and states that
     the client's lifetime is its caller's, so a consumer handed a completer built
     elsewhere has no way to release the pool. These assert that leaving the block
-    does release it — on the ordinary path, and when the body raises.
+    does release it — on the ordinary path, when the body raises, and when the block
+    is cancelled with the close already in flight.
+
+    That last one is the case a plain ``finally: await client.close()`` fails, and it
+    fails silently: the cancellation interrupts the close, the caller holds no
+    reference to the client, and nothing is left running that would release the pool.
+    ADR-0060 §1 is where the obligation is written.
     """
+
+    class _SuspendsItsClose(AsyncAnthropic):
+        """A real client whose ``close()`` parks until the test releases it.
+
+        A subclass rather than a stand-in, so what the assertion reads afterwards is
+        the SDK's own ``is_closed()`` over a real pool — the claim is that the pool
+        was released, not that a double recorded the attempt.
+        """
+
+        def __init__(self, *, parked: _ParkedClose, **configured: Any) -> None:
+            super().__init__(**configured)
+            self._parked = parked
+
+        async def close(self) -> None:
+            self._parked.entered.set()
+            await self._parked.release.wait()
+            await super().close()
+
+    class _FailsItsClose(AsyncAnthropic):
+        """A real client whose ``close()`` refuses, to pin what that does to the body."""
+
+        async def close(self) -> None:
+            msg = "the pool would not close"
+            raise RuntimeError(msg)
 
     @pytest.fixture
     def built(self, monkeypatch: pytest.MonkeyPatch) -> list[AsyncAnthropic]:
         """Record every client constructed, so the test can ask whether it closed."""
         clients: list[AsyncAnthropic] = []
+        monkeypatch.setattr(batch_module, "AsyncAnthropic", _recording(clients, AsyncAnthropic))
+        return clients
 
-        def _recorded(**configured: Any) -> AsyncAnthropic:
-            client = AsyncAnthropic(
-                api_key=DUMMY_KEY,
-                http_client=httpx.AsyncClient(transport=httpx.MockTransport(BatchServer())),
-                **configured,
-            )
-            clients.append(client)
-            return client
+    @pytest.fixture
+    def parked(self, monkeypatch: pytest.MonkeyPatch) -> _ParkedClose:
+        """The same recording, over a client whose ``close()`` suspends on demand."""
+        held = _ParkedClose()
 
-        monkeypatch.setattr(batch_module, "AsyncAnthropic", _recorded)
+        def _suspending(**configured: Any) -> AsyncAnthropic:
+            return self._SuspendsItsClose(parked=held, **configured)
+
+        monkeypatch.setattr(batch_module, "AsyncAnthropic", _recording(held.clients, _suspending))
+        return held
+
+    @pytest.fixture
+    def refusing(self, monkeypatch: pytest.MonkeyPatch) -> list[AsyncAnthropic]:
+        """The same recording, over a client that raises out of its ``close()``."""
+        clients: list[AsyncAnthropic] = []
+        monkeypatch.setattr(
+            batch_module, "AsyncAnthropic", _recording(clients, self._FailsItsClose)
+        )
         return clients
 
     async def test_leaving_the_block_closes_the_pool(self, built: list[AsyncAnthropic]) -> None:
@@ -325,6 +402,42 @@ class TestItClosesTheClientItOwns:
                 pass  # pragma: no cover - the refusal is the point
 
         assert built[0].is_closed()
+
+    async def test_a_cancellation_mid_close_does_not_take_the_pool_with_it(
+        self, parked: _ParkedClose
+    ) -> None:
+        async def use_the_block() -> None:
+            async with anthropic_batch_completer(issuer=ISSUER, default_model=MODEL):
+                pass
+
+        task = asyncio.create_task(use_the_block())
+        # The body is done and the close is suspended: the caller now holds nothing
+        # that could release this pool, so an interrupted close orphans it outright.
+        await parked.entered.wait()
+        task.cancel()
+        await asyncio.sleep(0)  # delivered, into the close that is in flight
+        parked.release.set()
+
+        # Both halves of §1, and the second is why this is not just `except
+        # CancelledError: pass`: the resource ends up safe, *and* the cancellation
+        # still arrives rather than being absorbed into an ordinary return.
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert parked.clients[0].is_closed()
+
+    async def test_a_close_that_fails_is_reported_over_the_bodys_own_failure(
+        self, refusing: list[AsyncAnthropic]
+    ) -> None:
+        # A deliberate choice rather than an accident of `finally`, so it is pinned:
+        # a pool that would not close is the news this block exists to deliver, and
+        # the body's failure is kept as the context rather than lost.
+        sentinel = ValueError("the caller's own failure")
+
+        with pytest.raises(RuntimeError, match="the pool would not close") as raised:
+            async with anthropic_batch_completer(issuer=ISSUER, default_model=MODEL):
+                raise sentinel
+
+        assert raised.value.__context__ is sentinel
 
 
 class TestItDoesNotLetTheSdkRepeatAPaidSubmission:
