@@ -1,7 +1,42 @@
 # 79. A correction resolves every conflict it is shown, or it does not land
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0159 (§3's promoted full-set retirement obligation, as it reaches a conflict labelled a restatement or an addition)
 - Date: 2026-07-28
+- Partially superseded: 2026-08-16 by ADR-0159 — **§3's promoted `MemoryWriter`
+  obligation is narrowed by one exclusion; everything §3 argues for promoting it
+  stands.** §3 makes the full-set retirement "an obligation of the `MemoryWriter`
+  contract, driven by the shared conformance suite and matched by the canonical
+  `FakeMemoryWriter`", stating the set as "the named `target`, plus every other
+  conflict in the set the policy ruled on whose source is supersedable".
+  [ADR-0159](0159-a-conflict-is-labelled-before-it-is-ruled-on-and-similarity-alone-folds-nothing.md)
+  §5 excludes from that set any conflict a reconciler labelled `RESTATES` or `ADDS`,
+  enforced at the writer from the writer's own relations. A reader holding only
+  ADR-0079 would build a writer that retires records ADR-0159 forbids retiring, so
+  the sentence no longer holds as written.
+
+  **Why this record is owed where ADR-0092's was not**, since the asymmetry will
+  look like an oversight in one direction or the other. ADR-0050's 2026-08-02 note
+  rules that "**ADR-0079 §3 needs no record of its own**" because §3 states the
+  obligation *intensionally* — "whose source is supersedable" — so widening what is
+  supersedable "leaves its sentence true verbatim". That reasoning is exactly right
+  and is exactly why it does not reach here: ADR-0159's exclusion is not a change to
+  which *sources* are supersedable. It withholds retirement from a conflict whose
+  source **is** supersedable, on a ground §3's sentence has no term for. The
+  intensional statement is what saved §3 from ADR-0092 and is what exposes it to
+  this one.
+
+  **What stands.** §1's ruling — "a correction resolves every conflict it is shown,
+  or it does not land" — stays true, and ADR-0159 §11 records why: a member labelled
+  `ADDS` is not a conflict the correction was shown but a distinct fact similarity
+  surfaced, so §1's own honesty claim ("not 'every conflict that exists on the
+  topic'") is made more accurate rather than weakened. §1's completeness refusal and
+  its ceiling, §2's deferral precedence, §3's argument that a silent divergence
+  between `MemoryIngestor` and `FakeMemoryWriter` is what the canonical fake exists
+  to prevent — which is why ADR-0159 §5 carries the exclusion into the fake and the
+  shared suite — §4's contract surface and §5's partial supersession of ADR-0050 all
+  stand. ADR-0159 §11 applies ADR-0070 §1's test and records this ruling; ADR-0159
+  lands in the same change, so this line never names an ADR that does not exist.
+  Refs #1188, #1029.
 - **This ADR partially supersedes [ADR-0050](0050-resolving-the-full-contradiction-set.md)**,
   in the scope named in §5: **§1's over-limit surplus clause** (the paragraph
   headed *"Full" is bounded by conflict detection; the over-limit surplus is a

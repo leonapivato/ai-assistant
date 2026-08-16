@@ -2,6 +2,39 @@
 
 - Status: Partially superseded by ADR-0086 (§1's and §5a's rule that a `REINFORCE` retains both records' `evidence`)
 - Date: 2026-07-22
+- Amended: 2026-08-16 by ADR-0159 — **§4's description of rule 5's ruling no
+  longer describes `DefaultMemoryPolicy`; §7's filed question is answered.** §4
+  records that "**rule 5** — a non-asserted proposal that conflicts with a
+  non-asserted record, reason 'updates an existing memory' — becomes `REINFORCE`",
+  and disowns the label in the same breath: "calling the ruling `REINFORCE` asserts
+  they agree, and sometimes they will not".
+  [ADR-0159](0159-a-conflict-is-labelled-before-it-is-ruled-on-and-similarity-alone-folds-nothing.md)
+  §4 replaces that arm — a fold now requires a conflict labelled a restatement, a
+  retirement requires one labelled a contradiction, and everything else is
+  `ACCEPT` — so a reader building rule 5 from §4 alone would build the arm ADR-0159
+  removes. That fails ADR-0082 §1's test and is why this note exists.
+
+  **It is an amendment and not a supersession**, because §4 decided nothing here.
+  Its own heading is "migrates with no behavioural change"; §5 rules that "the suite
+  must not assert which relation a policy picks"; and §7 files "**Whether
+  `DefaultMemoryPolicy` rule 5 should supersede** in some cases" as expressly not
+  decided, "a policy-lane question that this vocabulary makes askable". ADR-0159 is
+  that policy lane, and **§7's question is now answered in its own direction** as
+  well as in the mirror image ADR-0121 supplied — rule 5 sometimes supersedes.
+  Discharging a deferral by the ADR it named is a stacked addition and owes nothing
+  of its own (ADR-0083 §15); the record here is owed for §4's description alone.
+
+  **What stands.** §1's rule that a ruling "names the relation the policy asserts,
+  never the write it causes" is what ADR-0159 §1 builds on, and its conflict
+  relations are deliberately not `MemoryDecisionKind` members. §3's
+  "`_refuse_unsafe_fold` stays exactly where it is and stays keyed on the records"
+  stands: ADR-0159 opens no exception to it and asks for no write the floor did not
+  already permit. §5's "a conformance suite *is* the contract … the suite must not
+  assert which relation a policy picks" is restated by ADR-0159 §8 rather than
+  narrowed. §5a's latitude over the fold is untouched. ADR-0159 §11 applies
+  ADR-0070 §1's test and records this ruling; the `Status` line is unchanged because
+  ADR-0082 §2 puts the record in this note alone on a line led by `Partially
+  superseded by`. Refs #1188, #1029.
 - Amended: 2026-08-09 by ADR-0121 — **§5b's conformance predicate is narrowed by
   one exception in its first disjunct; §7's filed question is answered.** §5b
   states the obligation "so it cannot be paraphrased into something broader": a
