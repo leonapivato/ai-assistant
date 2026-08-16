@@ -1217,12 +1217,19 @@ async def test_the_prompt_asks_for_no_particular_the_evidence_does_not_give(
     in the batch (ADR-0077 §3), never what they support.
 
     Three things are pinned, because the clause alone is not the whole defence. The
-    prohibition itself; that the example does not model the error — it names the venue
-    without asserting a recurrence, so *"Tuesday"* must not appear in it; and that the
-    paragraph still sits directly above the two epistemic steps, which is where the
-    mechanism takes over from the wording. A model that labels its leap honestly is
-    refused by the evidence floor rather than by this paragraph
+    prohibition itself; that the worked example *cannot* model the error — a possession
+    is established outright by one episode, so no reading of *"drives a 2012 Honda
+    Civic"* turns a single occasion into an ongoing habit, and the two habit-shaped
+    spellings this example replaced are asserted gone; and that the paragraph still
+    sits directly above the two epistemic steps, which is where the mechanism takes
+    over from the wording. A model that labels its leap honestly is refused by the
+    evidence floor rather than by this paragraph
     (``test_an_inferred_entry_below_the_evidence_floor_is_discarded``).
+
+    The example is pinned by its exact text on purpose. It is the one line of a prompt
+    a model imitates rather than reasons about, so a later lane swapping in a
+    habit-shaped one — the shape three review rounds kept finding a one-visit reading
+    of — should have to change this assertion and say why.
     """
     observer, provider = _observer(_envelope(), timezone=timezone)
 
@@ -1232,7 +1239,9 @@ async def test_the_prompt_asks_for_no_particular_the_evidence_does_not_give(
     assert "Add nothing the evidence does not give" in system
     assert "a particular you cannot point to in a cited episode is an invention" in system
     assert "one occasion is not a routine" in system
+    assert '"drives a 2012 Honda Civic" beats "owns a car"' in system
     assert "Tuesday" not in system, "the worked example must not model a recurrence claim"
+    assert "climbs at" not in system, "nor a habit a single occasion could be read into"
     assert system.index("Add nothing the evidence does not give") < system.index(
         "a generalisation from a single episode will be discarded"
     )
