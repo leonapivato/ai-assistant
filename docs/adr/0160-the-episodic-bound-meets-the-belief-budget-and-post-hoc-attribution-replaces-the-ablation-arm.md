@@ -267,13 +267,14 @@ cross-pilot comparison as evidence rather than as arithmetic.
 > over populations partitioned by what reached the answering prompt, and not across
 > runs by raw counts.
 
-> **Normative.** The run's pre-registration fixes, before the run executes, the
-> minimum size of each compared population and any threshold on the *magnitude* of
-> the gap between them. Neither is chosen once the figures are known.
+> **Normative.** The run's pre-registration fixes, before the run executes, a
+> **positive** minimum size for each compared population and any threshold on the
+> *magnitude* of the gap between them. Neither is chosen once the figures are known.
 
-> **Normative.** Where either compared population falls below its pre-registered
-> minimum, the run does not discharge §3's measurement and the episodic bound does
-> not move on it.
+> **Normative.** Where either compared population is empty, or falls below its
+> pre-registered minimum, the run does not discharge §3's measurement and the
+> episodic bound does not move on it. An empty population never discharges it,
+> whatever minimum was registered.
 
 > **Normative.** Where both populations meet their minimum, the retraction test is
 > met when, on the scored run's LoCoMo figures, the questions whose gold episode
@@ -283,8 +284,17 @@ cross-pilot comparison as evidence rather than as arithmetic.
 > pre-registered threshold may only raise that bar and never lower it.
 
 > **Normative.** A run that meets the retraction test takes the episodic bound to
-> zero and removes the supplement, unless a controlled arm over the same questions
-> with and without the supplement is run first and does not meet it.
+> zero and removes the supplement, unless a controlled arm satisfying the two
+> clauses below is run first and escapes it.
+
+> **Normative.** The controlled arm is a paired comparison: the same questions, the
+> same store and the same run configuration, with the episodic supplement enabled in
+> one half and disabled in the other.
+
+> **Normative.** The arm escapes the removal when its supplemented half is more
+> accurate than its unsupplemented half over the questions the observational trigger
+> was computed on. A threshold fixed in the arm's own pre-registration, before the
+> arm executes, may only raise that bar and never lower it.
 
 > **Normative.** The observational partition is never on its own evidence *for* the
 > size of the supplement's effect. A claim that the supplement caused a measured
@@ -342,6 +352,16 @@ on its own vindicate it — which is the conservative direction ADR-0158 §6 alr
 chose when it ruled that zero and ties both fail. And the minimum populations stop
 the whole test being decided by a handful of questions, which is the shape the
 confound does most damage in.
+
+**The escaping arm is paired for the same reason the observational partition is
+not trustworthy alone.** Its two halves differ in the supplement and in nothing
+else, so the difference between them is caused by the supplement — which is the
+property the within-run partition cannot have, and the whole reason an arm can
+overturn it. It is scored over the questions the trigger was computed on rather
+than the whole corpus, because those are the questions the removal would be
+justified by, and a whole-corpus average would let a large untouched majority hide
+the population in dispute. The bar is again a zero-threshold comparison inventing
+no constant, and again a pre-registration may only make it harder to clear.
 
 **This does not quietly re-impose the arm §3 retired.** No arm is owed, and none
 needs to exist for the bound to stand: the escape is a route available to whoever
