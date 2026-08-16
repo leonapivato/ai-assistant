@@ -53,8 +53,8 @@ from ai_assistant.core.types import (
     Provenance,
     UserConfirmation,
 )
-from ai_assistant.memory import DefaultMemoryPolicy, InMemoryMemoryStore, MemoryIngestor
-from ai_assistant.testing import FakeMemoryWriter, FakeTraceSink
+from ai_assistant.memory import InMemoryMemoryStore, MemoryIngestor
+from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryWriter, FakeTraceSink
 
 if TYPE_CHECKING:
     from ai_assistant.core.clock import Clock
@@ -157,6 +157,23 @@ def _confirmed_proposal(record: MemoryRecord) -> MemoryUpdateProposal:
     )
 
 
+#: The policy the fold cases below drive their ``REINFORCE`` from.
+#:
+#: **Injected rather than provoked out of ``DefaultMemoryPolicy``, since ADR-0159.**
+#: These cases are about the *applier's* fold semantics, and they used to reach the
+#: arm through the default policy's rule 5, which folded whenever the conflict set
+#: was non-empty. ADR-0159 §4 replaced that rule with one resting on a *relation*,
+#: and §12 records the consequence for exactly this shape: "§4 excludes ``EXTERNAL``
+#: from both target classes, so ``DefaultMemoryPolicy`` no longer reaches the
+#: ``DERIVED``→``ATTESTED`` fold at all on the observed path. The contradiction is
+#: between two ADRs about how such a fold folds and **survives untouched for any
+#: policy that does reach it**." Both writers take rulings from any injected
+#: ``MemoryPolicy`` (ADR-0040 §3), so this is the seam and not a workaround — and it
+#: makes what these cases always meant explicit: the fold, not the ruling.
+def _folding_policy() -> FakeMemoryPolicy:
+    return FakeMemoryPolicy(MemoryDecisionKind.REINFORCE)
+
+
 async def _fold(
     make_writer: WriterFactory,
     *,
@@ -181,7 +198,7 @@ async def _fold(
     )
     await store.add(_target(tainted=tainted_target, corroborating=corroborating))
 
-    writer = make_writer(store, DefaultMemoryPolicy(), _fixed_now)
+    writer = make_writer(store, _folding_policy(), _fixed_now)
     result = await writer.ingest(_confirmed_proposal(_incoming(tainted=tainted_incoming)))
 
     assert result.decision.kind is MemoryDecisionKind.REINFORCE

@@ -2045,3 +2045,76 @@ class TestTheEgressRegistrationSettings:
         """The same for the endpoint, where the empty text would reach a parse."""
         with pytest.raises(ValidationError, match="must hold text"):
             Settings(send_email_connection="conn-0001", send_email_endpoint=blank)
+
+
+# --- the reconciler's route and its bound (ADR-0159 §3) ---
+
+
+def test_reconciler_model_is_unset_by_default() -> None:
+    """Unset means the route conversation already uses (ADR-0159 §3, ADR-0077 §3).
+
+    The same default the observer's route takes, for the same reason: it names no
+    provider the operator did not already configure, so ADR-0004 §2's property
+    cannot be breached by leaving it unset. Which route unset resolves to is the
+    composition root's to apply.
+    """
+    assert Settings().reconciler_model is None
+
+
+def test_a_malformed_reconciler_model_is_rejected_where_settings_is_built() -> None:
+    """ADR-0159 §3 in terms: refused at construction rather than at first use.
+
+    "…typed as the same validated ``provider:model`` spec ``observer_model``
+    carries, **so a malformed route is refused at construction rather than at first
+    use**." An ingest that discovered the route was unusable would degrade to an
+    unlabelled member and write anyway (§3's never-raises clause) — so the operator
+    would never learn, which is exactly what validating at load buys.
+    """
+    with pytest.raises(ValidationError, match="malformed model spec"):
+        Settings(reconciler_model="not-a-spec")
+
+
+def test_reconciler_model_accepts_a_route_of_its_own() -> None:
+    """Set, it names the route that weighs two stored beliefs against each other."""
+    settings = Settings(reconciler_model="openai:gpt-5", default_model="anthropic:claude-opus-4-8")
+    assert settings.reconciler_model == "openai:gpt-5"
+    assert settings.default_model == "anthropic:claude-opus-4-8"
+
+
+def test_reconciler_max_conflicts_defaults_to_three() -> None:
+    """ADR-0159 §3's ratified starting value, and its right value is empirical.
+
+    **Not a second ``conflict_limit``.** That ceiling is 100 and is a circuit
+    breaker on a runaway store (ADR-0079 §1), nowhere near a cost bound; this one is
+    exactly that. Three is where the measured distribution puts the records a
+    proposal could plausibly restate or contradict.
+    """
+    assert Settings().reconciler_max_conflicts == 3
+
+
+@pytest.mark.parametrize("bound", [0, -1])
+def test_a_non_positive_reconciler_bound_is_rejected_at_load(bound: int) -> None:
+    """ADR-0159 §3: positive. A zero bound would ask about nothing while reporting health."""
+    with pytest.raises(ValidationError):
+        Settings(reconciler_max_conflicts=bound)
+
+
+def test_a_boolean_reconciler_bound_is_rejected_at_load() -> None:
+    """``bool`` is an ``int`` subclass, and every bound the field carries admits the 1.
+
+    The same guard every other count here takes: a flag where a count belongs would
+    silently load a one-member bound that satisfies ``ge=1`` and tells nobody.
+    """
+    with pytest.raises(ValidationError):
+        Settings(reconciler_max_conflicts=True)
+
+
+def test_reconciler_settings_parse_from_the_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator moves the labelling to another model with one variable."""
+    monkeypatch.setenv("ASSISTANT_RECONCILER_MODEL", "openai:gpt-5")
+    monkeypatch.setenv("ASSISTANT_RECONCILER_MAX_CONFLICTS", "5")
+
+    settings = Settings()
+
+    assert settings.reconciler_model == "openai:gpt-5"
+    assert settings.reconciler_max_conflicts == 5

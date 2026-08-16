@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from typing import TYPE_CHECKING
 
@@ -12,6 +13,7 @@ from ai_assistant.core.errors import MemoryStoreError
 from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
+    ConflictRelation,
     DataTier,
     EpisodicMemory,
     MemoryDecision,
@@ -30,17 +32,18 @@ from ai_assistant.memory import (
     DefaultMemoryPolicy,
     InMemoryMemoryStore,
     MemoryIngestor,
+    ModelBackedReconciler,
     SqliteMemoryStore,
 )
 from ai_assistant.models import HashingEmbedder
-from ai_assistant.testing import FakeTraceSink
+from ai_assistant.testing import FakeMemoryPolicy, FakeModelProvider, FakeTraceSink
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.protocols import MemoryStore
-    from ai_assistant.core.types import ConflictRelation, MemoryIngestResult, MemoryKind
+    from ai_assistant.core.protocols import MemoryPolicy, MemoryStore
+    from ai_assistant.core.types import MemoryIngestResult, MemoryKind
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
 
@@ -172,6 +175,32 @@ def _proposal(
 def _ingestor(store: MemoryStore) -> MemoryIngestor:
     return MemoryIngestor(
         traces_sink=FakeTraceSink(), store=store, policy=DefaultMemoryPolicy(), now=_fixed_now
+    )
+
+
+def _folding(store: MemoryStore) -> MemoryIngestor:
+    """An ingestor whose injected policy reinforces at ``conflicts[0]``, unconditionally.
+
+    The three ADR-0103 §6 cases below are about **the applier's** fold semantics —
+    which content, confidence, source, window and expiry survive — and they used to
+    reach that arm through ``DefaultMemoryPolicy``'s rule 5, which folded whenever
+    the conflict set was non-empty. ADR-0159 §4 replaced that rule, and §12 records
+    the consequence for exactly these cases by name: "§4 excludes ``EXTERNAL`` from
+    both target classes, so ``DefaultMemoryPolicy`` no longer reaches the
+    ``DERIVED``→``ATTESTED`` fold at all on the observed path. The contradiction is
+    between two ADRs about how such a fold folds and **survives untouched for any
+    policy that does reach it**."
+
+    So the fold is driven from an injected policy rather than provoked out of the
+    default one, which is what these cases always meant and no longer get for free.
+    ``MemoryIngestor`` takes rulings from any injected ``MemoryPolicy`` (ADR-0040
+    §3), so this is the seam and not a workaround.
+    """
+    return MemoryIngestor(
+        traces_sink=FakeTraceSink(),
+        store=store,
+        policy=FakeMemoryPolicy(MemoryDecisionKind.REINFORCE),
+        now=_fixed_now,
     )
 
 
@@ -308,7 +337,7 @@ async def test_a_derived_reinforcement_of_an_attested_record_corroborates_it(
         )
     )
 
-    result = await _ingestor(store).ingest(
+    result = await _folding(store).ingest(
         _proposal(
             _preference(
                 "observed",
@@ -369,7 +398,7 @@ async def test_a_derived_reinforcement_never_raises_an_attested_records_confiden
         _preference("imported", _IMPORTED, confidence=0.7, source=MemorySource.EXTERNAL)
     )
 
-    result = await _ingestor(store).ingest(
+    result = await _folding(store).ingest(
         _proposal(_preference("observed", _CORROBORATED, confidence=0.9, evidence=(_EPISODE,)))
     )
 
@@ -422,7 +451,7 @@ async def test_an_attested_reinforcement_of_a_derived_record_folds_as_it_always_
         )
     )
 
-    result = await _ingestor(store).ingest(
+    result = await _folding(store).ingest(
         _proposal(
             _preference(
                 "imported",
@@ -1793,3 +1822,483 @@ async def test_a_one_token_correction_still_defers_end_to_end() -> None:
     assert survivor is not None
     assert survivor.content == "the user prefers window seats"
     assert set(survivor.provenance.evidence) == {"before"}
+
+
+# --- ADR-0159: the reconciler's two boundaries, counted rather than inferred ---
+#
+# Every ruling these govern is reachable *without* a reconciler, so a test reading
+# only the ruling passes on an implementation that violates both boundaries — which
+# is why ADR-0159 §10 requires them counted against a recording double. The secret
+# case is the one that must assert on the **provider**: a ruling-only assertion
+# passes whether or not tier-0 content was sent.
+
+_ROUTE = "anthropic:claude-x"
+
+
+def _observed(record_id: str, content: str, *, confidence: float = 0.6) -> MemoryRecord:
+    """A *warranted* observed preference — the shape every proposal below needs.
+
+    ``OBSERVED`` is in the ``DERIVED`` band, so a proposal citing nothing is
+    rejected by the admissibility floor before any of these boundaries is reached
+    (ADR-0077 §5) — which would make each case below measure the wrong rule. Every
+    case plants :data:`_EPISODE` so the citation resolves.
+    """
+    return _preference(record_id, content, confidence=confidence, evidence=(_EPISODE,))
+
+
+class _CountingReconciler:
+    """A real reconciler with the two counters ADR-0159 §10's tests read.
+
+    ``calls`` is how many times ``MemoryIngestor`` invoked it — §2's boundary — and
+    ``requests`` is how many model requests it made — §3's. They are different
+    numbers and only both together pin the two clauses: an implementation that
+    invokes ahead of the admissibility floor and then happens not to spend passes a
+    request-only assertion.
+    """
+
+    def __init__(self, reply: str = '{"relations": []}', *, max_conflicts: int = 3) -> None:
+        self.model = FakeModelProvider(reply=reply)
+        self._inner = ModelBackedReconciler(
+            model=self.model, route=_ROUTE, max_conflicts=max_conflicts
+        )
+        self.calls = 0
+
+    async def reconcile(
+        self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+    ) -> Mapping[str, ConflictRelation]:
+        """Count the invocation, then answer as the real reconciler does."""
+        self.calls += 1
+        return await self._inner.reconcile(proposal, conflicts)
+
+    @property
+    def requests(self) -> int:
+        """How many model requests this reconciler made."""
+        return self.model.call_count
+
+
+class _StubReconciler:
+    """Returns fixed labels, so a case can drive a relation it did not have to elicit."""
+
+    def __init__(self, labels: Mapping[str, ConflictRelation]) -> None:
+        self._labels = dict(labels)
+        self.calls = 0
+
+    async def reconcile(
+        self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+    ) -> Mapping[str, ConflictRelation]:
+        """Answer with this stub's fixed labels."""
+        self.calls += 1
+        return dict(self._labels)
+
+
+def _reconciling(
+    store: MemoryStore,
+    reconciler: _CountingReconciler | _StubReconciler | None,
+    *,
+    policy: MemoryPolicy | None = None,
+    id_factory: Callable[[], str] = lambda: "minted",
+) -> MemoryIngestor:
+    return MemoryIngestor(
+        traces_sink=FakeTraceSink(),
+        store=store,
+        policy=policy if policy is not None else DefaultMemoryPolicy(),
+        now=_fixed_now,
+        conflict_threshold=0.5,
+        id_factory=id_factory,
+        reconciler=reconciler,
+    )
+
+
+async def test_an_asserted_proposal_reaches_no_reconciler_and_no_provider() -> None:
+    """ADR-0159 §2: a `USER_ASSERTED` proposal is ADR-0121 §2's arm and reads no relation.
+
+    Computing one there would buy nothing and would spend a model request *inside
+    the ingest lock* on one of the two paths a user waits on.
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(_preference("stale", "user prefers morning meetings", confidence=0.6))
+    reconciler = _CountingReconciler()
+
+    await _reconciling(store, reconciler).ingest(
+        _proposal(_asserted("correction", "user prefers afternoon meetings"))
+    )
+
+    assert reconciler.calls == 0
+    assert reconciler.requests == 0
+
+
+async def test_an_asserted_conflict_reaches_no_reconciler_and_no_provider() -> None:
+    """ADR-0159 §2: a set holding an assertion is the `ASK_USER` arm §4 leaves untouched."""
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(_asserted("theirs", "user prefers morning meetings"))
+    reconciler = _CountingReconciler()
+
+    result = await _reconciling(store, reconciler).ingest(
+        _proposal(_observed("observed", "user prefers afternoon meetings", confidence=0.6))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.ASK_USER
+    assert reconciler.calls == 0
+    assert reconciler.requests == 0
+
+
+async def test_a_secret_proposal_puts_nothing_in_front_of_a_model() -> None:
+    """ADR-0159 §2's unrecoverable case, asserted on the **provider**.
+
+    A `DataTier.SECRET` proposal whose conflict set holds no assertion would, with
+    the reconciler sited on §2's other two conditions alone, put tier-0 content into
+    a model request before the gate ADR-0004 §3 exists to enforce had run — and the
+    `ASK_USER` that follows recalls nothing. A ruling-only assertion passes whether
+    or not the content was sent, which is why this reads the request count.
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(_preference("neighbour", "the api token for the billing service"))
+    reconciler = _CountingReconciler()
+
+    result = await _reconciling(store, reconciler).ingest(
+        _proposal(
+            _preference("secret", "the api token for the billing service is hunter2"),
+            sensitivity=DataTier.SECRET,
+        )
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.ASK_USER
+    assert reconciler.calls == 0
+    assert reconciler.requests == 0
+
+
+async def test_a_derived_belief_citing_nothing_reaches_no_reconciler() -> None:
+    """ADR-0159 §2: the floor's second ruling (ADR-0077 §5) excludes its population too.
+
+    Behind the floor rather than in front of it, so a proposal about to be rejected
+    costs no model request to find out.
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(_preference("neighbour", "user prefers morning meetings"))
+    reconciler = _CountingReconciler()
+
+    result = await _reconciling(store, reconciler).ingest(
+        _proposal(_preference("unwarranted", "user prefers morning meetings", evidence=()))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.REJECT
+    assert reconciler.calls == 0
+    assert reconciler.requests == 0
+
+
+async def test_an_unconfirmed_externally_derived_belief_reaches_no_reconciler() -> None:
+    """ADR-0159 §2: the floor's third ruling (ADR-0106 §6) likewise."""
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(_preference("neighbour", "user prefers morning meetings"))
+    tainted = PreferenceMemory(
+        id="tainted",
+        content="user prefers morning meetings, per the newsletter",
+        preference="user prefers morning meetings, per the newsletter",
+        provenance=Provenance(
+            source=MemorySource.INFERRED,
+            confidence=0.6,
+            last_updated=_WHEN,
+            evidence=(_EPISODE,),
+            derived_from_external=True,
+        ),
+    )
+    reconciler = _CountingReconciler()
+
+    result = await _reconciling(store, reconciler).ingest(_proposal(tainted))
+
+    assert result.decision.kind is MemoryDecisionKind.ASK_USER
+    assert reconciler.calls == 0
+    assert reconciler.requests == 0
+
+
+async def test_an_unsettled_multi_member_set_spends_exactly_one_request() -> None:
+    """ADR-0159 §3's one-request clause: one per ingest, covering every member consulted."""
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    for stale_id, text in (
+        ("a", "user prefers morning meetings on mondays"),
+        ("b", "user prefers morning meetings with the design team"),
+    ):
+        await store.add(_preference(stale_id, text, confidence=0.6))
+    reconciler = _CountingReconciler()
+
+    await _reconciling(store, reconciler).ingest(
+        _proposal(_observed("new", "user prefers morning meetings before travelling"))
+    )
+
+    assert reconciler.calls == 1
+    assert reconciler.requests == 1
+
+
+async def test_a_set_the_agrees_rung_settles_entirely_spends_nothing() -> None:
+    """ADR-0159 §3: no request where the certain rung labelled every member."""
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    same = "user prefers morning meetings"
+    for stale_id in ("a", "b"):
+        await store.add(_preference(stale_id, same, confidence=0.6))
+    reconciler = _CountingReconciler()
+
+    result = await _reconciling(store, reconciler).ingest(_proposal(_observed("new", same)))
+
+    assert reconciler.calls == 1
+    assert reconciler.requests == 0
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+
+
+async def test_a_volunteered_beyond_bound_label_changes_no_ruling() -> None:
+    """The bound's response half, end to end (ADR-0159 §3).
+
+    The fourth member's id is *valid* — it is in the conflict set — so §8's ignore
+    rule does not reach it. Installed, its volunteered `CONTRADICTS` would fail
+    §4(a)'s purity condition and block a fold the reconciler's own answers
+    authorised: the bound failing in the direction it exists to prevent.
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    same = "user prefers morning meetings"
+    for stale_id in ("a", "b", "c", "beyond"):
+        await store.add(_preference(stale_id, f"{same} {stale_id}", confidence=0.6))
+    reply = json.dumps(
+        {
+            "relations": [
+                {"id": "a", "relation": "restates"},
+                {"id": "beyond", "relation": "contradicts"},
+            ]
+        }
+    )
+    reconciler = _CountingReconciler(reply, max_conflicts=3)
+
+    result = await _reconciling(store, reconciler).ingest(_proposal(_observed("new", same)))
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result.decision.target_id == "a"
+
+
+async def test_an_unavailable_reconciler_reproduces_the_ratified_floor() -> None:
+    """ADR-0159 §6, end to end: ADR-0121 §1's certain predicate plus `ACCEPT`.
+
+    Strictly better than the rule ADR-0159 replaced on the same inputs: it folds
+    where the two strings are identical and duplicates where they are not, where
+    before it folded on similarity alone. This is the ratified behaviour of the
+    degraded case, not a fallback outside it.
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(_preference("identical", "user prefers window seats", confidence=0.6))
+    await store.add(_preference("similar", "user prefers aisle seats", confidence=0.6))
+
+    folded = await _reconciling(store, None).ingest(
+        _proposal(_observed("restated", "user prefers window seats"))
+    )
+    landed = await _reconciling(store, None).ingest(
+        _proposal(_observed("different", "user prefers a bulkhead seat"))
+    )
+
+    assert folded.decision.kind is MemoryDecisionKind.REINFORCE
+    assert folded.decision.target_id == "identical"
+    assert landed.decision.kind is MemoryDecisionKind.ACCEPT
+    assert await store.get("similar") is not None
+
+
+async def test_a_supersede_on_a_labelled_contradiction_leaves_an_adds_sibling_live() -> None:
+    """ADR-0159 §5, the clause on which §4(b) may exist at all.
+
+    ADR-0050 §1 defines the retirement set on the premise that every member "is a
+    same-kind, at-or-above-threshold contradiction of the proposal", which #1188
+    measures false. Without this exclusion, giving the observed path a supersession
+    arm would turn one lost fact per fold into up to `conflict_limit` lost facts per
+    correction: the `ADDS` sibling below is a distinct true fact that the widening
+    would have retired.
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(
+        _preference("stale", "user prefers morning meetings", confidence=0.6),
+    )
+    await store.add(
+        _preference("distinct", "user prefers morning meetings on fridays", confidence=0.6),
+    )
+    reconciler = _StubReconciler(
+        {"stale": ConflictRelation.CONTRADICTS, "distinct": ConflictRelation.ADDS}
+    )
+
+    result = await _reconciling(store, reconciler).ingest(
+        _proposal(_observed("new", "user prefers afternoon meetings", confidence=0.7))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+    assert result.decision.target_id == "stale"
+    exported = {record.id: record for record in await store.export()}
+    assert exported["stale"].validity.valid_until is not None  # retired
+    assert exported["distinct"].validity.valid_until is None  # still live
+
+
+class _SupersedeNamingPolicy:
+    """Rules ``SUPERSEDE`` at a chosen conflict, whatever the relations say.
+
+    ``MemoryIngestor`` takes rulings from *any* injected ``MemoryPolicy``, so the
+    ADR-0159 §5 refusal has to hold against one that asks for exactly the write the
+    exclusion forbids — which ``DefaultMemoryPolicy`` never does.
+    """
+
+    def __init__(self, target_id: str) -> None:
+        self._target_id = target_id
+
+    async def decide(
+        self,
+        proposal: MemoryUpdateProposal,
+        *,
+        conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
+    ) -> MemoryDecision:
+        """Supersede, naming the conflict this policy was built to name."""
+        return MemoryDecision(
+            kind=MemoryDecisionKind.SUPERSEDE,
+            target_id=self._target_id,
+            reason="test: an injected ruling",
+        )
+
+
+@pytest.mark.parametrize(
+    "relation", [ConflictRelation.RESTATES, ConflictRelation.ADDS], ids=lambda r: str(r.value)
+)
+async def test_a_supersede_naming_a_related_conflict_is_refused(
+    relation: ConflictRelation,
+) -> None:
+    """ADR-0159 §5 at the one place the exclusion cannot be an omission.
+
+    A `SUPERSEDE` naming another member simply leaves such a conflict out of the
+    retirement set; a `SUPERSEDE` naming *this* one has nowhere to leave it, because
+    retiring the named target is what the ruling means. Refused rather than
+    performed, from the writer's own relations and never from the ruling's word
+    (ADR-0038 §2a).
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(_preference("kept", "user prefers morning meetings", confidence=0.6))
+    ingestor = _reconciling(
+        store,
+        _StubReconciler({"kept": relation}),
+        policy=_SupersedeNamingPolicy("kept"),
+    )
+
+    with pytest.raises(MemoryStoreError, match="never retired"):
+        await ingestor.ingest(
+            _proposal(_observed("new", "user prefers afternoon meetings", confidence=0.7))
+        )
+
+    survivor = await store.get("kept")
+    assert survivor is not None
+    assert survivor.validity.valid_until is None
+
+
+class _MutatingPolicy:
+    """Narrows ``relations`` back to a ``dict`` and rewrites what it was handed.
+
+    ADR-0159 §8's own worked hazard: the annotation is erased at run time, so
+    ``isinstance(relations, dict)`` is exactly how a foreign policy would recover a
+    mutable object from a parameter typed ``Mapping``. What closes it is not the
+    annotation but the two clauses §8 states — the read-only view, which makes the
+    mutation fail where it is attempted, and the writer's untouched mapping, which
+    is the guarantee.
+    """
+
+    def __init__(self, target_id: str, relabel: str) -> None:
+        self._target_id = target_id
+        self._relabel = relabel
+        self.attempted = False
+        self.raised = False
+
+    async def decide(
+        self,
+        proposal: MemoryUpdateProposal,
+        *,
+        conflicts: Sequence[MemoryRecord],
+        relations: Mapping[str, ConflictRelation] | None = None,
+    ) -> MemoryDecision:
+        """Try to relabel a member, then supersede a different one."""
+        if isinstance(relations, dict):
+            self.attempted = True
+            try:
+                relations[self._relabel] = ConflictRelation.CONTRADICTS
+            except TypeError:  # pragma: no cover — a dict does not refuse this
+                self.raised = True
+        return MemoryDecision(
+            kind=MemoryDecisionKind.SUPERSEDE,
+            target_id=self._target_id,
+            reason="test: an injected ruling",
+        )
+
+
+async def test_a_policy_that_narrows_and_writes_cannot_reach_the_retirement_set() -> None:
+    """ADR-0159 §8's two mapping clauses, which no test reading only the ruling can see.
+
+    The policy narrows with ``isinstance(..., dict)``, relabels the `ADDS` member
+    `CONTRADICTS`, and rules `SUPERSEDE` naming a different member. Whether the
+    attempted mutation raised or landed on something the writer does not read, the
+    `ADDS` sibling stays live — because the writer rules its retirement set from a
+    mapping it handed to no policy.
+    """
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(_preference("stale", "user prefers morning meetings", confidence=0.6))
+    await store.add(
+        _preference("distinct", "user prefers morning meetings on fridays", confidence=0.6)
+    )
+    policy = _MutatingPolicy("stale", "distinct")
+    ingestor = _reconciling(
+        store,
+        _StubReconciler({"stale": ConflictRelation.CONTRADICTS, "distinct": ConflictRelation.ADDS}),
+        policy=policy,
+    )
+
+    result = await ingestor.ingest(
+        _proposal(_observed("new", "user prefers afternoon meetings", confidence=0.7))
+    )
+
+    assert result.decision.kind is MemoryDecisionKind.SUPERSEDE
+    # The narrowing must have failed outright: `MappingProxyType` is not a `dict`.
+    assert policy.attempted is False
+    exported = {record.id: record for record in await store.export()}
+    assert exported["distinct"].validity.valid_until is None
+
+
+async def test_a_reconciler_that_raises_refuses_no_ingest() -> None:
+    """ADR-0159 §6: no ingest is refused because a reconciler was unavailable.
+
+    A reconciler owes a never-raises contract; the guard at this boundary is what
+    holds §6's stronger promise against one that does not, so the write proceeds on
+    the relations the writer does hold — here, ADR-0121 §1's certain agreement.
+    """
+
+    class _Broken:
+        async def reconcile(
+            self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+        ) -> Mapping[str, ConflictRelation]:
+            msg = "a non-conforming reconciler"
+            raise RuntimeError(msg)
+
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(_preference("identical", "user prefers window seats", confidence=0.6))
+
+    result = await _reconciling(store, None).ingest(
+        _proposal(_observed("restated", "user prefers window seats"))
+    )
+    broken = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=_fixed_now,
+        conflict_threshold=0.5,
+        reconciler=_Broken(),
+    )
+    with_broken = await broken.ingest(_proposal(_observed("again", "user prefers window seats")))
+
+    assert result.decision.kind is with_broken.decision.kind is MemoryDecisionKind.REINFORCE

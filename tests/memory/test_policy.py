@@ -17,6 +17,7 @@ from pydantic import ValidationError
 from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
+    ConflictRelation,
     DataTier,
     EpisodicMemory,
     MemoryDecisionKind,
@@ -504,14 +505,254 @@ async def test_secret_tier_assertion_still_defers_before_superseding() -> None:
     assert decision.kind is MemoryDecisionKind.ASK_USER
 
 
-async def test_conflict_with_non_asserted_merges() -> None:
-    proposal = _proposal(_semantic("new"))
+# --- ADR-0159 §4: the non-asserted arm reads relations, never the set's size ---
+#
+# The rule these replace folded into ``conflicts[0]`` whenever the set was
+# non-empty. The pilot (#1188, run `8a8f7a033b3c`) measured that on seven LoCoMo
+# conversations: 765 proposals, 380 `ACCEPT`, **385 `REINFORCE`**, and the folds
+# were routinely distinct facts sitting at cosine 0.77 to 0.80. The two contents in
+# `_JON_LOST` / `_JON_TOOK` are that measurement's own pair, verbatim in substance,
+# and the first test below is the shape it produces under this arm.
+
+#: The 0.77 pair from #1188's error anatomy: two true, dated facts about one
+#: person's employment, which the conflict probe surfaces together at 0.75 and which
+#: the rule ADR-0159 replaced folded into one.
+_JON_LOST = "Jon lost his job shortly before 21 June 2023"
+_JON_TOOK = "Jon took a temporary job around mid-July 2023"
+
+
+async def test_the_pilots_own_0_77_pair_lands_beside_what_it_resembles() -> None:
+    """`ADDS` rules `ACCEPT` and names no target, so nothing is retired (ADR-0159 §4c).
+
+    The case the whole ADR is about. Under the rule this replaces the proposal
+    folded into `existing` at `existing`'s id and one of the two facts stopped
+    existing. Under this arm a relation that is neither a restatement nor a
+    contradiction authorises nothing, so the belief lands beside the one it
+    resembles — and the `reason` says which of the two `ACCEPT` paths it took.
+    """
+    existing = _semantic("existing", content=_JON_LOST)
+    proposal = _proposal(_semantic("new", content=_JON_TOOK))
+
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[existing], relations={"existing": ConflictRelation.ADDS}
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert decision.target_id is None
+    assert "none restates" in decision.reason
+
+
+async def test_a_non_empty_conflict_set_alone_no_longer_folds_anything() -> None:
+    """An unlabelled member authorises nothing (ADR-0159 §4).
+
+    The inversion stated at its barest: the exact input that ruled `REINFORCE` at
+    `conflicts[0]` before this ADR now rules `ACCEPT`, because nothing has said the
+    two records say the same thing.
+    """
     existing = _semantic("existing")
 
-    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[existing])
+    decision = await DefaultMemoryPolicy().decide(_proposal(_semantic("new")), conflicts=[existing])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert decision.target_id is None
+
+
+async def test_the_two_accept_paths_are_legible_apart() -> None:
+    """ADR-0159 §4's second clause: "no conflict" and "conflicts, none related" differ.
+
+    Both rule `ACCEPT`, and only the `reason` records which store state produced it —
+    a fact a later trace can report and the ruling alone cannot.
+    """
+    policy = DefaultMemoryPolicy()
+
+    alone = await policy.decide(_proposal(_semantic("new")), conflicts=[])
+    beside = await policy.decide(_proposal(_semantic("new")), conflicts=[_semantic("existing")])
+
+    assert alone.kind is beside.kind is MemoryDecisionKind.ACCEPT
+    assert alone.reason != beside.reason
+
+
+async def test_a_restates_member_reinforces_and_names_it_by_relation_not_rank() -> None:
+    """ADR-0159 §4a, and `conflicts[0]` is not the target (§4's third clause)."""
+    first = _semantic("first")
+    second = _semantic("second")
+    proposal = _proposal(_semantic("new"))
+
+    decision = await DefaultMemoryPolicy().decide(
+        proposal,
+        conflicts=[first, second],
+        relations={"second": ConflictRelation.RESTATES, "first": ConflictRelation.ADDS},
+    )
 
     assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "second"
+
+
+async def test_a_contradicts_member_supersedes_it() -> None:
+    """ADR-0159 §4b: the observed path acquires a supersession for the first time."""
+    existing = _semantic("existing", source=MemorySource.INFERRED)
+    proposal = _proposal(_semantic("new"))
+
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[existing], relations={"existing": ConflictRelation.CONTRADICTS}
+    )
+
+    assert decision.kind is MemoryDecisionKind.SUPERSEDE
     assert decision.target_id == "existing"
+
+
+async def test_a_set_holding_both_a_restatement_and_a_contradiction_accepts() -> None:
+    """Both purity conditions fail together, so neither exception fires (ADR-0159 §4).
+
+    The set is one in which the *stored records disagree with each other*, and no
+    ruling on this proposal resolves that: reinforcing one leaves the contradiction
+    live, superseding the other leaves the reinforced record's own contradiction
+    live. Deliberately not `ASK_USER` — an observation is not something the user
+    should be interrogated about (#869).
+    """
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(_semantic("new")),
+        conflicts=[_semantic("agreeing"), _semantic("disagreeing")],
+        relations={
+            "agreeing": ConflictRelation.RESTATES,
+            "disagreeing": ConflictRelation.CONTRADICTS,
+        },
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+@pytest.mark.parametrize(
+    ("relation", "blocked"),
+    [
+        (ConflictRelation.RESTATES, ConflictRelation.CONTRADICTS),
+        (ConflictRelation.CONTRADICTS, ConflictRelation.RESTATES),
+    ],
+)
+async def test_an_external_member_is_named_by_neither_arm_yet_still_blocks(
+    relation: ConflictRelation, blocked: ConflictRelation
+) -> None:
+    """ADR-0159 §4: excluded from the target classes, and from nothing else.
+
+    Two halves in one sweep. An `EXTERNAL` member carrying the relation an arm acts
+    on is never that arm's `target_id` — a fold at an imported id is overwritten by
+    the next sync, and a supersession is a claim an observation may not make against
+    the system that reported the fact (ADR-0121 §3). And an `EXTERNAL` member
+    carrying the *other* relation still fails the other arm's purity condition, so a
+    policy that ignored `EXTERNAL` labels wholesale would reinforce here.
+    """
+    imported = _semantic("imported", source=MemorySource.EXTERNAL)
+    other = _semantic("other")
+
+    named = await DefaultMemoryPolicy().decide(
+        _proposal(_semantic("new")), conflicts=[imported], relations={"imported": relation}
+    )
+    blocking = await DefaultMemoryPolicy().decide(
+        _proposal(_semantic("new")),
+        conflicts=[imported, other],
+        relations={"imported": blocked, "other": relation},
+    )
+
+    assert named.kind is MemoryDecisionKind.ACCEPT
+    assert blocking.kind is MemoryDecisionKind.ACCEPT
+
+
+async def test_an_unlabelled_member_neither_authorises_nor_withdraws() -> None:
+    """ADR-0159 §4: unlabelled blocks nothing, and this is the right sign.
+
+    Letting it block would mean one reconciler failure downgrades a *certain*
+    `agrees` restatement into a duplicate — a regression against ADR-0121 for no
+    gain. Letting it pass means the fold happens while an unexamined member sits
+    there, which is strictly better than the rule this replaces, where every member
+    folded unexamined.
+    """
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(_semantic("new")),
+        conflicts=[_semantic("labelled"), _semantic("silent")],
+        relations={"labelled": ConflictRelation.RESTATES},
+    )
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "labelled"
+
+
+async def test_an_entry_naming_no_member_of_the_set_is_ignored() -> None:
+    """ADR-0159 §8: a policy ignores a key that is not a conflict's id."""
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(_semantic("new")),
+        conflicts=[_semantic("existing")],
+        relations={"ghost": ConflictRelation.RESTATES},
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+async def test_no_relations_reproduces_adr_0121s_floor_exactly() -> None:
+    """ADR-0159 §6, on the policy's own arm: `agrees` folds, everything else lands.
+
+    The degraded case is a *decision* and not a fallback. With no reconciler the
+    certain predicate is still computed here, so a verbatim restatement reinforces
+    while a merely-similar record duplicates — where the rule this replaces folded
+    both on similarity alone. Asserted with `relations=None`, which ADR-0159 §8 fixes
+    as the value a writer holding no reconciler passes.
+    """
+    policy = DefaultMemoryPolicy()
+    identical = _semantic("identical", content="I prefer window seats")
+    similar = _semantic("similar", content="I prefer aisle seats")
+    proposal = _proposal(_semantic("new", content="I  PREFER   Window Seats "))
+
+    folded = await policy.decide(proposal, conflicts=[identical], relations=None)
+    landed = await policy.decide(proposal, conflicts=[similar], relations=None)
+
+    assert folded.kind is MemoryDecisionKind.REINFORCE
+    assert folded.target_id == "identical"
+    assert landed.kind is MemoryDecisionKind.ACCEPT
+
+
+async def test_the_certain_rung_outranks_a_reconciler_that_disagrees_with_it() -> None:
+    """ADR-0159 §3's first rung is unconditional, so a wrong label cannot overturn it.
+
+    A reconciler "that reaches a different answer on a pair `agrees` admits is not
+    conforming"; this policy recomputes the predicate rather than trusting the
+    mapping, so a non-conforming label cannot turn a certain restatement into a
+    retirement.
+    """
+    identical = _semantic("identical", content="I prefer window seats")
+    proposal = _proposal(_semantic("new", content="I prefer window seats"))
+
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[identical], relations={"identical": ConflictRelation.CONTRADICTS}
+    )
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "identical"
+
+
+async def test_a_low_confidence_proposal_beside_an_unrelated_conflict_stores_temporarily() -> None:
+    """ADR-0159 §4c is "the confidence arm exactly as it stands", now reachable here.
+
+    Before this ADR a non-empty set never reached the confidence arm at all: it
+    folded first. The arm is unchanged; what changed is that it is reached.
+    """
+    proposal = _proposal(_semantic("weak", confidence=0.1))
+
+    decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[_semantic("existing")])
+
+    assert decision.kind is MemoryDecisionKind.STORE_TEMPORARY
+    assert decision.ttl is not None
+
+
+async def test_an_asserted_conflict_still_defers_whatever_the_relations_say() -> None:
+    """ADR-0159 §4's last clause: the `ASK_USER` arm precedes this one and is untouched."""
+    asserted = _semantic("asserted", source=MemorySource.USER_ASSERTED, confidence=1.0, evidence=())
+
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(_semantic("new")),
+        conflicts=[asserted],
+        relations={"asserted": ConflictRelation.RESTATES},
+    )
+
+    assert decision.kind is MemoryDecisionKind.ASK_USER
 
 
 async def test_low_confidence_is_stored_temporarily() -> None:
