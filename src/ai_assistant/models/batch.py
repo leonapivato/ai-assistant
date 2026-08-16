@@ -19,23 +19,18 @@ break a second surface — and accepts it.
 third clause keeps a batch in the process that submits it; §11 leaves wiring a
 ``BatchCompleter`` into ``ai_assistant.app`` or any subsystem deferred until a
 subsystem — not a harness — asks for bulk inference. A consumer constructs this
-class in a composition root it owns, and
-:func:`build_anthropic_batch_completer` is how a consumer *outside* this package
-does so without naming a vendor type golden rule 4 confines to here.
+class in a composition root it owns, and :func:`anthropic_batch_completer` is how
+a consumer *outside* this package does so without naming a vendor type golden
+rule 4 confines to here.
 """
 
 from __future__ import annotations
 
 import json
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Final
 
-from anthropic import (
-    AnthropicError,
-    APIConnectionError,
-    APIStatusError,
-    APITimeoutError,
-    AsyncAnthropic,
-)
+from anthropic import APIConnectionError, APIStatusError, APITimeoutError, AsyncAnthropic
 from anthropic.types import TextBlock
 from pydantic import TypeAdapter, ValidationError
 
@@ -69,7 +64,7 @@ from ai_assistant.core.types import (
 from ai_assistant.models.provider import _classify_status
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     from anthropic.types import MessageParam
     from anthropic.types.message_create_params import MessageCreateParamsNonStreaming
@@ -622,14 +617,15 @@ class AnthropicBatchCompleter:
             _refuse_malformed_history(item)
 
 
-def build_anthropic_batch_completer(
+@asynccontextmanager
+async def anthropic_batch_completer(
     *,
     issuer: str,
     default_model: str,
     max_tokens: int = DEFAULT_MAX_TOKENS,
     max_items: int | None = DEFAULT_MAX_BATCH_ITEMS,
-) -> AnthropicBatchCompleter:
-    """Build the vendor client and the completer over it, for a caller that cannot.
+) -> AsyncIterator[AnthropicBatchCompleter]:
+    """Own a vendor client and a completer over it, for a caller that cannot.
 
     **This is the third option ADR-0143 §8 says a consumer outside this package
     has.** §8 has such a consumer obtain an instance "by construction in a
@@ -675,36 +671,50 @@ def build_anthropic_batch_completer(
     the harness of #1029 ingests for an hour before it submits anything, so it
     wants the check far earlier than this call, not folded into it.
 
-    **A broken credential *configuration* is translated, so no vendor exception
-    reaches the caller.** An explicitly selected profile that does not exist makes
-    the SDK raise ``anthropic.AnthropicError`` out of its constructor, and letting
-    that travel would hand a vendor type to the consumer outside this package that
-    this function exists to keep vendor-free — the same rule, one level up from
-    the import. It becomes a
-    :class:`~ai_assistant.core.errors.ConfigurationError`: the class both
-    ``ensure_vendor_available`` and ``ensure_credential_available`` raise for a
-    fault of this kind, for their stated reason that a ``ModelError``'s
+    **Every failure of that construction is translated, so no vendor exception
+    reaches the caller.** Two are known to reach it and they arrive as different
+    third-party classes: an explicitly selected profile with no config file behind
+    it raises ``anthropic.AnthropicError``, and a malformed ``ANTHROPIC_BASE_URL``
+    raises ``httpx.InvalidURL`` from inside the transport the client builds. Either
+    escaping would hand a vendor type to the consumer outside this package that
+    this function exists to keep vendor-free — the same rule, one level up from the
+    import — and that consumer cannot catch what it may not import.
+
+    So the catch is by *position* rather than by class: this call has no side
+    effect, nothing has been sent, and every way it can fail is the same fact —
+    the configuration this deployment holds does not produce a usable client. That
+    is what makes a broad catch right here and wrong almost everywhere else, and it
+    is the same judgement :meth:`AnthropicBatchCompleter.submit` already makes one
+    line either side of its own provider call. Enumerating the vendor's exception
+    classes instead would put this module in the business of tracking two
+    third-party taxonomies, and would go quiet the day a third appears.
+
+    The result is a :class:`~ai_assistant.core.errors.ConfigurationError` — the
+    class both ``ensure_vendor_available`` and ``ensure_credential_available`` raise
+    for a fault of this kind, for their stated reason that a ``ModelError``'s
     ``retryable`` and ``routable`` say nothing about a config file that is not
-    there. The SDK's own message is quoted rather than paraphrased, as
+    there. The third party's own message is quoted rather than paraphrased, as
     ``provider.py`` quotes pydantic-ai's, because it names the exact variable to
     set.
 
-    **The transport's lifetime becomes the caller's process's**, which is the one
-    thing this shape gives up and it is stated rather than hidden.
-    :class:`AnthropicBatchCompleter` exposes no accessor for the client it was
-    handed — deliberately, since that client is not part of the seam — so a caller
-    that did not build one cannot close it either. Three things bound what that
-    costs, and they are worth naming because the shape looks worse than it is.
-    Nothing is held until a request is made, so every failure path here, the
-    refusals below included, releases a pool that is empty. ADR-0060's rule is
-    about a resource orphaned *under cancellation* by one of the four
-    resource-owning Protocols (§3), and a synchronous builder is not in its scope.
-    And §8's third clause and §11's deferral keep a ``BatchCompleter`` out of the
-    hub and out of every subsystem, so the consumers this exists for build one per
-    process and exit. A consumer that must release the pool while its process keeps
-    running is, by §11's own condition, inside this package — and uses the
-    constructor with a client it owns, which is what that argument already
-    documents: "Its lifetime is the caller's; nothing here closes it".
+    **It is a context manager because it owns a connection pool the caller cannot
+    reach.** :class:`AnthropicBatchCompleter` states that its ``client``'s
+    "lifetime is the caller's; nothing here closes it", and exposes no accessor for
+    it — right, because the client is not part of the seam. A plain builder would
+    take that lifetime away from the caller and hand nothing back: after the first
+    ``submit`` there is a live ``httpx`` pool that only this module can close, and a
+    consumer outside this package cannot even name the type to close it with. The
+    residue is not bounded by §11, either, whatever a first reading suggests: §11
+    defers wiring a ``BatchCompleter`` into a *subsystem*, and says nothing about
+    how long an external consumer's process lives. So the pool is closed on the way
+    out of the block, including when the body raises and when the completer's own
+    construction does.
+
+    **Scoping it does not cost the resumption story**, which is the objection worth
+    answering because §2 is built on a handle outliving the run that made it. It
+    still does: the handle is a value, it is persisted inside the block, and a later
+    process opens a block of its own and presents it. What is scoped here is the
+    transport, which was never the thing that had to survive.
 
     Args:
         issuer: The non-secret account label stamped on every handle this
@@ -718,28 +728,34 @@ def build_anthropic_batch_completer(
         max_items: The item count to refuse above, or ``None`` to declare no
             bound, which ADR-0143 §7 permits.
 
-    Returns:
-        The completer, over a client built here.
+    Yields:
+        The completer, over a client this block owns and closes.
 
     Raises:
-        ConfigurationError: If the SDK cannot resolve the credential
-            *configuration* it was pointed at — a named profile with no config
-            file behind it — or if ``issuer`` is blank or has no UTF-8 encoding.
-            One class for both, because both are an operator's configuration
-            being wrong, and both land here rather than at the first submission.
+        ConfigurationError: If the client cannot be constructed from the
+            configuration this deployment holds — a named profile with no config
+            file behind it, a malformed base URL — or if ``issuer`` is blank or has
+            no UTF-8 encoding. One class for all of them, because each is an
+            operator's configuration being wrong, and each lands here rather than
+            at the first submission.
     """
     try:
         client = AsyncAnthropic()
-    except AnthropicError as exc:
+    except Exception as exc:
         msg = f"the Anthropic client could not be configured: {exc}"
         raise ConfigurationError(msg) from exc
-    return AnthropicBatchCompleter(
-        client=client,
-        issuer=issuer,
-        default_model=default_model,
-        max_tokens=max_tokens,
-        max_items=max_items,
-    )
+    try:
+        # Inside the `try`, so a refused `issuer` closes the pool too rather than
+        # leaving the one failure path that leaks what this shape exists to release.
+        yield AnthropicBatchCompleter(
+            client=client,
+            issuer=issuer,
+            default_model=default_model,
+            max_tokens=max_tokens,
+            max_items=max_items,
+        )
+    finally:
+        await client.close()
 
 
 def _snapshot(items: Sequence[BatchRequest]) -> tuple[BatchRequest, ...]:
