@@ -1076,7 +1076,7 @@ async def test_the_prompt_asks_a_belief_to_keep_the_particulars_the_evidence_giv
 
     system, _ = _prompt_of(provider)
     assert "keep the concrete particulars the evidence gives" in system
-    assert "the proper names, places, organisations, dates and quantities involved" in system
+    assert "the proper names, places, organisations and quantities involved" in system
     assert "State a trait alone only where the evidence gives no particular" in system
 
 
@@ -1125,3 +1125,45 @@ async def test_a_belief_that_names_a_particular_reaches_the_record_unaltered() -
 
     (proposal,) = outcome.proposals
     assert proposal.proposed.content == content
+
+
+#: The refusal each time variant makes in its own words, for the case where the
+#: evidence dates only the *telling*. Zoned, that is §2's third clause; unzoned,
+#: the producer states no time at all unless the evidence names the date itself.
+_UNDATED_TRAIT_REFUSAL: Final = {
+    None: "Otherwise state no time",
+    _ZONE: "a lasting trait acquires no date from the day it happened to be mentioned",
+}
+
+
+@pytest.mark.parametrize("timezone", [None, _ZONE], ids=["no-zone", "zoned"])
+async def test_keeping_the_particulars_never_dates_a_belief_the_time_rule_undates(
+    timezone: str | None,
+) -> None:
+    """The one place the two paragraphs could be read as contradicting each other.
+
+    Evidence reading *"on 7 May I told Alex I enjoy climbing"* dates the telling and
+    nothing the belief asserts. "Keep the particulars the evidence gives" would, if
+    it enumerated dates, invite *"enjoys climbing; told Alex on 7 May"* — a dated
+    transcript fragment, and precisely the naive implementation ADR-0156 §2's third
+    clause refuses in terms and §6 prices. So the enumeration names no dates and the
+    paragraph hands every time question to the section below it, which is more
+    precise about *which* date than the head could be; §2's second clause still gets
+    the dates a belief is entitled to, from that section.
+
+    Pinned in both variants, and both halves are asserted together: the carve-out
+    without the refusal it defers to would leave the trait undefended, and the
+    refusal without the carve-out is the conflict this test exists for.
+    """
+    observer, provider = _observer(_envelope(), timezone=timezone)
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "dates and quantities" not in system, "the enumeration must not name dates"
+    assert "Times are the one exception" in system
+    assert "keeping the particulars is never a reason to date a belief" in system
+    assert _UNDATED_TRAIT_REFUSAL[timezone] in system
+    assert system.index("keep the concrete particulars") < system.index(
+        _UNDATED_TRAIT_REFUSAL[timezone]
+    ), "the section it defers to has to come after it"
