@@ -186,13 +186,17 @@ _INSTANT_UNAVAILABLE: Final = "(recorded time unavailable)"
 #: check cannot catch, since that check verifies the episodes exist and not what
 #: they support. Two things answer it. The paragraph says it in terms — a particular
 #: not in a cited episode is an invention, and one occasion is not a routine — and
-#: the example was chosen so that it cannot model the error at all: *"drives a 2012
-#: Honda Civic"* is a possession, which one episode can establish outright, so no
-#: reading of it turns a single occasion into an ongoing habit. Any example shaped
-#: like a habit can be re-read as one visit generalised, whatever the evidence
-#: beside it is stipulated to be, and the worked example is the one line of a prompt
-#: a model imitates rather than reasons about. Beyond the prompt, the mechanism
-#: still bites where the model labels the
+#: **the worked example's two halves make the same claim**, differing only in the
+#: particular: *"owns a 2012 Honda Civic"* against *"owns a car"*, one predicate,
+#: one thing believed, one more detail. That shape is what makes it safe to imitate,
+#: and it took three review rounds to find: every pair that changed predicate as
+#: well as detail (*"climbs at Boulder Barn"* against *"enjoys climbing"*) could be
+#: paired with some episode supporting the vague half and not the specific one, so
+#: the example modelled a leap rather than a rewording. Here the only thing the
+#: preferred half adds is the particular, which the sentence beside it already
+#: conditions on the evidence. The example is the one line of a prompt a model
+#: imitates rather than reasons about, which is why it is pinned by exact text
+#: below. Beyond the prompt, the mechanism still bites where the model labels the
 #: leap honestly: ``INFERRED`` from a single episode is refused by the evidence
 #: floor (§5, and ``_EVIDENCE_FLOOR`` above), which is why the paragraph sits
 #: directly above the two epistemic steps rather than anywhere else.
@@ -208,10 +212,10 @@ already recorded. Proposing nothing is a perfectly good answer.
 
 When you do propose a belief, keep the concrete particulars the belief is about — \
 the proper names, places, organisations and quantities that identify or qualify \
-the thing believed — rather than abstracting over them. A belief that names the \
-thing is worth more than the trait it illustrates: "drives a 2012 Honda Civic" \
-beats "owns a car". Keep only those: whoever happened to be present, \
-wherever the conversation happened and whatever else was going on are the \
+the thing believed — rather than abstracting over them. Two ways of writing the \
+same belief are not equally useful: "owns a 2012 Honda Civic" beats "owns a car". \
+Keep only those: whoever happened to be present, wherever the conversation \
+happened and whatever else was going on are the \
 exchange, not the belief, and are left out. Add nothing the evidence does not \
 give — a particular you cannot point to in a cited episode is an invention, and \
 one occasion is not a routine — and where it gives no particular the belief is \
