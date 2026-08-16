@@ -814,8 +814,16 @@ async def anthropic_batch_completer(
         # ``__context__``. That is what ``await client.close()`` in this ``finally``
         # has always done, and it is kept deliberately: a pool that would not close
         # is the news this block exists to deliver, and the body's own failure is
-        # still in the traceback. Where a cancellation and a failed close are both in
-        # hand the cancellation wins, as it does in `sqlite_store`.
+        # still in the traceback.
+        #
+        # Where both happen — a cancellation deferred, and then the close it was
+        # waiting on fails — the cancellation is what leaves here, because §1's
+        # delivery clause is unconditional and a failed close is not a licence to
+        # swallow it. The failure is not dropped either: it becomes the context of
+        # the cancellation that outranks it. This is the intersection, not a third
+        # case, and it needs its own branch because the failure surfaces out of the
+        # *next* ``shield`` and would otherwise leave here in the cancellation's
+        # place.
         closing = asyncio.create_task(client.close())
         cancellation: asyncio.CancelledError | None = None
         while not closing.done():
@@ -823,6 +831,15 @@ async def anthropic_batch_completer(
                 await asyncio.shield(closing)
             except asyncio.CancelledError as exc:
                 cancellation = exc
+            except Exception as failure:
+                # The close is done either way, so the wait is over; what is left is
+                # which of the two in hand is delivered. ``from failure`` because the
+                # cancellation outranking it is not a reason to lose it: a pool that
+                # would not close is the one signal this block exists to raise, and
+                # dropping it here would leave no trace of it anywhere.
+                if cancellation is not None:
+                    raise cancellation from failure
+                raise
         if cancellation is not None:
             raise cancellation
 

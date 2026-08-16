@@ -274,18 +274,44 @@ class TestTheCompleterWorksOverTheWire:
             assert all(outcome.kind is BatchOutcomeKind.SUCCEEDED for outcome in outcomes)
 
 
-class _ParkedClose:
-    """A ``close()`` held open, so a test can cancel the task that is awaiting it.
+class _CloseOnCue:
+    """A ``close()`` the test drives, so both of its hazards can be staged.
 
     ``entered`` fires once the close has begun and suspended; ``release`` lets it
-    finish. Between the two, the exiting task sits in the only window where a
-    cancellation can orphan the pool, which is the window ADR-0060 §1 is about.
+    proceed. Between the two, the exiting task sits in the only window where a
+    cancellation can orphan the pool, which is the window ADR-0060 §1 is about. A
+    test wanting no suspension at all sets ``release`` before it enters the block.
+
+    ``failure``, where a test sets one, is what the close raises once released —
+    which is what lets the two hazards be put in the *same* run rather than only
+    one at a time.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, *, failure: Exception | None = None) -> None:
         self.entered = asyncio.Event()
         self.release = asyncio.Event()
+        self.failure = failure
         self.clients: list[AsyncAnthropic] = []
+
+
+class _ClosesOnCue(AsyncAnthropic):
+    """A real client whose ``close()`` does what its cue says.
+
+    A subclass rather than a stand-in, so what an assertion reads afterwards is the
+    SDK's own ``is_closed()`` over a real pool — the claim is that the pool was
+    released, not that a double recorded the attempt.
+    """
+
+    def __init__(self, *, cue: _CloseOnCue, **configured: Any) -> None:
+        super().__init__(**configured)
+        self._cue = cue
+
+    async def close(self) -> None:
+        self._cue.entered.set()
+        await self._cue.release.wait()
+        if self._cue.failure is not None:
+            raise self._cue.failure
+        await super().close()
 
 
 def _recording(
@@ -325,29 +351,18 @@ class TestItClosesTheClientItOwns:
     ADR-0060 §1 is where the obligation is written.
     """
 
-    class _SuspendsItsClose(AsyncAnthropic):
-        """A real client whose ``close()`` parks until the test releases it.
+    @staticmethod
+    def _on_cue(
+        monkeypatch: pytest.MonkeyPatch, *, failure: Exception | None = None
+    ) -> _CloseOnCue:
+        """Record clients as ``built`` does, over a ``close()`` the test drives."""
+        cue = _CloseOnCue(failure=failure)
 
-        A subclass rather than a stand-in, so what the assertion reads afterwards is
-        the SDK's own ``is_closed()`` over a real pool — the claim is that the pool
-        was released, not that a double recorded the attempt.
-        """
+        def _driven(**configured: Any) -> AsyncAnthropic:
+            return _ClosesOnCue(cue=cue, **configured)
 
-        def __init__(self, *, parked: _ParkedClose, **configured: Any) -> None:
-            super().__init__(**configured)
-            self._parked = parked
-
-        async def close(self) -> None:
-            self._parked.entered.set()
-            await self._parked.release.wait()
-            await super().close()
-
-    class _FailsItsClose(AsyncAnthropic):
-        """A real client whose ``close()`` refuses, to pin what that does to the body."""
-
-        async def close(self) -> None:
-            msg = "the pool would not close"
-            raise RuntimeError(msg)
+        monkeypatch.setattr(batch_module, "AsyncAnthropic", _recording(cue.clients, _driven))
+        return cue
 
     @pytest.fixture
     def built(self, monkeypatch: pytest.MonkeyPatch) -> list[AsyncAnthropic]:
@@ -357,24 +372,14 @@ class TestItClosesTheClientItOwns:
         return clients
 
     @pytest.fixture
-    def parked(self, monkeypatch: pytest.MonkeyPatch) -> _ParkedClose:
-        """The same recording, over a client whose ``close()`` suspends on demand."""
-        held = _ParkedClose()
-
-        def _suspending(**configured: Any) -> AsyncAnthropic:
-            return self._SuspendsItsClose(parked=held, **configured)
-
-        monkeypatch.setattr(batch_module, "AsyncAnthropic", _recording(held.clients, _suspending))
-        return held
+    def parked(self, monkeypatch: pytest.MonkeyPatch) -> _CloseOnCue:
+        """A close that suspends until released, and then succeeds."""
+        return self._on_cue(monkeypatch)
 
     @pytest.fixture
-    def refusing(self, monkeypatch: pytest.MonkeyPatch) -> list[AsyncAnthropic]:
-        """The same recording, over a client that raises out of its ``close()``."""
-        clients: list[AsyncAnthropic] = []
-        monkeypatch.setattr(
-            batch_module, "AsyncAnthropic", _recording(clients, self._FailsItsClose)
-        )
-        return clients
+    def refusing(self, monkeypatch: pytest.MonkeyPatch) -> _CloseOnCue:
+        """A close that suspends until released, and then raises."""
+        return self._on_cue(monkeypatch, failure=RuntimeError("the pool would not close"))
 
     async def test_leaving_the_block_closes_the_pool(self, built: list[AsyncAnthropic]) -> None:
         async with anthropic_batch_completer(issuer=ISSUER, default_model=MODEL) as completer:
@@ -404,7 +409,7 @@ class TestItClosesTheClientItOwns:
         assert built[0].is_closed()
 
     async def test_a_cancellation_mid_close_does_not_take_the_pool_with_it(
-        self, parked: _ParkedClose
+        self, parked: _CloseOnCue
     ) -> None:
         async def use_the_block() -> None:
             async with anthropic_batch_completer(issuer=ISSUER, default_model=MODEL):
@@ -426,11 +431,12 @@ class TestItClosesTheClientItOwns:
         assert parked.clients[0].is_closed()
 
     async def test_a_close_that_fails_is_reported_over_the_bodys_own_failure(
-        self, refusing: list[AsyncAnthropic]
+        self, refusing: _CloseOnCue
     ) -> None:
         # A deliberate choice rather than an accident of `finally`, so it is pinned:
         # a pool that would not close is the news this block exists to deliver, and
         # the body's failure is kept as the context rather than lost.
+        refusing.release.set()  # nothing to stage here: the close refuses at once
         sentinel = ValueError("the caller's own failure")
 
         with pytest.raises(RuntimeError, match="the pool would not close") as raised:
@@ -438,6 +444,30 @@ class TestItClosesTheClientItOwns:
                 raise sentinel
 
         assert raised.value.__context__ is sentinel
+
+    async def test_a_close_that_then_fails_still_delivers_the_cancellation(
+        self, refusing: _CloseOnCue
+    ) -> None:
+        # The intersection of the two above, and the one that needs its own branch:
+        # the close's failure surfaces out of the *next* shielded await, so a wait
+        # that only re-raised at the end would let it leave in the cancellation's
+        # place. ADR-0060 §1's delivery clause is unconditional — a close that
+        # refuses is not a licence to absorb the caller's cancellation.
+        async def use_the_block() -> None:
+            async with anthropic_batch_completer(issuer=ISSUER, default_model=MODEL):
+                pass
+
+        task = asyncio.create_task(use_the_block())
+        await refusing.entered.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        refusing.release.set()  # and now the close it was waiting on fails
+
+        with pytest.raises(asyncio.CancelledError) as raised:
+            await task
+
+        # Delivered, and the failure it outranks is kept rather than dropped.
+        assert raised.value.__cause__ is refusing.failure
 
 
 class TestItDoesNotLetTheSdkRepeatAPaidSubmission:
