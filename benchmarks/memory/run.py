@@ -24,7 +24,11 @@ from hashlib import sha256
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from ai_assistant.app.composition import CONFLICT_LIMIT, RETRIEVAL_LIMIT
+from ai_assistant.app.composition import (
+    CONFLICT_LIMIT,
+    EPISODIC_SUPPLEMENT_LIMIT,
+    RETRIEVAL_LIMIT,
+)
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.models import ensure_credential_available, ensure_vendor_available
 from benchmarks.memory.answer import ANSWER_SYSTEM_PROMPT, answer_question
@@ -440,6 +444,9 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         # written before any case runs — an interrupted run still says what it was.
         embedder_model_id=build_embedder(resolved).model_id,
         retrieval_limit=RETRIEVAL_LIMIT,
+        # The supplement's own budget, recorded beside the belief budget because a run
+        # is only recoverable from its manifest if both reads are in it (ADR-0158 §3).
+        episodic_limit=EPISODIC_SUPPLEMENT_LIMIT,
         conflict_limit=CONFLICT_LIMIT,
         observation_batch_size=resolved.observation_batch_size,
         observation_max_proposals=resolved.observation_max_proposals,

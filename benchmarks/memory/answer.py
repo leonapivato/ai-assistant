@@ -2,15 +2,61 @@
 
 **"Reads only retrieved context" is the whole experiment**, so it is enforced by
 construction rather than by prompt wording: the only conversation material this module
-can reach is the record list ``assemble_by_band`` returned. The corpus is not in
-scope here, the case is not passed in, and the question text is the single other input.
+can reach is what the two reads below returned. The corpus is not in scope here, the
+case is not passed in, and the question text is the single other input.
 
-**The retrieval path is the product's, not a convenience call.**
-``assemble_by_band`` is what ``LearningLoop`` uses, with the same
-``BELIEF_KINDS`` filter and the same budget imported from the composition root — one
-band-scoped ``search`` per band in precedence order, deduplicated across the calls
-(ADR-0072 §5, ADR-0113 §5). A single ``store.search`` would be a different retrieval
-system, and the numbers would not be about this one.
+**The retrieval path is the product's, not a convenience call.** ``LearningLoop``
+assembles an answering turn's ``memories`` from *two* reads since ADR-0158, and both
+are mirrored here by hand — the harness must not run the engine (see
+:mod:`benchmarks.memory.wiring` for why), so "mirrored by hand" is the only shape
+available and the equivalence is held by a test rather than by sharing the code.
+
+1. *The belief composition.* ``assemble_by_band`` is what ``LearningLoop._retrieve``
+   uses, with the same ``BELIEF_KINDS`` filter and the same budget imported from the
+   composition root — one band-scoped ``search`` per band in precedence order,
+   deduplicated across the calls (ADR-0072 §5, ADR-0113 §5). A single ``store.search``
+   would be a different retrieval system, and the numbers would not be about this one.
+2. *The episodic supplement* (ADR-0158, :func:`_supplement`). A second, separate
+   ``search`` for ``EPISODIC`` records in the ``DERIVED`` band under a budget of its
+   own, appended after the beliefs. It is what makes the pilot measure the product as
+   shipped: 42% of LoCoMo's answerable questions failed the previous run because the
+   fact never became a belief while the gold turn sat in the same store and the same
+   index, unreachable only because the one read asked for ``BELIEF_KINDS``.
+
+**Both groups render into one block, which is what the product does too.** The
+planner splits the records it is handed into the conversation tail and the retrieved
+group by the *leading run* of ``EPISODIC`` records and renders the retrieved group as
+one undifferentiated list — so a supplemented episode is shown beside the beliefs,
+after them, under the same heading (``planning.planner._split_conversation_tail``, and
+ADR-0158 §4 quoting it: the episode "arrives after the tail and stays in the retrieved
+group, which is the group it belongs to"). Giving the supplement a labelled section of
+its own here would be a prompt the product never builds, so :func:`render_context` is
+unchanged: the episodes are simply the last entries of the numbered block, and their
+kind is legible in each record's own JSON.
+
+**Which of ADR-0158 §4's rules are live in the harness, and which are vacuous.** The
+loop composes ``recent + retrieved + supplement``; this harness has no continuity tail
+at all — no conversation is in progress, and ``preceding`` is the belief group and
+nothing else. Rule by rule:
+
+* *Ordering* — **live**. Episodes are appended whole after the beliefs and never
+  interleaved, because position is how this corpus expresses precedence.
+* *Deduplication against the tail* — **vacuous, and written anyway**. There is no
+  tail, and ``BELIEF_KINDS`` and :data:`SUPPLEMENT_KINDS` are disjoint, so the
+  comparison cannot remove a record here. It is the loop's own line, kept so that the two
+  modules read alike; dropping it would read as the harness having decided something.
+* *The separator rule* — **live, and the one worth stating**. "Append only where the
+  records before it contain a non-``EPISODIC`` record" reduces, with beliefs the only
+  thing before it, to "drop the supplement where the belief read came back empty". Its
+  stated *reason* — the planner rendering an unbroken episodic run under the tail's
+  heading, fabricating continuity — has no analogue in :func:`render_context`, which
+  labels no groups at all. The rule is kept regardless, because the *behaviour* is the
+  product's in the product's own matching state: a benchmark question is a fresh
+  conversation's first turn, where ``history`` is empty and the loop drops the
+  supplement on exactly this condition. A harness that appended there would score a
+  system that answers from episodes in a case the shipped one does not.
+* *The failure rule* — deliberately **not** mirrored, and that deviation is argued
+  in :func:`_supplement`.
 
 **Two things #1029 asks the harness to record, and how each is obtained.**
 
@@ -53,7 +99,7 @@ from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.correlation import correlated_operation
 from ai_assistant.core.errors import ModelError
-from ai_assistant.core.types import Message, Role
+from ai_assistant.core.types import BeliefBand, MemoryKind, Message, Role
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.retrieval import assemble_by_band
 
@@ -67,10 +113,39 @@ if TYPE_CHECKING:
 __all__ = [
     "ABSTENTION_PHRASE",
     "ANSWER_SYSTEM_PROMPT",
+    "SUPPLEMENT_BANDS",
+    "SUPPLEMENT_KINDS",
     "AnswerAttempt",
     "answer_question",
     "render_context",
 ]
+
+#: The kinds the episodic supplement's read selects (ADR-0158 §3).
+#:
+#: A two-line copy of ``ai_assistant.orchestration.loop._SUPPLEMENT_KINDS`` rather than
+#: an import, because that name is private and the harness does not get to widen a
+#: subsystem's surface for its own convenience. The copy is held honest the way
+#: ``records.py``'s trace-metric keys are — by a test that fails the day the loop's
+#: value moves (``tests/benchmarks/test_harness_contracts.py``) — which is the same
+#: trade the composition root's *public* constants do not need.
+#:
+#: The narrowness is the point: widening this to ``None`` would admit derived
+#: *beliefs* into a group appended after the belief group, which is the one way a
+#: belief could be shown twice in one prompt.
+SUPPLEMENT_KINDS: Final = (MemoryKind.EPISODIC,)
+
+#: The band the episodic supplement's read is pinned to (ADR-0158 §3), copied from
+#: ``loop._SUPPLEMENT_BANDS`` under the same discipline as :data:`SUPPLEMENT_KINDS`.
+#:
+#: Pinned rather than left at ``None``, and not because of an assumption about who
+#: writes: capture stamps ``OBSERVED`` so every episode this system writes is
+#: ``DERIVED``, but ``EpisodicMemory`` accepts any ``Provenance`` and ``band_of`` maps
+#: ``EXTERNAL`` to ``ATTESTED``, so a band-blind read is the one read with no
+#: composition to impose ADR-0072 §5's precedence. Nothing in this harness writes a
+#: non-``DERIVED`` episode today, which makes the pin inert here — and it is copied
+#: anyway, because a harness whose read is only *accidentally* the product's read
+#: stops being one the day the corpus grows a channel that writes one.
+SUPPLEMENT_BANDS: Final = (BeliefBand.DERIVED,)
 
 #: The phrase the prompt sanctions for declining, exported so the tie between what the
 #: model is *asked* to say and what :func:`benchmarks.memory.grade.is_abstention`
@@ -162,8 +237,21 @@ class AnswerAttempt:
     Attributes:
         correlation_id: The scope every retrieval trace for this answer carries.
         answer: What the model said.
-        retrieved_ids: The records placed in the prompt, in prompt order.
+        retrieved_ids: The records placed in the prompt, in prompt order — the
+            belief composition first and then the episodic supplement (ADR-0158 §4),
+            which is the order the model read them in.
         retrieved_kinds: Each record's ``kind``, aligned with ``retrieved_ids``.
+
+            **This is the whole of the episodic-rescue attribution**, which replaced
+            the beliefs-versus-episodes ablation arm: two arms would have been two
+            paid runs, and the same question is answerable post hoc from one. An
+            ``EPISODIC`` entry here is a record that reached the prompt through the
+            supplement and could have reached it no other way, because the belief
+            composition's ``kinds`` filter excludes that kind by construction
+            (ADR-0158 §2). Joined against ``retrieved_evidence`` — where a *rescue* is
+            a right answer whose supporting episode no retrieved belief cites — this
+            says how much of any improvement the supplement bought, per question,
+            without a second run.
         retrieved_evidence: The **episode ids** each retrieved record cites, aligned
             with ``retrieved_ids``. This is the retrieval half of #1074's join: the
             corpus names its evidence by turn, ingestion records which episode each
@@ -207,8 +295,15 @@ def render_context(records: Sequence[MemoryRecord]) -> str:
     store holds. The one thing dropped is the embedding, which no store returns on a
     record anyway.
 
+    **The supplement needs nothing here**, which is a finding rather than an omission.
+    ADR-0158 §4's groups are carried by *position*, and the product's own renderer
+    shows the retrieved beliefs and the supplemented episodes as one undifferentiated
+    list in that order; dumping each record whole already tells the model which is
+    which, in the store's words rather than the harness's.
+
     Args:
-        records: What retrieval returned, best first.
+        records: What retrieval returned — the beliefs, best first, then the
+            episodic supplement (ADR-0158 §4).
 
     Returns:
         The block, or :data:`EMPTY_CONTEXT` when there is nothing.
@@ -220,8 +315,80 @@ def render_context(records: Sequence[MemoryRecord]) -> str:
     )
 
 
+async def _supplement(
+    harness: Harness, query: str, *, preceding: Sequence[MemoryRecord]
+) -> tuple[MemoryRecord, ...]:
+    """Retrieve *episodes* relevant to ``query``, to append after the beliefs.
+
+    A hand-mirror of ``ai_assistant.orchestration.loop.LearningLoop._supplement``,
+    line for line where the two can be the same. Every argument that keeps this from
+    being naive RAG over the transcript is here rather than in a policy: ``kinds`` is
+    :data:`SUPPLEMENT_KINDS`, ``bands`` is :data:`SUPPLEMENT_BANDS`, and the budget is
+    the harness's own ``episodic_limit``, which is never taken out of the belief
+    budget (ADR-0158 §2, §3). Merging the two reads into one kind-blind call is what
+    ADR-0158 §2 refuses: ADR-0128 §1 binds ``kinds`` before the KNN cut, so an
+    admitted episode spends a candidate slot no later pass can give back, and a store
+    holds an episode per turn against a belief per distilled fact — under one shared
+    budget the belief layer would be routinely displaced from its own prompt.
+
+    **The separator check is live here and the tail deduplication is not**; the module
+    docstring works both through against §4. The check is made *before* the read, as
+    the loop makes it, so a dropped supplement also costs no ``RETRIEVAL`` trace — which
+    matters more here than there, because those traces are the P4 count.
+
+    **The one deliberate deviation: a store failure is not caught.** ADR-0158 §4 has
+    the loop swallow a failed episodic read and keep the beliefs, because a user's
+    answer is worth more than the supplement and the alternative is no answer at all.
+    A benchmark has the opposite loss function. :func:`answer_question` already
+    declines to catch ``MemoryStoreError`` for the belief read, in as many words: it is
+    not a per-question outcome, and a run whose store is failing should stop rather
+    than record hundreds of answers that look like reader errors. Swallowing it here
+    would be worse than there — a systematically failing episodic read would produce a
+    whole run of belief-only prompts, scored and published as a measurement of a
+    configuration that never ran, with nothing in the artifacts to say so. The mirror
+    is therefore exact on every path where the store works, and diverges only in what
+    a broken store does to the run.
+
+    Args:
+        harness: The wired pipeline, read for the store and the episodic budget.
+        query: The question, which is the same text the belief composition was read
+            with — the loop passes its goal statement to both reads.
+        preceding: The records already assembled, in order. Read for the separator
+            rule and for deduplication, never appended to here.
+
+    Returns:
+        Up to ``harness.episodic_limit`` episodes, best first, none of them already in
+        ``preceding``. Empty where the bound is zero or the separator is absent.
+
+    Raises:
+        MemoryStoreError: If the read failed, deliberately unhandled (above).
+    """
+    if harness.episodic_limit <= 0:
+        return ()
+    if all(MemoryKind(record.kind) is MemoryKind.EPISODIC for record in preceding):
+        return ()
+    found = await harness.store.search(
+        query,
+        limit=harness.episodic_limit,
+        kinds=SUPPLEMENT_KINDS,
+        bands=SUPPLEMENT_BANDS,
+    )
+    # `capped` is unwrapped and not acted on, as the loop leaves it (ADR-0128 §6): the
+    # offline reading of the same fact is `RetrievalTelemetry.ceiling_bound`, derived
+    # from this call's own trace, so nothing is lost by not asserting it here.
+    held = {record.id for record in preceding}
+    return tuple(record for record in found.records if record.id not in held)
+
+
 async def answer_question(harness: Harness, question: BenchQuestion) -> AnswerAttempt:
     """Retrieve for one question and answer it from what came back.
+
+    **Two reads, in the product's order** (ADR-0158): the belief composition through
+    ``assemble_by_band``, then :func:`_supplement`'s episodic read appended after it.
+    Both run inside the one correlation scope, so the P4 count is now up to *four*
+    ``MemoryStore.search`` crossings per answer rather than up to three — three bands
+    and the supplement — and every one of them is still evidence read off the traces
+    rather than a number this driver asserts.
 
     The clock is moved to the question's stated instant where the corpus gives one,
     so retrieval's liveness axes are judged at the moment the question is asked rather
@@ -238,9 +405,11 @@ async def answer_question(harness: Harness, question: BenchQuestion) -> AnswerAt
     here, a failed answer keeps its real ids and its real telemetry and reports only
     that no answer came back.
 
-    A *retrieval* failure is deliberately not caught: ``MemoryStoreError`` is not a
-    per-question outcome, and a run whose store is failing should stop rather than
-    record hundreds of empty answers.
+    A *retrieval* failure is deliberately not caught, on **either** read:
+    ``MemoryStoreError`` is not a per-question outcome, and a run whose store is
+    failing should stop rather than record hundreds of empty answers. For the episodic
+    read that is a considered departure from ADR-0158 §4's failure rule, argued in
+    :func:`_supplement`.
 
     Args:
         harness: The wired pipeline.
@@ -254,12 +423,15 @@ async def answer_question(harness: Harness, question: BenchQuestion) -> AnswerAt
     asked_at = harness.clock().isoformat()
 
     with correlated_operation() as correlation_id:
-        records = await assemble_by_band(
-            harness.store,
-            question.question,
-            limit=harness.retrieval_limit,
-            kinds=BELIEF_KINDS,
+        beliefs = tuple(
+            await assemble_by_band(
+                harness.store,
+                question.question,
+                limit=harness.retrieval_limit,
+                kinds=BELIEF_KINDS,
+            )
         )
+        records = beliefs + await _supplement(harness, question.question, preceding=beliefs)
         context = render_context(records)
         failure: str | None = None
         answer = ""

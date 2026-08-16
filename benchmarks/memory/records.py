@@ -70,8 +70,11 @@ class RetrievalTelemetry(BaseModel):
 
     Attributes:
         search_calls: How many times ``MemoryStore.search`` was crossed. This is
-            #1029's P4 figure. Expect one to three: ``assemble_by_band`` reads one
-            band at a time and stops once the budget is full.
+            #1029's P4 figure. Expect one to four: ``assemble_by_band`` reads one
+            band at a time and stops once the budget is full, which is up to three,
+            and ADR-0158's episodic supplement is a fourth read of its own — made
+            unless the belief composition came back empty, which is the one state
+            that drops it (``benchmarks.memory.answer._supplement``).
         returned_ids: Every record id any of those calls returned, in trace order,
             deduplicated. A superset of what reached the prompt, because
             ``assemble_by_band`` deduplicates and cuts to the budget.
@@ -239,6 +242,18 @@ class RunManifest(BaseModel):
             measurement of retrieval at all.
         embedder_model_id: The embedding space the vectors live in.
         retrieval_limit: The budget ``assemble_by_band`` filled.
+        episodic_limit: The budget ADR-0158's **episodic supplement** filled — the
+            second, ``EPISODIC``-only read appended after the beliefs, whose budget is
+            never a share of ``retrieval_limit`` above.
+
+            **A manifest carrying this field is a run that made the supplementary
+            read**, which is why it is recorded rather than left implicit in the code
+            the run happened to be cut from. The pilot's earlier runs predate ADR-0158
+            and their manifests have no such key at all, so "was the supplement on?"
+            is answerable from the artifact in both directions; a future ``0`` would
+            be a run that made the read and could place nothing from it, which is a
+            third state and a different one. Imported from the composition root like
+            the budget above, so it cannot name a bound the product does not use.
         conflict_limit: The ingestor's conflict-probe limit.
         observation_batch_size: Turns per observation pass.
         observation_max_proposals: Beliefs one pass may return.
@@ -288,6 +303,7 @@ class RunManifest(BaseModel):
     embedder_kind: str
     embedder_model_id: str
     retrieval_limit: int
+    episodic_limit: int
     conflict_limit: int
     observation_batch_size: int
     observation_max_proposals: int
