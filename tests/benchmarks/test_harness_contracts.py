@@ -8,6 +8,7 @@ has a test.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import urllib.request
 from typing import TYPE_CHECKING
@@ -96,6 +97,37 @@ def test_the_harness_episodic_budget_is_the_composition_root_s(tmp_path: Path) -
     try:
         assert harness.episodic_limit == composition.EPISODIC_SUPPLEMENT_LIMIT
         assert harness.episodic_limit <= harness.retrieval_limit
+    finally:
+        harness.close()
+
+
+@pytest.mark.parametrize(
+    "bound",
+    [
+        pytest.param(composition.RETRIEVAL_LIMIT + 1, id="above-the-belief-budget"),
+        pytest.param(-1, id="negative"),
+    ],
+)
+def test_a_harness_may_not_carry_an_episodic_bound_the_product_would_refuse(
+    tmp_path: Path, bound: int
+) -> None:
+    """ADR-0158 §3's ceiling, held by construction rather than by provenance.
+
+    The bound `build_harness` sets is always the composition root's, so this is not
+    reachable from a run — but a harness derived with `dataclasses.replace`, which is
+    how a test varies the bound, would otherwise measure a configuration
+    `LearningLoop.__init__` refuses to start under. Zero is *not* in this list because
+    zero is legal and disables the supplement.
+    """
+    harness = build_harness(
+        Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING),
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider(),
+        observer=FakeObserver(),
+    )
+    try:
+        with pytest.raises(ValueError, match="episodic_limit"):
+            dataclasses.replace(harness, episodic_limit=bound)
     finally:
         harness.close()
 

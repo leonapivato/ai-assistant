@@ -140,6 +140,45 @@ class Harness:
     conversations: SqliteConversationStore
     deferrals: SqliteDeferralStore
 
+    def __post_init__(self) -> None:
+        """Hold ADR-0158 §3's ceiling where ``LearningLoop`` holds it: at construction.
+
+        §3's normative clause — the configured episodic bound never exceeds the
+        configured belief budget — is where that ADR puts the product thesis in
+        checkable form, and the product does not trust the line that sets it: it
+        re-checks at ``LearningLoop.__init__``. A harness that only *imported* the
+        right numbers would hold the ceiling by provenance rather than by
+        construction, and a benchmark measuring a configuration the product refuses to
+        run would publish it as this system's behaviour. Checked here rather than in
+        :func:`build_harness` so it also covers a harness derived with
+        ``dataclasses.replace``, which is how a test varies these bounds.
+
+        **The type half of the loop's own check is deliberately not mirrored.**
+        ``_check_tuning`` rejects a non-integral or ``bool`` limit because
+        ``LearningLoop`` takes those from a caller; these two are module constants of
+        the composition root, read under ``mypy --strict``, so the equivalent mistake
+        is not reachable without defeating the type checker first — and a runtime
+        ``isinstance`` on a typed constant is a check that can only ever pass.
+
+        Raises:
+            ValueError: If ``retrieval_limit`` is not positive, if ``episodic_limit``
+                is negative, or if ``episodic_limit`` exceeds ``retrieval_limit``
+                (ADR-0158 §3). Zero is legal for the episodic bound and disables the
+                supplement, which is a value ADR-0158 §6's arm may choose.
+        """
+        if self.retrieval_limit < 1:
+            msg = f"retrieval_limit must be at least 1, got {self.retrieval_limit}"
+            raise ValueError(msg)
+        if self.episodic_limit < 0:
+            msg = f"episodic_limit must be at least 0, got {self.episodic_limit}"
+            raise ValueError(msg)
+        if self.episodic_limit > self.retrieval_limit:
+            msg = (
+                f"episodic_limit must not exceed retrieval_limit (ADR-0158 §3): "
+                f"{self.episodic_limit} > {self.retrieval_limit}"
+            )
+            raise ValueError(msg)
+
     def close(self) -> None:
         """Close every connection this harness opened, in the reverse of open order.
 
