@@ -278,10 +278,17 @@ not available and is not sought.
 > conflict set in rank order**. `Settings` gains `reconciler_max_conflicts: int`,
 > positive, defaulting to **3**. Members beyond that bound are left unlabelled.
 
+> **Normative.** A reconciler installs a model-supplied label only for a member it
+> **consulted the model about**. A label the reply carries for any other record —
+> including a member of the conflict set that fell beyond the bound, and including
+> one the `agrees` rung already labelled — is discarded, and that member stays as
+> the two clauses above leave it.
+
 > **Normative.** A reconciler names the route it calls rather than inheriting the
-> default. `Settings` gains `reconciler_model: str | None`, defaulting to `None`,
-> in the shape `observer_model` already takes; `None` means the configured default
-> route.
+> default. `Settings` gains `reconciler_model`, defaulting to `None`, typed as the
+> same validated `provider:model` spec `observer_model` carries (`_ModelSpec | None`
+> in `core/config.py`), so a malformed route is refused at construction rather than
+> at first use; `None` means the configured default route.
 
 > **Normative.** Where both contents state an event time under ADR-0156 §2 and those
 > times differ, the relation is not `CONTRADICTS` unless the two claims are
@@ -334,6 +341,15 @@ a fourth is nearly always a topical neighbour. It is a `Settings` field for the
 reason `observation_max_proposals` is one (ADR-0077 §2) — it is a knob an operator
 tunes against their own corpus, and its right value is an empirical question this
 ADR does not pretend to have settled.
+
+**The bound has a response half, and it is the half a test forgets.** Asking about
+three members does not stop a reply naming a fourth, and the fourth's id is a *valid*
+id — it is in the conflict set — so §8's ignore rule, which is stated over ids absent
+from `conflicts`, does not reach it. Installed, a volunteered `CONTRADICTS` on a
+member nobody asked about would block a fold §4(a) would otherwise make, which is the
+bound failing in the one direction it exists to prevent. The clause is stated over
+what the reconciler *consulted about* rather than over what the reply contains,
+because that is the fact the reconciler holds and the model cannot influence.
 
 **One request, not one per member, and the reason is not only cost.** A relation is a
 statement about a pair, but the *set* is what disambiguates it: shown the three
@@ -674,7 +690,12 @@ The lane owes:
   - **exactly one** provider request for a non-asserted proposal whose conflict set
     holds several members the `agrees` rung did not settle, and **zero** for one
     whose members it settled entirely (§3's one-request clause);
-  - the request covers no member beyond `reconciler_max_conflicts` in rank order.
+  - the request covers no member beyond `reconciler_max_conflicts` in rank order,
+    **and** a reply volunteering a label for the beyond-bound member's own valid id
+    leaves that member unlabelled — the response half of the same bound, which a
+    test reading only the request cannot see;
+  - a malformed `reconciler_model` is refused where `Settings` is built, not at the
+    first ingest that would have used it.
 
 ### 11. What this records against earlier ADRs, under ADR-0082 §1
 
