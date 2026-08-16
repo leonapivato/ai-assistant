@@ -154,6 +154,18 @@ _INSTANT_UNAVAILABLE: Final = "(recorded time unavailable)"
 #: ratified clause: ADR-0077 §2's bar is untouched, and a `content` sentence is
 #: wholly model-authored prose (ADR-0156 §1), so what is written here is guidance
 #: on writing it, not a new field, predicate or licence.
+#:
+#: **Times are carved out of it in terms, because the two rules would otherwise
+#: read as contradicting each other.** "Keep the particulars the evidence gives"
+#: would, applied to an episode reading *"on 7 May I told Alex I enjoy climbing"*,
+#: invite the mention date onto a trait — which is exactly the naive implementation
+#: ADR-0156 §2's third clause exists to refuse ("a lasting trait acquires no date
+#: from the day it happened to be mentioned"), and it would cost the embedding
+#: dilution §2 priced. So the enumeration names no dates, and the paragraph hands
+#: every time question to the section that follows it in both assembled variants.
+#: A date the belief *is* entitled to state is not lost by the carve-out: §2's
+#: second clause requires it, in the section that decides it, and that section is
+#: more precise about which date than this paragraph could be.
 _PROMPT_HEAD: Final = """\
 You are the observation stage of an AI assistant. You are shown a batch of \
 recorded episodes — things that happened — and you propose what the assistant \
@@ -165,13 +177,15 @@ Do not summarise the exchange. Do not propose what merely happened; that is \
 already recorded. Proposing nothing is a perfectly good answer.
 
 When you do propose a belief, keep the concrete particulars the evidence gives — \
-the proper names, places, organisations, dates and quantities involved — rather \
-than abstracting over them. A belief that names the thing is worth more than the \
-trait it illustrates: "goes to the Tuesday climbing session at Boulder Barn" \
-beats "enjoys climbing". State a trait alone only where the evidence gives no \
-particular. This governs how a belief is written, never whether: the bar above \
-still decides that, and a retelling of what happened is refused however specific \
-it is.
+the proper names, places, organisations and quantities involved — rather than \
+abstracting over them. A belief that names the thing is worth more than the trait \
+it illustrates: "goes to the Tuesday climbing session at Boulder Barn" beats \
+"enjoys climbing". State a trait alone only where the evidence gives no \
+particular. Times are the one exception: the section below decides which of them \
+a belief states, and keeping the particulars is never a reason to date a belief \
+it says states none. This governs how a belief is written, never whether: the bar \
+above still decides that, and a retelling of what happened is refused however \
+specific it is.
 
 Each belief takes one of two epistemic steps:
 - "observed" — the cited episodes directly show it. One episode may be enough.
