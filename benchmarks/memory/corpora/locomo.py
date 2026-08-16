@@ -15,16 +15,35 @@ asking about it.** So every turn is the user's own side (``user_side=True``), an
 session is marked :attr:`~benchmarks.memory.cases.BenchSession.user_supplied` so each
 corpus turn becomes one exchange with no assistant half.
 
-What that entitles the observer to is a belief **about the owner's world**, naming the
-third party in the belief's own sentence and stating no subject — precisely the shape
-ADR-0100 §4 rules *correct* rather than a shortfall, in its ruling on
-``CalendarReader``: "Calendar entry 'Coffee with Marta', Tuesday 3pm" is a durable fact
-about the owner's world, "which is the case ADR-0077 §2's 'or their world' already
-covers". ``about_person`` therefore stays ``None`` throughout, and must: §5 forbids an
-observer to state a subject at all, and §4 forbids *any* producer to infer one from
-content. Nothing here asks for either. This loader changes what the episodes say about
-who spoke; it widens no producer's warrant, which ADR-0100 §4's closing clause forbids
-outright and §5's first clause leaves word-for-word as ADR-0077 §2 wrote it.
+**What this fixes, stated no wider than it is.** Four things, all of them properties of
+the *input* rather than predictions about the model:
+
+1. The corpus stops asserting what it does not contain — the assistant no longer
+   appears to have said a word of it.
+2. **Every turn becomes visible to distillation at all.** This is the largest of the
+   four and it is easy to miss: ``_render_batch`` gives the observer each episode's
+   ``content`` and nothing else, so under the old mapping ``speaker_b``'s lines — half
+   the corpus — went into ``outcome`` and were never shown to the observer in any
+   window. They are now.
+3. #1074's evidence join runs one corpus turn to one episode, its finest resolution.
+4. ``assistant_led_turns`` reports 0, which is true, where it used to report half.
+
+**And what it does not claim.** It does *not* establish that the observer will read
+"Caroline" as a third party rather than as the user naming themself. It cannot: the
+payload is the episode's ``content``, ``user_supplied`` is a loader-side fact that
+reaches no record, and at a small batch a transcript line and an ordinary user turn are
+the same string. Whether attribution lands correctly is a thing the pilot *measures*,
+not a thing this loader settles, and whether an explicit per-episode frame improves it
+is #1185's own pre-registered arm.
+
+Either way ``about_person`` stays ``None``, and must: ADR-0100 §5 forbids an observer
+to state a subject at all, and §4 forbids *any* producer to infer one from content. A
+belief that names a third party in its own sentence while stating no subject is the
+shape §4 rules *correct* rather than a shortfall, in its ruling on ``CalendarReader``
+— "which is the case ADR-0077 §2's 'or their world' already covers". This loader
+changes what the episodes say about who spoke; it widens no producer's warrant, which
+§4's closing clause forbids outright and §5's first clause leaves word-for-word as
+ADR-0077 §2 wrote it.
 
 **It is captured as the user's own turn: ``CAPTURE_CONFIDENCE``, and untainted.** The
 user told the assistant this, in the ordinary way a user tells it anything, so the
