@@ -124,6 +124,10 @@ def plan(
     table.add_row("[bold]total model calls (at most)", f"[bold]{computed.model_calls:,}")
     table.add_row("embedder", str(settings.embedder))
     table.add_row("answer route", settings.default_model)
+    # Named as the default rather than as the judge: `plan` takes no `--judge-model`,
+    # because a plan reports what a run would *cost* and the judge's route changes the
+    # price per call without changing the call count this table is about.
+    table.add_row("judge route (unless --judge-model)", settings.default_model)
     table.add_row("episode retention", _retention(settings))
     console.print(table)
     _warn_about_configuration(settings, computed.cases)
@@ -139,6 +143,10 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
     ] = 0,
     mode: Annotated[RunMode, typer.Option(help="smoke or scored.")] = RunMode.SMOKE,
     grader: Annotated[str, typer.Option(help="'exact' (no model call) or 'model'.")] = "exact",
+    judge_model: Annotated[
+        str | None,
+        typer.Option(help="Route the model judge grades on; default ASSISTANT_DEFAULT_MODEL."),
+    ] = None,
     preregistration_final: Annotated[
         bool, typer.Option(help="Confirm #1029 ground rule 1 is discharged.")
     ] = False,
@@ -174,6 +182,7 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
             corpus_digests=digests,
             settings=settings,
             grader_kind=grader,
+            judge_route=judge_model,
             preregistration_final=preregistration_final,
             slice_seed=seed if limit else None,
             max_sessions=max_sessions,

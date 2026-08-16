@@ -216,12 +216,32 @@ def plan_run(corpus: Corpus, cases: Sequence[BenchCase], *, batch_size: int) -> 
     )
 
 
-def build_grader(settings: Settings, *, kind: str) -> Grader:
+def build_grader(settings: Settings, *, kind: str, route: str | None = None) -> Grader:
     """Build the grader named by ``kind``.
+
+    **The judge is a route of its own, and defaults to the answering one.** It was
+    pinned to ``settings.default_model`` outright, which made the judge and the system
+    under test the same model by construction — a coupling nobody chose and one a
+    reader of the artifacts could not see, since the manifest recorded the two figures
+    separately and they simply always agreed. A judge is a *measuring instrument*: it
+    is legitimate for it to be a cheaper or a different model from the one being
+    measured, and it is not legitimate for that to be unstateable. So the route is an
+    argument, ``None`` keeps the previous behaviour exactly, and whatever is used
+    reaches the manifest through :attr:`~benchmarks.memory.grade.Grader.name`, which is
+    the route the grading was actually performed on rather than a declaration beside it.
+
+    Nothing here relaxes the scored-run gate. :func:`refuse_ineligible_scored_run`
+    clause 4 asks that the grader be the model judge, which is about the *kind*; a
+    scored run choosing a judge route is choosing a configuration, and it is recorded.
+    Clause 5's ban is on an injected grader *object*, which is what would make the
+    manifest untrue — a named route is the opposite of that.
 
     Args:
         settings: Loaded application settings.
         kind: ``"exact"`` or ``"model"``.
+        route: The ``"provider:model"`` spec to judge on, or ``None`` for
+            ``settings.default_model``. Ignored by the exact grader, which makes no
+            model call at all.
 
     Returns:
         The grader.
@@ -232,14 +252,19 @@ def build_grader(settings: Settings, *, kind: str) -> Grader:
     if kind == "exact":
         return ExactGrader()
     if kind == "model":
-        route = settings.default_model
-        return ModelGrader(build_model_provider(settings, route), route=route)
+        spec = route if route is not None else settings.default_model
+        return ModelGrader(build_model_provider(settings, spec), route=spec)
     msg = f"unknown grader {kind!r}; expected 'exact' or 'model'"
     raise ValueError(msg)
 
 
 def check_credentials_for(
-    settings: Settings, *, answering: bool, distillation: bool, judging: bool
+    settings: Settings,
+    *,
+    answering: bool,
+    distillation: bool,
+    judging: bool,
+    judge_route: str | None = None,
 ) -> None:
     """Fail now if a route this run will actually build holds no credential.
 
@@ -260,6 +285,11 @@ def check_credentials_for(
         answering: Whether the answering seam will be built here.
         distillation: Whether the observer will be built here.
         judging: Whether a model judge will be built here.
+        judge_route: The route the judge will be built on, or ``None`` for
+            ``settings.default_model`` — the same fallback :func:`build_grader` applies,
+            spelled here rather than assumed, because a judge on a route the answering
+            seam never touches is precisely the configuration this check exists to
+            refuse at startup instead of at the first graded answer.
 
     Raises:
         ConfigurationError: If a vendor is unresolvable or holds no credential.
@@ -273,8 +303,10 @@ def check_credentials_for(
     # injecting the observer would check nothing at all. Duplicates are checked once,
     # which is what the set is for.
     needed: set[str] = set()
-    if answering or judging:
+    if answering:
         needed.add(settings.default_model)
+    if judging:
+        needed.add(judge_route if judge_route is not None else settings.default_model)
     if distillation:
         needed.add(observer_route)
     for spec in sorted(needed):
@@ -294,6 +326,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     settings: Settings | None = None,
     grader: Grader | None = None,
     grader_kind: str = "exact",
+    judge_route: str | None = None,
     model: ModelProvider | None = None,
     observer: Observer | None = None,
     preregistration_final: bool = False,
@@ -343,6 +376,12 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
             call, the default) or ``"model"``. This is what the gate checks, because it
             names what the harness is about to construct rather than what a caller
             called it.
+        judge_route: The ``"provider:model"`` spec the model judge grades on, or
+            ``None`` for ``settings.default_model``. A judge is an instrument and need
+            not be the model under test; whichever route is used lands in the
+            manifest's ``judge`` field, which is read off the grader that graded rather
+            than declared beside it. Ignored under ``grader_kind="exact"`` and under an
+            injected grader, neither of which makes a call.
         model: Override the answering seam. Tests supply one; a live run does not.
         observer: Override the distillation seam, likewise.
         slice_seed: The seed a stratified slice was drawn with, for the manifest.
@@ -408,12 +447,17 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     )
     # Built after the gate, so a scored run's judge is one this function constructed
     # from `Settings` and never one it was handed.
-    judge = grader if grader is not None else build_grader(resolved, kind=grader_kind)
+    judge = (
+        grader
+        if grader is not None
+        else build_grader(resolved, kind=grader_kind, route=judge_route)
+    )
     check_credentials_for(
         resolved,
         answering=model is None,
         distillation=observer is None,
         judging=grader is None and grader_kind == "model",
+        judge_route=judge_route,
     )
     run_id = uuid4().hex[:12]
     run_dir = output_root / run_id
