@@ -202,6 +202,47 @@
   **Nothing else on any earlier ADR.** §13 makes the judgement clause by clause
   under ADR-0070 §1 and ADR-0082 §1, including for ADR-0103 §8, where the opposite
   answer is available and does not survive inspection.
+- **Amended: 2026-08-16 by
+  [ADR-0159](0159-a-conflict-is-labelled-before-it-is-ruled-on-and-similarity-alone-folds-nothing.md)
+  and [ADR-0161](0161-an-attested-re-read-restates-its-own-import-and-folds-at-an-id-that-is-ours.md)
+  (§4 — the fold its presence rule leans on is now conditioned on agreement, and the
+  sentence stating it reads more widely than it now holds).** §4's closing sentence
+  is "The unchanged entry, which must not take that path, does not — ADR-0092 §6
+  puts it on `REINFORCE`, which folds at the target's id and marks it present." It
+  was written when `DefaultMemoryPolicy` folded a non-asserted proposal into any
+  conflict-set member at or above `conflict_threshold`. ADR-0159 §4 replaced that
+  with a rule requiring an affirmative, record-specific relation, and ADR-0161 §1
+  supplies the clause under which an attested re-read reaches it: an `EXTERNAL`
+  proposal folds onto an `EXTERNAL` member that **agrees** with it under ADR-0121
+  §1 — byte-identical after that predicate's four transformations — and onto no
+  other. So the sentence stays true of the entry it is about, on a strictly
+  narrower condition than the one a reader would infer from it, which is ADR-0082
+  §1's second limb.
+
+  **No clause of this ADR moves, which is why this is an amendment and not a
+  supersession.** §4's two normative clauses are untouched and are used exactly as
+  ruled — presence is the ingest's own answer, read off
+  `MemoryIngestResult.record_id`, and one stored-nothing proposal suspends absence
+  for the whole reading. What is narrowed is the mechanical consequence §4 appends
+  beside them, of a fold rule this ADR does not own and cites ADR-0092 §6 for; that
+  is the case ADR-0070 §1's 2026-07-31 note puts on the amendment side by name ("a
+  citation, a cross-reference, or a mechanical consequence of a mechanism the ADR
+  does not own can be corrected in place, and a ruling cannot").
+
+  **The division §4 draws is unchanged and its footing is better.** The unchanged
+  entry folds and is present; the rewritten entry does not fold, installs beside its
+  predecessor, and the reading closes that predecessor's window — §4's own rewrite
+  path, "where the predecessor genuinely stopped being true and the install carries
+  the current text". The two are now separated by exactly the predicate §4's
+  converse-hazard paragraph already leans on — "identical text is the one case
+  neither can miss" — rather than by a similarity threshold that decided both cases
+  at once. ADR-0161 §5 states this and §8 applies ADR-0082 §1's test.
+
+  **This ADR's `Status` carries a leading `Partially superseded by` token**, so
+  under ADR-0082 §2 the record is this appended dated note alone and no qualifier is
+  written on the line. **Recorded now rather than at ADR-0161's ratification**, per
+  ADR-0082 §7: ADR-0070 §1's condition is that the amending ADR **exists**, and
+  ADR-0161 lands in this same change. Refs #1198, #1190.
 - Refs #112, #639, #729 (leg 7 fork 4), #631, #632.
 
 ## Context
