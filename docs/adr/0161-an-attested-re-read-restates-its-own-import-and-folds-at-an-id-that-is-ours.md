@@ -11,7 +11,8 @@
   condition, §4(c), the `ASK_USER` precedence and every other section of ADR-0159
   stand.
 - **This ADR amends** [ADR-0110](0110-a-covered-readings-absence-closes-a-window-and-a-clock-never-does.md)
-  §4 — the mechanical sentence it appends to its presence rule, not the rule (§8).
+  §4 — the mechanical sentence it appends to its presence rule, not the rule — and
+  ADR-0159 §6, whose degraded floor names no target class and delegates §4(a)'s (§8).
 - **No contract surface moves.** No Protocol gains a member, no signature changes,
   and `core/types.py` is untouched: this ADR moves one arm of one
   `MemoryPolicy` implementation. **Both review lenses are run anyway**, because it
@@ -251,13 +252,27 @@ unchanged and its contradiction is neither reopened nor resolved here.
 
 ### 4. The degraded path rules the same way, which is why the key is `agrees` and not the label
 
-> **Normative.** ADR-0159 §6's degraded behaviour is unchanged in form and now
-> covers this pairing: with no reconciler injected, or with one whose every answer
-> fails, the non-asserted arm rules `REINFORCE` onto a member eligible under clause
-> (ii) exactly as it does when a reconciler ran, and otherwise falls to the
-> confidence arm.
+> **Normative.** ADR-0159 §6's degraded floor is the arm above with the policy
+> supplying ADR-0121 §1's rung itself and every member otherwise unlabelled. With no
+> reconciler injected, or with one whose every answer fails, an agreeing member is
+> eligible under (i) where its source is `OBSERVED` or `INFERRED` — as §6 rules
+> today — and eligible under (ii) on §1's conditions, and the arm rules on the
+> result exactly as it does when a reconciler ran. Nothing else of §6 moves: it
+> degrades to ADR-0121 §1's certain predicate plus `ACCEPT`, and never below it.
 
-This is the reason clause (ii) is keyed on `agrees` rather than on a `RESTATES`
+**§6's target class is §4(a)'s, and this clause says so rather than assuming it.**
+§6's sentence — "rules `REINFORCE` onto a member that `agrees` under ADR-0121 §1" —
+does not restate a target class, and read in isolation it would admit an agreeing
+`EXTERNAL` member that §4(a) refuses on the reconciled path, so the degraded path
+would fold where the reconciled one would not. §6's own heading forecloses that
+reading: it degrades "to ADR-0121's floor, and never below it", and ADR-0121 §3's
+floor is precisely where an `EXTERNAL` target is refused. §6 therefore delegates its
+target class to §4(a), which is what makes moving §4(a) move both paths together —
+by clause (ii) and by nothing else. §6 is recorded as amended on that reading (§8),
+because a reader taking the sentence literally would read it more widely than it now
+holds.
+
+This is also the reason clause (ii) is keyed on `agrees` rather than on a `RESTATES`
 label. A member that agrees is labelled `RESTATES` unconditionally by §3's first
 rung whenever a reconciler ran, so on the reconciled path the two formulations pick
 the same member. They come apart in the degraded case, where there are no labels at
@@ -364,9 +379,20 @@ the pair lands together.
 ADR-0082 §1's test, applied to each: would a reader holding only the earlier ADR now
 act differently, or read one of its clauses more widely than it now holds?
 
-**A record is owed on two.**
+**A record is owed on three.**
 
 - **ADR-0159 §4 — partially superseded**, in the scope §1 names. Argued in §7.
+- **ADR-0159 §6 — amended**, and the record lands in the same dated note as the
+  supersession above, since ADR-0159's `Status` takes a leading token in this change
+  and ADR-0082 §2 puts an amendment record in the note alone. §6's clause names no
+  target class and says "a member that `agrees`"; a reader taking that literally
+  would fold onto an agreeing import the reconciled path refuses, and after this ADR
+  would fold across two integrations clause (ii) refuses. It reads more widely than
+  it now holds, which fails ADR-0082 §1's second limb. It is an **amendment** and
+  not a supersession because what §6 *decided* — that failure and absence degrade to
+  ADR-0121 §1's certain predicate plus `ACCEPT`, and never below it, as a ratified
+  deployment rather than a fallback — is untouched and is relied on in §4. The
+  target class it delegates is §4(a)'s, and §4(a) is superseded above.
 - **ADR-0110 §4 — amended**, and the record ADR-0159 owed and did not write is
   written here for both changes at once. §4's sentence "The unchanged entry, which
   must not take that path, does not — ADR-0092 §6 puts it on `REINFORCE`, which
@@ -431,8 +457,8 @@ otherwise.
 - **ADR-0040 §5.** Its "a conformance suite *is* the contract" is applied in §6
   above and reaches the same answer it has reached before. ADR-0159's own amendment
   of ADR-0040 §4 is untouched.
-- **ADR-0159 §5, §6, §8, §9, §11 and §12.** §5's exclusions and its last clause stay
-  true (§3). §6's floor is unchanged in form and named in §4. §8's contract surface
+- **ADR-0159 §5, §8, §9, §11 and §12.** §5's exclusions and its last clause stay
+  true (§3). §8's contract surface
   does not move and its conformance clause is applied rather than excepted (§6).
   §9 adds no metric key and this ADR adds none; the distribution shift §9 predicts is
   smaller by the attested re-read population, which is a change to a number and not
