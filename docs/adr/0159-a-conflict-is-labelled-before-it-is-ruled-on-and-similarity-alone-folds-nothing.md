@@ -24,12 +24,24 @@
   (ADR-0161 §1). Found by this ADR's own implementation lane (PR #1197) and filed as
   #1198.
 
+  **§6 is amended in the same change, and the record is this note** — ADR-0082 §2
+  puts an amendment record in the note alone once the `Status` line takes a leading
+  token. §6's clause names no target class and says the degraded arm "rules
+  `REINFORCE` onto a member that `agrees` under ADR-0121 §1"; read literally that
+  admits an agreeing `EXTERNAL` member §4(a) refuses on the reconciled path, so the
+  degraded path would fold where the reconciled one would not — below the floor §6's
+  own heading says it never goes below. §6 delegates its target class to §4(a), and
+  ADR-0161 §4 states that reading and moves both paths together by clause (ii) alone.
+  **What §6 decided is untouched:** failure and absence degrade to ADR-0121 §1's
+  certain predicate plus `ACCEPT`, as a ratified deployment rather than a fallback,
+  and never below it.
+
   **Nothing else moves.** §4(b) is untouched — `EXTERNAL` names no supersession
   target, its own purity condition binds unchanged, and an `EXTERNAL` member counts
   in both conditions as any other member does — as are §4(c), the `ASK_USER`
   precedence, the non-empty-set `ACCEPT` reason, §1's relations, §2's siting and
   invocation condition, §3's rungs and bounds, §5's retirement exclusion and its
-  last clause, §6's degraded floor, §8's whole contract surface including its
+  last clause, §6's degradation ruling, §8's whole contract surface including its
   conformance clause, §9's measures, §10's one-lane ruling, §11's record and §12's
   dispositions. ADR-0161 §8 applies ADR-0082 §1's test clause by clause and states
   why the scope is drawn here; its §7 argues why this is a supersession rather than
