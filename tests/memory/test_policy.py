@@ -8,7 +8,7 @@ remains here is what makes *this* policy the default one: its specific rules.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from memory_policy_contract import MemoryPolicyContract
@@ -1355,3 +1355,320 @@ async def test_the_agreement_arm_stays_behind_the_admissibility_floor() -> None:
     decision = await DefaultMemoryPolicy().decide(proposal, conflicts=[earlier])
 
     assert decision.kind is MemoryDecisionKind.ASK_USER
+
+
+# --- ADR-0161 §1: an attested re-read folds at an id that is ours ---
+#
+# ADR-0159 §4 kept `EXTERNAL` out of both target classes on ADR-0121 §3's argument,
+# whose premise — an import's id is the integrating system's idempotency key — is
+# false on this tree for a conforming producer: ADR-0092 §6 rules that the producer
+# **mints**, opaque to the source. So the next routine sync never addresses the id
+# the fold landed at, the futility never arises, and the fold ADR-0110 §4's presence
+# rule depends on is available again (#1198).
+#
+# ADR-0161 §6 owes a `DefaultMemoryPolicy` test per branch clause (ii) opens, and
+# says why they are owed *here* rather than end to end: four of them "are **not**
+# reached by a repeat-read fixture, so passing the end-to-end tests above is not
+# evidence that they hold". The conformance suite deliberately pins none of it
+# (ADR-0040 §5, ADR-0159 §8).
+
+#: The entry a connected calendar reports, rendered identically on every read. The
+#: fold turns on `agrees`, so the *bytes* are the fixture and the ids are not.
+_ENTRY = 'Calendar entry "standup", on 2026-08-03 from 09:00 to 09:15 (UTC).'
+
+#: A second connected instance reporting the very same text. `Attestation.reported_by`
+#: is "the only durable handle the record keeps on where it came from", and clause
+#: (ii) requires it to match — so this is the axis that separates one integration
+#: re-reporting itself from two integrations colliding (#1204).
+_OTHER_SOURCE = Attestation(reported_by="calendar:personal", reported_at=_WHEN)
+
+
+def _imported(
+    record_id: str,
+    *,
+    content: str = _ENTRY,
+    attestation: Attestation = _ATTESTED_BY,
+) -> MemoryRecord:
+    """An `EXTERNAL` belief in the shape a reader proposes and stores it.
+
+    `EXTERNAL` is in the `ATTESTED` band, which ADR-0092 §1 requires to carry an
+    attestation — so `reported_by` is always available where clause (ii) reaches,
+    and the comparison it makes is total.
+    """
+    return SemanticMemory(
+        id=record_id,
+        content=content,
+        fact=content,
+        provenance=Provenance(
+            source=MemorySource.EXTERNAL,
+            confidence=1.0,
+            last_updated=_WHEN,
+            attestation=attestation,
+        ),
+    )
+
+
+async def test_an_attested_re_read_folds_onto_the_record_it_already_reported() -> None:
+    """ADR-0161 §1 clause (ii), and the whole reason for it (#1198).
+
+    A scheduled read re-proposes an unchanged entry at a **freshly minted** id
+    (ADR-0092 §6). Without this clause the arm finds no `OBSERVED`/`INFERRED`
+    member, falls to ADR-0159 §4(c) and rules `ACCEPT`, which installs at that new
+    id — so the predecessor is *absent* from a reading that in fact reported it, and
+    ADR-0110 §5's coverage close retires it. Every scheduled read then retires its
+    entire previous set and re-installs it at new ids.
+    """
+    stored = _imported("stored")
+
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(_imported("freshly-minted")), conflicts=[stored]
+    )
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "stored"
+
+
+async def test_an_eligible_re_read_is_named_ahead_of_a_better_ranked_restatement() -> None:
+    """ADR-0161 §1's precedence clause, which is a decision and not a tie-break.
+
+    Without it a set holding both the proposal's own identical predecessor and a
+    better-ranked `OBSERVED` member labelled `RESTATES` would fold onto the
+    observation, leave the predecessor absent, and close it — #1198's failure
+    reached by retrieval order instead of by source class. The observation is placed
+    **first** here, so a scan that took the first eligible member by rank fails.
+    """
+    observed = _semantic("better-ranked", content=_ENTRY)
+    stored = _imported("stored")
+
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(_imported("freshly-minted")),
+        conflicts=[observed, stored],
+        relations={"better-ranked": ConflictRelation.RESTATES},
+    )
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "stored"
+
+
+async def test_a_contradicting_member_does_not_block_an_attested_re_read() -> None:
+    """ADR-0161 §1 lifts ADR-0159 §4(a)'s purity condition from clause (ii) alone.
+
+    Not an exemption from honesty — an application of it. Work both branches: the
+    fold retires nothing (ADR-0045 §4), installs nothing new, and lands
+    byte-identical content on a record that already carries it, so the contradicting
+    member stays live. *Refusing* installs a third live record saying exactly what
+    the target says, leaves the same member live, and — under a covered reading —
+    leaves the target absent for ADR-0110 §5's close to retire. Blocking makes the
+    store less honest on the same set.
+    """
+    stored = _imported("stored")
+    disputed = _semantic("disputed", source=MemorySource.INFERRED)
+
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(_imported("freshly-minted")),
+        conflicts=[stored, disputed],
+        relations={"disputed": ConflictRelation.CONTRADICTS},
+    )
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "stored"
+
+
+async def test_a_re_read_from_a_different_integration_does_not_fold() -> None:
+    """Clause (ii)'s `reported_by` conjunct, from its failing side (ADR-0161 §1).
+
+    Two integrations reporting an entry that renders identically land as two
+    records, each present in its own reader's reading, and nothing alternates.
+    Keying on `reported_by` also puts presence and absence on the same handle —
+    ADR-0110 §3's condition 1 already selects absence candidates by it. Whether the
+    restriction should ever be lifted is #1204's; this clause decides the case, and
+    decides it the conservative way.
+    """
+    theirs = _imported("theirs", attestation=_OTHER_SOURCE)
+
+    decision = await DefaultMemoryPolicy().decide(_proposal(_imported("ours")), conflicts=[theirs])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert decision.target_id is None
+
+
+async def test_a_rewritten_entry_from_the_same_integration_does_not_fold() -> None:
+    """Clause (ii)'s `agrees` conjunct, from its failing side (ADR-0161 §1, §5).
+
+    ADR-0110 §4's rewrite path, and the division ADR-0161 §5 turns on: "standup
+    9am" becoming "sprint planning, Thursday, room 4" does **not** agree, so it
+    installs beside its predecessor, whose window the reading closes — "the
+    predecessor genuinely stopped being true and the install carries the current
+    text."
+
+    **This is the case an implementation keying clause (ii) on `reported_by` alone
+    passes every other test with**, which is why ADR-0161 §6 names it and why no
+    repeat-read fixture reaches it: such an implementation would fold a rewritten
+    entry onto the predecessor it replaces, silently keeping the old text.
+    """
+    stored = _imported("stored")
+    rewritten = _imported(
+        "freshly-minted",
+        content='Calendar entry "sprint planning", on 2026-08-06 from 14:00 to 15:00 (UTC).',
+    )
+
+    decision = await DefaultMemoryPolicy().decide(_proposal(rewritten), conflicts=[stored])
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+    assert decision.target_id is None
+
+
+async def test_the_model_rung_never_reaches_an_attested_target() -> None:
+    """Clause (ii) is the certain rung and nothing above it (ADR-0161 §1).
+
+    ADR-0121 §3's surviving half, read in the *agreement* direction: a model-judged
+    statement is not a claim an observation is entitled to make against the system
+    that reported the fact, and that is as true of "these say the same thing" as of
+    "these cannot both be true". So a `RESTATES` label on an `EXTERNAL` member buys
+    nothing — clause (i) requires the target to be `OBSERVED`/`INFERRED`, and clause
+    (ii) requires the records to actually agree.
+    """
+    stored = _imported("stored")
+    rewritten = _imported("freshly-minted", content="something the source now says instead")
+
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(rewritten),
+        conflicts=[stored],
+        relations={"stored": ConflictRelation.RESTATES},
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+async def test_an_external_member_is_still_no_supersession_target() -> None:
+    """ADR-0161 §1: §4(b) is untouched, whatever the proposal's source.
+
+    A supersession onto an import is what ADR-0121 §3's surviving half refuses in
+    the contradiction direction, and clause (ii) reaches only the agreement one.
+    """
+    stored = _imported("stored")
+
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(_imported("freshly-minted", content="a different claim entirely")),
+        conflicts=[stored],
+        relations={"stored": ConflictRelation.CONTRADICTS},
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+# --- ADR-0161 §4: the degraded path names the same members ---
+#
+# §6 states no target class at all — "rules `REINFORCE` onto a member that `agrees`
+# under ADR-0121 §1" — so read as its own text a deployment with no provider would
+# fold where one with a provider does not. ADR-0161 §4 supplies the class and states
+# it as **parity**: no ruling turns on whether a provider was reachable, because a
+# presence rule that held only where one was configured would fail silently in the
+# direction ADR-0117 §1 names. Every case below is run in **both** states ADR-0159
+# §8 distinguishes — `None` says nothing determined relations at all, `{}` says
+# something did and labelled nothing — which must rule identically.
+
+_UNLABELLED: Final = pytest.mark.parametrize(
+    "relations", [None, {}], ids=["no-reconciler", "reconciler-labelled-nothing"]
+)
+
+
+@_UNLABELLED
+async def test_the_degraded_path_folds_an_attested_re_read(
+    relations: dict[str, ConflictRelation] | None,
+) -> None:
+    """Clause (ii) names no label, so it reads identically with none (ADR-0161 §4)."""
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(_imported("freshly-minted")),
+        conflicts=[_imported("stored")],
+        relations=relations,
+    )
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "stored"
+
+
+@_UNLABELLED
+async def test_the_degraded_path_refuses_a_cross_integration_fold(
+    relations: dict[str, ConflictRelation] | None,
+) -> None:
+    """A ruling §6's unqualified "any agreeing member" gets wrong (ADR-0161 §8).
+
+    This is one of the two rulings that change against §6's own text, which is why
+    §6 is *partially superseded* rather than amended: an implementer building from
+    it folds here, and after ADR-0161 rules `ACCEPT`.
+    """
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(_imported("ours")),
+        conflicts=[_imported("theirs", attestation=_OTHER_SOURCE)],
+        relations=relations,
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+@_UNLABELLED
+@pytest.mark.parametrize(
+    "source", [MemorySource.OBSERVED, MemorySource.INFERRED], ids=lambda s: str(s.value)
+)
+async def test_the_degraded_path_refuses_a_derived_proposal_onto_an_import(
+    relations: dict[str, ConflictRelation] | None, source: MemorySource
+) -> None:
+    """The second ruling that changes against §6's text (ADR-0161 §8).
+
+    Eligible under neither limb: (i) requires the **target** to be derived, and (ii)
+    requires the **proposal** to be external. That outcome is ADR-0159 §4(a)'s
+    exclusion holding exactly as ratified — what is new is that ADR-0161 §1 is the
+    first place §6's target class is written down, so it is §1 an implementer now
+    builds from.
+
+    Confidence is above `min_confidence`, so a fall to the confidence arm is an
+    `ACCEPT` and not a `STORE_TEMPORARY` — otherwise this case would be measuring
+    the wrong arm.
+    """
+    proposal = _proposal(_semantic("derived", content=_ENTRY, source=source, confidence=0.9))
+
+    decision = await DefaultMemoryPolicy().decide(
+        proposal, conflicts=[_imported("stored")], relations=relations
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+@_UNLABELLED
+async def test_the_degraded_path_refuses_a_rewritten_entry(
+    relations: dict[str, ConflictRelation] | None,
+) -> None:
+    """Clause (ii)'s conjunction, pinned on the path that states limb (i)'s predicate.
+
+    ADR-0161 §6 names this case in both matrices for a reason its own text gives: an
+    implementation reading `reported_by` as the whole of (ii) "satisfies every other
+    case in this matrix and still folds a rewritten entry, and the reconciled-path
+    matrix above does not reach the degraded path at all".
+    """
+    rewritten = _imported("freshly-minted", content="the source now reports something else")
+
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(rewritten), conflicts=[_imported("stored")], relations=relations
+    )
+
+    assert decision.kind is MemoryDecisionKind.ACCEPT
+
+
+@_UNLABELLED
+async def test_the_degraded_path_still_folds_an_agreeing_derived_member(
+    relations: dict[str, ConflictRelation] | None,
+) -> None:
+    """What ADR-0159 §6 *decided* is untouched, and ADR-0161 §8 says so.
+
+    "An agreeing `OBSERVED` or `INFERRED` member folds in the degraded case exactly
+    as it does today." Only the target set moved, and it moved by clause (ii) alone.
+    """
+    decision = await DefaultMemoryPolicy().decide(
+        _proposal(_semantic("new", content="I prefer window seats")),
+        conflicts=[_semantic("identical", content="I  PREFER   Window Seats ")],
+        relations=relations,
+    )
+
+    assert decision.kind is MemoryDecisionKind.REINFORCE
+    assert decision.target_id == "identical"
