@@ -116,11 +116,12 @@ pairing whose fold is decided with no model at all.
 > of them where several qualify — ahead of any member eligible only under (i).
 
 > **Normative.** ADR-0159 §4(b) is untouched. `EXTERNAL` names no supersession
-> target, whatever the proposal's source, and an `EXTERNAL` member counts in both
-> purity conditions exactly as any other member does: one labelled `CONTRADICTS`
-> blocks (a), and one labelled `RESTATES` blocks (b). ADR-0159 §4(c), the `ASK_USER`
-> precedence, and the clause distinguishing the non-empty-set `ACCEPT` are
-> unchanged.
+> target, whatever the proposal's source, and an `EXTERNAL` member counts in each
+> purity condition exactly as any other member does — a member labelled `RESTATES`
+> blocks (b), and a member labelled `CONTRADICTS` blocks (a) to the extent the
+> purity clause above leaves that condition binding, which is a target eligible only
+> under (i). ADR-0159 §4(c), the `ASK_USER` precedence, and the clause
+> distinguishing the non-empty-set `ACCEPT` are unchanged.
 
 > **Normative.** ADR-0159 §4's statement of what the arm reads is extended, for
 > clause (ii) alone, by `kind` and `content` — through ADR-0121 §1's predicate — and
@@ -296,17 +297,28 @@ one.
 > pairing. ADR-0159 §8's last clause is unchanged and is not excepted: the suite
 > asserts no relation-to-ruling mapping, and it asserts no source-class-to-ruling
 > mapping either. The pairing is pinned as a `DefaultMemoryPolicy` test, and the
-> property it exists for is pinned end to end in
+> property it exists for stays pinned end to end in
 > `tests/memory/test_absence_reconciliation.py` and
-> `tests/readers/test_calendar_absence_end_to_end.py`.
+> `tests/readers/test_calendar_absence_end_to_end.py`, which pass on `main` today
+> and must pass again when ADR-0159's implementation lands.
 
-> **Normative.** The `DefaultMemoryPolicy` tests cover each branch §1's clauses
-> introduce, and three of them are not reached by a repeat-read fixture: a set
-> holding **both** an eligible (ii) member and a better-ranked (i) member, which
-> must rule `REINFORCE` onto the (ii) member; a set holding an eligible (ii) member
-> **and** a member labelled `CONTRADICTS`, which must still rule `REINFORCE`; and a
-> set whose only `EXTERNAL` member agrees but carries a **different**
-> `reported_by`, which must fall to (c).
+> **Normative.** ADR-0159's implementing lane owes a `DefaultMemoryPolicy` test per
+> branch §1's clauses introduce, landing with the implementation and not after it.
+> Three of them are **not** reached by a repeat-read fixture, so passing the
+> end-to-end tests above is not evidence that they hold: a set holding **both** an
+> eligible (ii) member and a better-ranked (i) member, which must rule `REINFORCE`
+> onto the (ii) member; a set holding an eligible (ii) member **and** a member
+> labelled `CONTRADICTS`, which must still rule `REINFORCE`; and a set whose only
+> `EXTERNAL` member agrees but carries a **different** `reported_by`, which must
+> fall to (c).
+
+**This ADR carries no test of its own, and that is the point of the clause above.**
+It is prose, ratified ahead of the implementation under golden rule 5, so every
+branch §1 opens is unpinned until PR #1197 lands. An implementation that ignored
+`reported_by`, or kept the contradiction block over (ii), or took the first eligible
+member by rank, would pass the two end-to-end suites named above and violate §1 —
+which is exactly why the branches are enumerated here rather than left to whoever
+writes them.
 
 ADR-0040 §5's rule decides this and decides it against an exception: "a conformance
 suite *is* the contract", so asserting a policy's ladder in it "would make one
