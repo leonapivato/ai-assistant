@@ -553,13 +553,21 @@ class FakeMemoryWriter:
             return own
         try:
             determined = await self._reconciler.reconcile(proposal, conflicts)
+            # **Read inside the guard, not after it.** A reconciler that *returns*
+            # something unusable — ``None``, a non-mapping, a mapping whose lookup
+            # raises — is as non-conforming as one that raises, and reading it
+            # outside would let it refuse the ingest through a ``TypeError``
+            # instead of degrading. ADR-0159 §6 admits no such route: "no ingest is
+            # refused or ruled differently because a reconciler was unavailable,
+            # other than by the relations it therefore does not hold."
+            labelled = {
+                conflict.id: determined[conflict.id]
+                for conflict in conflicts
+                if conflict.id not in own and conflict.id in determined
+            }
         except Exception:
             return own
-        return {
-            conflict.id: determined[conflict.id]
-            for conflict in conflicts
-            if conflict.id not in own and conflict.id in determined
-        } | own
+        return labelled | own
 
     async def _require_resolvable_evidence(self, record: MemoryRecord) -> None:
         """Refuse a ``DERIVED`` proposal citing a record the store does not hold.
