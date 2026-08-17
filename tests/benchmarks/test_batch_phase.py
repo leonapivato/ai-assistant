@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from benchmarks.memory.batch import (
+    _ID_PREFIX_CHARS,
     ITEM_ID_PATTERN,
     JUDGE_ITEM_SUFFIX,
     PollPolicy,
@@ -828,6 +829,27 @@ class TestTheMappingBackToTheQuestion:
         assert len(by_id) == len(pairs)
         # And each id names back the exact pair, not merely some pair.
         assert all(by_id[item_id_for(*pair)] == pair for pair in pairs)
+
+    def test_a_pair_cannot_be_shifted_across_the_boundary_into_another_pairs_id(
+        self,
+    ) -> None:
+        """A separator only disambiguates while the payload cannot contain it.
+
+        Hashing the two halves joined on a ``NUL`` made the encoding ambiguous for any
+        key holding one — and a corpus key is a JSON string, which may. The two pairs
+        below sanitise and truncate to the same readable halves *and* used to hash the
+        same bytes, so they minted one id between them; `submit` refuses a batch on a
+        duplicate `item_id` (ADR-0143 §3), which would have thrown away the retrieval
+        phase that preceded it.
+        """
+        left, right = "a" * _ID_PREFIX_CHARS, "b" * _ID_PREFIX_CHARS
+
+        shifted = item_id_for(f"{left}\x00{right}", right)
+        unshifted = item_id_for(left, f"{right}\x00{right}")
+
+        assert shifted != unshifted
+        # The same shift without a NUL anywhere, which the old encoding did survive.
+        assert item_id_for("ab", "c") != item_id_for("a", "bc")
 
     def test_a_judge_id_strips_back_to_the_answer_id_it_was_built_from(self) -> None:
         pairs = _corpus_population()
