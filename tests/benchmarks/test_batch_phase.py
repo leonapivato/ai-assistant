@@ -23,11 +23,18 @@ or a credential.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import TYPE_CHECKING, Any
 
 import pytest
-from benchmarks.memory.batch import JUDGE_ITEM_SUFFIX, PollPolicy, item_id_for
+from benchmarks.memory.batch import (
+    ITEM_ID_PATTERN,
+    JUDGE_ITEM_SUFFIX,
+    PollPolicy,
+    item_id_for,
+)
 from benchmarks.memory.cases import BenchCase, BenchQuestion, BenchSession, BenchTurn
+from benchmarks.memory.corpora.longmemeval import ABSTENTION_SUFFIX
 from benchmarks.memory.corpora.provenance import LOCOMO
 from benchmarks.memory.grade import ExactGrader, ModelGrader, Verdict
 from benchmarks.memory.records import QuestionRecord, RunMode, RunPhase, read_jsonl
@@ -696,6 +703,143 @@ class TestTheWaitIsABoundedOne:
         # `interval=0` polls as fast as the provider answers, and `timeout=0` gives up
         # after one poll — both meaningful things to ask for.
         assert PollPolicy(interval=0.0, timeout=0.0).timeout == 0.0
+
+
+def _corpus_id_shapes() -> list[tuple[str, str]]:
+    """One named ``(case_key, question_id)`` pair per shape the two loaders mint.
+
+    Built from the loaders' own id rules rather than quoted out of the corpora, which
+    are a fetched build input and are not in the tree: `locomo._question` derives
+    ``f"{sample_id}#{ordinal}"``, and `longmemeval._case` sets ``case_key`` to the
+    corpus's own ``question_id``, whose abstention variant carries
+    :data:`ABSTENTION_SUFFIX`.
+    """
+    return [
+        # LoCoMo. The `#` is why sanitising was ever needed here at all.
+        ("conv-26", "conv-26#0"),
+        ("conv-26", "conv-26#198"),
+        # LongMemEval, where both halves are the corpus's own id.
+        ("7bdbc2eb", "7bdbc2eb"),
+        (f"7bdbc2eb{ABSTENTION_SUFFIX}", f"7bdbc2eb{ABSTENTION_SUFFIX}"),
+        # A key longer than the whole ceiling — the shape that took the answer id to 66
+        # characters and its judge id to 72, over a limit of 64.
+        ("gpt4_" * 20, f"gpt4_{'x' * 90}"),
+    ]
+
+
+def _corpus_population() -> list[tuple[str, str]]:
+    """Every pair a full run of both corpora submits, by those same id rules.
+
+    Ten LoCoMo dialogues of ~199 questions and LongMemEval's 500 single-question cases
+    with their abstention variants — the whole id space one scored run puts through
+    :func:`item_id_for`, so that injectivity is asserted over a population rather than
+    over a handful of hand-picked pairs.
+    """
+    locomo = [
+        (f"conv-{sample}", f"conv-{sample}#{ordinal}")
+        for sample in range(1, 11)
+        for ordinal in range(200)
+    ]
+    longmemeval = [
+        (f"{stem}{suffix}", f"{stem}{suffix}")
+        for index in range(500)
+        for stem in (sha256(str(index).encode()).hexdigest()[:8],)
+        for suffix in ("", ABSTENTION_SUFFIX)
+    ]
+    return locomo + longmemeval
+
+
+class TestTheVendorAcceptsEveryIdTheHarnessSubmits:
+    """``custom_id`` is a vendor-validated field and nothing downstream repairs it.
+
+    The first live ``--phase batch`` submission was refused whole —
+    ``requests.0.custom_id: String should match pattern '^[a-zA-Z0-9_-]{1,64}$'`` — on
+    a dot :func:`item_id_for` put between its two halves, on the same dot in the
+    ``.judge`` suffix, and on a length that could reach 66 before that suffix pushed it
+    to 72. Nothing between here and the wire can repair any of it: ADR-0143 §3 has the
+    seam "never mint, rewrite or normalise an ``item_id``" and §9 carries it
+    byte-for-byte, so conformance is this module's obligation and these hold it.
+    """
+
+    def test_the_judge_suffix_is_itself_made_of_admitted_characters(self) -> None:
+        # The regression that cost the smoke run, stated directly: the suffix is
+        # appended *after* every sanitising step there is, so `.judge` was
+        # unsubmittable however well the id in front of it conformed.
+        assert ITEM_ID_PATTERN.match(JUDGE_ITEM_SUFFIX)
+
+    @pytest.mark.parametrize(("case_key", "question_id"), _corpus_id_shapes())
+    def test_a_corpus_id_becomes_one_the_vendor_admits(
+        self, case_key: str, question_id: str
+    ) -> None:
+        assert ITEM_ID_PATTERN.match(item_id_for(case_key, question_id))
+
+    @pytest.mark.parametrize(("case_key", "question_id"), _corpus_id_shapes())
+    def test_the_judge_item_of_a_corpus_id_admits_too(
+        self, case_key: str, question_id: str
+    ) -> None:
+        # The judge id is the longer of the two and is the one the ceiling really
+        # binds, so an answer id that fits is not on its own evidence that the run's
+        # second batch will submit.
+        minted = f"{item_id_for(case_key, question_id)}{JUDGE_ITEM_SUFFIX}"
+
+        assert ITEM_ID_PATTERN.match(minted)
+
+    @pytest.mark.parametrize(
+        "hostile",
+        [
+            "a.b",
+            "a/b",
+            "conv-26#0",
+            "a b",
+            "a:b",
+            "a+b",
+            "caf\u00e9",
+            "\uff12",
+            "\u200bzero-width",
+            "x" * 500,
+        ],
+    )
+    def test_no_key_shape_survives_into_an_id_the_vendor_refuses(self, hostile: str) -> None:
+        # The last two are the ones a character class written as `str.isalnum()` would
+        # have let through: `"\u00e9"` and a full-width digit are both alphanumeric to
+        # Python and both outside an ASCII pattern.
+        for case_key, question_id in ((hostile, hostile), (hostile, "q0"), ("case", hostile)):
+            assert ITEM_ID_PATTERN.match(item_id_for(case_key, question_id))
+            assert ITEM_ID_PATTERN.match(f"{item_id_for(case_key, question_id)}{JUDGE_ITEM_SUFFIX}")
+
+
+class TestTheMappingBackToTheQuestion:
+    """An id is submitted so an outcome can be matched to the question it answers.
+
+    ADR-0143 §4: "a caller matches an outcome to its request by ``item_id`` and never
+    by position". The mapping stays harness-side — the run keys everything off
+    :attr:`~benchmarks.memory.batch.PreparedQuestion.item_id` and denormalises it onto
+    the row as ``batch_item_id`` — so what has to hold is that the id determines the
+    pair it was minted from, across the whole population a run submits.
+    """
+
+    def test_every_id_a_run_submits_recovers_its_own_question(self) -> None:
+        pairs = _corpus_population()
+
+        by_id = {item_id_for(*pair): pair for pair in pairs}
+
+        # Injective, because a collision would graft one case's answer onto another
+        # case's record without anything failing.
+        assert len(by_id) == len(pairs)
+        # And each id names back the exact pair, not merely some pair.
+        assert all(by_id[item_id_for(*pair)] == pair for pair in pairs)
+
+    def test_a_judge_id_strips_back_to_the_answer_id_it_was_built_from(self) -> None:
+        pairs = _corpus_population()
+        answers = [item_id_for(*pair) for pair in pairs]
+
+        stripped = [f"{one}{JUDGE_ITEM_SUFFIX}".removesuffix(JUDGE_ITEM_SUFFIX) for one in answers]
+
+        assert stripped == answers
+        # Stripping is unambiguous only while no answer id ends in the suffix itself:
+        # one that did would be indistinguishable from some other question's judge item
+        # in a results file, which carries the id and nothing else.
+        assert not any(one.endswith(JUDGE_ITEM_SUFFIX) for one in answers)
 
 
 class TestItemIds:
