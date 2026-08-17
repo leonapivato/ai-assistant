@@ -4,15 +4,15 @@
 - Date: 2026-08-16
 - **This ADR partially supersedes**
   [ADR-0159](0159-a-conflict-is-labelled-before-it-is-ruled-on-and-similarity-alone-folds-nothing.md)
-  §4, in the scope §1 names and in no other: §4(a) whole — its target class, its
-  target selection and the reach of its `CONTRADICTS` purity condition — and the
-  paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a
-  proposal whose own `provenance.source` is `EXTERNAL`. §4(b) and its purity
-  condition, §4(c), the `ASK_USER` precedence and every other section of ADR-0159
+  §4 and §6, in the scope §1 names and in no other: §4(a) whole — its target class,
+  its target selection and the reach of its `CONTRADICTS` purity condition — the
+  paragraph excluding `EXTERNAL` from both target classes, and the set of members
+  §6's degraded floor may name as a target, each only as it reaches a proposal whose
+  own `provenance.source` is `EXTERNAL`. §4(b) and its purity condition, §4(c), the
+  `ASK_USER` precedence, §6's degradation ruling and every other section of ADR-0159
   stand.
 - **This ADR amends** [ADR-0110](0110-a-covered-readings-absence-closes-a-window-and-a-clock-never-does.md)
-  §4 — the mechanical sentence it appends to its presence rule, not the rule — and
-  ADR-0159 §6, whose degraded floor names no target class and delegates §4(a)'s (§8).
+  §4 — the mechanical sentence it appends to its presence rule, not the rule (§8).
 - **No contract surface moves.** No Protocol gains a member, no signature changes,
   and `core/types.py` is untouched: this ADR moves one arm of one
   `MemoryPolicy` implementation. **Both review lenses are run anyway**, because it
@@ -268,9 +268,10 @@ would fold where the reconciled one would not. §6's own heading forecloses that
 reading: it degrades "to ADR-0121's floor, and never below it", and ADR-0121 §3's
 floor is precisely where an `EXTERNAL` target is refused. §6 therefore delegates its
 target class to §4(a), which is what makes moving §4(a) move both paths together —
-by clause (ii) and by nothing else. §6 is recorded as amended on that reading (§8),
-because a reader taking the sentence literally would read it more widely than it now
-holds.
+by clause (ii) and by nothing else. §6 is **partially superseded** in that scope rather
+than amended (§8): the delegation is why the scope is narrow, not a reason the
+record is lighter, because §6's text as written names no class and an implementer
+building only from it produces a different ruling after this ADR than before.
 
 This is also the reason clause (ii) is keyed on `agrees` rather than on a `RESTATES`
 label. A member that agrees is labelled `RESTATES` unconditionally by §3's first
@@ -368,9 +369,10 @@ made* is a supersession however it is labelled — ADR-0082 §1 says exactly tha
 ('**The test controls, not the label**')." §4's clause is normative, explicit, and
 argued; a mistaken ground does not make a ruling less of a ruling.
 
-It is **partial** because one clause of one section moves. ADR-0159's `Status` is a
-plain `Accepted`, so it takes the leading-token form and a dated note (ADR-0070 §4,
-ADR-0082 §2), and both land in this change — ADR-0070 §1's condition is that the
+It is **partial** because one clause of §4 and the target set of §6 move, and
+nothing else of either section does. ADR-0159's `Status` is a plain `Accepted`, so
+it takes the leading-token form and a dated note (ADR-0070 §4, ADR-0082 §2), and
+both land in this change — ADR-0070 §1's condition is that the
 superseding ADR **exists**, and ADR-0082 §7's atomic-pair reading is satisfied because
 the pair lands together.
 
@@ -382,17 +384,26 @@ act differently, or read one of its clauses more widely than it now holds?
 **A record is owed on three.**
 
 - **ADR-0159 §4 — partially superseded**, in the scope §1 names. Argued in §7.
-- **ADR-0159 §6 — amended**, and the record lands in the same dated note as the
-  supersession above, since ADR-0159's `Status` takes a leading token in this change
-  and ADR-0082 §2 puts an amendment record in the note alone. §6's clause names no
-  target class and says "a member that `agrees`"; a reader taking that literally
-  would fold onto an agreeing import the reconciled path refuses, and after this ADR
-  would fold across two integrations clause (ii) refuses. It reads more widely than
-  it now holds, which fails ADR-0082 §1's second limb. It is an **amendment** and
-  not a supersession because what §6 *decided* — that failure and absence degrade to
-  ADR-0121 §1's certain predicate plus `ACCEPT`, and never below it, as a ratified
-  deployment rather than a fallback — is untouched and is relied on in §4. The
-  target class it delegates is §4(a)'s, and §4(a) is superseded above.
+- **ADR-0159 §6 — partially superseded**, in the scope of the members its degraded
+  floor may name as a target. §6's normative clause is "rules `REINFORCE` onto a
+  member that `agrees` under ADR-0121 §1", with no target class stated. Apply
+  ADR-0070 §1's test to that text and not to a reading of it: an implementer
+  building only from §6 folds onto an agreeing `EXTERNAL` member from another
+  integration, and after this ADR rules `ACCEPT` on the same input. A changed ruling
+  is a change to what was decided, so it takes a superseding ADR however narrow the
+  scope, and ADR-0082 §1 says the test controls and not the label.
+
+  **The delegation argument is why the scope is narrow, and it is not a reason to
+  record less.** §4 above states the reading §6's own heading requires — it degrades
+  "to ADR-0121's floor, and never below it", and ADR-0121 §3's floor is where an
+  `EXTERNAL` target is refused, so a literal §6 would already have folded onto
+  imports that ADR-0159 §4 refuses on the reconciled path. That inconsistency
+  predates this ADR and is not a licence to leave a changed ruling unrecorded. What
+  §6 **decided** is untouched and is relied on in §4: failure and absence degrade to
+  ADR-0121 §1's certain predicate plus `ACCEPT`, as a ratified deployment rather
+  than a fallback, and never below it. Only the target set moves, and it moves by
+  clause (ii) and by nothing else — an agreeing `OBSERVED` or `INFERRED` member
+  folds in the degraded case exactly as it does today.
 - **ADR-0110 §4 — amended**, and the record ADR-0159 owed and did not write is
   written here for both changes at once. §4's sentence "The unchanged entry, which
   must not take that path, does not — ADR-0092 §6 puts it on `REINFORCE`, which

@@ -1,6 +1,6 @@
 # 159. A conflict is labelled before it is ruled on, and similarity alone folds nothing
 
-- Status: Partially superseded by ADR-0161 (§4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`)
+- Status: Partially superseded by ADR-0161 (§4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — the paragraph excluding `EXTERNAL` from both target classes, and the members §6's degraded floor may name as a target, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`)
 - Date: 2026-08-16
 - **Partially superseded: 2026-08-16 by
   [ADR-0161](0161-an-attested-re-read-restates-its-own-import-and-folds-at-an-id-that-is-ours.md),
@@ -24,17 +24,19 @@
   (ADR-0161 §1). Found by this ADR's own implementation lane (PR #1197) and filed as
   #1198.
 
-  **§6 is amended in the same change, and the record is this note** — ADR-0082 §2
-  puts an amendment record in the note alone once the `Status` line takes a leading
-  token. §6's clause names no target class and says the degraded arm "rules
-  `REINFORCE` onto a member that `agrees` under ADR-0121 §1"; read literally that
-  admits an agreeing `EXTERNAL` member §4(a) refuses on the reconciled path, so the
-  degraded path would fold where the reconciled one would not — below the floor §6's
-  own heading says it never goes below. §6 delegates its target class to §4(a), and
-  ADR-0161 §4 states that reading and moves both paths together by clause (ii) alone.
+  **§6 moves in the same scope, and it moves as a supersession rather than an
+  amendment.** §6's normative clause is "rules `REINFORCE` onto a member that
+  `agrees` under ADR-0121 §1", and it states no target class; read as its own text
+  rather than as a pointer to §4(a), it admits an agreeing `EXTERNAL` member that
+  §4(a) refuses on the reconciled path, so the degraded path would fold where the
+  reconciled one would not — below the floor §6's own heading says it never goes
+  below. Whichever reading a reader takes, the ruling for one input changes under
+  ADR-0161, and ADR-0070 §1 makes that a supersession however narrow the scope.
   **What §6 decided is untouched:** failure and absence degrade to ADR-0121 §1's
   certain predicate plus `ACCEPT`, as a ratified deployment rather than a fallback,
-  and never below it.
+  and never below it — and an agreeing `OBSERVED` or `INFERRED` member folds in the
+  degraded case exactly as it does today. Only the target set moves, by clause (ii)
+  and by nothing else. ADR-0161 §4 and §8 carry the reasoning.
 
   **Nothing else moves.** §4(b) is untouched — `EXTERNAL` names no supersession
   target, its own purity condition binds unchanged, and an `EXTERNAL` member counts
