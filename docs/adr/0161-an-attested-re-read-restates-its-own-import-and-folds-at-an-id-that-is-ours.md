@@ -254,13 +254,19 @@ unchanged and its contradiction is neither reopened nor resolved here.
 
 ### 4. The degraded path rules the same way, which is why the key is `agrees` and not the label
 
-> **Normative.** ADR-0159 §6's degraded floor is the arm above with the policy
-> supplying ADR-0121 §1's rung itself and every member otherwise unlabelled. With no
-> reconciler injected, or with one whose every answer fails, an agreeing member is
-> eligible under (i) where its source is `OBSERVED` or `INFERRED` — as §6 rules
-> today — and eligible under (ii) on §1's conditions, and the arm rules on the
-> result exactly as it does when a reconciler ran. Nothing else of §6 moves: it
-> degrades to ADR-0121 §1's certain predicate plus `ACCEPT`, and never below it.
+> **Normative.** With no reconciler injected, or with one whose every answer fails,
+> every member is unlabelled — ADR-0159 §8's two states alike — so ADR-0159 §6's
+> degraded floor is the arm above read with limb (i)'s label condition replaced by
+> the predicate that would have produced the label: the policy computes ADR-0121
+> §1's `agrees` itself, exactly as ADR-0159 §3's first rung does and with no model
+> call, and a member is eligible under (i) when it **agrees** with the proposed
+> record and its `provenance.source` is `OBSERVED` or `INFERRED` — as §6 rules
+> today. Limb (ii) names no label and is read exactly as §1 states it. Every other
+> clause of §1 is read as written: no member is labelled `CONTRADICTS`, so ADR-0159
+> §4(a)'s purity condition is satisfied for a target eligible only under (i), and the
+> arm rules on the result exactly as it does when a reconciler ran. Nothing else of
+> §6 moves: it degrades to ADR-0121 §1's certain predicate plus `ACCEPT`, and never
+> below it.
 
 **§6 states no target class, and this ADR supplies one rather than inferring it.**
 §6's sentence — "rules `REINFORCE` onto a member that `agrees` under ADR-0121 §1" —
