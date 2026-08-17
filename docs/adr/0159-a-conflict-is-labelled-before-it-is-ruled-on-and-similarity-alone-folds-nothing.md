@@ -1,6 +1,6 @@
 # 159. A conflict is labelled before it is ruled on, and similarity alone folds nothing
 
-- Status: Partially superseded by ADR-0161 (§4(a)'s target class and its target selection, and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`)
+- Status: Partially superseded by ADR-0161 (§4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`)
 - Date: 2026-08-16
 - **Partially superseded: 2026-08-16 by
   [ADR-0161](0161-an-attested-re-read-restates-its-own-import-and-folds-at-an-id-that-is-ours.md),
@@ -16,12 +16,17 @@
   ruled `ACCEPT`, and left its own predecessor absent from a reading that reported
   it, so the coverage close retired it. ADR-0161 §1 replaces §4(a) with an
   eligibility clause admitting an `EXTERNAL` target where the proposal is itself
-  `EXTERNAL` and the two agree under ADR-0121 §1, and gives that member precedence
-  over any other eligible member. Found by this ADR's own implementation lane
-  (PR #1197) and filed as #1198.
+  `EXTERNAL`, the two agree under ADR-0121 §1, and both name the same
+  `Attestation.reported_by`. It gives that member precedence over any other eligible
+  member, and lifts §4(a)'s `CONTRADICTS` purity condition from it alone — on this
+  pairing the block leaves the contradiction as live as the fold does, and
+  additionally duplicates a fact and retires a record under a covered reading
+  (ADR-0161 §1). Found by this ADR's own implementation lane (PR #1197) and filed as
+  #1198.
 
   **Nothing else moves.** §4(b) is untouched — `EXTERNAL` names no supersession
-  target and still counts in both purity conditions — as are §4(c), the `ASK_USER`
+  target, its own purity condition binds unchanged, and an `EXTERNAL` member counts
+  in both conditions as any other member does — as are §4(c), the `ASK_USER`
   precedence, the non-empty-set `ACCEPT` reason, §1's relations, §2's siting and
   invocation condition, §3's rungs and bounds, §5's retirement exclusion and its
   last clause, §6's degraded floor, §8's whole contract surface including its

@@ -214,8 +214,8 @@
   with a rule requiring an affirmative, record-specific relation, and ADR-0161 §1
   supplies the clause under which an attested re-read reaches it: an `EXTERNAL`
   proposal folds onto an `EXTERNAL` member that **agrees** with it under ADR-0121
-  §1 — byte-identical after that predicate's four transformations — and onto no
-  other. So the sentence stays true of the entry it is about, on a strictly
+  §1 — byte-identical after that predicate's four transformations — and whose
+  `Attestation.reported_by` is the same, and onto no other. So the sentence stays true of the entry it is about, on a strictly
   narrower condition than the one a reader would infer from it, which is ADR-0082
   §1's second limb.
 
