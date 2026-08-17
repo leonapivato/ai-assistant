@@ -1,7 +1,38 @@
 # 159. A conflict is labelled before it is ruled on, and similarity alone folds nothing
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0161 (§4(a)'s target class and its target selection, and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`)
 - Date: 2026-08-16
+- **Partially superseded: 2026-08-16 by
+  [ADR-0161](0161-an-attested-re-read-restates-its-own-import-and-folds-at-an-id-that-is-ours.md),
+  in the scope the `Status` line names — an `EXTERNAL` proposal that **agrees**
+  with its own stored `EXTERNAL` predecessor is folded, not accepted beside it.**
+  §4's exclusion imports ADR-0121 §3's argument, whose premise is that "an imported
+  record's id is the integrating system's idempotency key, and the next routine sync
+  overwrites the fold". ADR-0092 §6 forbids that premise for every conforming
+  producer — the producer mints an id "opaque to the source", and "minting removes
+  the aim" — so on this tree the next sync never computes the target's id and the
+  fold is not overwritten. Left standing, §4 defeated ADR-0110 §4's presence rule
+  for every attested reader: an unchanged scheduled read proposed at a fresh id,
+  ruled `ACCEPT`, and left its own predecessor absent from a reading that reported
+  it, so the coverage close retired it. ADR-0161 §1 replaces §4(a) with an
+  eligibility clause admitting an `EXTERNAL` target where the proposal is itself
+  `EXTERNAL` and the two agree under ADR-0121 §1, and gives that member precedence
+  over any other eligible member. Found by this ADR's own implementation lane
+  (PR #1197) and filed as #1198.
+
+  **Nothing else moves.** §4(b) is untouched — `EXTERNAL` names no supersession
+  target and still counts in both purity conditions — as are §4(c), the `ASK_USER`
+  precedence, the non-empty-set `ACCEPT` reason, §1's relations, §2's siting and
+  invocation condition, §3's rungs and bounds, §5's retirement exclusion and its
+  last clause, §6's degraded floor, §8's whole contract surface including its
+  conformance clause, §9's measures, §10's one-lane ruling, §11's record and §12's
+  dispositions. ADR-0161 §8 applies ADR-0082 §1's test clause by clause and states
+  why the scope is drawn here; its §7 argues why this is a supersession rather than
+  an in-place amendment.
+
+  **Recorded now rather than at ADR-0161's ratification**, per ADR-0082 §7:
+  ADR-0070 §1's condition is that the superseding ADR **exists**, and it lands in
+  this same change, so the reference resolves.
 - **This is a contract change under golden rule 5.** `MemoryPolicy.decide` gains a
   keyword-only parameter and `core/types.py` gains one enum (§8). It also narrows a
   ratified `MemoryWriter` conformance obligation — ADR-0079 §3's full-set retirement
