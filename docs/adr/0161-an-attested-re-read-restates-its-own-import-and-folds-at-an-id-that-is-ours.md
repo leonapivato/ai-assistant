@@ -329,13 +329,17 @@ one.
 
 > **Normative.** ADR-0159's implementing lane owes a `DefaultMemoryPolicy` test per
 > branch §1's clauses introduce, landing with the implementation and not after it.
-> Three of them are **not** reached by a repeat-read fixture, so passing the
+> **Four** of them are **not** reached by a repeat-read fixture, so passing the
 > end-to-end tests above is not evidence that they hold: a set holding **both** an
 > eligible (ii) member and a better-ranked (i) member, which must rule `REINFORCE`
 > onto the (ii) member; a set holding an eligible (ii) member **and** a member
-> labelled `CONTRADICTS`, which must still rule `REINFORCE`; and a set whose only
+> labelled `CONTRADICTS`, which must still rule `REINFORCE`; a set whose only
 > `EXTERNAL` member agrees but carries a **different** `reported_by`, which must
-> fall to (c).
+> fall to (c); and a set whose only `EXTERNAL` member carries the **same**
+> `reported_by` but does **not** agree, which must also fall to (c). The last two
+> pin clause (ii)'s conjunction from both sides: an implementation keying (ii) on
+> `reported_by` alone would fold a rewritten entry onto the predecessor it
+> replaces, which is ADR-0110 §4's rewrite path and the division §5 turns on.
 
 > **Normative.** The same lane owes a **degraded-path** test in each of the two
 > states ADR-0159 §8 distinguishes — `relations` passed as `None`, and passed as an
@@ -353,10 +357,10 @@ one.
 **This ADR carries no test of its own, and that is the point of the clause above.**
 It is prose, ratified ahead of the implementation under golden rule 5, so every
 branch §1 opens is unpinned until PR #1197 lands. An implementation that ignored
-`reported_by`, or kept the contradiction block over (ii), or took the first eligible
-member by rank, would pass the two end-to-end suites named above and violate §1 —
-which is exactly why the branches are enumerated here rather than left to whoever
-writes them.
+`reported_by`, or read it as sufficient on its own, or kept the contradiction block
+over (ii), or took the first eligible member by rank, would pass the two end-to-end
+suites named above and violate §1 — which is exactly why the branches are
+enumerated here rather than left to whoever writes them.
 
 ADR-0040 §5's rule decides this and decides it against an exception: "a conformance
 suite *is* the contract", so asserting a policy's ladder in it "would make one
