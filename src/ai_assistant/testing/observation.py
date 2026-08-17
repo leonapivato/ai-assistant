@@ -31,9 +31,9 @@ this fake must stay the thing a conforming implementation is compared against.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from hashlib import sha256
 from typing import TYPE_CHECKING, Final, final
 
 from ai_assistant.core.types import (
@@ -48,9 +48,14 @@ from ai_assistant.core.types import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
     from ai_assistant.core.types import EpisodicMemory, MemoryRecord
+
+
+def _uuid() -> str:
+    return str(uuid.uuid4())
+
 
 #: The batch bound ADR-0077 §1 names, and the proposal bound §2 names. Repeated
 #: here rather than imported from `learning`: a fake must not reach into a
@@ -257,6 +262,7 @@ class FakeObserver:
         discarded_unusable: int = 0,
         gate: ObservationGate | None = None,
         now: datetime = _DEFAULT_INSTANT,
+        id_factory: Callable[[], str] = _uuid,
     ) -> None:
         """Create the fake observer.
 
@@ -282,6 +288,12 @@ class FakeObserver:
                 instant rather than a ``Clock``: this fake computes nothing from
                 the passage of time, and a callable would invite a test to make it
                 do so.
+            id_factory: Mints the id of every proposed record, exactly as
+                ``ModelBackedObserver``'s does and defaulting to random UUIDs like
+                it (#736, ADR-0026 §7). Injectable so a consumer asserts exact ids
+                without the fake having to *derive* them, which is what it used to
+                do and what diverged it from the producer it doubles — see the
+                class docstring.
 
         Raises:
             TypeError: If ``max_batch_size`` or ``max_proposals`` is not an
@@ -301,6 +313,7 @@ class FakeObserver:
         self._extra_unusable = discarded_unusable
         self._gate = gate
         self._now = now
+        self._id_factory = id_factory
         self.batches: list[tuple[EpisodicMemory, ...]] = []
 
     @property
@@ -376,6 +389,47 @@ class FakeObserver:
             discarded_over_limit=max(len(usable) - self._max_proposals, 0),
         )
 
+    def _identify(self, template: ObservedBelief) -> str:
+        """The id for the record ``template`` proposes: the scripted one, or a mint.
+
+        **Minted, not derived, and that is the whole of #736.** This fake used to
+        hash the content, the kind, the step and the citations into a stable
+        ``fake-observed-…`` id, on the argument that "re-observing one batch
+        proposes the *same* record id twice, which is what a consumer testing a
+        ``REINFORCE`` fold needs". Both halves of that were wrong about the producer
+        this fake doubles, and ADR-0026 §7 is the rule they broke — a fake that
+        behaves where production refuses certifies consumers production rejects.
+
+        - **The producer mints.** ``ModelBackedObserver`` takes an ``id_factory``
+          defaulting to ``uuid4`` and calls it per proposal, so it never re-proposes
+          an id it has already written. This now has the same seam and the same
+          default.
+        - **The fold it promised never happened**, and since ADR-0159 it *fails*.
+          ``MemoryIngestor._detect_conflicts`` filters the proposal's own id
+          (``match.id != record.id``, #110), so a repeat was never in its own
+          conflict set. Before ADR-0159 the ruling still folded — onto a merely
+          *similar* sibling, destroying a distinct fact, which is the defect
+          ADR-0159 exists to stop. After it, a similar sibling authorises nothing,
+          the ruling is ``ACCEPT``, and ADR-0108 §2 refuses the install at an id
+          already stored. What a consumer testing a ``REINFORCE`` wants is the
+          production shape: identical *content* at a fresh id, which ADR-0121 §1's
+          predicate labels ``RESTATES`` and ADR-0159 §4(a) folds.
+
+        A consumer that needs an exact id still gets one — ``ObservedBelief``'s own
+        ``record_id`` names it, and it is checked first — and one that needs a
+        deterministic *sequence* injects an ``id_factory``. What is gone is only the
+        derivation nobody asked for.
+
+        Args:
+            template: The belief being proposed.
+
+        Returns:
+            The scripted id where the template names one, else a minted one.
+        """
+        if template.record_id is not None:
+            return template.record_id
+        return self._id_factory()
+
     def _to_proposal(
         self, template: ObservedBelief, batch: Sequence[EpisodicMemory]
     ) -> MemoryUpdateProposal | None:
@@ -416,7 +470,7 @@ class FakeObserver:
             last_confirmed_at=max(episode.occurred_at for episode in window),
         )
         return MemoryUpdateProposal(
-            proposed=_record(template, provenance, _identify(template, cited)),
+            proposed=_record(template, provenance, self._identify(template)),
             rationale=template.rationale,
         )
 
@@ -457,21 +511,6 @@ def _synthesise(batch: Sequence[EpisodicMemory]) -> tuple[ObservedBelief, ...]:
             )
         )
     return tuple(beliefs)
-
-
-def _identify(template: ObservedBelief, cited: Sequence[str]) -> str:
-    """A stable id for the record ``template`` proposes over ``cited``.
-
-    Derived from what is being believed and what supports it rather than from a
-    counter, so it is deterministic without depending on execution order and
-    identical across instances — two fakes writing into one store cannot silently
-    overwrite each other, and re-observing one batch proposes the *same* record id
-    twice, which is what a consumer testing a ``REINFORCE`` fold needs.
-    """
-    if template.record_id is not None:
-        return template.record_id
-    material = "\x00".join([template.content, template.kind.value, template.step.value, *cited])
-    return f"fake-observed-{sha256(material.encode()).hexdigest()[:16]}"
 
 
 def _record(template: ObservedBelief, provenance: Provenance, record_id: str) -> MemoryRecord:

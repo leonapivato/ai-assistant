@@ -297,38 +297,76 @@ async def test_two_unscoped_runs_select_the_same_conversation() -> None:
     """By design: there is no cursor and no rotation (§8).
 
     Asserted rather than left implicit, because a test demanding otherwise would be
-    demanding the durable state ADR-0077 §8 declines. **Selection** is the subject
-    and it is unchanged; what changed is what the second run's *write* does.
+    demanding the durable state ADR-0077 §8 declines.
 
-    This case used to read the second run's ``conversation_id`` off a completed
-    report, on the premise that "re-observation is safe … the gate folding a repeat
-    into a ``REINFORCE``". That premise is false on ``main`` and already filed as
-    such: ``_detect_conflicts`` filters the proposal's own id, so a repeat was never
-    a conflict, was never folded, and the second observation silently *replaced* the
-    first's records through ``add``'s upsert (#736, #110). ADR-0108 §1 makes it a
-    refusal instead — and that is this fake's derived ids meeting the rule, not the
-    observation stage changing: ``FakeBeliefObserver._identify`` derives a record id
-    from content, verbatim the producer class ADR-0081 §8 named as the trigger for
-    this ruling (#735), while ``learning/observer.py`` mints and so never reaches
-    it. Whether the fake should keep deriving is #736's, not this lane's.
+    **The second run completes again**, and getting there took two corrections a
+    reader should see rather than infer. This case originally read the second run's
+    ``conversation_id`` off a completed report on the premise that "re-observation
+    is safe … the gate folding a repeat into a ``REINFORCE``". That premise was
+    false: ``_detect_conflicts`` filters the proposal's *own* id (#110), so a repeat
+    was never in its own conflict set — the old rule folded onto a merely **similar**
+    sibling instead, destroying a distinct fact, and where no sibling existed the
+    second observation replaced the first's records through ``add``'s upsert. The
+    case was then narrowed to pin ADR-0108 §1's refusal, which is what this fake's
+    *derived* ids produced once that upsert became an insert.
 
-    So selection is asserted where it stays observable — the batch the observer was
-    handed — and the refusal is pinned beside it.
+    Both are now gone, and neither by this stage changing. ``FakeObserver`` **mints**
+    like the producer it doubles (#736, ADR-0026 §7), so a repeat proposes identical
+    content at a fresh id; ADR-0121 §1's predicate labels that ``RESTATES`` and
+    ADR-0159 §4(a) folds it onto the first run's record at *that* record's id. Which
+    is what "re-observation is safe" always meant and never was.
+
+    ADR-0108 §2's own-id refusal keeps a test of its own below, built by scripting
+    the collision rather than by relying on a fake to derive one.
     """
     harness = Harness()
     await harness.conversation_with(2)
     newest = await harness.conversation_with(2)
 
     first = await harness.stage.observe()
+    after_one = {record.id for record in await harness.memory.export()}
+    second = await harness.stage.observe()
+
     assert first.conversation_id == newest
-
-    with pytest.raises(MemoryStoreConflictError):
-        await harness.stage.observe()
-
+    assert second.conversation_id == newest
     # The second run reselected the same conversation: it read the same episodes in
     # the same order, which is what "no cursor and no rotation" means.
     assert len(harness.fake.batches) == 2
     assert harness.fake.batches[-1] == harness.fake.batches[-2]
+    # And nothing the first run wrote was replaced. That is the defect this case
+    # was narrowed to catch, stated over what survives rather than over a refusal:
+    # the second run's proposals carry minted ids, so they can neither collide with
+    # the first run's records nor overwrite them. Whether they then *fold* is the
+    # injected policy's business and not this stage's — this harness wires
+    # `FakeMemoryPolicy`, which accepts by rule, and ADR-0159 §4(a)'s fold is pinned
+    # against `DefaultMemoryPolicy` in `tests/memory/test_policy.py`.
+    assert after_one <= {record.id for record in await harness.memory.export()}
+
+
+async def test_a_producer_re_proposing_a_stored_id_is_refused() -> None:
+    """ADR-0108 §2's own-id refusal, built rather than derived (#630, #735, #736).
+
+    The rule is that "an id already naming a stored record is an accident in every
+    case — a minting producer whose factory collided — and the honest response is a
+    refusal rather than a silent replacement of a record no ruling was made about".
+    ``_detect_conflicts`` filters the proposal's own id (#110), so such a proposal
+    can never be folded into the record standing at that id; nothing but the refusal
+    stands between it and a silent replacement.
+
+    It used to be pinned as a side effect of ``FakeObserver`` *deriving* stable ids,
+    which is the divergence from ``ModelBackedObserver`` that #736 closed. So the
+    collision is scripted here instead — ``ObservedBelief.record_id`` names the id
+    both runs propose, which is a producer that derives, stated as one. The rule
+    keeps its test and the fake stops being the reason it has one.
+    """
+    scripted = [ObservedBelief(content="a belief worth holding", record_id="collides")]
+    harness = Harness(observer=FakeObserver(scripted))
+    conversation = await harness.conversation_with(2)
+
+    await harness.stage.observe(conversation)
+
+    with pytest.raises(MemoryStoreConflictError):
+        await harness.stage.observe(conversation)
 
 
 async def test_an_unknown_conversation_is_refused_rather_than_silently_empty() -> None:
