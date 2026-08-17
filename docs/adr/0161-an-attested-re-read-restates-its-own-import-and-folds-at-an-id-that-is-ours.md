@@ -1,7 +1,18 @@
 # 161. An attested re-read restates its own import, and folds at an id that is ours
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-16
+- **Note (2026-08-16): ratified.** `Proposed` → `Accepted`, after **both** required
+  reviews came back terminal on the content this ADR merges with: architecture
+  **APPROVE with no findings**, and adversarial **APPROVE WITH NITS** carrying one
+  `major` that was waived on the merits rather than folded in — it reads §6's second
+  normative clause (the three cases a repeat-read fixture does not reach) as the
+  whole test obligation, when the clause before it already requires "a
+  `DefaultMemoryPolicy` test per branch §1's clauses introduce", which is the
+  reconciled clause-(ii) branch the finding says is unpinned. The rationale is
+  recorded on PR #1202. Both lenses were run because this ADR amends the ruling a
+  contract ADR ratified, not because `scripts/ship.sh` requires it — the diff
+  touches no `core` file, so the requirement is `CONTRIBUTING.md`'s.
 - **This ADR partially supersedes**
   [ADR-0159](0159-a-conflict-is-labelled-before-it-is-ruled-on-and-similarity-alone-folds-nothing.md)
   §4 and §6, in the scope §1 names and in no other. **Of §4:** §4(a) whole — its
