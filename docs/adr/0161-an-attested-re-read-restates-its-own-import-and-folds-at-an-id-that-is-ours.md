@@ -4,11 +4,12 @@
 - Date: 2026-08-16
 - **This ADR partially supersedes**
   [ADR-0159](0159-a-conflict-is-labelled-before-it-is-ruled-on-and-similarity-alone-folds-nothing.md)
-  §4, in the scope §1 names and in no other: §4(a)'s target class and its target
-  selection, and the paragraph excluding `EXTERNAL` from both target classes, each
-  only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`. §4(b),
-  §4(c), both purity conditions, the `ASK_USER` precedence and every other section
-  of ADR-0159 stand.
+  §4, in the scope §1 names and in no other: §4(a) whole — its target class, its
+  target selection and the reach of its `CONTRADICTS` purity condition — and the
+  paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a
+  proposal whose own `provenance.source` is `EXTERNAL`. §4(b) and its purity
+  condition, §4(c), the `ASK_USER` precedence and every other section of ADR-0159
+  stand.
 - **This ADR amends** [ADR-0110](0110-a-covered-readings-absence-closes-a-window-and-a-clock-never-does.md)
   §4 — the mechanical sentence it appends to its presence rule, not the rule (§8).
 - **No contract surface moves.** No Protocol gains a member, no signature changes,
@@ -97,12 +98,18 @@ pairing whose fold is decided with no model at all.
 ### 1. §4(a) admits an `EXTERNAL` target where the proposal is `EXTERNAL` and the two agree
 
 > **Normative.** ADR-0159 §4(a) is replaced by: `REINFORCE`, naming as `target_id`
-> the best-ranked **eligible** member, exactly when an eligible member exists **and
-> no** member is labelled `CONTRADICTS`. A conflict-set member is **eligible** when
-> either (i) it is labelled `RESTATES` and its `provenance.source` is `OBSERVED` or
-> `INFERRED`, or (ii) its `provenance.source` is `EXTERNAL`, the proposed record's
-> `provenance.source` is `EXTERNAL`, and it **agrees** with the proposed record
-> under ADR-0121 §1.
+> the best-ranked **eligible** member, exactly when an eligible member exists and
+> the purity condition below is satisfied for it. A conflict-set member is
+> **eligible** when either (i) it is labelled `RESTATES` and its
+> `provenance.source` is `OBSERVED` or `INFERRED`, or (ii) its `provenance.source`
+> is `EXTERNAL`, the proposed record's `provenance.source` is `EXTERNAL`, its
+> `provenance.attestation.reported_by` equals the proposed record's, and it
+> **agrees** with the proposed record under ADR-0121 §1.
+
+> **Normative.** ADR-0159 §4(a)'s purity condition — that no member is labelled
+> `CONTRADICTS` — binds a target eligible only under (i), exactly as ADR-0159 §4(a)
+> states it. It does not bind a target eligible under (ii), which is named whatever
+> any other member of the set is labelled.
 
 > **Normative.** Where the proposal's `provenance.source` is `EXTERNAL` and the set
 > holds an eligible member under (ii), the target is that member — the best-ranked
@@ -115,11 +122,11 @@ pairing whose fold is decided with no model at all.
 > precedence, and the clause distinguishing the non-empty-set `ACCEPT` are
 > unchanged.
 
-> **Normative.** ADR-0159 §4's statement of what the arm reads is extended by
-> exactly one term: the arm additionally reads `kind` and `content`, through
-> ADR-0121 §1's predicate and for clause (ii) alone. It still reads no retrieval
-> score, no threshold, and no rank other than to order members the clauses above
-> have already selected.
+> **Normative.** ADR-0159 §4's statement of what the arm reads is extended, for
+> clause (ii) alone, by `kind` and `content` — through ADR-0121 §1's predicate — and
+> by `provenance.attestation.reported_by`. It still reads no retrieval score, no
+> threshold, and no rank other than to order members the clauses above have already
+> selected.
 
 **Clause (ii) is the certain rung and nothing above it.** ADR-0121 §1's `agrees` is
 a syntactic predicate over `kind` and `content` — NFC, case folding, whitespace
@@ -131,6 +138,35 @@ surviving half in force in the agreement direction as well as the contradiction 
 a model-judged statement is not a claim an observation is entitled to make against
 the system that reported the fact, and that is as true of "these say the same thing"
 as it is of "these cannot both be true."
+
+**The purity condition is lifted from (ii) because on this pairing it costs and
+buys nothing.** ADR-0159 §4's ground for it is honesty: a set holding both a
+`RESTATES` and a `CONTRADICTS` member is one "in which the *stored records disagree
+with each other*, and no ruling on this proposal resolves that". True — and (ii)'s
+`ACCEPT` does not resolve it either. Work both branches through. The fold retires
+nothing (ADR-0045 §4), installs nothing new, and lands byte-identical content on a
+record that already carries it; the contradicting member stays live. Refusing the
+fold installs a *third* live record saying exactly what the target says, leaves the
+same contradicting member live, and — for a covered reading — leaves the target
+absent, so ADR-0110 §5's close retires it. So blocking (ii) makes the store less
+honest, not more, on the same set. §4(b) is unaffected in either branch: an eligible
+(ii) member is labelled `RESTATES` whenever a reconciler ran, which blocks the
+supersession arm exactly as ADR-0159 wrote it, so nothing is retired by this
+lifting.
+
+**Clause (ii) requires the same `reported_by`, so a fold between two integrations is
+refused rather than left to fall out.** `Attestation.reported_by` is "the connected
+source **instance** … stable across syncs, because ADR-0092 §6 leaves it as the only
+durable handle the record keeps on where it came from", and the comparison is total
+where clause (ii) reaches: an attestation "is present exactly when the band is
+`ATTESTED`", and both records are `EXTERNAL`. Keying on it also puts presence and
+absence on the same handle — ADR-0110 §3's condition 1 already selects absence
+candidates by `reported_by` — so one reading's coverage and one reading's folds are
+judged against the same identity rather than against two. Two integrations reporting
+an entry that renders identically therefore land as two records, each present in its
+own reader's reading, and nothing alternates. Whether that restriction should ever
+be lifted is #1204's, and it is a deferral rather than an accident: this clause
+decides the case, and decides it the conservative way.
 
 **The precedence clause exists because the presence rule must not depend on a
 ranking.** Without it, an `EXTERNAL` proposal whose set holds both its own identical
@@ -237,8 +273,11 @@ The population clause (ii) admits is the population ADR-0110 §4 already ruled o
 §4 divides a re-appearing entry in two, and the division survives this ADR intact:
 
 - **The unchanged entry folds** — it agrees, byte for byte after ADR-0121 §1's four
-  transformations — so the fold lands at the target's id and the predecessor is
-  present. That is §4's sentence, true again.
+  transformations, and the two records name the same reporting source — so the fold
+  lands at the target's id and the predecessor is present. That is §4's sentence,
+  true again, and true whatever else the conflict set holds: the purity clause above
+  is what keeps a third, contradicting member from re-opening the failure through
+  the back door.
 - **The rewritten entry does not fold** — "standup 9am" becoming "sprint planning,
   Thursday, room 4" does not agree — so it installs beside its predecessor, whose
   window the reading closes. That is §4's rewrite path, unchanged: "the predecessor
@@ -260,6 +299,14 @@ one.
 > property it exists for is pinned end to end in
 > `tests/memory/test_absence_reconciliation.py` and
 > `tests/readers/test_calendar_absence_end_to_end.py`.
+
+> **Normative.** The `DefaultMemoryPolicy` tests cover each branch §1's clauses
+> introduce, and three of them are not reached by a repeat-read fixture: a set
+> holding **both** an eligible (ii) member and a better-ranked (i) member, which
+> must rule `REINFORCE` onto the (ii) member; a set holding an eligible (ii) member
+> **and** a member labelled `CONTRADICTS`, which must still rule `REINFORCE`; and a
+> set whose only `EXTERNAL` member agrees but carries a **different**
+> `reported_by`, which must fall to (c).
 
 ADR-0040 §5's rule decides this and decides it against an exception: "a conformance
 suite *is* the contract", so asserting a policy's ladder in it "would make one
@@ -351,6 +398,12 @@ otherwise.
   both records are `ATTESTED`, so both carry an attestation and ADR-0092 §1's iff
   validator is satisfied either way. #743's contradiction is with the
   `DERIVED`→`ATTESTED` pairing, which this ADR leaves unreachable.
+- **ADR-0092 §2 and §3, and ADR-0110 §3's condition 1.** `Attestation.reported_by`
+  is read, not changed: §2's one-value-object shape and §3's stability are relied on
+  as ratified, and clause (ii) keys a *presence* test on the same handle §3's
+  condition 1 already keys the *absence* candidate selection on. Neither sentence
+  becomes false and neither reads more widely — this is a stacked addition, recorded
+  here and nowhere else (ADR-0082 §1).
 - **ADR-0103 §6.** Its clause governs an `ATTESTED` target reinforced by a `DERIVED`
   record; clause (ii) is `ATTESTED` onto `ATTESTED`, which §6 leaves "as it stands".
   Its first clause is satisfied trivially. Neither is read more widely.
@@ -381,14 +434,16 @@ otherwise.
   foreign key. That is the writer floor for a `USER_ASSERTED` proposal, it is
   ADR-0121 §7's filed residue (#870) seen from the design side, and nothing here
   needs it. Filed as #1203.
-- **A fold between two different attested integrations.** Clause (ii) is keyed on
-  the source *class*, so two integrations that render an entry identically fold onto
-  one record and ADR-0092 §6's "`REINFORCE` takes the incoming attestation" makes the
-  survivor's attestation the later reader's. The content is identical, so the
-  attestation still "describes the content that survived"; whether one record naming
-  alternating sources is the right answer, or whether the arm should compare
-  attestations, is a question about what an attestation identifies. Filed as #1204,
-  and unreachable until a second `EXTERNAL` producer exists.
+- **Whether a fold between two different attested integrations should ever be
+  permitted.** Clause (ii) refuses it, by requiring the same `reported_by`, and that
+  refusal *is* a decision — the conservative one, taken because a survivor whose
+  attestation alternated with whichever integration read last would also alternate
+  the extent ADR-0110 §3's containment rule compares against. What is left open is
+  the opposite ruling: that one fact two connected sources independently report is
+  better held as one record with a composed attestation, the way ADR-0103 §6
+  composes currency. That needs a decision about what an attestation identifies, it
+  is unreachable until a second `EXTERNAL` producer exists, and it is filed as
+  #1204.
 - **The `MemoryPolicy` conformance suite's reach.** §6 declines this pairing; it does
   not reopen ADR-0159 §8's clause or ADR-0040 §5's rule.
 - **Anything under `src/` or `tests/`.** The implementation is ADR-0159's lane
@@ -455,4 +510,15 @@ otherwise.
   think one should change") and by ADR-0070 §1. §4's clause is explicit; reading it
   away in code would leave the corpus saying one thing and the tree doing another,
   which is the failure the ADR process exists to prevent.
+- **Keep ADR-0159 §4(a)'s `CONTRADICTS` purity condition over clause (ii).** The
+  literal reading of §4, and the one this ADR was drafted with. Refused in §1 on
+  its own ground: on this pairing the block leaves the contradiction exactly as live
+  as the fold does, and additionally duplicates a fact and retires a record under a
+  covered reading. An honesty condition that makes the store less honest is not
+  being applied, it is being copied.
+- **Let clause (ii) fold across integrations, and file the consequence.** The
+  drafted form, keyed on the source class alone. Refused in §1: it settles a real
+  seam — whose attestation, and therefore whose extent, a shared record carries — as
+  a by-product of a clause about something else. Requiring the same `reported_by`
+  makes the same question a deferral (#1204) instead.
 - **Amend ADR-0159 §4 in place.** Refused in §7: it changes what §4 decided.
