@@ -203,19 +203,68 @@ async def test_surplus_usable_beliefs_are_dropped_to_the_bound_and_counted() -> 
     assert outcome.discarded_unusable == 0
 
 
-async def test_re_observing_one_batch_proposes_the_same_record_id() -> None:
-    """What a consumer testing a ``REINFORCE`` fold depends on (ADR-0077 §8)."""
+async def test_re_observing_one_batch_proposes_a_fresh_id_and_the_same_confidence() -> None:
+    """The fake **mints** like the producer it doubles (#736, ADR-0026 §7).
+
+    This used to assert the opposite — a *stable* id across re-observations, "what a
+    consumer testing a ``REINFORCE`` fold depends on". Both halves were wrong about
+    ``ModelBackedObserver``, which takes an ``id_factory`` defaulting to ``uuid4``
+    and calls it per proposal, and the fold that premise promised never happened:
+    ``MemoryIngestor._detect_conflicts`` filters the proposal's own id (#110), so a
+    repeat was never in its own conflict set. Since ADR-0159 it does not merely fail
+    to fold — it is *refused*, because ADR-0108 §2 will not install at an id already
+    stored.
+
+    What a consumer testing a ``REINFORCE`` actually needs is the production shape:
+    identical **content** at a fresh id, which ADR-0121 §1's predicate labels
+    ``RESTATES`` and ADR-0159 §4(a) folds at the stored record's own id.
+
+    **Confidence is still stable, and that is the half worth keeping.** ADR-0077 §5
+    makes it pure in the step and the support count, which is what closes the
+    repetition route to inflation: a second pass over one batch re-proposes the same
+    number rather than a higher one.
+    """
     observer = FakeObserver([ObservedBelief(content="prefers concise replies")])
     episodes = batch_of(2)
 
     first = await observer.observe(episodes)
     second = await observer.observe(episodes)
 
-    assert first.proposals[0].proposed.id == second.proposals[0].proposed.id
+    assert first.proposals[0].proposed.id != second.proposals[0].proposed.id
+    assert first.proposals[0].proposed.content == second.proposals[0].proposed.content
     assert (
         first.proposals[0].proposed.provenance.confidence
         == second.proposals[0].proposed.provenance.confidence
     )
+
+
+async def test_a_scripted_record_id_still_names_the_record() -> None:
+    """The mint is the *default*, not the only path (#736).
+
+    A consumer that needs an exact id names it on the template, which is what the
+    derivation was standing in for and what the collision cases now use to build
+    ADR-0108 §2's own-id refusal deliberately rather than by accident.
+    """
+    observer = FakeObserver([ObservedBelief(content="a belief", record_id="pinned")])
+
+    outcome = await observer.observe(batch_of(2))
+
+    assert outcome.proposals[0].proposed.id == "pinned"
+
+
+async def test_an_injected_factory_mints_every_proposals_id() -> None:
+    """The seam ``ModelBackedObserver`` has, mirrored (ADR-0047 §2).
+
+    A consumer that wants a deterministic *sequence* rather than one pinned id gets
+    it the same way production does, so a test asserting exact ids does not have to
+    reach for a derivation nobody else has.
+    """
+    minted = iter(["first", "second"])
+    observer = FakeObserver(id_factory=lambda: next(minted))
+
+    outcome = await observer.observe(batch_of(1))
+
+    assert [proposal.proposed.id for proposal in outcome.proposals] == ["first"]
 
 
 async def test_every_batch_is_recorded_as_an_independent_snapshot() -> None:
