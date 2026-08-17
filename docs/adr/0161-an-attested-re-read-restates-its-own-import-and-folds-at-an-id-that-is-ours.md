@@ -1,7 +1,41 @@
 # 161. An attested re-read restates its own import, and folds at an id that is ours
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-16
+- **Note (2026-08-16): ratified, on the second flip.** `Proposed` → `Accepted` on
+  the content this ADR merges with, after **both** required lenses returned
+  **`APPROVE` with no findings on one tree** — adversarial and architecture, the
+  set the bullet below commits this ADR to because it amends the ruling a contract
+  ADR ratified, though no contract surface moves. `just ship` posts their terminal
+  verdicts and the aggregate to PR #1202; the round count and the churn ratio are
+  taken from that comment rather than restated here, so this note cannot disagree
+  with it.
+
+  **This ADR was flipped once before and returned to `Proposed`.** The first flip
+  claimed a terminal adversarial verdict it did not hold: the re-run that
+  `CONTRIBUTING.md` → "Finishing an ADR PR" step 3 requires on the flipped tree
+  came back `BLOCK`, against §4 — its degraded floor asserted eligibility under
+  §1's limb (i) while limb (i) requires a `RESTATES` label, on the one path where
+  nothing is labelled at all. Step 3's own answer was taken: the ADR returned to
+  `Proposed`, the premature note was removed rather than annotated, the finding was
+  corrected in §4's text, and the whole required set was earned again on the
+  corrected proposal. That is ADR-0127's and ADR-0133's route on their own PRs, and
+  it is why the note here records the second flip and not the first.
+
+  **Three normative clauses changed while this ADR stood `Proposed` after that
+  return**, and each is named because none is a correction of unmarked prose. §4's
+  degraded clause now states a **label-free** reading of limb (i) — the policy
+  computes ADR-0121 §1's `agrees` itself — rather than minting the label, which
+  would have falsified §4's own ground that label and predicate come apart exactly
+  where there are no labels. §6's reconciled matrix gained a fourth case, pinning
+  clause (ii)'s `agrees` conjunct from its failing side, because no required or
+  cited test carried a rewritten entry and an implementation reading `reported_by`
+  as sufficient on its own passed all of them. §6's degraded matrix gained the same
+  case, on the path that states limb (i)'s predicate itself and that the
+  reconciled matrix does not reach. All three add obligations on ADR-0159's
+  implementing lane; none changes a ruling this ADR makes. **ADR-0070 §1's
+  no-rewrite rule now protects this text**, so any further correction is an
+  appended dated note.
 - **This ADR partially supersedes**
   [ADR-0159](0159-a-conflict-is-labelled-before-it-is-ruled-on-and-similarity-alone-folds-nothing.md)
   §4 and §6, in the scope §1 names and in no other. **Of §4:** §4(a) whole — its
