@@ -262,18 +262,19 @@ unchanged and its contradiction is neither reopened nor resolved here.
 > result exactly as it does when a reconciler ran. Nothing else of §6 moves: it
 > degrades to ADR-0121 §1's certain predicate plus `ACCEPT`, and never below it.
 
-**§6's target class is §4(a)'s, and this clause says so rather than assuming it.**
+**§6 states no target class, and this ADR supplies one rather than inferring it.**
 §6's sentence — "rules `REINFORCE` onto a member that `agrees` under ADR-0121 §1" —
-does not restate a target class, and read in isolation it would admit an agreeing
-`EXTERNAL` member that §4(a) refuses on the reconciled path, so the degraded path
-would fold where the reconciled one would not. §6's own heading forecloses that
-reading: it degrades "to ADR-0121's floor, and never below it", and ADR-0121 §3's
-floor is precisely where an `EXTERNAL` target is refused. §6 therefore delegates its
-target class to §4(a), which is what makes moving §4(a) move both paths together —
-by clause (ii) and by nothing else. §6 is **partially superseded** in that scope rather
-than amended (§8): the delegation is why the scope is narrow, not a reason the
-record is lighter, because §6's text as written names no class and an implementer
-building only from it produces a different ruling after this ADR than before.
+names the predicate and no source class at all. Read as its own text it admits an
+agreeing `EXTERNAL` member that §4(a) refuses on the reconciled path, so a
+deployment with no provider reachable would fold where one with a provider does not.
+That is a fork, not a floor, and nothing in ADR-0121 closes it: §1 is the predicate
+§6 cites and says nothing about targets, and §3's target ruling is stated over "the
+arm in §2" — a `USER_ASSERTED` proposal, a population this arm never reaches (§2
+above). So the class is inherited from nowhere. This ADR states it, and what it
+states is **parity**: the degraded path names the members §1's clauses make eligible,
+exactly as the reconciled path does, so no ruling turns on whether a provider was
+reachable. That is a change to what an implementer building from §6 produces, so it
+is recorded as a **partial supersession** of §6 and not as an amendment (§8).
 
 This is also the reason clause (ii) is keyed on `agrees` rather than on a `RESTATES`
 label. A member that agrees is labelled `RESTATES` unconditionally by §3's first
@@ -408,6 +409,15 @@ act differently, or read one of its clauses more widely than it now holds?
   so it takes a superseding ADR however narrow the scope, and ADR-0082 §1 says the
   test controls and not the label.
 
+  **Why the scope is narrow, and why that is not a reason to record less.** §6
+  states no target class, and nothing in ADR-0121 supplies one — §1 is the predicate
+  §6 cites, and §3's target ruling is stated over "the arm in §2", which this arm
+  never reaches. So a §6 read as its own text would already have folded onto imports
+  that ADR-0159 §4 refuses on the reconciled path: an inconsistency that predates
+  this ADR and is not a licence to leave a changed ruling unrecorded. §4 above states
+  the class rather than inferring it, and states it as parity with the reconciled
+  path — which is why only the target set moves and §6's degradation ruling does not.
+
   **The scope is *not* narrowed to an `EXTERNAL` proposal, and that asymmetry with
   the §4 half is deliberate.** Two rulings change against §6's text, not one. The
   first is the cross-integration `EXTERNAL` fold above. The second is a proposal
@@ -420,13 +430,8 @@ act differently, or read one of its clauses more widely than it now holds?
   from. ADR-0082 §1 requires the record to cover every ruling that changes, so the
   §6 half of the scope is stated over every non-asserted proposal.
 
-  **The delegation argument is why the scope is narrow, and it is not a reason to
-  record less.** §4 above states the reading §6's own heading requires — it degrades
-  "to ADR-0121's floor, and never below it", and ADR-0121 §3's floor is where an
-  `EXTERNAL` target is refused, so a literal §6 would already have folded onto
-  imports that ADR-0159 §4 refuses on the reconciled path. That inconsistency
-  predates this ADR and is not a licence to leave a changed ruling unrecorded. What
-  §6 **decided** is untouched and is relied on in §4: failure and absence degrade to
+  What §6 **decided** is untouched and is relied on in §4: failure and absence
+  degrade to
   ADR-0121 §1's certain predicate plus `ACCEPT`, as a ratified deployment rather
   than a fallback, and never below it. Only the target set moves, and it moves by
   clause (ii) and by nothing else — an agreeing `OBSERVED` or `INFERRED` member
