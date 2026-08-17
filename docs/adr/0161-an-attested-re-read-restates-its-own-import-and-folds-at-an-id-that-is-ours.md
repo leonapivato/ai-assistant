@@ -4,11 +4,13 @@
 - Date: 2026-08-16
 - **This ADR partially supersedes**
   [ADR-0159](0159-a-conflict-is-labelled-before-it-is-ruled-on-and-similarity-alone-folds-nothing.md)
-  §4 and §6, in the scope §1 names and in no other: §4(a) whole — its target class,
-  its target selection and the reach of its `CONTRADICTS` purity condition — the
-  paragraph excluding `EXTERNAL` from both target classes, and the set of members
-  §6's degraded floor may name as a target, each only as it reaches a proposal whose
-  own `provenance.source` is `EXTERNAL`. §4(b) and its purity condition, §4(c), the
+  §4 and §6, in the scope §1 names and in no other. **Of §4:** §4(a) whole — its
+  target class, its target selection and the reach of its `CONTRADICTS` purity
+  condition — and the paragraph excluding `EXTERNAL` from both target classes, each
+  only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`. **Of
+  §6:** the set of members its degraded floor may name as a target, for every
+  non-asserted proposal and not only an `EXTERNAL` one, since §6 states no class and
+  §1 now states one for it (§8). §4(b) and its purity condition, §4(c), the
   `ASK_USER` precedence, §6's degradation ruling and every other section of ADR-0159
   stand.
 - **This ADR amends** [ADR-0110](0110-a-covered-readings-absence-closes-a-window-and-a-clock-never-does.md)
@@ -388,10 +390,22 @@ act differently, or read one of its clauses more widely than it now holds?
   floor may name as a target. §6's normative clause is "rules `REINFORCE` onto a
   member that `agrees` under ADR-0121 §1", with no target class stated. Apply
   ADR-0070 §1's test to that text and not to a reading of it: an implementer
-  building only from §6 folds onto an agreeing `EXTERNAL` member from another
-  integration, and after this ADR rules `ACCEPT` on the same input. A changed ruling
-  is a change to what was decided, so it takes a superseding ADR however narrow the
-  scope, and ADR-0082 §1 says the test controls and not the label.
+  building only from §6 folds onto an agreeing `EXTERNAL` member, and after this ADR
+  rules `ACCEPT` on the same input. A changed ruling is a change to what was decided,
+  so it takes a superseding ADR however narrow the scope, and ADR-0082 §1 says the
+  test controls and not the label.
+
+  **The scope is *not* narrowed to an `EXTERNAL` proposal, and that asymmetry with
+  the §4 half is deliberate.** Two rulings change against §6's text, not one. The
+  first is the cross-integration `EXTERNAL` fold above. The second is a proposal
+  whose source is `OBSERVED` or `INFERRED` agreeing with an `EXTERNAL` member: §6's
+  text folds, §1's clauses rule `ACCEPT` — eligible under neither limb, since (i)
+  requires the *target* to be derived and (ii) requires the *proposal* to be
+  external. That outcome is ADR-0159 §4(a)'s exclusion holding exactly as ratified,
+  and this ADR neither widens nor narrows it; what is new is that §1 is the first
+  place §6's target class is written down, so it is §1 an implementer now builds
+  from. ADR-0082 §1 requires the record to cover every ruling that changes, so the
+  §6 half of the scope is stated over every non-asserted proposal.
 
   **The delegation argument is why the scope is narrow, and it is not a reason to
   record less.** §4 above states the reading §6's own heading requires — it degrades

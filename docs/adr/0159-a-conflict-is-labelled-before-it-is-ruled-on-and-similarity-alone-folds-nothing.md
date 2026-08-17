@@ -1,6 +1,6 @@
 # 159. A conflict is labelled before it is ruled on, and similarity alone folds nothing
 
-- Status: Partially superseded by ADR-0161 (§4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — the paragraph excluding `EXTERNAL` from both target classes, and the members §6's degraded floor may name as a target, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`)
+- Status: Partially superseded by ADR-0161 (of §4, §4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`; of §6, the members its degraded floor may name as a target, for every non-asserted proposal)
 - Date: 2026-08-16
 - **Partially superseded: 2026-08-16 by
   [ADR-0161](0161-an-attested-re-read-restates-its-own-import-and-folds-at-an-id-that-is-ours.md),
@@ -30,8 +30,12 @@
   rather than as a pointer to §4(a), it admits an agreeing `EXTERNAL` member that
   §4(a) refuses on the reconciled path, so the degraded path would fold where the
   reconciled one would not — below the floor §6's own heading says it never goes
-  below. Whichever reading a reader takes, the ruling for one input changes under
-  ADR-0161, and ADR-0070 §1 makes that a supersession however narrow the scope.
+  below. Two rulings change against §6's text — that one, and an `OBSERVED` or
+  `INFERRED` proposal agreeing with an `EXTERNAL` member, which §6's text folds and
+  ADR-0161 §1 rules `ACCEPT` (§4(a)'s exclusion holding as ratified, now written
+  down where an implementer builds from it) — so the §6 half of the scope is stated
+  over every non-asserted proposal, and ADR-0070 §1 makes it a supersession however
+  narrow.
   **What §6 decided is untouched:** failure and absence degrade to ADR-0121 §1's
   certain predicate plus `ACCEPT`, as a ratified deployment rather than a fallback,
   and never below it — and an agreeing `OBSERVED` or `INFERRED` member folds in the
