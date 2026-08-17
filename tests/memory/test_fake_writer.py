@@ -32,10 +32,10 @@ from ai_assistant.core.types import (
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore, FakeMemoryWriter
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import MemoryPolicy, MemoryStore, MemoryWriter
-    from ai_assistant.core.types import BeliefBand, MemoryKind, MemoryRecord
+    from ai_assistant.core.types import BeliefBand, ConflictRelation, MemoryKind, MemoryRecord
 
 
 def _fixed_now() -> datetime:
@@ -745,3 +745,38 @@ async def test_a_bounded_envelope_window_does_not_substitute_for_an_extent() -> 
     await _read_over(store)
 
     assert await store.get(bounded.id) is not None
+
+
+@pytest.mark.parametrize("answer", [None, "not a mapping", 42], ids=["none", "a-string", "an-int"])
+async def test_a_reconciler_returning_something_unusable_refuses_no_ingest(
+    answer: object,
+) -> None:
+    """ADR-0159 §6 over the *return*, mirroring ``MemoryIngestor``.
+
+    A reconciler that returns ``None`` — or anything else that is not a mapping —
+    is as non-conforming as one that raises, and it is the harder case: the
+    ``await`` succeeds, so a boundary that read the result *after* its guard would
+    refuse the ingest through a ``TypeError`` while believing it had degraded. A
+    fake that refused where production degrades would fail a consumer's test on
+    state the real writer never produces (ADR-0026 §7), which is why this is
+    duplicated rather than left to the production writer's own regression.
+    """
+
+    class _Unusable:
+        async def reconcile(
+            self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+        ) -> Mapping[str, ConflictRelation]:
+            return answer  # type: ignore[return-value]  # deliberately non-conforming
+
+    store = FakeMemoryStore(now=_fixed_now)
+    writer = FakeMemoryWriter(
+        store=store,
+        policy=FakeMemoryPolicy(),
+        now=_fixed_now,
+        reconciler=_Unusable(),
+    )
+
+    result = await writer.ingest(_proposal("pref-1"))
+
+    assert result.record_id == "pref-1"
+    assert await store.get("pref-1") is not None

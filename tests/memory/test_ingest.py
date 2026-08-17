@@ -2269,6 +2269,86 @@ async def test_a_policy_that_narrows_and_writes_cannot_reach_the_retirement_set(
     assert exported["distinct"].validity.valid_until is None
 
 
+@pytest.mark.parametrize(
+    "answer",
+    [None, "not a mapping", 42],
+    ids=["none", "a-string", "an-int"],
+)
+async def test_a_reconciler_returning_something_unusable_refuses_no_ingest(
+    answer: object,
+) -> None:
+    """ADR-0159 §6 over the *return* as well as the raise.
+
+    A reconciler that returns ``None`` — or anything else that is not a mapping —
+    is as non-conforming as one that raises, and it is the harder case: the
+    ``await`` succeeds, so a boundary that read the result *after* its guard would
+    refuse the ingest through a ``TypeError`` while believing it had degraded. §6
+    admits no such route — "no ingest is refused or ruled differently because a
+    reconciler was unavailable, other than by the relations it therefore does not
+    hold" — so the write proceeds on ADR-0121 §1's certain agreement.
+    """
+
+    class _Unusable:
+        async def reconcile(
+            self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+        ) -> Mapping[str, ConflictRelation]:
+            return answer  # type: ignore[return-value]  # deliberately non-conforming
+
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(_preference("identical", "user prefers window seats", confidence=0.6))
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=_fixed_now,
+        conflict_threshold=0.5,
+        reconciler=_Unusable(),
+    )
+
+    result = await ingestor.ingest(_proposal(_observed("restated", "user prefers window seats")))
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result.decision.target_id == "identical"
+
+
+async def test_a_reconciler_whose_mapping_raises_on_lookup_refuses_no_ingest() -> None:
+    """The same clause, one step further in: a *mapping* that fails when read.
+
+    ``__contains__`` and ``__getitem__`` are the reconciler's to define, so a
+    conforming-looking return can still fail at the point the writer reads it. It
+    degrades exactly as an unreachable provider does.
+    """
+
+    class _Hostile(dict[str, ConflictRelation]):
+        def __contains__(self, key: object) -> bool:
+            msg = "this mapping refuses to be read"
+            raise RuntimeError(msg)
+
+    class _Returning:
+        async def reconcile(
+            self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
+        ) -> Mapping[str, ConflictRelation]:
+            return _Hostile()
+
+    store = InMemoryMemoryStore()
+    await _plant_episodes(store, _EPISODE)
+    await store.add(_preference("identical", "user prefers window seats", confidence=0.6))
+    ingestor = MemoryIngestor(
+        traces_sink=FakeTraceSink(),
+        store=store,
+        policy=DefaultMemoryPolicy(),
+        now=_fixed_now,
+        conflict_threshold=0.5,
+        reconciler=_Returning(),
+    )
+
+    result = await ingestor.ingest(_proposal(_observed("restated", "user prefers window seats")))
+
+    assert result.decision.kind is MemoryDecisionKind.REINFORCE
+    assert result.decision.target_id == "identical"
+
+
 async def test_a_reconciler_that_raises_refuses_no_ingest() -> None:
     """ADR-0159 §6: no ingest is refused because a reconciler was unavailable.
 
