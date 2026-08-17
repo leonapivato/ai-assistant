@@ -213,11 +213,15 @@
   conflict-set member at or above `conflict_threshold`. ADR-0159 §4 replaced that
   with a rule requiring an affirmative, record-specific relation, and ADR-0161 §1
   supplies the clause under which an attested re-read reaches it: an `EXTERNAL`
-  proposal folds onto an `EXTERNAL` member that **agrees** with it under ADR-0121
-  §1 — byte-identical after that predicate's four transformations — and whose
-  `Attestation.reported_by` is the same, and onto no other. So the sentence stays true of the entry it is about, on a strictly
-  narrower condition than the one a reader would infer from it, which is ADR-0082
-  §1's second limb.
+  proposal reaches an `EXTERNAL` target only where that member **agrees** with it
+  under ADR-0121 §1 — byte-identical after that predicate's four transformations —
+  and names the same `Attestation.reported_by`, and such a member is the target
+  whenever one exists. Where none does, ADR-0159 §4(a)'s `{OBSERVED, INFERRED}` limb
+  governs as ratified, and this ADR's presence rule turns on whether that limb fires,
+  exactly as it does for any other non-asserted proposal. So §4's sentence stays true
+  of the entry it is about — the unchanged re-read of an entry this same source
+  already reported — on a strictly narrower condition than the one a reader would
+  infer from it, which is ADR-0082 §1's second limb.
 
   **No clause of this ADR moves, which is why this is an amendment and not a
   supersession.** §4's two normative clauses are untouched and are used exactly as
