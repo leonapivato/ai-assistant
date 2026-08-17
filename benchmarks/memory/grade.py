@@ -331,6 +331,19 @@ class ModelGrader:
         """The judge label recorded for this grader."""
         return f"{MODEL_JUDGE_PREFIX}{self._route}"
 
+    @property
+    def route(self) -> str:
+        """The ``"provider:model"`` spec this judge grades on.
+
+        Public because a batched run has to *send* the judge items to this route,
+        and the only other way to it was stripping :attr:`name`'s prefix back off —
+        which would make the recorded provenance and the actual destination agree by
+        string surgery rather than by construction. They must agree: a manifest
+        naming a judge that never saw the prompt is a false benchmark result, which
+        is the thing ``--judge-model`` exists to prevent rather than to introduce.
+        """
+        return self._route
+
     async def grade(self, question: BenchQuestion, answer: str) -> Grading:
         """Judge one answer, abstention first.
 

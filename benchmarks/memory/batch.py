@@ -47,6 +47,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from hashlib import sha256
+from math import isfinite
 from time import monotonic
 from typing import TYPE_CHECKING, Final
 
@@ -169,6 +170,33 @@ class PollPolicy:
     interval: float = DEFAULT_POLL_INTERVAL
     timeout: float = DEFAULT_POLL_TIMEOUT
 
+    def __post_init__(self) -> None:
+        """Refuse a wait that is not a duration.
+
+        The same shape ``SpendGuard`` and ``Harness`` already check their own bounds
+        with, and here for a sharper reason than tidiness: these arrive off a command
+        line, where ``--batch-timeout nan`` parses perfectly well as a float and then
+        makes every ``monotonic() >= deadline`` false. :func:`_wait_for` would poll a
+        submitted, billing batch **forever** instead of stopping cleanly as its own
+        docstring promises — the one failure mode a bounded loop exists to rule out.
+        Infinity is refused with it: an unbounded wait is a legitimate thing to want
+        and is not what this parameter offers, so asking for it here would be asking
+        for a promise that is not kept.
+
+        Raises:
+            ValueError: If either value is not finite, or is negative. Zero is legal
+                for both — ``interval=0`` polls as fast as the provider answers, which
+                is what a test wants, and ``timeout=0`` gives up after one poll, which
+                is a meaningful way to ask "is it done yet?".
+        """
+        for name, value in (("interval", self.interval), ("timeout", self.timeout)):
+            if not isfinite(value):
+                msg = f"{name} must be a finite number of seconds, got {value!r}"
+                raise ValueError(msg)
+            if value < 0:
+                msg = f"{name} must not be negative, got {value}"
+                raise ValueError(msg)
+
 
 @dataclass(frozen=True, slots=True)
 class PreparedQuestion:
@@ -287,7 +315,11 @@ def _reply_of(outcome: BatchItemOutcome | None) -> tuple[str, str | None]:
 
 
 async def submit_and_settle(
-    session: BatchSession, *, kind: str, items: Sequence[BatchRequest]
+    session: BatchSession,
+    *,
+    kind: str,
+    items: Sequence[BatchRequest],
+    model: str | None = None,
 ) -> dict[str, BatchItemOutcome]:
     """Submit one batch, record it, wait for it, and read its outcomes.
 
@@ -303,6 +335,12 @@ async def submit_and_settle(
         items: What to submit. An empty sequence submits nothing and returns nothing,
             because ``submit`` refuses an empty batch (ADR-0143 §3) and a run whose
             every answer was settled without a judge call is a real run.
+        model: The ``"provider:model"`` route for this whole batch, or ``None`` for
+            the completer's configured default. ADR-0143 §2's per-batch override, and
+            the reason it is here: a judge is an instrument and need not be the model
+            under test, so its batch goes to *its* route rather than to the answering
+            one. §11 defers a per-item override; this is per batch, which is what a
+            run needs.
 
     Returns:
         Every outcome, keyed by ``item_id``.
@@ -317,7 +355,7 @@ async def submit_and_settle(
     if not items:
         return {}
     session.guard.charge_many(len(items))
-    handle = await session.completer.submit(f"{session.run_id}-{kind}", items)
+    handle = await session.completer.submit(f"{session.run_id}-{kind}", items, model=model)
     # Before the first poll, and before the announcement: if this process dies in the
     # next instant, the file is what says a paid job exists.
     session.on_batch(BatchRef.of(handle, kind=kind, item_count=len(items)))
@@ -388,6 +426,7 @@ async def judge_batch(
     pending: Sequence[tuple[str, BenchQuestion, str]],
     *,
     judge_name: str,
+    judge_route: str,
 ) -> dict[str, Grading]:
     """Grade every answer that a judge must actually read, in one batch.
 
@@ -399,8 +438,14 @@ async def judge_batch(
     Args:
         session: The run's seam, ceiling, record and wait.
         pending: ``(item_id, question, answer)`` for each answer needing a judgement.
-        judge_name: The route to record on every grading, read off the grader that is
+        judge_name: The label to record on every grading, read off the grader that is
             grading rather than declared beside it.
+        judge_route: The ``"provider:model"`` spec to *send* the batch to. Separate
+            from ``judge_name`` and taken from the same grader, because the two must
+            agree by construction: a batch submitted to the answering route while the
+            row records ``model:<judge>`` is a manifest that names a judge which never
+            saw the prompt, which is exactly the false provenance ``--judge-model``
+            exists to prevent.
 
     Returns:
         Each **answer** ``item_id`` mapped to its grading — the judge item's own
@@ -416,7 +461,7 @@ async def judge_batch(
         )
         for item_id, question, answer in pending
     ]
-    outcomes = await submit_and_settle(session, kind=JUDGE_BATCH, items=items)
+    outcomes = await submit_and_settle(session, kind=JUDGE_BATCH, items=items, model=judge_route)
     graded: dict[str, Grading] = {}
     for item_id, _question, _answer in pending:
         reply, failure = _reply_of(outcomes.get(f"{item_id}{JUDGE_ITEM_SUFFIX}"))

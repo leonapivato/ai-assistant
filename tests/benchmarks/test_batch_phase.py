@@ -148,6 +148,9 @@ class _SettlingCompleter:
         self._settle = settle
         self.polls = 0
         self.on_poll: list[Any] = []
+        #: ``(batch_key, model)`` for each submission, so a test can assert **where**
+        #: a batch was sent and not merely that one was.
+        self.sent: list[tuple[str, str | None]] = []
 
     @property
     def issuer(self) -> str:
@@ -160,6 +163,7 @@ class _SettlingCompleter:
     async def submit(
         self, batch_key: str, items: Sequence[BatchRequest], *, model: str | None = None
     ) -> BatchHandle:
+        self.sent.append((batch_key, model))
         handle = await self._inner.submit(batch_key, items, model=model)
         if self._settle:
             self._inner.provider.settle(handle.batch_id)
@@ -465,6 +469,35 @@ class TestTheJudgeBatchCarriesOnlyWhatAJudgeMustRead:
         declined = rows[case.questions[1].question_id]
         assert declined.judge_detail == "abstention expected"
 
+    async def test_the_judge_batch_is_sent_to_the_judge_route_it_records(
+        self, tmp_path: Path
+    ) -> None:
+        # A judge is an instrument and need not be the model under test, so
+        # `--judge-model` names a second route. A judge batch submitted to the
+        # *answering* route while the row records the judge's would be a manifest
+        # naming a judge that never saw the prompt — the exact false provenance
+        # `--judge-model` was added to prevent.
+        case = _case()
+        completer = _completer()
+        _program_answers(completer, case, ANSWER)
+        _program_judgements(completer, case, "CORRECT")
+
+        _, run_dir = await _run(
+            tmp_path,
+            phase=RunPhase.BATCH,
+            case=case,
+            completer=completer,
+            grader=ModelGrader(FakeModelProvider("CORRECT"), route="anthropic:a-judge"),
+        )
+
+        answer_send, judge_send = completer.sent
+        # The answering batch takes the completer's configured route; the judge batch
+        # overrides it, per ADR-0143 §2's per-batch override.
+        assert answer_send[1] is None
+        assert judge_send[1] == "anthropic:a-judge"
+        rows = read_jsonl(run_dir / "records.jsonl", QuestionRecord)
+        assert all(one.judge == "model:anthropic:a-judge" for one in rows)
+
     async def test_a_judge_item_that_did_not_come_back_is_ungraded(self, tmp_path: Path) -> None:
         case = _case()
         completer = _completer()
@@ -622,9 +655,47 @@ class TestWhatIsRefusedBeforeAnythingIsSpent:
         # this at `submit` means discovering it after every case has been ingested.
         assert not (tmp_path / "runs").exists()
 
+    async def test_an_unbatchable_judge_route_is_refused_before_a_store_is_opened(
+        self, tmp_path: Path
+    ) -> None:
+        # The answering route is batchable and the judge's is not. Checking only the
+        # first would ingest every case and buy the answer batch before refusing at
+        # the judge submission.
+        with pytest.raises(ConfigurationError, match="phase batch"):
+            await _run(
+                tmp_path,
+                phase=RunPhase.BATCH,
+                grader=ModelGrader(FakeModelProvider("CORRECT"), route="openai:gpt-5-mini"),
+            )
+
+        assert not (tmp_path / "runs").exists()
+
     def test_the_batchable_provider_matches_the_implementation(self) -> None:
         """The copied constant is the one `models/batch.py` actually answers for."""
         assert BATCH_PROVIDER == _PROVIDER_NAME
+
+
+class TestTheWaitIsABoundedOne:
+    """A submitted batch is billing, so the loop that waits on it must end."""
+
+    @pytest.mark.parametrize("timeout", [float("nan"), float("inf"), -1.0])
+    def test_a_timeout_that_is_not_a_duration_is_refused(self, timeout: float) -> None:
+        # `--batch-timeout nan` parses perfectly well as a float and then makes every
+        # `monotonic() >= deadline` false, so the loop would poll a paid batch forever
+        # instead of stopping cleanly. Refused where the value is made, not where it
+        # would have failed to bite.
+        with pytest.raises(ValueError, match="timeout"):
+            PollPolicy(timeout=timeout)
+
+    @pytest.mark.parametrize("interval", [float("nan"), float("inf"), -1.0])
+    def test_an_interval_that_is_not_a_duration_is_refused(self, interval: float) -> None:
+        with pytest.raises(ValueError, match="interval"):
+            PollPolicy(interval=interval)
+
+    def test_zero_is_legal_in_both(self) -> None:
+        # `interval=0` polls as fast as the provider answers, and `timeout=0` gives up
+        # after one poll — both meaningful things to ask for.
+        assert PollPolicy(interval=0.0, timeout=0.0).timeout == 0.0
 
 
 class TestItemIds:

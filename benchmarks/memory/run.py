@@ -578,6 +578,13 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     # answers for whatever route it likes.
     if phase is RunPhase.BATCH and batch_completer is None:
         refuse_unbatchable_route(resolved.default_model)
+        # And the judge's route, which is a *different* route whenever --judge-model
+        # was passed and is where this run's judge batch will actually be sent. A
+        # check on the answering route alone would admit `--judge-model openai:…`,
+        # ingest everything, and refuse at the judge submission — after both the
+        # ingestion and the answer batch had been paid for.
+        if isinstance(judge, ModelGrader):
+            refuse_unbatchable_route(judge.route)
     run_id = uuid4().hex[:12]
     run_dir = output_root / run_id
     records_path = run_dir / "records.jsonl"
@@ -856,6 +863,24 @@ def _ingestion_summary(
     }
 
 
+def _judge_route(judge: Grader) -> str:
+    """The ``"provider:model"`` spec a judge batch is submitted to.
+
+    Only a :class:`~benchmarks.memory.grade.ModelGrader` reaches a judge batch —
+    every other grader is applied locally in
+    :func:`_answer_and_judge_in_batches`, because it makes no call — so the route is
+    read off the grader that is grading rather than off a setting beside it, and the
+    fallback exists for the type checker rather than for a run.
+
+    Args:
+        judge: The grader.
+
+    Returns:
+        The route.
+    """
+    return judge.route if isinstance(judge, ModelGrader) else judge.name
+
+
 def _say_nothing(line: str) -> None:
     """Swallow a progress line, for a caller that asked for no announcements.
 
@@ -1069,7 +1094,9 @@ async def _answer_and_judge_in_batches(
                 pending.append((one.item_id, one.question, answer))
         else:
             gradings[one.item_id] = await judge.grade(one.question, answer)
-    gradings.update(await judge_batch(session, pending, judge_name=judge.name))
+    gradings.update(
+        await judge_batch(session, pending, judge_name=judge.name, judge_route=_judge_route(judge))
+    )
     for one in prepared:
         answer, failure = answers[one.item_id]
         write_jsonl_line(
