@@ -36,6 +36,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Final, final
 
+from pydantic import ValidationError
+
 from ai_assistant.core.types import (
     MemoryKind,
     MemorySource,
@@ -469,10 +471,23 @@ class FakeObserver:
             # ordered fixture and drift from `LearningObserver` on any other.
             last_confirmed_at=max(episode.occurred_at for episode in window),
         )
-        return MemoryUpdateProposal(
-            proposed=_record(template, provenance, self._identify(template)),
-            rationale=template.rationale,
-        )
+        try:
+            record = _record(template, provenance, self._identify(template))
+        except ValidationError:
+            # A ``core`` invariant the id or the text broke — a factory returning
+            # a non-``str`` or a blank one is the reachable case now that the id is
+            # minted rather than derived. Counted like any other refusal rather
+            # than raised, because that is what ``ModelBackedObserver`` does with
+            # the same failure at the same seam: "one bad belief in a batch is a
+            # degradation, not a failed observation" (ADR-0077 §4). A fake that
+            # raised where production discards would fail a consumer's test on an
+            # outcome production never produces (ADR-0026 §7).
+            #
+            # A factory that *raises* propagates from both, unguarded, for the same
+            # reason: production evaluates its own factory inside this ``try`` and
+            # catches ``ValidationError`` alone.
+            return None
+        return MemoryUpdateProposal(proposed=record, rationale=template.rationale)
 
 
 def _check_bound(name: str, value: int) -> None:
