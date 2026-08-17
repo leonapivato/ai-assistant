@@ -43,6 +43,7 @@ uv run python -m benchmarks.memory corpora            # provenance: source, revi
 uv run python -m benchmarks.memory fetch locomo       # download + verify against the pinned digest
 uv run python -m benchmarks.memory plan locomo        # what a run would cost — contacts nothing
 uv run python -m benchmarks.memory run locomo         # smoke: 5 questions, offline grader
+uv run python -m benchmarks.memory run locomo --phase batch   # answer + judge via the Batches API
 ```
 
 Two levers narrow a run, and they are not the same lever. `--limit` bounds **how many
@@ -115,10 +116,52 @@ Under `.runs/<run_id>/`:
   removed unless `--keep-stores` is passed. The directory is the case key with anything
   a path cannot carry replaced, plus a digest of the whole key — the readable half is
   for you, the digest is what stops two keys that sanitise alike from sharing a store.
+- `batches.jsonl` — under `--phase batch` only: every batch the run submitted, appended
+  the moment the provider accepted it and **before** the run starts waiting on it. It is
+  the orphan guard, not a summary: a batch is billed from acceptance, so a run killed
+  during the wait must still leave behind what it is being charged for. The manifest
+  carries the same references once the run ends.
+
+### `--phase batch`: half the price, paid for in latency
+
+Answering and judging are ~60% of a scored run's spend and all of its serial round
+trips. `--phase batch` retrieves for every question first, then submits the answers as
+one Batches-API job and the gradings as a second — the vendor bills a batch at half the
+per-request price, and the wall clock becomes two waits, each typically under an hour,
+instead of ~2,000 calls in a row. `--phase sync` is the default and is the path every
+pilot before this one ran.
+
+**Ingestion never batches.** Every observation pass reads the conversation's most recent
+window, so each one depends on the writes the pass before it made. Only the two model
+calls per question move.
+
+Four things worth knowing before spending on it:
+
+- **Retrieval is identical.** Both phases go through the same `retrieve_for`, so the
+  record ids, kinds, evidence and ADR-0119 telemetry mean the same thing either way. The
+  only real difference is that a batched completion happens outside the correlation
+  scope, which costs nothing recorded — the model seam emits no trace.
+- **Rows land at the end.** A synchronous run appends per question, so a death at 400 of
+  2,000 leaves 399 usable rows; a batched one has nothing to write until its batch
+  settles. What replaces that guarantee is `batches.jsonl` plus ADR-0143 §2's resumption
+  clause: the outcomes stay fetchable afterwards from any process holding the same
+  `--issuer`.
+- **A failed item is recorded, never blank.** An item the provider expired, cancelled or
+  refused becomes an `ungraded` row naming its kind. It is deliberately *not* an empty
+  answer, which the abstention detector would read as the system declining and which
+  would land in #1029's P7 as a result rather than as a fault.
+- **`--issuer` is an assertion you make.** It is the non-secret account label stamped on
+  every handle and compared against any handle presented back; the seam cannot check it
+  (ADR-0143 §2). The default, `unnamed-account`, says plainly that nobody named one — if
+  you run against two accounts, set it, or a handle from one can be accepted against the
+  other.
 
 **A run has a spend ceiling, and it stops itself rather than dying.** `--max-model-calls`
 bounds how many model calls the run may make across ingestion, answering and judging
-together — read the figure off `plan`, which reports the same currency. Reaching it stops
+together — read the figure off `plan`, which reports the same currency. Under
+`--phase batch` a submission is charged whole rather than item by item, because
+`submit` accepts or refuses the whole batch: a run that cannot afford the batch stops
+without sending it, so nothing partial is ever billed. Reaching it stops
 the run cleanly: the records written so far stay, `manifest.json` gains an `aborted` line
 saying why, and the command exits non-zero so nothing downstream mistakes a partial
 record set for a finished one. The same clean stop covers the failure that voided two
