@@ -45,6 +45,7 @@ recorded, the text is dropped. Only :class:`~ai_assistant.core.types.BatchFailur
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass
 from hashlib import sha256
 from math import isfinite
@@ -69,6 +70,7 @@ __all__ = [
     "ANSWER_BATCH",
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_POLL_TIMEOUT",
+    "ITEM_ID_PATTERN",
     "JUDGE_BATCH",
     "JUDGE_ITEM_SUFFIX",
     "BatchFile",
@@ -107,13 +109,59 @@ DEFAULT_POLL_TIMEOUT: Final = 26 * 60 * 60.0
 #: id it was submitted under. Suffixing rather than minting a second id keeps the join
 #: trivial — strip it, and you have the answer item, which is what ``batch_item_id``
 #: records on the row.
-JUDGE_ITEM_SUFFIX: Final = ".judge"
+#:
+#: It is spelled with a hyphen rather than the ``.judge`` it once was because a dot is
+#: outside :data:`ITEM_ID_PATTERN` and the vendor refuses the whole batch over one
+#: character. Its *length* is load-bearing too: the judge id is the answer id plus this
+#: suffix, so it is the judge id that has to fit in 64 characters, and
+#: :data:`_ID_PREFIX_CHARS` is derived from this string's length so that lengthening it
+#: shortens the readable half instead of overflowing the ceiling.
+JUDGE_ITEM_SUFFIX: Final = "-judge"
+
+#: What Anthropic's Message Batches API accepts as a ``custom_id``, which is what
+#: ADR-0143's ``item_id`` is submitted as (``models/batch.py``'s ``_request_for``).
+#:
+#: **A vendor constraint the caller has to satisfy, because nothing between here and
+#: the wire will.** ADR-0143 §3 is explicit that the seam "never mints, rewrites or
+#: normalises an ``item_id``", and §9 chose ``NonBlankEncodableText`` over
+#: ``Identifier`` precisely so an id is carried byte-for-byte — so an id this harness
+#: mints is the id the provider validates. The first live ``--phase batch`` submission
+#: found that out: the whole batch was refused with
+#: ``requests.0.custom_id: String should match pattern '^[a-zA-Z0-9_-]{1,64}$'``, on
+#: the dot this module used to put between the two halves and again in ``.judge``, and
+#: on a length that could reach 66 before the judge suffix pushed it to 72. Nothing was
+#: charged, and nothing else in the run had failed: an hour of retrieval was thrown
+#: away over the id format alone.
+#:
+#: It is stated here rather than enforced in ``models/batch.py`` because it is *this*
+#: vendor's rule and that module is the only place that knows it — a check there is
+#: issue #1207's question, not this constant's.
+ITEM_ID_PATTERN: Final = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+#: The ceiling :data:`ITEM_ID_PATTERN` imposes, as a number the budget below can do
+#: arithmetic on.
+_ID_MAX_CHARS: Final = 64
+
+#: How much of the digest of the whole pair is appended. Sixty-four bits of SHA-256,
+#: which is what makes distinct pairs distinct ids once the readable halves have been
+#: truncated and sanitised into each other.
+_ID_DIGEST_CHARS: Final = 16
 
 #: How much of a sanitised key survives into an ``item_id``, per half.
-_ID_PREFIX_CHARS: Final = 24
+#:
+#: **Derived rather than chosen, so the ceiling cannot be overflowed by editing
+#: something else.** The longest id this module submits is a *judge* id, which is
+#: ``<half>-<half>-<digest>`` plus :data:`JUDGE_ITEM_SUFFIX`: two separators, the
+#: digest, and the suffix are fixed costs, and what is left over is split between the
+#: two readable halves. Twenty characters each, at present — enough for a LoCoMo
+#: ``sample_id`` and its question ordinal whole, and enough of a LongMemEval hash to
+#: pick a case out of a provider console.
+_ID_PREFIX_CHARS: Final = (
+    _ID_MAX_CHARS - len(JUDGE_ITEM_SUFFIX) - _ID_DIGEST_CHARS - len("--")
+) // 2
 
-#: How much of the digest of the whole pair is appended.
-_ID_DIGEST_CHARS: Final = 16
+#: Everything :data:`ITEM_ID_PATTERN` does not admit, for the substitution below.
+_ID_UNSAFE: Final = re.compile(r"[^a-zA-Z0-9_-]")
 
 
 def item_id_for(case_key: str, question_id: str) -> str:
@@ -136,22 +184,30 @@ def item_id_for(case_key: str, question_id: str) -> str:
 
     ``item_id`` is ``NonBlankEncodableText`` and is carried back byte-for-byte
     (ADR-0143 §9 chose it over ``Identifier`` for exactly that), so nothing here has
-    to survive a normalisation.
+    to survive a normalisation — and nothing here is *given* one either, which is why
+    :data:`ITEM_ID_PATTERN` has to be satisfied on this side of the seam. Every
+    character outside it becomes ``_``, and each half is truncated to
+    :data:`_ID_PREFIX_CHARS` so that the id, **and the judge id built from it**, fit
+    the vendor's 64. Note that the substitution is against that pattern rather than
+    against :meth:`str.isalnum`, which is true of ``"é"`` and ``"²"``: this is an ASCII
+    rule, and a corpus key is not obliged to be ASCII.
 
     This names a question's **answer** item. Its judge item is this plus
     :data:`JUDGE_ITEM_SUFFIX`, so the two are joinable by stripping and are still
-    telling apart in a provider's console, which shows ids and nothing else.
+    telling apart in a provider's console, which shows ids and nothing else. Nothing
+    this returns can be mistaken for a judge id: an answer id ends in ``-`` followed by
+    :data:`_ID_DIGEST_CHARS` hex characters, and ``-judge`` is neither that length nor
+    hex.
 
     Args:
         case_key: The case's key, as its corpus gives it.
         question_id: The question's id within that case.
 
     Returns:
-        One id, unique to the pair, non-blank and ASCII.
+        One id, unique to the pair, non-blank, and matching :data:`ITEM_ID_PATTERN`.
     """
-    readable = "".join(
-        character if character.isalnum() or character in "._-" else "_"
-        for character in f"{case_key[:_ID_PREFIX_CHARS]}.{question_id[:_ID_PREFIX_CHARS]}"
+    readable = _ID_UNSAFE.sub(
+        "_", f"{case_key[:_ID_PREFIX_CHARS]}-{question_id[:_ID_PREFIX_CHARS]}"
     )
     digest = sha256(f"{case_key}\x00{question_id}".encode()).hexdigest()[:_ID_DIGEST_CHARS]
     return f"{readable}-{digest}"
