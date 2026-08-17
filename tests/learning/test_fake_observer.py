@@ -334,3 +334,54 @@ async def test_a_repeated_episode_is_refused_before_the_batch_is_recorded() -> N
         await observer.observe([repeated, repeated])
 
     assert observer.call_count == 0
+
+
+@pytest.mark.parametrize("minted", [None, 42], ids=["none", "an-int"])
+async def test_a_malformed_minted_id_is_discarded_and_never_raised(minted: object) -> None:
+    """The fake degrades exactly where ``ModelBackedObserver`` does (ADR-0026 §7).
+
+    The producer evaluates its own ``id_factory`` inside the ``try`` that guards
+    record construction and catches ``ValidationError``, so a factory returning a
+    non-``str`` or a blank one costs **one unusable proposal** rather than a failed
+    observation — "one bad belief in a batch is a degradation, not a failed
+    observation" (ADR-0077 §4). A fake that raised instead would fail a consumer's
+    test on an outcome production never produces.
+
+    The failure mode is *new to this fake*: while it derived its ids from content
+    there was no factory to get wrong. It arrived with the mint (#736), so its
+    degradation arrives with it too.
+
+    **Only the values a ``core`` invariant actually refuses are swept here**, which
+    is a non-``str``. An *empty* or whitespace id is accepted by ``MemoryRecord`` and
+    therefore by both observers alike — refusing it is the **writer's** job, where
+    ``MemoryIngestor._checked_id`` guards the factory it owns, and a producer-side
+    assertion here would pin a rule neither implementation carries.
+    """
+    observer = FakeObserver(
+        [ObservedBelief(content="prefers concise replies")],
+        id_factory=lambda: minted,  # type: ignore[arg-type, return-value]
+    )
+
+    outcome = await observer.observe(batch_of(2))
+
+    assert outcome.proposals == ()
+    assert outcome.discarded_unusable == 1
+
+
+async def test_an_id_factory_that_raises_propagates_from_the_fake() -> None:
+    """And the other half of the mirror: a *raising* factory is not swallowed.
+
+    ``ModelBackedObserver`` catches ``ValidationError`` alone, so a factory that
+    raises anything else propagates out of ``observe`` there — a broken collaborator
+    is not a degraded belief. The fake matches, rather than being quietly more
+    forgiving than the thing it doubles.
+    """
+
+    def explode() -> str:
+        msg = "the id factory is broken"
+        raise RuntimeError(msg)
+
+    observer = FakeObserver([ObservedBelief(content="a belief")], id_factory=explode)
+
+    with pytest.raises(RuntimeError, match="broken"):
+        await observer.observe(batch_of(2))

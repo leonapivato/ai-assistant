@@ -289,6 +289,34 @@ async def test_an_entry_citing_a_label_outside_the_batch_is_discarded_not_repair
     assert outcome.discarded_over_limit == 0
 
 
+@pytest.mark.parametrize("minted", [None, 42], ids=["none", "an-int"])
+async def test_a_malformed_minted_id_is_discarded_not_raised(minted: object) -> None:
+    """One bad belief in a batch is a degradation, not a failed observation (ADR-0077 §4).
+
+    ``self._id_factory()`` is evaluated *inside* the ``try`` that guards record
+    construction, so a factory returning a value ``MemoryRecord`` refuses costs one
+    unusable proposal and no more. Pinned here because ``FakeObserver`` is required
+    to mirror it (ADR-0026 §7) and now can: it mints rather than deriving (#736), so
+    the failure mode exists on both sides and the mirroring claim is testable.
+
+    Only a non-``str`` is swept: an empty or whitespace id is *accepted* by
+    ``MemoryRecord`` and therefore by both observers, and refusing it is the
+    writer's job (``MemoryIngestor._checked_id``).
+    """
+    observer = ModelBackedObserver(
+        FakeModelProvider(reply=_envelope(_belief(evidence=["E1"]))),
+        now=_fixed_now,
+        id_factory=lambda: minted,  # type: ignore[arg-type, return-value]
+        max_proposals=_MAX_PROPOSALS,
+        max_batch_size=_MAX_BATCH,
+    )
+
+    outcome = await observer.observe(batch_of(2))
+
+    assert outcome.proposals == ()
+    assert outcome.discarded_unusable == 1
+
+
 async def test_two_labels_resolving_to_one_episode_are_one_support() -> None:
     """Support is counted over distinct ids, never over citations (ADR-0077 §5)."""
     observer, _ = _observer(_envelope(_belief(evidence=["E1", "E1"], step="inferred")))
