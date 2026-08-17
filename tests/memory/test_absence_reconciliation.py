@@ -741,16 +741,32 @@ async def test_a_coverage_widened_mid_flight_does_not_authorise_a_close() -> Non
     while the ingest was in flight would otherwise have the reconciliation retire a
     record that lay outside the coverage the read actually declared.
 
-    That is not a small slip: an unbounded record is contained by an unbounded
-    coverage alone, so widening the bound is exactly the edit that turns "states no
-    position in the source's world" into "covered", and it would close a belief on
-    the strength of a slice nobody exhausted.
+    That is not a small slip: an extent reaching **past** the declared horizon is
+    contained by an unbounded coverage alone, so widening the bound is exactly the
+    edit that turns "the source placed this outside what the read exhausted" into
+    "covered", and it would close a belief on the strength of a slice nobody
+    exhausted.
+
+    **The record is planted with an overhanging extent, and that is what makes the
+    tampering decisive.** §3 condition 3 is asked of the *reported extent* and never
+    of the record's operational window, since ADR-0117 §3 moved the operand
+    (``ReadCoverage.contains``) — so an in-coverage record would be closed whatever
+    the coverage said and the case would assert nothing about the snapshot. It
+    previously planted one and survived on a *fold* instead: ``DefaultMemoryPolicy``'s
+    old rule 5 folded the proposal into it on similarity alone, which left it
+    **present** under §4 and never reached containment at all. ADR-0159 §4 ended that
+    fold, and the fixture now states what this docstring always claimed.
     """
     store = _store()
-    await store.add(_attested("open-window", validity=Validity()))
+    await store.add(
+        _attested(
+            "beyond-the-horizon",
+            extent=ReportedExtent(extends_until=_HORIZON + timedelta(days=5)),
+        )
+    )
     coverage = _coverage()
     proposal = MemoryUpdateProposal(
-        proposed=_attested("something-new", validity=Validity()),
+        proposed=_attested("something-new"),
         rationale="the source reported it",
         sensitivity=DataTier.PERSONAL,
     )
@@ -763,8 +779,9 @@ async def test_a_coverage_widened_mid_flight_does_not_authorise_a_close() -> Non
     object.__setattr__(coverage, "covers_until", None)
     await task
 
-    # The bound the reading declared still governs: an open window is not covered.
-    assert await _is_live(store, "open-window")
+    # The bound the reading declared still governs: an overhanging extent is not
+    # contained, so nothing authorises closing this record.
+    assert await _is_live(store, "beyond-the-horizon")
 
 
 async def test_a_covered_reading_whose_later_proposal_raises_closes_nothing() -> None:

@@ -99,6 +99,15 @@ _AGREEMENT_FOLDABLE = frozenset(
 # direction — the reason `EXTERNAL` may not be a *target* is about what a write at an
 # imported id would do, which is no reason to disregard what was said about the
 # record.
+#
+# **ADR-0161 §1 partially supersedes that exclusion, and this set is deliberately
+# not where it is repaired.** Clause (ii) admits an `EXTERNAL` target on a *third*
+# condition — the proposal is itself `EXTERNAL`, the two records name the same
+# reporting source, and they `agrees` — and it is held in
+# :func:`_re_reported` rather than by adding a member here. ADR-0161 §3 forbids the
+# widening in as many words, on ADR-0092 §5's twice-recorded ground: a frozenset that
+# answers two questions "answers neither once the questions come apart", and this one
+# answers "which member may a *label* name", which clause (ii) does not ask.
 _RELATION_TARGETS = frozenset({MemorySource.OBSERVED, MemorySource.INFERRED})
 
 
@@ -522,6 +531,75 @@ def _effective_relations(
     return effective
 
 
+def _re_reported(conflict: MemoryRecord, record: MemoryRecord) -> bool:
+    """Whether ``conflict`` is eligible under ADR-0161 §1's clause (ii).
+
+    Four conditions, all of them facts about the two records and none of them a
+    score, a rank, a threshold or anything a model said: the proposed record's
+    source is ``EXTERNAL``, the conflict's is, their
+    ``provenance.attestation.reported_by`` are equal, and they **agree** under
+    ADR-0121 §1.
+
+    **This is a scheduled reader re-reporting an entry it already reported**, and
+    the fold is what makes ADR-0110 §4's presence rule work. §4 defines a record as
+    present in a reading "exactly when `R`'s ingest left it live at its own id", and
+    puts the unchanged entry on ``REINFORCE`` "which folds at the target's id and
+    marks it present". Without this clause the arm finds no ``OBSERVED`` or
+    ``INFERRED`` member, falls to ADR-0159 §4(c), and installs at the proposal's own
+    freshly minted id — so the predecessor is *absent* from a reading that in fact
+    reported it, and the coverage close retires it. Every scheduled read then retires
+    its entire previous set and re-installs it at new ids (#1198).
+
+    **Why the exclusion it narrows does not reach this pairing** (ADR-0161 §2).
+    ADR-0159 §4 excluded ``EXTERNAL`` on ADR-0121 §3's argument, whose premise is
+    that "an imported record's id is the integrating system's idempotency key". That
+    premise is false here by ratified rule: ADR-0092 §6 forbids a producer to use the
+    source's own key, "whether directly or namespaced", so the next routine sync
+    cannot address the id the fold landed at and the futility never arises.
+    ADR-0121 §3's own ruling — stated over a ``USER_ASSERTED`` restatement — is
+    untouched, and :data:`_AGREEMENT_FOLDABLE` gains no member.
+
+    **Keyed on ``agrees`` and never on a ``RESTATES`` label** (ADR-0161 §1, §4).
+    Two reasons, and the second is the load-bearing one. A model-judged restatement
+    is not a claim an observation is entitled to make against the system that
+    reported the fact — the surviving half of ADR-0121 §3, read in the agreement
+    direction — so the model rung may not reach an ``EXTERNAL`` target at all. And a
+    label exists only where a reconciler ran, so keying on one would make the
+    presence rule depend on a provider being reachable, silently losing it in
+    exactly the deployment ADR-0159 §6 ratifies.
+
+    **Keyed on the same ``reported_by``, so two integrations do not fold into one**
+    (ADR-0161 §1). It is "the only durable handle the record keeps on where it came
+    from", the comparison is total where this clause reaches (an attestation is
+    present exactly when the band is ``ATTESTED``, and both records are ``EXTERNAL``),
+    and it is the same handle ADR-0110 §3's condition 1 selects *absence* candidates
+    by — so one reading's coverage and one reading's folds are judged against one
+    identity rather than two. Whether that should ever be lifted is #1204's.
+
+    Args:
+        conflict: A member of the conflict set.
+        record: The proposed record.
+
+    Returns:
+        Whether this member is the proposal's own prior import, unchanged.
+    """
+    incoming = record.provenance
+    stored = conflict.provenance
+    if incoming.source is not MemorySource.EXTERNAL:
+        return False
+    if stored.source is not MemorySource.EXTERNAL:
+        return False
+    # Both are `ATTESTED`, so ADR-0092 §1's iff validator has already guaranteed an
+    # attestation on each. Read defensively anyway rather than asserted: this is a
+    # gate on a *write*, and a gate that raised on a shape the type system says is
+    # unreachable would turn an invariant violation into a failed ingest.
+    if incoming.attestation is None or stored.attestation is None:
+        return False
+    return stored.attestation.reported_by == incoming.attestation.reported_by and agrees(
+        conflict, record
+    )
+
+
 def _rule_on_relations(
     record: MemoryRecord,
     conflicts: Sequence[MemoryRecord],
@@ -540,9 +618,21 @@ def _rule_on_relations(
 
     In order:
 
-    **(a) ``REINFORCE``** at the best-ranked member labelled ``RESTATES`` whose
-    source is in :data:`_RELATION_TARGETS`, exactly when such a member exists *and*
-    **no** member is labelled ``CONTRADICTS``.
+    **(a) ``REINFORCE``** at the best-ranked **eligible** member. A member is
+    eligible under either of two clauses (ADR-0161 §1, replacing ADR-0159 §4(a)):
+
+    - **(ii)** it is the proposal's own prior import, unchanged —
+      :func:`_re_reported`. Named **ahead of** any member eligible only under (i),
+      and named whatever any other member is labelled.
+    - **(i)** it is labelled ``RESTATES`` and its source is in
+      :data:`_RELATION_TARGETS`, and **no** member is labelled ``CONTRADICTS``.
+
+    The purity condition binds (i) alone. ADR-0161 §1 lifts it from (ii) because on
+    that pairing it costs and buys nothing: the fold retires nothing and lands
+    byte-identical content on a record that already carries it, so the contradicting
+    member stays live either way — while *refusing* additionally installs a third
+    record saying what the target says and, under a covered reading, leaves the
+    target absent for ADR-0110 §5's close to retire.
 
     **(b) ``SUPERSEDE``** at the best-ranked member labelled ``CONTRADICTS`` whose
     source is in :data:`_RELATION_TARGETS`, exactly when such a member exists *and*
@@ -573,9 +663,24 @@ def _rule_on_relations(
     unlabelled member neither authorises a write nor withdraws one a certain answer
     authorised.
 
-    **Rank is read only to break a tie the relations already selected** (§4).
-    ``conflicts[0]`` is never the target by position; the scans below run over the
-    members the labels chose, in the order the set arrived.
+    **Rank is read only to break a tie the clauses already selected** (ADR-0159 §4,
+    ADR-0161 §1). ``conflicts[0]`` is never the target by position; the scans below
+    run over the members the labels and clause (ii) chose, in the order the set
+    arrived.
+
+    **What the arm reads.** Relations and the members' ``provenance.source``
+    throughout, extended for clause (ii) alone by ``kind`` and ``content`` — through
+    ADR-0121 §1's predicate — and by ``provenance.attestation.reported_by``
+    (ADR-0161 §1). Still no retrieval score, no threshold, and no rank beyond
+    ordering members already selected.
+
+    **The degraded path rules the same way** (ADR-0161 §4). With no reconciler every
+    member is unlabelled, so limb (i)'s label condition is read as the predicate that
+    would have produced the label — :func:`_effective_relations` computes ``agrees``
+    itself — and limb (ii), which names no label at all, is read exactly as stated.
+    Parity is the decision: no ruling here turns on whether a provider was reachable,
+    because a presence rule that held only where one was configured would fail
+    silently in the direction ADR-0117 §1 names.
 
     Args:
         record: The proposed record — non-asserted, its caller having established
@@ -590,6 +695,28 @@ def _rule_on_relations(
     restating = [c for c in conflicts if effective.get(c.id) is ConflictRelation.RESTATES]
     contradicting = [c for c in conflicts if effective.get(c.id) is ConflictRelation.CONTRADICTS]
 
+    # (a) clause (ii) — ADR-0161 §1, and **ahead of clause (i)**. The precedence is
+    # the decision and not a tie-break: without it a set holding both the proposal's
+    # own identical predecessor and a better-ranked `OBSERVED` member labelled
+    # `RESTATES` would fold onto the observation, leave the predecessor absent, and
+    # close it — #1198's failure reached by retrieval order instead of by source
+    # class. No purity condition binds here, on ADR-0161 §1's own ground: refusing
+    # this fold leaves the contradicting member exactly as live as performing it
+    # does, *and* installs a third record saying what the target says, *and* leaves
+    # the target absent under a covered reading. An honesty condition that makes the
+    # store less honest is not being applied, it is being copied.
+    re_reported = next((c for c in conflicts if _re_reported(c, record)), None)
+    if re_reported is not None:
+        return MemoryDecision(
+            kind=MemoryDecisionKind.REINFORCE,
+            target_id=re_reported.id,
+            reason=(
+                "the connected source reported this unchanged; folded onto the record "
+                "it already reported (ADR-0161 §1)"
+            ),
+        )
+
+    # (a) clause (i) — ADR-0159 §4(a) as ratified, purity condition and all.
     if restating and not contradicting:
         target = next((c for c in restating if c.provenance.source in _RELATION_TARGETS), None)
         if target is not None:
@@ -752,11 +879,23 @@ class DefaultMemoryPolicy:
     9. A user-asserted proposal with nothing to supersede is trusted and
        accepted — which, since rule 8 took ``EXTERNAL``, means nothing conflicted
        with it at all.
-    10. A non-asserted proposal whose conflict set holds a member labelled
-        ``RESTATES`` — and **no** member labelled ``CONTRADICTS`` — rules
-        ``REINFORCE`` at the best-ranked such member whose source is
-        ``OBSERVED``/``INFERRED`` (ADR-0159 §4a). A *relation*, never the conflict
-        set being non-empty: ``conflicts[0]`` is no longer a target by position.
+    10. A non-asserted proposal rules ``REINFORCE`` at the best-ranked **eligible**
+        member of its conflict set (ADR-0159 §4a, replaced by ADR-0161 §1). A
+        member is eligible under either of two clauses, and the first takes
+        precedence:
+
+        - **(ii)** an ``EXTERNAL`` member that a scheduled reader is re-reporting
+          unchanged — the proposal is itself ``EXTERNAL``, the two carry the same
+          ``provenance.attestation.reported_by``, and they **agree** under ADR-0121
+          §1. Named whatever any other member is labelled, because refusing the
+          fold leaves a contradicting member exactly as live while duplicating a
+          fact and letting a covered reading retire the target (ADR-0161 §1).
+        - **(i)** a member labelled ``RESTATES`` whose source is
+          ``OBSERVED``/``INFERRED``, and only when **no** member is labelled
+          ``CONTRADICTS``.
+
+        A *relation* or a *certain predicate*, never the conflict set being
+        non-empty: ``conflicts[0]`` is no longer a target by position.
     11. Otherwise, a member labelled ``CONTRADICTS`` — and **no** member labelled
         ``RESTATES`` — rules ``SUPERSEDE`` at the best-ranked such member of the
         same two sources (ADR-0159 §4b). This is the observed path's first
@@ -787,10 +926,13 @@ class DefaultMemoryPolicy:
     sometimes they will not"), and filed the question these two rules answer.
 
     **With no relations at all the two rules still hold ADR-0121 §1's floor**
-    (ADR-0159 §6): rule 10 fires on a member that ``agrees``, which this policy
-    computes for itself and which no reconciler can overturn, and everything else
-    falls to rule 13. There is no configuration of this system in which the rule
-    ADR-0159 replaced is the better one.
+    (ADR-0159 §6, ADR-0161 §4): rule 10 fires on a member that ``agrees``, which
+    this policy computes for itself and which no reconciler can overturn, and
+    everything else falls to rule 13. The degraded path names exactly the members
+    the reconciled one does — clause (ii) never mentioned a label, and clause (i)'s
+    is read as the predicate that would have produced it — so no ruling turns on
+    whether a provider was reachable. There is no configuration of this system in
+    which the rule ADR-0159 replaced is the better one.
     """
 
     def __init__(
