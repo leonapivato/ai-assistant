@@ -16,8 +16,8 @@
   `MemoryPolicy` implementation. **Both review lenses are run anyway**, because it
   amends the ruling a contract ADR ratified eight days into its own implementation
   lane, and the architecture lens is the one whose subject is a decision.
-- Refs #1198 (the case, filed by ADR-0159's implementing lane), #1190. Cites #736,
-  #743, #827.
+- Refs #1198 (the case, filed by ADR-0159's implementing lane), #1190. Files #1203
+  and #1204 in §9. Cites #736, #743, #827, #870.
 
 ## Context
 
@@ -168,7 +168,7 @@ widen.** §5 defines membership as "does not carry a foreign idempotency key" an
 excludes `EXTERNAL` on the ground that it "still does not satisfy" it. Whether §6's
 minting rule makes that characterisation stale is a real question about the *writer
 floor* for a `USER_ASSERTED` proposal, and it is not this question: nothing here
-needs the floor to move (§3). It is filed as an issue rather than half-ruled.
+needs the floor to move (§3). Filed as #1203 rather than half-ruled.
 
 **A third-party attested producer with no stable key is exactly who this helps.**
 The rejected alternative — give readers stable derived ids so a re-import lands at
@@ -380,15 +380,15 @@ otherwise.
 - **Whether ADR-0092 §5's reinforce-safe class should widen** now that §6 forbids a
   foreign key. That is the writer floor for a `USER_ASSERTED` proposal, it is
   ADR-0121 §7's filed residue (#870) seen from the design side, and nothing here
-  needs it. Filed as an issue.
+  needs it. Filed as #1203.
 - **A fold between two different attested integrations.** Clause (ii) is keyed on
   the source *class*, so two integrations that render an entry identically fold onto
   one record and ADR-0092 §6's "`REINFORCE` takes the incoming attestation" makes the
   survivor's attestation the later reader's. The content is identical, so the
   attestation still "describes the content that survived"; whether one record naming
   alternating sources is the right answer, or whether the arm should compare
-  attestations, is a question about what an attestation identifies and is filed
-  rather than answered here.
+  attestations, is a question about what an attestation identifies. Filed as #1204,
+  and unreachable until a second `EXTERNAL` producer exists.
 - **The `MemoryPolicy` conformance suite's reach.** §6 declines this pairing; it does
   not reopen ADR-0159 §8's clause or ADR-0040 §5's rule.
 - **Anything under `src/` or `tests/`.** The implementation is ADR-0159's lane
