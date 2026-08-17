@@ -177,6 +177,17 @@ def item_id_for(case_key: str, question_id: str) -> str:
     *plus a digest of the exact pair*, and the digest is what makes distinct pairs
     distinct ids.
 
+    **The digest hashes a length-prefixed encoding, not a delimited one**, because a
+    delimiter is only unambiguous while the payload cannot contain it. Joining the two
+    halves on a ``NUL`` — as this did — collides the moment a key holds one: the pair
+    whose case key is ``a``-``NUL``-``b`` with question id ``b``, and the pair whose
+    case key is ``a`` with question id ``b``-``NUL``-``b``, hash the same bytes. A
+    corpus key is a JSON string, and JSON admits ``NUL``. Two questions sharing an id
+    is not a mild defect here: ``submit`` refuses the whole batch on a duplicate
+    (ADR-0143 §3), after the retrieval phase has already run and cannot be replayed
+    cheaply. Prefixing the first half's length makes the encoding decodable, and so
+    injective over any pair of strings at all rather than over the well-behaved ones.
+
     The readable prefix is not decoration. A run that dies between ``submit`` and
     ``fetch`` leaves a batch whose ids are all anyone has to work from until
     ``records.jsonl`` exists, and an operator reading ``batches.jsonl`` against the
@@ -209,7 +220,9 @@ def item_id_for(case_key: str, question_id: str) -> str:
     readable = _ID_UNSAFE.sub(
         "_", f"{case_key[:_ID_PREFIX_CHARS]}-{question_id[:_ID_PREFIX_CHARS]}"
     )
-    digest = sha256(f"{case_key}\x00{question_id}".encode()).hexdigest()[:_ID_DIGEST_CHARS]
+    digest = sha256(f"{len(case_key)}:{case_key}{question_id}".encode()).hexdigest()[
+        :_ID_DIGEST_CHARS
+    ]
     return f"{readable}-{digest}"
 
 
