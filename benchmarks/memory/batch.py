@@ -69,6 +69,7 @@ __all__ = [
     "DEFAULT_POLL_INTERVAL",
     "DEFAULT_POLL_TIMEOUT",
     "JUDGE_BATCH",
+    "JUDGE_ITEM_SUFFIX",
     "BatchFile",
     "BatchSession",
     "PollPolicy",
@@ -96,6 +97,16 @@ DEFAULT_POLL_INTERVAL: Final = 60.0
 #: closes its window late; a run that reaches this really has hit something other
 #: than ordinary latency.
 DEFAULT_POLL_TIMEOUT: Final = 26 * 60 * 60.0
+
+#: What distinguishes a question's judge item from its answer item.
+#:
+#: The two batches carry different work for the same question, and an id that did not
+#: say which would be legible to nobody: an operator reading a provider console or
+#: ``batches.jsonl`` sees ids and nothing else, and a fetched outcome carries only the
+#: id it was submitted under. Suffixing rather than minting a second id keeps the join
+#: trivial — strip it, and you have the answer item, which is what ``batch_item_id``
+#: records on the row.
+JUDGE_ITEM_SUFFIX: Final = ".judge"
 
 #: How much of a sanitised key survives into an ``item_id``, per half.
 _ID_PREFIX_CHARS: Final = 24
@@ -125,6 +136,10 @@ def item_id_for(case_key: str, question_id: str) -> str:
     ``item_id`` is ``NonBlankEncodableText`` and is carried back byte-for-byte
     (ADR-0143 §9 chose it over ``Identifier`` for exactly that), so nothing here has
     to survive a normalisation.
+
+    This names a question's **answer** item. Its judge item is this plus
+    :data:`JUDGE_ITEM_SUFFIX`, so the two are joinable by stripping and are still
+    telling apart in a provider's console, which shows ids and nothing else.
 
     Args:
         case_key: The case's key, as its corpus gives it.
@@ -388,18 +403,23 @@ async def judge_batch(
             grading rather than declared beside it.
 
     Returns:
-        Each ``item_id`` mapped to its grading. A judge item that did not come back
+        Each **answer** ``item_id`` mapped to its grading — the judge item's own
+        suffix is stripped here, so a caller keys everything by one id. A judge item
+        that did not come back
         usable is ``UNGRADED`` naming why — never a guess, because a judge that could
         not be read has not graded.
     """
     items = [
-        BatchRequest(item_id=item_id, messages=list(judge_messages(question, answer)))
+        BatchRequest(
+            item_id=f"{item_id}{JUDGE_ITEM_SUFFIX}",
+            messages=list(judge_messages(question, answer)),
+        )
         for item_id, question, answer in pending
     ]
     outcomes = await submit_and_settle(session, kind=JUDGE_BATCH, items=items)
     graded: dict[str, Grading] = {}
     for item_id, _question, _answer in pending:
-        reply, failure = _reply_of(outcomes.get(item_id))
+        reply, failure = _reply_of(outcomes.get(f"{item_id}{JUDGE_ITEM_SUFFIX}"))
         graded[item_id] = (
             grading_from_reply(reply, judge=judge_name)
             if failure is None
