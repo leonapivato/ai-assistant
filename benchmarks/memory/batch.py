@@ -188,6 +188,14 @@ def item_id_for(case_key: str, question_id: str) -> str:
     cheaply. Prefixing the first half's length makes the encoding decodable, and so
     injective over any pair of strings at all rather than over the well-behaved ones.
 
+    ``surrogatepass`` is on that encode for the same reason the length prefix is
+    there: to make "any pair of strings" true rather than nearly true. ``json.loads``
+    turns a ``u+D800`` escape into a lone surrogate — a perfectly ordinary Python
+    ``str`` that both loaders' string checks admit — and plain UTF-8 raises
+    ``UnicodeEncodeError`` on it, which would abandon a run at id-minting time over a
+    character the id was going to replace with ``_`` anyway. The codec is injective
+    over the whole of ``str``, so nothing about the paragraph above weakens.
+
     The readable prefix is not decoration. A run that dies between ``submit`` and
     ``fetch`` leaves a batch whose ids are all anyone has to work from until
     ``records.jsonl`` exists, and an operator reading ``batches.jsonl`` against the
@@ -220,9 +228,9 @@ def item_id_for(case_key: str, question_id: str) -> str:
     readable = _ID_UNSAFE.sub(
         "_", f"{case_key[:_ID_PREFIX_CHARS]}-{question_id[:_ID_PREFIX_CHARS]}"
     )
-    digest = sha256(f"{len(case_key)}:{case_key}{question_id}".encode()).hexdigest()[
-        :_ID_DIGEST_CHARS
-    ]
+    digest = sha256(
+        f"{len(case_key)}:{case_key}{question_id}".encode(errors="surrogatepass")
+    ).hexdigest()[:_ID_DIGEST_CHARS]
     return f"{readable}-{digest}"
 
 

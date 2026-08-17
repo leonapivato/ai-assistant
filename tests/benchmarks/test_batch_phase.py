@@ -797,13 +797,20 @@ class TestTheVendorAcceptsEveryIdTheHarnessSubmits:
             "caf\u00e9",
             "\uff12",
             "\u200bzero-width",
+            "\ud800",
+            "pre\udfffpost",
             "x" * 500,
         ],
     )
     def test_no_key_shape_survives_into_an_id_the_vendor_refuses(self, hostile: str) -> None:
-        # The last two are the ones a character class written as `str.isalnum()` would
-        # have let through: `"\u00e9"` and a full-width digit are both alphanumeric to
-        # Python and both outside an ASCII pattern.
+        # The accented letter and the full-width digit are what a character class
+        # written as `str.isalnum()` would still have let through: both are
+        # alphanumeric to Python and both outside an ASCII pattern.
+        #
+        # The lone surrogates are what `json.loads` makes of a `"\ud800"` escape, and
+        # they are `str` values plain UTF-8 cannot encode at all — so minting used to
+        # raise `UnicodeEncodeError` rather than produce the id it was about to
+        # sanitise the character out of.
         for case_key, question_id in ((hostile, hostile), (hostile, "q0"), ("case", hostile)):
             assert ITEM_ID_PATTERN.match(item_id_for(case_key, question_id))
             assert ITEM_ID_PATTERN.match(f"{item_id_for(case_key, question_id)}{JUDGE_ITEM_SUFFIX}")
