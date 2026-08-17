@@ -330,14 +330,18 @@ one.
 > `EXTERNAL` member agrees but carries a **different** `reported_by`, which must
 > fall to (c).
 
-> **Normative.** The same lane owes a **degraded-path** test — `relations` passed as
-> `None` — for each ruling §8 records as changed against ADR-0159 §6's text: an
+> **Normative.** The same lane owes a **degraded-path** test in each of the two
+> states ADR-0159 §8 distinguishes — `relations` passed as `None`, and passed as an
+> empty mapping — which must rule identically, for each ruling §8 records as changed
+> against ADR-0159 §6's text: an
 > `EXTERNAL` proposal agreeing with a same-`reported_by` `EXTERNAL` member, which
 > must rule `REINFORCE`; the same with a different `reported_by`, which must rule
 > `ACCEPT`; and an `OBSERVED` and an `INFERRED` proposal above `min_confidence`
 > agreeing with an `EXTERNAL`-only conflict set, which must rule `ACCEPT`. An
 > implementation that kept §6's unqualified "any agreeing member" would pass every
-> reconciled-path test above and fail these.
+> reconciled-path test above and fail these — and one that applied the new class on
+> the `None` path alone would pass half of them, which is why both states are named
+> rather than one.
 
 **This ADR carries no test of its own, and that is the point of the clause above.**
 It is prose, ratified ahead of the implementation under golden rule 5, so every
