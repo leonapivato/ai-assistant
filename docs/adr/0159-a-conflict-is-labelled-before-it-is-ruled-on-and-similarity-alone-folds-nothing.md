@@ -27,10 +27,12 @@
   **§6 moves in the same scope, and it moves as a supersession rather than an
   amendment.** §6's normative clause is "rules `REINFORCE` onto a member that
   `agrees` under ADR-0121 §1", and it states no target class; read as its own text
-  rather than as a pointer to §4(a), it admits an agreeing `EXTERNAL` member that
-  §4(a) refuses on the reconciled path, so the degraded path would fold where the
-  reconciled one would not — below the floor §6's own heading says it never goes
-  below. Two rulings change against §6's text — that one, and an `OBSERVED` or
+  it admits an agreeing `EXTERNAL` member that §4(a) refuses on the reconciled path,
+  so a deployment with no provider reachable would fold where one with a provider
+  does not. Nothing in ADR-0121 closes that fork — its §3 target ruling is stated
+  over "the arm in §2", a `USER_ASSERTED` population — so ADR-0161 §4 supplies the
+  class rather than inferring it, as parity with the reconciled path. Two rulings
+  change against §6's text — that one, and an `OBSERVED` or
   `INFERRED` proposal agreeing with an `EXTERNAL` member, which §6's text folds and
   ADR-0161 §1 rules `ACCEPT` (§4(a)'s exclusion holding as ratified, now written
   down where an implementer builds from it) — so the §6 half of the scope is stated
