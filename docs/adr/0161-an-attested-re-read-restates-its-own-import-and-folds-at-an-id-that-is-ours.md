@@ -363,12 +363,16 @@ one.
 > rather than one.
 
 **This ADR carries no test of its own, and that is the point of the clause above.**
-It is prose, ratified ahead of the implementation under golden rule 5, so every
-branch §1 opens is unpinned until PR #1197 lands. An implementation that ignored
-`reported_by`, or read it as sufficient on its own, or kept the contradiction block
-over (ii), or took the first eligible member by rank, would pass the two end-to-end
-suites named above and violate §1 — which is exactly why the branches are
-enumerated here rather than left to whoever writes them.
+It is prose, and it merges ahead of the lane it binds: PR #1197 is ADR-0159's
+implementing lane, and it must build from §1's clauses as this ADR leaves them.
+That ordering is this batch's sequencing choice and **not** golden rule 5's
+contract-first rule — that rule and ADR-0015 §5 both reach only a Protocol or a
+`core/` type crossing subsystem boundaries, and this ADR changes neither, as the
+header states. So every branch §1 opens is unpinned until #1197 lands. An
+implementation that ignored `reported_by`, or read it as sufficient on its own, or
+kept the contradiction block over (ii), or took the first eligible member by rank,
+would pass the two end-to-end suites named above and violate §1 — which is exactly
+why the branches are enumerated here rather than left to whoever writes them.
 
 ADR-0040 §5's rule decides this and decides it against an exception: "a conformance
 suite *is* the contract", so asserting a policy's ladder in it "would make one
