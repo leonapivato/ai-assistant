@@ -23,7 +23,7 @@ from typing import TYPE_CHECKING, Final
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ai_assistant.core.types import TraceKind, TraceRecordSet, TraceRef
+from ai_assistant.core.types import BatchHandle, TraceKind, TraceRecordSet, TraceRef
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -37,10 +37,12 @@ __all__ = [
     "EXCLUSION_KEYS",
     "FETCH_K_KEY",
     "LIMIT_KEY",
+    "BatchRef",
     "QuestionRecord",
     "RetrievalTelemetry",
     "RunManifest",
     "RunMode",
+    "RunPhase",
     "TraceCursor",
     "now_iso",
     "read_jsonl",
@@ -60,6 +62,94 @@ class RunMode(StrEnum):
 
     SMOKE = "smoke"
     SCORED = "scored"
+
+
+class RunPhase(StrEnum):
+    """How a run makes the model calls that answer and judge its questions.
+
+    Ingestion is **not** on this axis and never batches: ``ObservationStage`` reads
+    the conversation's most recent window, so every pass depends on the writes the
+    pass before it made (``benchmarks.memory.ingest``). What varies here is only
+    what happens once a case's memory is built.
+
+    ``SYNC`` is the default and is what every pilot before this one ran: one
+    completion per question, then one per grading, in order.
+
+    ``BATCH`` retrieves for every question first, submits the answers as one
+    ``BatchCompleter`` job, waits, then submits the gradings as a second. The
+    vendor bills a batch at half the per-request price, and answering plus judging
+    is about 60% of a scored run's cost. The wall clock changes shape rather than
+    simply shrinking: two waits, each typically under an hour, instead of ~2,000
+    serial round trips.
+
+    It is recorded in the manifest because it is a configuration of the run and not
+    a detail of how it was driven: a reader comparing two record sets needs to know
+    that one of them may carry ``ungraded`` rows for a reason the other cannot have
+    (:class:`~ai_assistant.core.types.BatchOutcomeKind`'s three non-success kinds).
+    """
+
+    SYNC = "sync"
+    BATCH = "batch"
+
+
+class BatchRef(BaseModel):
+    """A submitted batch, written down so a paid job is never lost.
+
+    **This is ADR-0060's shape applied to money rather than to a lock.** A batch is
+    remote, outlives the coroutine that made it, is being billed, and cannot be
+    released by returning; ADR-0143 §2 splits ``submit`` from the waiting precisely
+    so the handle is in the caller's hands *before* any waiting begins. Holding it
+    in memory would discharge that only until the process dies, so the run writes it
+    to ``batches.jsonl`` before its first ``poll`` — an interrupted run then leaves a
+    file naming exactly what it is being charged for, and the outcomes stay fetchable
+    from any process with the same ``issuer`` (§2's resumption clause).
+
+    It carries no count the provider would have to agree with, for the reason
+    :class:`~ai_assistant.core.types.BatchHandle` carries none: ``item_count`` here
+    is *the caller's* record of what it submitted, which is the set §4 has the caller
+    match outcomes against, and never a claim about what ``poll`` will report.
+
+    Attributes:
+        kind: ``"answer"`` or ``"judge"`` — which of the run's two batches this is.
+        batch_key: The run's own key for it, carried unchanged onto the handle and
+            never interpreted by the provider.
+        batch_id: The provider's identifier.
+        issuer: The non-secret account label the batch is reachable from. Recorded
+            because a handle is only an address *for that account*: a run resumed
+            against another one cannot fetch this.
+        submitted_at: When the provider accepted it, ISO-8601.
+        item_count: How many items this run put in it.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    kind: str
+    batch_key: str
+    batch_id: str
+    issuer: str
+    submitted_at: str
+    item_count: int
+
+    @classmethod
+    def of(cls, handle: BatchHandle, *, kind: str, item_count: int) -> BatchRef:
+        """Record a handle the provider has just accepted.
+
+        Args:
+            handle: What ``submit`` returned.
+            kind: ``"answer"`` or ``"judge"``.
+            item_count: How many items were submitted.
+
+        Returns:
+            The reference, ready to append to ``batches.jsonl``.
+        """
+        return cls(
+            kind=kind,
+            batch_key=handle.batch_key,
+            batch_id=handle.batch_id,
+            issuer=handle.issuer,
+            submitted_at=handle.submitted_at.isoformat(),
+            item_count=item_count,
+        )
 
 
 class RetrievalTelemetry(BaseModel):
@@ -181,6 +271,18 @@ class QuestionRecord(BaseModel):
             turn no pointer at all. Read it against
             ``ingestion["evidence_keys_captured"]`` before concluding anything: a case
             that mapped nothing has a *missing* split, not a negative one.
+        batch_item_id: The ``item_id`` this question's answer was submitted and
+            matched back under, or ``None`` on a synchronous run — where the field is
+            absent rather than empty, so an older artifact and a ``--phase sync`` one
+            read alike and neither claims a batch it was not in.
+
+            **Recorded because ADR-0143 §4 makes the caller the only party that can
+            check the match.** ``fetch`` returns one outcome per submitted item and
+            the caller matches by ``item_id``, never by position; nothing on the
+            provider's side can be asked afterwards which question an id stood for.
+            Written here, the join from ``batches.jsonl`` back to a question survives
+            the process, which is what makes a batch that settled after an interrupted
+            run still readable.
         telemetry: What the traces said.
         asked_at: The benchmark clock's reading while the question was answered.
         context_chars: How large the rendered context block was. A crude proxy for
@@ -221,6 +323,7 @@ class QuestionRecord(BaseModel):
     retrieved_evidence_elided: tuple[int, ...]
     evidence: tuple[str, ...]
     evidence_episode_ids: tuple[tuple[str, ...], ...]
+    batch_item_id: str | None = None
     telemetry: RetrievalTelemetry
     asked_at: str
     context_chars: int
@@ -243,6 +346,21 @@ class RunManifest(BaseModel):
         case_count: Cases in the run.
         question_count: Questions in the run.
         slice_seed: The seed a stratified slice was drawn with, where one was.
+        phase: :class:`RunPhase` — whether the answers and gradings were made one
+            call at a time or through the Batches API. Ingestion is synchronous under
+            both and is not on this axis.
+
+            **Read it before reading a run's ``ungraded`` rows.** A batched run can
+            record a question as ungraded for a reason a synchronous one has no way
+            to produce: an item the provider expired, cancelled, or failed
+            (:class:`~ai_assistant.core.types.BatchOutcomeKind`). The verdict is the
+            same word and the cause is not, so the two record sets are only
+            comparable with this field in hand.
+        batches: Every batch this run submitted, in submission order, or empty on a
+            synchronous run. The same references ``batches.jsonl`` already carries —
+            duplicated here because that file is the *guard*, appended before the
+            first poll so an interrupted run can still name what it is paying for,
+            and this is the *record*, so a manifest describes its own run whole.
         max_sessions: The session bound the cases were shortened to, or ``0`` where the
             histories are whole. **A non-zero value means the run answered questions
             about a conversation that did not happen**, which is legitimate for a
@@ -325,9 +443,12 @@ class RunManifest(BaseModel):
             ``None`` is "this manifest does not record a clean stop", which is true of
             both.
 
-            The field is written by rewriting ``manifest.json`` at the end of an
-            aborted run. That is the only rewrite: the file is otherwise written once,
-            before any case runs, so an interrupted run still says what it was.
+            The field is written by rewriting ``manifest.json`` at the end of the
+            run. **The manifest is rewritten at most once**, after the last case, to
+            record this and ``batches`` — both being facts a run only has once it is
+            over. It is otherwise written once before any case runs, so an interrupted
+            run still says what it was, and the orphan guard that must survive an
+            interruption is ``batches.jsonl`` rather than this file.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -343,6 +464,8 @@ class RunManifest(BaseModel):
     case_count: int
     question_count: int
     slice_seed: int | None
+    phase: RunPhase = RunPhase.SYNC
+    batches: tuple[BatchRef, ...] = ()
     max_sessions: int = 0
     answer_route: str
     observer_route: str

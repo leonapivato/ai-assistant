@@ -18,6 +18,14 @@ makes no model call, because #1029's ground rule 1 permits smoke runs and forbid
 reading their output as scores until the pre-registration is final. A scored run has
 to be asked for by name and confirmed.
 
+``--phase batch`` answers and judges through the Batches API instead of one call at a
+time: half the vendor's price on the two seams that are ~60% of a scored run's spend,
+paid for in latency rather than in money — two waits instead of ~2,000 serial round
+trips. Ingestion is unaffected and stays serial. ``--phase sync``, the default, is the
+path every pilot before this one ran. A batched run prints each handle as the provider
+accepts it and writes it to ``batches.jsonl`` **before** it starts waiting, so an
+interrupted run still names the job it is being billed for.
+
 **This is not an ``assistant`` subcommand and it is not a console script.** The
 offline-tool family in ``pyproject.toml`` exists because those tools take the hub's
 instance lock and live in ``service``, which nothing may import (ADR-0084 §6). None of
@@ -37,16 +45,18 @@ from rich.console import Console
 from rich.table import Table
 
 from ai_assistant.core.config import Settings
+from benchmarks.memory.batch import DEFAULT_POLL_INTERVAL, DEFAULT_POLL_TIMEOUT, PollPolicy
 from benchmarks.memory.corpora import locomo, longmemeval
 from benchmarks.memory.corpora.fetch import DEFAULT_CACHE, digest_of, ensure_corpus
 from benchmarks.memory.corpora.provenance import CORPORA, Corpus, corpus_by_key
-from benchmarks.memory.records import RunMode
+from benchmarks.memory.records import RunMode, RunPhase
 from benchmarks.memory.run import (
     execute_run,
     plan_run,
     refuse_ineligible_scored_run,
 )
 from benchmarks.memory.select import first_questions, first_sessions
+from benchmarks.memory.wiring import DEFAULT_ISSUER
 
 if TYPE_CHECKING:
     from benchmarks.memory.cases import BenchCase
@@ -143,6 +153,20 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
     ] = 0,
     mode: Annotated[RunMode, typer.Option(help="smoke or scored.")] = RunMode.SMOKE,
     grader: Annotated[str, typer.Option(help="'exact' (no model call) or 'model'.")] = "exact",
+    phase: Annotated[
+        RunPhase,
+        typer.Option(help="sync (a call per question) or batch (two Batches-API jobs)."),
+    ] = RunPhase.SYNC,
+    issuer: Annotated[
+        str,
+        typer.Option(help="Account label stamped on batch handles; not a credential."),
+    ] = DEFAULT_ISSUER,
+    poll_interval: Annotated[
+        float, typer.Option(help="Seconds between polls of a submitted batch.")
+    ] = DEFAULT_POLL_INTERVAL,
+    batch_timeout: Annotated[
+        float, typer.Option(help="Seconds to wait for a batch before stopping cleanly.")
+    ] = DEFAULT_POLL_TIMEOUT,
     judge_model: Annotated[
         str | None,
         typer.Option(help="Route the model judge grades on; default ASSISTANT_DEFAULT_MODEL."),
@@ -193,6 +217,14 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
             notes=notes,
             keep_stores=keep_stores,
             max_model_calls=max_model_calls,
+            phase=phase,
+            issuer=issuer,
+            poll=PollPolicy(interval=poll_interval, timeout=batch_timeout),
+            # An operator watching a paid batched run needs to see each handle as it
+            # is accepted and the settled count as it moves; there is nothing else to
+            # look at for an hour, and the handle is what a cancelled run is
+            # recovered from.
+            announce=console.print,
         )
     )
     root = output if output is not None else DEFAULT_RUNS

@@ -44,7 +44,7 @@ asking a reader to keep them in step.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from ai_assistant.app.composition import (
     CONFLICT_LIMIT,
@@ -52,6 +52,7 @@ from ai_assistant.app.composition import (
     RETRIEVAL_LIMIT,
 )
 from ai_assistant.core.config import EmbedderKind
+from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.evaluation import SqliteTraceStore
 from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import (
@@ -70,6 +71,7 @@ from ai_assistant.models import (
     PydanticAIProvider,
     ensure_vendor_available,
 )
+from ai_assistant.models.batch import anthropic_batch_completer
 from ai_assistant.models.retry import RetryingProvider, RetryPolicy
 from ai_assistant.orchestration import (
     ConversationLifecycle,
@@ -79,13 +81,49 @@ from ai_assistant.orchestration import (
 from benchmarks.memory.clock import BenchmarkClock
 
 if TYPE_CHECKING:
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
-    from ai_assistant.core.protocols import Embedder, ModelProvider, Observer
+    from ai_assistant.core.protocols import BatchCompleter, Embedder, ModelProvider, Observer
     from benchmarks.memory.spend import SpendGuard
 
-__all__ = ["Harness", "build_embedder", "build_harness", "build_model_provider"]
+__all__ = [
+    "BATCH_PROVIDER",
+    "DEFAULT_ISSUER",
+    "Harness",
+    "build_batch_completer",
+    "build_embedder",
+    "build_harness",
+    "build_model_provider",
+    "refuse_unbatchable_route",
+]
+
+#: The provider half of a ``"provider:model"`` spec whose batch endpoint the harness
+#: can actually reach.
+#:
+#: A two-word copy of ``ai_assistant.models.batch._PROVIDER_NAME``, under the same
+#: discipline :data:`benchmarks.memory.answer.SUPPLEMENT_KINDS` is copied under: the
+#: name is private and the harness does not widen a subsystem's surface for its own
+#: convenience. ``tests/benchmarks/test_harness_contracts.py`` fails the day the two
+#: disagree.
+#:
+#: **It is copied so the refusal can happen early, and early is the whole point.**
+#: ``AnthropicBatchCompleter`` refuses a foreign spec itself — but at ``submit``,
+#: which on a batched run is *after* every case has been ingested. On LoCoMo that is
+#: ~294 paid observation calls and an hour of wall clock spent before the run
+#: discovers it cannot answer.
+BATCH_PROVIDER: Final = "anthropic"
+
+#: The account label a run stamps on its batches when the operator names none.
+#:
+#: ADR-0143 §2 makes ``issuer`` an assertion the seam cannot check: it is what a
+#: handle is compared against, so a deployment that labels two accounts alike gets a
+#: handle accepted against the wrong one. The default therefore says plainly that
+#: nobody named an account, rather than inventing one that looks specific — an
+#: operator running against two accounts has to pass ``--issuer`` for the comparison
+#: to mean anything, and a default like ``"default"`` would hide that.
+DEFAULT_ISSUER: Final = "unnamed-account"
 
 
 @dataclass(frozen=True, slots=True)
@@ -262,6 +300,76 @@ def build_model_provider(
         PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings)
     )
     return built if guard is None else guard.wrap(built)
+
+
+def refuse_unbatchable_route(spec: str) -> None:
+    """Fail now if ``spec``'s vendor has no batch endpoint this harness can reach.
+
+    The sibling of :func:`~benchmarks.memory.run.check_credentials_for`, answering the
+    question a batched run adds: not "does this route hold a credential" but "can this
+    route be batched at all". Both are asked before a store is opened, and for the
+    same reason — the failure they prevent otherwise lands after the expensive part.
+
+    Args:
+        spec: The ``"provider:model"`` spec the run will answer and judge on.
+
+    Raises:
+        ConfigurationError: If ``spec`` names a provider other than
+            :data:`BATCH_PROVIDER`. Its own class rather than ``ValueError`` because
+            this is a startup misconfiguration in exactly the sense
+            ``ensure_vendor_available`` uses: there is nothing to retry and nothing to
+            reroute, the run is simply configured for something it cannot do.
+    """
+    provider, separator, _ = spec.partition(":")
+    if separator and provider != BATCH_PROVIDER:
+        msg = (
+            f"--phase batch cannot answer on {spec!r}: the only batch endpoint wired "
+            f"into this tree is {BATCH_PROVIDER!r} (ADR-0143 §11 defers a second "
+            f"vendor). Run --phase sync, or set ASSISTANT_DEFAULT_MODEL to an "
+            f"{BATCH_PROVIDER} route."
+        )
+        raise ConfigurationError(msg)
+
+
+def build_batch_completer(
+    settings: Settings, *, issuer: str, spec: str | None = None
+) -> AbstractAsyncContextManager[BatchCompleter]:
+    """The harness's own composition root for bulk inference (ADR-0143 §8).
+
+    §8 is normative that a consumer depends on the ``BatchCompleter`` Protocol and
+    "never on a concrete class in ``models/`` for its types", and obtains an instance
+    "by construction in a composition root it owns ... its own root for a consumer
+    outside ``ai_assistant``". This module is that root, and this is the one line in
+    it: the return type is the Protocol, and the concrete class is named nowhere the
+    harness can see it.
+
+    **It is a context manager because the client it owns is one.** The transport is
+    built here and the completer exposes no accessor for it, so the block is what
+    releases the connection pool — see ``models/batch.py`` for the argument, including
+    why scoping the transport costs ADR-0143 §2's resumption story nothing (the handle
+    is a value, and this run persists it to ``batches.jsonl`` inside the block).
+
+    Nothing here checks a credential. That is
+    :func:`~benchmarks.memory.run.check_credentials_for`'s job on the answering route,
+    which is the same route this batches, and the harness asks it before any store is
+    opened.
+
+    Args:
+        settings: Loaded application settings, read for the default route only.
+        issuer: The non-secret account label stamped on every handle and compared
+            against every handle presented. Never a credential — handles are written
+            to ``batches.jsonl``.
+        spec: The ``"provider:model"`` route to batch on, or ``None`` for
+            ``settings.default_model``. The answering route by default, because the
+            batch *is* the answering seam here.
+
+    Returns:
+        A block yielding the completer, typed as the Protocol.
+    """
+    return anthropic_batch_completer(
+        issuer=issuer,
+        default_model=spec if spec is not None else settings.default_model,
+    )
 
 
 def build_harness(

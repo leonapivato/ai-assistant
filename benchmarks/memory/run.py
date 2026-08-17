@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from hashlib import sha256
 from typing import TYPE_CHECKING
@@ -31,31 +32,59 @@ from ai_assistant.app.composition import (
 )
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.models import ensure_credential_available, ensure_vendor_available
-from benchmarks.memory.answer import ANSWER_SYSTEM_PROMPT, answer_question
-from benchmarks.memory.grade import JUDGE_PROMPT, ExactGrader, Grading, ModelGrader, Verdict
+from benchmarks.memory.answer import ANSWER_SYSTEM_PROMPT, answer_question, retrieve_for
+from benchmarks.memory.batch import (
+    BatchSession,
+    PollPolicy,
+    PreparedQuestion,
+    answer_batch,
+    judge_batch,
+)
+from benchmarks.memory.grade import (
+    JUDGE_PROMPT,
+    ExactGrader,
+    Grading,
+    ModelGrader,
+    Verdict,
+    grading_without_a_call,
+)
 from benchmarks.memory.ingest import exchanges_of, ingest_case
 from benchmarks.memory.records import (
+    BatchRef,
     QuestionRecord,
     RunManifest,
     RunMode,
+    RunPhase,
     TraceCursor,
     now_iso,
     write_jsonl_line,
 )
 from benchmarks.memory.select import CaseSelection
 from benchmarks.memory.spend import RunAbortedError, SpendGuard
-from benchmarks.memory.wiring import build_embedder, build_harness, build_model_provider
+from benchmarks.memory.wiring import (
+    DEFAULT_ISSUER,
+    build_batch_completer,
+    build_embedder,
+    build_harness,
+    build_model_provider,
+    refuse_unbatchable_route,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.protocols import ModelProvider, Observer
-    from benchmarks.memory.cases import BenchCase
+    from ai_assistant.core.protocols import BatchCompleter, ModelProvider, Observer
+    from benchmarks.memory.answer import AnswerAttempt
+    from benchmarks.memory.cases import BenchCase, BenchQuestion
     from benchmarks.memory.corpora.provenance import Corpus
     from benchmarks.memory.grade import Grader
+    from benchmarks.memory.ingest import IngestionSummary
+    from benchmarks.memory.records import RetrievalTelemetry
+    from benchmarks.memory.wiring import Harness
 
 __all__ = [
+    "BATCHES_FILE",
     "DEFAULT_RUNS_DIR",
     "PREREGISTRATION_REFUSAL",
     "RunPlan",
@@ -81,6 +110,17 @@ PREREGISTRATION_REFUSAL = (
 
 #: Where runs are written, beside the harness and ignored by git.
 DEFAULT_RUNS_DIR = "runs"
+
+#: Where a batched run writes each accepted batch, **before** it waits on it.
+#:
+#: Append-only and separate from ``manifest.json`` on purpose. The manifest is
+#: rewritten once at the end of a run, which is exactly the wrong shape for a record
+#: whose whole job is to survive a run that does not reach its end: a batch is billed
+#: from the moment the provider accepts it, and a process killed during the wait must
+#: still leave behind what it is being charged for (ADR-0060, and ADR-0143 §2's reason
+#: for handing the handle back before any waiting). The manifest carries the same
+#: references afterwards, for a reader who has one.
+BATCHES_FILE = "batches.jsonl"
 
 #: Everything a case directory name does not keep verbatim.
 _UNSAFE_IN_DIR_NAME = re.compile(r"[^A-Za-z0-9._-]")
@@ -344,6 +384,11 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     notes: str = "",
     keep_stores: bool = False,
     max_model_calls: int | None = None,
+    phase: RunPhase = RunPhase.SYNC,
+    batch_completer: BatchCompleter | None = None,
+    issuer: str = DEFAULT_ISSUER,
+    poll: PollPolicy | None = None,
+    announce: Callable[[str], None] | None = None,
 ) -> RunManifest:
     """Run the plan, writing a manifest and one JSONL record per question.
 
@@ -406,6 +451,36 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
             default, declares nothing — which is always safe, and is what a caller that
             planned through :func:`~benchmarks.memory.select.first_sessions` should
             pass, because the plan already knows.
+        phase: :class:`~benchmarks.memory.records.RunPhase`. ``SYNC``, the default,
+            is the path every pilot before this one ran: one completion per question,
+            then one per grading. ``BATCH`` retrieves for every question first, then
+            answers them all in one ``BatchCompleter`` job and grades them in a
+            second — half the price on the two seams that are ~60% of a scored run's
+            spend, and two waits instead of ~2,000 serial round trips.
+
+            **Ingestion is not on this axis and never batches.** Every observation
+            pass reads the conversation's most recent window, so each one depends on
+            the writes the pass before it made.
+
+            **What a batched run can record that a synchronous one cannot** is an
+            ``ungraded`` row whose cause is a batch item the provider expired,
+            cancelled or failed (ADR-0143 §4). The manifest records the phase so those
+            rows are readable; nothing silently becomes an empty answer, which would
+            grade as an abstention and corrupt #1029's P7.
+        batch_completer: Override the bulk-inference seam. Tests supply a fake; a live
+            run does not, and a scored run may not — it is refused by
+            :func:`refuse_ineligible_scored_run` clause 5 alongside the other three,
+            for the same reason. Ignored under ``SYNC``, which submits nothing.
+        issuer: The non-secret account label stamped on this run's batch handles and
+            compared against any handle presented back (ADR-0143 §2). Recorded in
+            ``batches.jsonl`` and in the manifest, because a handle is an address only
+            *for that account*. Never a credential.
+        poll: How long to wait on each batch and how often to ask, or ``None`` for
+            :class:`~benchmarks.memory.batch.PollPolicy`'s defaults. Waiting is the
+            caller's loop by ADR-0143 §2, and this is that loop's policy.
+        announce: Where to print a batched run's progress — the handles as they are
+            accepted and each poll's settled count — or ``None`` to print nothing. An
+            operator watching a paid run needs to see the handle; a test does not.
         notes: Attached to the manifest.
         keep_stores: Keep every case's databases rather than only its traces.
         max_model_calls: The most model calls this run may make across every seam it
@@ -433,9 +508,15 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     # disagree about what this run is — see the gate for why a `StrEnum` makes that a
     # real hazard rather than a hypothetical one.
     mode = RunMode(mode)
+    phase = RunPhase(phase)
     injected = tuple(
         name
-        for name, seam in (("grader", grader), ("model", model), ("observer", observer))
+        for name, seam in (
+            ("batch_completer", batch_completer),
+            ("grader", grader),
+            ("model", model),
+            ("observer", observer),
+        )
         if seam is not None
     )
     refuse_ineligible_scored_run(
@@ -491,6 +572,12 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         judging=grader is None and grader_kind == "model",
         judge_route=judge_route,
     )
+    # Beside the credential check and for the same reason: a batched run that cannot
+    # reach a batch endpoint should say so now, not after every case has been ingested
+    # at full price. Skipped where a completer was injected, which is a fake and
+    # answers for whatever route it likes.
+    if phase is RunPhase.BATCH and batch_completer is None:
+        refuse_unbatchable_route(resolved.default_model)
     run_id = uuid4().hex[:12]
     run_dir = output_root / run_id
     records_path = run_dir / "records.jsonl"
@@ -507,6 +594,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         case_count=len(plan.cases),
         question_count=plan.question_count,
         slice_seed=slice_seed,
+        phase=phase,
         max_sessions=recorded_max_sessions,
         answer_route=resolved.default_model,
         observer_route=(
@@ -547,117 +635,457 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     # A `MemoryStoreError` is deliberately *not* caught with it — a failing store is not
     # a budget decision, and `answer._supplement` argues at length why that one ends the
     # run with nothing published.
+    say = announce if announce is not None else _say_nothing
+    batches_path = run_dir / BATCHES_FILE
+    submitted: list[BatchRef] = []
+
+    def file_batch(reference: BatchRef) -> None:
+        """Put an accepted batch on disk before anything waits on it."""
+        submitted.append(reference)
+        write_jsonl_line(batches_path, reference)
+
+    prepared: list[PreparedQuestion] = []
     aborted: str | None = None
     try:
-        for case in plan.cases:
-            case_dir = run_dir / "cases" / case_dir_name(case.case_key)
-            harness = build_harness(
-                resolved, data_dir=case_dir, model=model, observer=observer, guard=guard
-            )
-            try:
-                summary = await ingest_case(
-                    harness, case, batch_size=resolved.observation_batch_size
+        async with AsyncExitStack() as stack:
+            session: BatchSession | None = None
+            if phase is RunPhase.BATCH:
+                # Entered here rather than per batch so one client serves both, and
+                # closed by the stack however this run ends — the completer owns a
+                # connection pool nothing else can reach.
+                completer = (
+                    batch_completer
+                    if batch_completer is not None
+                    else await stack.enter_async_context(
+                        build_batch_completer(resolved, issuer=issuer)
+                    )
                 )
-                ingestion: dict[str, int | float | str | list[str]] = {
-                    "conversation_id": summary.conversation_id,
-                    "turns_captured": summary.turns_captured,
-                    "turns_degraded": summary.turns_degraded,
-                    "assistant_led_turns": summary.assistant_led_turns,
-                    "observation_passes": summary.observation_passes,
-                    "episodes_read": summary.episodes_read,
-                    "episodes_reobserved": summary.episodes_reobserved,
-                    "proposals": summary.proposals,
-                    "discarded_unusable": summary.discarded_unusable,
-                    "discarded_over_limit": summary.discarded_over_limit,
-                    "dropped_unsupported": summary.dropped_unsupported,
-                    # The harness's own headlessness, reported beside the run's records so
-                    # a depressed P3/P5 is attributable to it rather than to retrieval: a
-                    # deferred proposal is a question nobody will answer, so the belief is
-                    # never written and no retrieval can find it.
-                    "proposals_deferred": summary.proposals_deferred,
-                    "proposals_ruled": summary.proposals_ruled,
-                    "ask_rate": summary.ask_rate,
-                    # The denominator for `QuestionRecord.evidence_episode_ids`: how many
-                    # of this case's corpus pointers became an episode at all.
-                    "evidence_keys_captured": summary.evidence_keys_captured,
-                    "observation_routes": sorted(summary.observation_routes),
-                }
-                cursor = TraceCursor(harness.traces)
-                for question in case.questions:
-                    # A per-question provider failure is recorded and stepped over rather
-                    # than allowed to end the run. On a ~2,000-question paid run, dying at
-                    # question 400 loses the 1,586 after it *and* every later case, which
-                    # is a far worse outcome than a handful of `ungraded` rows a reader can
-                    # exclude. `ensure_model_credentials` above is what keeps this from
-                    # papering over a misconfiguration: a bad credential fails at startup,
-                    # so what reaches here is a transient fault or a refused prompt.
-                    #
-                    # The failure is caught in `answer_question`, inside the correlation
-                    # scope, so the retrieval that had already happened keeps its ids and
-                    # its telemetry. Grading is skipped rather than asked to judge an
-                    # answer that does not exist.
-                    attempt = await answer_question(harness, question)
-                    grading = (
-                        Grading(
-                            verdict=Verdict.UNGRADED,
-                            abstained=False,
-                            judge=judge.name,
-                            detail=f"answering failed: {attempt.failure}",
-                        )
-                        if attempt.failure is not None
-                        else await judge.grade(question, attempt.answer)
-                    )
-                    write_jsonl_line(
-                        records_path,
-                        QuestionRecord(
-                            run_id=run_id,
-                            corpus=case.corpus_key,
-                            case_key=case.case_key,
-                            question_id=question.question_id,
-                            category=question.category,
-                            unanswerable=question.unanswerable,
-                            question=question.question,
-                            reference_answer=question.answer,
-                            answer=attempt.answer,
-                            verdict=str(grading.verdict),
-                            abstained=grading.abstained,
-                            judge=grading.judge,
-                            judge_detail=grading.detail,
-                            correlation_id=attempt.correlation_id,
-                            retrieved_ids=attempt.retrieved_ids,
-                            retrieved_kinds=attempt.retrieved_kinds,
-                            retrieved_evidence=attempt.retrieved_evidence,
-                            retrieved_evidence_elided=attempt.retrieved_evidence_elided,
-                            evidence=question.evidence,
-                            # #1074's join, projected onto this question's own pointers.
-                            # The case's whole mapping is thousands of entries wide on a
-                            # LoCoMo dialogue and would be denormalised onto all ~199 of
-                            # its records; the slice a question's own analysis reads is
-                            # this one, and it is small.
-                            evidence_episode_ids=tuple(
-                                tuple(summary.evidence_episodes.get(pointer, ()))
-                                for pointer in question.evidence
-                            ),
-                            telemetry=await cursor.collect(attempt.correlation_id),
-                            asked_at=attempt.asked_at,
-                            context_chars=len(attempt.context),
-                            ingestion=ingestion,
-                        ),
-                    )
-            finally:
-                harness.close()
-            if not keep_stores:
-                for name in ("memory.db", "conversations.db", "deferrals.db"):
-                    (case_dir / name).unlink(missing_ok=True)
+                session = BatchSession(
+                    completer=completer,
+                    guard=guard,
+                    run_id=run_id,
+                    on_batch=file_batch,
+                    poll=poll if poll is not None else PollPolicy(),
+                    announce=say,
+                )
+            driver = _CaseDriver(
+                settings=resolved,
+                judge=judge,
+                guard=guard,
+                run_id=run_id,
+                run_dir=run_dir,
+                records_path=records_path,
+                keep_stores=keep_stores,
+                model=model,
+                observer=observer,
+                session=session,
+            )
+            for case in plan.cases:
+                prepared.extend(await driver.run(case))
+            if session is not None:
+                # Every case is ingested, scored for retrieval and closed before a single
+                # paid batch exists. That ordering is the cheap direction under ADR-0143
+                # §2's un-closed acceptance window: the work that can still fail happens
+                # while nothing is billing.
+                await _answer_and_judge_in_batches(
+                    session, prepared, judge=judge, run_id=run_id, records_path=records_path
+                )
     except RunAbortedError as stop:
         aborted = stop.reason
         # The aborted case keeps its databases whichever way `keep_stores` was set:
         # the deletion sits after the per-case `finally` and is skipped, which is the
         # right direction — the one case that did not finish is the one whose store
         # someone may want to look at.
-        manifest = manifest.model_copy(update={"aborted": aborted})
+    if aborted is not None or submitted:
+        # The manifest's one rewrite, and both things it adds are facts a run only has
+        # once it is over. A batch that must survive an interruption is already in
+        # `batches.jsonl`, appended the moment the provider accepted it — this file is
+        # the record for a reader, not the guard.
+        manifest = manifest.model_copy(update={"aborted": aborted, "batches": tuple(submitted)})
         (run_dir / "manifest.json").write_text(manifest.model_dump_json(indent=1), encoding="utf-8")
     return manifest
+
+
+@dataclass(frozen=True, slots=True)
+class _CaseDriver:
+    """Everything constant across a run's cases, so running one is one call.
+
+    A bundle rather than eleven arguments threaded through a loop, and the grouping
+    is the same one :class:`~benchmarks.memory.batch.BatchSession` makes: every field
+    is fixed before the first case and identical for the last. What varies is the
+    case, which is the argument.
+
+    Attributes:
+        settings: Loaded application settings.
+        judge: The grader, used only on the synchronous path — a batched run grades
+            after every case is closed.
+        guard: The run's spend ceiling, shared by every seam the run builds.
+        run_id: The run.
+        run_dir: Where this run's artifacts live.
+        records_path: Where synchronous rows are appended as they are produced.
+        keep_stores: Keep every case's databases rather than only its traces.
+        model: An injected answering seam, or ``None``.
+        observer: An injected distillation seam, or ``None``.
+        session: The batch session, or ``None`` under ``--phase sync``. It is what
+            decides which of the two paths each question takes, so the phase is read
+            off the thing that would do the batching rather than off a flag beside it.
+    """
+
+    settings: Settings
+    judge: Grader
+    guard: SpendGuard
+    run_id: str
+    run_dir: Path
+    records_path: Path
+    keep_stores: bool
+    model: ModelProvider | None
+    observer: Observer | None
+    session: BatchSession | None
+
+    async def run(self, case: BenchCase) -> list[PreparedQuestion]:
+        """Ingest one case and either answer its questions or retrieve for them.
+
+        Each case gets its own data directory and its own harness: a benchmark case is
+        a whole memory, and two cases sharing a store would let one case's beliefs
+        answer another's questions. The stores are removed afterwards unless asked
+        for, because a LoCoMo case's ``memory.db`` carries thousands of vectors;
+        ``traces.db`` is always kept, being the ADR-0119 record P8 is defined over.
+
+        Args:
+            case: The case to run.
+
+        Returns:
+            Under ``--phase batch``, one :class:`PreparedQuestion` per question,
+            awaiting an answer. Under ``--phase sync``, an empty list — those rows are
+            already written.
+
+        Raises:
+            RunAbortedError: If the run's ceiling or its account ran out. Raised
+                through, so the caller's handler keeps what was written and the case's
+                databases survive for inspection.
+        """
+        case_dir = self.run_dir / "cases" / case_dir_name(case.case_key)
+        harness = build_harness(
+            self.settings,
+            data_dir=case_dir,
+            model=self.model,
+            observer=self.observer,
+            guard=self.guard,
+        )
+        prepared: list[PreparedQuestion] = []
+        try:
+            summary = await ingest_case(
+                harness, case, batch_size=self.settings.observation_batch_size
+            )
+            ingestion = _ingestion_summary(summary)
+            cursor = TraceCursor(harness.traces)
+            for question in case.questions:
+                if self.session is None:
+                    await _answer_now(
+                        harness,
+                        question,
+                        case=case,
+                        judge=self.judge,
+                        cursor=cursor,
+                        summary=summary,
+                        ingestion=ingestion,
+                        run_id=self.run_id,
+                        records_path=self.records_path,
+                    )
+                else:
+                    # Retrieval only. The two reads, the separator rule and the
+                    # correlation scope are `retrieve_for`'s — the same function
+                    # `answer_question` composes — so nothing #1029 computes about
+                    # retrieval depends on which phase is running. The telemetry is
+                    # collected *here*, while this case's trace store is still open:
+                    # the answer arrives hours later, long after the store was closed
+                    # and its databases deleted.
+                    retrieved = await retrieve_for(harness, question)
+                    prepared.append(
+                        PreparedQuestion(
+                            case=case,
+                            question=question,
+                            retrieved=retrieved,
+                            telemetry=await cursor.collect(retrieved.correlation_id),
+                            evidence_episode_ids=_evidence_episode_ids(summary, question),
+                            ingestion=ingestion,
+                        )
+                    )
+        finally:
+            harness.close()
+        if not self.keep_stores:
+            for name in ("memory.db", "conversations.db", "deferrals.db"):
+                (case_dir / name).unlink(missing_ok=True)
+        return prepared
+
+
+def _ingestion_summary(
+    summary: IngestionSummary,
+) -> dict[str, int | float | str | list[str]]:
+    """Flatten what ingesting a case reported, for the rows it is denormalised onto.
+
+    Args:
+        summary: The summary.
+
+    Returns:
+        The fields every record of that case carries.
+    """
+    return {
+        "conversation_id": summary.conversation_id,
+        "turns_captured": summary.turns_captured,
+        "turns_degraded": summary.turns_degraded,
+        "assistant_led_turns": summary.assistant_led_turns,
+        "observation_passes": summary.observation_passes,
+        "episodes_read": summary.episodes_read,
+        "episodes_reobserved": summary.episodes_reobserved,
+        "proposals": summary.proposals,
+        "discarded_unusable": summary.discarded_unusable,
+        "discarded_over_limit": summary.discarded_over_limit,
+        "dropped_unsupported": summary.dropped_unsupported,
+        # The harness's own headlessness, reported beside the run's records so a
+        # depressed P3/P5 is attributable to it rather than to retrieval: a deferred
+        # proposal is a question nobody will answer, so the belief is never written
+        # and no retrieval can find it.
+        "proposals_deferred": summary.proposals_deferred,
+        "proposals_ruled": summary.proposals_ruled,
+        "ask_rate": summary.ask_rate,
+        # The denominator for `QuestionRecord.evidence_episode_ids`: how many of this
+        # case's corpus pointers became an episode at all.
+        "evidence_keys_captured": summary.evidence_keys_captured,
+        "observation_routes": sorted(summary.observation_routes),
+    }
+
+
+def _say_nothing(line: str) -> None:
+    """Swallow a progress line, for a caller that asked for no announcements.
+
+    Args:
+        line: What would have been printed.
+    """
+
+
+def _evidence_episode_ids(
+    summary: IngestionSummary, question: BenchQuestion
+) -> tuple[tuple[str, ...], ...]:
+    """#1074's join, projected onto one question's own corpus pointers.
+
+    The case's whole mapping is thousands of entries wide on a LoCoMo dialogue and
+    would be denormalised onto all ~199 of its records; the slice a question's own
+    analysis reads is this one, and it is small.
+
+    Args:
+        summary: What ingesting the case reported.
+        question: The question whose pointers to project.
+
+    Returns:
+        For each entry of ``question.evidence``, in order, the episode ids that
+        pointer became. An empty tuple means it became none.
+    """
+    return tuple(tuple(summary.evidence_episodes.get(pointer, ())) for pointer in question.evidence)
+
+
+def _question_record(  # noqa: PLR0913 — every parameter is one field of the record, and bundling them would only move the list somewhere a reader has to follow
+    *,
+    run_id: str,
+    case: BenchCase,
+    question: BenchQuestion,
+    attempt: AnswerAttempt,
+    grading: Grading,
+    evidence_episode_ids: tuple[tuple[str, ...], ...],
+    telemetry: RetrievalTelemetry,
+    ingestion: Mapping[str, int | float | str | list[str]],
+    batch_item_id: str | None = None,
+) -> QuestionRecord:
+    """Assemble the one row a question leaves behind, whichever phase produced it.
+
+    One function so the two phases cannot record different things about the same
+    question. Everything it reads is already phase-independent: an
+    :class:`~benchmarks.memory.answer.AnswerAttempt` carries its retrieval's own ids
+    and correlation scope whether the answer came back from ``complete`` or from a
+    batch outcome (``RetrievedContext.answered``).
+
+    Args:
+        run_id: The run.
+        case: The case, for its corpus and key.
+        question: The question.
+        attempt: The retrieval, paired with whatever answer arrived.
+        grading: The verdict.
+        evidence_episode_ids: #1074's join for this question.
+        telemetry: What the ``RETRIEVAL`` traces said.
+        ingestion: The case's summary, denormalised onto every one of its rows.
+        batch_item_id: The id this question's answer was submitted under, or ``None``
+            on a synchronous run.
+
+    Returns:
+        The record, ready to append.
+    """
+    return QuestionRecord(
+        run_id=run_id,
+        corpus=case.corpus_key,
+        case_key=case.case_key,
+        question_id=question.question_id,
+        category=question.category,
+        unanswerable=question.unanswerable,
+        question=question.question,
+        reference_answer=question.answer,
+        answer=attempt.answer,
+        verdict=str(grading.verdict),
+        abstained=grading.abstained,
+        judge=grading.judge,
+        judge_detail=grading.detail,
+        correlation_id=attempt.correlation_id,
+        retrieved_ids=attempt.retrieved_ids,
+        retrieved_kinds=attempt.retrieved_kinds,
+        retrieved_evidence=attempt.retrieved_evidence,
+        retrieved_evidence_elided=attempt.retrieved_evidence_elided,
+        evidence=question.evidence,
+        evidence_episode_ids=evidence_episode_ids,
+        batch_item_id=batch_item_id,
+        telemetry=telemetry,
+        asked_at=attempt.asked_at,
+        context_chars=len(attempt.context),
+        ingestion=dict(ingestion),
+    )
+
+
+async def _answer_now(  # noqa: PLR0913 — the synchronous per-question step, lifted out of `execute_run` whole rather than reshaped
+    harness: Harness,
+    question: BenchQuestion,
+    *,
+    case: BenchCase,
+    judge: Grader,
+    cursor: TraceCursor,
+    summary: IngestionSummary,
+    ingestion: Mapping[str, int | float | str | list[str]],
+    run_id: str,
+    records_path: Path,
+) -> None:
+    """Answer, grade and record one question, in this process, right now.
+
+    The ``--phase sync`` path, unchanged in behaviour from every pilot before this
+    one and lifted out of :func:`execute_run` only so the loop can carry two phases
+    without either being harder to read than it was.
+
+    A per-question provider failure is recorded and stepped over rather than allowed
+    to end the run. On a ~2,000-question paid run, dying at question 400 loses the
+    1,586 after it *and* every later case, which is a far worse outcome than a handful
+    of ``ungraded`` rows a reader can exclude. ``check_credentials_for`` is what keeps
+    this from papering over a misconfiguration: a bad credential fails at startup, so
+    what reaches here is a transient fault or a refused prompt. The failure is caught
+    in ``answer_question``, inside the correlation scope, so the retrieval that had
+    already happened keeps its ids and its telemetry. Grading is skipped rather than
+    asked to judge an answer that does not exist.
+
+    Args:
+        harness: The wired pipeline for this case.
+        question: The question to answer.
+        case: The case it belongs to.
+        judge: The grader.
+        cursor: The case's trace cursor, walked forward one question at a time.
+        summary: What ingesting the case reported.
+        ingestion: That summary, flattened for the record.
+        run_id: The run.
+        records_path: Where the row is appended.
+    """
+    attempt = await answer_question(harness, question)
+    grading = (
+        Grading(
+            verdict=Verdict.UNGRADED,
+            abstained=False,
+            judge=judge.name,
+            detail=f"answering failed: {attempt.failure}",
+        )
+        if attempt.failure is not None
+        else await judge.grade(question, attempt.answer)
+    )
+    write_jsonl_line(
+        records_path,
+        _question_record(
+            run_id=run_id,
+            case=case,
+            question=question,
+            attempt=attempt,
+            grading=grading,
+            evidence_episode_ids=_evidence_episode_ids(summary, question),
+            telemetry=await cursor.collect(attempt.correlation_id),
+            ingestion=ingestion,
+        ),
+    )
+
+
+async def _answer_and_judge_in_batches(
+    session: BatchSession,
+    prepared: Sequence[PreparedQuestion],
+    *,
+    judge: Grader,
+    run_id: str,
+    records_path: Path,
+) -> None:
+    """Run the two batches, then write every row at once.
+
+    **Records land at the end here, and that is the one property the batched phase
+    gives up.** The synchronous path appends per question so a run that dies at 400 of
+    2,000 leaves 399 usable rows; a batched one has no answer to write until its batch
+    settles, so a death before that leaves none. What replaces the guarantee is
+    ``batches.jsonl``: the handles are on disk from the moment the provider accepted
+    them, and ADR-0143 §2's resumption clause makes the outcomes fetchable afterwards
+    from any process holding the same ``issuer``. The rows are recoverable; they are
+    just not already written.
+
+    **A judge batch carries only the answers a judge must read.** An abstention and an
+    unanswerable question are settled by
+    :func:`~benchmarks.memory.grade.grading_without_a_call` — the same function the
+    synchronous ``ModelGrader`` uses first — so they cost no item, exactly as they
+    cost no call. On the pilot-3 partial that was most of the population.
+
+    A grader that is not a model judge is applied here directly instead: it makes no
+    call, so there is nothing to batch, and routing it through a batch would submit
+    items for a decision already available locally.
+
+    Args:
+        session: The run's seam, ceiling, batch record and wait policy.
+        prepared: Every question the run retrieved for.
+        judge: The grader.
+        run_id: The run.
+        records_path: Where the rows are appended.
+    """
+    answers = await answer_batch(session, prepared)
+    gradings: dict[str, Grading] = {}
+    pending: list[tuple[str, BenchQuestion, str]] = []
+    for one in prepared:
+        answer, failure = answers[one.item_id]
+        if failure is not None:
+            gradings[one.item_id] = Grading(
+                verdict=Verdict.UNGRADED,
+                abstained=False,
+                judge=judge.name,
+                detail=f"answering failed: {failure}",
+            )
+        elif isinstance(judge, ModelGrader):
+            settled = grading_without_a_call(one.question, answer, judge=judge.name)
+            if settled is not None:
+                gradings[one.item_id] = settled
+            else:
+                pending.append((one.item_id, one.question, answer))
+        else:
+            gradings[one.item_id] = await judge.grade(one.question, answer)
+    gradings.update(await judge_batch(session, pending, judge_name=judge.name))
+    for one in prepared:
+        answer, failure = answers[one.item_id]
+        write_jsonl_line(
+            records_path,
+            _question_record(
+                run_id=run_id,
+                case=one.case,
+                question=one.question,
+                attempt=one.retrieved.answered(answer=answer, failure=failure),
+                grading=gradings[one.item_id],
+                evidence_episode_ids=one.evidence_episode_ids,
+                telemetry=one.telemetry,
+                ingestion=one.ingestion,
+                batch_item_id=one.item_id,
+            ),
+        )
 
 
 def refuse_ineligible_scored_run(  # noqa: PLR0913 — one parameter per precondition, and bundling them into a config object would hide which ones a caller left at a default
