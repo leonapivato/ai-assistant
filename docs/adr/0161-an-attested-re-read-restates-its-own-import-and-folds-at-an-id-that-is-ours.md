@@ -344,11 +344,19 @@ one.
 > **Normative.** The same lane owes a **degraded-path** test in each of the two
 > states ADR-0159 §8 distinguishes — `relations` passed as `None`, and passed as an
 > empty mapping — which must rule identically, for each ruling §8 records as changed
-> against ADR-0159 §6's text: an
+> against ADR-0159 §6's text and for the cases that make those changes checkable: an
 > `EXTERNAL` proposal agreeing with a same-`reported_by` `EXTERNAL` member, which
 > must rule `REINFORCE`; the same with a different `reported_by`, which must rule
-> `ACCEPT`; and an `OBSERVED` and an `INFERRED` proposal above `min_confidence`
-> agreeing with an `EXTERNAL`-only conflict set, which must rule `ACCEPT`. An
+> `ACCEPT`; an `OBSERVED` and an `INFERRED` proposal above `min_confidence`
+> agreeing with an `EXTERNAL`-only conflict set, which must rule `ACCEPT`; and an
+> `EXTERNAL` proposal whose only `EXTERNAL` member carries the **same**
+> `reported_by` and does **not** agree, which must fall to ADR-0159 §6's confidence
+> arm. The first and the last of those are rulings §6's own text already gives, and
+> they are owed here because they are what pins clause (ii)'s conjunction on the
+> path that states limb (i)'s predicate itself (§4): an implementation reading
+> `reported_by` as the whole of (ii) satisfies every other case in this matrix and
+> still folds a rewritten entry, and the reconciled-path matrix above does not reach
+> the degraded path at all. An
 > implementation that kept §6's unqualified "any agreeing member" would pass every
 > reconciled-path test above and fail these — and one that applied the new class on
 > the `None` path alone would pass half of them, which is why both states are named
