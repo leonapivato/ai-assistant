@@ -308,12 +308,22 @@ def load_reused_run(output_root: Path, run_id: str) -> ReusedRun:
     Returns:
         The loaded run.
 
+    **The three artifacts must describe one run.** A run directory is a directory
+    like any other: a manifest restored from one run beside another's records and
+    stores is a state nothing else would notice, and the reusing run would then record
+    one run's provenance while retrieving over another's memories. So the directory
+    name, the manifest's own ``run_id`` and every record's are required to agree —
+    which is cheap, and is the only thing tying the digest this run publishes to the
+    stores it actually opened.
+
     Raises:
-        ValueError: If ``run_id`` is not a single path component, if the directory does
-            not exist, or if it holds no readable ``manifest.json`` or
-            ``records.jsonl``. All four are refusals rather than empty results: a run
-            that cannot be read cannot be reused, and discovering that after a corpus
-            fetch would be the expensive place to find out.
+        ValueError: If ``run_id`` is not a single path component; if the directory does
+            not exist; if it holds no readable ``manifest.json`` or ``records.jsonl``;
+            if those artifacts name a different run from each other or from the
+            directory; or if two rows claim one question. Every one is a refusal rather
+            than an empty result: a run that cannot be read cannot be reused, and
+            discovering that after a corpus fetch would be the expensive place to find
+            out.
     """
     if not run_id or run_id in {".", ".."} or "/" in run_id or "\\" in run_id:
         msg = (
@@ -339,11 +349,27 @@ def load_reused_run(output_root: Path, run_id: str) -> ReusedRun:
         raise ValueError(msg)
     raw = manifest_path.read_bytes()
     manifest = RunManifest.model_validate_json(raw)
+    if manifest.run_id != run_id:
+        msg = (
+            f"the artifacts in {run_dir} do not describe one run: manifest.json names "
+            f"run {manifest.run_id!r} while the directory it sits in is {run_id!r}. "
+            f"A manifest restored beside another run's stores would have this run "
+            f"publish one run's provenance for another run's memories."
+        )
+        raise ValueError(msg)
     ingestion: dict[str, Mapping[str, int | float | str | list[str]]] = {}
     joins: dict[tuple[str, str], tuple[tuple[str, ...], ...]] = {}
     evidence: dict[tuple[str, str], tuple[str, ...]] = {}
     asked_at: dict[tuple[str, str], str] = {}
     for record in read_jsonl(records_path, QuestionRecord):
+        if record.run_id != run_id:
+            msg = (
+                f"the artifacts in {run_dir} do not describe one run: records.jsonl "
+                f"carries a row from run {record.run_id!r}. The evidence join and the "
+                f"answering instant are read out of these rows, so a row from another "
+                f"run would be attached to a retrieval it never made."
+            )
+            raise ValueError(msg)
         key = (record.case_key, record.question_id)
         if key in joins:
             # Refused rather than resolved, because there is no honest resolution: two
