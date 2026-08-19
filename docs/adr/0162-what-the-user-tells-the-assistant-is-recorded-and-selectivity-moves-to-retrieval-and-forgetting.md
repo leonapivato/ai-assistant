@@ -1,7 +1,44 @@
 # 162. What the user tells the assistant is recorded, and selectivity moves to retrieval and forgetting
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-19
+- **Note (2026-08-19): ratified.** `Proposed` → `Accepted` on the content this ADR
+  merges with, after **both** required lenses returned **`APPROVE` with no findings on
+  one tree** — adversarial and architecture, the set the bullet below commits it to.
+  `just ship` posts their terminal verdicts and the aggregate to PR #1219; the round
+  count and the churn ratio are taken from that comment rather than restated here, so
+  this note cannot disagree with it. That sequence is `CONTRIBUTING.md` → "Finishing an
+  ADR PR", pointed at rather than re-argued.
+
+  **Seven findings changed this text while it stood `Proposed`**, and each is named
+  because none is a wording repair. Two arrived together on the first adversarial
+  round: §1's completeness rule and §6's finite cap could both be in force and not both
+  be satisfiable, so §1's clause now carries the bound as its own exception and §6
+  reports a binding pass as **incomplete** with both knobs named; and §7's overlap
+  bound was *empty* at an `observation_batch_size` of 1, which `Settings` permits, so
+  *k* is 0 there as a stated exception. The second adversarial round found the
+  over-limit recovery claim unbounded by ADR-0074 §7's horizon — "the episodes remain
+  in the store" is a recovery only while they remain live — and §6 now says so.
+
+  **The architecture rounds moved a ruling and the ADR's own classification.** §2
+  imposed a told-versus-sensed rule with no carrier a producer could read while
+  forbidding the available ones; the carrier is now deferred to the ADR introducing the
+  second class of episode, on the surface-with-no-consumer ground, with a fail-closed
+  obligation on the selecting stage meanwhile. Following that finding out found the
+  wider one: §1 replaces a sentence that lives in `Observer.observe`'s docstring in
+  `core/protocols.py`, so **this is a substantive contract ADR and the header declared
+  the opposite**. It is corrected in place with §13 added to name what the implementing
+  lane owes. The second architecture round then found §8 admitting the assistant's own
+  assertion as warrant for a belief about the world — the laundering failure §8 now
+  refuses — and the adversarial round after it found the two clauses that refused it
+  overlapping, so they are partitioned by what a record *claims*: the assistant's act,
+  which its `outcome` independently supports, against the proposition it asserted,
+  which it never supports. The last finding completed §13's edit list, which had
+  omitted `learning/observer.py`'s `DEFAULT_OBSERVATION_MAX_PROPOSALS` and said nothing
+  about the canonical fake.
+
+  **ADR-0070 §1's no-rewrite rule now protects this text**, so any further correction
+  is an appended dated note.
 - **A substantive contract ADR, and the ground is narrow and named.**
   [ADR-0015](0015-simplify-the-agent-workflow.md) §5 defines one as "adding or
   changing a Protocol or a `core/` type crossing subsystem boundaries". No `Observer`
@@ -118,7 +155,8 @@
   that set is re-run on the flipped tree. A finding arriving after a flip returns it
   to `Proposed` and is folded there, per that block's step 3. The tense is
   deliberate: written prospectively, this bullet is true in both states the document
-  passes through, so the ratifying commit changes the `Status` line and nothing else.
+  passes through, so the ratifying commit changes the `Status` line and appends the
+  note that names the set and its outcome, and nothing else.
 - Refs #1210, #1029, #1179, #1185, #545, #1162, ADR-0077, ADR-0156, ADR-0158,
   ADR-0159, ADR-0160, ADR-0100, ADR-0121
 
