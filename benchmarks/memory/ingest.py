@@ -99,6 +99,7 @@ from ai_assistant.core.types import LearnDecision
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from ai_assistant.core.protocols import ConversationStore
     from benchmarks.memory.cases import BenchCase, BenchSession, BenchTurn
     from benchmarks.memory.wiring import Harness
 
@@ -523,7 +524,7 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
             # backfilling** (ADR-0074 §5), so that turn still holds a slot. A lost
             # append records no turn and holds none. The store's own ordinal is what
             # separates them, and it is why this is read rather than counted.
-            ordinal = await _tail_ordinal(harness, conversation.id)
+            ordinal = await _tail_ordinal(harness.conversations, conversation.id)
             next_at = ordinal + batch_size - 1 if next_at is None and ordinal else next_at
             # Recorded off the episode id alone rather than off the branch below,
             # which is the conservative direction: a report that is `degraded` and
@@ -610,27 +611,32 @@ def _pass_is_due(*, ordinal: int, next_at: int | None, observed_through: int) ->
     return ordinal > observed_through
 
 
-async def _tail_ordinal(harness: Harness, conversation_id: str) -> int:
+async def _tail_ordinal(conversations: ConversationStore, conversation_id: str) -> int:
     """The ordinal of the conversation's most recent turn, or 0 where it has none.
 
     The one exact answer to "did that capture put a turn in the conversation, and
     where". ``ConversationTurn.ordinal`` is store-allocated, dense and monotonic
     within its conversation (ADR-0074 §3), so a lost append leaves it where it was and
     an episode-stage failure advances it — the distinction ``CaptureReport`` cannot
-    make (#1075) and this driver's schedule needs. Read through the ratified
-    ``ConversationStore.turns`` contract, one row, and never derived from an episode
-    id: an id is opaque and a driver reading a position out of one would be inventing
-    a second id space beside the store's own.
+    make (#1075) and this driver's schedule needs.
+
+    **The dependency is the Protocol and not a store**, which is why this takes the
+    contract rather than the ``Harness`` it comes off. Any conforming
+    ``ConversationStore`` answers this, the driver names nothing a particular
+    implementation has, and ``mypy`` checks that structurally. One row, and never
+    derived from an episode id: an id is opaque, and a driver reading a position out of
+    one would be inventing a second id space beside the store's own.
 
     Args:
-        harness: The wired pipeline, whose conversation store this reads.
+        conversations: The conversation index, read through
+            :meth:`~ai_assistant.core.protocols.ConversationStore.turns`.
         conversation_id: The conversation.
 
     Returns:
         The last ordinal, or 0 for a conversation with no turns yet — below
         ``FIRST_TURN_ORDINAL`` by construction, so it can never be mistaken for one.
     """
-    tail = await harness.conversations.turns(conversation_id, limit=1)
+    tail = await conversations.turns(conversation_id, limit=1)
     return tail[-1].ordinal if tail else 0
 
 

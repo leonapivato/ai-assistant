@@ -173,12 +173,13 @@ class Harness:
     retrieval_limit: int
     episodic_limit: int
     data_dir: Path
-    #: Held so :meth:`close` can reach them, and — for ``conversations`` — so the
-    #: ingestion driver can read a turn's store-allocated ordinal through the ratified
-    #: ``ConversationStore.turns`` contract, which is the only exact answer to where a
-    #: captured turn sits in an observation window (ADR-0162 §7, #1075). Both are
-    #: injected into the stages above, which is where the rest of the harness meets
-    #: them; ``deferrals`` is named nowhere else.
+    #: Held so :meth:`close` can reach them — the concrete handle, because closing a
+    #: resource is this composition root's business and no Protocol here declares it.
+    #: ``conversations`` is also handed to the ingestion driver, which takes it as a
+    #: ``ConversationStore`` and reads a turn's store-allocated ordinal through that
+    #: contract: the only exact answer to where a captured turn sits in an observation
+    #: window (ADR-0162 §7, #1075). Both are injected into the stages above, which is
+    #: where the rest of the harness meets them; ``deferrals`` is named nowhere else.
     conversations: SqliteConversationStore
     deferrals: SqliteDeferralStore
 
