@@ -495,11 +495,23 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
     # skipped: a stretch that skipped a pass is by construction a stretch in which
     # nothing was stored, and the pass fires on the first capture that lands.
     #
-    # (The positions are the driver's own count of captures, which a lost *append*
-    # over-counts because `CaptureReport` reports both failures identically (#1075).
-    # That is the pre-existing safe direction the comment below argues for, and this
-    # scheduling inherits it: over-counting under-fills a window, where under-counting
-    # drops episodes.)
+    # **The positions are capture counts, so the schedule is exact for every failure
+    # this driver can see and approximate for the one it cannot.** An episode-stage
+    # failure leaves the turn appended, so a position is still a turn and the
+    # arithmetic above delivers §7's identity with the gap in it. A *lost append*
+    # records no turn at all, and `CaptureReport` reports the two identically — that
+    # is #1075, whose title says in terms that a driver's cadence needs the
+    # distinction — so under one the positions run ahead of the conversation.
+    #
+    # The direction of that error is the pre-existing safe one the comment below
+    # argues for, and it is worth stating as a bound rather than left as "approximate":
+    # over-counting fires a pass *earlier* in real turns than intended, so the next
+    # window begins at or before the episode the carry aimed at and therefore still
+    # **contains** the whole carried tail — §7's remedy is delivered, and what is lost
+    # is only its position as the window's literal prefix, plus some duplicated passes.
+    # Closing it exactly needs #1075 and a change in `orchestration`, which is not this
+    # module's to make; a floor on the schedule would buy the append case by breaking
+    # the episode-stage case, because the driver cannot tell which one it is in.
     turns = 0
     landed: list[int] = []
     observed_through = 0
