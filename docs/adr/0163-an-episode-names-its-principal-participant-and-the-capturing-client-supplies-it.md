@@ -202,7 +202,8 @@ not settle.
 ### 1. An episode may name which of its participants is the user, in one optional field
 
 > **Normative.** `EpisodicMemory` grows one field,
-> `principal: NonBlankEncodableText | None`, defaulting to `None`. Stated, it names
+> `principal: NonBlankEncodableText | None`, defaulting to `None` and **bounded to
+> 128 characters**, a value above which is refused at construction. Stated, it names
 > the speaker — among those this episode records — who is the owner of this hub.
 
 > **Normative.** No other memory kind grows this field, and no other type does.
@@ -229,6 +230,20 @@ against the neighbouring `participants`.
 That clause exists because the word carries a second meaning in this corpus's
 neighbourhood and a later reader could import it. The field says which voice in one
 recording belongs to the hub's owner. It authorises nothing.
+
+**The bound is what makes §5's rendering obligation safe to state unconditionally**,
+and it is a bound on *shape* rather than a validation against `content` (§2's fourth
+clause stands: nothing checks the marker against the text). A speaker tag is a name
+or a label; 128 characters is far above any real one. Without a bound the field is
+`NonBlankEncodableText`, which has none, and §5 obliges every surface rendering an
+episode to a model to render the marker in full — so a client could inflate every
+prompt an episode reaches by as much as the record itself, in a field the hub does
+not otherwise read. `orchestration/consolidation.py` is where that bites hardest: it
+already bounds each record's rendered `content` to 400 characters *because* the
+chunk is fifty records of Tier 1 material leaving the process, and an unbounded
+marker beside a bounded content would undo that budget from the side. The bound is
+below that budget on purpose, so the marker is a small addition to a bounded line
+rather than a second, larger payload.
 
 ### 2. The value is a tag the episode's own `content` uses, it is owed where it is stateable, and it resolves to nothing
 
@@ -469,6 +484,11 @@ it a predicate to sit under, and §6 below gives `principal` none.
 > no kind filter, so an episode reaches it whenever the store holds one. They bind
 > no user-facing surface, which may render the marker or not.
 
+> **Normative.** A surface that bounds how much of an episode's `content` it renders
+> renders the marker **in full** regardless, and truncates it never. A truncated tag
+> is a different tag, and one that resolves to nothing (§2) is one no reader can
+> repair. §1's 128-character bound is what makes that obligation bounded.
+
 > **Normative.** A principal marker never widens what may be proposed. ADR-0077
 > §2's bar — the belief is about the user and would change a later answer, and the
 > exchange is not summarised — is applied unchanged, and the presence of a marker is
@@ -536,11 +556,23 @@ stating the clause over a description rather than over a list.
 **Minimisation is satisfied rather than strained**, and the argument is §2's first
 clause rather than a fresh one: the marker is a string already inside the `content`
 the prompt carries, so ADR-0077 §3's four refusals stand verbatim — no existing
-beliefs, no profile, no context facet, no plan. De-duplication remains the gate's
+beliefs, no profile, no context facet, no plan.
+
+**One surface makes that argument work one step harder**, and the step is worth
+writing down rather than leaving for a reader to notice. Consolidation renders a
+*prefix* of the content, so where the tag first occurs past that prefix the marker
+is not, strictly, a string the payload already carried — it is at most 128 further
+characters of the same record's own text. ADR-0004 §7 tests what a payload *needs*,
+not what it could have been trimmed to, and those characters are precisely what
+stops the prefix being read as the owner's speech. Disclosing a speaker's tag in
+order not to attribute that speaker's sentences to the owner is the trade that
+section licenses rather than an exception to it. Nothing else in the argument moves:
+the marker still adds no datum the record does not hold, and no belief, profile,
+facet or plan enters any prompt because of it. De-duplication remains the gate's
 job, and the store ids stay out of the prompt for the reason `learning/observer.py`
 already gives: "the model has no use for an id it is not allowed to cite".
 
-**The fourth clause holds a line a reviewer should test**, and it is ADR-0156 §2's
+**The fifth clause holds a line a reviewer should test**, and it is ADR-0156 §2's
 fourth clause stated for this field rather than borrowed from it. The measured
 ingestion loss is large and the temptation is to let this ADR buy some of it back by
 admitting third-person beliefs the utility bar refuses. It does not. What the marker
@@ -681,12 +713,12 @@ belongs to the sensor lane that first has one.
 
 - **Step 1, `core`.** A record round-tripping a marker byte for byte (§2). A record
   serialised without the field decoding with none (§4) — the legacy-blob case, which
-  is what makes the no-migration ruling checkable. And a blank or whitespace-only
-  marker **refused at construction**, which is the only test that pins the
-  annotation to `NonBlankEncodableText | None` (§1); a round trip and a legacy
-  decode both pass against a bare `EncodableText | None`, under which `principal="
-  "` would be stored and rendered as an owner marker — §1's two states quietly
-  becoming three.
+  is what makes the no-migration ruling checkable. And the two refusals that pin
+  the annotation (§1), neither of which a round trip or a legacy decode can see: a
+  blank or whitespace-only marker — under a bare `EncodableText | None`,
+  `principal="  "` would be stored and rendered as an owner marker, §1's two states
+  quietly becoming three — and a marker of 129 characters, which is what holds the
+  bound §5's full-rendering clause depends on.
 - **Step 2, `learning`.** The observation prompt built from a **constructed**
   `EpisodicMemory` carrying a marker states it, and one built from a record without
   a marker renders nothing in its place (§5); and the rendered region is
@@ -695,7 +727,9 @@ belongs to the sensor lane that first has one.
 - **Step 4, `orchestration`.** The same two assertions for the consolidation
   prompt, built from a chunk containing a **constructed** marked episode — which
   doubles as the assertion that an episode reaches this prompt at all, the fact the
-  step exists for.
+  step exists for. And the truncation case §5's fourth clause rules: an episode
+  whose `content` exceeds the prompt's per-record budget and whose tag first occurs
+  past it still renders its marker, whole.
 - **Step 5, `orchestration`.** A marker supplied to `ConversationLifecycle.capture`
   reaching the stored `EpisodicMemory` unchanged, and the engine's own capture path
   storing none (§3). This is the seam a spoke will use, exercised without a spoke.
@@ -826,7 +860,7 @@ consequence are ADR-0098 §12's seam and are not. The implementing lane updates
   gives labels cross-record meaning (#691), which would make §2's third clause the
   thing standing in the way rather than the thing protecting the design; or a
   measured finding that stating the marker changes *what* the observer proposes
-  rather than *whom* it proposes it about, which §5's fourth clause forbids and
+  rather than *whom* it proposes it about, which §5's fifth clause forbids and
   which would mean the clause needs an enforcement point rather than a statement.
 
 ## Alternatives considered
