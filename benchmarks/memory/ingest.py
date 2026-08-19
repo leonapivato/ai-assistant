@@ -90,6 +90,7 @@ auto-answering was rejected outright.
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
@@ -500,7 +501,9 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
     # a long postponement can cost is the carried tail's *position* — the window slides
     # while nothing is stored — and that costs §7 nothing, because a stretch that stored
     # nothing has no new fact for the tail to be joined to.
-    landed: list[int] = []
+    # Pruned to the current window by :func:`_record_landing`, so the schedule costs
+    # the same on turn one and turn a million.
+    landed: deque[int] = deque()
     observed_through = 0
     next_at: int | None = None
     for session in case.sessions:
@@ -523,8 +526,7 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
             # Recorded off the episode id alone rather than off the branch below,
             # which is the conservative direction: a report that is `degraded` and
             # still carries an id has something a pass can read.
-            if report.episode_id is not None:
-                landed.append(ordinal)
+            _record_landing(landed, ordinal, stored=report.episode_id is not None, reach=batch_size)
             if report.degraded or report.episode_id is None:
                 summary.turns_degraded += 1
             else:
@@ -547,6 +549,27 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
     if landed and landed[-1] > observed_through:
         await _observe(harness, conversation.id, summary)
     return summary
+
+
+def _record_landing(landed: deque[int], ordinal: int, *, stored: bool, reach: int) -> None:
+    """Note an episode at ``ordinal``, and forget the ones out of reach.
+
+    Args:
+        landed: The ordinals still inside a window the driver could schedule from.
+            Mutated in place.
+        ordinal: The conversation's most recent turn ordinal.
+        stored: Whether that turn stored an episode.
+        reach: The window, in turns — how far back an ordinal can be and still matter.
+
+    An ordinal that has fallen out of reach can never return: ``ObservationStage`` has
+    no offset, so it never reads a window starting further back than the most recent
+    ``reach`` turns. Keeping the whole history would make the scheduling quadratic in a
+    corpus's successful turns for no answer it could give.
+    """
+    if stored:
+        landed.append(ordinal)
+    while landed and landed[0] <= ordinal - reach:
+        landed.popleft()
 
 
 def _pass_is_due(*, ordinal: int, next_at: int | None, observed_through: int) -> bool:
