@@ -225,7 +225,7 @@ async def test_a_default_deployment_records_its_effective_figures(settings: Sett
         SCHEDULER_RUN_BUDGET_SECONDS: timedelta(minutes=5).total_seconds(),
         SCHEDULER_CHUNK_SIZE: 50,
         OBSERVATION_BATCH_SIZE: 20,
-        OBSERVATION_MAX_PROPOSALS: 5,
+        OBSERVATION_MAX_PROPOSALS: 40,
         TRACE_RETENTION_FINITE: True,
         TRACE_RETENTION_SECONDS: timedelta(days=365).total_seconds(),
         EPISODE_RETENTION_FINITE: True,

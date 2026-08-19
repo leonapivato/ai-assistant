@@ -1592,9 +1592,29 @@ class Settings(BaseSettings):
     #
     # ``observation_max_proposals`` is the most beliefs one pass may return; excess
     # is discarded rather than queued (a queue is durable state nothing ratifies,
-    # and the episodes remain in the store for a later pass). Five is ADR-0077 §2's
-    # selectivity bar in numbers — a batch that genuinely yields more durable
-    # beliefs than that is a batch worth observing twice.
+    # and the episodes remain in the store for a later pass — for as long as they
+    # remain live, which ADR-0074 §7's horizon bounds).
+    #
+    # **Forty, and the ground is cost and egress on one pass rather than the intake
+    # rule expressed as a number** (ADR-0162 §6). Five *was* ADR-0077 §2's
+    # selectivity bar in numbers — "a batch that genuinely yields more durable
+    # beliefs than that is a batch worth observing twice" — and ADR-0162 §1 replaces
+    # that bar for an episode recording what the user told the assistant, so the
+    # figure's ground does not survive with the figure. The probe measured 8.7, 9.1
+    # and 9.0 proposals per pass at ``observation_batch_size`` 20 under a cap of 60
+    # that never bound; 40 is more than four times that mean, two records per episode
+    # in the batch. Held equal to ``learning.observer``'s
+    # ``DEFAULT_OBSERVATION_MAX_PROPOSALS``, which is what a direct construction gets
+    # and which carries the same reasoning at length; the composition root passes
+    # this one, so an operator's value wins over both.
+    #
+    # **``discarded_over_limit`` above zero is a defect, never the steady state**
+    # (§6). A pass in which the bound binds is an *incomplete* pass: it meets the
+    # completeness rule up to the bound and no further, the truncation drops records
+    # by position in a model's reply rather than by any ranking, and the response is
+    # to raise this value, lower ``observation_batch_size``, or both. The two are a
+    # pair — raising this one alone relocates the boundary, while halving the batch
+    # halves the material each pass must fit — which is why §6 names both.
     observation_batch_size: _IntegerSetting = Field(
         default=20,
         ge=1,
@@ -1602,7 +1622,7 @@ class Settings(BaseSettings):
         description=("How many of a conversation's most recent turns one observation pass reads."),
     )
     observation_max_proposals: _IntegerSetting = Field(
-        default=5,
+        default=40,
         ge=1,
         description="The most beliefs one observation pass may propose; excess is discarded.",
     )

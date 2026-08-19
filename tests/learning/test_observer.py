@@ -24,10 +24,17 @@ from observer_contract import (
     episode,
 )
 
+from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ConfigurationError, ModelError
-from ai_assistant.core.types import MemoryKind, Message, Role
-from ai_assistant.learning import ModelBackedObserver
+from ai_assistant.core.types import EpisodicMemory, MemoryKind, Message, Role
+from ai_assistant.learning import DEFAULT_OBSERVATION_MAX_PROPOSALS, ModelBackedObserver
 from ai_assistant.testing import FakeModelProvider, ObservationGate
+from ai_assistant.testing.observation import (
+    DEFAULT_MAX_BATCH_SIZE as FAKE_DEFAULT_MAX_BATCH_SIZE,
+)
+from ai_assistant.testing.observation import (
+    DEFAULT_MAX_PROPOSALS as FAKE_DEFAULT_MAX_PROPOSALS,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -712,6 +719,181 @@ def _prompt_of(provider: FakeModelProvider) -> tuple[str, str]:
     return messages[0].content, messages[-1].content
 
 
+# --- complete intake and the assistant's half (ADR-0162 §1, §8) -------------
+
+
+def _told(episode_id: str, *, content: str, outcome: str | None = None) -> EpisodicMemory:
+    """One episode of ADR-0162 §1's class, optionally carrying the assistant's half.
+
+    Built by copy off the shared suite's ``episode`` rather than inline, so a batch
+    here is the same capture-shaped record every other case uses and the only thing
+    this helper adds is the field §8 rules on.
+    """
+    record = episode(episode_id, content=content)
+    return record if outcome is None else record.model_copy(update={"outcome": outcome})
+
+
+async def test_the_prompt_asks_for_a_record_of_everything_the_user_stated() -> None:
+    """ADR-0162 §1's recording rule, which replaces ADR-0077 §2's warrant bar here.
+
+    The bar asked the model to judge whether a thing was worth believing, and the
+    measurement says that filter's false-negative rate is the system's dominant loss
+    — 39.3% of pilot-4's answerable LoCoMo questions had gold no belief cited. §1
+    asks a question the model can answer from the batch in front of it instead. Three
+    halves of the rule are pinned because a partial edit is the failure that would
+    read as compliance: the completeness instruction, the enumeration of what counts
+    as a thing a later question could ask about, and the explicit repeal of "that it
+    merely happened" as a ground for refusing.
+
+    The filler clause is pinned with them, because §1 keeps exactly one refusal and a
+    prompt that dropped it would be a different rule.
+    """
+    observer, provider = _observer(_envelope())
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "Record what the user told you, completely" in system
+    assert "one belief for each distinct thing the user stated" in system
+    assert "That a thing merely happened is not a reason to leave it out" in system
+    assert "Pass over pure conversational filler" in system
+    assert "pass over nothing else" in system
+
+
+async def test_the_prompt_asks_for_one_thing_per_record() -> None:
+    """§1's third clause, which is what stops completeness becoming a summary.
+
+    A model told to record everything and not told the unit will fold a session into
+    one dense sentence, which retrieval then returns whole or not at all. The unit is
+    the thing a later question could ask about because that is the unit a search
+    returns — so the reason is in the prompt and not only in the ADR.
+    """
+    observer, provider = _observer(_envelope())
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert "One belief states ONE thing" in system
+    assert "the unit is the thing a later question could ask about" in system
+
+
+async def test_the_prompt_partitions_the_assistants_half_by_what_a_record_claims() -> None:
+    """ADR-0162 §8's two clauses, which are a boundary and not a volume control.
+
+    What the assistant said independently supports a record of the assistant's own
+    *act* — that it was asked something, that it answered or did a particular thing,
+    and when — which the ``outcome`` field witnesses. It never supports a record that
+    adopts the proposition it asserted as a fact about the world or the user: that
+    would let the assistant launder its own assertions into the user's model, a
+    belief citing an episode that witnesses only the *saying*. Both halves are pinned
+    because either alone is a different rule — the permission alone opens the
+    laundering route, and the refusal alone loses the
+    single-session-assistant material (#1029 scores that arm at 50%).
+
+    The citation clause rides here because the rendering below puts two texts under
+    one label: ADR-0077 §5's floor counts labels, and an episode split into two would
+    let one episode supply the two distinct supports an ``INFERRED`` record owes.
+    """
+    observer, provider = _observer(_envelope())
+
+    await observer.observe(batch_of(1))
+
+    system, _ = _prompt_of(provider)
+    assert 'on an "Assistant:" line' in system
+    assert "evidence about what HAPPENED, never about what is TRUE" in system
+    assert "propose a belief about the assistant's own act" in system
+    assert "You may NOT take a claim the assistant asserted" in system
+    assert "record such a fact only where the USER stated it" in system
+    assert "one episode is one label and one support" in system
+
+
+@pytest.mark.parametrize("timezone", [None, _ZONE], ids=["no-zone", "zoned"])
+async def test_an_episodes_outcome_reaches_the_prompt_under_that_episodes_label(
+    timezone: str | None,
+) -> None:
+    """§8's first clause, in both rendered variants.
+
+    The field has been stored and outside the prompt since it existed: the harness
+    pairs a user turn with the assistant turn that follows it and puts the latter
+    here, so under the pre-#1184 LoCoMo mapping roughly half the corpus was never
+    visible to distillation at all (#1185). Parametrised over the zone because the
+    two variants build their lines separately and an edit to one is not an edit to
+    the other.
+
+    **Under the same label is the assertion, not merely present.** An episode is
+    cited whole (§8's second clause), so the two texts share one label and the batch
+    grows a line rather than an entry — which is what the index comparison checks:
+    the assistant's half falls between this episode's label and the next one's.
+    """
+    observer, provider = _observer(_envelope(), timezone=timezone)
+    episodes = [
+        _told("e1", content="I asked which route to take", outcome="I recommended the coastal one"),
+        _told("e2", content="I took it and it was lovely"),
+    ]
+
+    await observer.observe(episodes)
+
+    _, batch = _prompt_of(provider)
+    assert "Assistant: I recommended the coastal one" in batch
+    assert batch.index("[E1]") < batch.index("Assistant:") < batch.index("[E2]")
+    assert "[E3]" not in batch, "the outcome is a line of E1, never an episode of its own"
+
+
+async def test_an_episode_carrying_no_outcome_renders_exactly_as_it_did() -> None:
+    """The rendering adds a line where there is one to add, and nothing where there
+    is not — so a corpus with no assistant half (LoCoMo, under #1177's framing, where
+    every exchange carries ``outcome=None``) is byte for byte what it was."""
+    observer, provider = _observer(_envelope())
+
+    await observer.observe([_told("e1", content="I took the coastal route")])
+
+    _, batch = _prompt_of(provider)
+    assert "Assistant:" not in batch
+    assert batch.splitlines() == [
+        "Episodes (recorded times withheld: no local calendar is configured):",
+        "  [E1] I took the coastal route",
+    ]
+
+
+def test_the_producers_default_proposal_bound_is_the_one_settings_ships() -> None:
+    """ADR-0162 §13 holds the two equal, and nothing else in the tree checks it.
+
+    ``core.config`` and ``learning.observer`` state the figure separately — the
+    composition root passes the operator's value, and this constant is what a direct
+    construction gets — so the two are held in step by a rule rather than by a
+    dependency. A rule stated only in two comments is one a later edit moves by half.
+
+    The value's *ground* is what changed with it (§6): 5 was ADR-0077 §2's
+    selectivity bar expressed as a number, and §1 repeals that bar for a told
+    episode, so what bounds the return value now is one pass's cost and egress alone.
+    """
+    assert DEFAULT_OBSERVATION_MAX_PROPOSALS == 40
+    assert Settings().observation_max_proposals == DEFAULT_OBSERVATION_MAX_PROPOSALS
+
+
+def test_the_canonical_fakes_proposal_bound_deliberately_does_not_follow() -> None:
+    """§13's fourth clause: ``testing``'s ``DEFAULT_MAX_PROPOSALS`` **stays 5**.
+
+    ``FakeObserver`` synthesises one ``OBSERVED`` belief per episode plus one
+    ``INFERRED`` over the first two, so a batch of *n* asks for more than *n*
+    proposals — which is what makes the configured maximum bite, and at
+    ``DEFAULT_MAX_BATCH_SIZE`` 20 that is 21 proposals against a maximum of 5. Taking
+    the fake to 40 would put 21 under it and retire the very clause the fake exists
+    to exercise, so its number follows the *fixture's* purpose and not a
+    deployment's. That is the difference between a canonical fake and a default, and
+    it is asserted here rather than left to a comment because the two constants now
+    differ and the obvious tidy-up is to make them agree.
+    """
+    assert FAKE_DEFAULT_MAX_PROPOSALS == 5
+    assert FAKE_DEFAULT_MAX_BATCH_SIZE + 1 > FAKE_DEFAULT_MAX_PROPOSALS, (
+        "a batch of n asks for n + 1 proposals, which is what makes the bound bite"
+    )
+    assert FAKE_DEFAULT_MAX_BATCH_SIZE + 1 <= DEFAULT_OBSERVATION_MAX_PROPOSALS, (
+        "and the deployment default is where 21 proposals would fit under the bound, "
+        "which is the divergence §13 rules deliberate"
+    )
+
+
 async def test_the_batch_states_every_episodes_occurred_at_in_the_configured_zone() -> None:
     """ADR-0156 §2's first clause, over a batch of two dated on different days.
 
@@ -904,12 +1086,22 @@ async def test_the_prompt_refuses_a_date_the_recorded_time_alone_would_supply() 
 
 
 async def test_the_prompt_does_not_let_a_date_widen_what_may_be_proposed() -> None:
-    """§2's fourth clause: ADR-0077 §2's bar is applied unchanged.
+    """ADR-0156 §2's fourth clause: the rule above is applied unchanged.
 
-    The measured ingestion loss is far larger than the measured anchor loss, and the
-    temptation is to buy some of it back by admitting event-shaped beliefs the
-    utility bar refuses. ADR-0156 §6 says what that would cost, and this pins that
-    the prompt did not quietly do it.
+    The temptation ADR-0156 §6 priced was to buy some of the measured ingestion loss
+    back by letting the *time section* admit beliefs the rule above refuses. That
+    clause is untouched by ADR-0162: what widened is the rule itself, in §1, by a
+    ratified decision in the paragraph that owns it — and the time section still
+    hands the decision back rather than taking any of it.
+
+    **Two of the three sentences this used to assert were the bar and are gone**
+    (ADR-0162 §1). "Do not summarise the exchange" and "Do not propose what merely
+    happened" said exactly what §1 repeals for an episode recording what the user
+    told the assistant; asserting them now would pin the prompt to a rule no longer
+    in force. What survives unchanged is the *relation* — the time section decides
+    what a belief says and never how many — and that is what is checked, together
+    with the one refusal §1 keeps, so this cannot pass on a prompt that has quietly
+    stopped refusing anything at all.
     """
     observer, provider = _observer(_envelope(), timezone=_ZONE)
 
@@ -917,8 +1109,8 @@ async def test_the_prompt_does_not_let_a_date_widen_what_may_be_proposed() -> No
 
     system, _ = _prompt_of(provider)
     assert "A date is never a reason to propose a belief" in system
-    assert "Do not summarise the exchange" in system
-    assert "Do not propose what merely happened" in system
+    assert "This governs how a belief is written, never whether" in system
+    assert "Pass over pure conversational filler" in system
 
 
 async def test_the_zoned_prompt_states_that_clause_in_both_directions() -> None:
@@ -1110,16 +1302,22 @@ async def test_the_prompt_asks_a_belief_to_keep_the_particulars_the_evidence_giv
     assert "where it gives no particular the belief is about, state the trait alone" in system
 
 
-async def test_the_specificity_paragraph_reopens_nothing_the_bar_refuses() -> None:
+async def test_the_specificity_paragraph_decides_no_part_of_which_beliefs() -> None:
     """It governs *how* a belief is written, never *whether* — and says so.
 
-    The failure mode of asking for particulars is a model that starts logging
-    events, which is the one thing ADR-0077 §2 refuses in terms and the thesis
-    ADR-0158 keeps out of the belief store. Three things hold the line, and all
-    three are pinned: the paragraph opens on "when you do propose", it hands the
-    decision back in its last sentence, and it sits *after* the paragraph that
-    makes that decision and before the epistemic steps. The ordering assertion is
-    the one a re-flow of the prompt would break silently.
+    Two things hold that line and both are pinned: the paragraph opens on "when you
+    do propose", and it hands the decision back in its last sentence. The ordering
+    assertion is the one a re-flow of the prompt would break silently — it sits after
+    every paragraph that decides *which* beliefs and before the epistemic steps.
+
+    **What is no longer asserted, and why** (ADR-0162 §1). The closing sentence used
+    to add "and a retelling of what happened is refused however specific it is", and
+    the ordering anchor used to be "Proposing nothing is a perfectly good answer".
+    Both were ADR-0077 §2's bar, which §1 replaces for an episode recording what the
+    user told the assistant: a record of what happened is now the point, and
+    proposing nothing is relocated to the filler case rather than standing as the
+    paragraph's opening posture. The anchor moves to the recording rule's own first
+    line, which is what the paragraph now sits after.
     """
     observer, provider = _observer(_envelope(), timezone=_ZONE)
 
@@ -1127,10 +1325,10 @@ async def test_the_specificity_paragraph_reopens_nothing_the_bar_refuses() -> No
 
     system, _ = _prompt_of(provider)
     assert "This governs how a belief is written, never whether" in system
-    assert "a retelling of what happened is refused however specific it is" in system
-    assert "Do not propose what merely happened; that is already recorded" in system
+    assert "the rule above decides that" in system
     assert (
-        system.index("Proposing nothing is a perfectly good answer")
+        system.index("Record what the user told you, completely")
+        < system.index("One belief states ONE thing")
         < system.index("When you do propose a belief")
         < system.index("Each belief takes one of two epistemic steps")
     )
@@ -1229,7 +1427,11 @@ async def test_the_particulars_kept_are_scoped_to_the_belief_and_not_the_exchang
     system, _ = _prompt_of(provider)
     assert "that identify or qualify the thing believed" in system
     assert "whoever happened to be present" in system
-    assert "are the exchange, not the belief, and are left out" in system
+    assert "are the exchange, not this belief, and are left out of its sentence" in system
+    # ADR-0162 §1's boundary on that exclusion, pinned because without it the
+    # sentence now reads as a refusal to record the diner at all — which §1 requires
+    # as a belief of its own, from the same episode, in its own sentence.
+    assert "never whether a person or place the user named gets a belief of its own" in system
 
 
 @pytest.mark.parametrize("timezone", [None, _ZONE], ids=["no-zone", "zoned"])

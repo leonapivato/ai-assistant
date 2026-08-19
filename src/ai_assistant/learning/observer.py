@@ -71,8 +71,35 @@ if TYPE_CHECKING:
 #: The batch bound ADR-0077 §1 names and the proposal bound §2 names, as
 #: defaults. Both are *also* ``Settings`` fields, so the composition root passes
 #: the operator's values; these are what the class does when nobody says.
+#:
+#: **The proposal bound is 40 and its ground is cost, not selectivity** (ADR-0162
+#: §6). Under ADR-0077 §2's warrant bar, five *was* the selectivity rule expressed
+#: as a number — "a batch that genuinely yields more durable beliefs than that is a
+#: batch worth observing twice". ADR-0162 §1 replaces that bar for an episode
+#: recording what the user told the assistant, and the number does not survive with
+#: the ground: what bounds the return value now is one pass's cost and egress and
+#: nothing else. The probe measured 8.7, 9.1 and 9.0 proposals per pass over three
+#: conversations at a batch of 20, under a cap of 60 that never bound; 40 is more
+#: than four times that mean — two records per episode in the batch — which is
+#: headroom for a stretch of unusually dense turns while staying a bound rather than
+#: an absence of one.
+#:
+#: **A pass in which it binds is an incomplete pass, not a compliant one** (§6). The
+#: cap truncates by *position* in a model's reply, and position is not a ranking:
+#: under ADR-0077 §2 the tail it dropped was the least selective end of an
+#: already-selected set, and under complete intake there is no selection for it to be
+#: the tail of. So ``discarded_over_limit`` above zero is read as a defect with a
+#: stated response — raise this bound, lower the batch size, or both — and never as
+#: the intended steady state. The two knobs are a pair because raising this one alone
+#: only relocates the boundary while halving the batch halves the material each pass
+#: must fit.
+#:
+#: **The batch bound is unchanged and is coupled to it.** 40 is per call and 20 is
+#: turns per call, so a deployment that raises the batch raises expected proposals
+#: proportionally and will make 40 bind; no clause ties the two, because a formula
+#: would ratify a linearity nothing has measured. That is what the counter is for.
 DEFAULT_OBSERVATION_BATCH_SIZE: Final = 20
-DEFAULT_OBSERVATION_MAX_PROPOSALS: Final = 5
+DEFAULT_OBSERVATION_MAX_PROPOSALS: Final = 40
 
 #: The most decode **misses** :func:`_extract_object` tolerates in one reply
 #: before giving up, for the reason ``planning.planner`` records: a failed
@@ -136,13 +163,57 @@ _INSTANT_FORMAT: Final = "%a %Y-%m-%d %H:%M %z"
 _INSTANT_UNAVAILABLE: Final = "(recorded time unavailable)"
 
 #: The prompt's opening, which says nothing about time and is shared by both
-#: variants below. Three paragraphs after the framing: the utility bar ADR-0077 §2
-#: states as a producer-side rule, **how a belief that has cleared that bar is
-#: phrased**, and the two epistemic steps.
+#: variants below. Five paragraphs after the framing: the **recording rule**
+#: ADR-0162 §1 states as a producer-side obligation, the one-record-one-thing
+#: clause beside it, ADR-0162 §8's boundary between what the user said and what
+#: this assistant asserted, **how a belief that clears the rule is phrased**, and
+#: the two epistemic steps.
 #:
-#: **The specificity paragraph is about wording, not about the bar**, and the order
-#: is what keeps it so: it opens on "when you do propose a belief", it sits after
-#: the paragraph that decides whether, and it closes by handing that decision back.
+#: **The recording rule replaces ADR-0077 §2's warrant bar here** (ADR-0162 §1),
+#: and the replacement is what the prompt had to carry: the measurement says the
+#: filter's false-negative rate is the system's dominant loss, and the question
+#: the model can actually answer from the batch in front of it is *did the user say
+#: this?* rather than *would this change a later answer?*. Three of the old
+#: paragraph's four sentences were the bar and are gone; "proposing nothing is a
+#: perfectly good answer" is **relocated rather than repealed** (§1's third
+#: paragraph) and now names filler explicitly, because unqualified beside a
+#: completeness instruction it is the sentence a model reaches for when a batch is
+#: dense. Nothing here states a *number*: the cap is post-hoc truncation and the
+#: prompt has never mentioned it (#1029), which is exactly why ADR-0162 §6 rules a
+#: binding cap a defect rather than a design.
+#:
+#: **The scope is not in the prompt, and that is ADR-0162 §2 rather than an
+#: omission.** §1's rule reaches only an episode recording what the user told the
+#: assistant, and §2 defers the carrier of that distinction to the ADR introducing
+#: the second class of episode while forbidding anything to enter this payload to
+#: carry it. So this prompt is written for §1's class outright, and the fail-closed
+#: obligation sits on the stage that selects the batch — today the only construction
+#: site for an ``EpisodicMemory`` under ``src/`` is the conversation capture path,
+#: so every episode reaching here is already §1's.
+#:
+#: **The assistant paragraph partitions by what a record claims** (ADR-0162 §8),
+#: which is the one place this text could most easily have breached §1's own
+#: boundary. An act the episode witnesses — that the assistant was asked something,
+#: answered, did a thing, and when — is supported by the ``outcome`` half alone. The
+#: proposition inside that answer is not: adopting it would let the assistant
+#: launder its own assertions into the user's model, a belief citing an episode that
+#: witnesses only the *saying*. The citation clause is in the same paragraph because
+#: the prompt now shows two texts under one label and ADR-0077 §5's floor counts
+#: labels — a split episode would let one episode supply the two distinct supports
+#: an ``INFERRED`` record owes.
+#:
+#: **The specificity paragraph is about wording, not about which beliefs**, and the
+#: order is what keeps it so: it opens on "when you do propose a belief", it sits
+#: after the paragraphs that decide whether, and it closes by handing that decision
+#: back. Its closing sentence used to add "and a retelling of what happened is
+#: refused however specific it is", which was the bar speaking; under §1 a record of
+#: what happened is the point, so the clause is dropped rather than reworded. Its
+#: exclusion of incidental particulars is scoped in terms to *this belief's
+#: sentence*, because under §1 the fellow diner the third sentence keeps out of a
+#: vegan-meal preference is themselves a thing the user named — and §1 records that
+#: as a belief of its own. The two rules are about different questions and now have
+#: to say so; ADR-0162 §3 rules the growth in third-party content deliberate and
+#: leaves the subject axis where ADR-0100 put it.
 #: It is there because the void run's dominant loss is a belief that cleared the
 #: bar and then abstracted the evidence away — *"Caroline is passionate about
 #: supporting the LGBTQ+ community"* distilled from an episode naming the group,
@@ -205,25 +276,44 @@ You are the observation stage of an AI assistant. You are shown a batch of \
 recorded episodes — things that happened — and you propose what the assistant \
 should durably believe about the user as a result.
 
-Propose a belief only when it is ABOUT THE USER and would change a later answer: \
-a preference, a durable fact about them or their world, a workflow they follow. \
-Do not summarise the exchange. Do not propose what merely happened; that is \
-already recorded. Proposing nothing is a perfectly good answer.
+Record what the user told you, completely. Propose one belief for each distinct \
+thing the user stated that a later question could ask about: an event that \
+happened, a person, place, organisation or thing they named, a durable fact, a \
+preference, a workflow they follow. That a thing merely happened is not a reason \
+to leave it out, and neither is a judgement that it may not matter later — the \
+user chose to tell an assistant whose job is to remember them, and that is the \
+signal you are reading. Pass over pure conversational filler — a greeting, an \
+acknowledgement, a restatement of something you yourself just said — and pass \
+over nothing else. Proposing nothing is still the right answer for a batch that \
+is only filler.
+
+One belief states ONE thing. Do not fold several distinct facts or events into a \
+single sentence: the unit is the thing a later question could ask about, because \
+that is the unit a search returns.
+
+An episode may also carry what the assistant said back, on an "Assistant:" line. \
+That half is evidence about what HAPPENED, never about what is TRUE. You may \
+propose a belief about the assistant's own act — that it was asked something, \
+that it answered or did a particular thing, and when. You may NOT take a claim \
+the assistant asserted and record it as a fact about the world or about the user; \
+record such a fact only where the USER stated it, and the assistant's words may \
+then corroborate it but never stand in for it. Either way you cite the episode \
+whole: one episode is one label and one support, whichever half of it you read.
 
 When you do propose a belief, keep the concrete particulars the belief is about — \
 the proper names, places, organisations and quantities that identify or qualify \
 the thing believed — rather than abstracting over them. Two ways of writing the \
 same belief are not equally useful: "owns a 2012 Honda Civic" beats "owns a car". \
 Keep only those: whoever happened to be present, wherever the conversation \
-happened and whatever else was going on are the \
-exchange, not the belief, and are left out. Add nothing the evidence does not \
-give — a particular you cannot point to in a cited episode is an invention, and \
-one occasion is not a routine — and where it gives no particular the belief is \
-about, state the trait alone. Times are the one exception: the section below \
-decides which of them a belief states, and keeping the particulars is never a \
-reason to date a belief it says states none. This governs how a belief is \
-written, never whether: the bar above still decides that, and a retelling of what \
-happened is refused however specific it is.
+happened and whatever else was going on are the exchange, not this belief, and \
+are left out of its sentence — which decides what THIS belief says and never \
+whether a person or place the user named gets a belief of its own. Add nothing \
+the evidence does not give — a particular you cannot point to in a cited episode \
+is an invention, and one occasion is not a routine — and where it gives no \
+particular the belief is about, state the trait alone. Times are the one \
+exception: the section below decides which of them a belief states, and keeping \
+the particulars is never a reason to date a belief it says states none. This \
+governs how a belief is written, never whether: the rule above decides that.
 
 Each belief takes one of two epistemic steps:
 - "observed" — the cited episodes directly show it. One episode may be enough.
@@ -712,13 +802,14 @@ def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str
 
     **The payload is the batch and nothing else** (ADR-0077 §3, as partially
     superseded by ADR-0156): each episode's canonical ``content`` (ADR-0005 §1),
-    the label the model cites it by, and — since ADR-0156 §2 — that episode's own
-    ``occurred_at``. Still not the user's existing beliefs, not the profile, not a
-    context facet, not a plan: the instant is admitted precisely because it is a
-    field of the very records whose ``content`` is already here rather than a
-    second class of data, so ADR-0004 §7's minimisation is satisfied rather than
-    strained and §3's four refusals stand verbatim. De-duplication remains the
-    gate's job, deterministically and locally.
+    the label the model cites it by, that episode's own ``occurred_at`` since
+    ADR-0156 §2, and its ``outcome`` since ADR-0162 §8. Still not the user's
+    existing beliefs, not the profile, not a context facet, not a plan: each of the
+    two added fields is admitted precisely because it is a field of the very
+    records whose ``content`` is already here rather than a second class of data,
+    so ADR-0004 §7's minimisation is satisfied rather than strained and §3's four
+    refusals stand verbatim. De-duplication remains the gate's job,
+    deterministically and locally.
 
     Not the store ids either, and that is the same rule from the other side: the
     model has no use for an id it is not allowed to cite, and an id in the prompt
@@ -731,17 +822,48 @@ def _render_batch(batch: Sequence[EpisodicMemory], zone: ZoneInfo | None) -> str
     of all evidence by one day, always in the same direction. Without a zone the
     header says the times are withheld and the lines carry none — the state the
     system prompt's second variant is written against.
+
+    **And ``outcome`` is rendered where the episode carries one** (ADR-0162 §8).
+    It has been stored and outside the prompt since the field existed: the harness
+    pairs a user turn with the assistant turn that follows it and puts the latter
+    here, so under the pre-#1184 LoCoMo mapping roughly half the corpus was never
+    visible to distillation at all (#1185). No supersession is owed for it, on
+    ADR-0156 §2's own ground — it is a field of the very records whose ``content``
+    ADR-0077 §3 already sends, not a second class of data, so §3's four refusals
+    stand verbatim.
+
+    **Under the same label, on a continuation line, and never as a second entry.**
+    An episode is cited whole (ADR-0162 §8): the model is shown two texts and the
+    evidence floor counts labels, so splitting the halves into two labels would let
+    one episode supply the two *distinct* supports an ``INFERRED`` record owes —
+    the failure ADR-0077 §5's distinct-id counting exists to prevent. The line is
+    prefixed ``Assistant:`` because the system prompt names that word when it
+    partitions what the half supports, and an episode carrying no ``outcome``
+    renders exactly as it did.
     """
     if zone is None:
         lines = ["Episodes (recorded times withheld: no local calendar is configured):"]
-        lines += [f"  [E{index + 1}] {record.content}" for index, record in enumerate(batch)]
+        for index, record in enumerate(batch):
+            lines.append(f"  [E{index + 1}] {record.content}")
+            lines.extend(_outcome_lines(record))
         return "\n".join(lines)
     lines = [f"Episodes (each carries the local time it was recorded, in {zone.key}):"]
-    lines += [
-        f"  [E{index + 1}] {_localised(record.occurred_at, zone)} — {record.content}"
-        for index, record in enumerate(batch)
-    ]
+    for index, record in enumerate(batch):
+        lines.append(f"  [E{index + 1}] {_localised(record.occurred_at, zone)} — {record.content}")
+        lines.extend(_outcome_lines(record))
     return "\n".join(lines)
+
+
+def _outcome_lines(record: EpisodicMemory) -> list[str]:
+    """The episode's ``outcome`` as its own continuation line, or nothing.
+
+    Empty where the episode carries none, which keeps a batch of outcome-less
+    episodes rendering byte for byte as it did before ADR-0162 §8. The indent is
+    deeper than the label's so the two texts read as one entry rather than two.
+    """
+    if record.outcome is None:
+        return []
+    return [f"       Assistant: {record.outcome}"]
 
 
 def _step_of(raw: object) -> MemorySource | None:
