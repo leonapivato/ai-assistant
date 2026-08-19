@@ -1,6 +1,6 @@
 # 77. The observer proposes beliefs from episodes, through the gate, on a named route
 
-- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise) and ADR-0156 (§3's sentence enumerating what the observation prompt's payload carries) and ADR-0162 (§2's warrant bar, as it reaches an episode recording what the user said to the assistant; and the proposal bound's value of 5 together with the sentence grounding it)
+- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise) and ADR-0156 (§3's sentence enumerating what the observation prompt's payload carries) and ADR-0162 (§2's warrant bar, as it reaches an episode recording what the user said to the assistant; and the proposal bound's value of 5 together with the sentence grounding it) and ADR-0163 (that same sentence again, in the scope of an episode's principal-participant marker)
 - Date: 2026-07-28
 - Partially superseded: 2026-07-31 by ADR-0084 — **§10 item 7's claim that the
   façade's observation result is an `orchestration` type and not contract surface
@@ -234,6 +234,61 @@
   [ADR-0083](0083-the-hub-is-a-resident-process.md) §15 states, so this line never
   names an ADR that does not exist. Appended per ADR-0070 §1: no text below is
   rewritten, and the replaced sentences stand exactly as written. Refs #1210, #1029.
+- Partially superseded: 2026-08-19 by ADR-0163 — **§3's sentence enumerating what
+  the observation prompt carries is replaced a second time; §3's ruling, its four
+  refusals and everything else in this ADR stand.** The replaced sentence is the
+  one the note above names — *"The prompt carries the episodes' canonical
+  `content` (ADR-0005 §1) and what the model needs to cite them (§5)"* — and it
+  enumerates exhaustively, which is why a second addition to the payload reaches
+  that sentence again rather than reaching the note.
+  [ADR-0163](0163-an-episode-names-its-principal-participant-and-the-capturing-client-supplies-it.md)
+  §5 adds each episode's `principal` — the marker naming which of the speakers an
+  episode records is the owner of this hub — where one is stated, and nothing
+  where none is. Without it the observer applies §2's *"about the user"* bar to a
+  captured multi-party conversation with no way to know which speaker that is,
+  which #1162 measures and which ADR-0163 §Context reads.
+
+  **This is a partial supersession and not an amendment**, on ADR-0070 §1's test
+  rather than the author's preference: a reader holding only this ADR builds the
+  observation prompt **without** the marker, which ADR-0163 §5's first clause
+  requires it to carry, so the reader acts differently before and after and the
+  softer form is unavailable. The discriminator this corpus uses is met for the
+  same reason it was met for ADR-0156 — the replaced sentence is a *rule an
+  implementer obeys* rather than an explanation of one. ADR-0163's header argues
+  the point at the site, as ADR-0082 §1 requires.
+
+  **The scope is that one sentence, and the rest of §3 is what admits the change.**
+  §3's bolded ruling is *"**The payload is the batch and nothing else**"*, and a
+  `principal` is a field of the very `EpisodicMemory` records whose `content` §3
+  already sends — and, under ADR-0163 §2's first clause, a string that is
+  **already inside that `content`**, so the prompt gains a pointer into text it
+  already had rather than a datum it did not. §3's four refusals therefore stand
+  **verbatim**: no existing beliefs, no profile, no context facet and no plan, and
+  ADR-0004 §7's minimisation is honoured rather than traded. Everything else in §3
+  is untouched — the observer's own named route and why unset means the
+  conversational one, the no-fallback rule and both arguments for it, the
+  on-device direction stated as a shape rather than a claim, and the outcome
+  naming the route that read the episodes.
+
+  **Neighbouring clauses were checked and are untouched.** §2's kind rule — the
+  observer proposes `SemanticMemory`, `PreferenceMemory` and `ProceduralMemory`
+  and **never** `EpisodicMemory` — stands, and ADR-0163 §3 leans on it rather than
+  lifting it. §2's utility bar stands, and ADR-0163 §5's fourth clause says so in
+  terms: a marker changes *whose* beliefs the producer is writing, never *whether*
+  the bar admits one. §5's "Confidence is computed by the producer, and never
+  taken from the model" is a rule about a field ADR-0163 does not touch, and its
+  §3 forbids taking the marker from a model as well.
+
+  **The `Status` line accumulates a fourth pair rather than being replaced**
+  (ADR-0070 §4): the ADR-0084, ADR-0156 and ADR-0162 pairs are kept and
+  `and ADR-0163 (…)` added on the same physical line, because "replacing the whole
+  value would lose the earlier dead scope". The scope names a clause and carries no
+  `ADR-NNNN` token, so §4's extraction invariant holds and all four targets are
+  real.
+  ADR-0163 lands **in the same change as this record**, the existence condition
+  ADR-0083 §15 states, so this line never names an ADR that does not exist.
+  Appended per ADR-0070 §1: no text below is rewritten, and §3's replaced sentence
+  stands exactly as written. Refs #1162, #1210.
 - Note (2026-08-06): **§8's sentence filing the cursor's ownership with the
   resident process is narrowed by
   [ADR-0111](0111-a-scheduled-walk-is-chunked-and-resumes-from-a-durable-cursor.md);
