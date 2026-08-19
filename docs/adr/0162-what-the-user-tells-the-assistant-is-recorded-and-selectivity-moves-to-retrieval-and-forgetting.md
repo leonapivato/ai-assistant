@@ -875,16 +875,36 @@ them is asked to mean anything it did not already mean.
 
 > **Normative.** The lane's remaining edits are `learning/observer.py`'s `_PROMPT_HEAD`
 > — §1's recording rule, and §8's boundary between what the user said and what the
-> assistant asserted — and `_render_batch` (§8); `core/config.py`'s `observation_max_proposals` default
-> and the comment stating its ground (§6); `app/composition.py`'s `RETRIEVAL_LIMIT` and
-> `EPISODIC_SUPPLEMENT_LIMIT` with `orchestration/loop.py`'s two defaults held equal to
-> them (§9); the tiling in `benchmarks/memory/ingest.py`'s `ingest_case` (§7); and the
-> tests pinning each.
+> assistant asserted — and `_render_batch` (§8); `core/config.py`'s
+> `observation_max_proposals` default with `learning/observer.py`'s
+> `DEFAULT_OBSERVATION_MAX_PROPOSALS` held equal to it, and the comments stating their
+> ground (§6); `app/composition.py`'s `RETRIEVAL_LIMIT` and `EPISODIC_SUPPLEMENT_LIMIT`
+> with `orchestration/loop.py`'s two defaults held equal to them (§9); the tiling in
+> `benchmarks/memory/ingest.py`'s `ingest_case` (§7); and the tests pinning each.
+
+> **Normative.** The canonical fake in `ai_assistant.testing` changes in no respect,
+> and `testing/observation.py`'s `DEFAULT_MAX_PROPOSALS` in particular **stays 5**
+> rather than following §6.
 
 > **Normative.** The lane adds no member to any Protocol, changes no signature, and
 > changes no field in `core/types.py`. It opens no route by which an observer states
 > `about_person` (§3), and it implements no part of §1 or §3 downstream of the
 > producer — ADR-0100 §5's fourth clause binds unchanged.
+
+**Why the canonical fake is on the list as an explicit non-change rather than absent
+from it.** `FakeObserver` synthesises one `OBSERVED` belief per episode plus one
+`INFERRED` over the first two, and its docstring says why: "a batch of *n* therefore
+asks for more proposals than *n*, which is what makes the configured maximum bite". At
+`DEFAULT_MAX_BATCH_SIZE` 20 that is 21 proposals against a maximum of 5. Taking the
+fake's maximum to 40 would put 21 under it and stop the bound biting, retiring the very
+clause the fake exists to exercise — so its number follows the *fixture's* purpose and
+not a deployment's, which is the difference between a canonical fake and a default.
+Nor does §1 oblige the fake to synthesise more records per episode: §1 is a rule about
+which propositions a producer takes from real content, no clause of it is mechanically
+checkable (§8's last paragraph gives the reason and ADR-0077 §2 with ADR-0100 §5 give
+the precedent), and the shared suite gains no assertion here that a deterministic
+script could fail. §13 says so rather than staying silent, because silence about the
+third member of a Protocol's triad reads as an omission.
 
 **Two things about the shape of that work, stated because they are the dispatcher's
 and not this ADR's.** The edits cross `core/`, `learning/`, `app/`, `orchestration/`
