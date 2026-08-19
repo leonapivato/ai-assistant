@@ -1,7 +1,20 @@
 # 164. The write trace carries the relations the reconciler returned, split by rung
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-19
+- **Note (2026-08-19): ratified, on the second flip.** `Proposed` → `Accepted` on the
+  content this ADR merges with, after **adversarial** — the required set, which §7
+  argues from §2's no-contract-surface finding — returned a non-blocking verdict on one
+  tree and again on the flipped tree. `just ship` posts the terminal verdict and the
+  aggregate to PR #1217; the round count and the churn ratio are taken from that comment
+  rather than restated here, so this note cannot disagree with it.
+
+  **This ADR was flipped once before and returned to `Proposed`.** A fresh reviewer
+  session found three defects on the first flipped tree, so the status went back and the
+  sequence re-entered at step 1 (§7). The loop that followed ran under three successive
+  holders on ADR-0138 §1's handoff rule; what each round bought is recorded in §7 and in
+  `Alternatives considered`, where every refused direction is answerable without this
+  PR's history.
 
 ## Context
 
@@ -182,10 +195,14 @@ a contract ADR with an architecture lens; it is not one.
 > `memory`-internal seam ADR-0159 §2 keeps inside this subsystem, beside the
 > relations it returns.
 
-> **Normative.** The report is read for exactly two purposes: to fill the four
-> proposal keys, and to decide whether the model rung's labels are installable under
-> the clause below. Nothing else reads it. No ruling, no retirement set and no ingest
-> outcome turns on it, and no ingest is ever refused or delayed because of it.
+> **Normative.** The report is read for exactly two purposes: to fill the four proposal
+> keys, and to decide whether the model rung's labels are installable under the clause
+> below. Nothing else reads it. It reaches a ruling only the way any other determination
+> of the relation set does — **through the relations the writer therefore holds**, which
+> is the one route ADR-0159 §6 admits ("other than by the relations it therefore does
+> not hold"). No ruling, no retirement set and no ingest outcome turns on it by any
+> other route, no ruling reads the report itself, and no ingest is ever refused or
+> delayed because of it.
 
 > **Normative.** A model-rung label is installed only where the report says the model
 > answered. A report of `reconciler_unconsulted` or `reconciler_failed` arriving
@@ -239,14 +256,18 @@ a contract ADR with an architecture lens; it is not one.
 > exactly the others, so the ten are observed exactly when the six are, are written in
 > the same statement, and no crossing carries one set without the other.
 
-**Coherence is what makes a positive model count mean anything, and it is the
-property #1209 actually needs.** With the clause, `relations_model_restates`,
+**Coherence is what makes a positive model count mean anything, and it is the property
+#1209 actually needs.** With the clause, `relations_model_restates`,
 `relations_model_adds` or `relations_model_contradicts` above zero on a crossing
-**entails** that a model answered on that crossing; without it a non-conforming
-reconciler could report that it never asked and hand back labels anyway, and the two
-halves of the same trace would deny each other. A reader could then draw no
-conclusion from a positive contradiction count, which is the one conclusion this ADR
-exists to make drawable.
+**entails that the reconciler reported a model answer** for the proposal those labels
+came from — and, on a **conforming** reconciler, that a model answered. Without the
+clause not even that holds: a reconciler could report that it never asked and hand back
+labels anyway, and the two halves of the same trace would deny each other, leaving a
+reader no conclusion to draw from a positive contradiction count — the one conclusion
+this ADR exists to make drawable. The guard is deliberately one-directional and §6
+states the residue: it catches a report that **under**claims beside labels that stand,
+which is the incoherence a reader can detect, and it does not catch a reconciler that
+reports an answer it never obtained, which no writer-side check can.
 
 **Reading the report to decide installability is not a ruling turning on
 availability.** ADR-0159 §6 promises that "no ingest is refused or ruled differently
@@ -481,6 +502,18 @@ makes such a reconciler non-conforming, which is why this is the right count and
 a gap — but a zero model count is a statement about labels *held*, not about strings
 a model emitted.
 
+**And a model key is a statement about what the reconciler reported, not an
+independently verified fact about a provider.** §3's coherence clause rejects a report
+that claims *less* than the labels beside it — `unconsulted` or `failed` arriving with
+model labels — because that incoherence is visible at the writer. The symmetric lie is
+not: a reconciler reporting `answered` while having made no request produces a positive
+model count the writer cannot distinguish from a true one, because verifying it would
+mean observing the provider call, which lives inside the reconciler on ADR-0159 §3's
+ground. Such a reconciler is non-conforming, exactly as one fabricating labels is, and
+this instrument inherits that trust rather than replacing it. What the keys measure
+without qualification is what the reconciler *reported*; that this equals what a model
+did is a property of a conforming reconciler.
+
 **A pair's relation is not joinable to the ruling that followed it.** The trace says
 six proposals ruled `ACCEPT` and says three pairs were labelled `CONTRADICTS`; it
 does not say the `CONTRADICTS` pairs belonged to `ACCEPT`-ruled proposals. On a
@@ -608,15 +641,17 @@ and recorded among the alternatives. It records itself as ratified on its second
 flip.
 Nothing implements against this until it has merged (ADR-0015 §5).
 
-**Most rounds so far have changed this text, and six of them narrowed a claim it had no
-right to make** — that a positive contradiction count implicated ADR-0159 §4's purity
+**Most rounds so far have changed this text, and eight of them narrowed a claim it had
+no right to make** — that a positive contradiction count implicated ADR-0159 §4's purity
 conditions specifically; that a figure over these keys was a crossing-level figure; that
 a zero model count meant nothing was returned; that `reconciler_unconsulted` measured
-certainty; and, in the `Consequences` bullet an operator is likeliest to act on, that a
-zero contradiction count was a statement about the model even where the three qualifier
-keys account for the crossing and no model answered at all, and that a positive one
-placed the contradiction in the proposal the absent retirement belonged to — the join §6
-rules unavailable on a reading. Another found the defect that reshaped the decision:
+certainty; that a zero contradiction count was a statement about the model even where
+the three qualifier keys account for the crossing and no model answered at all; that a
+positive one placed the contradiction in the proposal the absent retirement belonged to,
+the join §6 rules unavailable on a reading; that the outcome report reached no ruling at
+all, when it reaches one by the single route ADR-0159 §6 admits; and that a positive
+model key *entailed* a model answer, when it entails a reported one and the rest is the
+reconciler's conformance. Another found the defect that reshaped the decision:
 `ModelBackedReconciler.reconcile` absorbs its own provider failures, so a key counted at
 the writer could not have distinguished a broken provider from a silent model, which is
 why §3 takes the outcome across the reconciler seam at all. That is recorded here
