@@ -351,8 +351,9 @@ pipeline.
 > **Normative.** A later decision that admits such a producer — the sensor
 > submission surface ADR-0094 §10 defers — rules at that time whether an episode
 > recording distinguishable speakers with no marker is eligible to be observed at
-> all. This ADR neither grants nor denies that eligibility, and §4's protection of
-> an absent marker does not decide it.
+> all. This ADR neither grants nor denies that eligibility; §4's protection of an
+> absent marker does not decide it, and §6's second clause is the one carve-out in
+> this ADR's prohibitions that leaves the ruling available.
 
 **These two clauses are the honest statement of this ADR's reach, and they are
 worth stating rather than leaving to be inferred.** The state a reviewer will reach
@@ -471,10 +472,18 @@ as ADR-0162 §2 leaves it standing for a captured episode, and ADR-0100's
 
 ### 6. What it may not influence
 
-> **Normative.** `principal` is never an input to retrieval, ranking, eligibility,
-> band assignment, deduplication, conflict detection, retention, expiry or policy.
-> No `MemoryStore` read filters or orders on it, no `MemoryPolicy` rules on it, and
-> no producer's band or confidence is computed from it.
+> **Normative.** `principal` is never an input to retrieval, ranking, read
+> eligibility, band assignment, deduplication, conflict detection, retention, expiry
+> or policy. No `MemoryStore` read filters or orders on it, no `MemoryPolicy` rules
+> on it, and no producer's band or confidence is computed from it.
+
+> **Normative.** One exception exists, and it is the one §3's last clause defers: a
+> decision admitting a producer that can deliver an episode recording
+> distinguishable speakers with no marker may rule such an episode ineligible to be
+> **observed**. That ruling is available to that decision and to no other, it reads
+> the marker's *absence* and never a marker's value, and it changes nothing in the
+> enumeration above — an episode ruled out of an observation batch is retrieved,
+> ranked, retained and rendered exactly as before.
 
 > **Normative.** `participants` and `about_person` are unchanged in shape and in
 > meaning. `principal` is not written into `participants`, is not read from it, does
@@ -486,6 +495,18 @@ because it is conveniently present, and each would turn a rendering aid into an
 epistemic instrument that §2's third clause has just refused to give it standing
 for. A retrieval filter on `principal` would be the join §2 forbids, wearing a
 predicate.
+
+**The exception is drawn narrowly, and the two halves of the drawing matter
+separately.** *Absence, never value*: a rule reading which speaker a marker names in
+order to decide what to observe would be the epistemic instrument the paragraph
+above refuses, while a rule noticing that a producer said nothing is reading the
+producer's own admission of what it does not know. *Observation, never retrieval*:
+the observer is the one consumer that forms beliefs about the owner from the text
+it is shown, so it is the only place where not knowing who the owner is could
+warrant declining to read at all; everywhere else the episode is being served back
+to the person it belongs to, and the marker's absence is none of that reader's
+business (§4). This ADR grants the exception rather than exercising it — nothing
+today may act on it, because §3 admits no producer that can reach the state.
 
 **One mechanical consequence is worth stating rather than discovering.**
 `MemoryUpdateProposal._fingerprint_projection` is built from `model_dump` with a
@@ -593,7 +614,7 @@ lane updates #1162 to say so rather than closing it.
   §3's harness clause the corpus is captured as what it is. Whether the score moves is
   a measurement, pre-registered under §7, and this ADR predicts nothing about it.
 - **`EpisodicMemory` gains a third participant-shaped field**, and three is where a
-  reader starts needing to be told which is which. §6's second clause and the
+  reader starts needing to be told which is which. §6's third clause and the
   docstring §7 requires are the mitigation; the alternative — folding them — is
   refused below.
 - **A rendering obligation now spans two subsystems** (`learning` and `planning`),
