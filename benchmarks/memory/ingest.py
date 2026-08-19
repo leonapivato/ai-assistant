@@ -8,6 +8,26 @@ once would distil the last twenty and never see the other 280. So the driver
 captures a batch, observes it, captures the next, observes that: the full windows
 tile, and the pass count is the honest cost of ingesting that case.
 
+**And consecutive windows overlap by design, not only at the end** (ADR-0162 §7).
+The last *k* episodes of one window are the first *k* of the next, which the driver
+buys by advancing ``batch_size - k`` captures between passes instead of
+``batch_size``. The loss it closes is a fact stated across a window boundary — the
+user names a trip in the last turn of one window and says where they went in the
+first turn of the next, visible to neither pass as a whole. Under ADR-0077 §2's
+warrant bar that was rare, because a fragment cleared the bar seldom enough to be
+noise; under ADR-0162 §1 every fragment is proposable, so a boundary now cuts through
+material that would otherwise have been recorded, at a rate set by an arbitrary
+alignment rather than by the data.
+
+The duplication it buys costs almost nothing, because it is already solved: ADR-0077
+§3 puts de-duplication at the gate deterministically and locally, ADR-0121 §1's
+``agrees`` predicate decides a verbatim restatement with no model call, and ADR-0159
+§3's first rung labels it ``RESTATES`` unconditionally, folding to a ``REINFORCE``
+that finds nothing higher. An episode carried in by the overlap is a **full member**
+of the window it is carried into — labelled, rendered and citable exactly as any
+other — which is what makes the shape cheaper than the alternative of showing the
+previous tail as un-proposable context.
+
 **The last window overlaps, and it cannot be made not to.** A case whose turn count is
 not a multiple of the batch ends with a remainder, and the window is always *the most
 recent ``batch_size``* — there is no offset on the read — so the closing pass re-reads
@@ -64,7 +84,7 @@ auto-answering was rejected outright.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.types import LearnDecision
 
@@ -75,6 +95,48 @@ if TYPE_CHECKING:
     from benchmarks.memory.wiring import Harness
 
 __all__ = ["Exchange", "IngestionSummary", "exchanges_of", "ingest_case"]
+
+#: How many episodes consecutive observation windows share, nominally (ADR-0162 §7).
+#:
+#: **A module constant rather than a ``Settings`` field, and the argument is the one
+#: §13 hands the lane.** The test is whether the right value is a thing an operator
+#: can know about their own corpus — which is why ``observation_max_proposals`` is a
+#: setting (ADR-0077 §2) and ``EPISODIC_SUPPLEMENT_LIMIT`` is not (ADR-0158 §5). It
+#: is not. §7 says in terms that the value inside its bound is "an empirical question
+#: about how far a fact spreads across turns, which no run has measured", so there is
+#: nothing for an operator to know it against; and the clause binds the benchmark
+#: harness's ingestion driver, which no deployment runs — the product's
+#: explicit-trigger path tiles nothing (§7's fifth clause, ADR-0077 §8). A setting
+#: would therefore offer an operator a knob onto a code path they do not have. When
+#: a durable-cursor walk (ADR-0111 §1) inherits §7 and a run has measured the spread,
+#: that lane is the one with a consumer for a configured value.
+#:
+#: **Why 4.** §7 bounds *k* at ``observation_batch_size // 2`` because the re-read
+#: cost is exactly ``batch / (batch - k)`` passes over a corpus, so half the batch
+#: doubles ingestion spend. At the default batch of 20, 4 costs 20/16 = 1.25 times the
+#: passes and guarantees that **any fact spread over at most five consecutive turns
+#: is whole in some window**: windows start every ``batch - k`` turns and run
+#: ``batch`` long, so a run of length ``L`` starting anywhere is contained in one
+#: whenever ``L <= k + 1``. That is a property worth stating rather than a taste, and
+#: it is the shape a later measurement of the real spread would revise.
+_TILE_OVERLAP: Final = 4
+
+
+def _overlap_of(batch_size: int) -> int:
+    """How many episodes consecutive windows share, for this ``batch_size``.
+
+    :data:`_TILE_OVERLAP`, clamped into ADR-0162 §7's bound of at least 1 and at most
+    ``batch_size // 2``. The clamp is not defensive: ``observation_batch_size`` is a
+    positive ``Settings`` field with no upper bound near this one, and the harness's
+    own tests run batches of 1 and 2.
+
+    **At a batch of 1 the answer is 0, which §7 rules explicitly rather than leaving
+    to the arithmetic.** The bound is empty there and the deployment forgoes the
+    section's remedy: an overlap of 1 on a window of 1 advances the tiling by nothing,
+    so no value satisfies progress and overlap together. ``1 // 2`` is 0, so the
+    expression states that case rather than special-casing it.
+    """
+    return min(_TILE_OVERLAP, batch_size // 2)
 
 
 @dataclass(frozen=True, slots=True)
@@ -372,7 +434,10 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
         case: The case to ingest.
         batch_size: How many captured turns an observation pass reads. Must be the
             same value the harness's ``ObservationStage`` was built with, or the
-            windows stop tiling — pass ``settings.observation_batch_size``.
+            windows stop tiling — pass ``settings.observation_batch_size``. It is
+            also what :func:`_overlap_of` reads the window overlap off, for the same
+            reason: the overlap is a fraction of the window, and a driver computing
+            it from a different number would not be describing the stage's window.
 
     Returns:
         What it cost and produced.
@@ -384,13 +449,25 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
     if batch_size < 1:
         msg = f"batch_size must be positive, got {batch_size}"
         raise ValueError(msg)
+    overlap = _overlap_of(batch_size)
 
     # The clock is set before `begin`, because starting a conversation stamps it.
     harness.clock.set(case.sessions[0].occurred_at)
     conversation = await harness.lifecycle.begin(None)
     summary = IngestionSummary(conversation_id=conversation.id)
 
+    # **Two counters, because the trigger is about a whole window and only one of
+    # them is turns this loop captured.** ``pending`` is new turns since the last
+    # pass; ``carried`` is how many of the *previous* window the next one will read
+    # again, which is 0 until a pass has run and ``overlap`` after every one
+    # (ADR-0162 §7). A pass fires when the two together fill a window, so consecutive
+    # passes are ``batch_size - overlap`` captures apart and consecutive windows share
+    # exactly ``overlap`` episodes. Resetting ``pending`` to 0 rather than to
+    # ``overlap`` is what keeps the closing flush below honest: it fires only where
+    # there are turns no pass has read, never on the carried tail alone, which would
+    # re-read a window wholly contained in the one before it.
     pending = 0
+    carried = 0
     for session in case.sessions:
         harness.clock.set(session.occurred_at)
         for exchange in exchanges_of(session):
@@ -427,9 +504,10 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
                 # stored".
                 for key in exchange.evidence_keys:
                     summary.evidence_episodes.setdefault(key, []).append(report.episode_id)
-            if pending == batch_size:
+            if pending + carried == batch_size:
                 await _observe(harness, conversation.id, summary)
                 pending = 0
+                carried = overlap
     if pending:
         await _observe(harness, conversation.id, summary)
     return summary
