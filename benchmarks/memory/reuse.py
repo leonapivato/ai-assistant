@@ -40,6 +40,15 @@ the join is a tuple positioned against the question's ``evidence``, so a source 
 whose ``evidence`` differs from the planned question's is refused rather than
 attached.
 
+**Nothing about the reused run is taken from the planned cases except which
+questions to ask.** A reused run does not capture a turn, so a case's sessions reach it
+through exactly one channel: the instant the answering clock is set to, which decides
+which memories the copied store still counts as live. That instant is therefore read
+off the source's own records — the ``asked_at`` it published per question — rather than
+recomputed from the case in hand, and a case that would answer at a different instant
+is refused. A hand-built case with the same key, questions and evidence but a session
+moved by a month cannot quietly retrieve under a different clock.
+
 **The stores are copied into the new run's case directory, never opened in place.**
 The source run's ``records.jsonl``, ``traces.db`` and databases are a published
 measurement, and the cheapest way to guarantee this run cannot mutate them is to never
@@ -56,6 +65,7 @@ from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
 from typing import TYPE_CHECKING, Final
 
@@ -72,7 +82,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from pathlib import Path
 
-    from benchmarks.memory.cases import BenchCase
+    from benchmarks.memory.cases import BenchCase, BenchQuestion
 
 __all__ = [
     "INGESTION_SOURCE_KEY",
@@ -168,6 +178,11 @@ class ReusedRun:
         evidence: Each ``(case key, question id)`` mapped to the corpus pointers the
             join above is positioned against, so the alignment can be checked rather
             than assumed.
+        asked_at: Each ``(case key, question id)`` mapped to the instant the source run
+            answered it at, ISO-8601 — the reading of the benchmark clock, not the wall
+            clock. This is the run's *published* statement of when it retrieved, and it
+            is what a reused run retrieves at, so the clock is verified provenance
+            rather than a figure recomputed from whatever case the caller supplied.
     """
 
     run_dir: Path
@@ -176,6 +191,7 @@ class ReusedRun:
     ingestion: Mapping[str, Mapping[str, int | float | str | list[str]]]
     joins: Mapping[tuple[str, str], tuple[tuple[str, ...], ...]]
     evidence: Mapping[tuple[str, str], tuple[str, ...]]
+    asked_at: Mapping[tuple[str, str], str]
 
     @property
     def run_id(self) -> str:
@@ -233,6 +249,30 @@ class ReusedRun:
         inherited = dict(self.ingestion.get(case.case_key, {}))
         inherited[INGESTION_SOURCE_KEY] = self.run_id
         return inherited
+
+    def answering_instant(self, case: BenchCase) -> datetime | None:
+        """Where the source run's clock stood when it began answering this case.
+
+        Ingestion leaves the benchmark clock at the last session's instant, and
+        ``answer_question`` moves it per question only where the corpus states one —
+        so for a corpus like LoCoMo, which states none, this *is* the retrieval
+        instant for every question of the case. Read off the first question's
+        published ``asked_at`` rather than off the case's sessions, because the
+        records are the source run's own account of what it did and the case is the
+        caller's.
+
+        Args:
+            case: The case about to be answered.
+
+        Returns:
+            The instant, or ``None`` for a case with no questions — where there is
+            nothing to answer and so nothing to answer *at*.
+        """
+        for question in case.questions:
+            recorded = self.asked_at.get((case.case_key, question.question_id))
+            if recorded is not None:
+                return datetime.fromisoformat(recorded)
+        return None
 
     def join_for(self, case: BenchCase, question_id: str) -> tuple[tuple[str, ...], ...]:
         """#1074's join for one question, read back off the source's records.
@@ -300,10 +340,25 @@ def load_reused_run(output_root: Path, run_id: str) -> ReusedRun:
     ingestion: dict[str, Mapping[str, int | float | str | list[str]]] = {}
     joins: dict[tuple[str, str], tuple[tuple[str, ...], ...]] = {}
     evidence: dict[tuple[str, str], tuple[str, ...]] = {}
+    asked_at: dict[tuple[str, str], str] = {}
     for record in read_jsonl(records_path, QuestionRecord):
+        key = (record.case_key, record.question_id)
+        if key in joins:
+            # Refused rather than resolved, because there is no honest resolution: two
+            # rows for one question are two different retrievals, and taking either
+            # one would attach an evidence join and an answering instant that may
+            # belong to the other. A run this harness wrote never produces them.
+            msg = (
+                f"run {run_id} recorded question {record.question_id!r} of case "
+                f"{record.case_key!r} more than once: a reused run reads the join and "
+                f"the answering instant back per question, and two rows for one "
+                f"question do not say which."
+            )
+            raise ValueError(msg)
         ingestion.setdefault(record.case_key, record.ingestion)
-        joins[record.case_key, record.question_id] = record.evidence_episode_ids
-        evidence[record.case_key, record.question_id] = record.evidence
+        joins[key] = record.evidence_episode_ids
+        evidence[key] = record.evidence
+        asked_at[key] = record.asked_at
     return ReusedRun(
         run_dir=run_dir,
         manifest=manifest,
@@ -311,6 +366,7 @@ def load_reused_run(output_root: Path, run_id: str) -> ReusedRun:
         ingestion=ingestion,
         joins=joins,
         evidence=evidence,
+        asked_at=asked_at,
     )
 
 
@@ -358,9 +414,15 @@ def refuse_ineligible_reuse(  # noqa: PLR0913 — one parameter per precondition
     6. **Every case's stores must be there.** ``memory.db`` is what a source run
        without ``--keep-stores`` deleted, so its absence is that mistake's name.
     7. **Every question must be covered by the source's records, and covered
-       compatibly.** The evidence join is read back per question, positioned against
-       that question's corpus pointers, so a missing row has no join and a row whose
-       pointers differ has the wrong one.
+       compatibly.** Three things are read back per question and each is checked
+       rather than assumed: the evidence join is *positional*, so a row whose corpus
+       pointers differ carries the wrong join and one whose entries do not line up
+       with its own pointers carries a malformed one; and the answering instant is
+       what the copied store's liveness axes are judged against, so a case that would
+       answer at an instant the source did not answer at is a different retrieval
+       wearing the same key. That last is the only channel a planned case has into a
+       reused run at all — nothing else about its sessions is read, because nothing is
+       captured — which is what makes checking it sufficient rather than a sample.
     8. **A scored run may only reuse a scored run.** ``refuse_ineligible_scored_run``
        makes a scored run's *own* configuration true by construction, but it can say
        nothing about the process that built the memories — a smoke run may inject a
@@ -467,24 +529,67 @@ def _refuse_unusable_cases(reused: ReusedRun, cases: Sequence[BenchCase]) -> Non
             )
             raise ValueError(msg)
         for question in case.questions:
-            key = (case.case_key, question.question_id)
-            if key not in reused.joins:
-                msg = (
-                    f"run {reused.run_id} recorded no row for question "
-                    f"{question.question_id!r} of case {case.case_key!r}: a reused run "
-                    f"reads #1074's evidence join back per question, so it can only "
-                    f"answer questions the source run also answered. Select the same "
-                    f"questions, or re-ingest."
-                )
-                raise ValueError(msg)
-            if reused.evidence[key] != question.evidence:
-                msg = (
-                    f"run {reused.run_id} recorded question {question.question_id!r} "
-                    f"of case {case.case_key!r} with evidence {reused.evidence[key]} "
-                    f"and this run plans {question.evidence}: the join is positioned "
-                    f"against those pointers, so it cannot be carried across."
-                )
-                raise ValueError(msg)
+            _refuse_uncarriable_question(reused, case, question)
+
+
+def _refuse_uncarriable_question(
+    reused: ReusedRun, case: BenchCase, question: BenchQuestion
+) -> None:
+    """Refuse a question whose row is missing, misaligned, or answered at another time.
+
+    Clause 7 of :func:`refuse_ineligible_reuse`, one question at a time.
+
+    Args:
+        reused: The source run.
+        case: The case the question belongs to.
+        question: The question.
+
+    Raises:
+        ValueError: If the source recorded no row for it; if that row's corpus
+            pointers differ from the ones this run plans; if its evidence join does
+            not line up with its own pointers; or if this run would answer it at an
+            instant the source did not answer it at.
+    """
+    key = (case.case_key, question.question_id)
+    if key not in reused.joins:
+        msg = (
+            f"run {reused.run_id} recorded no row for question "
+            f"{question.question_id!r} of case {case.case_key!r}: a reused run "
+            f"reads #1074's evidence join back per question, so it can only "
+            f"answer questions the source run also answered. Select the same "
+            f"questions, or re-ingest."
+        )
+        raise ValueError(msg)
+    if reused.evidence[key] != question.evidence:
+        msg = (
+            f"run {reused.run_id} recorded question {question.question_id!r} "
+            f"of case {case.case_key!r} with evidence {reused.evidence[key]} "
+            f"and this run plans {question.evidence}: the join is positioned "
+            f"against those pointers, so it cannot be carried across."
+        )
+        raise ValueError(msg)
+    if len(reused.joins[key]) != len(question.evidence):
+        msg = (
+            f"run {reused.run_id} recorded {len(reused.joins[key])} evidence-join "
+            f"entries for the {len(question.evidence)} pointer(s) of question "
+            f"{question.question_id!r} of case {case.case_key!r}: #1074's join is "
+            f"positional, so a row whose entries do not line up with its own pointers "
+            f"would drop a pointer out of P8's split silently."
+        )
+        raise ValueError(msg)
+    # The instant this run would retrieve at: the question's own where the corpus
+    # states one, and otherwise wherever the case left the clock — which for a reused
+    # run is the source's recorded instant, restored per case.
+    instant = question.asked_at if question.asked_at is not None else case.sessions[-1].occurred_at
+    if reused.asked_at[key] != instant.isoformat():
+        msg = (
+            f"run {reused.run_id} answered question {question.question_id!r} of case "
+            f"{case.case_key!r} at {reused.asked_at[key]} and this run would answer it "
+            f"at {instant.isoformat()}: the copied store's liveness axes are judged "
+            f"against that instant, so the two are different retrievals and the "
+            f"comparison the reuse claims is not one."
+        )
+        raise ValueError(msg)
 
 
 def describe_reuse(manifest: RunManifest, reused: ReusedRun | None) -> RunManifest:

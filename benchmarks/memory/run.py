@@ -779,12 +779,16 @@ class _CaseDriver:
         carried them per row since #1074 for exactly this class of reason — an analysis
         that must survive the stores being deleted.
 
-        **The clock is put where ingestion would have left it**, which is the last
-        session's instant. That is not tidiness: ``answer_question`` moves the clock to
-        the question's own instant only where the corpus states one, and LoCoMo states
-        none — so a reused run that skipped the ingest would retrieve at the clock's
-        epoch default, judging every liveness axis in the store against 1970 and
-        quietly measuring something no run has ever measured.
+        **The clock is put where ingestion left it**, which the source run published
+        as the ``asked_at`` of the case's first row. That is not tidiness:
+        ``answer_question`` moves the clock to the question's own instant only where
+        the corpus states one, and LoCoMo states none — so a reused run that skipped
+        the ingest would retrieve at the clock's epoch default, judging every liveness
+        axis in the store against 1970 and quietly measuring something no run has ever
+        measured. It is read off the *source's records* rather than off the case in
+        hand because the case is the caller's and the records are the source run's own
+        account of when it retrieved; the gate refuses any case that would answer at
+        an instant the source did not.
 
         Args:
             case: The case to run.
@@ -827,7 +831,9 @@ class _CaseDriver:
                     question.question_id: self.reuse.join_for(case, question.question_id)
                     for question in case.questions
                 }
-                harness.clock.set(case.sessions[-1].occurred_at)
+                instant = self.reuse.answering_instant(case)
+                if instant is not None:
+                    harness.clock.set(instant)
             cursor = TraceCursor(harness.traces)
             for question in case.questions:
                 if self.session is None:
