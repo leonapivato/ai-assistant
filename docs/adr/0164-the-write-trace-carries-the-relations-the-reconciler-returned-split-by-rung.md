@@ -174,12 +174,15 @@ a contract ADR with an architecture lens; it is not one.
 > `memory`-internal seam ADR-0159 §2 keeps inside this subsystem, beside the
 > relations it returns.
 
-> **Normative.** That report is **observed and never read**. No ruling, no
-> retirement set, no relation and no ingest outcome turns on it, at the writer or
-> anywhere else. ADR-0159 §6's promise — "no ingest is refused or ruled differently
-> because a reconciler was unavailable, other than by the relations it therefore does
-> not hold" — is untouched, and ADR-0119 §7's third clause is what the restriction
-> is for.
+> **Normative.** The report is read for exactly two purposes: to fill the four
+> proposal keys, and to decide whether the model rung's labels are installable under
+> the clause below. Nothing else reads it. No ruling, no retirement set and no ingest
+> outcome turns on it, and no ingest is ever refused or delayed because of it.
+
+> **Normative.** A model-rung label is installed only where the report says the model
+> answered. A report of `reconciler_unconsulted` or `reconciler_failed` arriving
+> **with** model labels is incoherent: the labels are discarded, those members stay
+> unlabelled, and the proposal counts under `reconciler_failed`.
 
 > **Normative.** Six keys count **pairs** — one proposal of the crossing against one
 > member of its resolved conflict set. `relations_offered` counts every pair the
@@ -206,6 +209,25 @@ a contract ADR with an architecture lens; it is not one.
 > are, are written in the same statement, and carry the same reading of ADR-0119 §3:
 > present with a zero on a crossing that observed the quantity and reached none of
 > it, absent together where the crossing observed nothing.
+
+**Coherence is what makes a positive model count mean anything, and it is the
+property #1209 actually needs.** With the clause, `relations_model_restates`,
+`relations_model_adds` or `relations_model_contradicts` above zero on a crossing
+**entails** that a model answered on that crossing; without it a non-conforming
+reconciler could report that it never asked and hand back labels anyway, and the two
+halves of the same trace would deny each other. A reader could then draw no
+conclusion from a positive contradiction count, which is the one conclusion this ADR
+exists to make drawable.
+
+**Reading the report to decide installability is not a ruling turning on
+availability.** ADR-0159 §6 promises that "no ingest is refused or ruled differently
+because a reconciler was unavailable, **other than by the relations it therefore does
+not hold**", and a discarded incoherent label is precisely a relation the writer does
+not hold. Nothing is refused, nothing waits, and a **conforming** reconciler is
+unaffected in every case — which is the test to apply to this clause and to the one
+below. Both are ADR-0159 §3's absorption of a non-conforming reconciler, extended
+from the shapes `MemoryIngestor._relations_for` already guards to the values and the
+combinations it does not.
 
 **Installing on identity is not defensive typing; it is what keeps the instrument
 and the ruling saying the same thing about one input.** `DefaultMemoryPolicy`
@@ -430,7 +452,11 @@ The lane owes:
   request made; that a reconciler returning a value **equal to** a `ConflictRelation`
   member but not one — the bare string a `StrEnum` makes equal to it and hashable
   with it — leaves the member unlabelled, counts its proposal under
-  `reconciler_failed`, and costs the crossing no trace; that a proposal §2's condition
+  `reconciler_failed`, and costs the crossing no trace; that a report of
+  `unconsulted` and a report of `failed`, each arriving with a model label, discard
+  that label, leave the member unlabelled and count the proposal under
+  `reconciler_failed` — the two combinations that would otherwise let one trace deny
+  itself; that a proposal §2's condition
   excludes carries none of the ten in
   its contribution while `proposals` still counts it; that an `ingest_reading` whose
   **second** proposal raises after the first was applied emits the first's relation
@@ -476,8 +502,10 @@ act differently, or read one of its clauses more widely than it now holds?
   `core/protocols.py`". So §3's requirement that the reconciler report its outcome
   changes no ratified text, and a reader building a reconciler from §3 builds the same
   rungs with the same spend and the same never-raises guarantee. What the report may
-  not do is feed a rule, which §3's fourth clause forbids in the terms ADR-0159 §6
-  already uses.
+  not do is feed a ruling, which §3 confines by naming the two things that read it.
+  That one of those two discards a non-conforming reconciler's labels is not a ruling
+  turning on availability: §6 admits exactly that cost — "other than by the relations
+  it therefore does not hold" — and a conforming reconciler never reaches the clause.
 - **ADR-0159 §9.** Its first clause — "This ADR adds no metric key, removes none, and
   changes no metric key's definition" — is a statement about ADR-0159 and stays true
   of it. This ADR removes no key and redefines none; `decisions_reinforce`,
