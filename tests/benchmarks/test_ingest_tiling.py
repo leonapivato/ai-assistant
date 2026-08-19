@@ -19,13 +19,14 @@ and the only place it is visible is the batches the observer was actually handed
 
 from __future__ import annotations
 
+from collections import deque
 from datetime import UTC, datetime
 from itertools import pairwise
 from typing import TYPE_CHECKING
 
 import pytest
 from benchmarks.memory.cases import BenchCase, BenchSession, BenchTurn
-from benchmarks.memory.ingest import _overlap_of, ingest_case
+from benchmarks.memory.ingest import _overlap_of, _record_landing, ingest_case
 from benchmarks.memory.wiring import build_harness
 
 from ai_assistant.core.config import EmbedderKind, Settings
@@ -566,6 +567,45 @@ async def test_a_batch_of_one_forgoes_the_overlap_entirely(tmp_path: Path) -> No
     assert all(len(window) == 1 for window in windows)
     assert not set(windows[0]) & set(windows[1])
     assert not set(windows[1]) & set(windows[2])
+
+
+def test_the_schedule_remembers_only_the_window_it_can_schedule_from() -> None:
+    """The ordinals kept never grow with the corpus, which is a cost bound.
+
+    :func:`_next_pass_at` reads only the ordinals inside the window it is scheduling
+    from, and one that has fallen out can never return: ``ObservationStage`` has no
+    offset, so it never reads a window starting further back than the most recent
+    ``batch_size`` turns. Keeping every landed ordinal would make scheduling quadratic
+    in a corpus's successful turns — at a million turns and the default stride, tens of
+    thousands of passes each rescanning a list of a million — for no answer it could
+    give. Asserted over a run far longer than any transcript, because the growth is the
+    property and a short case cannot show it.
+    """
+    landed: deque[int] = deque()
+    reach = 20
+
+    for ordinal in range(1, 10_001):
+        _record_landing(landed, ordinal, stored=True, reach=reach)
+        assert len(landed) <= reach
+
+    assert list(landed) == list(range(10_000 - reach + 1, 10_001))
+
+
+def test_the_schedule_keeps_every_ordinal_a_window_could_still_reach() -> None:
+    """Pruning is a cost bound and must never be a correctness one.
+
+    The kept set is exactly the ordinals a window ending at the latest turn can still
+    contain, so nothing the carry could aim at is discarded early. Checked against the
+    same predicate :func:`_next_pass_at` filters on, over a run with gaps in it.
+    """
+    landed: deque[int] = deque()
+    reach = 6
+    stored = {1, 2, 5, 7, 8, 9, 12}
+
+    for ordinal in range(1, 13):
+        _record_landing(landed, ordinal, stored=ordinal in stored, reach=reach)
+
+    assert list(landed) == sorted(position for position in stored if position > 12 - reach)
 
 
 @pytest.mark.parametrize("batch_size", [1, 2, 3, 4, 8, 20, 100])
