@@ -320,7 +320,8 @@ def load_reused_run(output_root: Path, run_id: str) -> ReusedRun:
         ValueError: If ``run_id`` is not a single path component; if the directory does
             not exist; if it holds no readable ``manifest.json`` or ``records.jsonl``;
             if those artifacts name a different run from each other or from the
-            directory; or if two rows claim one question. Every one is a refusal rather
+            directory; if two rows claim one question; or if a case's rows disagree
+            about what ingesting it reported. Every one is a refusal rather
             than an empty result: a run that cannot be read cannot be reused, and
             discovering that after a corpus fetch would be the expensive place to find
             out.
@@ -383,7 +384,19 @@ def load_reused_run(output_root: Path, run_id: str) -> ReusedRun:
                 f"question do not say which."
             )
             raise ValueError(msg)
-        ingestion.setdefault(record.case_key, record.ingestion)
+        recorded = ingestion.setdefault(record.case_key, record.ingestion)
+        if recorded != record.ingestion:
+            # The summary is denormalised onto every row of a case, so two rows
+            # carrying different figures are not a summary to choose between: they are
+            # a file that does not say what ingesting this case reported. Taking the
+            # first would republish it onto every new row, including for questions
+            # whose own row said otherwise.
+            msg = (
+                f"rows of case {record.case_key!r} in run {run_id} disagree about what "
+                f"ingesting it reported: the summary is denormalised onto every row of "
+                f"a case, so there is no first row to prefer."
+            )
+            raise ValueError(msg)
         joins[key] = record.evidence_episode_ids
         evidence[key] = record.evidence
         asked_at[key] = record.asked_at
