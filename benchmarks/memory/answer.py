@@ -229,7 +229,19 @@ ABSTENTION_PHRASE: Final = "I don't know"
 #: records themselves supersede. So the instruction now says that partial support is
 #: support, asks for every record to be read and aggregated where the question counts
 #: or lists, asks for the arithmetic where the records carry dates, and says the later
-#: record wins where two disagree about something that changes. **None of them touches
+#: record wins where two disagree about something that changes.
+#:
+#: **The partial-support clause is bounded, and the boundary is the one the paragraph
+#: above draws.** "Partial" means an answer that is *incomplete* — some of a list, a
+#: date fixed only to its month — and never a question whose particular fact is
+#: absent from records that discuss its subject, which is what every unanswerable
+#: question in both corpora looks like. Left unbounded it would read as a licence to
+#: name a breed for a cat the records only say was adopted, inverting cat 5 and the
+#: ``_abs`` variants exactly as a relevance-conditioned decline would. The clause
+#: therefore sits *after* the decline and restates the boundary in its own words
+#: rather than beside it, so that the two cannot be read as alternatives to choose
+#: between (the adversarial round on #1212 read them that way when they sat the other
+#: way round). **None of them touches
 #: the threshold**, which the paragraphs above settle and pilot-4 vindicated; they say
 #: what to *do* with records that already clear it. This is again a re-run under its
 #: own registration, pre-registered as an arm on #1029, and not an amendment to
@@ -305,14 +317,17 @@ ANSWER_SYSTEM_PROMPT: Final = (
     "Give your best answer whenever the records plausibly support one — including "
     "when it has to be inferred, pieced together from several records, or read "
     "through wording that differs from the question's, and including when you are "
-    "not certain. A best effort from the records is what is wanted. Partial support "
-    "is still support: where the records carry part of what the question asks for, "
-    "answer from the part they carry instead of declining because the rest is "
-    "missing. "
+    "not certain. A best effort from the records is what is wanted. "
     "Where the records give you nothing to answer from, reply exactly: "
     f"{ABSTENTION_PHRASE}. That includes the case where they discuss the subject of "
     "the question but do not contain the fact it asks for — being on the topic is not "
     "the same as supporting an answer. "
+    "Partial support is still support: where the records support an answer that is "
+    "incomplete or approximate — some of the items a list asks for, a date fixed only "
+    "to its month, one of several reasons — give that answer rather than declining "
+    "because it is not the whole of what was asked. That does not loosen the rule "
+    "above: where the particular fact the question asks for is absent, the records "
+    "support no answer at all, however much they say about its subject. "
     "Read every record before you answer, not only the first that looks relevant. "
     "Where the question asks how many, how often, or for a list, gather the answer "
     "across all of the records together: the occasions it asks about are usually "

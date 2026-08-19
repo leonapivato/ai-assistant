@@ -142,7 +142,24 @@ def test_the_prompt_states_that_partial_support_is_still_support() -> None:
     nothing, so the case is stated rather than left to the threshold to imply.
     """
     assert "Partial support is still support" in ANSWER_SYSTEM_PROMPT
-    assert "instead of declining because the rest is missing" in ANSWER_SYSTEM_PROMPT
+    assert "rather than declining because it is not the whole of what was asked" in (
+        ANSWER_SYSTEM_PROMPT
+    )
+
+
+def test_partial_support_does_not_reach_a_question_whose_fact_is_absent() -> None:
+    """The bound on the clause above, which is the unanswerable population itself.
+
+    Every cat-5 and ``_abs`` question is records-discuss-the-subject, fact-absent. An
+    unbounded "answer from the part they carry" reads as a licence to name a breed for
+    a cat the records only say was adopted, which inverts P7's measure just as surely
+    as a relevance-conditioned decline would. So the clause sits after the decline and
+    restates its boundary rather than being left beside it.
+    """
+    prompt = ANSWER_SYSTEM_PROMPT
+    assert "That does not loosen the rule above" in prompt
+    assert "the particular fact the question asks for is absent" in prompt
+    assert prompt.index("nothing to answer from") < prompt.index("Partial support")
 
 
 def test_the_prompt_asks_for_aggregation_across_records() -> None:
