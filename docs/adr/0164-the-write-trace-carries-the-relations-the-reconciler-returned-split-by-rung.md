@@ -290,16 +290,33 @@ is a stronger statement than a setting's presence at startup.
 
 ### 6. What this instrument cannot say, stated rather than left to be discovered
 
-> **Normative.** A figure computed from these keys is a figure over **crossings**
-> and not over proposals, and whatever report states one states with it that no
-> relation it counts is attributable to a particular proposal or to a particular
-> record.
+> **Normative.** A figure computed from these keys is stated in the unit §3 gives
+> each key — the proposal keys count proposals, the pair keys count pairs — and
+> whatever report states one states with it that no pair it counts is attributable to
+> a particular proposal or to a particular record.
 
-The crossing is the unit (§2), so a trace saying `relations_model_contradicts = 2`
-does not say which of the reading's proposals they belonged to, nor which conflict
-member. For #1209's question — did the model ever return `CONTRADICTS`, and how
-often — that is sufficient, and it is worth saying plainly that it is the whole of
-what is bought. A per-pair attribution needs a carrier the family does not have (§2).
+The **trace's** unit is the crossing (§2), and the keys' units are not: an aggregate
+over many traces is a rate in the unit §3 fixes, so `reconciled` against `proposals`
+is a proposal-level reconciliation rate and is stated as one. What no aggregate
+recovers is which proposal or which record a counted pair belonged to. A trace saying
+`relations_model_contradicts = 2` does not say which of the reading's proposals they
+arose from, nor which conflict member. For #1209's question — did the model ever
+return `CONTRADICTS`, and how often — that is sufficient, and it is worth saying
+plainly that it is the whole of what is bought. A per-pair attribution needs a
+carrier the family does not have (§2).
+
+**A label held is not a ruling refused, and the trace does not say which clause
+declined.** These keys record what relations stood when the arm ran; they record
+nothing about why it ruled as it did. ADR-0159 §4(b) names a `SUPERSEDE` target only
+among members whose `provenance.source` is `OBSERVED` or `INFERRED`, and only where
+no member is labelled `RESTATES` — two independent bars, and §4 keeps them apart
+deliberately: an `EXTERNAL` member "is never *named* by either exception, and it
+counts in both purity conditions exactly as any other member does". So a stream
+carrying `relations_model_contradicts` above zero beside `decisions_supersede` at
+zero says a contradiction was held and no retirement followed, and does not say
+whether the target class excluded it, a purity condition blocked it, or both.
+Narrowing that needs the member's `provenance.source` and the pair it belonged to,
+which the clause above and §2 put out of reach.
 
 **Whether a model request was made is not emitted and is not observable here.**
 ADR-0159 §3 rules that a reconciler "makes none where the rung above labelled every
@@ -349,7 +366,11 @@ The lane owes:
   `relations_offered`; that a writer holding no reconciler emits `reconciler_absent`
   and still counts the certain rung's labels, on the same ingest for which `decide`
   receives `None`; that a reconciler raising is counted under
-  `reconciler_unanswered` and not as a model silence; that a proposal §2's condition
+  `reconciler_unanswered` and not as a model silence; that a reconciler returning an
+  **empty** mapping — a conforming "nothing to add" under ADR-0159 §3, and the `{}`
+  ADR-0159 §8 distinguishes from `None` — leaves `reconciler_unanswered` at zero and
+  counts its offered pairs under `relations_unlabelled`, on a trace that differs from
+  the raising reconciler's; that a proposal §2's condition
   excludes carries none of the nine in its contribution while `proposals` still
   counts it; and totality over `ConflictRelation`.
 - A test under `tests/service/` extending the pinned allowlist.
@@ -444,12 +465,15 @@ act differently, or read one of its clauses more widely than it now holds?
 
 ## Consequences
 
-- **#1209's question becomes answerable, and answerable in the direction that decides
-  what to do next.** On a pilot run reporting zero supersessions,
-  `relations_model_contradicts = 0` says the reconciler never proposed one and points
-  at the prompt, the bound or the temporal clause; a positive value says ADR-0159
-  §4's purity conditions refused every supersession it proposed, and points at the
-  conditions. Those are different investigations and the stream now separates them.
+- **#1209's question becomes answerable, and it is the question that decides what to
+  do next.** On a pilot run reporting zero supersessions,
+  `relations_model_contradicts = 0` says the reconciler never returned a contradiction
+  at all, and points at the prompt, the bound or ADR-0159 §3's temporal clause; a
+  positive value says it did and that the arm declined to act on it, and points at
+  ADR-0159 §4. Those are different investigations and the stream now separates them.
+  It does **not** say which of §4's bars declined — an `EXTERNAL` contradiction
+  outside the target class and a contradiction standing beside a `RESTATES` member
+  present as the same positive count against the same zero, and §6 says so.
 - **The floor deployment becomes visible for the first time.** `reconciler_absent`
   and `reconciler_unanswered` distinguish a hub running ADR-0159 §6's ratified floor,
   a hub whose provider is failing, and a hub whose model simply had nothing to add —
