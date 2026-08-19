@@ -610,25 +610,30 @@ parallel once step 1 has merged. **Nothing in the harness's corpora changes at a
 step**, per §3's first clause: no loader and no ingestion path is touched, and the
 harness's only obligation is the negative assertion below, which rides with
 whichever step is convenient.
-Across those steps, the tests owed are these — each with the step that owes it, and
-none deferred past it. Tests, in two groups. The **field and its rendering**: a record written without
-  the field decoding from a stored blob and reading as absent (§4); a marker
-  surviving the store round trip byte for byte (§2); both renderers with and
-  without a marker, including that nothing is rendered in its place when absent
-  (§5); and the non-forgeability of the rendered region (§5). Then the **two that
-  test the decision rather than the field**:
+Each test belongs to the step that owes it, mirrors that step's package, and uses
+fakes for every other subsystem — `CLAUDE.md`'s testing rule, which is the same rule
+the decomposition above obeys. **No test spans two of these steps**, and the
+end-to-end path from a captured multi-party episode to a distilled belief is
+deliberately not asserted here: it needs a producer that does not exist yet, so it
+belongs to the sensor lane that first has one.
 
-  1. An episode captured through the real `ConversationLifecycle.capture` seam with
-     a marker supplied by the caller, asserting that the stored record carries it
-     and that the observation prompt built from that record states it. This is
-     synthetic because no corpus supplies the input (§3), and it is the only test
-     that exercises the path a spoke will use.
-  2. A LoCoMo session and a LongMemEval session driven through the harness's own
-     ingestion, asserting that the captured episodes carry **no** marker. This is
-     the guard on §3's first clause, and it is the more important of the two: the
-     failure it catches is a later lane "fixing" LoCoMo by marking `speaker_a`,
-     which would assert that a named third party owns the hub and would silently
-     undo #1177's reframing.
+- **Step 1, `core`.** A record round-tripping a marker byte for byte (§2). A record
+  serialised without the field decoding with none (§4) — the legacy-blob case, which
+  is what makes the no-migration ruling checkable.
+- **Step 2, `orchestration`.** A marker supplied to `ConversationLifecycle.capture`
+  reaching the stored `EpisodicMemory` unchanged, and the engine's own capture path
+  storing none (§3). This is the seam a spoke will use, exercised without a spoke.
+- **Step 3, `learning`.** The observation prompt built from a **constructed**
+  `EpisodicMemory` carrying a marker states it, and one built from a record without
+  a marker renders nothing in its place (§5); and the rendered region is
+  non-forgeable from inside the episode's own `content` (§5).
+- **Step 4, `planning`.** The same two assertions for the record renderer.
+- **The negative, in `benchmarks`.** A LoCoMo session and a LongMemEval session
+  driven through the harness's own ingestion, asserting the captured episodes carry
+  **no** marker. This is the guard on §3's first clause and the most valuable test
+  of the set: the failure it catches is a later lane "fixing" LoCoMo by marking
+  `speaker_a`, which would assert that a named third party owns the hub and would
+  silently undo #1177's reframing.
 
 No step may: add a validator (§2), add a store column, migration or backfill (§4),
 add a `Settings` field, add or change any Protocol member, populate `participants`
