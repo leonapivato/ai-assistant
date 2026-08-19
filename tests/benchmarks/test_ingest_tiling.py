@@ -314,6 +314,36 @@ async def test_the_overlap_identity_holds_wherever_the_gap_falls(
     )
 
 
+async def test_a_barren_stretch_does_not_defer_a_pass_off_its_boundary(
+    tmp_path: Path,
+) -> None:
+    """A due pass fires at its boundary even with no new episode to read.
+
+    Episode-write failures **move** the conversation: the turns are appended and hold
+    slots, so the window slides whether or not anything landed in it. A driver that
+    waited for a new episode before firing a scheduled pass would therefore let the
+    window slide off part of the carried tail — with a batch of 6 and failures at
+    ordinals 7, 8 and 9, waiting until 10 reads turns 5 to 10 and loses episode 4 from a
+    carry §7 requires to be 4, 5, 6. ADR-0162 §7 admits one exception and a barren
+    stretch is not it, so the boundary wins and the pass is spent.
+
+    What the pass buys is nothing, and that is the honest price: it reads a window
+    with three gaps in it and re-proposes what the gate will fold. The alternative is
+    losing a boundary the section exists to preserve.
+    """
+    batch_size = 6
+    overlap = _overlap_of(batch_size)
+
+    windows = await _windows_with_gaps(
+        tmp_path, turns=10, batch_size=batch_size, unresolvable={7, 8, 9}
+    )
+
+    assert len(windows) >= 2
+    assert windows[0] == windows[0][:batch_size], "the first window is whole"
+    assert len(windows[1]) == batch_size - 3, "the second reads three gaps"
+    assert windows[0][-overlap:] == windows[1][:overlap], "and the carry survives them"
+
+
 async def test_a_lost_append_holds_the_identity_because_the_ordinal_does_not_move(
     tmp_path: Path,
 ) -> None:
@@ -439,17 +469,13 @@ async def test_captures_that_store_no_episode_buy_no_pass_of_their_own(
 async def test_a_pass_fires_on_the_first_capture_that_lands_after_a_barren_stretch(
     tmp_path: Path,
 ) -> None:
-    """The gate postpones a pass; it must never cancel one.
+    """A run of lost appends leaves the schedule where it was, not behind it.
 
-    Postponing lets ``pending`` run past the threshold, so the trigger tests ``>=``
-    rather than ``==`` — an equality would step over the boundary during the barren
-    stretch and never come back to it, and every episode captured afterwards would go
-    unobserved until the *next* whole window. The barren stretch here is deliberately
-    longer than the window for exactly that reason: the threshold of six is crossed at
-    the sixth capture, with nothing stored and no pass owed, and the equality is gone
-    by the time anything lands. What is pinned is the tighter property — the pass
-    fires on the very first capture that lands an episode, with that episode the most
-    recent turn in the window it reads.
+    A lost append records no turn, so it moves neither the conversation nor the
+    ordinal the schedule is kept in: the first pass is still owed at the first window
+    the conversation actually reaches, however many captures were refused before it.
+    The trigger tests ``>=`` rather than ``==`` for the general case where the
+    conversation jumps past a due ordinal, and the pass then reads what is there.
     """
     batch_size = 6
     barren = 8
