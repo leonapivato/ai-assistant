@@ -126,6 +126,32 @@ def _case(key: str = "conv-test") -> BenchCase:
     )
 
 
+def _mixed_case() -> BenchCase:
+    """A case whose first question states no instant and whose second states one.
+
+    The shape a per-case clock restoration gets wrong: the second question moves the
+    clock, so the first is answered at a different reading from the second, and which
+    reading each gets depends on the order they are asked in.
+
+    Returns:
+        The case.
+    """
+    case = _case("mixed")
+    return case.model_copy(
+        update={
+            "questions": (
+                case.questions[0].model_copy(update={"question_id": "mixed#0"}),
+                case.questions[1].model_copy(
+                    update={
+                        "question_id": "mixed#1",
+                        "asked_at": LAST + timedelta(days=200),
+                    }
+                ),
+            )
+        }
+    )
+
+
 def _settings(tmp_path: Path, **overrides: Any) -> Settings:
     """Settings a plumbing check may use, and a scored run may not.
 
@@ -439,10 +465,35 @@ class TestItAnswersOverTheSameMemories:
         source, source_dir = await _ingest(root, tmp_path)
         reused = load_reused_run(root, source.run_id)
 
-        instant = reused.answering_instant(_case())
+        instant = reused.instant_for(_case(), "conv-test#0")
 
-        assert instant is not None
         assert instant.isoformat() == _rows(source_dir)[0].asked_at
+
+    async def test_a_corpus_mixing_stated_and_unstated_instants_reorders_safely(
+        self, tmp_path: Path
+    ) -> None:
+        """The clock is one moving reading, so a question's instant depends on the ones
+        before it.
+
+        Restoring it once per case would reproduce the source only for a corpus whose
+        questions all state an instant or all state none. Here one question states one
+        and the other does not, and the reuse asks them in the opposite order: the
+        unstated one must still retrieve at the instant ingestion left, not at the
+        stated one's.
+        """
+        root = tmp_path / "runs"
+        case = _mixed_case()
+        source, source_dir = await _ingest(root, tmp_path, cases=(case,))
+        reversed_case = case.model_copy(update={"questions": tuple(reversed(case.questions))})
+
+        _, reused_dir = await _reanswer(root, tmp_path, source.run_id, cases=(reversed_case,))
+
+        answered_at = {row.question_id: row.asked_at for row in _rows(reused_dir)}
+        assert answered_at == {row.question_id: row.asked_at for row in _rows(source_dir)}
+        assert answered_at == {
+            "mixed#0": LAST.isoformat(),
+            "mixed#1": (LAST + timedelta(days=200)).isoformat(),
+        }
 
     async def test_the_evidence_join_is_the_one_ingestion_recorded(self, tmp_path: Path) -> None:
         """#1074's join is read back per question rather than recomputed."""

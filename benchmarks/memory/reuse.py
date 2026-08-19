@@ -250,29 +250,31 @@ class ReusedRun:
         inherited[INGESTION_SOURCE_KEY] = self.run_id
         return inherited
 
-    def answering_instant(self, case: BenchCase) -> datetime | None:
-        """Where the source run's clock stood when it began answering this case.
+    def instant_for(self, case: BenchCase, question_id: str) -> datetime:
+        """The instant the source run retrieved this question at.
 
-        Ingestion leaves the benchmark clock at the last session's instant, and
-        ``answer_question`` moves it per question only where the corpus states one —
-        so for a corpus like LoCoMo, which states none, this *is* the retrieval
-        instant for every question of the case. Read off the first question's
-        published ``asked_at`` rather than off the case's sessions, because the
-        records are the source run's own account of what it did and the case is the
-        caller's.
+        **Per question, and not per case.** The benchmark clock is a single moving
+        reading: ingestion leaves it at the last session's instant and
+        ``answer_question`` moves it only where the corpus states an ``asked_at``, so
+        what a question is answered at depends on every question *before* it. A reused
+        run that restored the clock once per case would reproduce the source only for
+        a corpus whose questions all state an instant or all state none — and would
+        diverge, silently, on any mix. Restoring per question makes the reused
+        retrieval instant the source's published one by construction, whatever order
+        the questions arrive in.
 
         Args:
-            case: The case about to be answered.
+            case: The case.
+            question_id: The question.
 
         Returns:
-            The instant, or ``None`` for a case with no questions — where there is
-            nothing to answer and so nothing to answer *at*.
+            The instant, parsed from the source's record.
+
+        Raises:
+            KeyError: If the source recorded no row for that question, which
+                :func:`refuse_ineligible_reuse` refuses long before this is reached.
         """
-        for question in case.questions:
-            recorded = self.asked_at.get((case.case_key, question.question_id))
-            if recorded is not None:
-                return datetime.fromisoformat(recorded)
-        return None
+        return datetime.fromisoformat(self.asked_at[case.case_key, question_id])
 
     def join_for(self, case: BenchCase, question_id: str) -> tuple[tuple[str, ...], ...]:
         """#1074's join for one question, read back off the source's records.
@@ -417,12 +419,13 @@ def refuse_ineligible_reuse(  # noqa: PLR0913 — one parameter per precondition
        compatibly.** Three things are read back per question and each is checked
        rather than assumed: the evidence join is *positional*, so a row whose corpus
        pointers differ carries the wrong join and one whose entries do not line up
-       with its own pointers carries a malformed one; and the answering instant is
-       what the copied store's liveness axes are judged against, so a case that would
-       answer at an instant the source did not answer at is a different retrieval
-       wearing the same key. That last is the only channel a planned case has into a
-       reused run at all — nothing else about its sessions is read, because nothing is
-       captured — which is what makes checking it sufficient rather than a sample.
+       with its own pointers carries a malformed one; and the answering instant this
+       case implies — the question's own where it states one, and the last session's
+       otherwise — must be the instant the source recorded. A reused run retrieves at
+       the source's published instant whatever the case says
+       (:meth:`ReusedRun.instant_for`), so a case implying another one is either
+       mistaken about which memories were live or not the case the source ingested;
+       either way its own artifacts would describe a retrieval that did not happen.
     8. **A scored run may only reuse a scored run.** ``refuse_ineligible_scored_run``
        makes a scored run's *own* configuration true by construction, but it can say
        nothing about the process that built the memories — a smoke run may inject a
@@ -577,15 +580,14 @@ def _refuse_uncarriable_question(
             f"would drop a pointer out of P8's split silently."
         )
         raise ValueError(msg)
-    # The instant this run would retrieve at: the question's own where the corpus
-    # states one, and otherwise wherever the case left the clock — which for a reused
-    # run is the source's recorded instant, restored per case.
+    # What this case says the question is asked at: its own instant where it states
+    # one, and otherwise wherever ingesting it would have left the clock.
     instant = question.asked_at if question.asked_at is not None else case.sessions[-1].occurred_at
     if reused.asked_at[key] != instant.isoformat():
         msg = (
             f"run {reused.run_id} answered question {question.question_id!r} of case "
-            f"{case.case_key!r} at {reused.asked_at[key]} and this run would answer it "
-            f"at {instant.isoformat()}: the copied store's liveness axes are judged "
+            f"{case.case_key!r} at {reused.asked_at[key]} and this case puts it at "
+            f"{instant.isoformat()}: the copied store's liveness axes are judged "
             f"against that instant, so the two are different retrievals and the "
             f"comparison the reuse claims is not one."
         )
