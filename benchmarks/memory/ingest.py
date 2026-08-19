@@ -628,15 +628,23 @@ def _next_pass_at(landed: Sequence[int], *, through: int, batch_size: int, overl
     Returns:
         The ordinal at which the next pass is due.
 
-    **Progress is the floor, and §7 says why in its own voice.** Where a window holds
-    no more episodes than the carry asks for, aiming the next window at the
-    ``overlap``-th from the end aims it at where this one already began: "no value
-    satisfies progress and overlap together", which the section says of a one-turn
-    window and which is the same shape here — a window whose gaps leave it with *k*
-    episodes or fewer. So the start is floored at one turn past this window's, which
-    advances the tiling by the least it can and carries the most the window has left
-    to give. It is reachable only after ``batch_size - overlap`` episode-write
-    failures inside one window.
+    **A window holding no more episodes than the carry is outside the clause's
+    protasis, and that is the text rather than an exception to it.** §7 binds "where
+    consecutive observation passes **tile a sequence of episodes rather than re-reading
+    one window**". Where the gaps in a window leave it with *k* episodes or fewer, the
+    only start that makes its last *k* episodes the next window's prefix is the start
+    it already has — so the identity there *is* re-reading one window, which is the
+    case the clause's own opening words exclude rather than govern. §7 says the same
+    thing in its own voice one clause later, of the one-turn window: "no value
+    satisfies progress and overlap together — a property of a one-turn window rather
+    than something this section can repair". A window whose episodes are down to the
+    carry has acquired that property, and this section cannot repair it either.
+
+    So the start is floored at one turn past this window's: the least advance there is,
+    carrying the most the window has left to give, and never a step that stands still.
+    It is reachable only after ``batch_size - overlap`` episode-write failures inside
+    one window, which is a store failing repeatedly and is counted as
+    :attr:`IngestionSummary.turns_degraded` where a reader will see it.
 
     An ``overlap`` of 0 is §7's explicit exception, the batch of 1, and a window that
     held no episode at all has nothing to aim at; both fall back to the next
