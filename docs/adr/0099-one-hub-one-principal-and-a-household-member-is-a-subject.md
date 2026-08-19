@@ -96,6 +96,36 @@
   the *frame* a later lane designs that field inside and leaves the field to it.
   A frame left open does not stay open; it gets fixed by drift if nobody fixes
   it on purpose.
+- Note (2026-08-19): **the Context sentence *"So `assistant observe` is not
+  authorised to write about third parties, and nothing here authorises it"* is
+  narrowed by
+  [ADR-0162](0162-what-the-user-tells-the-assistant-is-recorded-and-selectivity-moves-to-retrieval-and-forgetting.md);
+  everything this ADR *decided* stands.** ADR-0162 §1 replaces ADR-0077 §2's warrant
+  bar for an episode recording what the user said to the assistant, so the observer
+  now records what the user told it about other people, places and organisations. A
+  reader holding only this ADR would take the quoted sentence as a live prohibition on
+  that, which is ADR-0082 §1's second limb — reading a clause more widely than it now
+  holds — and the record is owed even though the sentence is unmarked Context in a
+  marked ADR and so supplies no obligation under ADR-0089 §3.
+
+  **This is an amendment, not a supersession** (ADR-0070 §1): every clause of this
+  ADR's Decision reads identically before and after. §1's one principal, §2's
+  orthogonal axes, §3's peer hubs, §4's supersession and rendering floor and §5's
+  deferrals are untouched.
+
+  **The axis itself does not move, and ADR-0162 §3 says so in terms.** ADR-0100 §5's
+  refusal — an observer proposal states no subject, one that would is not proposed and
+  is counted, and the shared conformance suite pins it — is untouched, and ADR-0162 §3
+  forbids its own implementing lane to open a route around it. So such a record states
+  no subject and ADR-0100 §3 reads it as the owner's own, "about the owner or the
+  owner's world"; it joins the population this ADR's Context already describes as
+  accumulating "deliberately, with no way to tell them from the rest", and what
+  changes is that population's size. §5's firing condition for the subject axis is not
+  met by ADR-0162 either: §5 fires on "anything that has to *check* ADR-0077 §2's
+  'about the user' rule rather than instruct it", and ADR-0162 removes the rule for
+  that class of episode rather than needing to check it. What it does raise is the
+  value of the subject-scoped delete and export §5 defers, which is filed rather than
+  ruled. Appended per ADR-0070 §1: no text below is rewritten. Refs #1210, #1162.
 
 ## Context
 
