@@ -442,15 +442,25 @@ boundary — the reviewer's richer batch always exists — while halving the bat
 the material each pass must fit, so for any finite batch some pair of values satisfies
 §1. The two are a pair and §6's third clause names both.
 
-**And nothing is destroyed when the bound does bind**, which is what keeps an
-incomplete pass a recoverable state rather than a loss. ADR-0077 §2's reasoning for
-discarding rather than queueing is untouched and is the reason: "a queue is durable
-state this ADR does not ratify, and the episodes remain in the store, so a later run
-over the same batch can propose what this one dropped". The counter says a pass was
-incomplete; the episodes it read are still there to be observed again under a
-configuration that fits them. What this ADR does not do is *automate* that second run
-— that is #1179's second half, left open in §11 for want of any evidence about what
-should trigger it.
+**The bound destroys nothing itself, and the recovery it leaves is bounded by the
+episode's own life — which is the honest form of the claim.** ADR-0077 §2's reasoning
+for discarding rather than queueing is untouched and is the mechanism: "a queue is
+durable state this ADR does not ratify, and the episodes remain in the store, so a
+later run over the same batch can propose what this one dropped". The counter says a
+pass was incomplete; the episodes it read can be observed again under a configuration
+that fits them **for as long as they remain live**. They may not. An episode expires
+under ADR-0074 §7's finite horizon and is destroyed with its conversation under
+ADR-0074 §8, and `ObservationStage.observe` skips a turn whose episode no longer
+resolves without backfilling it — so a residue left unobserved until its evidence is
+gone is gone with it. That is not a loss class this ADR introduces: ADR-0077's own
+Consequences name it, "episodes can expire unobserved", as the accepted price of an
+explicit trigger. What this ADR adds is that a binding bound makes the race *visible*
+before it is lost, through a counter with a stated response, where under ADR-0077 §2 a
+binding cap was reported and had no rule about it.
+
+What this ADR does not do is *automate* the second run — that is #1179's second half,
+left open in §11 for want of any evidence about what should trigger it, and it is the
+mechanism that would close the residual rather than merely surface it.
 
 **Why 40.** The probe measured 8.7, 9.1 and 9.0 proposals per pass across three
 conversations at `observation_batch_size` 20, under a cap of 60 that never bound. 40
