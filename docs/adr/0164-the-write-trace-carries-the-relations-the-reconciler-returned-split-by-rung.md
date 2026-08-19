@@ -777,8 +777,13 @@ act differently, or read one of its clauses more widely than it now holds?
   reconciler, no contradiction standing is the same as none being returned). Each of
   those three qualifiers yields that same zero with **no model answer behind it at
   all**, so where they account for the crossing the zero is not evidence about the
-  model and the prompt is the wrong place to look. Read the qualifier keys first: an
-  operator who skips them will investigate a prompt that was never sent.
+  model and the prompt is the wrong place to look. Read the qualifier keys first, and
+  read the three apart, because they do not all say the same thing about the request:
+  `reconciler_absent` and `reconciler_unconsulted` mean **no request was made**, so an
+  operator who skips them will investigate a prompt that was never sent;
+  `reconciler_failed` means a request **was** attempted and yielded nothing usable
+  (§3), so it points at the provider, the route, or the reconciler's conformance, and
+  not at the prompt's wording either.
 - **The floor deployment becomes visible for the first time.** `reconciler_absent`,
   `reconciler_failed` and `reconciler_unconsulted` distinguish a hub running ADR-0159
   §6's ratified floor, a hub whose provider is failing, a hub whose model is never
