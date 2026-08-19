@@ -119,12 +119,13 @@ watching.
 
 ### 2. Metric keys only: no trace field, no enum member, no `core` change
 
-> **Normative.** This ADR adds metric keys to the `MEMORY_WRITE` trace and nothing
-> else. It adds no field to `EvaluationTrace`; no member to `TraceKind`,
+> **Normative.** What this ADR adds to the trace family is **metric keys and
+> nothing else**. It adds no field to `EvaluationTrace`; no member to `TraceKind`,
 > `TraceOutcome`, `TraceRef`, `TraceRecordSet`, `ConflictRelation` or
 > `MemoryDecisionKind`; and it changes no type, field, signature or docstring
 > obligation in `src/ai_assistant/core/types.py` or
-> `src/ai_assistant/core/protocols.py`.
+> `src/ai_assistant/core/protocols.py`. What it changes inside `memory` — the
+> reconciler's outcome report (§3) — reaches no contract and no trace of its own.
 
 > **Normative.** Every key this ADR names is a literal constant declared in
 > `src/ai_assistant/memory/traces.py` beside the keys already there, and every value
@@ -155,14 +156,30 @@ assumed: `ConflictRelation` is already in `core/types.py` and already imported b
 integers the envelope already carries. Had any of those been otherwise this would be
 a contract ADR with an architecture lens; it is not one.
 
-### 3. The vocabulary: nine keys, two units, and the rung named on every label
+### 3. The vocabulary: ten keys, two units, and the rung named on every label
 
-> **Normative.** Three keys count **proposals** of the crossing. `reconciled` counts
+> **Normative.** Four keys count **proposals** of the crossing. `reconciled` counts
 > those for which ADR-0159 §2's invocation condition held, so relations were
 > determined. `reconciler_absent` counts those among them ingested by a writer
-> holding no reconciler — ADR-0159 §6's floor. `reconciler_unanswered` counts those
-> among them whose injected reconciler yielded no usable answer, the case §3's
-> never-raises clause absorbs.
+> holding no reconciler — ADR-0159 §6's floor. `reconciler_failed` counts those among
+> them whose model rung did not complete: the reconciler made a request that yielded
+> no readable answer, or it was non-conforming and the writer's guard absorbed it.
+> `reconciler_unconsulted` counts those among them whose reconciler completed without
+> making a model request at all — ADR-0159 §3's other half of the one-request clause.
+
+> **Normative.** Proposals whose model rung answered are `reconciled` less the three
+> keys that qualify it, and no key counts them.
+
+> **Normative.** The reconciler reports which of those outcomes it took, across the
+> `memory`-internal seam ADR-0159 §2 keeps inside this subsystem, beside the
+> relations it returns.
+
+> **Normative.** That report is **observed and never read**. No ruling, no
+> retirement set, no relation and no ingest outcome turns on it, at the writer or
+> anywhere else. ADR-0159 §6's promise — "no ingest is refused or ruled differently
+> because a reconciler was unavailable, other than by the relations it therefore does
+> not hold" — is untouched, and ADR-0119 §7's third clause is what the restriction
+> is for.
 
 > **Normative.** Six keys count **pairs** — one proposal of the crossing against one
 > member of its resolved conflict set. `relations_offered` counts every pair the
@@ -181,7 +198,7 @@ a contract ADR with an architecture lens; it is not one.
 > model-supplied label for a member the rung already labelled is discarded; the
 > count records the label that stands.
 
-> **Normative.** The nine keys are observed exactly when the six `decisions_*` keys
+> **Normative.** The ten keys are observed exactly when the six `decisions_*` keys
 > are, are written in the same statement, and carry the same reading of ADR-0119 §3:
 > present with a zero on a crossing that observed the quantity and reached none of
 > it, absent together where the crossing observed nothing.
@@ -197,9 +214,9 @@ why each clause says which it counts.
 
 **The complement of `reconciled` is already there and is not re-emitted.** The
 `proposals` key is observed at entry on both write seams, so proposals excluded by
-§2's invocation condition are `proposals` less `reconciled`. Emitting a tenth key
+§2's invocation condition are `proposals` less `reconciled`. Emitting a further key
 for a difference of two the trace already carries would be a quantity nobody
-observed.
+observed, and the same argument is why the answered case has no key of its own.
 
 **`certain` names the property and not the symbol.** The predicate is
 `ai_assistant.memory._agreement.agrees` and ADR-0159 §3 calls the rung "certain
@@ -318,14 +335,22 @@ whether the target class excluded it, a purity condition blocked it, or both.
 Narrowing that needs the member's `provenance.source` and the pair it belonged to,
 which the clause above and §2 put out of reach.
 
-**Whether a model request was made is not emitted and is not observable here.**
-ADR-0159 §3 rules that a reconciler "makes none where the rung above labelled every
-member it would have consulted about", and puts that judgement inside the reconciler
-precisely because "a mis-scoped one is unobservable in the ruling". It is unobservable
-in the write trace too. What §3's keys record is what was **held**, never what was
-**asked**: a crossing whose model keys are all zero is one where no model label
-stood, whether because none was sought, none came back, or none survived §3's
-discard rule.
+**Which members a request covered is not emitted, though whether one was made
+is.** §3's outcome report answers "was the model asked, and did it answer" because
+that fact is the difference between a silent model and a failing provider, and it is
+the fact #1209 is actually about. It stops there. Which members the reconciler
+consulted about, and how the bound cut the set, stay inside the reconciler on
+ADR-0159 §3's ground that its own economics are its own — "a mis-scoped one is
+unobservable in the ruling", and this ADR does not make it observable in the trace
+either. What remains, read with §5's configured bound beside `relations_unlabelled`,
+is a bound on the consulted set rather than the set itself.
+
+**And a model label that was returned but discarded is not counted.** §3 counts the
+label that **stands**, so a reconciler answering `CONTRADICTS` about a pair the
+certain rung already labelled leaves every model key at zero for it. ADR-0159 §3
+makes such a reconciler non-conforming, which is why this is the right count and not
+a gap — but a zero model count is a statement about labels *held*, not about strings
+a model emitted.
 
 **A pair's relation is not joinable to the ruling that followed it.** The trace says
 six proposals ruled `ACCEPT` and says three pairs were labelled `CONTRADICTS`; it
@@ -340,7 +365,8 @@ rule and is inherited, not introduced.
 > entry, and their tests, ratified and merged behind this ADR.
 
 ADR-0137 §1 asks whether the slice "puts substantial new machinery into at most one
-subsystem". It does: the observation, the nine keys and the reading that fills them
+subsystem". It does: the observation, the ten keys, the reconciler's outcome report
+and the reading that fills them
 are `memory`'s. The allowlist entry is one literal and one mapping line in
 `service`, which is the adaptation §1 excludes from the bound, and ADR-0141's lane is
 the precedent — "The allowlist entry is `service`, the emitter is `memory`… that is
@@ -348,9 +374,14 @@ admissible rather than a widening".
 
 The lane owes:
 
-- `src/ai_assistant/memory/traces.py` — the nine literal keys with their docstrings,
+- `src/ai_assistant/memory/traces.py` — the ten literal keys with their docstrings,
   and a closed mapping from `ConflictRelation` to the three model keys in the shape
   `DECISION_METRICS` takes.
+- `src/ai_assistant/memory/_reconciler.py` — the outcome §3 requires the reconciler
+  to report, on its own `memory`-internal Protocol and its model-backed
+  implementation, carried beside the relations rather than inferred from them. The
+  seam gains what it reports and loses nothing: the never-raises clause, the bound,
+  the one-request clause and the discard rule are ADR-0159 §3's and are untouched.
 - `src/ai_assistant/memory/ingest.py` — the observation of each quantity in §3 at the
   point it is known, carried to the reading through the writer's own internal types,
   and written in the statement that writes the decision counts.
@@ -366,13 +397,21 @@ The lane owes:
   `relations_offered`; that a writer holding no reconciler emits `reconciler_absent`
   and still counts the certain rung's labels, on the same ingest for which `decide`
   receives `None`; that a reconciler raising is counted under
-  `reconciler_unanswered` and not as a model silence; that a reconciler returning an
-  **empty** mapping — a conforming "nothing to add" under ADR-0159 §3, and the `{}`
-  ADR-0159 §8 distinguishes from `None` — leaves `reconciler_unanswered` at zero and
-  counts its offered pairs under `relations_unlabelled`, on a trace that differs from
-  the raising reconciler's; that a proposal §2's condition
-  excludes carries none of the nine in its contribution while `proposals` still
-  counts it; and totality over `ConflictRelation`.
+  `reconciler_failed` — and, because that is the finding this ADR nearly got wrong,
+  a test driving a **raising `ModelProvider`** through the real reconciler rather
+  than a reconciler stub, since `ModelBackedReconciler.reconcile` absorbs a provider
+  failure itself and the writer's guard never sees it; that a reconciler completing
+  with an **empty** mapping — a conforming "nothing to add" under ADR-0159 §3, and
+  the `{}` ADR-0159 §8 distinguishes from `None` — leaves `reconciler_failed` at zero
+  and counts its offered pairs under `relations_unlabelled`, on a trace that differs
+  from the failing provider's; that a proposal whose certain rung settled every
+  member within the bound is counted under `reconciler_unconsulted` with no provider
+  request made; that a proposal §2's condition excludes carries none of the ten in
+  its contribution while `proposals` still counts it; that an `ingest_reading` whose
+  **second** proposal raises after the first was applied emits the first's relation
+  keys on the fault path's partial reading, beside the `decisions_*` keys it already
+  emits there, since §3 binds the two sets to one observation; and totality over
+  `ConflictRelation`.
 - A test under `tests/service/` extending the pinned allowlist.
 - No change under `src/ai_assistant/core/`, `src/ai_assistant/evaluation/`,
   `src/ai_assistant/learning/`, `src/ai_assistant/orchestration/` or
@@ -404,6 +443,16 @@ act differently, or read one of its clauses more widely than it now holds?
   which is the relation ADR-0083 §15's own clauses have to the scheduler they
   deferred to — none of them could name an ADR that did not yet exist either. No note
   is appended to ADR-0159 and its text is not touched.
+- **ADR-0159 §3 and §10.** §3's clauses bind what a reconciler *answers*, what it may
+  spend and that it never raises; §10's list of what the implementing lane owes names
+  "the reconciler behind a `memory`-internal seam" and its rungs. Neither fixes the
+  seam's **return type**, and §8's contract surface is `core/types.py` and
+  `core/protocols.py` alone — ADR-0159 §2 is explicit that "no Protocol for it goes in
+  `core/protocols.py`". So §3's requirement that the reconciler report its outcome
+  changes no ratified text, and a reader building a reconciler from §3 builds the same
+  rungs with the same spend and the same never-raises guarantee. What the report may
+  not do is feed a rule, which §3's fourth clause forbids in the terms ADR-0159 §6
+  already uses.
 - **ADR-0159 §9.** Its first clause — "This ADR adds no metric key, removes none, and
   changes no metric key's definition" — is a statement about ADR-0159 and stays true
   of it. This ADR removes no key and redefines none; `decisions_reinforce`,
@@ -450,10 +499,12 @@ act differently, or read one of its clauses more widely than it now holds?
 - **Per-pair or per-proposal attribution**, and whether the family should ever grow a
   carrier for it. §6 states the limit; closing it is a change to `EvaluationTrace`
   and would be ADR-0119's to reopen.
-- **Whether the reconciler seam should report what it asked about.** §6 declines to
-  emit it because the writer cannot see it. Making it visible means changing what a
-  `memory`-internal reconciler returns, which is available without disturbing any
-  contract and is not needed for #1209's question.
+- **Which members a reconciler consulted about, and how its bound cut the set.** §3
+  takes the *outcome* across the reconciler seam and §6 declines the membership: the
+  first is the difference between a silent model and a broken one, the second is the
+  economics ADR-0159 §3 deliberately leaves inside the reconciler. Taking the second
+  as well is available without disturbing any contract and is not needed for #1209's
+  question.
 - **The right value of `reconciler_max_conflicts`**, which stays where ADR-0159 §12
   left it — an empirical question a pilot arm answers. §5 makes the value readable
   and takes no view on it.
@@ -467,18 +518,22 @@ act differently, or read one of its clauses more widely than it now holds?
 
 - **#1209's question becomes answerable, and it is the question that decides what to
   do next.** On a pilot run reporting zero supersessions,
-  `relations_model_contradicts = 0` says the reconciler never returned a contradiction
-  at all, and points at the prompt, the bound or ADR-0159 §3's temporal clause; a
+  `relations_model_contradicts = 0` says no model contradiction **stood** — read with
+  §6's discard note, on a conforming reconciler that is the same as none being
+  returned — and points at the prompt, the bound or ADR-0159 §3's temporal clause; a
   positive value says it did and that the arm declined to act on it, and points at
   ADR-0159 §4. Those are different investigations and the stream now separates them.
   It does **not** say which of §4's bars declined — an `EXTERNAL` contradiction
   outside the target class and a contradiction standing beside a `RESTATES` member
   present as the same positive count against the same zero, and §6 says so.
-- **The floor deployment becomes visible for the first time.** `reconciler_absent`
-  and `reconciler_unanswered` distinguish a hub running ADR-0159 §6's ratified floor,
-  a hub whose provider is failing, and a hub whose model simply had nothing to add —
-  three states that today all present as an unremarkable run of `ACCEPT`s.
-- **The write trace grows by nine integers per crossing**, and one number joins the
+- **The floor deployment becomes visible for the first time.** `reconciler_absent`,
+  `reconciler_failed` and `reconciler_unconsulted` distinguish a hub running ADR-0159
+  §6's ratified floor, a hub whose provider is failing, a hub whose model is never
+  asked because the certain rung settles everything, and a hub whose model is asked
+  and adds nothing — four states that today all present as an unremarkable run of
+  `ACCEPT`s. Three of them need the reconciler's own report, because it absorbs its
+  failures itself and the writer sees only a mapping (§3).
+- **The write trace grows by ten integers per crossing**, and one number joins the
   startup stamp. Both are small against what the envelope already carries, and the
   keys ride the statement that writes the decision counts rather than adding a
   branch.
