@@ -198,10 +198,31 @@ a contract ADR with an architecture lens; it is not one.
 > model-supplied label for a member the rung already labelled is discarded; the
 > count records the label that stands.
 
+> **Normative.** The writer installs a reconciler's relation for a member only where
+> the value **is** a `ConflictRelation` member. Any other value leaves that member
+> unlabelled and counts its proposal under `reconciler_failed`.
+
 > **Normative.** The ten keys are observed exactly when the six `decisions_*` keys
 > are, are written in the same statement, and carry the same reading of ADR-0119 §3:
 > present with a zero on a crossing that observed the quantity and reached none of
 > it, absent together where the crossing observed nothing.
+
+**Installing on identity is not defensive typing; it is what keeps the instrument
+and the ruling saying the same thing about one input.** `DefaultMemoryPolicy`
+selects its target with `is ConflictRelation.RESTATES` and `is
+ConflictRelation.CONTRADICTS`, so a value merely *equal* to a member is unlabelled to
+the arm. `ConflictRelation` is a `StrEnum`: the bare string `"contradicts"` compares
+equal to `CONTRADICTS` **and hashes with it**, so a metric mapping keyed by the enum
+finds it and counts it. Without this clause the trace would report a model
+contradiction the arm never saw — the instrument contradicting the ruling, silently,
+about the same pair. A value equal to no member fails in the other direction: the
+mapping raises, ADR-0119 §5 makes a mapper that raises a **lost trace** rather than a
+lost write, and one non-conforming reconciler costs the whole crossing's record. Both
+are closed by installing on the test the policy already applies. **No ruling moves**:
+a value that is not a member is unlabelled to the arm today, by the same `is`. And
+this is ADR-0159 §3's absorption of a non-conforming reconciler reaching *values*,
+where `MemoryIngestor._relations_for`'s existing guard reaches shapes — "a reconciler
+that *returns* something unusable… is as non-conforming as one that raises".
 
 **The two units are different populations and conflating them is the trap.**
 ADR-0159 §2's condition is a property of a proposal; a relation is a property of a
@@ -406,7 +427,11 @@ The lane owes:
   and counts its offered pairs under `relations_unlabelled`, on a trace that differs
   from the failing provider's; that a proposal whose certain rung settled every
   member within the bound is counted under `reconciler_unconsulted` with no provider
-  request made; that a proposal §2's condition excludes carries none of the ten in
+  request made; that a reconciler returning a value **equal to** a `ConflictRelation`
+  member but not one — the bare string a `StrEnum` makes equal to it and hashable
+  with it — leaves the member unlabelled, counts its proposal under
+  `reconciler_failed`, and costs the crossing no trace; that a proposal §2's condition
+  excludes carries none of the ten in
   its contribution while `proposals` still counts it; that an `ingest_reading` whose
   **second** proposal raises after the first was applied emits the first's relation
   keys on the fault path's partial reading, beside the `decisions_*` keys it already
