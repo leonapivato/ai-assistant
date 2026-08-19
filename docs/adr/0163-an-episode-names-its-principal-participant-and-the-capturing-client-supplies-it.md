@@ -573,29 +573,45 @@ writes its episode directly rather than through `MemoryWriter.ingest` (ADR-0075 
 — so no fingerprint in the system changes value. Stating it here is what stops a
 later reader from "fixing" the projection in either direction without an ADR.
 
-### 7. What the implementing lane owes, and what it may not touch
+### 7. What the implementation owes, in what order, and what it may not touch
 
-The lane is #1210's 2.5. It owes, and owes nothing beyond:
+> **Normative.** This decision is implemented in **more than one change**.
+> `CLAUDE.md`'s "One subsystem per change" governs, and its only widening — a
+> Protocol triad with its primary implementation (ADR-0137 §2) — is unavailable
+> here, because this ADR adds no Protocol. A single lane spanning `core`,
+> `orchestration`, `learning` and `planning` is therefore not a permitted shape for
+> it, whatever a dispatch plan says.
 
-- The field on `EpisodicMemory` in `src/ai_assistant/core/types.py`, with a
-  docstring carrying §2's discipline and §4's reading of absence — the
-  form `about_person`'s docstring already takes for ADR-0100's clauses.
-- The keyword on `ConversationLifecycle.capture`, defaulting to `None`, threaded
-  into the `EpisodicMemory` it builds, with the recorder's docstring stating that
-  the engine's own capture path passes none and why (§3).
-- The observation prompt's rendering, in `learning/observer.py`'s batch renderer,
-  beside the localised instant ADR-0156 §2 put there — and the batch renderer's
-  docstring updated, since it currently states the payload enumeration in terms
-  ("**The payload is the batch and nothing else**  … each episode's canonical
-  ``content`` …, the label the model cites it by, and — since ADR-0156 §2 — that
-  episode's own ``occurred_at``").
-- The planner's record renderer, non-forgeably (§5). **This lane lands after
-  #1210's lane 2.1**, which is rewriting that same renderer for #1194;
-  taking the two in the other order would put two lanes in one file.
-- **Nothing in the harness's corpora**, per §3's first clause. The lane changes no
-  loader and no ingestion path; the harness's only obligation here is the negative
-  assertion below.
-- Tests, in two groups. The **field and its rendering**: a record written without
+The work decomposes at the subsystem seams, and the order is forced by dependency
+rather than chosen. Each step is a change of its own, with its own tests:
+
+1. **`core`** — the field on `EpisodicMemory` in `src/ai_assistant/core/types.py`,
+   with a docstring carrying §2's discipline and §4's reading of absence, in the
+   form `about_person`'s docstring already takes for ADR-0100's clauses. It lands
+   first because everything below names it, and it is safe alone: the field is
+   optional and defaulted, so nothing changes behaviour until a producer sets one.
+2. **`orchestration`** — the keyword on `ConversationLifecycle.capture`, defaulting
+   to `None`, threaded into the `EpisodicMemory` it builds, with the recorder's
+   docstring stating that the engine's own capture path passes none and why (§3).
+   This is the seam a spoke will eventually use and the one §7's synthetic test
+   exercises.
+3. **`learning`** — the observation prompt's rendering, in `learning/observer.py`'s
+   batch renderer, beside the localised instant ADR-0156 §2 put there, and the batch
+   renderer's docstring updated, since it currently states the payload enumeration
+   in terms ("**The payload is the batch and nothing else** … each episode's
+   canonical ``content`` …, the label the model cites it by, and — since ADR-0156 §2
+   — that episode's own ``occurred_at``").
+4. **`planning`** — the record renderer, non-forgeably (§5). **This one lands after
+   #1210's lane 2.1**, which is rewriting that same renderer for #1194; taking the
+   two in the other order would put two lanes in one file.
+
+Steps 2, 3 and 4 are independent of each other and may land in any order or in
+parallel once step 1 has merged. **Nothing in the harness's corpora changes at any
+step**, per §3's first clause: no loader and no ingestion path is touched, and the
+harness's only obligation is the negative assertion below, which rides with
+whichever step is convenient.
+Across those steps, the tests owed are these — each with the step that owes it, and
+none deferred past it. Tests, in two groups. The **field and its rendering**: a record written without
   the field decoding from a stored blob and reading as absent (§4); a marker
   surviving the store round trip byte for byte (§2); both renderers with and
   without a marker, including that nothing is rendered in its place when absent
@@ -614,10 +630,12 @@ The lane is #1210's 2.5. It owes, and owes nothing beyond:
      which would assert that a named third party owns the hub and would silently
      undo #1177's reframing.
 
-It may not: add a validator (§2), add a store column, migration or backfill (§4),
+No step may: add a validator (§2), add a store column, migration or backfill (§4),
 add a `Settings` field, add or change any Protocol member, populate `participants`
 or `about_person` from the marker (§6), change the observer's utility bar (§5), or
-change either corpus loader or the harness's ingestion (§3).
+change either corpus loader or the harness's ingestion (§3). And no step may absorb
+another's subsystem to save a round, which is the clause above restated where a lane
+will feel the temptation.
 
 > **Normative.** This lane changes nothing a benchmark run measures, and it may not
 > acquire such a change: no marker reaches either corpus's episodes (§3), so no
@@ -721,7 +739,8 @@ consequence are ADR-0098 §12's seam and are not. The implementing lane updates
   docstring §7 requires are the mitigation; the alternative — folding them — is
   refused below.
 - **A rendering obligation now spans two subsystems** (`learning` and `planning`),
-  and a third renderer added later must honour it. §5's first clause is stated over
+  which is part of why §7 rules the implementation to be more than one change, and a
+  third renderer added later must honour it. §5's first clause is stated over
   "a surface that renders an episode's `content` to a model" rather than over the
   two known sites, so a new one inherits the rule instead of being forgotten by it.
 - **What would trigger revisiting this.** A producer that needs to mark more than
