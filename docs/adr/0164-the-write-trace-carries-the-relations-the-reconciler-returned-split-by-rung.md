@@ -209,16 +209,23 @@ a contract ADR with an architecture lens; it is not one.
 > model-supplied label for a member the rung already labelled is discarded; the
 > count records the label that stands.
 
-> **Normative.** The writer installs a reconciler's relation for a member only where
-> the value **is** a `ConflictRelation` member. A reply supplying any other value for
-> a member the writer reads it for is **non-conforming in whole**: no label from that
-> reply installs, every member it would have labelled stays unlabelled, and the
-> proposal counts under `reconciler_failed`.
+> **Normative.** What the writer reads is **the mapping a reconciler returns** across
+> the `memory`-internal seam, and nothing else. It is not the model's reply to the
+> reconciler — the term ADR-0159 §3 uses — which this writer never sees and no clause
+> of this ADR is about.
 
-> **Normative.** The members a reply is read for are this crossing's resolved
-> conflict set less those the certain rung labelled. An id the reply invented is
-> dropped unread (ADR-0159 §8) and a value for a member the certain rung labelled is
-> discarded unread (ADR-0159 §3), so neither can make a reply non-conforming.
+> **Normative.** The writer installs a reconciler's relation for a member only where
+> the value **is** a `ConflictRelation` member. A returned mapping supplying any other
+> value for a member the writer reads it for is **non-conforming in whole**: no label
+> from that mapping installs, every member it would have labelled stays unlabelled,
+> and the proposal counts under `reconciler_failed`.
+
+> **Normative.** The members a returned mapping is read for are this crossing's
+> resolved conflict set less those the certain rung labelled — the set
+> `MemoryIngestor._relations_for` looks up, and nothing wider. An id the mapping
+> invented is dropped unread (ADR-0159 §8) and a value for a member the certain rung
+> labelled is discarded unread (ADR-0159 §3), so neither can make a mapping
+> non-conforming.
 
 > **Normative.** Where a crossing's reading is taken, the ten keys are **present**,
 > each carrying the count it reached, zero included. That includes a crossing in
@@ -268,16 +275,35 @@ this is ADR-0159 §3's absorption of a non-conforming reconciler reaching *value
 where `MemoryIngestor._relations_for`'s existing guard reaches shapes — "a reconciler
 that *returns* something unusable… is as non-conforming as one that raises".
 
-**And it is the whole reply that fails, because partial trust is what would make the
-arithmetic lie.** A reply carrying one valid `ADDS` and one bare `"contradicts"` could
-install the valid label and count its proposal `reconciler_failed` — and then one
-trace would say a model label stood *and*, through the answered arithmetic above, that
-no model rung answered on that proposal. Discarding the reply whole is the arm that
-keeps both statements true, and it is the shape `_relations_for` already has: its
-guard's `except Exception: return own` discards the entire `determined`, not the
-member that failed. The rejected alternative is to keep the valid labels and add an
-eleventh key for a partly malformed reply; it buys a distinction nobody has asked for,
-and it leaves `answered` needing a footnote in every report that states it.
+**And it is the whole mapping that fails, because partial trust is what would make the
+arithmetic lie.** A returned mapping carrying one valid `ADDS` and one bare
+`"contradicts"` could install the valid label and count its proposal `reconciler_failed`
+— and then one trace would say a model label stood *and*, through the answered
+arithmetic above, that no model rung answered on that proposal. Discarding the mapping
+whole is the arm that keeps both statements true, and it is the shape `_relations_for`
+already has: its guard's `except Exception: return own` discards the entire
+`determined`, not the member that failed. The rejected alternative is to keep the valid
+labels and add an eleventh key for a partly malformed mapping; it buys a distinction
+nobody has asked for, and it leaves `answered` needing a footnote in every report that
+states it.
+
+**A beyond-bound entry marks a reconciler that already failed to conform, and the clause
+above competes with no rule of ADR-0159's.** ADR-0159 §3's discard binds the
+**reconciler**: "A reconciler installs a model-supplied label only for a member it
+consulted the model about. A label the reply carries for any other record — including a
+member of the conflict set that fell beyond the bound … — is discarded." That happens on
+the reconciler's side of the `memory`-internal seam, before anything crosses to this
+writer. So a returned mapping still carrying a label for a member beyond
+`reconciler_max_conflicts` is already the output of a reconciler that did not conform,
+and the whole-mapping clause meets it as it meets any other non-conforming value —
+costing the crossing the relations it therefore does not hold, which is ADR-0159 §6's
+admitted cost and not a second discard rule. The writer is **not** asked to make the
+consulted/beyond-bound distinction and cannot: it validates *values* for the members it
+reads, and *which members a request covered* stays with the reconciler, where §6 and §9
+below leave it in terms. `MemoryIngestor._relations_for` has exactly that shape today —
+it ranges over `conflicts` and never over a consulted set, because it is not the layer
+that knows one. §7 pins the mixed case rather than leaving an implementer to meet it
+fresh.
 
 **A crossing that reconciled nothing observed a zero; it did not fail to observe.**
 ADR-0119 §3 is the clause under strain here — "an absent key means *not observed* and
@@ -485,7 +511,7 @@ The lane owes:
   the one-request clause and the discard rule are ADR-0159 §3's and are untouched.
 - `src/ai_assistant/memory/ingest.py` — the observation of each quantity in §3 at the
   point it is known, carried to the reading through the writer's own internal types,
-  and written in the statement that writes the decision counts. §3's whole-reply
+  and written in the statement that writes the decision counts. §3's whole-mapping
   clause reaches this file too: `_relations_for` installs member by member today, so
   the values it reads are validated before any of them installs.
 - `src/ai_assistant/service/configuration.py` — the allowlist entry of §5.
@@ -518,12 +544,20 @@ The lane owes:
   `ConflictRelation`
   member but not one — the bare string a `StrEnum` makes equal to it and hashable
   with it — leaves the member unlabelled, counts its proposal under
-  `reconciler_failed`, and costs the crossing no trace; that a reply pairing **one
-  valid member value with one such non-member value** installs *neither*, leaves both
-  members under `relations_unlabelled`, counts its proposal under `reconciler_failed`
-  and leaves every model key at zero for it — the whole-reply clause, and the case
-  where a partial install would make one trace report a model label beside an
-  answered count of zero; that a report of
+  `reconciler_failed`, and costs the crossing no trace; that a returned mapping pairing
+  **one valid member value with one such non-member value** installs *neither*, leaves
+  both members under `relations_unlabelled`, counts its proposal under
+  `reconciler_failed` and leaves every model key at zero for it — the whole-mapping
+  clause, and the case where a partial install would make one trace report a model label
+  beside an answered count of zero; that on a conflict set **longer than
+  `reconciler_max_conflicts`** a returned mapping carrying a valid label for a member
+  within the bound **and** an entry for a member beyond it is ruled on the values alone
+  — a valid beyond-bound value installs like any other, and a non-member beyond-bound
+  value makes the mapping non-conforming in whole, leaving both members under
+  `relations_unlabelled` and counting the proposal under `reconciler_failed` — pinning
+  that the writer reads the resolved conflict set and holds no consulted set to except
+  the second entry from, since a mapping carrying that entry at all is already the
+  output of a reconciler ADR-0159 §3 required to discard it; that a report of
   `unconsulted` and a report of `failed`, each arriving with a model label, discard
   that label, leave the member unlabelled and count the proposal under
   `reconciler_failed` — the two combinations that would otherwise let one trace deny
@@ -559,23 +593,30 @@ recovery route**: adversarial returned `APPROVE` at round 6, the status was flip
 and a fresh reviewer session found three defects on the flipped tree — so the status
 is returned to `Proposed` and the sequence re-enters at step 1, as ADR-0127 and
 ADR-0133 each did on their own PRs. Two of the three were taken in full — the
-whole-reply clause and the three non-raising test cases above. The third named a real
+whole-mapping clause and the three non-raising test cases above. The third named a real
 ambiguity in the key-presence clause and a direction that would have closed it by
 making the ten keys absent where nothing reconciled; the ambiguity is closed by
 stating the two cases apart, and the direction is refused on ADR-0119 §3's own text
+and recorded among the alternatives. A later round found a second ambiguity of the
+same kind in §3 — the clauses said *reply*, ADR-0159 §3's term for what the model
+sends the reconciler, where they meant the mapping the reconciler returns to the
+writer — and its direction would have closed it by carrying the consulted set across
+the `memory`-internal seam; the wording is corrected and that direction too is refused
 and recorded among the alternatives. It records itself as ratified on its second
 flip.
 Nothing implements against this until it has merged (ADR-0015 §5).
 
-**Most rounds so far have changed this text, and four of them narrowed a claim it
-had no right to make** — that a positive contradiction count implicated ADR-0159
-§4's purity conditions specifically; that a figure over these keys was a
-crossing-level figure; that a zero model count meant nothing was returned; that
-`reconciler_unconsulted` measured certainty. The fifth found the defect that reshaped
-the decision: `ModelBackedReconciler.reconcile` absorbs its own provider failures, so
-a key counted at the writer could not have distinguished a broken provider from a
-silent model, which is why §3 takes the outcome across the reconciler seam at all.
-That is recorded here because it is the evidence for §3's shape, not as process
+**Most rounds so far have changed this text, and five of them narrowed a claim it had no
+right to make** — that a positive contradiction count implicated ADR-0159 §4's purity
+conditions specifically; that a figure over these keys was a crossing-level figure; that
+a zero model count meant nothing was returned; that `reconciler_unconsulted` measured
+certainty; and, in the `Consequences` bullet an operator is likeliest to act on, that a
+zero contradiction count was a statement about the model even where the three qualifier
+keys account for the crossing and no model answered at all. Another found the defect
+that reshaped the decision: `ModelBackedReconciler.reconcile` absorbs its own provider
+failures, so a key counted at the writer could not have distinguished a broken provider
+from a silent model, which is why §3 takes the outcome across the reconciler seam at
+all. That is recorded here because it is the evidence for §3's shape, not as process
 narration.
 
 ### 8. What this records against earlier ADRs, under ADR-0082 §1
@@ -670,15 +711,23 @@ act differently, or read one of its clauses more widely than it now holds?
 ## Consequences
 
 - **#1209's question becomes answerable, and it is the question that decides what to
-  do next.** On a pilot run reporting zero supersessions,
-  `relations_model_contradicts = 0` says no model contradiction **stood** — read with
-  §6's discard note, on a conforming reconciler that is the same as none being
-  returned — and points at the prompt, the bound or ADR-0159 §3's temporal clause; a
-  positive value says it did and that the arm declined to act on it, and points at
-  ADR-0159 §4. Those are different investigations and the stream now separates them.
-  It does **not** say which of §4's bars declined — an `EXTERNAL` contradiction
-  outside the target class and a contradiction standing beside a `RESTATES` member
-  present as the same positive count against the same zero, and §6 says so.
+  do next.** On a pilot run reporting zero supersessions, a **positive**
+  `relations_model_contradicts` says a model contradiction **stood** and that the arm
+  declined to act on it, and points at ADR-0159 §4. It does **not** say which of §4's
+  bars declined — an `EXTERNAL` contradiction outside the target class and a
+  contradiction standing beside a `RESTATES` member present as the same positive count
+  against the same zero, and §6 says so.
+- **A zero contradiction count is read against the answered count first, and says
+  nothing about the model until it is.** `relations_model_contradicts = 0` means the
+  model was silent on contradiction only over proposals **whose model rung answered**
+  — §3's `reconciled` less `reconciler_absent`, `reconciler_failed` and
+  `reconciler_unconsulted` — and only there does it point at the prompt, the bound or
+  ADR-0159 §3's temporal clause (read with §6's discard note: on a conforming
+  reconciler, no contradiction standing is the same as none being returned). Each of
+  those three qualifiers yields that same zero with **no model answer behind it at
+  all**, so where they account for the crossing the zero is not evidence about the
+  model and the prompt is the wrong place to look. Read the qualifier keys first: an
+  operator who skips them will investigate a prompt that was never sent.
 - **The floor deployment becomes visible for the first time.** `reconciler_absent`,
   `reconciler_failed` and `reconciler_unconsulted` distinguish a hub running ADR-0159
   §6's ratified floor, a hub whose provider is failing, a hub whose model is never
@@ -732,13 +781,27 @@ act differently, or read one of its clauses more widely than it now holds?
   §8's own ground, and more strongly than for decision counts: a relation is a
   statement about a pair made during one ingest and written to no row, so there is
   nothing to derive it from once the crossing ends.
-- **Preserving the valid labels in a partly malformed reply, under an eleventh key
-  for "the reply was partly malformed".** Rejected in §3. It keeps a label from a
-  component that has already returned one unusable value, and it either breaks the
-  answered arithmetic — a proposal counted `reconciler_failed` while a model label of
-  its own stands — or forces `answered` to be stated with an exception clause wherever
-  it is read. Discarding the reply whole costs a conforming reconciler nothing and is
-  the shape `_relations_for`'s existing guard already takes.
+- **Preserving the valid labels in a partly malformed returned mapping, under an
+  eleventh key for "the mapping was partly malformed".** Rejected in §3. It keeps a
+  label from a component that has already returned one unusable value, and it either
+  breaks the answered arithmetic — a proposal counted `reconciler_failed` while a model
+  label of its own stands — or forces `answered` to be stated with an exception clause
+  wherever it is read. Discarding the mapping whole costs a conforming reconciler
+  nothing and is the shape `_relations_for`'s existing guard already takes.
+- **Carrying the reconciler's consulted set across the `memory`-internal seam, so the
+  writer can except a beyond-bound entry from validation.** Rejected in §3. The
+  distinction it wants is already made, one layer earlier and unconditionally:
+  ADR-0159 §3 obliges the reconciler to discard a label for any member it did not
+  consult the model about, so a mapping still carrying one is non-conforming before
+  it crosses. Bringing the set across would reopen a boundary §6 and §9 draw
+  deliberately — "which members a request covered is not emitted"; "the economics
+  ADR-0159 §3 deliberately leaves inside the reconciler" — and would grow the seam,
+  the outcome report and §7's owed lane to support a distinction no key here reads
+  and no ruling turns on. What the round found that *was* real — that "reply" named
+  the wrong artefact — is fixed in the clauses instead. This is not §9's open
+  question: that one is whether the membership is *emitted*, which stays undecided
+  and unneeded there; this one is whether the writer's validation rule turns on it,
+  and that is answered no.
 - **Making the ten keys absent on a crossing that reconciled nothing.** Rejected in
   §3. It reads ADR-0159 §2's invocation condition excluding every proposal as an
   absence of observation, when the condition was evaluated and found none admitted —
