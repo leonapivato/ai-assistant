@@ -1,6 +1,6 @@
 # 164. The write trace carries the relations the reconciler returned, split by rung
 
-- Status: Accepted
+- Status: Proposed
 - Date: 2026-08-19
 
 ## Context
@@ -489,12 +489,15 @@ clause that decides it: no contract surface moves — nothing in `core/types.py`
 `core/protocols.py` changes, and the vocabulary this ADR names is a metric-key
 roster ADR-0119 §2 places in the emitting module. `CONTRIBUTING.md` → "Finishing an
 ADR PR" holds the sequence and is pointed at rather than re-argued: drafted, reviewed
-and revised as `Proposed` over six rounds, with the status flipped only once
-adversarial returned **APPROVE** with no findings on one tree, and that review re-run
-on the flipped tree. Nothing implements against this until it has merged (ADR-0015
-§5).
+and revised as `Proposed`, with the status flipped only once adversarial returns clean
+on one tree, and that review re-run on the flipped tree. **This ADR takes step 3's
+recovery route**: adversarial returned `APPROVE` at round 6, the status was flipped,
+and a fresh reviewer session found three defects on the flipped tree — so the status
+is returned to `Proposed` and the sequence re-enters at step 1, as ADR-0127 and
+ADR-0133 each did on their own PRs. It records itself as ratified on its second flip.
+Nothing implements against this until it has merged (ADR-0015 §5).
 
-**Five of those six rounds changed this text, and four of them narrowed a claim it
+**Most rounds so far have changed this text, and four of them narrowed a claim it
 had no right to make** — that a positive contradiction count implicated ADR-0159
 §4's purity conditions specifically; that a figure over these keys was a
 crossing-level figure; that a zero model count meant nothing was returned; that
