@@ -83,6 +83,10 @@ from ai_assistant.memory import deferral_store as deferral_store_module
 from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
+from ai_assistant.orchestration.loop import (
+    _DEFAULT_EPISODIC_LIMIT,
+    _DEFAULT_RETRIEVAL_LIMIT,
+)
 from ai_assistant.orchestration.retrieval import assemble_by_band
 from ai_assistant.orchestration.upcoming import (
     NOTIFICATION_CLASS as UPCOMING_NOTIFICATION_CLASS,
@@ -2853,39 +2857,62 @@ async def test_the_band_budget_never_asks_for_more_than_the_reported_figure() ->
     assert max(store.limits) == composition_module.RETRIEVAL_LIMIT
 
 
-def test_the_retrieval_budget_is_the_depth_the_re_rank_evidence_bought() -> None:
-    """The figure itself, pinned to the measurement that chose it (#1163).
+def test_the_retrieval_budget_is_the_depth_the_reach_evidence_bought() -> None:
+    """The figure itself, pinned to the measurement that chose it (ADR-0162 §9).
 
     Every other test here holds the figure *symbolically* — that the stamp reports
     what the loop was built with, that the band budget never over-asks — and would
     pass just as well on a budget of 5 or 1. None of them notices the number going
-    back, which is what this one is for: #1029's scored pilot re-ranked the
-    retrieval misses whose gold record was already in the store, found the
-    gold-citing record's median cosine rank at 12 with 114 of 277 at ranks 6 to 10,
-    and a budget of 15 is where that population comes inside the page.
+    back, which is what this one is for. It was 15 on #1029's re-rank analysis, and
+    §9 takes it to 30 on the probe's reach sweep: complete intake (ADR-0162 §1)
+    removes the 63.1% ceiling that made depth in beliefs worthless, the probe's
+    belief-reach curve runs 55.1% at 5 to 81.2% at 50 and is still climbing, and
+    30+10 reaches 85.1% union all-gold-reached against the incumbent 15+15's 79.8%.
 
-    Reverting it is allowed — it is tuning, not a ratified bound — but it costs a
+    Reverting it is allowed — it is tuning, not a ratified bound, and §9 marks the
+    value **provisional** pending ADR-0160 §5's byte-budgeted pool — but it costs a
     deliberate edit here rather than passing as a tidy-up, because the evidence
     lives in a comment and a comment fails nothing.
     """
-    assert composition_module.RETRIEVAL_LIMIT == 15
+    assert composition_module.RETRIEVAL_LIMIT == 30
 
 
-def test_the_episodic_supplement_is_bounded_at_fifteen_and_never_above_the_beliefs() -> None:
-    """ADR-0160 §1's bound, and the ceiling it may never cross.
+def test_the_episodic_supplement_is_bounded_at_ten_and_never_above_the_beliefs() -> None:
+    """ADR-0162 §9's bound, and the ceiling it may never cross.
 
-    Two figures, one test, because the second is what the first means. 15 rests on a
-    measurement where 5 rested on a judgement: #1029's pilot-3 anatomy puts episode
-    recall@5 at 55.3% against recall@15 at 72.7%, and ADR-0160 §3 retires the
-    ablation arm that used to own the value in favour of post-hoc attribution on a
-    scored run. The **relation** is not tuning: it is where the product thesis stops
-    being documentation, since whatever the two numbers become, nobody can configure
-    a system that asks for more transcript than belief. It holds as an equality now,
-    which ADR-0160 §2 admits rather than tolerates — so the second assertion pins the
-    deployed parity and no longer records slack.
+    Two figures, one test, because the second is what the first means. The value
+    began at 5 on a judgement, went to 15 on ADR-0160 §1's measurement, and comes
+    back to 10 here — not because the episodes got worse but because the beliefs got
+    better: 30+15 measures 86.5% against 30+10's 85.1%, 1.4 points for half again as
+    much transcript in every prompt, where ADR-0158 §5's byte bound is still unset.
+    The **relation** is not tuning: it is where the product thesis stops being
+    documentation, since whatever the two numbers become, nobody can configure a
+    system that asks for more transcript than belief. At 10 against 30 it is
+    satisfied with slack again rather than at the parity ADR-0160 §2 admitted, so the
+    second assertion records slack once more.
     """
-    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT == 15
-    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT <= composition_module.RETRIEVAL_LIMIT
+    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT == 10
+    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT < composition_module.RETRIEVAL_LIMIT
+
+
+def test_the_roots_two_budgets_are_held_equal_to_orchestrations_own_defaults() -> None:
+    """ADR-0162 §9's "held equal to", made checkable rather than asserted twice.
+
+    ``orchestration`` may not import this module and this module does not import
+    ``orchestration``'s private defaults in production — the root passes its own
+    figures explicitly (ADR-0119 §9), which is what makes a *direct* construction's
+    default a separate number that has to be kept in step by a rule. A rule stated
+    only in two comments is one a later edit moves by half, and the half that moves
+    silently is ``orchestration``'s: every deployment gets the root's value, so a
+    stale default here fails nothing until someone constructs a loop without one.
+
+    This is a test and not an import in either direction on purpose. Reading the
+    root's constant off ``orchestration`` would make a subsystem's default the
+    deployment figure, which §9's placement and ADR-0158 §5 both refuse; reading the
+    other way round would be an import ``lint-imports`` exists to stop.
+    """
+    assert composition_module.RETRIEVAL_LIMIT == _DEFAULT_RETRIEVAL_LIMIT
+    assert composition_module.EPISODIC_SUPPLEMENT_LIMIT == _DEFAULT_EPISODIC_LIMIT
 
 
 async def test_the_composed_loop_is_built_with_the_roots_episodic_bound(tmp_path: Path) -> None:
