@@ -647,15 +647,25 @@ def test_observer_model_parses_from_the_environment(monkeypatch: pytest.MonkeyPa
 
 
 def test_the_observation_bounds_have_the_defaults_the_adr_names() -> None:
-    """20 episodes and 5 proposals — named here, not left to the implementation.
+    """20 episodes and 40 proposals — named here, not left to the implementation.
 
     ADR-0074 §9.3's rule applied by ADR-0077 §1: two conforming stages picking 20
     and 2,000 would send categorically different amounts of Tier 1 data to a model
     while each believed it conformed.
+
+    **The proposal bound is 40 and its ground is cost, not selectivity** (ADR-0162
+    §6). Five was ADR-0077 §2's warrant bar expressed as a number, and ADR-0162 §1
+    replaces that bar for an episode recording what the user told the assistant — so
+    the figure does not survive its ground. The probe measured 8.7, 9.1 and 9.0
+    proposals per pass at a batch of 20 under a cap of 60 that never bound, and 40 is
+    more than four times that mean. It is pinned here rather than left symbolic
+    because a truncated pass is now a *defect* (§6's fourth clause) rather than the
+    intended steady state, and nothing downstream can tell one from a complete pass
+    without ``discarded_over_limit``.
     """
     settings = Settings()
     assert settings.observation_batch_size == 20
-    assert settings.observation_max_proposals == 5
+    assert settings.observation_max_proposals == 40
 
 
 @pytest.mark.parametrize("value", [0, -1])
@@ -679,7 +689,7 @@ def test_an_observation_batch_size_at_the_stores_range_bound_is_rejected() -> No
 
 @pytest.mark.parametrize("value", [0, -1])
 def test_a_non_positive_observation_max_proposals_is_rejected(value: int) -> None:
-    """A zero proposal bound could never propose anything (ADR-0077 §2)."""
+    """A zero proposal bound could never propose anything (ADR-0077 §2, ADR-0162 §6)."""
     with pytest.raises(ValidationError):
         Settings(observation_max_proposals=value)
 
