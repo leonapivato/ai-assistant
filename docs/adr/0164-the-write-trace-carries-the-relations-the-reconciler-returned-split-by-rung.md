@@ -165,7 +165,8 @@ a contract ADR with an architecture lens; it is not one.
 > them whose model rung did not complete: the reconciler made a request that yielded
 > no readable answer, or it was non-conforming and the writer's guard absorbed it.
 > `reconciler_unconsulted` counts those among them whose reconciler completed without
-> making a model request at all — ADR-0159 §3's other half of the one-request clause.
+> making a model request at all — ADR-0159 §3's other half of the one-request clause,
+> whatever left it with nothing to ask about.
 
 > **Normative.** Proposals whose model rung answered are `reconciled` less the three
 > keys that qualify it, and no key counts them.
@@ -254,6 +255,16 @@ pair. A proposal that clears the condition with an **empty** conflict set counts
 not an edge one. `reconciled` is therefore the wrong denominator for any relation
 figure and `relations_offered` is the right one, which is why both are emitted and
 why each clause says which it counts.
+
+**`reconciler_unconsulted` is not a measure of certainty, and on this corpus it will
+be dominated by the empty case.** A reconciler makes no request when the certain rung
+settled every member within the bound *and* when there was no member to settle: a
+proposal clearing ADR-0159 §2's condition with an empty conflict set reaches the
+reconciler with nothing consulted and returns immediately. Both are "no model request
+was made", which is what the key says and the whole of what it says. Which of the two
+it was is `relations_offered` on the same trace — zero for the empty set, positive
+where the rung settled the set — so the pair reads what neither key does alone, and
+nothing needs a further key.
 
 **The complement of `reconciled` is already there and is not re-emitted.** The
 `proposals` key is observed at entry on both write seams, so proposals excluded by
@@ -449,7 +460,11 @@ The lane owes:
   and counts its offered pairs under `relations_unlabelled`, on a trace that differs
   from the failing provider's; that a proposal whose certain rung settled every
   member within the bound is counted under `reconciler_unconsulted` with no provider
-  request made; that a reconciler returning a value **equal to** a `ConflictRelation`
+  request made; that a proposal clearing §2's condition with an **empty** conflict set
+  counts under `reconciler_unconsulted` with `relations_offered` at zero, which is the
+  path that dominates the population and the one an implementation reading the key as
+  "certainty settled it" gets wrong; that a reconciler returning a value **equal to** a
+  `ConflictRelation`
   member but not one — the bare string a `StrEnum` makes equal to it and hashable
   with it — leaves the member unlabelled, counts its proposal under
   `reconciler_failed`, and costs the crossing no trace; that a report of
@@ -582,9 +597,10 @@ act differently, or read one of its clauses more widely than it now holds?
 - **The floor deployment becomes visible for the first time.** `reconciler_absent`,
   `reconciler_failed` and `reconciler_unconsulted` distinguish a hub running ADR-0159
   §6's ratified floor, a hub whose provider is failing, a hub whose model is never
-  asked because the certain rung settles everything, and a hub whose model is asked
-  and adds nothing — four states that today all present as an unremarkable run of
-  `ACCEPT`s. Three of them need the reconciler's own report, because it absorbs its
+  asked at all, and a hub whose model is asked and adds nothing — four states that
+  today all present as an unremarkable run of `ACCEPT`s. `reconciler_unconsulted` is
+  read with `relations_offered` beside it, because it does not say *why* nothing was
+  asked (§3). Three of them need the reconciler's own report, because it absorbs its
   failures itself and the writer sees only a mapping (§3).
 - **The write trace grows by ten integers per crossing**, and one number joins the
   startup stamp. Both are small against what the envelope already carries, and the
