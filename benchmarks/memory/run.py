@@ -17,11 +17,9 @@ their price, which is a vendor's number and not the harness's to guess.
 
 from __future__ import annotations
 
-import re
 from collections import Counter
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
-from hashlib import sha256
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -56,9 +54,11 @@ from benchmarks.memory.records import (
     RunMode,
     RunPhase,
     TraceCursor,
+    case_dir_name,
     now_iso,
     write_jsonl_line,
 )
+from benchmarks.memory.reuse import describe_reuse, refuse_ineligible_reuse
 from benchmarks.memory.select import CaseSelection
 from benchmarks.memory.spend import RunAbortedError, SpendGuard
 from benchmarks.memory.wiring import (
@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     from benchmarks.memory.grade import Grader
     from benchmarks.memory.ingest import IngestionSummary
     from benchmarks.memory.records import RetrievalTelemetry
+    from benchmarks.memory.reuse import ReusedRun
     from benchmarks.memory.wiring import Harness
 
 __all__ = [
@@ -94,6 +95,7 @@ __all__ = [
     "execute_run",
     "plan_run",
     "refuse_ineligible_scored_run",
+    "retention_of",
 ]
 
 #: Why a scored run is refused without an explicit confirmation.
@@ -121,38 +123,6 @@ DEFAULT_RUNS_DIR = "runs"
 #: for handing the handle back before any waiting). The manifest carries the same
 #: references afterwards, for a reader who has one.
 BATCHES_FILE = "batches.jsonl"
-
-#: Everything a case directory name does not keep verbatim.
-_UNSAFE_IN_DIR_NAME = re.compile(r"[^A-Za-z0-9._-]")
-
-#: How much of the sanitised key survives into a case directory name.
-_DIR_NAME_PREFIX_CHARS = 64
-
-#: How much of the key's digest is appended to it.
-_DIR_NAME_DIGEST_CHARS = 12
-
-
-def case_dir_name(case_key: str) -> str:
-    """Name the directory a case's stores live in, injectively.
-
-    **Sanitising a key is not an injective mapping, and per-case store isolation
-    needs one.** ``"a/b"`` and ``"a_b"`` both sanitise to ``a_b``, and two cases
-    sharing a directory share their memory, conversations and deferral stores — so
-    one case's beliefs can answer another's questions, which is the property
-    :func:`execute_run` exists to keep. The name is therefore a sanitised prefix of
-    the key *plus a digest of the whole key*: the prefix keeps the directory
-    recognisable, which is what ``--keep-stores`` is for, and the digest is what
-    makes distinct keys distinct directories.
-
-    Args:
-        case_key: The case's key, as its corpus gives it.
-
-    Returns:
-        One path component, unique to ``case_key``.
-    """
-    prefix = _UNSAFE_IN_DIR_NAME.sub("_", case_key)[:_DIR_NAME_PREFIX_CHARS]
-    digest = sha256(case_key.encode("utf-8")).hexdigest()[:_DIR_NAME_DIGEST_CHARS]
-    return f"{prefix}-{digest}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -384,6 +354,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     notes: str = "",
     keep_stores: bool = False,
     max_model_calls: int | None = None,
+    reuse: ReusedRun | None = None,
     phase: RunPhase = RunPhase.SYNC,
     batch_completer: BatchCompleter | None = None,
     issuer: str = DEFAULT_ISSUER,
@@ -408,6 +379,17 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     pass ``--keep-stores`` on. It is written into ``records.jsonl`` here instead —
     ``evidence_episode_ids`` off the ingestion summary, ``retrieved_evidence`` off the
     answer — so the split is computable from the retained artifacts by default.
+
+    **A run given ``reuse`` skips ingestion entirely and answers over the stores a
+    previous run kept.** Everything after the ingest — the retrieval, the two phases,
+    the grading, the records — is the same code on the same seam, because the only
+    thing that changes is where the memories came from. What that costs the artifacts
+    is stated rather than hidden: the ingestion-side manifest fields are the source
+    run's, every row's ``ingestion`` object carries the source's figures under a
+    ``reused_from`` marker, and :mod:`benchmarks.memory.reuse` refuses outright any
+    reuse that would answer over the wrong memories. The clock ingestion would have
+    left behind is restored per case, because a corpus stating no ``asked_at``
+    retrieves at exactly that instant.
 
     Args:
         plan: What to run.
@@ -495,6 +477,13 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
             provider, and is guarded whether built or injected. Clause 5 of
             :func:`refuse_ineligible_scored_run` refuses every injected seam on a scored
             run, so the ceiling covers a scored run whole.
+        reuse: A finished run whose kept case stores this run answers over instead of
+            ingesting the corpus again, or ``None`` to ingest. Loaded by
+            :func:`~benchmarks.memory.reuse.load_reused_run` and put through
+            :func:`~benchmarks.memory.reuse.refuse_ineligible_reuse` **here**, at the
+            boundary that writes the manifest, for the reason ``mode`` is: this
+            function is exported, and a caller reaching it directly could otherwise
+            answer over stores written under another embedder and label the result.
 
     Returns:
         The manifest, already written to ``<output_root>/<run_id>/manifest.json`` —
@@ -568,7 +557,10 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     check_credentials_for(
         resolved,
         answering=model is None,
-        distillation=observer is None,
+        # A reused run makes no observation call, so it needs no observer credential —
+        # and requiring one would refuse a perfectly valid re-answer on a machine
+        # configured only for the seam it is actually about to build.
+        distillation=observer is None and reuse is None,
         judging=grader is None and grader_kind == "model",
         judge_route=judge_route,
     )
@@ -585,6 +577,21 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         # ingestion and the answer batch had been paid for.
         if isinstance(judge, ModelGrader):
             refuse_unbatchable_route(judge.route)
+    # Built here rather than inline in the manifest below, because the reuse gate is
+    # asked before the manifest exists and has to judge the same embedding space the
+    # manifest will record — and because building it twice would load ONNX twice.
+    embedder_model_id = build_embedder(resolved).model_id
+    refuse_ineligible_reuse(
+        reuse,
+        plan.cases,
+        mode=mode,
+        corpus_key=plan.corpus.key,
+        corpus_revision=plan.corpus.revision,
+        max_sessions=plan.max_sessions,
+        embedder_kind=str(resolved.embedder),
+        embedder_model_id=embedder_model_id,
+        episode_retention=retention_of(resolved),
+    )
     run_id = uuid4().hex[:12]
     run_dir = output_root / run_id
     records_path = run_dir / "records.jsonl"
@@ -611,9 +618,9 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         ),
         judge=judge.name,
         embedder_kind=str(resolved.embedder),
-        # Built once here rather than read off a case's harness, so the manifest is
+        # Built above rather than read off a case's harness, so the manifest is
         # written before any case runs — an interrupted run still says what it was.
-        embedder_model_id=build_embedder(resolved).model_id,
+        embedder_model_id=embedder_model_id,
         retrieval_limit=RETRIEVAL_LIMIT,
         # The supplement's own budget, recorded beside the belief budget because a run
         # is only recoverable from its manifest if both reads are in it (ADR-0158 §3).
@@ -624,14 +631,15 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         # The same `Settings` field `build_harness` hands the producer, so the manifest
         # cannot name a calendar the observation prompt did not run under.
         observer_timezone=resolved.timezone,
-        episode_retention=(
-            "none" if resolved.episode_retention is None else str(resolved.episode_retention)
-        ),
+        episode_retention=retention_of(resolved),
         answer_prompt=ANSWER_SYSTEM_PROMPT,
         judge_prompt=JUDGE_PROMPT if isinstance(judge, ModelGrader) else None,
         notes=notes,
         model_call_ceiling=max_model_calls,
     )
+    # A no-op where nothing was reused; where something was, it is what makes the
+    # observer-side fields describe the run that actually distilled these beliefs.
+    manifest = describe_reuse(manifest, reuse)
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "manifest.json").write_text(manifest.model_dump_json(indent=1), encoding="utf-8")
 
@@ -686,6 +694,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
                 model=model,
                 observer=observer,
                 session=session,
+                reuse=reuse,
             )
             for case in plan.cases:
                 prepared.extend(await driver.run(case))
@@ -736,6 +745,10 @@ class _CaseDriver:
         session: The batch session, or ``None`` under ``--phase sync``. It is what
             decides which of the two paths each question takes, so the phase is read
             off the thing that would do the batching rather than off a flag beside it.
+        reuse: A finished run whose stores each case is answered over, or ``None`` to
+            ingest. Like ``session`` beside it, it is read off the object that would do
+            the work rather than off a flag: a case ingests exactly when there is no
+            run to take its memories from.
     """
 
     settings: Settings
@@ -748,15 +761,30 @@ class _CaseDriver:
     model: ModelProvider | None
     observer: Observer | None
     session: BatchSession | None
+    reuse: ReusedRun | None = None
 
     async def run(self, case: BenchCase) -> list[PreparedQuestion]:
-        """Ingest one case and either answer its questions or retrieve for them.
+        """Ingest one case — or reuse one — and answer its questions or retrieve for them.
 
         Each case gets its own data directory and its own harness: a benchmark case is
         a whole memory, and two cases sharing a store would let one case's beliefs
         answer another's questions. The stores are removed afterwards unless asked
         for, because a LoCoMo case's ``memory.db`` carries thousands of vectors;
         ``traces.db`` is always kept, being the ADR-0119 record P8 is defined over.
+
+        **Under ``reuse`` the case's databases are copied in and the ingest is skipped,
+        and two things ingestion would have produced are taken from the source run
+        instead**: the flattened summary every row carries, and #1074's evidence join
+        per question. Both are read off the source's ``records.jsonl``, which has
+        carried them per row since #1074 for exactly this class of reason — an analysis
+        that must survive the stores being deleted.
+
+        **The clock is put where ingestion would have left it**, which is the last
+        session's instant. That is not tidiness: ``answer_question`` moves the clock to
+        the question's own instant only where the corpus states one, and LoCoMo states
+        none — so a reused run that skipped the ingest would retrieve at the clock's
+        epoch default, judging every liveness axis in the store against 1970 and
+        quietly measuring something no run has ever measured.
 
         Args:
             case: The case to run.
@@ -772,6 +800,9 @@ class _CaseDriver:
                 databases survive for inspection.
         """
         case_dir = self.run_dir / "cases" / case_dir_name(case.case_key)
+        if self.reuse is not None:
+            # Before the harness, because this is what the harness will open.
+            self.reuse.stage(case, case_dir)
         harness = build_harness(
             self.settings,
             data_dir=case_dir,
@@ -781,10 +812,22 @@ class _CaseDriver:
         )
         prepared: list[PreparedQuestion] = []
         try:
-            summary = await ingest_case(
-                harness, case, batch_size=self.settings.observation_batch_size
-            )
-            ingestion = _ingestion_summary(summary)
+            if self.reuse is None:
+                summary = await ingest_case(
+                    harness, case, batch_size=self.settings.observation_batch_size
+                )
+                ingestion = _ingestion_summary(summary)
+                joins = {
+                    question.question_id: _evidence_episode_ids(summary, question)
+                    for question in case.questions
+                }
+            else:
+                ingestion = self.reuse.ingestion_for(case)
+                joins = {
+                    question.question_id: self.reuse.join_for(case, question.question_id)
+                    for question in case.questions
+                }
+                harness.clock.set(case.sessions[-1].occurred_at)
             cursor = TraceCursor(harness.traces)
             for question in case.questions:
                 if self.session is None:
@@ -794,7 +837,7 @@ class _CaseDriver:
                         case=case,
                         judge=self.judge,
                         cursor=cursor,
-                        summary=summary,
+                        evidence_episode_ids=joins[question.question_id],
                         ingestion=ingestion,
                         run_id=self.run_id,
                         records_path=self.records_path,
@@ -814,7 +857,7 @@ class _CaseDriver:
                             question=question,
                             retrieved=retrieved,
                             telemetry=await cursor.collect(retrieved.correlation_id),
-                            evidence_episode_ids=_evidence_episode_ids(summary, question),
+                            evidence_episode_ids=joins[question.question_id],
                             ingestion=ingestion,
                         )
                     )
@@ -879,6 +922,22 @@ def _judge_route(judge: Grader) -> str:
         The route.
     """
     return judge.route if isinstance(judge, ModelGrader) else judge.name
+
+
+def retention_of(settings: Settings) -> str:
+    """The configured episode horizon, as the manifest spells it.
+
+    One definition rather than two, because the command line prints the same string in
+    its plan table and a second copy would be a place for the two to disagree about
+    what ``None`` is called.
+
+    Args:
+        settings: Loaded application settings.
+
+    Returns:
+        The horizon, or ``"none"``.
+    """
+    return "none" if settings.episode_retention is None else str(settings.episode_retention)
 
 
 def _say_nothing(line: str) -> None:
@@ -980,7 +1039,7 @@ async def _answer_now(  # noqa: PLR0913 — the synchronous per-question step, l
     case: BenchCase,
     judge: Grader,
     cursor: TraceCursor,
-    summary: IngestionSummary,
+    evidence_episode_ids: tuple[tuple[str, ...], ...],
     ingestion: Mapping[str, int | float | str | list[str]],
     run_id: str,
     records_path: Path,
@@ -1007,8 +1066,9 @@ async def _answer_now(  # noqa: PLR0913 — the synchronous per-question step, l
         case: The case it belongs to.
         judge: The grader.
         cursor: The case's trace cursor, walked forward one question at a time.
-        summary: What ingesting the case reported.
-        ingestion: That summary, flattened for the record.
+        evidence_episode_ids: #1074's join for this question — computed from the
+            ingestion summary, or read back off the run whose stores are being reused.
+        ingestion: The case's ingestion summary, flattened for the record.
         run_id: The run.
         records_path: Where the row is appended.
     """
@@ -1031,7 +1091,7 @@ async def _answer_now(  # noqa: PLR0913 — the synchronous per-question step, l
             question=question,
             attempt=attempt,
             grading=grading,
-            evidence_episode_ids=_evidence_episode_ids(summary, question),
+            evidence_episode_ids=evidence_episode_ids,
             telemetry=await cursor.collect(attempt.correlation_id),
             ingestion=ingestion,
         ),

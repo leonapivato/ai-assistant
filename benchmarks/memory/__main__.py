@@ -26,6 +26,14 @@ path every pilot before this one ran. A batched run prints each handle as the pr
 accepts it and writes it to ``batches.jsonl`` **before** it starts waiting, so an
 interrupted run still names the job it is being billed for.
 
+``--from-run <run id>`` answers a corpus again over the case stores a previous run
+kept, instead of ingesting it a second time. Ingestion dominates the price and an
+answering arm — a different retrieval budget, a different answering prompt — does not
+vary it, so an arm that reuses costs a fraction of one that re-ingests. The source run
+must have been made with ``--keep-stores``; everything else about the eligibility of a
+reuse, and everything a reused run's artifacts say about where its memories came from,
+is :mod:`benchmarks.memory.reuse`.
+
 **This is not an ``assistant`` subcommand and it is not a console script.** The
 offline-tool family in ``pyproject.toml`` exists because those tools take the hub's
 instance lock and live in ``service``, which nothing may import (ADR-0084 §6). None of
@@ -50,10 +58,12 @@ from benchmarks.memory.corpora import locomo, longmemeval
 from benchmarks.memory.corpora.fetch import DEFAULT_CACHE, digest_of, ensure_corpus
 from benchmarks.memory.corpora.provenance import CORPORA, Corpus, corpus_by_key
 from benchmarks.memory.records import RunMode, RunPhase
+from benchmarks.memory.reuse import load_reused_run
 from benchmarks.memory.run import (
     execute_run,
     plan_run,
     refuse_ineligible_scored_run,
+    retention_of,
 )
 from benchmarks.memory.select import first_questions, first_sessions
 from benchmarks.memory.wiring import DEFAULT_ISSUER
@@ -138,7 +148,7 @@ def plan(
     # because a plan reports what a run would *cost* and the judge's route changes the
     # price per call without changing the call count this table is about.
     table.add_row("judge route (unless --judge-model)", settings.default_model)
-    table.add_row("episode retention", _retention(settings))
+    table.add_row("episode retention", retention_of(settings))
     console.print(table)
     _warn_about_configuration(settings, computed.cases)
 
@@ -175,6 +185,12 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
         bool, typer.Option(help="Confirm #1029 ground rule 1 is discharged.")
     ] = False,
     keep_stores: Annotated[bool, typer.Option(help="Keep each case's databases.")] = False,
+    from_run: Annotated[
+        str | None,
+        typer.Option(
+            help="Answer over this run's kept case stores instead of ingesting again.",
+        ),
+    ] = None,
     max_model_calls: Annotated[
         int | None,
         typer.Option(help="Stop the run cleanly after this many model calls; see `plan`."),
@@ -196,16 +212,27 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
         embedder=settings.embedder,
         grader_kind=grader,
     )
+    root = output if output is not None else DEFAULT_RUNS
+    # Resolved before the corpus is fetched, like the gate above and for the same
+    # reason: a mistyped run id should cost a second, not a 278 MiB download. What it
+    # cannot decide yet is *eligibility* — that needs the plan and the embedder, and it
+    # is asked inside `execute_run`, at the boundary that writes the manifest.
+    reused = None if from_run is None else load_reused_run(root, from_run)
     corpus, cases, digests = _select(
         corpus_key, limit=limit, seed=seed, max_sessions=max_sessions, cache=cache
     )
     computed = plan_run(corpus, cases, batch_size=settings.observation_batch_size)
     _warn_about_configuration(settings, computed.cases)
+    if reused is not None:
+        console.print(
+            f"[green]Reusing[/green] run {reused.run_id}'s case stores: no ingestion, "
+            f"so {computed.observation_calls:,} observation calls are not made."
+        )
 
     manifest = asyncio.run(
         execute_run(
             computed,
-            output_root=output if output is not None else DEFAULT_RUNS,
+            output_root=root,
             mode=mode,
             corpus_digests=digests,
             settings=settings,
@@ -217,6 +244,7 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
             notes=notes,
             keep_stores=keep_stores,
             max_model_calls=max_model_calls,
+            reuse=reused,
             phase=phase,
             issuer=issuer,
             poll=PollPolicy(interval=poll_interval, timeout=batch_timeout),
@@ -227,7 +255,6 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
             announce=console.print,
         )
     )
-    root = output if output is not None else DEFAULT_RUNS
     console.print(
         f"[green]{manifest.mode}[/green] run {manifest.run_id} -> {root / manifest.run_id}"
     )
@@ -283,18 +310,6 @@ def _select(
         if limit:
             selected = longmemeval.stratified(selected, total=limit, seed=seed)
     return corpus, first_sessions(selected, max_sessions), digests
-
-
-def _retention(settings: Settings) -> str:
-    """The configured episode retention, as the manifest spells it.
-
-    Args:
-        settings: Loaded application settings.
-
-    Returns:
-        The horizon, or ``"none"``.
-    """
-    return "none" if settings.episode_retention is None else str(settings.episode_retention)
 
 
 def _warn_about_configuration(settings: Settings, cases: tuple[BenchCase, ...]) -> None:

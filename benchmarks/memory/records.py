@@ -17,8 +17,10 @@ pre-registration is final.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime
 from enum import StrEnum
+from hashlib import sha256
 from typing import TYPE_CHECKING, Final
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -40,14 +42,49 @@ __all__ = [
     "BatchRef",
     "QuestionRecord",
     "RetrievalTelemetry",
+    "ReuseRef",
     "RunManifest",
     "RunMode",
     "RunPhase",
     "TraceCursor",
+    "case_dir_name",
     "now_iso",
     "read_jsonl",
     "write_jsonl_line",
 ]
+
+
+#: Everything a case directory name does not keep verbatim.
+_UNSAFE_IN_DIR_NAME = re.compile(r"[^A-Za-z0-9._-]")
+
+#: How much of the sanitised key survives into a case directory name.
+_DIR_NAME_PREFIX_CHARS = 64
+
+#: How much of the key's digest is appended to it.
+_DIR_NAME_DIGEST_CHARS = 12
+
+
+def case_dir_name(case_key: str) -> str:
+    """Name the directory a case's stores live in, injectively.
+
+    **Sanitising a key is not an injective mapping, and per-case store isolation
+    needs one.** ``"a/b"`` and ``"a_b"`` both sanitise to ``a_b``, and two cases
+    sharing a directory share their memory, conversations and deferral stores — so
+    one case's beliefs can answer another's questions, which is the property
+    :func:`execute_run` exists to keep. The name is therefore a sanitised prefix of
+    the key *plus a digest of the whole key*: the prefix keeps the directory
+    recognisable, which is what ``--keep-stores`` is for, and the digest is what
+    makes distinct keys distinct directories.
+
+    Args:
+        case_key: The case's key, as its corpus gives it.
+
+    Returns:
+        One path component, unique to ``case_key``.
+    """
+    prefix = _UNSAFE_IN_DIR_NAME.sub("_", case_key)[:_DIR_NAME_PREFIX_CHARS]
+    digest = sha256(case_key.encode("utf-8")).hexdigest()[:_DIR_NAME_DIGEST_CHARS]
+    return f"{prefix}-{digest}"
 
 
 class RunMode(StrEnum):
@@ -330,6 +367,50 @@ class QuestionRecord(BaseModel):
     ingestion: dict[str, int | float | str | list[str]]
 
 
+class ReuseRef(BaseModel):
+    """Where a run's memories came from, when it did not build them itself.
+
+    **A run that reused another's stores must be readable as one from its own
+    artifacts.** Ingestion is most of what a run costs and all of what its manifest's
+    observer-side fields describe, so a run that skipped it and left those fields
+    reading like a fresh distillation would be a manifest that is wrong in exactly the
+    place a reader checks first. This is the field that makes the reuse visible, and
+    :mod:`benchmarks.memory.reuse` is where the rest of the discipline lives.
+
+    Attributes:
+        run_id: The run whose kept case stores were answered over.
+        manifest_sha256: The SHA-256 of that run's ``manifest.json`` as it was read.
+            The id names a directory, which is mutable; this names the bytes the
+            inherited fields below were actually taken from.
+        corpus_revision: The upstream revision the source was pinned to. Duplicated
+            from the source manifest so the join between the two artifacts can be
+            checked without opening the other one.
+        embedder_model_id: The embedding space the reused vectors live in — which the
+            reusing run is required to match, since a vector written under one and
+            searched under another returns noise.
+        inherited: The manifest fields whose values were taken from the source run
+            because they describe *ingestion*, which this run did not do
+            (:data:`~benchmarks.memory.reuse.INHERITED_FIELDS`). Recorded as names
+            rather than as values, because the values are in this manifest already;
+            what a reader cannot otherwise tell is which of them this process
+            contributed and which it copied.
+        varied: The answering-side fields whose values differ from the source run's —
+            the arm's whole content. Empty means a re-answer under the same
+            configuration, which is a legitimate thing to want (a re-run of a run that
+            aborted late, a check that the harness is deterministic where it claims to
+            be) and is worth being able to see at a glance.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    run_id: str
+    manifest_sha256: str
+    corpus_revision: str
+    embedder_model_id: str
+    inherited: tuple[str, ...]
+    varied: tuple[str, ...]
+
+
 class RunManifest(BaseModel):
     """The configuration a run happened under, recorded rather than described.
 
@@ -432,6 +513,18 @@ class RunManifest(BaseModel):
             was asked for. Recorded beside ``aborted`` because the two are read
             together: a ceiling with no abort is a run that came in under budget, and a
             ceiling with an abort naming it is a run that did not.
+        reused_from: The run whose kept case stores this one answered over instead of
+            ingesting the corpus itself, or ``None`` — the default, and every artifact
+            written before the option existed — where it ingested.
+
+            **Read it before reading any observer-side field above.** On a reused run
+            the fields naming ``inherited`` here describe the *source* run's
+            distillation, because that is what wrote the beliefs being answered from;
+            this process's own observer settings did nothing and are not recorded. The
+            same fact is on every row of ``records.jsonl``, whose ``ingestion`` object
+            carries a ``reused_from`` marker beside the source's figures, so a reader
+            holding one JSONL line and no manifest is not misled either.
+
         aborted: Why the run stopped before finishing, or ``None`` where it ran to
             completion.
 
@@ -483,6 +576,7 @@ class RunManifest(BaseModel):
     judge_prompt: str | None
     notes: str = ""
     model_call_ceiling: int | None = None
+    reused_from: ReuseRef | None = None
     aborted: str | None = None
 
 
