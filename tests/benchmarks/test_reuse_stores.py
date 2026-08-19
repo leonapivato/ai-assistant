@@ -656,6 +656,29 @@ class TestALoadThatCannotBeARun:
         with pytest.raises(ValueError, match="no run to reuse"):
             load_reused_run(tmp_path, "deadbeefcafe")
 
+    async def test_a_manifest_from_another_run(self, tmp_path: Path) -> None:
+        """A run directory is a directory: nothing else would notice the mix-up."""
+        root = tmp_path / "runs"
+        first, first_dir = await _ingest(root, tmp_path)
+        _, second_dir = await _ingest(root, tmp_path)
+        (first_dir / "manifest.json").write_text(
+            (second_dir / "manifest.json").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+        with pytest.raises(ValueError, match="do not describe one run"):
+            load_reused_run(root, first.run_id)
+
+    async def test_a_record_from_another_run(self, tmp_path: Path) -> None:
+        root = tmp_path / "runs"
+        first, first_dir = await _ingest(root, tmp_path)
+        _, second_dir = await _ingest(root, tmp_path)
+        (first_dir / "records.jsonl").write_text(
+            (second_dir / "records.jsonl").read_text(encoding="utf-8"), encoding="utf-8"
+        )
+
+        with pytest.raises(ValueError, match="do not describe one run"):
+            load_reused_run(root, first.run_id)
+
     async def test_a_run_that_wrote_no_records(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, source_dir = await _ingest(root, tmp_path)
