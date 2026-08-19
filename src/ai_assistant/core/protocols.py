@@ -1791,17 +1791,21 @@ class Observer(Protocol):
 
         **And it states no subject.** Every proposal leaves ``about_person``
         unset; one that would state it is **not proposed**, and is counted in
-        ``discarded_unusable`` (ADR-0100 §5). This adds nothing to the bar below —
-        a belief warranted only when it is *about the user* never has a non-owner
-        subject to state, so the refusal excludes nothing a conforming observer
-        would have produced. What it changes is that the bar is now *checkable*:
-        an obligation that has been in this contract since ADR-0077 §2 with
-        nothing able to see it is pinned by the shared conformance suite. It does
-        not make that bar enforceable, and must not be read as though it did — a
-        model proposing "Marta prefers window seats" with ``about_person`` unset
-        is as undetectable after ADR-0100 as before. The difference is that the
-        honest case is now recordable and the dishonest one is a lie about a
-        field.
+        ``discarded_unusable`` (ADR-0100 §5). **The refusal is untouched by the
+        completeness rule below and now carries more traffic than it did.** When
+        that rule was ADR-0077 §2's bar, the refusal excluded nothing a
+        conforming observer would have produced, because a belief warranted only
+        when it is *about the user* had no non-owner subject to state. Complete
+        intake records what the user said about third parties as well, so
+        proposals whose grammatical subject is not the user are now ordinary
+        (ADR-0162 §3) — and such a record is not *mislabelled* but **unlabelled**,
+        as every observer record has been since ADR-0100, read under ADR-0100
+        §3 as the owner's own world. What the field never did is make a
+        producer-side obligation enforceable, and it must not be read as though
+        it did — a model proposing "Marta prefers window seats" with
+        ``about_person`` unset is as undetectable after ADR-0100 as before. The
+        difference is that the honest case is now recordable and the dishonest
+        one is a lie about a field.
 
         **The refusal is the producer's and stays there.** It is not implemented
         by a caller dropping a returned proposal — the caller's obligation below
@@ -1855,14 +1859,51 @@ class Observer(Protocol):
         inputs, **re-observing the same episodes cannot inflate a belief** — a
         ``REINFORCE`` that takes the maximum finds nothing higher.
 
-        **The bar for proposing at all is durable usefulness, not
-        interestingness.** A belief is warranted only when it is *about the user*
-        and would change a later answer. Summarising the exchange is the failure
-        mode: it turns the belief store into a second transcript, at indefinite
-        retention, behind the surface that answers "what do you believe about me".
-        This is the half of selective memory a gate cannot enforce, because a
-        policy judging one proposal at a time cannot see that all twenty of them
-        are a retelling — so it is stated as a producer-side obligation.
+        **For an episode recording what the user told the assistant, intake is
+        complete.** One record is proposed for each distinct thing the user
+        stated that a later question could ask about — an event that happened, a
+        person, place, organisation or thing named, a durable fact, a preference,
+        a workflow — **up to the maximum below**, which is the one exception and
+        which ``discarded_over_limit`` makes visible when it binds. Pure
+        conversational filler is what it passes over, and is the only thing it
+        passes over. **One record states one thing**: a sentence combining
+        several distinct facts or events is not the compliant form, because the
+        unit is the thing a later question could ask about and that is the unit
+        retrieval returns. That a thing merely happened, that it may not change a
+        later answer, and that recording it makes the pass read as a retelling
+        are **no longer grounds to refuse a record** (ADR-0162 §1, replacing
+        ADR-0077 §2's warrant bar for such an episode). The signal is the
+        telling: the user chose to say it to an assistant whose stated purpose is
+        to remember them, and *did the user say this?* is answerable from the
+        batch in front of the producer where *would this change a later answer?*
+        never was. "Proposing nothing is a perfectly good answer" is not
+        repealed, only relocated — it remains the right answer for a batch that
+        is only filler, and stops being the answer to a batch full of things that
+        happened.
+
+        **That rule reaches no other episode, and everywhere else the bar stands
+        exactly as ratified** (ADR-0162 §2). For an episode a reader ingested
+        (ADR-0097) or a sensor captured (ADR-0094), a belief is warranted only
+        when it is *about the user* and would change a later answer; summarising
+        the exchange is the failure mode there, because it turns the belief store
+        into a second transcript, at indefinite retention, behind the surface
+        that answers "what do you believe about me". The asymmetry is the ruling
+        rather than a compromise: the user telling the assistant something is a
+        speech act directed at the assistant, and content that arrives whether or
+        not the user meant it to is not that.
+
+        **How an implementation comes to know which rule a batch falls under is
+        not decided here**, and nothing in this contract carries the distinction:
+        no field of an episode records it, and the observation payload is not
+        widened to say so. The ADR introducing the second class of episode
+        decides it. Until then the seam fails closed from the caller's side — a
+        stage selecting a batch for a producer implementing the complete-intake
+        rule selects only episodes of that class, and such a producer is never
+        handed one outside it. Which rule a record was proposed under is a fact
+        about meaning, so both halves are producer-side obligations: this is the
+        half of selective memory a gate cannot enforce, because a policy judging
+        one proposal at a time cannot see that all twenty of them are a
+        retelling.
 
         **Output is bounded, and excess is discarded rather than queued.** An
         implementation is constructed with its own maximum; ``proposals`` never
