@@ -692,6 +692,25 @@ class TestALoadThatCannotBeARun:
         with pytest.raises(ValueError, match="disagree about what ingesting it reported"):
             load_reused_run(root, source.run_id)
 
+    @pytest.mark.parametrize("instant", ["2023-06-12T13:56:00", "not an instant"])
+    async def test_a_row_whose_answering_instant_no_clock_would_take(
+        self, tmp_path: Path, instant: str
+    ) -> None:
+        """Refused at load, so it cannot fail mid-run and leave a directory that looks
+        like a run: the manifest is written and the stores staged before the first
+        question is answered."""
+        root = tmp_path / "runs"
+        source, source_dir = await _ingest(root, tmp_path)
+        path = source_dir / "records.jsonl"
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        rows[0]["asked_at"] = instant
+        path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="not a timezone-aware instant"):
+            load_reused_run(root, source.run_id)
+
+        assert sorted(one.name for one in root.iterdir()) == [source.run_id]
+
     async def test_a_run_that_wrote_no_records(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, source_dir = await _ingest(root, tmp_path)
