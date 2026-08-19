@@ -461,11 +461,13 @@ it a predicate to sit under, and §6 below gives `principal` none.
 > episode's other rendered fields occupy, and never inside the region a model may
 > read as the episode's own text (ADR-0098 §2, ADR-0072 §6).
 
-> **Normative.** The clauses above bind the observation prompt (ADR-0077 §3 as
-> partially superseded by ADR-0156 and by this ADR) and the planner's record
-> renderer, which is what carries ADR-0158 §4's episodic supplement into the
-> answering prompt. They bind no user-facing surface, which may render the marker
-> or not.
+> **Normative.** The clauses above bind every surface that meets the first
+> clause's description, and the tree holds **three** of them today: the observation
+> prompt (ADR-0077 §3 as partially superseded by ADR-0156 and by this ADR); the
+> planner's record renderer, which is what carries ADR-0158 §4's episodic supplement
+> into the answering prompt; and the consolidation prompt, whose chunk walk applies
+> no kind filter, so an episode reaches it whenever the store holds one. They bind
+> no user-facing surface, which may render the marker or not.
 
 > **Normative.** A principal marker never widens what may be proposed. ADR-0077
 > §2's bar — the belief is about the user and would change a later answer, and the
@@ -497,15 +499,39 @@ which, on a transcript containing another person's sentences, is the worse half
 still open. ADR-0098 §2 is not modified here in any direction; this clause exists so
 that no implementer reads §5's first clause as having covered it.
 
-**Both bound surfaces are ones where the misattribution is live.** The observation
-prompt is where beliefs are minted, so it is the obvious one. The planner's renderer
-is the less obvious and not the lesser: ADR-0158 §4 admits an episodic supplement
-retrieved by relevance from other conversations, and an episode from a captured
-multi-party conversation arriving in an answering prompt without its marker tells
-the answering model that the interlocutor's words are the user's. ADR-0074 §5's
-continuity tail is unaffected in practice, because its episodes are turns and state
-no marker (§3) — the clause covers it anyway, because "which records are turns" is
-not something a renderer should have to know.
+**All three bound surfaces are ones where the misattribution is live.** The
+observation prompt is where beliefs are minted, so it is the obvious one. The
+planner's renderer is the less obvious and not the lesser: ADR-0158 §4 admits an
+episodic supplement retrieved by relevance from other conversations, and an episode
+from a captured multi-party conversation arriving in an answering prompt without its
+marker tells the answering model that the interlocutor's words are the user's.
+ADR-0074 §5's continuity tail is unaffected in practice, because its episodes are
+turns and state no marker (§3) — the clause covers it anyway, because "which records
+are turns" is not something a renderer should have to know.
+
+**The consolidation prompt is the third, and it is easy to miss because nothing
+about it says "episode".** `ConsolidationStage` walks the store with
+`MemoryStore.walk_records`, which filters by lifecycle and by nothing else
+(ADR-0114 §1), and renders each record in the chunk as its kind, its origin and its
+`content`. Its *outputs* exclude `EPISODIC` — a consolidation may not propose an
+episode — and that exclusion is what makes the input side easy to read as excluded
+too. It is not: an episode is exactly the kind of raw material a consolidation is
+meant to generalise from, and it does so over the batch *taken together*, which puts
+the misattribution one step further from the evidence than the observer's. A belief
+minted from a multi-party episode nobody marked would carry no trace of whose
+sentence it came from.
+
+**The memory reconciler is not a fourth site, and the reason is worth recording so
+that a later reader can check whether it still holds.** `memory/_reconciler.py`
+renders a proposal's `kind` and `content` and those of the stored beliefs it
+conflicts with (ADR-0159 §1), which would meet the first clause's description if an
+episode could appear in either position. None can: no producer proposes an
+`EpisodicMemory` at all — the observer is forbidden (ADR-0077 §2), consolidation's
+proposable kinds exclude it, and capture writes directly rather than through
+`MemoryWriter.ingest` (ADR-0075 §2) — and conflict detection is same-kind, so no
+episode is ever consulted about either. A decision that admits an episodic proposal
+brings that renderer inside the first clause automatically, which is the point of
+stating the clause over a description rather than over a list.
 
 **Minimisation is satisfied rather than strained**, and the argument is §2's first
 clause rather than a fresh one: the marker is a string already inside the `content`
@@ -613,24 +639,34 @@ its own, with its own tests:
    #1210's lane 2.1**, which rewrote that same renderer for #1194 and merged as
    [#1213](https://github.com/leonapivato/ai-assistant/pull/1213); taking the two in
    the other order would have put two lanes in one file.
-4. **`orchestration`** — the keyword on `ConversationLifecycle.capture`, defaulting
+4. **`orchestration`** — the consolidation prompt's rendering, in
+   `orchestration/consolidation.py`'s `_render`, beside the kind and origin each
+   entry already states, and that function's docstring updated to say why an
+   episode reaches a prompt whose *proposable* kinds exclude one (§5).
+5. **`orchestration`** — the keyword on `ConversationLifecycle.capture`, defaulting
    to `None`, threaded into the `EpisodicMemory` it builds, with the recorder's
    docstring stating that the engine's own capture path passes none and why (§3).
    This is the seam a spoke will eventually use and the one §7's synthetic test
    exercises. **It lands last**, for the reason below.
 
-> **Normative.** Steps 2 and 3 are independent of each other and may land in any
-> order or in parallel once step 1 has merged. **Both precede step 4**: no change
-> may enable `ConversationLifecycle.capture` to accept or store a marker until
-> every surface §5 binds already renders one.
+> **Normative.** Steps 2, 3 and 4 are independent of each other and may land in any
+> order or in parallel once step 1 has merged. **All three precede step 5**: no
+> change may enable `ConversationLifecycle.capture` to accept or store a marker
+> until every surface §5 binds already renders one.
+
+Steps 4 and 5 are both `orchestration`, and they are two steps rather than one so
+that the clause above is checkable in a single change's diff. A lane may take them
+as **one** `orchestration` change instead, on the one condition that the renderer
+and the seam land atomically in it — what is forbidden is the seam arriving first,
+not the two arriving together.
 
 The consumers come before the producer because the reverse order admits exactly the
 misattribution §5 exists to prevent. A capture seam that stores a marker no surface
 yet renders would let a multi-speaker episode reach a model as undifferentiated
 speech while the system holds the correction and does not state it — for the whole
 window between that merge and the renderers', and §5's first clause is unconditional
-in that window as in any other. The safe order costs nothing to take: until step 4
-merges no episode in the tree states a marker, so steps 2 and 3 change no rendered
+in that window as in any other. The safe order costs nothing to take: until step 5
+merges no episode in the tree states a marker, so steps 2, 3 and 4 change no rendered
 byte and can be verified only against constructed records, which is what their tests
 below already do. **Nothing in the harness's corpora changes at any step**, per §3's
 first clause: no loader and no ingestion path is touched, and the harness's only
@@ -656,7 +692,11 @@ belongs to the sensor lane that first has one.
   a marker renders nothing in its place (§5); and the rendered region is
   non-forgeable from inside the episode's own `content` (§5).
 - **Step 3, `planning`.** The same two assertions for the record renderer.
-- **Step 4, `orchestration`.** A marker supplied to `ConversationLifecycle.capture`
+- **Step 4, `orchestration`.** The same two assertions for the consolidation
+  prompt, built from a chunk containing a **constructed** marked episode — which
+  doubles as the assertion that an episode reaches this prompt at all, the fact the
+  step exists for.
+- **Step 5, `orchestration`.** A marker supplied to `ConversationLifecycle.capture`
   reaching the stored `EpisodicMemory` unchanged, and the engine's own capture path
   storing none (§3). This is the seam a spoke will use, exercised without a spoke.
 - **The negative, in `benchmarks`.** A LoCoMo session and a LongMemEval session
@@ -774,11 +814,13 @@ consequence are ADR-0098 §12's seam and are not. The implementing lane updates
   reader starts needing to be told which is which. §6's third clause and the
   docstring §7 requires are the mitigation; the alternative — folding them — is
   refused below.
-- **A rendering obligation now spans two subsystems** (`learning` and `planning`),
-  which is part of why §7 rules the implementation to be more than one change, and a
-  third renderer added later must honour it. §5's first clause is stated over
-  "a surface that renders an episode's `content` to a model" rather than over the
-  two known sites, so a new one inherits the rule instead of being forgotten by it.
+- **A rendering obligation now spans three subsystems** (`learning`, `planning` and
+  `orchestration`), which is part of why §7 rules the implementation to be more than
+  one change, and a fourth renderer added later must honour it. §5's first clause is
+  stated over "a surface that renders an episode's `content` to a model" rather than
+  over the known sites, which is what turned up the third one — the consolidation
+  prompt, whose walk has no kind filter — after a draft of this ADR had enumerated
+  two.
 - **What would trigger revisiting this.** A producer that needs to mark more than
   one participant, or to record an episode with no owner in it; a decision that
   gives labels cross-record meaning (#691), which would make §2's third clause the
