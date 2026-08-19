@@ -301,6 +301,29 @@ NOTIFICATION_RECONSIDER_ARMED: Final = "notification_reconsider_interval_armed"
 #: sub-population, and every figure §7 computes over it.
 NOTIFICATION_RECONSIDER_SECONDS: Final = "notification_reconsider_interval_seconds"
 
+# --- the allowlist: the reconciler's bound (ADR-0164 §5) ----------------------
+# One entry, by ADR-0141 §10's route and on §9's own words — "A later change that
+# needs one adds it". `reconciler_max_conflicts` meets this list's inclusion test:
+# it bounds how many members of a conflict set can carry a model label at all, so
+# it shapes the accumulation every one of ADR-0164 §3's ten write-trace keys is
+# read over, and without it "beyond the bound" and "the model declined to label"
+# are the same `relations_unlabelled`. ADR-0141's sequencing clause comes with it:
+# the entry lands no later than the emitter, because an emitter running while the
+# bound is off the list writes a stretch of stream no boundary divides.
+#
+# `Settings.reconciler_model` deliberately does **not** join, and §9's third clause
+# is why: a model identifier "is recorded as its presence or absence, or not at
+# all", and the presence of a configured route is not the fact anyone wants —
+# whether a reconciler was actually *injected* is answered per crossing by
+# ADR-0164 §3's `reconciler_absent`, from the writer, which is the stronger
+# statement.
+
+#: How many members of a conflict set, in rank order, one ingest's reconciler may
+#: ask a model about (ADR-0159 §3). It is not carried on every ``MEMORY_WRITE``
+#: trace: a constant on every crossing would be a configuration dump wearing a
+#: trace's clothes (ADR-0119 §1), and this is the carrier the corpus already has.
+RECONCILER_MAX_CONFLICTS: Final = "reconciler_max_conflicts"
+
 #: Every key the allowlist can produce, for the test that pins the list against
 #: this module rather than against a reviewer's memory. A key that is emitted and
 #: not here, or here and unreachable, is a list that has drifted from its own
@@ -333,6 +356,7 @@ ALLOWLIST_KEYS: Final[frozenset[str]] = frozenset(
         NOTIFICATION_RETENTION_SECONDS,
         NOTIFICATION_RECONSIDER_ARMED,
         NOTIFICATION_RECONSIDER_SECONDS,
+        RECONCILER_MAX_CONFLICTS,
     }
 )
 
@@ -471,6 +495,7 @@ class ConfigurationStamp:
             RETRIEVAL_SEARCH_LIMIT: self._retrieval_search_limit,
             CONFLICT_SEARCH_LIMIT: self._conflict_search_limit,
             NOTIFICATION_QUEUE_LIMIT: settings.notification_queue_limit,
+            RECONCILER_MAX_CONFLICTS: settings.reconciler_max_conflicts,
         }
         _pair(
             metrics,
@@ -585,6 +610,7 @@ __all__ = [
     "OBSERVATION_BATCH_SIZE",
     "OBSERVATION_MAX_PROPOSALS",
     "OBSERVATION_SECONDS",
+    "RECONCILER_MAX_CONFLICTS",
     "RETENTION_PURGE_ARMED",
     "RETENTION_PURGE_SECONDS",
     "RETRIEVAL_SEARCH_LIMIT",

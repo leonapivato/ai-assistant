@@ -42,6 +42,7 @@ from ai_assistant.core.correlation import current_correlation
 from ai_assistant.core.errors import SelfConsumingWriteError, UnresolvedEvidenceError
 from ai_assistant.core.types import (
     TRACE_RECORD_SET_CAP,
+    ConflictRelation,
     EvaluationTrace,
     MemoryDecisionKind,
     RecordIdSet,
@@ -210,6 +211,115 @@ DECISION_METRICS: Final[Mapping[MemoryDecisionKind, str]] = {
     MemoryDecisionKind.ASK_USER: "decisions_ask_user",
     MemoryDecisionKind.STORE_TEMPORARY: "decisions_store_temporary",
 }
+
+# --- the reconciliation metric keys (ADR-0164 §3) -----------------------------
+# Ten keys in two units, and conflating the units is the trap §3 names: the four
+# below count **proposals** of the crossing, the six after them count **pairs** —
+# one proposal against one member of its resolved conflict set. A proposal that
+# clears ADR-0159 §2's invocation condition with an *empty* conflict set counts in
+# :data:`RECONCILED` and contributes nothing to :data:`RELATIONS_OFFERED`, which is
+# the common case rather than an edge one, so :data:`RECONCILED` is never the
+# denominator for a relation figure.
+#
+# **All ten are present wherever a reading is taken, zeros included, and absent
+# only where none is** (§3). They ride the statement that writes the six
+# ``decisions_*`` keys, so no crossing carries one set without the other: a
+# crossing whose proposals ADR-0159 §2 all excluded **evaluated** the condition and
+# found none admitted, and ``reconciled = 0`` beside nine other zeros is that
+# finding — recording it as absence would make it identical to a crossing that
+# faulted before any reading was taken, the substitution ADR-0119 §3 forbids.
+
+#: Proposals for which ADR-0159 §2's invocation condition held, so relations were
+#: determined. Its complement is not re-emitted: :data:`PROPOSALS` less this is
+#: what §2 excluded, and a key for a difference of two the trace already carries
+#: would be a quantity nobody observed.
+RECONCILED: Final = "reconciled"
+
+#: Of those, the ones ingested by a writer holding **no** reconciler — ADR-0159
+#: §6's ratified floor, and the one qualifier the writer observes about *itself*
+#: rather than reading from a report. It alone establishes that no model request
+#: was made.
+RECONCILER_ABSENT: Final = "reconciler_absent"
+
+#: Of those, the ones whose reconciler ran and whose determination was **unusable**:
+#: it reported that its request yielded no readable answer, or the writer's own
+#: guard absorbed a non-conforming result. Both arms count here deliberately, and
+#: the key therefore takes no view on whether a request was ever made — an operator
+#: reads it as "go and look at the reconciler", not "go and look at the provider".
+RECONCILER_FAILED: Final = "reconciler_failed"
+
+#: Of those, the ones whose reconciler completed **without making a model request
+#: at all** — ADR-0159 §3's other half of the one-request clause, whatever left it
+#: with nothing to ask about. **Not a measure of certainty**: the certain rung
+#: settling every member within the bound and an *empty* conflict set are both "no
+#: request was made", and on this corpus the second dominates. Which one it was is
+#: :data:`RELATIONS_OFFERED` on the same trace, so nothing needs a further key.
+#:
+#: The three qualifiers are **mutually exclusive** and each counts only proposals
+#: :data:`RECONCILED` counts, so proposals whose model rung answered are
+#: :data:`RECONCILED` less the three — and that remainder has no key of its own for
+#: the reason above.
+RECONCILER_UNCONSULTED: Final = "reconciler_unconsulted"
+
+#: Every pair the determination ranged over — one proposal against one member of
+#: its resolved conflict set. The five label keys **partition** it: every offered
+#: pair is counted under exactly one of them and their sum is this.
+RELATIONS_OFFERED: Final = "relations_offered"
+
+#: Offered pairs the **certain** predicate labelled, whatever a reconciler returned
+#: for the same pair. ADR-0159 §3 rules that rung unconditional and discards a
+#: model label for a member it already settled, so this counts the label that
+#: *stands* — and a model key never double-counts one.
+#:
+#: **``certain`` names the property, not the symbol.** The predicate is
+#: ``ai_assistant.memory._agreement.agrees`` today; keying on the property means
+#: renaming it does not orphan a metric key. There is deliberately no
+#: ``relations_certain_adds``: §3's first clause admits exactly ``RESTATES`` from
+#: this rung, so such a key would be zero by construction — a different thing from
+#: ADR-0128's retained structural zeros, which decompose a set the same trace
+#: reports and whose going to zero on a date is itself an observation.
+RELATIONS_CERTAIN_RESTATES: Final = "relations_certain_restates"
+
+#: Offered pairs that ended with **no relation at all** — beyond the reconciler's
+#: bound, unlabelled by a model that declined, or labelled by a determination the
+#: writer discarded whole. Read beside ADR-0119 §9's stamped
+#: ``reconciler_max_conflicts`` to tell the first of those from the second.
+RELATIONS_UNLABELLED: Final = "relations_unlabelled"
+
+#: One literal key per ``ConflictRelation``, counting the pairs a **reconciler**
+#: labelled — the model rung and never the certain one. The shape and the reason
+#: are :data:`DECISION_METRICS`': an ``f"relations_model_{relation.value}"`` would
+#: be a key composed at runtime, and totality over the enum is asserted by test so
+#: a fourth relation added later fails loudly here instead of silently dropping a
+#: count.
+#:
+#: **What a positive count means, exactly.** It says the reconciler **reported** a
+#: model answer and returned this label for a pair, and that the label stood. That
+#: it equals what a provider said is a property of a *conforming* reconciler:
+#: ADR-0164 §3's coherence clause catches a report claiming *less* than the labels
+#: beside it, and no writer-side check can catch one claiming more.
+RELATION_METRICS: Final[Mapping[ConflictRelation, str]] = {
+    ConflictRelation.RESTATES: "relations_model_restates",
+    ConflictRelation.ADDS: "relations_model_adds",
+    ConflictRelation.CONTRADICTS: "relations_model_contradicts",
+}
+
+#: Every key ADR-0164 §3 names, in one place, so the emitter fills all ten with
+#: zeros without a second list to keep honest. A **tuple** rather than a set: the
+#: emitter seeds its metrics mapping from this, and a set would hand one crossing's
+#: trace a different key order from the next one's for no gain. Ten, distinct, and
+#: a test says both.
+RECONCILIATION_METRICS: Final[tuple[str, ...]] = (
+    RECONCILED,
+    RECONCILER_ABSENT,
+    RECONCILER_FAILED,
+    RECONCILER_UNCONSULTED,
+    RELATIONS_OFFERED,
+    RELATIONS_CERTAIN_RESTATES,
+    RELATIONS_UNLABELLED,
+    *RELATION_METRICS.values(),
+)
+
 
 #: The exception classes `memory`'s traced seams raise to mean **"no, and that is
 #: the right answer"**, as against "something broke" (§3, ADR-0111 §9).

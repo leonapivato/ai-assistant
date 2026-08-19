@@ -178,6 +178,7 @@ from ai_assistant.core.types import (
     Validity,
     band_of,
 )
+from ai_assistant.memory._reconciler import ReconcilerOutcome
 from ai_assistant.testing import FakeMemoryPolicy, FakeMemoryStore
 
 if TYPE_CHECKING:
@@ -200,13 +201,21 @@ class StubReconciler(Protocol):
     The suite never asserts what a reconciler answers — that is ADR-0159 §3's
     contract and is pinned per implementation. What it asserts is what a *writer*
     does with the relations it ends up holding.
+
+    **The two writers read a determination differently, and the shape here is the
+    one both accept.** Since ADR-0164 §3 ``MemoryIngestor`` reads an outcome report
+    beside the relations; the canonical fake predates it and reads a bare mapping,
+    and ADR-0164 §7 rules that neither the fake nor this suite is reached by that
+    ADR — the fake emits no trace and this suite asserts none. So the answer is
+    :class:`_Determination`, which *is* the mapping and *carries* the report, and
+    the divergence stays where it belongs: in what each writer chooses to read.
     """
 
     async def reconcile(
         self,
         proposal: MemoryUpdateProposal,
         conflicts: Sequence[MemoryRecord],
-    ) -> Mapping[str, ConflictRelation]:
+    ) -> _Determination:
         """Label what can be labelled, keyed by ``MemoryRecord.id``."""
         ...
 
@@ -744,6 +753,33 @@ _FOLD_MATRIX = [
 ]
 
 
+class _Determination(dict[str, ConflictRelation]):
+    """A determination in the one shape both writers under test can read.
+
+    It **is** the mapping, so the canonical fake reads it exactly as it read a
+    ``dict`` before ADR-0164; and it carries ``relations`` and ``outcomes``, so
+    ``MemoryIngestor`` reads it as the report ADR-0164 §3 requires. Reporting
+    ``ANSWERED`` is what makes the labels installable at that writer: §3 discards a
+    mapping whose report claims less than the labels beside it.
+
+    A double rather than a change to the canonical fake, because ADR-0164 §7 rules
+    that fake out of the lane in terms and its author does not hold that ground.
+    Nothing about it is asserted here; it exists so that one stub can drive two
+    writers whose seams have diverged, and the moment the fake grows a report of its
+    own this class collapses back into a plain mapping.
+    """
+
+    @property
+    def relations(self) -> Mapping[str, ConflictRelation]:
+        """The labels, which are this object (ADR-0164 §3)."""
+        return self
+
+    @property
+    def outcomes(self) -> frozenset[ReconcilerOutcome]:
+        """The one outcome a conforming reconciler reports beside labels."""
+        return frozenset({ReconcilerOutcome.ANSWERED})
+
+
 class _LabellingReconciler:
     """A stub answering with fixed ADR-0159 §1 relations, keyed by record id.
 
@@ -760,9 +796,9 @@ class _LabellingReconciler:
         self,
         proposal: MemoryUpdateProposal,
         conflicts: Sequence[MemoryRecord],
-    ) -> Mapping[str, ConflictRelation]:
+    ) -> _Determination:
         """Answer with this stub's fixed labels."""
-        return dict(self._labels)
+        return _Determination(self._labels)
 
 
 class _FoldToAbsentTargetPolicy:

@@ -35,6 +35,7 @@ from ai_assistant.memory import (
     ModelBackedReconciler,
     SqliteMemoryStore,
 )
+from ai_assistant.memory._reconciler import ReconcilerOutcome, ReconcilerReport
 from ai_assistant.models import HashingEmbedder
 from ai_assistant.testing import FakeMemoryPolicy, FakeModelProvider, FakeTraceSink
 
@@ -1865,7 +1866,7 @@ class _CountingReconciler:
 
     async def reconcile(
         self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
-    ) -> Mapping[str, ConflictRelation]:
+    ) -> ReconcilerReport:
         """Count the invocation, then answer as the real reconciler does."""
         self.calls += 1
         return await self._inner.reconcile(proposal, conflicts)
@@ -1877,7 +1878,12 @@ class _CountingReconciler:
 
 
 class _StubReconciler:
-    """Returns fixed labels, so a case can drive a relation it did not have to elicit."""
+    """Returns fixed labels, so a case can drive a relation it did not have to elicit.
+
+    It reports :attr:`~ai_assistant.memory._reconciler.ReconcilerOutcome.ANSWERED`,
+    which is what makes the labels installable at all under ADR-0164 §3: a stub
+    reporting anything else beside labels is the incoherence that clause discards.
+    """
 
     def __init__(self, labels: Mapping[str, ConflictRelation]) -> None:
         self._labels = dict(labels)
@@ -1885,10 +1891,12 @@ class _StubReconciler:
 
     async def reconcile(
         self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
-    ) -> Mapping[str, ConflictRelation]:
+    ) -> ReconcilerReport:
         """Answer with this stub's fixed labels."""
         self.calls += 1
-        return dict(self._labels)
+        return ReconcilerReport(
+            relations=dict(self._labels), outcomes=frozenset({ReconcilerOutcome.ANSWERED})
+        )
 
 
 def _reconciling(
@@ -2291,7 +2299,7 @@ async def test_a_reconciler_returning_something_unusable_refuses_no_ingest(
     class _Unusable:
         async def reconcile(
             self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
-        ) -> Mapping[str, ConflictRelation]:
+        ) -> ReconcilerReport:
             return answer  # type: ignore[return-value]  # deliberately non-conforming
 
     store = InMemoryMemoryStore()
@@ -2328,8 +2336,10 @@ async def test_a_reconciler_whose_mapping_raises_on_lookup_refuses_no_ingest() -
     class _Returning:
         async def reconcile(
             self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
-        ) -> Mapping[str, ConflictRelation]:
-            return _Hostile()
+        ) -> ReconcilerReport:
+            return ReconcilerReport(
+                relations=_Hostile(), outcomes=frozenset({ReconcilerOutcome.ANSWERED})
+            )
 
     store = InMemoryMemoryStore()
     await _plant_episodes(store, _EPISODE)
@@ -2360,7 +2370,7 @@ async def test_a_reconciler_that_raises_refuses_no_ingest() -> None:
     class _Broken:
         async def reconcile(
             self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
-        ) -> Mapping[str, ConflictRelation]:
+        ) -> ReconcilerReport:
             msg = "a non-conforming reconciler"
             raise RuntimeError(msg)
 

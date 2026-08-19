@@ -42,6 +42,8 @@ halves live in different places (§3).
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
+from enum import Enum
 from typing import TYPE_CHECKING, Final, Protocol
 
 from ai_assistant.core.types import ConflictRelation, Message, Role
@@ -114,6 +116,77 @@ Omit an entry you cannot decide; an omission is a valid answer and is better tha
 a guess."""
 
 
+class ReconcilerOutcome(Enum):
+    """Which of its three outcomes a reconciler that **ran** took (ADR-0164 §3).
+
+    The three are exhaustive over a reconciler that ran and a report names
+    **exactly one** of them. ``reconciler_absent`` is deliberately not among them:
+    no reconciler ran there, so no report was due, and the writer observes that
+    about itself.
+
+    - :attr:`ANSWERED` — the model rung completed and its answer was readable. The
+      relations beside it are the labels that determination produced.
+    - :attr:`FAILED` — a request was made and yielded no readable answer. The
+      writer's guard counts a *non-conforming* result under the same metric key
+      without any report saying so, which is why that key takes no view on whether
+      a request reached a provider (§6).
+    - :attr:`UNCONSULTED` — the reconciler completed without making a model request
+      at all: ADR-0159 §3's other half of the one-request clause, whatever left it
+      with nothing to ask about. It is **not** a claim that certainty settled the
+      set — an empty conflict set reaches here too, and dominates.
+
+    **A plain ``Enum`` and not a ``StrEnum``, deliberately.** ADR-0164 §3's
+    installing-on-identity clause is about exactly the hazard a ``StrEnum`` creates:
+    a bare string compares equal to a member *and hashes with it*, so a report
+    carrying ``"answered"`` would read as conforming. With a plain ``Enum`` it is
+    the non-member value §3 calls non-conforming, and the writer's identity test
+    says so.
+    """
+
+    ANSWERED = "answered"
+    FAILED = "failed"
+    UNCONSULTED = "unconsulted"
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcilerReport:
+    """What a reconciler returns: the relations, and the outcome it took.
+
+    ADR-0164 §3 requires the outcome to travel **beside** the relations rather than
+    be inferred from them, and the reason is a defect that reshaped that ADR:
+    :meth:`ModelBackedReconciler.reconcile` absorbs its own provider failures, so
+    from the mapping alone a failed determination and a silent model are the same
+    empty answer. Only this side of the seam knows which it was.
+
+    **It crosses no contract.** ADR-0159 §2 keeps this seam inside ``memory`` — "no
+    Protocol for it goes in ``core/protocols.py``" — so this type is
+    ``memory``-internal and ADR-0164 §2's no-``core``-change finding is unaffected.
+
+    **The report is read for exactly two purposes** (ADR-0164 §3): to fill the four
+    proposal metric keys, and to decide whether the model rung's labels are
+    installable. Nothing else reads it, no ruling reads it, and no ingest is
+    refused or delayed because of it — it reaches a ruling only the way any other
+    determination does, through the relations the writer therefore holds, which is
+    the one route ADR-0159 §6 admits.
+
+    Attributes:
+        relations: A relation for each member a determination was made about,
+            keyed by ``MemoryRecord.id``. A member absent from the mapping is
+            unlabelled, which is the absence of a statement rather than a fourth
+            relation.
+        outcomes: The outcome taken. A conforming reconciler names **exactly one**;
+            the field is a set rather than a single member because a report naming
+            *none* and one naming *more than one* are both shapes ADR-0164 §3 rules
+            on and both must be expressible for the writer's handling of them to be
+            testable. Either is non-conforming **in whole**: nothing the report
+            accompanies installs, and the proposal counts under
+            ``reconciler_failed``.
+    """
+
+    relations: Mapping[str, ConflictRelation]
+    outcomes: frozenset[ReconcilerOutcome]
+
+
 class ConflictReconciler(Protocol):
     """Determines ADR-0159 §1 relations for members of a conflict set.
 
@@ -144,23 +217,29 @@ class ConflictReconciler(Protocol):
        and which is never converted into an unlabelled member; a deadline
        ``models/`` issues against its own request is not that, and is classified
        into unlabelled like any other timeout.
+    6. **It reports which outcome it took**, beside the relations (ADR-0164 §3).
+       Exactly one of :class:`ReconcilerOutcome`'s three members, on every call.
+       This is what the seam *gained*; the five clauses above are ADR-0159 §3's and
+       are untouched by it.
     """
 
     async def reconcile(
         self,
         proposal: MemoryUpdateProposal,
         conflicts: Sequence[MemoryRecord],
-    ) -> Mapping[str, ConflictRelation]:
-        """Label what can be labelled, keyed by ``MemoryRecord.id``.
+    ) -> ReconcilerReport:
+        """Label what can be labelled, and say which outcome this call took.
 
         Args:
             proposal: The proposal being ingested.
             conflicts: The resolved conflict set, best-ranked first.
 
         Returns:
-            A relation for each member a determination was made about. A member
-            absent from the mapping is unlabelled, which is the absence of a
-            statement rather than a fourth relation.
+            The relations determined, beside the one :class:`ReconcilerOutcome`
+            this call took (ADR-0164 §3). The outcome is **reported** rather than
+            inferred: an implementation that absorbs its own provider failures —
+            as clause 5 obliges it to — is the only side of this seam that can tell
+            a failed determination from a model with nothing to say.
         """
         ...
 
@@ -238,7 +317,7 @@ class ModelBackedReconciler:
         self,
         proposal: MemoryUpdateProposal,
         conflicts: Sequence[MemoryRecord],
-    ) -> Mapping[str, ConflictRelation]:
+    ) -> ReconcilerReport:
         """Label the conflict set, spending at most one model request.
 
         Args:
@@ -246,8 +325,19 @@ class ModelBackedReconciler:
             conflicts: The resolved conflict set, best-ranked first.
 
         Returns:
-            The relations determined. Every member the first rung settled, plus
-            every member the model was consulted about and answered readably.
+            The relations determined — every member the first rung settled, plus
+            every member the model was consulted about and answered readably —
+            beside the outcome this call took (ADR-0164 §3). The three are reported
+            apart because they are *this object's* facts and nothing downstream can
+            recover them: :attr:`~ReconcilerOutcome.UNCONSULTED` where the guard
+            below never ran because no request was due,
+            :attr:`~ReconcilerOutcome.FAILED` where a request was made and yielded
+            no readable answer — the broad guard, and a reply carrying no readable
+            envelope, which are the same fact from two directions — and
+            :attr:`~ReconcilerOutcome.ANSWERED` where it was made and read. A
+            readable reply naming no relation is ``ANSWERED`` with an empty
+            mapping, **not** ``UNCONSULTED``: the request happened, and a report
+            denying it would make the trace say a prompt was never sent.
 
         Raises:
             asyncio.CancelledError: Only where one was delivered from **outside**
@@ -275,7 +365,10 @@ class ModelBackedReconciler:
             # §3's other half of the one-request clause: no request at all where
             # the rung settled every member this call would have asked about. Most
             # ingests take this path or never reach a reconciler in the first place.
-            return labelled
+            # An **empty** conflict set arrives here too, and on the observed corpus
+            # it dominates — which is why ADR-0164 §3 says this key is not a measure
+            # of certainty and must be read beside ``relations_offered``.
+            return _report(labelled, ReconcilerOutcome.UNCONSULTED)
         conversation = [
             Message(role=Role.SYSTEM, content=_SYSTEM_PROMPT + _ENVELOPE),
             Message(role=Role.USER, content=_render(record, consulted)),
@@ -284,17 +377,45 @@ class ModelBackedReconciler:
             reply = await self._model.complete(conversation, model=self._route)
             answered = _read(reply.content, {conflict.id for conflict in consulted})
         except Exception:
-            # Every failure mode collapses to the same outcome, deliberately: a
+            # Every failure mode collapses to the same *relations*, deliberately: a
             # model error, an exhausted deadline, an unroutable request, a reply
             # that does not decode. None of them is a reason to refuse a write
             # (§6), and distinguishing them here would only invite a rule written
             # over the distinction. Nothing is logged from this subsystem's write
-            # path; the observable consequence is the relations it does not hold.
-            return labelled
+            # path; the observable consequence is the relations it does not hold —
+            # and, since ADR-0164 §3, the outcome reported beside them, which is a
+            # count and never an input to a ruling.
+            return _report(labelled, ReconcilerOutcome.FAILED)
+        if answered is None:
+            # A request was made and came back unreadable: no envelope at all, or
+            # one carrying no `relations` list. ADR-0164 §3 counts that under
+            # `reconciler_failed` — "made a request that yielded no readable
+            # answer" — and it is exactly the state a merged empty mapping cannot
+            # be told apart from once it has crossed the seam.
+            return _report(labelled, ReconcilerOutcome.FAILED)
         # The model may not overturn the certain rung, and may not speak for a
         # member nobody asked about: `_read` has already dropped ids outside
         # `consulted`, and `consulted` already excludes everything `labelled` holds.
-        return labelled | answered
+        return _report(labelled | answered, ReconcilerOutcome.ANSWERED)
+
+
+def _report(
+    relations: Mapping[str, ConflictRelation], outcome: ReconcilerOutcome
+) -> ReconcilerReport:
+    """One outcome, in the set shape the seam carries (ADR-0164 §3).
+
+    A conforming reconciler names exactly one, and this is the only place this
+    module builds a report — so "exactly one" holds by construction here rather
+    than by three call sites agreeing.
+
+    Args:
+        relations: The labels this call determined.
+        outcome: The one outcome it took.
+
+    Returns:
+        The report to hand the writer.
+    """
+    return ReconcilerReport(relations=relations, outcomes=frozenset({outcome}))
 
 
 def _render(record: MemoryRecord, consulted: Sequence[MemoryRecord]) -> str:
@@ -321,19 +442,36 @@ def _render(record: MemoryRecord, consulted: Sequence[MemoryRecord]) -> str:
     )
 
 
-def _read(content: str, consulted: set[str]) -> dict[str, ConflictRelation]:
-    """The readable labels of one reply, restricted to ``consulted``.
+def _read(content: str, consulted: set[str]) -> dict[str, ConflictRelation] | None:
+    """The readable labels of one reply, restricted to ``consulted``, or ``None``.
 
     Total and silent: every malformed shape yields no entry for the member it
     concerned rather than an error, because ADR-0159 §3 forbids this path to raise
     and an unlabelled member is a ruled, safe outcome (§4, §6).
+
+    **``None`` and ``{}`` are different answers** (ADR-0164 §3). ``None`` says the
+    reply was not readable *at all* — no JSON envelope, or one carrying no
+    ``relations`` list — which the reconciler reports as
+    :attr:`~ReconcilerOutcome.FAILED`. ``{}`` says the envelope was read and named
+    no relation this call may install, which is a conforming "nothing to add" and
+    is reported as :attr:`~ReconcilerOutcome.ANSWERED`. Both yield the same
+    *relations*, so ADR-0159's rulings are untouched; only the count divides.
+    A **malformed entry inside a readable list** is dropped and leaves the reply
+    readable, because the request plainly reached a model that answered.
+
+    Args:
+        content: The reply's text.
+        consulted: The ids this call asked about; anything else is dropped unread.
+
+    Returns:
+        The labels read, or ``None`` where the reply was not readable.
     """
     envelope = _extract_object(content)
     if envelope is None:
-        return {}
+        return None
     entries = envelope.get("relations")
     if not isinstance(entries, list):
-        return {}
+        return None
     labels: dict[str, ConflictRelation] = {}
     for entry in entries:
         if not isinstance(entry, dict):

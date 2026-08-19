@@ -55,6 +55,7 @@ from ai_assistant.service.configuration import (
     OBSERVATION_BATCH_SIZE,
     OBSERVATION_MAX_PROPOSALS,
     OBSERVATION_SECONDS,
+    RECONCILER_MAX_CONFLICTS,
     RETENTION_PURGE_ARMED,
     RETENTION_PURGE_SECONDS,
     RETRIEVAL_SEARCH_LIMIT,
@@ -238,7 +239,32 @@ async def test_a_default_deployment_records_its_effective_figures(settings: Sett
         NOTIFICATION_RETENTION_SECONDS: timedelta(days=7).total_seconds(),
         NOTIFICATION_RECONSIDER_ARMED: True,
         NOTIFICATION_RECONSIDER_SECONDS: timedelta(minutes=5).total_seconds(),
+        RECONCILER_MAX_CONFLICTS: 3,
     }
+
+
+async def test_the_reconcilers_bound_is_stamped_and_its_route_is_not(tmp_path: Path) -> None:
+    """ADR-0164 §5, both halves, because the second is a refusal and not an omission.
+
+    The **bound** joins the list by ADR-0119 §9's own route — "a later change that
+    needs one adds it" — and it is what lets a reader of ADR-0164 §3's ten write-trace
+    keys tell "beyond the bound" from "the model declined to label"; without it the
+    stream cannot see the bound move. The **route** stays off it, on §9's third
+    clause: a model identifier "is recorded as its presence or absence, or not at
+    all", and the presence of a configured route is not the fact anyone wants —
+    whether a reconciler was *injected* is answered per crossing by
+    ``reconciler_absent``, from the writer.
+    """
+    tuned = Settings(
+        data_dir=tmp_path / "hub-data",
+        reconciler_max_conflicts=7,
+        reconciler_model="anthropic:claude-x",
+    )
+
+    metrics = dict((await _recorded(tuned)).metrics)
+
+    assert metrics[RECONCILER_MAX_CONFLICTS] == 7
+    assert not [key for key in metrics if "reconciler_model" in key]
 
 
 async def test_a_disabled_job_is_recorded_as_off_and_not_as_absent(tmp_path: Path) -> None:

@@ -50,6 +50,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.memory import traces
 from ai_assistant.memory._agreement import agrees
+from ai_assistant.memory._reconciler import ReconcilerOutcome
 
 # `memory`'s own policy module, for its floor predicate alone (ADR-0159 §2, §10).
 # The dependency is on a *predicate over the proposal*, not on the injected policy:
@@ -72,7 +73,7 @@ if TYPE_CHECKING:
         ReadCoverage,
         SourceReading,
     )
-    from ai_assistant.memory._reconciler import ConflictReconciler
+    from ai_assistant.memory._reconciler import ConflictReconciler, ReconcilerReport
 
 _DEFAULT_CONFLICT_THRESHOLD = 0.75
 
@@ -1416,11 +1417,82 @@ class _Applied:
 
 
 @dataclass(frozen=True, slots=True)
+class _Reconciliation:
+    """One proposal's relations beside what ADR-0164 §3 observed determining them.
+
+    The relations are what the ruling reads; everything else here is read by the
+    trace and by nothing at all besides. That separation is ADR-0164 §3's rule that
+    the reconciler's report "reaches a ruling only the way any other determination
+    of the relation set does — through the relations the writer therefore holds".
+
+    **Two units live here and they are different populations** (§3). This object is
+    one *proposal*; :attr:`offered`, :attr:`certain_restates` and
+    :attr:`model_labels` count *pairs*. A proposal clearing ADR-0159 §2's condition
+    with an empty conflict set is reconciled and offers no pair at all, which is the
+    common case and the reason ``reconciled`` is the wrong denominator for any
+    relation figure.
+
+    Attributes:
+        relations: The relations this writer holds for the proposal, or ``None``
+            where ADR-0159 §2's invocation condition excluded it — the value §8
+            distinguishes from an empty mapping, and the flag that decides whether
+            this proposal was ``reconciled`` at all.
+        qualifier: The metric key this proposal counts under beside ``reconciled``,
+            or ``None`` where its model rung answered. The three qualifier keys are
+            mutually exclusive by construction: one field can hold one of them.
+        offered: Every pair the determination ranged over — this proposal against
+            each member of its resolved conflict set.
+        certain_restates: Those the certain predicate labelled, whatever a
+            reconciler returned for the same pair.
+        model_labels: The labels a reconciler supplied **that stand**, one entry per
+            pair. Empty wherever nothing installed, which is every path but an
+            answered one.
+    """
+
+    relations: dict[str, ConflictRelation] | None
+    qualifier: str | None = None
+    offered: int = 0
+    certain_restates: int = 0
+    model_labels: tuple[ConflictRelation, ...] = ()
+
+    def observe(self, counts: dict[str, int]) -> None:
+        """Add this proposal's ten quantities into a crossing's counts.
+
+        Called once per proposal of the crossing, so the keys accumulate across a
+        reading exactly as the ``decisions_*`` keys beside them do. A proposal
+        ADR-0159 §2 excluded contributes **zero to each of the ten** and is counted
+        by ``proposals`` alone — it is not skipped because it went unobserved, but
+        because what it observed was nothing.
+
+        Args:
+            counts: The crossing's ten counts, already seeded with a zero apiece;
+                mutated in place.
+        """
+        if self.relations is None:
+            return
+        counts[traces.RECONCILED] += 1
+        if self.qualifier is not None:
+            counts[self.qualifier] += 1
+        counts[traces.RELATIONS_OFFERED] += self.offered
+        counts[traces.RELATIONS_CERTAIN_RESTATES] += self.certain_restates
+        for relation in self.model_labels:
+            counts[traces.RELATION_METRICS[relation]] += 1
+        # The five label keys partition ``relations_offered`` by construction: what
+        # neither rung labelled is the remainder, and deriving it rather than
+        # counting it separately is what makes the sum an identity instead of a
+        # coincidence two counters have to keep.
+        counts[traces.RELATIONS_UNLABELLED] += (
+            self.offered - self.certain_restates - len(self.model_labels)
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class _Ingested:
     """One proposal's public result beside what the trace needs and it lacks."""
 
     result: MemoryIngestResult
-    superseded: tuple[str, ...] = ()
+    superseded: tuple[str, ...]
+    reconciliation: _Reconciliation
 
 
 @dataclass(frozen=True, slots=True)
@@ -1457,6 +1529,65 @@ _WRITE_DISPOSITIONS: Final[Mapping[MemoryDecisionKind, TraceRecordSet | None]] =
 }
 
 
+def _sole_outcome(report: ReconcilerReport) -> ReconcilerOutcome | None:
+    """The one outcome a report names, or ``None`` where it names anything else.
+
+    ADR-0164 §3: a report from a reconciler that **ran** names exactly one of
+    :class:`~ai_assistant.memory._reconciler.ReconcilerOutcome`'s three members. One
+    that is missing where it was due, names none of them, or names more than one is
+    non-conforming *in whole* — the mapping it accompanies installs nothing and the
+    proposal counts under ``reconciler_failed``. A report naming more than one is no
+    more usable for carrying a valid outcome among them, because nothing says which
+    of them to read, and that is what stops two implementations reporting the same
+    unusable report differently.
+
+    **Membership is tested with ``is``**, the same test ADR-0164 §3 puts on the
+    relation values, so a value merely *equal* to a member can never read as
+    conforming.
+
+    Args:
+        report: What the reconciler returned. Read defensively: this runs inside the
+            caller's guard, and a non-conforming reconciler can put anything here.
+
+    Returns:
+        The sole outcome named, or ``None``.
+    """
+    reported = report.outcomes
+    named = [member for member in ReconcilerOutcome if any(value is member for value in reported)]
+    if len(named) != 1 or len(reported) != 1:
+        return None
+    return named[0]
+
+
+def _installable(
+    supplied: Mapping[str, ConflictRelation],
+) -> dict[str, ConflictRelation] | None:
+    """The mapping's labels, or ``None`` where **any** value is not a member.
+
+    ADR-0164 §3's whole-mapping clause. It is the whole mapping and not the offending
+    entry because partial trust is what would make the arithmetic lie: a mapping
+    carrying one valid ``ADDS`` beside one bare ``"contradicts"`` could install the
+    valid label and count its proposal ``reconciler_failed``, and then one trace
+    would say a model label stood *and* that no model rung answered on that
+    proposal. It is also the shape ``_relations_for``'s existing guard already has —
+    ``except Exception: return own`` discards the entire determination, not the
+    member that failed.
+
+    Args:
+        supplied: The values read for the members this crossing reads a mapping for.
+
+    Returns:
+        The labels to install, or ``None`` where the mapping is non-conforming.
+    """
+    installed: dict[str, ConflictRelation] = {}
+    for record_id, value in supplied.items():
+        member = next((member for member in ConflictRelation if value is member), None)
+        if member is None:
+            return None
+        installed[record_id] = member
+    return installed
+
+
 def _reconciliation_reading(reconciled: _Reconciled) -> traces.Reading:
     """Read one completed crossing of the write seam into its trace (ADR-0119 §8).
 
@@ -1467,13 +1598,23 @@ def _reconciliation_reading(reconciled: _Reconciled) -> traces.Reading:
     "unobserved". The fault path omits them all, which is the same rule from the
     other side.
 
+    **ADR-0164 §3's ten reconciliation keys ride the same statement**, and that is
+    the whole of what binds them: they are present on exactly the crossings the six
+    ``decisions_*`` keys are present on, absent on exactly the ones they are absent
+    on, and no crossing can carry one set without the other. So a crossing whose
+    proposals ADR-0159 §2 all excluded emits ten zeros — the invocation condition
+    *was* evaluated, on every proposal — where a crossing that faulted before any
+    reading was taken emits none of them, and a reader can tell "the reconciler was
+    never reached" from "the trace never got that far".
+
     Args:
         reconciled: What the crossing produced.
 
     Returns:
         The reading the emitter turns into a trace.
     """
-    metrics: dict[str, int | float | bool] = dict.fromkeys(traces.DECISION_METRICS.values(), 0)
+    counts: dict[str, int] = dict.fromkeys(traces.DECISION_METRICS.values(), 0)
+    counts.update(dict.fromkeys(traces.RECONCILIATION_METRICS, 0))
     records: dict[TraceRecordSet, list[str]] = {
         TraceRecordSet.WRITTEN: [],
         TraceRecordSet.REINFORCED: [],
@@ -1481,11 +1622,13 @@ def _reconciliation_reading(reconciled: _Reconciled) -> traces.Reading:
     }
     for one in reconciled.ingested:
         kind = one.result.decision.kind
-        metrics[traces.DECISION_METRICS[kind]] += 1
+        counts[traces.DECISION_METRICS[kind]] += 1
+        one.reconciliation.observe(counts)
         disposition = _WRITE_DISPOSITIONS[kind]
         if disposition is not None and one.result.record_id is not None:
             records[disposition].append(one.result.record_id)
         records[TraceRecordSet.SUPERSEDED].extend(one.superseded)
+    metrics: dict[str, int | float | bool] = dict(counts)
     if reconciled.retired is not None:
         metrics[traces.CLOSED] = len(reconciled.retired)
         records[TraceRecordSet.RETIRED] = list(reconciled.retired)
@@ -2083,7 +2226,8 @@ class MemoryIngestor:
         # crosses the policy seam is a read-only view over a **copy**, so nothing
         # the ruling does with what it was handed can reach the mapping
         # `_retirement_set` rules from (ADR-0159 §8).
-        relations = await self._relations_for(ruled, conflicts)
+        determined = await self._relations_for(ruled, conflicts)
+        relations = determined.relations
         decision = await self._policy.decide(
             ruled,
             conflicts=conflicts,
@@ -2122,19 +2266,27 @@ class MemoryIngestor:
                 decision=decision, record_id=applied.record_id, conflicts=resolved
             ),
             superseded=applied.superseded,
+            # ADR-0164 §4: what the trace counts is what **this** object held, never
+            # the read-only view handed to ``decide`` above nor anything the policy
+            # returned. An injected policy can narrow a ``Mapping`` at run time, and
+            # an instrument a policy can move is measuring the policy; the view is
+            # lossy even when the policy is honest, since it is ``None`` in the
+            # no-reconciler deployment while this writer holds the certain rung's
+            # labels.
+            reconciliation=determined,
         )
 
     async def _relations_for(
         self, proposal: MemoryUpdateProposal, conflicts: Sequence[MemoryRecord]
-    ) -> dict[str, ConflictRelation] | None:
-        """The relations **this writer** holds for one ingest, or ``None``.
+    ) -> _Reconciliation:
+        """The relations **this writer** holds for one ingest, and what it observed.
 
-        ``None`` means no relation was determined at all — ADR-0159 §2's condition
-        excluded this ingest — and it is the value ADR-0159 §8 distinguishes from an
-        empty mapping, which says something ran and labelled nothing. Both rule
-        identically under §4; only one of them is a fact a ``reason`` or a later
-        trace can report, and erasing the distinction at the seam would make it
-        unrecoverable.
+        A ``relations`` of ``None`` means no relation was determined at all —
+        ADR-0159 §2's condition excluded this ingest — and it is the value ADR-0159
+        §8 distinguishes from an empty mapping, which says something ran and
+        labelled nothing. Both rule identically under §4; only one of them is a fact
+        a ``reason`` or a later trace can report, and erasing the distinction at the
+        seam would make it unrecoverable.
 
         Two sources, in one order:
 
@@ -2157,12 +2309,40 @@ class MemoryIngestor:
         reconciler was unavailable, other than by the relations it therefore does
         not hold" — against a non-conforming one as well as an absent one.
 
+        **Two clauses of ADR-0164 §3 extend that absorption from shapes to values
+        and to combinations, and neither moves a ruling.** A returned mapping
+        supplying, for a member this writer reads it for, a value that **is** not a
+        ``ConflictRelation`` member is non-conforming *in whole*: nothing from it
+        installs. That is not defensive typing — ``DefaultMemoryPolicy`` selects on
+        ``is``, so a value merely *equal* to a member (``ConflictRelation`` is a
+        ``StrEnum``, so the bare string ``"contradicts"`` compares equal to
+        ``CONTRADICTS`` and hashes with it) is unlabelled to the arm today while a
+        mapping keyed by the enum would find it and count it, and the trace would
+        report a model contradiction the arm never saw. And a report claiming *less*
+        than the labels beside it — ``unconsulted`` or ``failed`` arriving with model
+        labels — is incoherent, so those labels are discarded too. Both discard the
+        mapping **whole**, which is the shape the guard below already has: partial
+        trust would let one trace say a model label stood *and*, through the answered
+        arithmetic, that no model rung answered on that proposal.
+
+        **The members a returned mapping is read for are this crossing's resolved
+        conflict set less those the certain rung labelled, and nothing wider.** An id
+        the mapping invented is dropped unread (ADR-0159 §8) and a value for a member
+        the certain rung labelled is discarded unread (§3), so neither can make a
+        mapping non-conforming. A **beyond-bound** entry is read like any other: this
+        writer holds no consulted set to except it with, and a mapping still carrying
+        one is already the output of a reconciler ADR-0159 §3 obliged to discard it.
+        Whether a *well-formed* beyond-bound label should also be refused is
+        ADR-0159's enforcement question, which ADR-0164 §9 declines and #1225 records.
+
         Args:
             proposal: The proposal, carrying this ingest's resolved conflict ids.
             conflicts: The resolved conflict set, best-ranked first.
 
         Returns:
-            The relations determined, or ``None`` where none may be.
+            The relations determined — ``None`` where none may be — beside the
+            quantities ADR-0164 §3 counts. Nothing here reads the observation back:
+            it travels to the trace and to nowhere else.
 
         Raises:
             asyncio.CancelledError: Where one was delivered from **outside** this
@@ -2176,32 +2356,86 @@ class MemoryIngestor:
                 — and is classified into unlabelled like any other timeout.
         """
         if not _may_reconcile(proposal, conflicts):
-            return None
+            return _Reconciliation(relations=None)
         record = proposal.proposed
         own = {
             conflict.id: ConflictRelation.RESTATES
             for conflict in conflicts
             if agrees(conflict, record)
         }
+        offered = len(conflicts)
+        certain = len(own)
+
+        def reading(
+            relations: dict[str, ConflictRelation],
+            *,
+            qualifier: str | None = None,
+            model_labels: tuple[ConflictRelation, ...] = (),
+        ) -> _Reconciliation:
+            """This ingest's pair counts, whichever arm below produced the labels.
+
+            Args:
+                relations: What this writer ends up holding.
+                qualifier: The metric key the proposal counts under, if any.
+                model_labels: The reconciler's labels that stand.
+
+            Returns:
+                The determination and its reading.
+            """
+            return _Reconciliation(
+                relations=relations,
+                qualifier=qualifier,
+                offered=offered,
+                certain_restates=certain,
+                model_labels=model_labels,
+            )
+
         if self._reconciler is None:
-            return own
+            # ADR-0159 §6's ratified floor, and the one qualifier this writer
+            # observes about *itself*. It counts under ``reconciler_absent`` alone
+            # and never under ``reconciler_unconsulted``, which is a statement about
+            # a reconciler that ran.
+            return reading(own, qualifier=traces.RECONCILER_ABSENT)
+        failed = reading(own, qualifier=traces.RECONCILER_FAILED)
+        outcome: ReconcilerOutcome | None = None
+        labelled: dict[str, ConflictRelation] | None = None
         try:
-            determined = await self._reconciler.reconcile(proposal, conflicts)
+            report = await self._reconciler.reconcile(proposal, conflicts)
             # **Read inside the guard, not after it.** A reconciler that *returns*
             # something unusable — ``None``, a non-mapping, a mapping whose lookup
-            # raises — is as non-conforming as one that raises, and reading it
-            # outside would let it refuse the ingest through a ``TypeError``
-            # instead of degrading. ADR-0159 §6 admits no such route: "no ingest is
-            # refused or ruled differently because a reconciler was unavailable,
-            # other than by the relations it therefore does not hold."
-            labelled = {
-                conflict.id: determined[conflict.id]
-                for conflict in conflicts
-                if conflict.id not in own and conflict.id in determined
-            }
+            # raises, a report naming no outcome — is as non-conforming as one that
+            # raises, and reading it outside would let it refuse the ingest through
+            # a ``TypeError`` instead of degrading. ADR-0159 §6 admits no such
+            # route: "no ingest is refused or ruled differently because a
+            # reconciler was unavailable, other than by the relations it therefore
+            # does not hold."
+            outcome = _sole_outcome(report)
+            determined = report.relations
+            labelled = _installable(
+                {
+                    conflict.id: determined[conflict.id]
+                    for conflict in conflicts
+                    if conflict.id not in own and conflict.id in determined
+                }
+            )
+        # A raise leaves both readings at ``None``, which is the same answer the
+        # non-conforming *returns* below reach — ADR-0159 §3 rules the two
+        # identically, and one arm here is what keeps them from drifting.
         except Exception:
-            return own
-        return labelled | own
+            labelled = None
+        if labelled is None:
+            return failed
+        if outcome is ReconcilerOutcome.ANSWERED:
+            return reading(labelled | own, model_labels=tuple(labelled.values()))
+        if outcome is ReconcilerOutcome.UNCONSULTED and not labelled:
+            return reading(own, qualifier=traces.RECONCILER_UNCONSULTED)
+        # What is left is every incoherence ADR-0164 §3 rules on at once: a report
+        # of ``unconsulted`` or ``failed`` arriving **with** labels, a report of
+        # ``failed`` arriving without them, and a report naming none of the three or
+        # more than one of them. All discard the mapping whole and count here,
+        # because a reader who could not tell them apart from a broken determination
+        # would have no conclusion to draw from either.
+        return failed
 
     async def _require_resolvable_evidence(self, record: MemoryRecord) -> None:
         """Refuse a ``DERIVED`` proposal citing a record this store does not hold.
