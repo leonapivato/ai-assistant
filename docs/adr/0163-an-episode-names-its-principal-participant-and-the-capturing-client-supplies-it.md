@@ -199,8 +199,8 @@ Caroline" to the text. That puts a structural claim inside the region a model is
 entitled to read as the episode's own words, which is exactly what ADR-0098 §2's
 non-forgeability rule exists to prevent, and it makes the claim invisible to every
 reader that is not a model. A field can be rendered non-forgeably (§5), can be
-absent in a way that means something (§4), and can be forbidden to influence
-anything else (§6). A convention can do none of the three.
+absent in a way whose reading is ruled rather than guessed (§4), and can be
+forbidden to influence anything else (§6). A convention can do none of the three.
 
 **`principal`, not `participants[0]` and not `about_person`,** for the two reasons
 §Context states as facts about the tree. The name is chosen for the question it
@@ -291,8 +291,8 @@ and no user act to point at when it is wrong.
 **The third clause keeps the field honest in the common case.** Every episode in
 production today is a turn, and stamping a constant marker on all of them would put
 noise in the field for no reader — the same argument the recorder already makes for
-`participants`, applied to the field beside it. §4 is what makes the omission
-correct rather than merely economical.
+`participants`, applied to the field beside it. §4's third clause is what makes
+the omission correct rather than merely economical.
 
 **The seam is a keyword on capture, and it is not contract surface.**
 `ConversationLifecycle.capture` grows an optional keyword-only parameter defaulting
@@ -316,28 +316,47 @@ harness that captures those episodes without a marker leaves the ADR untested. �
 carries the pre-registration obligation that goes with changing a measured
 pipeline.
 
-### 4. Absence is the structural reading, never "unknown"
+### 4. Absence says no marker was stated, and says nothing else
 
-> **Normative.** `principal` absent means no marker was stated, and is read as
-> ADR-0074 §3's structural premise: the episode records an exchange whose user half
-> is the owner. It is not "unknown" and not "no user present".
+> **Normative.** `principal` absent means no marker was stated. It is not
+> "unknown"; it is not an assertion that the owner is among the speakers this
+> episode records; and it is not an assertion that they are not.
 
 > **Normative.** No reader, renderer, store, policy or surface may withhold,
 > downrank, exclude, or degrade an episode on the ground that it states no
-> `principal`.
+> `principal`, nor infer a principal for one (§3).
+
+> **Normative.** Where an episode is a conversation turn (ADR-0074 §3), an absent
+> marker leaves that producer's structural premise exactly as it stands: the
+> exchange's user half is the owner. That reading is a fact about the capture path
+> and about the shape of what it records, not a meaning of this field, and no
+> reader may extend it to an episode from another producer.
+
+**The third clause is separated from the first deliberately, and the separation is
+the whole of this section.** The tempting shorter rule — *absent means the episode
+is an owner↔assistant exchange* — is false about the kind, and ADR-0074 §3 says so
+in the same breath it establishes the premise: "**the entailment runs one way:
+every turn is an episode, and not every episode is a turn**", and it names a
+calendar event and "a captured moment with a timestamp and no dialogue around it"
+as ordinary instances. Neither has a speaker at all, so neither can carry a marker,
+and a rule reading their absence as a two-party exchange would attribute a
+conversation to a record of a meeting invitation. The premise belongs to the
+producer that satisfies it; the field merely declines to restate it.
 
 **Two states, never three** — the shape ADR-0100 §1 fixed for `about_person`, taken
-here for the same reason. A third state would have to be produced by someone, and §3
-forbids the only component that could produce it from inferring anything.
+here for the same reason. A third state ("unknown") would have to be produced by
+someone, and §3 forbids the only component that could produce it from inferring
+anything; what a reader needs instead is the first clause's refusal to read
+anything into the silence.
 
 **Backwards compatibility is free, and the store is why.** `SqliteMemoryStore`
 records that "**The blob stays the truth and the column is a derived index** …
 every read decodes the record from ``data``", so a record written before this field
-existed decodes with the default and states no marker — which §4's first clause
-makes exactly the right answer for it, since every such record *is* a turn. **No
-migration, no backfill and no column are owed**, and none may be added: `about_person`
-has a nullable column because ADR-0101 gives it a predicate to sit under, and §6
-below gives `principal` none.
+existed decodes with the default and states no marker — which is exactly right for
+it, since every episode written before this field existed is a turn (§3) and the
+third clause reads it as one. **No migration, no backfill and no column are owed**,
+and none may be added: `about_person` has a nullable column because ADR-0101 gives
+it a predicate to sit under, and §6 below gives `principal` none.
 
 ### 5. It travels with the content, to a model, non-forgeably
 
@@ -486,12 +505,12 @@ or `about_person` from the marker (§6), or change the observer's utility bar (�
 - **The sensor submission surface** by which a spoke delivers a captured episode to
   the hub. ADR-0094 §10 defers it and this ADR does not open it; §3's seam is the
   existing capture path, which is why a docs-only decision is testable today.
-- **An episode in which the owner is not a participant at all** — a room the user
-  is not in. The two states §4 fixes do not encode it, and that is a deferral rather
-  than an oversight: no producer this ADR admits can deliver such an episode, §3
-  forbids inferring a marker for one, and the condition that fires the question is
-  the sensor submission surface landing. Answering it now would be ratifying a third
-  state on the strength of no producer's need.
+- **How an episode says positively that the owner is *not* among its speakers** — a
+  room the user is not in. §4's first clause makes absence say nothing either way,
+  so no such episode is misdescribed today; what is deferred is a way to state the
+  fact affirmatively, and the condition that fires it is a producer that can tell
+  the difference and needs the distinction acted on. Answering it now would be
+  ratifying a third state on the strength of no producer's need.
 - **Whether user-facing surfaces render the marker** (§5's third clause leaves them
   free), and whether more than one participant may be marked.
 
