@@ -625,14 +625,21 @@ The lane owes:
   `unconsulted` and a report of `failed`, each arriving with a model label, discard
   that label, leave the member unlabelled and count the proposal under
   `reconciler_failed` — the two combinations that would otherwise let one trace deny
-  itself; that a report from a reconciler that **ran** failing to name exactly one of
-  its three outcomes — missing, carrying a value that is none of them, or naming more
-  than one, the last pinned on a report carrying **both** an answered model and
-  `reconciler_unconsulted` beside valid labels — retains the certain rung's labels,
-  installs nothing from the mapping beside it however well formed that mapping is,
-  leaves the remaining offered pairs under `relations_unlabelled` and counts the
-  proposal under `reconciler_failed`, which are the cases on which two implementations
-  would otherwise report the same input differently; that each of the three
+  itself; that **every** report from a reconciler that **ran** failing to name exactly
+  one of its three outcomes counts its proposal under `reconciler_failed` with every
+  model key at zero, retaining the certain rung's labels and leaving the remaining
+  offered pairs under `relations_unlabelled`, **whatever accompanies that report** — an
+  empty mapping, a well-formed one, one carrying a non-member value, or one of the
+  shapes `_relations_for`'s guard absorbs — which is the **rule** the cases here
+  instance rather than a list of cells to be completed, so a report shape paired with a
+  mapping shape named nowhere in this list is covered by it and needs no case of its
+  own; that its instances pinned here are a report **missing** where one was due, one
+  carrying a value that is none of the three, and one **naming more than one** — the
+  last on a report carrying **both** an answered model and `reconciler_unconsulted`
+  beside valid labels — each of which must also be pinned **beside an empty mapping**,
+  since "nothing installs" is vacuous where there is nothing to install and
+  `reconciler_failed` at one is then the only observable an implementation validating
+  the report only when labels are present would fail; that each of the three
   **non-raising** shapes
   `MemoryIngestor._relations_for`'s guard already absorbs — a reconciler returning
   `None`, one returning a non-mapping, and one returning a mapping whose lookup
