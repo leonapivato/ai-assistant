@@ -34,6 +34,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     Attestation,
     BeliefBand,
+    ConflictRelation,
     MemoryDecisionKind,
     MemoryKind,
     MemorySource,
@@ -972,6 +973,34 @@ def test_every_decision_kind_has_a_declared_disposition() -> None:
     assert set(_WRITE_DISPOSITIONS) == set(MemoryDecisionKind)
 
 
+def test_every_conflict_relation_has_a_literal_model_metric_key() -> None:
+    """ADR-0164 §3's totality, asserted the way ``DECISION_METRICS``' is.
+
+    A fourth relation is possible in a later ADR; it should break a test rather
+    than vanish, and the construction that would guarantee totality —
+    ``f"relations_model_{relation.value}"`` — is the runtime-composed key ADR-0119
+    §2 keeps out. There is deliberately **no** certain-rung counterpart per member:
+    ADR-0159 §3 admits exactly ``RESTATES`` from that rung, so a
+    ``relations_certain_adds`` would be zero by construction.
+    """
+    assert set(traces.RELATION_METRICS) == set(ConflictRelation)
+    assert len(set(traces.RELATION_METRICS.values())) == len(ConflictRelation)
+
+
+def test_the_reconciliation_roster_is_the_ten_keys_and_no_others() -> None:
+    """ADR-0164 §3 names ten, and the emitter seeds every crossing from this roster.
+
+    A key on the roster the emitter never fills would be a zero nobody observed; a
+    key it fills that is off the roster would be absent on the crossings where it
+    reached no count, which is the substitution §3 forbids. Both failures are one
+    list drifting from the section that names it, so the list is counted here.
+    """
+    assert len(traces.RECONCILIATION_METRICS) == 10
+    assert len(set(traces.RECONCILIATION_METRICS)) == 10
+    assert set(traces.RELATION_METRICS.values()) <= set(traces.RECONCILIATION_METRICS)
+    assert not set(traces.RECONCILIATION_METRICS) & set(traces.DECISION_METRICS.values())
+
+
 @pytest.mark.parametrize(
     "label",
     [
@@ -991,6 +1020,7 @@ def test_every_decision_kind_has_a_declared_disposition() -> None:
         traces.PROPOSALS,
         traces.COVERAGE_DECLARED,
         traces.CLOSED,
+        *traces.RECONCILIATION_METRICS,
     ],
 )
 def test_every_literal_this_module_writes_is_a_trace_label(label: str) -> None:
