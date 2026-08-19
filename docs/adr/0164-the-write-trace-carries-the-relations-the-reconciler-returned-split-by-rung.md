@@ -209,6 +209,18 @@ a contract ADR with an architecture lens; it is not one.
 > **with** model labels is incoherent: the labels are discarded, those members stay
 > unlabelled, and the proposal counts under `reconciler_failed`.
 
+> **Normative.** Where a reconciler ran, its report names **exactly one** of the three
+> outcomes it can take: the model answered, `reconciler_failed`, or
+> `reconciler_unconsulted`. (`reconciler_absent` is not among them — no reconciler ran,
+> so no report was due.) A report that names none of the three, or that is missing
+> where one was due, is itself **non-conforming in whole**: the mapping it accompanies
+> installs nothing, every member it would have labelled stays unlabelled, and the
+> proposal counts under `reconciler_failed`. That is the same all-or-nothing shape this
+> section takes for a non-conforming mapping, and it is what stops two implementations
+> reporting the same unusable report differently. How the report is **represented**
+> across the seam is not decided here: it is `memory`-internal, where ADR-0159 §2 keeps
+> it, and a closed type is one way to meet this clause rather than a requirement of it.
+
 > **Normative.** Six keys count **pairs** — one proposal of the crossing against one
 > member of its resolved conflict set. `relations_offered` counts every pair the
 > determination ranged over. `relations_certain_restates` counts those the certain
@@ -306,7 +318,10 @@ already has: its guard's `except Exception: return own` discards the entire
 `determined`, not the member that failed. The rejected alternative is to keep the valid
 labels and add an eleventh key for a partly malformed mapping; it buys a distinction
 nobody has asked for, and it leaves `answered` needing a footnote in every report that
-states it.
+states it. The same answer is given to the later proposal to split `reconciler_failed`
+itself into an attempted-request key and a pre-request one: no key here reads that
+difference, so it does not earn a key, and the operator bullet in `Consequences` stops
+asserting the difference instead.
 
 **A beyond-bound entry marks a reconciler that already failed to conform, and the clause
 above competes with no rule of ADR-0159's.** ADR-0159 §3's discard binds the
@@ -596,7 +611,13 @@ The lane owes:
   `unconsulted` and a report of `failed`, each arriving with a model label, discard
   that label, leave the member unlabelled and count the proposal under
   `reconciler_failed` — the two combinations that would otherwise let one trace deny
-  itself; that each of the three **non-raising** shapes
+  itself; that a report from a reconciler that **ran** naming none of its three
+  outcomes — missing, or carrying a value that is none of them — retains the certain
+  rung's labels, installs nothing from the mapping beside it however well formed that
+  mapping is, leaves the remaining offered pairs under `relations_unlabelled` and
+  counts the proposal under `reconciler_failed`, which is the case on which two
+  implementations would otherwise report the same input differently; that each of the
+  three **non-raising** shapes
   `MemoryIngestor._relations_for`'s guard already absorbs — a reconciler returning
   `None`, one returning a non-mapping, and one returning a mapping whose lookup
   raises — retains the certain rung's labels, leaves the remaining offered pairs under
@@ -778,12 +799,15 @@ act differently, or read one of its clauses more widely than it now holds?
   those three qualifiers yields that same zero with **no model answer behind it at
   all**, so where they account for the crossing the zero is not evidence about the
   model and the prompt is the wrong place to look. Read the qualifier keys first, and
-  read the three apart, because they do not all say the same thing about the request:
+  read the three apart, because they do not all say the same thing.
   `reconciler_absent` and `reconciler_unconsulted` mean **no request was made**, so an
-  operator who skips them will investigate a prompt that was never sent;
-  `reconciler_failed` means a request **was** attempted and yielded nothing usable
-  (§3), so it points at the provider, the route, or the reconciler's conformance, and
-  not at the prompt's wording either.
+  operator who skips them will investigate a prompt that was never sent.
+  `reconciler_failed` says only that the **determination was unusable**, and takes no
+  view on whether a request was made: §3 counts under it both a request that yielded no
+  readable answer and a non-conforming reconciler the writer's guard absorbed, and the
+  second of those need never have reached a provider. So this key sends an operator to
+  the reconciler — its conformance, and its own logs — before the provider or the
+  route, because the trace does not say which of the two arms produced the count.
 - **The floor deployment becomes visible for the first time.** `reconciler_absent`,
   `reconciler_failed` and `reconciler_unconsulted` distinguish a hub running ADR-0159
   §6's ratified floor, a hub whose provider is failing, a hub whose model is never
