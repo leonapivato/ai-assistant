@@ -2,21 +2,33 @@
 
 - Status: Proposed
 - Date: 2026-08-19
-- **Not a substantive contract ADR; contract-surface for the review set, and the
-  two are different questions.** [ADR-0015](0015-simplify-the-agent-workflow.md) §5
-  defines a substantive contract ADR as one "adding or changing a Protocol or a
-  `core/` type crossing subsystem boundaries", and nothing below adds or changes
-  either — no `Observer` member moves, no field of `core/types.py` moves, and the
-  implementing lane owes no triad. What is true is narrower: this ADR decides what
-  the `Observer` contract's shipped implementation may propose, which is the
-  behaviour [ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) §2
-  ratified for it, and it re-values two composition-root cardinality controls. So
-  the required set is adversarial **and** architecture, on
-  `CONTRIBUTING.md` → "Stop when the required reviews are green"'s ground that a
-  change is contract-surface "when it is the ADR deciding that surface, even though
-  such a PR is prose only". Docs only, and **no code changes with it**: the
-  implementation is its own lane (#1210's 2.4), which needs this text as its
-  authority.
+- **A substantive contract ADR, and the ground is narrow and named.**
+  [ADR-0015](0015-simplify-the-agent-workflow.md) §5 defines one as "adding or
+  changing a Protocol or a `core/` type crossing subsystem boundaries". No `Observer`
+  member, no signature and no field of `core/types.py` moves — but **a documented
+  behavioural obligation of `Observer.observe` in `src/ai_assistant/core/protocols.py`
+  does**: the bar paragraph beginning *"The bar for proposing at all is durable
+  usefulness, not interestingness"*, which is the same sentence §1 replaces in
+  [ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) §2 and which that
+  module states as the producer-side obligation every conforming `Observer` carries.
+  That module is where this corpus writes a Protocol's obligations and where
+  [ADR-0100](0100-a-belief-states-whom-it-is-about-and-the-label-resolves-to-nothing.md)
+  §5 put its own producer-side refusal, so changing a clause of it is changing the
+  Protocol. **An earlier draft of this bullet declared the opposite and was corrected
+  on review**, which is recorded because under-declaring is the error ADR-0015 §5
+  exists to prevent: a lane editing `core/protocols.py` under golden rule 5 needs a
+  ratified ADR behind it, and this is that ADR.
+
+  **What follows from the declaration, and what does not.** Golden rule 5 and
+  ADR-0015 §5's land-ahead rule govern: this ADR is its own PR, ratified and merged
+  before anything implements against it, which is the shape this PR already has.
+  **No triad is owed** — `CONTRIBUTING.md` → "Adding a Protocol" binds a *new*
+  Protocol, and `Observer`, its conformance suite and its canonical fake all exist;
+  §13 names the edits to each. The required review set is adversarial **and**
+  architecture either way, which is what `CONTRIBUTING.md` → "Contract ADRs land
+  before their implementation" asks of an ADR PR and what "Stop when the required
+  reviews are green" asks of a change that decides a contract surface. Docs only, and
+  **no code changes with it**: the implementation is its own lane (#1210's 2.4).
 - **Partially supersedes on ratification:**
   [ADR-0077](0077-the-observer-proposes-beliefs-from-episodes.md) §2, in two named
   scopes and no others.
@@ -90,9 +102,15 @@
   second limb. §3 below states exactly what moves and what does not, and
   [ADR-0100](0100-a-belief-states-whom-it-is-about-and-the-label-resolves-to-nothing.md)
   §5's refusal — an observer proposal states no subject — is untouched by this ADR.
-- **No contract surface moves.** No Protocol gains or loses a member, no
-  `core/types.py` field changes, no `Settings` field is added or removed. `Settings`
-  gains no field for §7's overlap either: §7 leaves that placement to the lane.
+- **What moves on the contract, exactly.** One paragraph of `Observer.observe`'s
+  docstring in `core/protocols.py` — the bar — and the reasoning (not the assertion)
+  in the shared conformance suite's `test_no_proposal_states_a_subject`, whose
+  docstring argues from the bar that a conforming proposal "has no non-owner subject
+  to state". §3 keeps that test's refusal and supplies it a ground that survives §1.
+  **Nothing else:** no Protocol gains or loses a member, no signature changes, no
+  `core/types.py` field changes, and no `Settings` field is added or removed —
+  `Settings` gains none for §7's overlap either, whose placement §7 leaves to the
+  lane. §13 is the whole list.
 - **Ratified on `CONTRIBUTING.md` → "Finishing an ADR PR", which is where that
   sequence is argued rather than re-argued here.** This ADR is drafted, reviewed and
   revised as `Proposed`; its status is flipped only once **both** required lenses —
@@ -239,13 +257,18 @@ is a real, accepted regression in that principle, not a redefinition of it.
 > assistant, and no other episode. An episode a reader ingested (ADR-0097) or a
 > sensor captured (ADR-0094) keeps ADR-0077 §2's bar exactly as ratified.
 
-> **Normative.** Which rule governs a pass is a property of the batch the selecting
-> stage handed the producer, never of a line in the prompt or of a field the producer
-> reads. A batch never mixes the two classes.
+> **Normative.** How an observer comes to know which rule a batch falls under is
+> **not decided here**. It is the ADR introducing the second class of episode that
+> decides it, and this ADR forecloses no shape that decision may take.
 
-> **Normative.** ADR-0077 §3's payload is untouched by this section. Nothing about
-> the user, no existing belief, no profile, no context facet and no plan enters the
-> prompt to carry the distinction.
+> **Normative.** Until such an ADR lands, a stage selecting a batch for a producer
+> implementing §1 selects only episodes of §1's class, and a producer implementing §1
+> is never handed one outside it.
+
+> **Normative.** This ADR widens ADR-0077 §3's payload only as §8 does. Nothing
+> enters the observation prompt to carry the told-versus-sensed distinction, and
+> §3's four refusals — no existing beliefs, no profile, no context facet, no plan —
+> stand verbatim.
 
 **The asymmetry is the ruling, and it is not a compromise.** The user choosing to
 tell the assistant something is a *speech act directed at the assistant*. A calendar
@@ -256,22 +279,28 @@ that arrives whether or not the user meant it to, and it keeps it. A later ADR m
 revisit that when there is a sensor with a measurement behind it; nothing here
 forecloses it and nothing here invites it.
 
-**Why the class rides with the call rather than with the record.** The observer
-cannot compute the class from an `EpisodicMemory` it is handed: capture stamps
-`MemorySource.OBSERVED` on every episode it writes, `participants` is left empty by
-design, and no field distinguishes a told episode from a sensed one. Putting the
-distinction in the prompt would breach ADR-0077 §3 and hand a model a fact it could
-be misled about. So it is the selecting stage's, which is where ADR-0077 §1 already
-put selection and for the same reason — "the scope of observation" is a property of
-a ratified seam rather than of a producer's code.
+**Why the carrier is deferred rather than designed, which is the corpus's own move
+and not an evasion.** An observer cannot compute the class from an `EpisodicMemory`
+it is handed: capture stamps `MemorySource.OBSERVED` on every episode it writes,
+`participants` is left empty by design, and no field distinguishes a told episode
+from a sensed one. So some carrier would have to be built — a field, a typed batch,
+a second construction-time mode, a second `Observer` route — and every one of those
+is a surface whose *shape* is decided by the consumer that needs it. There is no such
+consumer. `EpisodicMemory` is constructed at exactly one site under `src/` —
+`orchestration/conversations.py`'s `ConversationLifecycle._episode`, on the
+conversation capture path — so every episode in the system today is §1's, and a
+carrier ratified now would be designed against an imagined sensor. That is the
+surface-with-no-consumer refusal ADR-0045 §1, ADR-0028 §7 and ADR-0092 §10 each made
+in their own lane, and the one ADR-0099 §5 invokes to defer the subject axis's field
+to "the first consumer that must distinguish".
 
-**This binds no code today, and the check is cheap to state.** `EpisodicMemory` is
-constructed at exactly one site under `src/` — `orchestration/conversations.py`'s
-`ConversationLifecycle._episode`, on the conversation capture path. There is no
-second producer of episodes, so there is no batch that could mix classes and no lane
-owes an implementation for the second clause. It is written now so the widening does
-not silently reach the first sensor that arrives: a rule stated only after the
-sensor exists is a rule stated after the code that would have broken it.
+**What is ruled now is the boundary, and it is ruled now for a reason.** Deferring the
+carrier is not deferring the *rule*: §1's scope and the bar's survival outside it are
+fixed here, so the sensor lane inherits a settled question about which rule applies
+and an open one about how to say so. A boundary stated only after the sensor exists is
+a boundary stated after the code that would have crossed it — which is what the second
+clause fails closed against in the meantime, at no cost, because a stage that selects
+from one producer of episodes cannot select from a second that does not exist.
 
 ### 3. The subject axis does not move, and the volume on it does
 
@@ -724,10 +753,12 @@ Stated at the resolution the probe supports, and no finer.
 - **Decomposition and iterative retrieval.** The multi-hop residual the probe still
   shows — 4+ evidence turns at 8% — is a query-side question and is deferred past
   pilot 5 (#1210).
+- **How an observer is told which class a batch falls under.** §2 defers the carrier
+  to the ADR introducing the second class of episode, on the corpus's
+  surface-with-no-consumer ground, and fails closed until then.
 - **Which participant is the user**, and any marker that would carry it. #1162's
-  question is untouched: identity stays structural, and §2 deliberately puts the
-  told/sensed distinction on the *batch* rather than on a field precisely so this ADR
-  does not pre-empt that ruling.
+  question is untouched: identity stays structural, and nothing here needs a marker,
+  which is part of why §2 can defer its own carrier without pre-empting that ruling.
 - **`about_person` on an observer proposal.** ADR-0100 §5 forbids it, §3 keeps the
   refusal, and the subject axis's consumers — subject-scoped delete and export —
   remain ADR-0099 §5's deferral (filed, §12).
@@ -772,7 +803,14 @@ is the claim.** §5's first clause is scoped to ADR-0100's own change ("unchange
 this ADR**") and stays true. §5's second, third and fourth clauses — no stated subject,
 the conformance suite pinning it, no downstream implementation of the refusal — are
 untouched and §3 restates the first of them as a constraint on this ADR's own lane.
-ADR-0100 §3's reading of an unstated subject is relied on rather than changed.
+ADR-0100 §3's reading of an unstated subject is relied on rather than changed. What
+§13 does put on the shared conformance suite is a restated *ground* for
+`test_no_proposal_states_a_subject` — its docstring argues from the bar that a
+conforming proposal "has no non-owner subject to state", and §1 makes that argument
+false while leaving the refusal it justifies exactly as ADR-0100 §5 ruled it. A test's
+reasoning is not an ADR's clause, so nothing is recorded against ADR-0100 for it; it
+is named here because a reviewer reading §3 will look for the place the corpus's
+prose goes stale, and this is it.
 
 **ADR-0077 §3, ADR-0121 §1, ADR-0128, ADR-0158 §3, ADR-0159 §3 and ADR-0111 §1 —
 relied on, not changed.** Each was checked by asking what this ADR relies on it *for*,
@@ -782,6 +820,45 @@ ADR-0121 §1's predicate and ADR-0159 §3's first rung doing the de-duplication;
 §5 and §9 rest on ADR-0128's eligibility ordering and ADR-0158 §3's two budgets and
 ceiling; §7's last clause rests on ADR-0111 §1's placement of a durable cursor. None of
 them is asked to mean anything it did not already mean.
+
+### 13. What the implementing lane owes, and what it may not touch
+
+> **Normative.** The lane replaces `Observer.observe`'s bar paragraph in
+> `core/protocols.py` with §1's rule, scoped as §2 scopes it. The `Output is bounded`
+> paragraph beside it is untouched but for the figure §6 sets.
+
+> **Normative.** The lane restates the ground of the shared conformance suite's
+> `test_no_proposal_states_a_subject` docstring, which argues from the bar that a
+> conforming proposal "has no non-owner subject to state". Its assertion is unchanged
+> and its refusal is not weakened: §3 supplies the ground that survives §1.
+
+> **Normative.** The lane's remaining edits are `learning/observer.py`'s `_PROMPT_HEAD`
+> (§1) and `_render_batch` (§8); `core/config.py`'s `observation_max_proposals` default
+> and the comment stating its ground (§6); `app/composition.py`'s `RETRIEVAL_LIMIT` and
+> `EPISODIC_SUPPLEMENT_LIMIT` with `orchestration/loop.py`'s two defaults held equal to
+> them (§9); the tiling in `benchmarks/memory/ingest.py`'s `ingest_case` (§7); and the
+> tests pinning each.
+
+> **Normative.** The lane adds no member to any Protocol, changes no signature, and
+> changes no field in `core/types.py`. It opens no route by which an observer states
+> `about_person` (§3), and it implements no part of §1 or §3 downstream of the
+> producer — ADR-0100 §5's fourth clause binds unchanged.
+
+**Two things about the shape of that work, stated because they are the dispatcher's
+and not this ADR's.** The edits cross `core/`, `learning/`, `app/`, `orchestration/`
+and `benchmarks/`, which is more than `CLAUDE.md`'s one-subsystem rule admits by
+default; whether that is one lane or several is a scoping decision, and the only thing
+this ADR requires is that nothing implements against it before it merges (ADR-0015 §5).
+And §7's *k* has no placement ruled here: a module constant and a `Settings` field are
+both open, the latter being a configuration addition rather than contract surface, and
+the argument that decides it is `observation_max_proposals`'s own (ADR-0077 §2) against
+`EPISODIC_SUPPLEMENT_LIMIT`'s (ADR-0158 §5) — whether the right value is a thing an
+operator can know about their corpus.
+
+**What the lane does *not* inherit from §7.** The product's observation path tiles
+nothing, so `orchestration/observation.py` is not on the list above. A lane that later
+builds the durable cursor ADR-0077 §11 files inherits §7 at that point.
+
 
 ## Consequences
 
