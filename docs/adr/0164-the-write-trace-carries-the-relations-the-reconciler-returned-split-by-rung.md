@@ -538,13 +538,17 @@ call, which lives inside the reconciler on ADR-0159 §3's ground. Such a reconci
 non-conforming, exactly as one fabricating labels is, and this instrument inherits
 that trust rather than replacing it. What the keys measure without qualification is
 what the reconciler *reported*; that this equals what a model did is a property of a
-conforming reconciler. The rule is the same for the outcome keys: `reconciler_failed`
-and `reconciler_unconsulted` record the outcome the reconciler *reported*, and the
-symmetric lie is invisible there too — a reconciler that made a request, returned an
-empty mapping and reported `unconsulted` is an underclaim with **no labels beside
-it**, and labels beside it are what §3's clause needs to see one. `reconciler_absent`
-is the single exception, because it is read from no report at all: the writer holds no
-reconciler and observes that itself, so it alone establishes that no request was made.
+conforming reconciler. The outcome keys divide by **source** rather than as a group.
+`reconciler_unconsulted` is read from the report alone, and the symmetric lie is
+invisible there too — a reconciler that made a request, returned an empty mapping and
+reported `unconsulted` is an underclaim with **no labels beside it**, and labels
+beside it are what §3's coherence clause needs to see one. `reconciler_absent` is read
+from no report at all: the writer holds no reconciler and observes that itself, so it
+alone establishes that no request was made. `reconciler_failed` is both at once — §3
+counts under it a request that yielded no readable answer, which the report states,
+**and** a non-conforming result the writer's own guard absorbed, which the writer
+classifies — which is why it takes no view on whether a request was made, and why
+"what the reconciler reported" is the wrong frame for that second arm.
 
 **A pair's relation is not joinable to the ruling that followed it.** The trace says
 six proposals ruled `ACCEPT` and says three pairs were labelled `CONTRADICTS`; it
@@ -852,10 +856,12 @@ act differently, or read one of its clauses more widely than it now holds?
   and adds nothing — four states that
   today all present as an unremarkable run of `ACCEPT`s. `reconciler_unconsulted` is
   read with `relations_offered` beside it, because it does not say *why* nothing was
-  asked (§3). Three of them rest on the reconciler's own report, because it absorbs its
-  failures itself and the writer sees only a mapping (§3), so each is the state
-  **reported** and, on a **conforming** reconciler, the state that obtains (§6). Only
-  `reconciler_absent` is the writer's own observation.
+  asked (§3). Only `reconciler_absent` is the writer's own observation of the hub it
+  runs in. The other three come from the reconciler's report, or — on
+  `reconciler_failed`'s second arm — from the writer's guard absorbing a
+  non-conforming result, because the reconciler absorbs its own failures and the
+  writer sees only a mapping (§3); on a **conforming** reconciler each is the state
+  that obtains (§6).
 - **The write trace grows by ten integers per crossing**, and one number joins the
   startup stamp. Both are small against what the envelope already carries, and the
   keys ride the statement that writes the decision counts rather than adding a
