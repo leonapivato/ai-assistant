@@ -527,17 +527,29 @@ as ADR-0162 §2 leaves it standing for a captured episode, and ADR-0100's
 ### 6. What it may not influence
 
 > **Normative.** `principal` is never an input to retrieval, ranking, read
-> eligibility, band assignment, deduplication, conflict detection, retention, expiry
-> or policy. No `MemoryStore` read filters or orders on it, no `MemoryPolicy` rules
-> on it, and no producer's band or confidence is computed from it.
+> eligibility, band assignment, conflict detection, retention, expiry or policy. No
+> `MemoryStore` read filters or orders on it, no `MemoryPolicy` rules on it, and no
+> producer's band or confidence is computed from it.
 
-> **Normative.** One exception exists, and it is the one §3's last clause defers: a
-> decision admitting a producer that can deliver an episode recording
-> distinguishable speakers with no marker may rule such an episode ineligible to be
-> **observed**. That ruling is available to that decision and to no other, it reads
-> the marker's *absence* and never a marker's value, and it changes nothing in the
-> enumeration above — an episode ruled out of an observation batch is retrieved,
-> ranked, retained and rendered exactly as before.
+> **Normative.** Deduplication is left off that list because the word covers two
+> different things and this ADR rules them differently. No rule may **compare** two
+> markers to fold one record into another, to prefer one, to decide that one
+> supersedes or answers another, or to hold two records to be the same because
+> their markers agree — §2's third clause already refuses the field that resolving
+> power, and this states what it forecloses. But `principal` does stay inside the
+> content-identity digest `MemoryUpdateProposal.proposal_fingerprint` computes,
+> where it is part of *what a record says* rather than a judgement about it: two
+> proposals differing only in their marker are two different proposals, and neither
+> is preferred over the other. Nothing compares the markers there; the digest is
+> over the whole record and is equal or it is not.
+
+> **Normative.** One exception to the enumeration exists, and it is the one §3's
+> last clause defers: a decision admitting a producer that can deliver an episode
+> recording distinguishable speakers with no marker may rule such an episode
+> ineligible to be **observed**. That ruling is available to that decision and to no
+> other, it reads the marker's *absence* and never a marker's value, and it changes
+> nothing in the enumeration above — an episode ruled out of an observation batch is
+> retrieved, ranked, retained and rendered exactly as before.
 
 > **Normative.** `participants` and `about_person` are unchanged in shape and in
 > meaning. `principal` is not written into `participants`, is not read from it, does
@@ -562,7 +574,7 @@ to the person it belongs to, and the marker's absence is none of that reader's
 business (§4). This ADR grants the exception rather than exercising it — nothing
 today may act on it, because §3 admits no producer that can reach the state.
 
-**One mechanical consequence is worth stating rather than discovering.**
+**The fingerprint clause is worth stating rather than leaving to be discovered.**
 `MemoryUpdateProposal._fingerprint_projection` is built from `model_dump` with a
 *denylist* — `_FINGERPRINT_EXCLUDED_RECORD_FIELDS` holds `id` and `score` — so a new
 field is included by default. This ADR **adds no exclusion**: the marker is part of
@@ -633,7 +645,12 @@ belongs to the sensor lane that first has one.
 
 - **Step 1, `core`.** A record round-tripping a marker byte for byte (§2). A record
   serialised without the field decoding with none (§4) — the legacy-blob case, which
-  is what makes the no-migration ruling checkable.
+  is what makes the no-migration ruling checkable. And a blank or whitespace-only
+  marker **refused at construction**, which is the only test that pins the
+  annotation to `NonBlankEncodableText | None` (§1); a round trip and a legacy
+  decode both pass against a bare `EncodableText | None`, under which `principal="
+  "` would be stored and rendered as an owner marker — §1's two states quietly
+  becoming three.
 - **Step 2, `learning`.** The observation prompt built from a **constructed**
   `EpisodicMemory` carrying a marker states it, and one built from a record without
   a marker renders nothing in its place (§5); and the rendered region is
