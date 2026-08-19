@@ -593,9 +593,13 @@ The lane owes:
   than a reconciler stub, since `ModelBackedReconciler.reconcile` absorbs a provider
   failure itself and the writer's guard never sees it; that a reconciler completing
   with an **empty** mapping — a conforming "nothing to add" under ADR-0159 §3, and
-  the `{}` ADR-0159 §8 distinguishes from `None` — leaves `reconciler_failed` at zero
-  and counts its offered pairs under `relations_unlabelled`, on a trace that differs
-  from the failing provider's; that a proposal whose certain rung settled every
+  the `{}` ADR-0159 §8 distinguishes from `None` — counts its offered pairs under
+  `relations_unlabelled` with **all three** qualifier keys at zero, so the answered
+  remainder is one — the case driven, like the raising one beside it, through the real
+  reconciler on a **readable empty** `ModelProvider` response rather than a reconciler
+  stub, since an implementation reading an asked-and-empty reply as
+  `reconciler_unconsulted` would otherwise pass every test here while emitting a trace
+  that denies the request was made; that a proposal whose certain rung settled every
   member within the bound is counted under `reconciler_unconsulted` with no provider
   request made; that a proposal clearing §2's condition with an **empty** conflict set
   counts under `reconciler_unconsulted` with `relations_offered` at zero, which is the
