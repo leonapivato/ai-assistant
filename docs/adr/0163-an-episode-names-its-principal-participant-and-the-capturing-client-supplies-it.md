@@ -129,27 +129,42 @@ with the assistant at all. On that episode the structural premise is not merely
 unstated — it is **false**, and a producer applying ADR-0077 §2's bar has no way to
 know it.
 
-### It is not hypothetical, and it has been measured twice
+### It is not hypothetical: the benchmark harness hit the premise and had to route around it
 
 [#1162](https://github.com/leonapivato/ai-assistant/issues/1162) records the first
-benchmark pilot measuring this by accident. LoCoMo is two named third parties
-chatting; the harness maps `speaker_a` onto the user half and keeps the speaker
-names in the text, because the questions name people and the names are evidence
-(`benchmarks/memory/corpora/locomo.py` renders each utterance as
-`f"{speaker}: {said}"`). The result was **ingestion recall 56.7%** — gold evidence
-cited by no belief record for 43% of answerable questions — against **82%** on
-LongMemEval, first-person user↔assistant chat that matches the premise, on the same
-pipeline. #1162's own reading is the one this ADR adopts: "the observer is not
-failing at its job", it is "correctly executing its first-person contract on data
-that violates the contract's premise".
+benchmark pilot walking into this by accident. LoCoMo is a conversation between two
+named third parties, and the loader then mapped one of them onto the user half of an
+exchange and the other onto the *assistant* half. The observer, correctly executing
+its first-person contract on data that violates the contract's premise, produced
+**ingestion recall 56.7%** — gold evidence cited by no belief record for 43% of
+answerable questions — against **82%** on LongMemEval, first-person user↔assistant
+chat that matches the premise, on the same pipeline. #1162's reading is the one this
+ADR adopts: "the observer is not failing at its job".
 
-**This ADR is not motivated by that score, and #1162 excludes such a motive by
-name** ("Any change motivated by LoCoMo's score" is out of scope there). Pilot 4
-(#1029, batch #1190) moved the numbers substantially and did not move the premise:
-what is wrong is that a contract's premise is carried by the shape of the data
-instead of by the data, so it cannot be checked, cannot be stated to the producer,
-and fails silently when a new producer arrives. The measurement is evidence that
-the failure is silent, not the reason to fix it.
+**That particular mapping is gone, and how it was repaired is the more instructive
+half.** `benchmarks/memory/corpora/locomo.py` now states the frame in its own words:
+"**The whole dialogue is material the user supplied, and none of it is the
+assistant.** … Neither of them is this system's user … The honest frame is the one
+the questions themselves assume: **the user is the person who handed the assistant
+this transcript and is now asking about it.**" Every turn is `user_side=True` and the
+session is marked `user_supplied`. The loader repaired the premise by finding a
+reading of the corpus in which it is *true* — the owner is the person who supplied
+the transcript — rather than by telling the observer who the user is, because there
+was no way to tell it.
+
+**That is the gap this ADR closes, and the harness is the evidence that the gap is
+real rather than the case that exercises it.** A loader can reframe a corpus; a
+microphone cannot reframe a room. When ADR-0094's sensor profile delivers an episode
+in which the owner *is* one of several speakers, no reframing is available and there
+is nowhere to record which speaker they are. §3 is explicit that neither benchmark
+corpus is that case, and §7 requires the lane to assert it of both.
+
+**This ADR is not motivated by a score, and #1162 excludes such a motive by name**
+("Any change motivated by LoCoMo's score" is out of scope there). Pilot 4 (#1029,
+batch #1190) moved the numbers substantially and did not move the premise: what is
+wrong is that a contract's premise is carried by the shape of the data instead of by
+the data, so it cannot be checked, cannot be stated to the producer, and fails
+silently when a new producer arrives.
 
 ### The owner ruled the producer; the shape is what is left
 
@@ -254,10 +269,16 @@ pair is best read as a partition of the producer's situation:
 - **Speakers distinguishable, owner known.** The marker is *owed*, and the tag it
   names is one the producer is putting into `content` anyway. This is the whole
   case this ADR is for.
-- **Speakers distinguishable, owner not known.** No marker is stateable, and none
-  may be guessed (§3). This is diarization and identity — #691's, not this ADR's
-  (§8) — and §3's producer clauses record that no producer this ADR admits can
-  reach the state.
+- **Speakers distinguishable, owner among them but not known.** No marker is
+  stateable, and none may be guessed (§3). This is diarization and identity —
+  #691's, not this ADR's (§8) — and §3's producer clauses record that no producer
+  this ADR admits can reach the state.
+- **Speakers distinguishable, owner not among them.** No marker, and correctly so:
+  the field names a participant, and there is none to name. **This row is live
+  today** — it is every LoCoMo session the benchmark harness captures, where "the
+  user is the person who handed the assistant this transcript" — which is why §3
+  forbids marking those episodes and §8 defers the separate question of stating the
+  fact affirmatively.
 - **Speakers not distinguishable.** There is no tag for a marker to name and
   nothing a marker could fix: undifferentiated transcript text is a capture-quality
   question, and a field naming a speaker cannot answer it.
@@ -329,42 +350,58 @@ Protocol method changes, and the sensor submission surface by which a spoke woul
 deliver a multi-party episode stays exactly as deferred as ADR-0094 §10 left it
 (§8).
 
-> **Normative.** The benchmark harness, which drives capture directly as a client,
-> sets `principal` on episodes it captures from a corpus whose speakers are named
-> third parties, to the same tag its own rendering prefixes to those utterances. It
-> sets none for a first-person corpus, whose episodes satisfy the structural
-> premise unchanged.
+> **Normative.** The benchmark harness sets `principal` on **neither** corpus it
+> carries. LongMemEval is a first-person user↔assistant exchange, whose principal is
+> structural. LoCoMo is a transcript the user supplied, in which the owner is not a
+> participant at all — so there is no speaker to mark, and marking either named
+> speaker would assert that a third party owns this hub.
 
-That clause is here rather than in an implementation brief because it is the only
-part of this decision that is exercisable today, and because it is what makes the
-decision falsifiable: LoCoMo is the measured case where the premise is false, and a
-harness that captures those episodes without a marker leaves the ADR untested. §7
-carries the pre-registration obligation that goes with changing a measured
-pipeline.
+**This clause is a prohibition, and that is why it is normative rather than
+descriptive.** The reading it forecloses is a natural one and was in this ADR's own
+first draft: LoCoMo's speakers are named and distinguishable, so it looks like the
+case the marker is for, and `speaker_a` looks like the tag to use. It is not.
+`benchmarks/memory/corpora/locomo.py` records that `speaker_a` "is deliberately no
+longer read" and that "the user is the person who handed the assistant this
+transcript", and `BenchSession.user_supplied` carries that framing into capture. A
+later lane reaching for `principal=speaker_a` to "make LoCoMo work" would be
+asserting exactly what #1177's reframing removed, and would hand the observer a
+false owner rather than no owner. §7 requires the negative to be asserted in tests
+for both corpora, so the prohibition has a mechanical guard and not only a sentence.
+
+**The consequence is worth stating plainly: no producer exercises this field
+today.** That is a cost of the decision and not a hidden one. What the ADR buys now
+is that the vocabulary exists, is ruled, and is the thing ADR-0094's sensor lane
+implements against instead of inventing — golden rule 5's sequencing, which is why
+this is an ADR ahead of an implementation rather than a field added when a spoke
+first needs it. §7 gives the lane a synthetic end-to-end test through the real
+capture seam, since no corpus supplies the input.
 
 > **Normative.** This ADR admits exactly two producers of episodes: the conversation
 > capture path, which records turns and states no marker, and a client driving that
-> path directly, which states one where §2's second clause obliges it. It admits no
-> producer that can deliver an episode recording several distinguishable speakers
-> without a marker.
+> path directly, which states one where §2's second clause obliges it. Neither can
+> deliver an episode in which the owner **is** one of several distinguishable
+> speakers and no marker is stated.
 
 > **Normative.** A later decision that admits such a producer — the sensor
-> submission surface ADR-0094 §10 defers — rules at that time whether an episode
-> recording distinguishable speakers with no marker is eligible to be observed at
-> all. This ADR neither grants nor denies that eligibility; §4's protection of an
+> submission surface ADR-0094 §10 defers — rules at that time whether an episode in
+> which the owner is one of several distinguishable speakers, with no marker stated,
+> is eligible to be observed at all. This ADR neither grants nor denies that eligibility; §4's protection of an
 > absent marker does not decide it, and §6's second clause is the one carve-out in
 > this ADR's prohibitions that leaves the ruling available.
 
-**These two clauses are the honest statement of this ADR's reach, and they are
-worth stating rather than leaving to be inferred.** The state a reviewer will reach
-for — a multi-party episode arriving at the observer with no marker, so that the
-producer must again guess whose beliefs it is writing from the same ambiguous text
-— is *unreachable under the producers named above*: a turn has no ambiguity to
-resolve, and a client capturing named speakers owes the marker under §2. It becomes
-reachable the day a spoke can submit a captured conversation, and that is the day
-the eligibility question has both a producer to attach to and evidence about how
-often diarization actually fails. Deciding it now would be ratifying a
-withholding rule against a producer whose failure modes nobody has seen.
+**These two clauses are the honest statement of this ADR's reach, and the line they
+draw is narrower than it first looks.** An episode recording several
+distinguishable speakers with no marker is *not* unreachable — the harness delivers
+one for every LoCoMo session today, and §2's first clause makes that correct rather
+than a gap, because the owner is none of those speakers and a marker would be a
+falsehood. What is unreachable is the state that actually harms: the owner **is** a
+speaker and nothing says which. A turn has no ambiguity to resolve; a client
+capturing an episode the owner is in owes the marker under §2's second clause; and
+no other producer exists. It becomes reachable the day a spoke can submit a captured
+conversation, and that is the day the eligibility question has both a producer to
+attach to and evidence about how often diarization actually fails. Deciding it now
+would be ratifying a withholding rule against a producer whose failure modes nobody
+has seen.
 
 ### 4. Absence says no marker was stated, and says nothing else
 
@@ -555,30 +592,39 @@ The lane is #1210's 2.5. It owes, and owes nothing beyond:
 - The planner's record renderer, non-forgeably (§5). **This lane lands after
   #1210's lane 2.1**, which is rewriting that same renderer for #1194;
   taking the two in the other order would put two lanes in one file.
-- The harness, per §3's harness clause: LoCoMo's `speaker_a`, matching the tag
-  `benchmarks/memory/corpora/locomo.py` already prefixes to each utterance;
-  nothing for LongMemEval.
-- Tests: a record written without the field decoding from a stored blob and
-  reading as absent (§4); a marker surviving the store round trip byte for byte
-  (§2); both renderers with and without a marker, including that nothing is
-  rendered in its place when absent (§5); the non-forgeability of the rendered
-  region (§5); and — the one that tests the decision rather than the field — a
-  LoCoMo item driven through the harness's own ingestion, asserting that the
-  episode it captures carries that corpus's `speaker_a` tag as `principal` and
-  that the observation prompt built from it states the marker. Without that last
-  one every other test passes while the harness still captures unmarked
-  multi-party episodes, which is the exact input this ADR exists to eliminate;
-  the corresponding LongMemEval assertion is that no marker is set.
+- **Nothing in the harness's corpora**, per §3's first clause. The lane changes no
+  loader and no ingestion path; the harness's only obligation here is the negative
+  assertion below.
+- Tests, in two groups. The **field and its rendering**: a record written without
+  the field decoding from a stored blob and reading as absent (§4); a marker
+  surviving the store round trip byte for byte (§2); both renderers with and
+  without a marker, including that nothing is rendered in its place when absent
+  (§5); and the non-forgeability of the rendered region (§5). Then the **two that
+  test the decision rather than the field**:
+
+  1. An episode captured through the real `ConversationLifecycle.capture` seam with
+     a marker supplied by the caller, asserting that the stored record carries it
+     and that the observation prompt built from that record states it. This is
+     synthetic because no corpus supplies the input (§3), and it is the only test
+     that exercises the path a spoke will use.
+  2. A LoCoMo session and a LongMemEval session driven through the harness's own
+     ingestion, asserting that the captured episodes carry **no** marker. This is
+     the guard on §3's first clause, and it is the more important of the two: the
+     failure it catches is a later lane "fixing" LoCoMo by marking `speaker_a`,
+     which would assert that a named third party owns the hub and would silently
+     undo #1177's reframing.
 
 It may not: add a validator (§2), add a store column, migration or backfill (§4),
 add a `Settings` field, add or change any Protocol member, populate `participants`
-or `about_person` from the marker (§6), or change the observer's utility bar (§5).
+or `about_person` from the marker (§6), change the observer's utility bar (§5), or
+change either corpus loader or the harness's ingestion (§3).
 
-> **Normative.** Changing what the harness captures changes a measured pipeline, so
-> the harness half of this lane is pre-registered as its own arm on
-> [#1029](https://github.com/leonapivato/ai-assistant/issues/1029) before it is
-> scored, stating the expected direction. A run that mixes it with an unrelated
-> change measures neither.
+> **Normative.** This lane changes nothing a benchmark run measures, and it may not
+> acquire such a change: no marker reaches either corpus's episodes (§3), so no
+> prompt any scored run builds differs by a byte. A lane that finds itself wanting
+> to change that is proposing a measured arm, which is pre-registered on
+> [#1029](https://github.com/leonapivato/ai-assistant/issues/1029) and is not this
+> lane's to take.
 
 ### 8. What this ADR does not decide
 
@@ -611,11 +657,18 @@ or `about_person` from the marker (§6), or change the observer's utility bar (�
   here.** ADR-0098 §12 states that seam's live condition as "the first mixed-origin
   payload handed to a producer **whose output is ruled on by `MemoryPolicy`**", and
   reassures itself that "the observer, which is, receives episodes and nothing else".
-  Under ADR-0098 §1 the benchmark harness's LoCoMo episodes are already such a
-  payload — third-party speech, captured through the first-party path, recorded
-  `OBSERVED`, handed to the observer — so the condition appears to be met on `main`
-  today, before this ADR. That is a **pre-existing** state this ADR neither creates
-  nor worsens (§3 admits no new producer), so it is filed as
+  Under ADR-0098 §1 the benchmark harness's LoCoMo episodes look like such a payload:
+  two named third parties' speech, captured through the first-party path and recorded
+  `OBSERVED`, handed to the observer. **The harness took that question deliberately
+  rather than by omission** — `benchmarks/memory/corpora/locomo.py` argues it in
+  terms, that "the user told the assistant this, in the ordinary way a user tells it
+  anything", and that treating a supplied transcript as external content would defer
+  "essentially every proposal the corpus produced" under ADR-0106 §6 and "measure the
+  harness's own headlessness instead of the pipeline", filing the real question at
+  #1162. So this is a **standing, argued deferral** rather than a defect, and whether
+  ADR-0098 §12's condition is thereby met is a question about the corpus's own
+  framing. It is **pre-existing** either way, this ADR neither creates nor worsens it
+  (§3 admits no new producer and marks no episode), and it is recorded at
   [#1218](https://github.com/leonapivato/ai-assistant/issues/1218) rather than
   absorbed here, per `CLAUDE.md`'s triage rule.
 - **The sensor submission surface** by which a spoke delivers a captured episode to
@@ -627,12 +680,15 @@ or `about_person` from the marker (§6), or change the observer's utility bar (�
   pre-empting it. No producer this ADR admits can create that episode, so the
   deferral costs nothing today and the decision, when it is taken, will have a
   producer's measured failure rate to take it against.
-- **How an episode says positively that the owner is *not* among its speakers** — a
-  room the user is not in. §4's first clause makes absence say nothing either way,
-  so no such episode is misdescribed today; what is deferred is a way to state the
-  fact affirmatively, and the condition that fires it is a producer that can tell
-  the difference and needs the distinction acted on. Answering it now would be
-  ratifying a third state on the strength of no producer's need.
+- **How an episode says positively that the owner is *not* among its speakers.**
+  §4's first clause makes absence say nothing either way, so no such episode is
+  misdescribed today, and §2's third row and §3's first clause together make the
+  unmarked capture the *correct* handling rather than a shortfall. **This case is
+  live rather than hypothetical** — it is every LoCoMo session — and it is still
+  deferred, because what it needs is not a third state of this field but a
+  per-episode frame, and whether such a frame helps at all is an open measurement
+  (#1185's pre-registered arm). Ratifying a state on this field to serve it would be
+  answering a question the corpus is still measuring.
 - **Whether user-facing surfaces render the marker** (§5's third clause leaves them
   free), and whether more than one participant may be marked.
 
@@ -652,10 +708,14 @@ consequence are ADR-0098 §12's seam and are not. The implementing lane updates
   check it; a renderer can carry it. The failure mode this replaces is silent by
   construction, which is what made it worth a decision at a moment when no
   multi-party producer exists yet.
-- **The LoCoMo arm becomes an honest measurement instead of a known-invalid one.**
-  #1162 records the harness's first-person mapping as a validity limitation; with
-  §3's harness clause the corpus is captured as what it is. Whether the score moves is
-  a measurement, pre-registered under §7, and this ADR predicts nothing about it.
+- **No benchmark number moves, and none is expected to.** Neither corpus captures a
+  marker (§3), so no scored prompt differs by a byte. This ADR buys a vocabulary
+  ahead of its producer rather than a measurement, which is golden rule 5's
+  sequencing and is the cost §3 states rather than hides.
+- **The harm the marker prevents stays open for LoCoMo, and it is a different
+  question.** A transcript in which the owner is *no* participant is §2's third row,
+  and what it needs is a per-episode frame — whether one helps is #1185's own
+  pre-registered arm — not a field naming a participant that does not exist.
 - **`EpisodicMemory` gains a third participant-shaped field**, and three is where a
   reader starts needing to be told which is which. §6's third clause and the
   docstring §7 requires are the mitigation; the alternative — folding them — is
