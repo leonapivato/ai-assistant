@@ -314,6 +314,70 @@ async def test_the_overlap_identity_holds_wherever_the_gap_falls(
     )
 
 
+async def test_a_lost_append_keeps_the_carried_tail_without_its_position(
+    tmp_path: Path,
+) -> None:
+    """The one failure the driver cannot see, bounded rather than claimed away (#1229).
+
+    `CaptureReport` reports a **lost append** and a lost **episode** identically —
+    `degraded=True`, no episode id — which is #1075, whose title says in terms that a
+    driver's cadence needs the distinction. Only the second leaves a turn in the
+    conversation, so under the first this driver's positions run ahead of it and the
+    schedule aims at a turn that is not where it thinks.
+
+    **The direction of that error is the safe one, and this is where it is proved.**
+    Over-counting fires a pass earlier in real turns than intended, so the next window
+    begins at or before the episode the carry aimed at and still *contains* the whole
+    carried tail: §7's remedy — a fact spread across a boundary is whole in some pass
+    — is delivered, and what is lost is its position as the literal prefix, plus some
+    duplicated passes. This runs the architecture lens's own case, `batch_size` 6 with
+    captures 5 and 6 refused at append, and asserts exactly that bound and no more.
+
+    Closing it exactly needs #1075 and a change in `orchestration`, which this module
+    may not make: a floor on the schedule would buy this case by breaking the
+    episode-stage case above, because the driver cannot tell which one it is in.
+    """
+    batch_size = 6
+    overlap = _overlap_of(batch_size)
+    settings = _settings(tmp_path, batch_size=batch_size)
+    observer = FakeObserver(beliefs=[], max_batch_size=batch_size)
+    harness = build_harness(settings, data_dir=tmp_path / "case", observer=observer)
+    real_capture = harness.lifecycle.capture
+    position = 0
+
+    async def _capture(conversation_id: str, *, content: str, **kwargs: object) -> CaptureReport:
+        """Refuse the fifth and sixth captures before anything is appended.
+
+        Args:
+            conversation_id: The conversation.
+            content: The user half.
+            kwargs: Relayed.
+
+        Returns:
+            A degraded report whose turn was never recorded, or the real one.
+        """
+        nonlocal position
+        position += 1
+        if position in {5, 6}:
+            return CaptureReport(conversation_id=conversation_id, degraded=True)
+        return await real_capture(conversation_id, content=content, **kwargs)  # type: ignore[arg-type]
+
+    try:
+        harness.lifecycle.capture = _capture  # type: ignore[method-assign]
+        await ingest_case(harness, _case(12), batch_size=batch_size)
+    finally:
+        harness.close()
+
+    windows = [[record.id for record in batch] for batch in observer.batches]
+    assert len(windows) >= 2
+    for earlier, later in pairwise(windows):
+        carried = min(overlap, len(earlier))
+        tail = earlier[-carried:]
+        assert any(later[index : index + carried] == tail for index in range(len(later))), (
+            "a lost append may cost the tail its position and must never cost the tail"
+        )
+
+
 async def test_captures_that_store_no_episode_buy_no_pass_of_their_own(
     tmp_path: Path,
 ) -> None:
