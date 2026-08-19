@@ -157,13 +157,25 @@ def test_the_prompt_asks_for_aggregation_across_records() -> None:
     assert "Read every record before you answer" in ANSWER_SYSTEM_PROMPT
 
 
+def test_the_aggregation_clause_counts_occasions_rather_than_records() -> None:
+    """Corroboration is the normal case in this prompt, not the exception.
+
+    The belief read and the episodic supplement are separate reads deduplicated by id
+    (ADR-0158 §4), so a belief and the episode it was distilled from are two records
+    describing one occasion and both reach the prompt. "Gather across all the records"
+    on its own inflates every count by however much of the evidence survived twice.
+    """
+    assert "Count occasions, not records" in ANSWER_SYSTEM_PROMPT
+    assert "are one occasion and not two" in ANSWER_SYSTEM_PROMPT
+
+
 def test_the_prompt_asks_for_date_arithmetic() -> None:
     """Temporal questions were abstained on with the dates retrievable."""
     assert "Where the records carry dates or times" in ANSWER_SYSTEM_PROMPT
     assert "compute the interval or the elapsed time the question asks for" in (
         ANSWER_SYSTEM_PROMPT
     )
-    assert "give an absolute date where the question asks when something happened" in (
+    assert "Give an absolute date where the question asks when something happened" in (
         ANSWER_SYSTEM_PROMPT
     )
 
@@ -178,6 +190,18 @@ def test_the_date_clause_falls_back_to_what_the_records_do_fix() -> None:
     """
     assert "Where nothing shown fixes an absolute date" in ANSWER_SYSTEM_PROMPT
     assert "answer with what the records do fix" in ANSWER_SYSTEM_PROMPT
+
+
+def test_the_date_clause_resolves_only_against_a_date_the_block_shows() -> None:
+    """The renderer shows kind, source and content — no field to read a date from.
+
+    So the clause anchors on "a date the records actually show", which is content
+    today and a rendered instant once #1194 lands, and forbids supplying one they do
+    not: the alternative is an instruction to invent a date, against the records-only
+    constraint the whole experiment is.
+    """
+    assert "against a date the records actually show" in ANSWER_SYSTEM_PROMPT
+    assert "never supply a date they do not" in ANSWER_SYSTEM_PROMPT
 
 
 @pytest.mark.parametrize("rendered", ["occurred_at", "timestamp", "the date on each record"])
@@ -203,6 +227,20 @@ def test_the_prompt_prefers_the_later_of_two_conflicting_records() -> None:
     assert "Where two records disagree about something that can change" in ANSWER_SYSTEM_PROMPT
     assert "answer from the later one" in ANSWER_SYSTEM_PROMPT
     assert "treat the earlier as superseded" in ANSWER_SYSTEM_PROMPT
+    assert "wording that describes a change" in ANSWER_SYSTEM_PROMPT
+    assert "not by the order they are listed in" in ANSWER_SYSTEM_PROMPT
+
+
+def test_the_conflict_clause_does_not_fall_back_to_a_decline() -> None:
+    """A conflict the block cannot order is still a question the records support.
+
+    Nothing rendered carries ``provenance`` or a validity window, so two beliefs can
+    disagree with no visible chronology at all. Sending that case to the decline would
+    reintroduce pilot-1's artifact through a side door, on exactly the knowledge-update
+    population the clause was added for.
+    """
+    assert "Where nothing shows which of the two is later" in ANSWER_SYSTEM_PROMPT
+    assert "give the value the records support best rather than declining" in (ANSWER_SYSTEM_PROMPT)
 
 
 def test_the_recalibration_did_not_move_the_threshold() -> None:
