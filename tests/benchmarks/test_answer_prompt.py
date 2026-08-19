@@ -1,10 +1,12 @@
 """What the answering instruction must say, and what it must not.
 
 A prompt is text, and a test over text can only pin the properties the experiment
-depends on. Four do, and each one is here because something measurable broke or would
+depends on. These do, and each one is here because something measurable broke or would
 break without it (#1029's results comment, and the freeze-relevant follow-up beneath
 it, which measured 1,309 of LoCoMo's 1,320 declines on *answerable* questions as one
 literal the prompt asked for).
+
+The first group is the pilot-1→2 threshold recalibration:
 
 * **Best effort, not conservatism.** The prompt must ask for an answer where the
   records plausibly support one. The pilot's headline over-abstention was this clause
@@ -20,6 +22,21 @@ literal the prompt asked for).
   an answer prefaced with a caveat is scored as a decline however well it answered.
 * **Records only.** The ban on general knowledge is the experiment itself and is not
   what changed.
+
+The second group is the pilot-4→5 recalibration (#1210), which leaves that threshold
+alone and adds what to *do* with records that already clear it — each clause named by
+an error population the pilot-4 anatomy counted:
+
+* **Partial support is support.** 123 LoCoMo questions were declined with the gold
+  evidence in the prompt.
+* **Aggregate across records.** LongMemEval counts came back off one session when the
+  occasions were spread over several.
+* **Do the date arithmetic — but claim no rendered field.** Temporal questions were
+  abstained on with the dates retrievable; the clause has to hold both before and
+  after #1194 renders an episode's ``occurred_at``, so it must not name that field,
+  and it must not promise a present moment the prompt does not carry (#1211).
+* **The later record wins.** Knowledge-update questions came back with the value the
+  records themselves supersede.
 """
 
 from __future__ import annotations
@@ -115,3 +132,90 @@ def test_the_prompt_still_confines_the_model_to_the_retrieved_records() -> None:
     """Unchanged, and the reason the harness exists — asserted so it stays that way."""
     assert "Answer from those records alone" in ANSWER_SYSTEM_PROMPT
     assert "do not use general knowledge" in ANSWER_SYSTEM_PROMPT
+
+
+def test_the_prompt_states_that_partial_support_is_still_support() -> None:
+    """123 LoCoMo declines had the gold evidence in the prompt (#1029, pilot-4).
+
+    The threshold above already says "nothing to answer from"; what the anatomy found
+    is that a model reads records carrying *part* of what was asked as carrying
+    nothing, so the case is stated rather than left to the threshold to imply.
+    """
+    assert "Partial support is still support" in ANSWER_SYSTEM_PROMPT
+    assert "instead of declining because the rest is missing" in ANSWER_SYSTEM_PROMPT
+
+
+def test_the_prompt_asks_for_aggregation_across_records() -> None:
+    """LongMemEval's counts were answered off a single session.
+
+    The occasions a "how many times" question asks about are spread across sessions by
+    construction in both corpora, so answering from the best-matching record alone is
+    wrong by default rather than occasionally.
+    """
+    assert "how many, how often, or for a list" in ANSWER_SYSTEM_PROMPT
+    assert "gather the answer across all of the records together" in ANSWER_SYSTEM_PROMPT
+    assert "Read every record before you answer" in ANSWER_SYSTEM_PROMPT
+
+
+def test_the_prompt_asks_for_date_arithmetic() -> None:
+    """Temporal questions were abstained on with the dates retrievable."""
+    assert "Where the records carry dates or times" in ANSWER_SYSTEM_PROMPT
+    assert "compute the interval or the elapsed time the question asks for" in (
+        ANSWER_SYSTEM_PROMPT
+    )
+    assert "give an absolute date where the question asks when something happened" in (
+        ANSWER_SYSTEM_PROMPT
+    )
+
+
+def test_the_date_clause_falls_back_to_what_the_records_do_fix() -> None:
+    """The added clause must not become a new licence to decline.
+
+    Pilot-1's lesson is that a clause naming a condition for *not* answering is read
+    generously, so the date clause names what to answer with instead of naming a
+    decline: where no absolute date is fixed, the ordering or the gap is still an
+    answer the records support.
+    """
+    assert "Where nothing shown fixes an absolute date" in ANSWER_SYSTEM_PROMPT
+    assert "answer with what the records do fix" in ANSWER_SYSTEM_PROMPT
+
+
+@pytest.mark.parametrize("rendered", ["occurred_at", "timestamp", "the date on each record"])
+def test_the_date_clause_names_no_field_the_prompt_may_not_carry(rendered: str) -> None:
+    """It has to hold on both sides of #1194, so it is conditioned, not asserted.
+
+    ``_render_record`` mirrors the product's bullet, which drops ``occurred_at``; a
+    clause telling the model to read a field the block does not carry is drift the
+    harness cannot detect from its own artifacts, since the prompt and the rendering
+    are both recorded and neither is compared against the other.
+    """
+    assert rendered not in ANSWER_SYSTEM_PROMPT
+
+
+def test_the_prompt_prefers_the_later_of_two_conflicting_records() -> None:
+    """Knowledge-update questions returned the superseded value.
+
+    Judged by "whatever the records themselves show" rather than by prompt order,
+    because the block is ordered by the retrieval composition (ADR-0072 §5), not by
+    time — reading position as recency would be a different instruction that happened
+    to score.
+    """
+    assert "Where two records disagree about something that can change" in ANSWER_SYSTEM_PROMPT
+    assert "answer from the later one" in ANSWER_SYSTEM_PROMPT
+    assert "treat the earlier as superseded" in ANSWER_SYSTEM_PROMPT
+
+
+def test_the_recalibration_did_not_move_the_threshold() -> None:
+    """The pilot-4 clauses are additive: the decline's condition is untouched.
+
+    Stated as its own test because it is the property the whole change is claimed
+    under — an arm that also moved the threshold would not be measuring what #1029
+    pre-registers it as measuring, and every unanswerable question's graded behaviour
+    rides on this literal.
+    """
+    assert "Where the records give you nothing to answer from, reply exactly: " in (
+        ANSWER_SYSTEM_PROMPT
+    )
+    assert "being on the topic is not the same as supporting an answer" in ANSWER_SYSTEM_PROMPT
+    assert "always answer" not in ANSWER_SYSTEM_PROMPT
+    assert "never reply" not in ANSWER_SYSTEM_PROMPT
