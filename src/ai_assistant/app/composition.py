@@ -127,13 +127,34 @@ if TYPE_CHECKING:
 #: about 80% of that population, and the deeper page is the cheapest lever there
 #: is, because the records are already ranked and already in the store.
 #:
+#: **And 30 rather than 15, because complete intake removed the ceiling that made
+#: depth in beliefs worthless** (ADR-0162 §9). ADR-0160 §1 took the episodic bound
+#: to 15 on a correct reading of a store that no longer exists: the belief layer was
+#: saturated at 63.1%, "the ceiling of what its distilled records cite at all", so
+#: buying depth here bought nothing. Under ADR-0162 §1 the probe's belief-reach
+#: curve runs 55.1% at 5 to 81.2% at 50 and is still climbing, where the control's
+#: runs 31.2% to 38.8% and is flat by 15. On union all-gold-reached the probe swept
+#: 15+15 79.8%, 20+10 80.9%, 20+20 83.3%, **30+10 85.1%**, 30+15 86.5%, 30+30 88.6%,
+#: 50+10 88.4% — so 30+10 beats 20+20 at a comparable prompt size (~6.5k against
+#: ~5.9k characters) and beats the incumbent 15+15 by 5.3 points at about 1.5 times the
+#: context. Spending the marginal slot on the layer still returning new gold is
+#: ADR-0160's own reasoning applied to the store its ruling helped create.
+#:
+#: **It is provisional in a stated way, which is a cost this constant carries**
+#: (§9's third clause). Whatever the byte-budgeted single ranked pool ADR-0160 §5
+#: leaves open decides replaces it, and pilot 5's post-hoc attribution (ADR-0160 §3)
+#: re-tests it. No ratified clause fixed the old value — ADR-0160 §6 lists
+#: "``RETRIEVAL_LIMIT`` stays 15" among what that ADR does *not* decide, in unmarked
+#: text, which under ADR-0089 §3 supplies no obligation — so this is the same kind of
+#: composition-root tuning move on the same kind of evidence.
+#:
 #: What it costs is answer context: 5 records filled roughly 4KB, so this is
-#: about three times that in the prompt, per turn. That is the trade the
+#: about six times that in the prompt, per turn. That is the trade the
 #: evidence buys, and it is bounded on both sides — ADR-0119 §3's
 #: ``TRACE_RECORD_SET_CAP`` of 256 is still an order of magnitude away, so no
 #: traced read moves nearer to truncating and §9's diagnostic keeps saying the
 #: same thing about this deployment.
-RETRIEVAL_LIMIT: Final = 15
+RETRIEVAL_LIMIT: Final = 30
 
 #: How many episodes a turn's **supplementary** read may add to the answering
 #: prompt (ADR-0158 §3), beside — never out of — :data:`RETRIEVAL_LIMIT`.
@@ -147,27 +168,40 @@ RETRIEVAL_LIMIT: Final = 15
 #: not a preference; it is a fact nobody has measured, and offering it as a knob
 #: would imply a user could know it.
 #:
-#: **15 against a belief budget of 15, and the two still never share.** ADR-0158 §3
+#: **10 against a belief budget of 30, and the two still never share.** ADR-0158 §3
 #: gives the supplement a budget of its own precisely so that
-#: :data:`RETRIEVAL_LIMIT`'s 5→15 move — bought for *beliefs* on #1029's rank-miss
-#: measurement — is not handed back to episodes. What has changed is the evidence,
-#: not the separation: the bound began at 5 as a judgement standing in for a
-#: measurement, and ADR-0160 §1 replaces it with one. #1029's pilot-3 anatomy
-#: re-ranked every question against its whole store and put episode recall@5 at
-#: 55.3% against recall@15 at 72.7% — seventeen points on records the ranking had
-#: already found — where a gold episode reaching the prompt is worth 78 to 81% correct
-#: against 36.6% for a belief citing the same fact. Recall@20 and @30 measure higher
-#: still; 15 is the largest value the ceiling below admits without also moving the
-#: belief budget, which is a separate decision on evidence pointing the other way.
+#: :data:`RETRIEVAL_LIMIT`'s moves — bought for *beliefs*, on #1029's rank-miss
+#: measurement and then on ADR-0162 §9's reach sweep — are not handed back to
+#: episodes. What has changed is the evidence, not the separation: the bound began
+#: at 5 as a judgement standing in for a measurement, ADR-0160 §1 replaced it with
+#: one at 15 on a store where the belief layer was saturated, and ADR-0162 §9
+#: replaces that in turn on a store where it is not.
+#:
+#: **Why 10 rather than 15, when 30+15 measures higher** (§9). The probe puts 30+15
+#: at 86.5% against 30+10's 85.1% — 1.4 points for half again as much transcript in
+#: every prompt, where an episode is a verbatim turn against a belief's distilled
+#: sentence. ADR-0158 §5 left the byte bound open precisely because count is a weak
+#: guard on volume and named the next scored run's ``context_chars`` as what decides
+#: it, so the smaller number spends less of an unmeasured budget while the layer
+#: demonstrably still returning gold gets the depth. It is also the reversible
+#: direction: raising a bound on the pilot's evidence is one integer, and unwinding a
+#: prompt that grew past a byte bound nobody has set is not.
+#:
+#: **Both numbers are provisional in a stated way** (§9's third clause) — the
+#: byte-budgeted single ranked pool ADR-0160 §5 leaves open replaces them, and pilot
+#: 5's post-hoc attribution (ADR-0160 §3) re-tests them. ADR-0160 §1's remaining
+#: half stands and is relied on here: no separately registered ablation arm is owed
+#: for the bound.
 #:
 #: **It may never exceed :data:`RETRIEVAL_LIMIT`**, which ``LearningLoop`` enforces
 #: at construction rather than trusting this line. That ceiling is where ADR-0158
 #: §3 puts the product thesis in checkable form: whatever the numbers become,
-#: nobody can configure a system that asks for more transcript than belief. At 15
-#: against 15 it is *met* rather than exceeded, which ADR-0160 §2 admits explicitly
-#: — so the clause now binds in both directions, and this constant cannot rise
-#: unless the belief budget rises first.
-EPISODIC_SUPPLEMENT_LIMIT: Final = 15
+#: nobody can configure a system that asks for more transcript than belief. At 10
+#: against 30 it is satisfied with slack again, so the coupling ADR-0160 §2 warned
+#: about — that dropping belief depth would drag this bound down with it — is simply
+#: not exercised. ADR-0160 §2's admission that parity *meets* the ceiling is
+#: untouched and unneeded here.
+EPISODIC_SUPPLEMENT_LIMIT: Final = 10
 
 #: What this layer tunes :class:`MemoryIngestor`'s conflict ceiling to, passed
 #: explicitly for :data:`RETRIEVAL_LIMIT`'s reason.
@@ -855,8 +889,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             retrieval_limit=RETRIEVAL_LIMIT,
             # The episodic supplement's own budget (ADR-0158 §3), passed for the
             # same reason and never subtracted from the one above: the two are two
-            # budgets, not a share of one, so a turn asks for 15 beliefs *and* up
-            # to 5 episodes. §5 puts this figure here rather than on ``Settings``.
+            # budgets, not a share of one, so a turn asks for 30 beliefs *and* up
+            # to 10 episodes. §5 puts this figure here rather than on ``Settings``.
             episodic_limit=EPISODIC_SUPPLEMENT_LIMIT,
         )
         # ADR-0152 §10's marked clause: "It is implemented in `tools/`, and consumed

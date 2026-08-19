@@ -401,22 +401,24 @@ async def test_respond_retrieves_at_most_the_configured_limit() -> None:
     assert len(result.memories) == 2
 
 
-async def test_an_untuned_loop_reads_the_default_page_and_that_page_is_fifteen() -> None:
-    """The default is a number a turn actually gets, and #1163 moved it to 15.
+async def test_an_untuned_loop_reads_the_default_page_and_that_page_is_thirty() -> None:
+    """The default is a number a turn actually gets, and ADR-0162 §9 moved it to 30.
 
     Every other retrieval test here passes ``retrieval_limit`` explicitly, so none
-    of them can tell 15 from 5 — and the deployment figure lives in
+    of them can tell 30 from 5 — and the deployment figure lives in
     ``app/composition.py``, which this subsystem may not import. What is checkable
     from here is the pair the constant claims: that an untuned loop fills a budget
     of ``_DEFAULT_RETRIEVAL_LIMIT`` (so the default is wired, not decorative), and
-    that the budget is the depth #1029's re-rank analysis bought — median gold
-    cosine rank 12, 114 of 277 misses at ranks 6 to 10.
+    that the budget is the depth the evidence bought — #1029's re-rank analysis for
+    the move to 15, and ADR-0162 §9's reach sweep for the move to 30, where complete
+    intake lifts the belief ceiling and the reach curve is still climbing at 50.
 
     The store holds more than the budget on purpose. A page equal to the corpus
-    would pass on any limit at or above 20 and prove only that nothing truncates.
+    would pass on any limit at or above the corpus size and prove only that nothing
+    truncates.
     """
     memory = FakeMemoryStore(now=_clock)
-    for index in range(20):
+    for index in range(40):
         await memory.add(
             SemanticMemory(
                 id=f"fact-{index}",
@@ -438,7 +440,7 @@ async def test_an_untuned_loop_reads_the_default_page_and_that_page_is_fifteen()
 
     result = await loop.respond("dana")
 
-    assert _DEFAULT_RETRIEVAL_LIMIT == 15
+    assert _DEFAULT_RETRIEVAL_LIMIT == 30
     assert len(result.memories) == _DEFAULT_RETRIEVAL_LIMIT
 
 
@@ -1370,18 +1372,20 @@ async def test_the_supplements_read_is_the_one_section_three_pins() -> None:
     assert call.limit == _DEFAULT_EPISODIC_LIMIT
 
 
-def test_the_episodic_bound_is_fifteen_and_never_exceeds_the_belief_budget() -> None:
-    """ADR-0160 §1's value, and the ceiling that is the thesis in code.
+def test_the_episodic_bound_is_ten_and_never_exceeds_the_belief_budget() -> None:
+    """ADR-0162 §9's value, and the ceiling that is the thesis in code.
 
     The deployment figure lives in ``app/composition.py``, which this subsystem may
     not import; what is checkable here is the default a direct construction gets and
     the relation ADR-0158 §3 fixes between the two numbers. The value moves on the
     post-hoc attribution ADR-0160 §3 requires, read off a scored run — there is no
-    ablation arm left to wait for. The relation now holds as an equality, which
-    ADR-0160 §2 admits: "never exceeds" is met at parity, not breached.
+    ablation arm left to wait for, and §9 widens the evidence that may move it to
+    include measured retrieval reach. The relation is back to holding with slack
+    rather than at the parity ADR-0160 §2 admitted, because the belief budget rose
+    while this one fell.
     """
-    assert _DEFAULT_EPISODIC_LIMIT == 15
-    assert _DEFAULT_EPISODIC_LIMIT <= _DEFAULT_RETRIEVAL_LIMIT
+    assert _DEFAULT_EPISODIC_LIMIT == 10
+    assert _DEFAULT_EPISODIC_LIMIT < _DEFAULT_RETRIEVAL_LIMIT
 
 
 async def test_a_derived_belief_never_reaches_the_supplement() -> None:
@@ -1643,11 +1647,11 @@ async def test_a_belief_budget_below_the_default_bound_is_tuning_and_not_an_erro
 async def test_an_untuned_bound_at_the_belief_budget_is_the_default_itself() -> None:
     """Capping is for the small-budget case only; the ordinary one is untouched.
 
-    Renamed on ADR-0160 §7's instruction: the two numbers are equal now, so a name
-    stating that one sits above the other describes nothing. What is proved is
-    unchanged — ``LearningLoop.__init__``'s cap fires only where a *stated* belief
-    budget is below the default, and at the default budget the untuned bound
-    resolves whole.
+    The name is ADR-0160 §7's and still fits: it says where the cap does *not* fire,
+    which is the point whether the two numbers are equal or, as under ADR-0162 §9,
+    ten against thirty. What is proved is unchanged — ``LearningLoop.__init__``'s cap
+    fires only where a *stated* belief budget is below the default, and at the
+    default budget the untuned bound resolves whole.
     """
     loop = _loop_with(retrieval_limit=_DEFAULT_RETRIEVAL_LIMIT)
 
