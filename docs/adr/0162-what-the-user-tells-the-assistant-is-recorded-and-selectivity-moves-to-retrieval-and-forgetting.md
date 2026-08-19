@@ -2,6 +2,81 @@
 
 - Status: Accepted
 - Date: 2026-08-19
+- Amended: 2026-08-19 (§7 — its progress-over-overlap sentence names one instance of
+  a property that has two). §7 rules that consecutive windows overlap by *k* episodes
+  and states one exception, an `observation_batch_size` of 1, together with the reason
+  that carries it: *"An overlap of 1 on a window of 1 advances the tiling by nothing,
+  so no value satisfies progress and overlap together — a property of a one-turn
+  window rather than something this section can repair."* **A window whose episodes
+  have thinned to *k* or fewer can acquire that same property**, and §7 states the
+  reason generally while naming only the one-turn instance of it. The second instance
+  is recorded here:
+
+  > **Normative.** Where a window holds no more than *k* episodes, progress takes
+  > precedence over the overlap: the next window begins strictly after the turn this
+  > one began at, and carries every episode of this one from that start onward. Where
+  > honouring the overlap in full already begins the next window later than this one
+  > began, this clause asks for nothing further and the clauses above are satisfied
+  > whole. Where it does not, the carry is short by the episodes the advance drops,
+  > and it is empty where the window resolved no episode at all.
+
+  **When the two conflict, and when they do not.** `ObservationStage` holds no cursor
+  and takes no offset: it reads a conversation's most recent `observation_batch_size`
+  turns and nothing else (ADR-0077 §8, which §7 cites for exactly this). A window is
+  therefore fixed by the turn it begins at, and a driver reaches the next one by
+  deferring its call until the turns being dropped have been captured — it needs no
+  new selection mechanism for any of this. A window holding **more** than *k* episodes
+  hands over a proper tail of what it holds, which begins later than the window does,
+  so the floor above is never its binding constraint and nothing here reaches it. A
+  window holding *k* or **fewer** must hand over everything it has — and where its
+  episodes reach back to the turn it began at, the window the overlap then demands
+  begins where this one began, so it **is** this window, and so is every window after
+  it: the tiling never advances and the walk never terminates. Where its episodes
+  begin later, the demanded window begins later too, the floor does not bind, and §7
+  governs whole; that window is then carried into a successor whose own episodes do
+  reach its start, so the floor binds at the following pass instead. The walk is
+  paced, not stalled: one turn per pass across a stretch of unresolvable turns until
+  new material comes into reach. Honouring the overlap where it does conflict would
+  also leave §7's own protasis, *"Where consecutive observation passes tile a sequence
+  of episodes **rather than re-reading one window**"*.
+
+  **What reaches it, and what removes it.** A window reaches the conflict only when at
+  least `observation_batch_size − k` of its turns carry no resolvable episode. §7
+  ratifies a bound on *k* rather than a value, so the rate is stated as that bound and
+  not as a figure. ADR-0077 §8 rules that such a turn is skipped and the batch is not
+  backfilled, and `ObservationStage._select` reaches that state from a failed episode
+  write, an expiry or a `forget` alike, so this clause names no cause and turns on the
+  shape it can see. §8 already rules the short window itself *"the honest consequence
+  of a gap"*, its bound being *"a maximum rather than a quota"*; what this note settles
+  is only which of two clauses yields where both cannot hold. In the harness driver §7
+  binds today, a run in which the conflict can arise already carries a non-zero
+  `turns_degraded`. The durable cursor ADR-0077 §11 filed, which §7's last clause names
+  as ADR-0111 §1's walk, is what would remove the conflict rather than yield to it —
+  and that clause already binds whoever builds it; nothing is designed for it here.
+
+  **Classification: an amendment under [ADR-0070](0070-amendment-and-supersession-rules.md)
+  §1, and the scope is what makes it one.** The floor binds only where honouring the
+  overlap in full would leave the next window beginning where this one began, and there
+  §7 demanded of a reader something no value satisfies — so no action it prescribed is
+  abandoned, on either reading of the section. Read as §7's protasis and its stated
+  property have it, the case was never inside the overlap clause; read with the
+  exception list closed, the clause was unsatisfiable and no reader could act on it at
+  all. **The two shapes that reach the floor are each unsatisfiable before this note in
+  their own right.** A window holding *fewer* than *k* episodes has no *k* episodes to
+  hand over, so the overlap asks it for something it does not contain, whatever a
+  driver does. A window holding exactly *k* whose episodes reach its own start can
+  satisfy the overlap only by being read again, unchanged, for ever. And where the
+  floor does **not** bind — every window holding more than *k*, and every thinned one
+  whose episodes begin later than it does — the overlap stays *k* episodes and nothing
+  moves. Two readings of one section, one of which makes it demand the impossible, is
+  the internal contradiction ADR-0070 §1 admits as an in-place amendment; it is not a
+  decision being replaced, and the ratified clauses below are **not** rewritten. It
+  names no other ADR as its cause, so it is a self-amendment and no `Status` edit is
+  owed ([ADR-0082](0082-recording-an-amendment-on-an-earlier-adrs-status-line.md) §1).
+  The fork was raised against PR #1227's tiling driver, whose two lenses read the
+  exception list as closed; the owner ruled it on 2026-08-19 under #1210 and it is
+  recorded here rather than re-argued. Refs #1210, #1227, ADR-0070 §1, ADR-0077 §8,
+  ADR-0111 §1.
 - **Note (2026-08-19): ratified.** `Proposed` → `Accepted` on the content this ADR
   merges with, after **both** required lenses returned **`APPROVE` with no findings on
   one tree** — adversarial and architecture, the set the bullet below commits it to.
