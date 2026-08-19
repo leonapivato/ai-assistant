@@ -212,14 +212,17 @@ a contract ADR with an architecture lens; it is not one.
 > **Normative.** Where a reconciler ran, its report names **exactly one** of the three
 > outcomes it can take: the model answered, `reconciler_failed`, or
 > `reconciler_unconsulted`. (`reconciler_absent` is not among them — no reconciler ran,
-> so no report was due.) A report that names none of the three, or that is missing
-> where one was due, is itself **non-conforming in whole**: the mapping it accompanies
-> installs nothing, every member it would have labelled stays unlabelled, and the
-> proposal counts under `reconciler_failed`. That is the same all-or-nothing shape this
-> section takes for a non-conforming mapping, and it is what stops two implementations
-> reporting the same unusable report differently. How the report is **represented**
-> across the seam is not decided here: it is `memory`-internal, where ADR-0159 §2 keeps
-> it, and a closed type is one way to meet this clause rather than a requirement of it.
+> so no report was due.) A report that does **not** name exactly one of them — missing
+> where one was due, naming none of them, or naming more than one — is itself
+> **non-conforming in whole**: the mapping it accompanies installs nothing, every
+> member it would have labelled stays unlabelled, and the proposal counts under
+> `reconciler_failed`. A report naming more than one is no more usable for carrying a
+> valid outcome among them, because nothing here says which of them to read. That is
+> the same all-or-nothing shape this section takes for a non-conforming mapping, and it
+> is what stops two implementations reporting the same unusable report differently.
+> How the report is **represented** across the seam is not decided here: it is
+> `memory`-internal, where ADR-0159 §2 keeps it, and a closed type is one way to meet
+> this clause rather than a requirement of it.
 
 > **Normative.** Six keys count **pairs** — one proposal of the crossing against one
 > member of its resolved conflict set. `relations_offered` counts every pair the
@@ -611,13 +614,15 @@ The lane owes:
   `unconsulted` and a report of `failed`, each arriving with a model label, discard
   that label, leave the member unlabelled and count the proposal under
   `reconciler_failed` — the two combinations that would otherwise let one trace deny
-  itself; that a report from a reconciler that **ran** naming none of its three
-  outcomes — missing, or carrying a value that is none of them — retains the certain
-  rung's labels, installs nothing from the mapping beside it however well formed that
-  mapping is, leaves the remaining offered pairs under `relations_unlabelled` and
-  counts the proposal under `reconciler_failed`, which is the case on which two
-  implementations would otherwise report the same input differently; that each of the
-  three **non-raising** shapes
+  itself; that a report from a reconciler that **ran** failing to name exactly one of
+  its three outcomes — missing, carrying a value that is none of them, or naming more
+  than one, the last pinned on a report carrying **both** an answered model and
+  `reconciler_unconsulted` beside valid labels — retains the certain rung's labels,
+  installs nothing from the mapping beside it however well formed that mapping is,
+  leaves the remaining offered pairs under `relations_unlabelled` and counts the
+  proposal under `reconciler_failed`, which are the cases on which two implementations
+  would otherwise report the same input differently; that each of the three
+  **non-raising** shapes
   `MemoryIngestor._relations_for`'s guard already absorbs — a reconciler returning
   `None`, one returning a non-mapping, and one returning a mapping whose lookup
   raises — retains the certain rung's labels, leaves the remaining offered pairs under
@@ -810,8 +815,9 @@ act differently, or read one of its clauses more widely than it now holds?
   route, because the trace does not say which of the two arms produced the count.
 - **The floor deployment becomes visible for the first time.** `reconciler_absent`,
   `reconciler_failed` and `reconciler_unconsulted` distinguish a hub running ADR-0159
-  §6's ratified floor, a hub whose provider is failing, a hub whose model is never
-  asked at all, and a hub whose model is asked and adds nothing — four states that
+  §6's ratified floor, a hub whose reconciler cannot deliver a usable determination, a
+  hub whose model is never asked at all, and a hub whose model is asked and adds
+  nothing — four states that
   today all present as an unremarkable run of `ACCEPT`s. `reconciler_unconsulted` is
   read with `relations_offered` beside it, because it does not say *why* nothing was
   asked (§3). Three of them need the reconciler's own report, because it absorbs its
