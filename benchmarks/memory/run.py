@@ -779,16 +779,18 @@ class _CaseDriver:
         carried them per row since #1074 for exactly this class of reason — an analysis
         that must survive the stores being deleted.
 
-        **The clock is put where ingestion left it**, which the source run published
-        as the ``asked_at`` of the case's first row. That is not tidiness:
+        **The clock is restored before every reused question**, to the instant the
+        source published for that question. That is not tidiness:
         ``answer_question`` moves the clock to the question's own instant only where
         the corpus states one, and LoCoMo states none — so a reused run that skipped
         the ingest would retrieve at the clock's epoch default, judging every liveness
         axis in the store against 1970 and quietly measuring something no run has ever
-        measured. It is read off the *source's records* rather than off the case in
-        hand because the case is the caller's and the records are the source run's own
-        account of when it retrieved; the gate refuses any case that would answer at
-        an instant the source did not.
+        measured. It is restored *per question* rather than once per case because the
+        clock is one moving reading and a corpus mixing stated and unstated instants
+        makes each question's depend on the ones before it; and it is read off the
+        source's records rather than off the case in hand because the case is the
+        caller's and the records are the source run's own account of when it
+        retrieved.
 
         Args:
             case: The case to run.
@@ -831,11 +833,13 @@ class _CaseDriver:
                     question.question_id: self.reuse.join_for(case, question.question_id)
                     for question in case.questions
                 }
-                instant = self.reuse.answering_instant(case)
-                if instant is not None:
-                    harness.clock.set(instant)
             cursor = TraceCursor(harness.traces)
             for question in case.questions:
+                if self.reuse is not None:
+                    # `retrieve_for` and `answer_question` move the clock again where
+                    # the corpus states an instant — to the same value, which the gate
+                    # is what guarantees.
+                    harness.clock.set(self.reuse.instant_for(case, question.question_id))
                 if self.session is None:
                     await _answer_now(
                         harness,
