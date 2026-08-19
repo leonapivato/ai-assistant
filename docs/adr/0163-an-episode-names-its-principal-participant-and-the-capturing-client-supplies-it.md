@@ -544,8 +544,14 @@ The lane is #1210's 2.5. It owes, and owes nothing beyond:
 - Tests: a record written without the field decoding from a stored blob and
   reading as absent (§4); a marker surviving the store round trip byte for byte
   (§2); both renderers with and without a marker, including that nothing is
-  rendered in its place when absent (§5); and the non-forgeability of the rendered
-  region (§5).
+  rendered in its place when absent (§5); the non-forgeability of the rendered
+  region (§5); and — the one that tests the decision rather than the field — a
+  LoCoMo item driven through the harness's own ingestion, asserting that the
+  episode it captures carries that corpus's `speaker_a` tag as `principal` and
+  that the observation prompt built from it states the marker. Without that last
+  one every other test passes while the harness still captures unmarked
+  multi-party episodes, which is the exact input this ADR exists to eliminate;
+  the corresponding LongMemEval assertion is that no marker is set.
 
 It may not: add a validator (§2), add a store column, migration or backfill (§4),
 add a `Settings` field, add or change any Protocol member, populate `participants`
