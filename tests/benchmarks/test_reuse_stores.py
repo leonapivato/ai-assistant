@@ -731,6 +731,28 @@ class TestTheGateRefusesTheWrongMemories:
         with pytest.raises(ValueError, match="cannot be reused"):
             _refuse(root, source.run_id, (_case(),))
 
+    async def test_a_source_run_that_was_killed_outright(self, tmp_path: Path) -> None:
+        """A `SIGKILL` writes no `aborted`, so the rows are the only thing that says so.
+
+        The manifest is written before the first case and rewritten only at the end, so
+        a run killed between them leaves one that reads as whole. Truncating the records
+        while leaving `aborted` null is exactly that state on disk.
+        """
+        root = tmp_path / "runs"
+        source, source_dir = await _ingest(root, tmp_path)
+        records = source_dir / "records.jsonl"
+        lines = records.read_text(encoding="utf-8").splitlines(keepends=True)
+        records.write_text("".join(lines[:-1]), encoding="utf-8")
+        written = json.loads((source_dir / "manifest.json").read_text(encoding="utf-8"))
+        assert written["aborted"] is None, "the state under test is an unmarked stop"
+        assert written["question_count"] == len(lines), "a finished run wrote one row each"
+
+        # Asserted on the message rather than the type: the coverage clause would also
+        # refuse this source, one clause later, and for a reason that names the case
+        # rather than the run.
+        with pytest.raises(ValueError, match="stopped before it finished"):
+            _refuse(root, source.run_id, (_case(),))
+
     @pytest.mark.parametrize(
         ("override", "expected"),
         [
