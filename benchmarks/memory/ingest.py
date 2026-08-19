@@ -456,18 +456,38 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
     conversation = await harness.lifecycle.begin(None)
     summary = IngestionSummary(conversation_id=conversation.id)
 
-    # **Two counters, because the trigger is about a whole window and only one of
+    # **Three counters, because the trigger is about a whole window and only one of
     # them is turns this loop captured.** ``pending`` is new turns since the last
     # pass; ``carried`` is how many of the *previous* window the next one will read
     # again, which is 0 until a pass has run and ``overlap`` after every one
     # (ADR-0162 §7). A pass fires when the two together fill a window, so consecutive
     # passes are ``batch_size - overlap`` captures apart and consecutive windows share
     # exactly ``overlap`` episodes. Resetting ``pending`` to 0 rather than to
-    # ``overlap`` is what keeps the closing flush below honest: it fires only where
-    # there are turns no pass has read, never on the carried tail alone, which would
-    # re-read a window wholly contained in the one before it.
+    # ``overlap`` is half of what keeps a pass from re-reading a window wholly
+    # contained in the one before it: without it the closing flush would fire on the
+    # carried tail alone.
+    #
+    # ``observable`` is the other half, and it is what the overlap made worth having.
+    # A capture reporting **no episode** — a lost append, which records no turn at
+    # all, or an episode write that never landed — adds nothing a pass could read, so
+    # a window filled only with those re-reads exactly what the previous pass read:
+    # a duplicate model call, on a paid run, proposing what the gate will fold. That
+    # was already reachable before this section, after ``batch_size`` such captures
+    # in a row; the overlap makes it reachable after ``batch_size - overlap``, which
+    # is enough to close it here rather than leave it. So a pass fires only where at
+    # least one episode has landed since the last one.
+    #
+    # **The gate suppresses no episode, and the ``>=`` is why.** ``pending`` still
+    # counts every capture, degraded or not, for the reason below — the window counts
+    # turns and this loop cannot see which kind of degradation it got. Postponing on
+    # ``observable`` can therefore carry ``pending`` past the threshold, so the test
+    # is ``>=`` and not ``==``: the pass fires on the very first capture that lands an
+    # episode, with that episode the most recent turn in the window. Nothing that
+    # could have been read is skipped, because a stretch that skipped a pass is by
+    # construction a stretch in which nothing was stored.
     pending = 0
     carried = 0
+    observable = 0
     for session in case.sessions:
         harness.clock.set(session.occurred_at)
         for exchange in exchanges_of(session):
@@ -491,6 +511,12 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
             # so over-counting under-fills a window, where under-counting drops
             # episodes.
             pending += 1
+            # Keyed on the episode alone rather than on the branch below, which is
+            # the conservative direction: a report that is `degraded` and still
+            # carries an episode id has something a pass can read, and a gate that
+            # let the flag alone suppress a pass would be able to skip it.
+            if report.episode_id is not None:
+                observable += 1
             if report.degraded or report.episode_id is None:
                 summary.turns_degraded += 1
             else:
@@ -504,11 +530,12 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
                 # stored".
                 for key in exchange.evidence_keys:
                     summary.evidence_episodes.setdefault(key, []).append(report.episode_id)
-            if pending + carried == batch_size:
+            if observable and pending + carried >= batch_size:
                 await _observe(harness, conversation.id, summary)
                 pending = 0
                 carried = overlap
-    if pending:
+                observable = 0
+    if observable:
         await _observe(harness, conversation.id, summary)
     return summary
 

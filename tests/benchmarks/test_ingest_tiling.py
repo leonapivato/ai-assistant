@@ -28,6 +28,7 @@ from benchmarks.memory.ingest import _overlap_of, ingest_case
 from benchmarks.memory.wiring import build_harness
 
 from ai_assistant.core.config import EmbedderKind, Settings
+from ai_assistant.orchestration.conversations import CaptureReport
 from ai_assistant.testing import FakeObserver
 
 if TYPE_CHECKING:
@@ -76,6 +77,24 @@ def _case(turns: int) -> BenchCase:
     )
 
 
+def _settings(tmp_path: Path, *, batch_size: int) -> Settings:
+    """Settings a plumbing check may use, and a scored run may not.
+
+    Args:
+        tmp_path: The test's directory.
+        batch_size: The window the stage is built with.
+
+    Returns:
+        The settings.
+    """
+    return Settings(
+        data_dir=tmp_path / "data",
+        embedder=EmbedderKind.HASHING,
+        episode_retention=None,
+        observation_batch_size=batch_size,
+    )
+
+
 async def _windows(tmp_path: Path, *, turns: int, batch_size: int) -> list[list[str]]:
     """Ingest a case of ``turns`` and return the episode ids of each pass's window.
 
@@ -87,12 +106,7 @@ async def _windows(tmp_path: Path, *, turns: int, batch_size: int) -> list[list[
     Returns:
         One list of episode ids per observation pass, in pass order.
     """
-    settings = Settings(
-        data_dir=tmp_path / "data",
-        embedder=EmbedderKind.HASHING,
-        episode_retention=None,
-        observation_batch_size=batch_size,
-    )
+    settings = _settings(tmp_path, batch_size=batch_size)
     observer = FakeObserver(beliefs=[], max_batch_size=batch_size)
     harness = build_harness(settings, data_dir=tmp_path / "case", observer=observer)
     try:
@@ -171,6 +185,115 @@ async def test_a_carried_tail_alone_never_buys_a_closing_pass(tmp_path: Path) ->
 
     assert len(windows) == 1
     assert len(windows[0]) == 6
+
+
+async def test_captures_that_store_no_episode_buy_no_pass_of_their_own(
+    tmp_path: Path,
+) -> None:
+    """The other route to a window wholly contained in the one before it.
+
+    ``pending`` counts **every** capture, degraded or not, and deliberately: the
+    window counts turns, an episode-stage failure still leaves a turn holding a slot,
+    and `CaptureReport` reports a lost append identically (#1075), so pacing on
+    successful captures alone would let a good episode fall out of every window that
+    is ever read. What that costs is that a run of captures storing nothing can carry
+    ``pending`` to the trigger on its own — and where the appends were the half that
+    failed, the conversation has not moved, so the pass re-reads exactly the window
+    the last one read. It was reachable before ADR-0162 §7 after ``batch_size`` such
+    captures; the overlap makes it reachable after ``batch_size - overlap``.
+
+    So the trigger also asks whether anything landed. Here the first six captures are
+    real and the next three store nothing at all: without the gate the driver fires a
+    second pass over the first six episodes, and with it the run ends on one pass. The counting is
+    unchanged, which the summary is asserted on — all nine turns are counted, three of
+    them as degraded.
+    """
+    batch_size = 6
+    settings = _settings(tmp_path, batch_size=batch_size)
+    observer = FakeObserver(beliefs=[], max_batch_size=batch_size)
+    harness = build_harness(settings, data_dir=tmp_path / "case", observer=observer)
+    real_capture = harness.lifecycle.capture
+    landed: list[str] = []
+
+    async def _capture(conversation_id: str, *, content: str, **kwargs: object) -> CaptureReport:
+        """Capture for real for the first six turns, then store nothing at all.
+
+        Args:
+            conversation_id: The conversation.
+            content: The user half.
+            kwargs: Relayed.
+
+        Returns:
+            The real report, or a degraded one carrying no episode.
+        """
+        if len(landed) >= batch_size:
+            return CaptureReport(conversation_id=conversation_id, degraded=True)
+        report = await real_capture(conversation_id, content=content, **kwargs)  # type: ignore[arg-type]
+        landed.append(content)
+        return report
+
+    try:
+        harness.lifecycle.capture = _capture  # type: ignore[method-assign]
+        summary = await ingest_case(harness, _case(batch_size + 3), batch_size=batch_size)
+    finally:
+        harness.close()
+
+    assert summary.turns_captured == batch_size
+    assert summary.turns_degraded == 3
+    assert summary.observation_passes == 1
+    assert [[record.id for record in batch] for batch in observer.batches] == [
+        [record.id for record in observer.batches[0]]
+    ]
+
+
+async def test_a_pass_fires_on_the_first_capture_that_lands_after_a_barren_stretch(
+    tmp_path: Path,
+) -> None:
+    """The gate postpones a pass; it must never cancel one.
+
+    Postponing lets ``pending`` run past the threshold, so the trigger tests ``>=``
+    rather than ``==`` — an equality would step over the boundary during the barren
+    stretch and never come back to it, and every episode captured afterwards would go
+    unobserved until the *next* whole window. The barren stretch here is deliberately
+    longer than the window for exactly that reason: the threshold of six is crossed at
+    the sixth capture, with nothing stored and no pass owed, and the equality is gone
+    by the time anything lands. What is pinned is the tighter property — the pass
+    fires on the very first capture that lands an episode, with that episode the most
+    recent turn in the window it reads.
+    """
+    batch_size = 6
+    barren = 8
+    settings = _settings(tmp_path, batch_size=batch_size)
+    observer = FakeObserver(beliefs=[], max_batch_size=batch_size)
+    harness = build_harness(settings, data_dir=tmp_path / "case", observer=observer)
+    real_capture = harness.lifecycle.capture
+    seen: list[str] = []
+
+    async def _capture(conversation_id: str, *, content: str, **kwargs: object) -> CaptureReport:
+        """Store nothing for the first ``barren`` captures, then capture for real.
+
+        Args:
+            conversation_id: The conversation.
+            content: The user half.
+            kwargs: Relayed.
+
+        Returns:
+            A degraded report carrying no episode, or the real one.
+        """
+        seen.append(content)
+        if len(seen) <= barren:
+            return CaptureReport(conversation_id=conversation_id, degraded=True)
+        return await real_capture(conversation_id, content=content, **kwargs)  # type: ignore[arg-type]
+
+    try:
+        harness.lifecycle.capture = _capture  # type: ignore[method-assign]
+        await ingest_case(harness, _case(barren + 1), batch_size=batch_size)
+    finally:
+        harness.close()
+
+    windows = [[record.id for record in batch] for batch in observer.batches]
+    assert len(windows) == 1, "one pass, and it is the capture that landed that bought it"
+    assert len(windows[0]) == 1, "the one turn that was actually appended"
 
 
 async def test_a_batch_of_one_forgoes_the_overlap_entirely(tmp_path: Path) -> None:
