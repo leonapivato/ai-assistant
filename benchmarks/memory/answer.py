@@ -235,17 +235,35 @@ ABSTENTION_PHRASE: Final = "I don't know"
 #: own registration, pre-registered as an arm on #1029, and not an amendment to
 #: pilot-4's numbers.
 #:
-#: **The date clause is conditioned on what the records happen to carry, because at
-#: this commit an instant is not among it.** :func:`_render_record` mirrors the
-#: product's bullet and the product drops ``occurred_at`` — the module docstring
-#: argues why the mirror keeps that omission, and #1194 is the product-side fix that
-#: removes it. A clause naming a rendered date would therefore describe a prompt this
+#: **Every added clause is conditioned on a signal the rendered block actually
+#: carries, and names what to do where it does not, because the block carries almost
+#: nothing.** :func:`_render_record` mirrors the product's bullet — kind, source,
+#: content — and drops ``occurred_at``, ``provenance`` and every other field; the
+#: module docstring argues why the mirror keeps those omissions, and #1194 is the
+#: product-side fix that removes the first of them. So a clause telling the model to
+#: read "the date of the record" or "the newer record" would describe a prompt this
 #: module does not build, which is the drift the "listed"/"numbered" paragraph below
-#: exists to prevent, and it would silently become a lie again if #1194 were reverted.
-#: So the clause says "where the records carry dates or times" and asks for the
-#: ordering or the interval where nothing fixes an absolute date — true of the
-#: dates that appear inside a record's *content* today, and true of a rendered
-#: instant tomorrow, without asserting either.
+#: exists to prevent — and, worse, would ask for an answer from a field that is not
+#: there, against the records-only constraint that is the whole experiment. Three
+#: consequences, each of which the adversarial round on #1212 named as its own
+#: finding:
+#:
+#: * *Dates.* The clause fires "where the records carry dates or times", resolves
+#:   relative wording against "a date the records actually show", forbids supplying a
+#:   date they do not, and asks for the ordering or the interval where nothing fixes
+#:   an absolute one. True of the dates inside a record's *content* today, true of a
+#:   rendered instant once #1194 lands, and asserting neither.
+#: * *Conflicts.* "Which is later" is judged by a date **or by wording that describes
+#:   a change** — the signal a knowledge-update belief actually carries in its content
+#:   — and explicitly *not* by list position, which is the retrieval composition's
+#:   precedence order (ADR-0072 §5) and not chronology. Where neither shows, the
+#:   instruction asks for the best-supported value rather than a decline, because a
+#:   decline here would be the pilot-1 artifact returning through a side door.
+#: * *Counting.* The aggregation clause counts **occasions, not records**. A belief
+#:   and the episode it was distilled from are two records describing one occasion and
+#:   both reach the prompt — the belief read and the episodic supplement are separate
+#:   reads deduplicated by id (ADR-0158 §4), so corroboration is the normal case and
+#:   "gather across all the records" alone would inflate every count.
 #:
 #: **Nothing here gives the model a present moment, and supplying one is not this
 #: literal's to do.** :func:`_moved_clock` sets the benchmark clock to the question's
@@ -299,18 +317,23 @@ ANSWER_SYSTEM_PROMPT: Final = (
     "Where the question asks how many, how often, or for a list, gather the answer "
     "across all of the records together: the occasions it asks about are usually "
     "spread over several separate conversations, and one record describing one of "
-    "them is rarely the whole count. "
+    "them is rarely the whole count. Count occasions, not records — two records "
+    "describing the same occasion, such as a summary of an event and the event "
+    "itself, are one occasion and not two. "
     "Where the records carry dates or times, work with them rather than repeating "
     "them: put events in order, compute the interval or the elapsed time the question "
-    "asks for, read any relative wording — 'yesterday', 'last summer' — against the "
-    "date of the record it appears in, and give an absolute date where the question "
-    "asks when something happened. Where nothing shown fixes an absolute date, answer "
-    "with what the records do fix, such as the order of the events or the gap between "
-    "them. "
+    "asks for, and read any relative wording — 'yesterday', 'last summer' — against a "
+    "date the records actually show. Give an absolute date where the question asks "
+    "when something happened and the records fix one; never supply a date they do "
+    "not. Where nothing shown fixes an absolute date, answer with what the records do "
+    "fix, such as the order of the events or the gap between them. "
     "Where two records disagree about something that can change, answer from the "
-    "later one — judged by whatever the records themselves show of when each was "
-    "said — and treat the earlier as superseded rather than as an equally good "
-    "answer. "
+    "later one and treat the earlier as superseded rather than as an equally good "
+    "answer. Judge which is later by what the records themselves show — a date, or "
+    "wording that describes a change, such as 'moved to', 'switched to' or 'now' — "
+    "and not by the order they are listed in, which is not chronological. Where "
+    "nothing shows which of the two is later, give the value the records support "
+    "best rather than declining. "
     "When you do answer, answer as briefly as the question allows — a name, a date, a "
     "phrase — with no preamble, no explanation, no statement of how confident you are, "
     "and no opening caveat about the records."
