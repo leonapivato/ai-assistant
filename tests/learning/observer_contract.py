@@ -192,19 +192,34 @@ class ObserverContract:
     # --- the subject axis (ADR-0100 §5) -------------------------------------
 
     async def test_no_proposal_states_a_subject(self, observer: Observer) -> None:
-        """An observer proposes only about the user, so it never names a subject.
+        """An observer states no subject, whatever a record is about.
 
         The clause ADR-0100 §5 puts in this suite rather than in one
         implementation: an observer's proposal leaves ``about_person`` unset, and
-        one that would state it is not proposed at all. It adds no obligation —
-        a belief warranted only when it is *about the user* (ADR-0077 §2) has no
-        non-owner subject to state — but until the field existed there was nowhere
-        for the obligation to be *seen*, so the bar could only be asserted in
-        prose and requested in a prompt.
+        one that would state it is not proposed at all.
 
-        **The batch is the provocation, not a neutral one.** Every episode names a
-        third party, so an implementation that reached for the obvious shortcut —
-        reading a name out of content and calling it the subject — fails here.
+        **The ground has moved and the assertion has not** (ADR-0162 §3). This
+        clause used to add no obligation, because a belief warranted only when it
+        is *about the user* (ADR-0077 §2) had no non-owner subject to state, and
+        the refusal therefore excluded nothing a conforming observer would
+        produce. ADR-0162 §1 replaces that bar for an episode recording what the
+        user told the assistant: what the user said about a third party is now
+        recorded, so a proposal whose grammatical subject is not the user is
+        ordinary rather than a sign of a producer overreaching. What holds the
+        refusal up instead is that the axis did not move with the volume on it —
+        ADR-0162 §3 opens no route by which an observer states ``about_person``
+        and forbids a lane implementing it to add one, and the shipped envelope
+        has no subject key to state one with. Such a record is therefore not
+        *mislabelled* but **unlabelled**, exactly as every observer record has
+        been since ADR-0100, and ADR-0100 §3 reads an unstated subject as the
+        owner's own world.
+
+        **The batch is the provocation, and complete intake sharpens it.** Every
+        episode names a third party, and under ADR-0162 §1 an implementation now
+        has a real reason to have something to say about Marta and still no
+        standing to say whom it is about — so one that reached for the obvious
+        shortcut, reading a name out of content and calling it the subject, fails
+        here.
         That is ADR-0100 §4's no-inference rule arriving through §5: a subject is
         stated only from a subject actually received, and a name in a sentence is
         scenery until someone says otherwise.
