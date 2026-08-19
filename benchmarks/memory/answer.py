@@ -34,27 +34,35 @@ its own here would be a prompt the product never builds, so :func:`render_contex
 gives it none: the episodes are simply the last lines of the one block, under the
 retrieved group's own heading, and their kind is legible in each line's own tag.
 
-**A record is rendered the way the product renders it, one line, and that is the whole
-of :func:`render_context`.** It used to dump each record's ``model_dump_json`` — id,
+**A record is rendered by the product's own renderer, and that is the whole of**
+:func:`render_context`. It used to dump each record's ``model_dump_json`` — id,
 provenance with its entire evidence list, validity window, scores — on the stated
 ground that the model should see "what the store holds". That ground was wrong about
-the thing the harness exists to mirror: the product shows the answering model one line
-per memory, ``  - [kind/source] content`` (``planning.planner._render_record``), and
-never the record's machinery. The cost was measured on the pilot-3 partial and it is
-not small — a median answer context of 15,922 characters for 15 beliefs and 5
-one-line episodes, roughly 800 characters per record against ~150 characters of
-content — but the size is the lesser half of it (#1189). The larger half is that a
-prompt carrying UUIDs, confidence scores and validity bounds is a *different* prompt
-from the product's, so a score computed under it is a score for a system nobody ships.
+the thing the harness exists to mirror: the product shows the answering model a bullet
+per memory and never the record's machinery. The cost was measured on the pilot-3
+partial and it is not small — a median answer context of 15,922 characters for 15
+beliefs and 5 one-line episodes, roughly 800 characters per record against ~150
+characters of content — but the size is the lesser half of it (#1189). The larger half
+is that a prompt carrying UUIDs, evidence lists and validity bounds is a *different*
+prompt from the product's, so a score computed under it is a score for a system nobody
+ships.
 
-**Everything the product's line omits is omitted here too, including where the omission
-costs the harness something.** ``occurred_at`` is the case worth naming: an episode
-carries the instant it happened and ``_render_record`` does not show it, so neither
-does this — a harness that added it back would be answering LoCoMo's temporal category
-from a field the shipped prompt withholds, which is #1029's P2 measured on the wrong
-system. ``outcome`` — the assistant half of a captured episode — is dropped for the
-same reason and by the same line, which is a real limitation of the product's renderer
-rather than of this mirror, and is filed as its own issue rather than patched here.
+**The bullet is now called rather than copied** (#1181). It was a hand copy of
+``planning.planner._render_record``, character for character, held honest by an
+equivalence test. That was defensible while the product's line was one f-string; it
+stopped being defensible when the line grew a band, a confidence, an instant, an
+outcome and a quoting rule (#1194, #672), because a five-branch copy is drift waiting
+for somebody to notice. So this module imports the product's renderer and its heading
+and calls them. Nothing in ``planning`` was made public for that — the names are read
+privately, knowingly, which is what the equivalence test was already doing.
+
+**What an episode shows is the product's answer, not this harness's.** Since #1194 the
+product's bullet carries an episode's ``occurred_at`` and its ``outcome``, so this
+prompt carries them too — and it carries them because the shipped renderer does,
+which is the only ground on which the harness may show a field at all. The previous
+run withheld both, and #1029's P2 was measured against a prompt with no instant in it
+anywhere; that measurement is of the older renderer and is not comparable to this one
+field by field.
 
 **Which of ADR-0158 §4's rules are live in the harness, and which are vacuous.** The
 loop composes ``recent + retrieved + supplement``; this harness has no continuity tail
@@ -125,6 +133,7 @@ from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import BeliefBand, MemoryKind, Message, Role
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.retrieval import assemble_by_band
+from ai_assistant.planning.planner import _RETRIEVED_HEADING, _render_record
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -366,16 +375,17 @@ ANSWER_SYSTEM_PROMPT: Final = (
 #: hold. Nothing downstream reads this literal except ``context_chars``.
 EMPTY_CONTEXT: Final = "(no memory records were retrieved)"
 
-#: The heading the product puts the relevance-retrieved group under, copied verbatim
-#: from ``planning.planner._render_request``.
+#: The heading the product puts the relevance-retrieved group under — the product's
+#: own constant, re-exported here under the name this module's callers already use.
 #:
-#: Copied rather than imported, under the discipline :data:`SUPPLEMENT_KINDS` is copied
-#: under: it is a literal inside a private function and the harness does not get to
-#: widen a subsystem's surface for its own convenience. The copy is held honest by
-#: ``tests/benchmarks/test_render_context.py``, which renders the same records through
-#: the planner's own request renderer and asserts this block appears in it verbatim —
-#: an equivalence over behaviour rather than over a string, so it also catches the
-#: bullet's shape moving.
+#: **Imported rather than copied** (#1181). It used to be a verbatim copy, on the
+#: ground that a literal inside a private function is not a surface the harness gets
+#: to widen for its own convenience. That ground survives — nothing in ``planning``
+#: was made public for this — but the copy did not: the equivalence test caught drift
+#: only after somebody wrote it, and #1181 asks for the divergence to be impossible
+#: rather than detected. Reading a private name knowingly is the cheaper of the two,
+#: and it is what ``tests/benchmarks/test_render_context.py`` already did to check the
+#: copy.
 #:
 #: **It is always the retrieved group's heading and never the tail's**, because the
 #: harness cannot produce a tail: ``answer_question`` appends the supplement after the
@@ -383,7 +393,7 @@ EMPTY_CONTEXT: Final = "(no memory records were retrieved)"
 #: so ``planner._split_conversation_tail`` over these records always returns an empty
 #: leading episodic run. A benchmark question is a fresh conversation's first turn and
 #: there is no recent conversation to head.
-RETRIEVED_HEADING: Final = "Relevant memories about the user:"
+RETRIEVED_HEADING: Final = _RETRIEVED_HEADING
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,38 +469,21 @@ class AnswerAttempt:
     failure: str | None = None
 
 
-def _render_record(record: MemoryRecord) -> str:
-    """Render one record as the product's prompt bullet.
-
-    A hand-copy of ``ai_assistant.planning.planner._render_record``, character for
-    character, for the reason :data:`RETRIEVED_HEADING` is copied: it is private, and
-    an equivalence test rather than an import is what keeps a copy honest here.
-
-    ``record.kind`` is interpolated as it stands rather than through
-    :class:`~ai_assistant.core.types.MemoryKind`, because that is what the product's
-    line does — the discriminator is a ``Literal`` str, so the two are the same
-    characters, and taking the enum's ``.value`` would be a second way to spell it that
-    could drift.
-
-    Args:
-        record: The record to render.
-
-    Returns:
-        The bullet, with the product's two-space indent.
-    """
-    return f"  - [{record.kind}/{record.provenance.source.value}] {record.content}"
-
-
 def render_context(records: Sequence[MemoryRecord]) -> str:
     """Render retrieved records as the block the product's answering prompt shows.
 
-    One heading and one line per record — :data:`RETRIEVED_HEADING`, then
-    :func:`_render_record` for each — which is exactly what
+    One heading and the product's own bullet per record — :data:`RETRIEVED_HEADING`,
+    then ``planner._render_record`` for each — which is exactly what
     ``planning.planner._render_request`` builds for a turn whose memories are all
     relevance-retrieved. That is the whole of the change #1189 asked for, and the
     module docstring holds the argument: a prompt carrying each record's ``id``,
     provenance, validity window and scores is a prompt the product never assembles, so
     a benchmark scored under it scores a system nobody ships.
+
+    **A record is not always one line.** Since #1194 an episode that recorded an
+    outcome renders a continuation line under its own bullet, so this joins rendered
+    *records* rather than counting lines, and a reader of the block must not assume
+    one line per record either.
 
     **The supplement needs nothing here**, which is a finding rather than an omission.
     ADR-0158 §4's groups are carried by *position*, and the product's own renderer

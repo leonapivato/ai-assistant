@@ -25,16 +25,25 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from pydantic import ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import PlanningError
-from ai_assistant.core.types import ActionPlan, MemoryKind, Message, PlanStep, Role
+from ai_assistant.core.types import (
+    ActionPlan,
+    BeliefBand,
+    EpisodicMemory,
+    MemoryKind,
+    Message,
+    PlanStep,
+    Role,
+    band_of,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import ModelProvider
@@ -63,6 +72,30 @@ DEFAULT_PLAN_ATTEMPTS = 2
 #: reply is never lost to it; only a reply burying the envelope behind more than
 #: this many unparseable braces degrades to bounded repair.
 _MAX_EXTRACTION_MISSES = 256
+
+#: The heading the chronological conversation tail is printed under (ADR-0074 §5).
+_TAIL_HEADING: Final = "Recent conversation turns, in order:"
+
+#: The heading the relevance-retrieved group is printed under (ADR-0074 §5).
+#:
+#: Named rather than inlined because it is read outside this module: the benchmark
+#: harness assembles the same block for its answering prompt and imports this
+#: instead of spelling it a second time (#1181). It stays private — the harness
+#: reads a private name knowingly, which is cheaper than widening ``planning``'s
+#: public surface for a driver that is not a subsystem.
+_RETRIEVED_HEADING: Final = "Relevant memories about the user:"
+
+#: What each band's records are introduced as, for the non-episodic kinds
+#: (ADR-0072 §6). One clause per band, saying whose claim the content is: the
+#: user's own word, this system's own conclusion, or a connected source's report.
+#: §6 fixes *what the assembler must convey* — the band and the confidence — and
+#: leaves the wording here, so these are phrases a reader needs no vocabulary for,
+#: unlike the ``[kind/source]`` tag they sit beside.
+_STANCE: Final[Mapping[BeliefBand, str]] = {
+    BeliefBand.ASSERTED: "the user stated",
+    BeliefBand.DERIVED: "the assistant believes",
+    BeliefBand.ATTESTED: "a source the user connected reported",
+}
 
 _SYSTEM_PROMPT = """\
 You are the planning stage of an AI assistant. Decompose the user's goal into an \
@@ -309,9 +342,12 @@ def _render_request(
 ) -> str:
     """Render the goal, context and memories into the user-turn prompt.
 
-    The memories are rendered one line each, tagged with kind and provenance
-    source, because passing the retrieved user model into the prompt is what makes
-    a plan personal rather than generic (ADR-0014 §6).
+    The memories are rendered by :func:`_render_record`, each tagged with its kind,
+    its provenance source, its band and its confidence, because passing the
+    retrieved user model into the prompt is what makes a plan personal rather than
+    generic (ADR-0014 §6). A record is one bullet; an episode that recorded an
+    outcome adds one continuation line under its own bullet, which is why the
+    groups are assembled by joining rendered records rather than counted as lines.
 
     ``memories`` carries two groups (ADR-0074 §5) and they are headed separately,
     because one header calling both "relevant memories" tells the model a
@@ -352,12 +388,12 @@ def _render_request(
     if memories:
         turns, retrieved = _split_conversation_tail(memories)
         if turns:
-            lines.append("Recent conversation turns, in order:")
+            lines.append(_TAIL_HEADING)
             lines += [_render_record(record) for record in turns]
             if retrieved:
                 lines.append("")
         if retrieved:
-            lines.append("Relevant memories about the user:")
+            lines.append(_RETRIEVED_HEADING)
             lines += [_render_record(record) for record in retrieved]
     else:
         lines.append("No stored memories were retrieved for this goal.")
@@ -508,8 +544,85 @@ def _quoted_span(value: str) -> str:
 
 
 def _render_record(record: MemoryRecord) -> str:
-    """Render one memory record as a prompt bullet, tagged with kind and source."""
-    return f"  - [{record.kind}/{record.provenance.source.value}] {record.content}"
+    """Render one memory record as a prompt bullet, whole and non-forgeably.
+
+    Three obligations meet on this function and are discharged together (#1194,
+    #672), because each of them changes the same line and two of them are about the
+    spans the third adds.
+
+    **Every span the record controls is quoted** (ADR-0098 §2, §9). This block's
+    syntax is line-oriented — a two-space indent, a ``-`` bullet, a ``[kind/source]``
+    label, a four-space continuation line, and the two group headings
+    :func:`_render_request` prints above it — and ``content`` and ``outcome`` are
+    :data:`~ai_assistant.core.types.EncodableText`, which validates UTF-8
+    encodability and permits every newline and bracket in between. Left raw, a
+    record whose ``content`` carried a newline and a second bullet wrote a bullet
+    **claiming a source of its choosing**, ``user_asserted`` included — the concrete
+    defect #672 is, and the one ADR-0098 §2's second clause names as
+    non-conformance "whatever labels it emits". :func:`_quoted_span` is the
+    deterministic transform §2 admits, already used one function above for a
+    facet's ``source``; here it is applied to the two spans a record supplies, so
+    no record can open a second bullet, forge a label, or reopen a heading. The
+    label itself stays derived from held data — ``kind``, ``source``, ``band_of``
+    and ``confidence`` — and never from reading the text (§2's third clause).
+
+    **A belief states the standing it is held with** (ADR-0072 §6). "A derived
+    belief that reaches a prompt is rendered as a belief, carrying its band and its
+    confidence … never as a bare fact indistinguishable from what the user stated",
+    and §6 leaves the phrasing to this lane. So each bullet opens with the band, the
+    confidence, and a stance clause naming who the record's claim belongs to: the
+    user, this system, or a source the user connected. ``[kind/source]`` alone was
+    the de facto stand-in, and it is a vocabulary a reader has to already know —
+    ``inferred`` and ``observed`` both mean *the assistant worked this out*, and
+    neither says so.
+
+    **An episode is rendered whole** (#1194). ``occurred_at`` and ``outcome`` are
+    fields capture writes and no prompt has ever shown, so a retrieved episode
+    reached the model as a timeless half-exchange: nothing in the pipeline carried
+    an instant to a model, and the reply to the recorded turn was dropped. Both are
+    rendered here, and the ``outcome`` line is labelled *how it turned out* — the
+    words ADR-0074 §4 gives the field — rather than as the assistant's reply.
+    Product capture writes a disposition phrase there ("the selected tool ran",
+    ``orchestration.engine._outcome_of``); it is the benchmark harness's ingestion
+    that puts the other speaker's turn in it. One label has to be true of both, and
+    §4's own is.
+
+    **The instant is this prompt's own frame, which is UTC** (FLAG, and see the
+    issue this lane files). ADR-0156 §2's local-calendar clause is scoped in terms
+    to *the observation prompt*, and §3's to resolving a relative expression at
+    distillation; neither reaches ``planning``, which resolves nothing and holds no
+    zone — ``CurrentContext`` carries none, and taking one would be a second
+    timezone source to argue (ADR-0008 §6). What this renderer can be is
+    *consistent*: ``context.now``, a facet's ``read_at``, a goal's ``deadline`` and
+    every other instant in this prompt are ``isoformat()`` with their offset, so an
+    episode's ``occurred_at`` is too, and the model can order it against ``now``
+    without converting anything. Localising this one field beside a UTC ``now``
+    would manufacture, inside a single prompt, the day-boundary error §3 exists to
+    prevent.
+
+    Args:
+        record: The record to render, verbatim as this system holds it.
+
+    Returns:
+        The bullet — one line, plus one continuation line for an episode that
+        recorded an outcome.
+    """
+    provenance = record.provenance
+    band = band_of(provenance.source)
+    standing = f"{band.value}, confidence {provenance.confidence:.2f}"
+    label = f"  - [{record.kind}/{provenance.source.value}]"
+    content = _quoted_span(record.content)
+
+    if isinstance(record, EpisodicMemory):
+        lines = [
+            f"{label} ({standing}) the assistant recorded this exchange at "
+            f"{record.occurred_at.isoformat()}: {content}"
+        ]
+        if record.outcome is not None:
+            lines.append(f"    how it turned out: {_quoted_span(record.outcome)}")
+        return "\n".join(lines)
+
+    return f"{label} ({standing}) {_STANCE[band]}: {content}"
 
 
 def _split_conversation_tail(
