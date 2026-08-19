@@ -126,30 +126,29 @@ def _case(key: str = "conv-test") -> BenchCase:
     )
 
 
-def _mixed_case() -> BenchCase:
-    """A case whose first question states no instant and whose second states one.
+#: Where a stated-instant question in `_mixed_case` moves the benchmark clock to.
+MOVED = LAST + timedelta(days=200)
 
-    The shape a per-case clock restoration gets wrong: the second question moves the
-    clock, so the first is answered at a different reading from the second, and which
-    reading each gets depends on the order they are asked in.
+
+def _mixed_case(*, stated_first: bool) -> BenchCase:
+    """A case where one question states an instant and the other does not.
+
+    The shape both the clock restoration and the gate's expected instant have to get
+    right: the stated question *moves* the clock, so an unstated question after it is
+    asked at the moved reading rather than at the last session's, and which of the two
+    each question gets depends on the order they are asked in.
+
+    Args:
+        stated_first: Whether the question stating an instant comes first.
 
     Returns:
         The case.
     """
     case = _case("mixed")
-    return case.model_copy(
-        update={
-            "questions": (
-                case.questions[0].model_copy(update={"question_id": "mixed#0"}),
-                case.questions[1].model_copy(
-                    update={
-                        "question_id": "mixed#1",
-                        "asked_at": LAST + timedelta(days=200),
-                    }
-                ),
-            )
-        }
-    )
+    unstated = case.questions[0].model_copy(update={"question_id": "mixed#unstated"})
+    stated = case.questions[1].model_copy(update={"question_id": "mixed#stated", "asked_at": MOVED})
+    ordered = (stated, unstated) if stated_first else (unstated, stated)
+    return case.model_copy(update={"questions": ordered})
 
 
 def _settings(tmp_path: Path, **overrides: Any) -> Settings:
@@ -469,30 +468,32 @@ class TestItAnswersOverTheSameMemories:
 
         assert instant.isoformat() == _rows(source_dir)[0].asked_at
 
-    async def test_a_corpus_mixing_stated_and_unstated_instants_reorders_safely(
-        self, tmp_path: Path
+    @pytest.mark.parametrize("stated_first", [True, False])
+    async def test_a_corpus_mixing_stated_and_unstated_instants(
+        self, tmp_path: Path, stated_first: bool
     ) -> None:
         """The clock is one moving reading, so a question's instant depends on the ones
         before it.
 
-        Restoring it once per case would reproduce the source only for a corpus whose
-        questions all state an instant or all state none. Here one question states one
-        and the other does not, and the reuse asks them in the opposite order: the
-        unstated one must still retrieve at the instant ingestion left, not at the
-        stated one's.
+        A stated instant moves the clock and an unstated question keeps whatever the
+        one before it left, so a case reusing its own source run has to be accepted and
+        reproduced under *both* orders — which is what a rule assigning every unstated
+        question the last session's instant, or a clock restored once per case, gets
+        wrong in opposite directions.
         """
         root = tmp_path / "runs"
-        case = _mixed_case()
+        case = _mixed_case(stated_first=stated_first)
         source, source_dir = await _ingest(root, tmp_path, cases=(case,))
-        reversed_case = case.model_copy(update={"questions": tuple(reversed(case.questions))})
 
-        _, reused_dir = await _reanswer(root, tmp_path, source.run_id, cases=(reversed_case,))
+        _, reused_dir = await _reanswer(root, tmp_path, source.run_id, cases=(case,))
 
         answered_at = {row.question_id: row.asked_at for row in _rows(reused_dir)}
         assert answered_at == {row.question_id: row.asked_at for row in _rows(source_dir)}
         assert answered_at == {
-            "mixed#0": LAST.isoformat(),
-            "mixed#1": (LAST + timedelta(days=200)).isoformat(),
+            "mixed#stated": MOVED.isoformat(),
+            # After the stated one it inherits the moved reading; before it, the
+            # instant ingestion left.
+            "mixed#unstated": (MOVED if stated_first else LAST).isoformat(),
         }
 
     async def test_the_evidence_join_is_the_one_ingestion_recorded(self, tmp_path: Path) -> None:
@@ -779,6 +780,19 @@ class TestTheGateRefusesTheWrongMemories:
 
         with pytest.raises(ValueError, match="different retrievals"):
             _refuse(root, source.run_id, (moved,))
+
+    async def test_a_case_that_reorders_a_mixed_instant_question_list(self, tmp_path: Path) -> None:
+        """Reordering moves an unstated question across the one that moves the clock.
+
+        The reused run would answer it at the source's instant either way — the clock
+        is restored per question — so what this refuses is a case whose own account of
+        when it asks would not match the retrieval it is about to publish.
+        """
+        root = tmp_path / "runs"
+        source, _ = await _ingest(root, tmp_path, cases=(_mixed_case(stated_first=False),))
+
+        with pytest.raises(ValueError, match="different retrievals"):
+            _refuse(root, source.run_id, (_mixed_case(stated_first=True),))
 
     async def test_a_join_that_does_not_line_up_with_its_own_pointers(self, tmp_path: Path) -> None:
         """`QuestionRecord` does not enforce the cardinality, so the gate does.
