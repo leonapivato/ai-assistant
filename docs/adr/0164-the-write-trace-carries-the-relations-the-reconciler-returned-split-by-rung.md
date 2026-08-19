@@ -409,9 +409,9 @@ it should break a test, not vanish.
 job.** `_relations_for` today absorbs a non-conforming or unavailable reconciler by
 returning `own`, so a reconciler that raised and one that answered with nothing
 useful are indistinguishable from their result. ADR-0159 §3 is right to make them
-rule identically; a *measure* that cannot tell them apart, though, reads a broken
-provider as a model that had nothing to say. The emitter observes which it was at
-the point the guard absorbs it.
+rule identically; a *measure* that cannot tell them apart, though, reads an unusable
+determination as a model that had nothing to say. The emitter observes which of those
+two it was at the point the guard absorbs it, and no more than that.
 
 ### 4. The counts are read from the writer's own mapping, never the one a policy was handed
 
@@ -503,11 +503,15 @@ whether the target class excluded it, a purity condition blocked it, or both.
 Narrowing that needs the member's `provenance.source` and the pair it belonged to,
 which the clause above and §2 put out of reach.
 
-**Which members a request covered is not emitted, though whether one was made
-is.** §3's outcome report answers "was the model asked, and did it answer" because
-that fact is the difference between a silent model and a failing provider, and it is
-the fact #1209 is actually about. It stops there. Which members the reconciler
-consulted about, and how the bound cut the set, stay inside the reconciler on
+**Which members a request covered is not emitted, and neither is whether one reached
+a provider.** §3's outcome report answers which of the reconciler's three outcomes it
+took — the model answered, `reconciler_failed`, or `reconciler_unconsulted` — because
+that is the difference between a silent model and a reconciler that delivered nothing
+usable, and it is the fact #1209 is actually about. It does **not** say a request was
+made: `reconciler_failed` covers a non-conforming reconciler the writer's guard
+absorbed as well as a request that yielded no readable answer, and `Consequences`
+records that limitation where an operator meets it. It stops there. Which members the
+reconciler consulted about, and how the bound cut the set, stay inside the reconciler on
 ADR-0159 §3's ground that its own economics are its own — "a mis-scoped one is
 unobservable in the ruling", and this ADR does not make it observable in the trace
 either. What remains, read with §5's configured bound beside `relations_unlabelled`,
@@ -679,9 +683,9 @@ all, when it reaches one by the single route ADR-0159 §6 admits; and that a pos
 model key *entailed* a model answer, when it entails a reported one and the rest is the
 reconciler's conformance. Another found the defect that reshaped the decision:
 `ModelBackedReconciler.reconcile` absorbs its own provider failures, so a key counted at
-the writer could not have distinguished a broken provider from a silent model, which is
-why §3 takes the outcome across the reconciler seam at all. That is recorded here
-because it is the evidence for §3's shape, not as process narration.
+the writer could not have distinguished a failed determination from a silent model,
+which is why §3 takes the outcome across the reconciler seam at all. That is recorded
+here because it is the evidence for §3's shape, not as process narration.
 
 ### 8. What this records against earlier ADRs, under ADR-0082 §1
 
