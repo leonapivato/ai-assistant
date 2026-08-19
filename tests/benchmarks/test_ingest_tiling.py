@@ -344,6 +344,42 @@ async def test_a_barren_stretch_does_not_defer_a_pass_off_its_boundary(
     assert windows[0][-overlap:] == windows[1][:overlap], "and the carry survives them"
 
 
+async def test_a_window_down_to_the_carry_advances_and_carries_what_it_can(
+    tmp_path: Path,
+) -> None:
+    """The one place progress and the identity cannot both hold, and §7 says so.
+
+    §7 binds "where consecutive observation passes **tile a sequence of episodes rather
+    than re-reading one window**". Where a window's gaps leave it with *k* episodes or
+    fewer, the only start that makes its last *k* the next window's prefix is the start
+    it already has — the identity there *is* re-reading one window, which the clause's
+    opening words exclude rather than govern, and which would never terminate. §7 names
+    that property itself one clause later, of the one-turn window: "no value satisfies
+    progress and overlap together — a property of a one-turn window rather than
+    something this section can repair".
+
+    So the driver advances by the least it can and carries the most the window has
+    left. With a batch of 6 and episode-write failures at ordinals 4, 5 and 6, the
+    first window holds exactly three episodes against a carry of three: the next window
+    begins one turn later and carries two of them. What is pinned is that it advances
+    at all, that the carry is the largest the arithmetic admits, and that the shortfall
+    needs a store failing for half a window to reach — which the summary counts.
+    """
+    batch_size = 6
+    overlap = _overlap_of(batch_size)
+
+    windows = await _windows_with_gaps(
+        tmp_path, turns=12, batch_size=batch_size, unresolvable={4, 5, 6}
+    )
+
+    assert len(windows) >= 2
+    assert len(windows[0]) == overlap, "a window down to the carry"
+    assert windows[0] != windows[1], "and the tiling advanced rather than standing still"
+    assert windows[0][-(overlap - 1) :] == windows[1][: overlap - 1], (
+        "carrying every episode the advance leaves room for"
+    )
+
+
 async def test_a_lost_append_holds_the_identity_because_the_ordinal_does_not_move(
     tmp_path: Path,
 ) -> None:
