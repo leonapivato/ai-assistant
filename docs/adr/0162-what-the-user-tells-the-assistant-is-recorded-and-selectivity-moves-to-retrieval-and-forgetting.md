@@ -593,6 +593,15 @@ an obligation on a lane that owes nothing for it.
 > **Normative.** An episode is cited whole. A record cites the episode and never one
 > half of it, and ADR-0077 §5's floor counts distinct episode ids exactly as before.
 
+> **Normative.** What the assistant said does support a record about **the exchange
+> itself** — what it was asked, what it answered or did, and when. That is a record of
+> something that happened, which the `outcome` field witnesses.
+
+> **Normative.** A record whose only support is a proposition the assistant
+> *asserted* — rather than something the user said, or the fact that the assistant
+> said it — is **not proposed**. `outcome` corroborates and contextualises a record
+> grounded in what the user said; it never independently justifies one.
+
 > **Normative.** What the assistant said is evidence about what happened and never a
 > licence to propose an `EpisodicMemory`. ADR-0077 §2's refusal stands.
 
@@ -621,6 +630,31 @@ replaced by ADR-0156 rather than by this ADR.
 let one episode supply the two distinct supports an `INFERRED` record owes, which is
 exactly the failure ADR-0077 §1's duplicate-batch refusal and §5's distinct-id counting
 exist to prevent. The prompt shows two texts for one label; the floor counts labels.
+
+**Why the assistant's assertions are not the user's, which is the same boundary §1 and
+§2 rest on and the one this section could most easily have breached.** §1's rule is
+that the user *told* the assistant something, and the assistant's own answer is not
+that: it is the system's output. Admitting it as independent warrant would let the
+assistant launder its own assertions into the user's model — the assistant answers
+"Paris is the capital of France", or worse a guess about the user, and a pass later
+that assertion is a belief with the user's model behind it and an episode as its
+citation. It is the same shape as the failure ADR-0077 §2 refuses one layer down when
+it forbids a model-authored episode, "a fabricated event wearing the type reserved for
+witnessed ones" that "later beliefs would *cite* as though it were evidence". Here the
+fabrication would be a *belief* rather than an episode, and the type it wears is the
+user's world model. What is legitimately supported is the record of the exchange —
+"the assistant recommended the coastal route on 3 May" is something that happened and
+the `outcome` field witnesses it, and it is precisely the material LongMemEval's
+single-session-assistant questions ask about (#1029 scores that arm at 50%).
+
+**This is a producer-side obligation and it is not mechanically checkable, which is
+said rather than glossed.** Which proposition supports a record is a fact about
+meaning, so no field carries it and no conformance test sees it. That is the same
+limit ADR-0077 §2 named of its own bar — "the half of that principle a gate cannot
+enforce" — and that ADR-0100 §5 restated when it declined to claim its field made the
+bar enforceable. So the clause lands in the prompt and in this text, where every other
+producer-side obligation in this seam lands, and the honest claim is that it directs a
+conforming producer rather than that it stops a non-conforming one.
 
 **The product-side gap, named and not decided here.** In the product the assistant's
 half is not its reply. `orchestration/engine.py`'s `_exchange_of` renders "The user
@@ -833,7 +867,8 @@ them is asked to mean anything it did not already mean.
 > and its refusal is not weakened: §3 supplies the ground that survives §1.
 
 > **Normative.** The lane's remaining edits are `learning/observer.py`'s `_PROMPT_HEAD`
-> (§1) and `_render_batch` (§8); `core/config.py`'s `observation_max_proposals` default
+> — §1's recording rule, and §8's boundary between what the user said and what the
+> assistant asserted — and `_render_batch` (§8); `core/config.py`'s `observation_max_proposals` default
 > and the comment stating its ground (§6); `app/composition.py`'s `RETRIEVAL_LIMIT` and
 > `EPISODIC_SUPPLEMENT_LIMIT` with `orchestration/loop.py`'s two defaults held equal to
 > them (§9); the tiling in `benchmarks/memory/ingest.py`'s `ingest_case` (§7); and the
