@@ -216,6 +216,46 @@ ABSTENTION_PHRASE: Final = "I don't know"
 #: it, so the prompt names the relevant-but-unsupporting case explicitly instead of
 #: leaving it to be inferred.
 #:
+#: **Pilot-4 measured what that threshold change left undone, and these four clauses
+#: are the second recalibration.** Moving the threshold worked, and the headline says
+#: so: LoCoMo 27.8% → 71.8%, LongMemEval 20% → 68% (#1029's pilot-4 results comment).
+#: What is left is not the threshold but *work the instruction never asked for*. Of
+#: LoCoMo's 504 errors, **123 are questions declined with the gold evidence in the
+#: prompt** — the deep anatomy behind #1210 counts 126 of them — and on LongMemEval,
+#: where the gold evidence reached the prompt in 50 questions out of 50, every one of
+#: the 16 misses is answer-side: abstentions with the evidence present, a count
+#: answered off a single session when the occasions were spread over several,
+#: temporal arithmetic not attempted, and a changed fact answered with the value the
+#: records themselves supersede. So the instruction now says that partial support is
+#: support, asks for every record to be read and aggregated where the question counts
+#: or lists, asks for the arithmetic where the records carry dates, and says the later
+#: record wins where two disagree about something that changes. **None of them touches
+#: the threshold**, which the paragraphs above settle and pilot-4 vindicated; they say
+#: what to *do* with records that already clear it. This is again a re-run under its
+#: own registration, pre-registered as an arm on #1029, and not an amendment to
+#: pilot-4's numbers.
+#:
+#: **The date clause is conditioned on what the records happen to carry, because at
+#: this commit an instant is not among it.** :func:`_render_record` mirrors the
+#: product's bullet and the product drops ``occurred_at`` — the module docstring
+#: argues why the mirror keeps that omission, and #1194 is the product-side fix that
+#: removes it. A clause naming a rendered date would therefore describe a prompt this
+#: module does not build, which is the drift the "listed"/"numbered" paragraph below
+#: exists to prevent, and it would silently become a lie again if #1194 were reverted.
+#: So the clause says "where the records carry dates or times" and asks for the
+#: ordering or the interval where nothing fixes an absolute date — true of the
+#: dates that appear inside a record's *content* today, and true of a rendered
+#: instant tomorrow, without asserting either.
+#:
+#: **Nothing here gives the model a present moment, and supplying one is not this
+#: literal's to do.** :func:`_moved_clock` sets the benchmark clock to the question's
+#: stated instant and :attr:`AnswerAttempt.asked_at` records where it landed, but
+#: :func:`answer_messages` sends the context block and the question and nothing else —
+#: so "how long ago" is relative to an anchor the model is never shown, whatever the
+#: records carry. That is a property of the prompt, not a wording defect this clause
+#: could repair, and patching it here would be the harness answering a temporal
+#: question from something the shipped prompt withholds. It is #1211.
+#:
 #: **Three clauses exist for the measure rather than for the answer.** The prompt asks
 #: for :data:`ABSTENTION_PHRASE` verbatim, because ``is_abstention`` reads the answer's
 #: text and the run has no other channel. And it forbids both a stated confidence and
@@ -247,11 +287,30 @@ ANSWER_SYSTEM_PROMPT: Final = (
     "Give your best answer whenever the records plausibly support one — including "
     "when it has to be inferred, pieced together from several records, or read "
     "through wording that differs from the question's, and including when you are "
-    "not certain. A best effort from the records is what is wanted. "
+    "not certain. A best effort from the records is what is wanted. Partial support "
+    "is still support: where the records carry part of what the question asks for, "
+    "answer from the part they carry instead of declining because the rest is "
+    "missing. "
     "Where the records give you nothing to answer from, reply exactly: "
     f"{ABSTENTION_PHRASE}. That includes the case where they discuss the subject of "
     "the question but do not contain the fact it asks for — being on the topic is not "
     "the same as supporting an answer. "
+    "Read every record before you answer, not only the first that looks relevant. "
+    "Where the question asks how many, how often, or for a list, gather the answer "
+    "across all of the records together: the occasions it asks about are usually "
+    "spread over several separate conversations, and one record describing one of "
+    "them is rarely the whole count. "
+    "Where the records carry dates or times, work with them rather than repeating "
+    "them: put events in order, compute the interval or the elapsed time the question "
+    "asks for, read any relative wording — 'yesterday', 'last summer' — against the "
+    "date of the record it appears in, and give an absolute date where the question "
+    "asks when something happened. Where nothing shown fixes an absolute date, answer "
+    "with what the records do fix, such as the order of the events or the gap between "
+    "them. "
+    "Where two records disagree about something that can change, answer from the "
+    "later one — judged by whatever the records themselves show of when each was "
+    "said — and treat the earlier as superseded rather than as an equally good "
+    "answer. "
     "When you do answer, answer as briefly as the question allows — a name, a date, a "
     "phrase — with no preamble, no explanation, no statement of how confident you are, "
     "and no opening caveat about the records."
