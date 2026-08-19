@@ -15,8 +15,14 @@ the prompt the product would build.
 
 Three further properties are pinned because each is a way the mirror could be right in
 form and wrong in effect: the record machinery is gone, an episode's ``occurred_at``
-and ``outcome`` are gone *because the product drops them too*, and the block is the
-retrieved group's rather than the conversation tail's.
+and ``outcome`` are *present* because since #1194 the product shows them, and the block
+is the retrieved group's rather than the conversation tail's.
+
+**Since #1181 the harness calls the product's renderer rather than copying it**, so the
+first test below is no longer catching a copy going stale — it is catching the harness
+assembling the product's own bullets into a block the product would not build. The
+heading, the order, the spacing and the absence of a tail heading are all still this
+module's to hold, and the copy the equivalence used to guard is simply gone.
 """
 
 from __future__ import annotations
@@ -127,8 +133,6 @@ def test_the_heading_is_the_retrieved_groups_and_not_the_conversation_tails() ->
     "absent",
     [
         BELIEF.id,
-        "0.72",
-        "confidence",
         "validity",
         "evidence",
         "last_updated",
@@ -137,8 +141,6 @@ def test_the_heading_is_the_retrieved_groups_and_not_the_conversation_tails() ->
     ],
     ids=[
         "record id",
-        "confidence value",
-        "confidence key",
         "validity window",
         "evidence list",
         "update stamp",
@@ -155,33 +157,54 @@ def test_none_of_the_records_machinery_reaches_the_prompt(absent: str) -> None:
     anything a reader wrote: ``score`` is the retrieval rank the store attaches, and
     ``fact`` is ``SemanticMemory``'s field name, which appears in a dump and in no
     prompt the product builds.
+
+    **``confidence`` used to be on this list and is deliberately off it** (#672). It
+    was here as machinery, and ADR-0072 §6 rules that it is not: a derived belief
+    reaching a prompt is rendered "as a belief, carrying its band and its confidence".
+    The test below asserts its presence, so the two cannot both be satisfied by an
+    empty renderer.
     """
     assert absent not in render_context([BELIEF, EPISODE])
 
 
-def test_an_episode_shows_neither_its_instant_nor_its_outcome() -> None:
-    """Because ``planner._render_record`` shows neither, and the mirror is the point.
+def test_a_belief_carries_the_band_and_confidence_the_product_renders() -> None:
+    """ADR-0072 §6 through the mirror, and the counterweight to the test above.
 
-    This is the one omission that costs the harness something. An episode carries the
-    instant it happened, and #1029's P2 is a prediction about temporal reasoning; a
-    harness that rendered ``occurred_at`` back in would answer that category from a
-    field the shipped prompt withholds, which measures a system that does not exist.
-    ``outcome`` — the assistant half of a captured turn — is dropped by the same line
-    and for the same reason, and is a limitation of the product's renderer rather than
-    of this copy of it.
+    The values, not merely the words: a renderer that printed a constant band or a
+    constant confidence would pass a presence check and tell the answering model
+    something false about every record but one.
+    """
+    block = render_context([BELIEF])
+
+    assert "derived" in block
+    assert "0.72" in block
+    assert BELIEF.provenance.confidence == 0.72
+
+
+def test_an_episode_shows_its_instant_and_its_outcome() -> None:
+    """Because since #1194 ``planner._render_record`` shows both, and the mirror is
+    the point.
+
+    This used to be the one omission that cost the harness something: #1029's P2 is a
+    prediction about temporal reasoning and no instant reached the prompt at all, so
+    the category was being measured against a renderer that withheld its input. Both
+    fields are here now for the only admissible reason — the shipped renderer emits
+    them — and the assertion runs the other way so that a regression in ``planning``
+    is caught here rather than only in the score.
     """
     block = render_context([EPISODE])
-    bullet = block.splitlines()[1]
+    bullet, outcome_line = block.splitlines()[1:3]
 
     assert EPISODE.content in bullet
-    assert "2023-05-08" not in block
+    assert EPISODE.occurred_at.isoformat() in bullet
     assert EPISODE.outcome is not None
-    assert EPISODE.outcome not in block
-    # The bullet and not the block: an episode arriving *alone* is a leading episodic
+    assert EPISODE.outcome in outcome_line
+    assert outcome_line.startswith("    how it turned out:")
+    # The lines and not the block: an episode arriving *alone* is a leading episodic
     # run, so the planner heads it as the conversation tail. That state is unreachable
     # from `answer_question` — §4's separator rule drops a supplement with no belief
-    # before it — so what is compared here is the line, which both renderers share.
-    assert bullet in _product_prompt(EPISODE)
+    # before it — so what is compared here is the record's own rendering.
+    assert f"{bullet}\n{outcome_line}" in _product_prompt(EPISODE)
 
 
 def test_the_block_is_a_fraction_of_the_dump_it_replaced() -> None:

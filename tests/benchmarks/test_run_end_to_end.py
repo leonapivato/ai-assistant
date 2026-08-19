@@ -380,7 +380,9 @@ async def test_the_answer_reads_only_retrieved_context(tmp_path: Path) -> None:
     Since #1189 the block is the product's own bullets rather than a dump of each
     record's JSON, so the witness is read off the rendered line instead of off a
     parsed record — the property is the same one and the text it is read from is the
-    text the model was actually shown."""
+    text the model was actually shown. Since #1194 a second corpus turn reaches it
+    legitimately as well: an episode's ``outcome``, which the product's renderer now
+    shows on the bullet's continuation line."""
     settings = _settings(tmp_path)
     model = FakeModelProvider("a dog")
     plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH)
@@ -399,12 +401,7 @@ async def test_the_answer_reads_only_retrieved_context(tmp_path: Path) -> None:
     block = sent.split(RETRIEVED_HEADING, 1)[1].split("\n\nQuestion:", 1)[0]
     rendered = [line for line in block.splitlines() if line.startswith("  - [")]
 
-    # A *user-side* turn, because since #1189 the block is the product's bullets and
-    # the product renders `content` alone: an episode's `outcome` — the assistant half
-    # of the captured turn — no longer reaches the prompt at all. That withholding is
-    # `planner._render_record` showing through the mirror rather than a harness
-    # decision, and is filed as its own issue; the assertion below pins it so it cannot
-    # change here unnoticed.
+    # A *user-side* turn, on the record's own bullet.
     witness = "Ada: Her name is Juno."
     assert any(witness in line for line in rendered), (
         "the fixture no longer puts a corpus turn in the prompt, so this proves nothing"
@@ -412,8 +409,19 @@ async def test_the_answer_reads_only_retrieved_context(tmp_path: Path) -> None:
     assert witness not in sent.replace(block, ""), (
         "a corpus turn reached the prompt outside the retrieved records"
     )
-    assert "Bo: Lovely name." not in sent, (
-        "an episode's assistant half reached the prompt, which the product's renderer does not show"
+    # And the *other* speaker's turn, which corpus ingestion stores as that episode's
+    # `outcome`. It used to be asserted absent, because `planner._render_record`
+    # rendered `content` alone and the withholding was `planning`'s rather than this
+    # harness's (#1194). The renderer shows it now, so the assertion flips — and the
+    # property under test does not: it still reaches the model only inside a rendered
+    # record, on the continuation line under that record's own bullet.
+    reply = "Bo: Lovely name."
+    outcomes = [line for line in block.splitlines() if line.startswith("    how it turned out:")]
+    assert any(reply in line for line in outcomes), (
+        "an episode's outcome did not reach the prompt, which the product's renderer shows"
+    )
+    assert reply not in sent.replace(block, ""), (
+        "a corpus turn reached the prompt outside the retrieved records"
     )
     for withheld in ("No such information", "D1:1", "Did Ada adopt a cat?"):
         assert withheld not in sent, f"{withheld!r} is corpus material no record carries"
