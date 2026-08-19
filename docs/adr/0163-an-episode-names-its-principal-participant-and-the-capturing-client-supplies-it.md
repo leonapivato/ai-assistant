@@ -435,6 +435,14 @@ it a predicate to sit under, and §6 below gives `principal` none.
 > exchange is not summarised — is applied unchanged, and the presence of a marker is
 > not a reason to propose a belief that bar would otherwise refuse.
 
+> **Normative.** The marker discharges nothing of ADR-0098 §2. Where an episode's
+> `content` carries a span of external content — which ADR-0098 §1 rules a third
+> party's speech captured by a spoke to be — that section's obligation to present
+> the span to a model as third-party data, non-forgeably and from held data rather
+> than from the text, binds independently of this ADR and is neither satisfied nor
+> narrowed by naming the principal. Saying who the owner is says nothing about the
+> standing of anyone else's words.
+
 **Content and marker travel together because separating them is the failure.** The
 harm this ADR exists to prevent is a producer reading `"Melanie: I finally booked
 the trip"` in an episode whose owner is Caroline and writing a belief about the
@@ -442,6 +450,15 @@ owner's trip. That harm is caused by rendering the content; it is prevented by
 rendering the marker with it. A rule permitting one surface to render the content
 alone would leave exactly one path by which the misattribution still happens, and it
 would be the quiet one — nothing reports which surface rendered what.
+
+**The ADR-0098 clause is here because the two obligations are easy to confuse and
+they answer different questions.** *Who is the owner* and *whose words are these*
+are separate facts, and the marker supplies only the first. A renderer that marks
+the principal and interpolates the rest of the episode raw has told the model which
+speaker to attribute beliefs to while leaving every span in the episode forgeable —
+which, on a transcript containing another person's sentences, is the worse half
+still open. ADR-0098 §2 is not modified here in any direction; this clause exists so
+that no implementer reads §5's first clause as having covered it.
 
 **Both bound surfaces are ones where the misattribution is live.** The observation
 prompt is where beliefs are minted, so it is the obvious one. The planner's renderer
@@ -575,14 +592,32 @@ or `about_person` from the marker (§6), or change the observer's utility bar (�
   that is ADR-0101's, as ADR-0100 §6 already rules for `about_person`.
 - **Multi-user hubs, or whose hub this is.** ADR-0099 §2 rules the subject axis
   orthogonal to that question and this ADR takes it no further.
-- **The ADR-0106 §6 taint boundary for a captured multi-party conversation** —
-  whether an interlocutor's utterance is recorded external content while the
-  owner's own words in the same episode are first-party. #1162 raises it and it
-  **stays open there**. This ADR is deliberately silent: the marker says who the
-  owner is and says nothing about the standing of anyone else's words, and deciding
-  the taint boundary would be deciding what `derived_from_external` means for a new
-  source class — a decision with its own enforcement point and its own review set.
-  **This is what narrows #1162 rather than closing it** (see below).
+- **How a mixed-origin episode carries its origins, and what the gate does with
+  one.** The *classification* is not open and this ADR must not be read as leaving
+  it so: ADR-0098 §1 already rules that "a third party's speech captured by a spoke"
+  is external content and that "the user's own utterance is not, however it was
+  composed". What is open is the **mechanism** — `Provenance` records one origin for
+  a whole record, and ADR-0098 §1's second clause forbids deciding membership by
+  inspecting the text, so an `EpisodicMemory` whose `content` holds both the owner's
+  words and an interlocutor's has nowhere to say so — and the **gate consequence**
+  that follows, which is ADR-0106 §6's ceiling over a `DERIVED` proposal carrying
+  `derived_from_external`. Both are ADR-0098 §12's first deferral, the seam that
+  makes externality recoverable at the ruling point, and this ADR neither discharges
+  it nor claims to. #1162 raises the same boundary in its own words and **keeps
+  it**; what this ADR adds is §5's clause saying the marker discharges nothing of
+  ADR-0098 §2, so that a lane implementing this one cannot mistake the two.
+
+  **One thing found while writing this is worth recording rather than deciding
+  here.** ADR-0098 §12 states that seam's live condition as "the first mixed-origin
+  payload handed to a producer **whose output is ruled on by `MemoryPolicy`**", and
+  reassures itself that "the observer, which is, receives episodes and nothing else".
+  Under ADR-0098 §1 the benchmark harness's LoCoMo episodes are already such a
+  payload — third-party speech, captured through the first-party path, recorded
+  `OBSERVED`, handed to the observer — so the condition appears to be met on `main`
+  today, before this ADR. That is a **pre-existing** state this ADR neither creates
+  nor worsens (§3 admits no new producer), so it is filed as
+  [#1218](https://github.com/leonapivato/ai-assistant/issues/1218) rather than
+  absorbed here, per `CLAUDE.md`'s triage rule.
 - **The sensor submission surface** by which a spoke delivers a captured episode to
   the hub. ADR-0094 §10 defers it and this ADR does not open it; §3's seam is the
   existing capture path, which is why a docs-only decision is testable today.
@@ -605,8 +640,10 @@ or `about_person` from the marker (§6), or change the observer's utility bar (�
 episode metadata, and the ADR-0106 §6 boundary for third-party utterances in a
 captured conversation. This ADR rules the first — the shape #1162 sketches, "a
 label, not a name … the observer still receives no profile data" — and leaves the
-second open on that issue, with the paragraph above as the reason. The implementing
-lane updates #1162 to say so rather than closing it.
+second on that issue, in the corrected form the bullet above states: the
+classification is ADR-0098 §1's and is settled, the mechanism and the gate
+consequence are ADR-0098 §12's seam and are not. The implementing lane updates
+#1162 to say so rather than closing it.
 
 ## Consequences
 
@@ -670,7 +707,10 @@ lane updates #1162 to say so rather than closing it.
   captures use different tags — and it would make the owner's name a value the
   operator types into a config file, which is the identity ADR-0100 §3 says this
   system does not have.
-- **Decide the ADR-0106 §6 taint boundary here as well.** Refused as scope: it is a
-  different decision, with a different enforcement point (the gate) and a different
-  blast radius (every `DERIVED` proposal resting on a sensed source), and folding it
-  in would make a one-field decision into a leg. It stays on #1162 (§8).
+- **Decide the mixed-origin mechanism and the ADR-0106 §6 gate consequence here as
+  well.** Refused as scope: it is a different decision, with a different enforcement
+  point (the gate), a different blast radius (every `DERIVED` proposal resting on a
+  sensed source), and a `core` surface of its own — a per-record or per-span origin
+  on the frozen record graph. ADR-0098 §12 already owns the seam and names what
+  fires it; folding it in would make a one-field decision into a leg. It stays there
+  and on #1162 (§8).
