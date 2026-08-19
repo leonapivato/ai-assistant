@@ -432,6 +432,18 @@ class TestItAnswersOverTheSameMemories:
             row.asked_at for row in _rows(source_dir)
         ]
 
+    async def test_the_instant_is_read_off_the_source_s_own_records(self, tmp_path: Path) -> None:
+        """Not recomputed from the case in hand, which is the caller's rather than the
+        source run's account of what happened."""
+        root = tmp_path / "runs"
+        source, source_dir = await _ingest(root, tmp_path)
+        reused = load_reused_run(root, source.run_id)
+
+        instant = reused.answering_instant(_case())
+
+        assert instant is not None
+        assert instant.isoformat() == _rows(source_dir)[0].asked_at
+
     async def test_the_evidence_join_is_the_one_ingestion_recorded(self, tmp_path: Path) -> None:
         """#1074's join is read back per question rather than recomputed."""
         root = tmp_path / "runs"
@@ -690,6 +702,73 @@ class TestTheGateRefusesTheWrongMemories:
 
         with pytest.raises(ValueError, match="the join is positioned"):
             _refuse(root, source.run_id, (moved,))
+
+    async def test_a_case_whose_sessions_would_answer_at_another_instant(
+        self, tmp_path: Path
+    ) -> None:
+        """The one channel a planned case has into a reused run, and it is checked.
+
+        Nothing about a case's sessions is captured on this path, so the only thing
+        they still decide is the instant the copied store is read at — which decides
+        which memories it counts as live. A same-key case with the same questions,
+        the same evidence and the same session bound, but a final session a month
+        later, is a different retrieval wearing the same name.
+        """
+        root = tmp_path / "runs"
+        source, _ = await _ingest(root, tmp_path)
+        case = _case()
+        moved = case.model_copy(
+            update={
+                "sessions": (
+                    *case.sessions[:-1],
+                    case.sessions[-1].model_copy(update={"occurred_at": LAST + timedelta(days=30)}),
+                )
+            }
+        )
+
+        with pytest.raises(ValueError, match="different retrievals"):
+            _refuse(root, source.run_id, (moved,))
+
+    async def test_a_join_that_does_not_line_up_with_its_own_pointers(self, tmp_path: Path) -> None:
+        """`QuestionRecord` does not enforce the cardinality, so the gate does.
+
+        #1074's join is positional. A row carrying fewer entries than pointers would
+        republish a mapping with a pointer missing from it, and P8's
+        retrieved-but-misread versus never-retrieved split would be quietly wrong
+        rather than visibly absent.
+        """
+        root = tmp_path / "runs"
+        source, source_dir = await _ingest(root, tmp_path)
+        path = source_dir / "records.jsonl"
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        rows[0]["evidence"] = ["D1:1", "D1:3"]
+        path.write_text(
+            "".join(f"{json.dumps(row)}\n" for row in rows),
+            encoding="utf-8",
+        )
+        case = _case()
+        widened = case.model_copy(
+            update={
+                "questions": (
+                    case.questions[0].model_copy(update={"evidence": ("D1:1", "D1:3")}),
+                    *case.questions[1:],
+                )
+            }
+        )
+
+        with pytest.raises(ValueError, match="evidence-join entries"):
+            _refuse(root, source.run_id, (widened,))
+
+    async def test_two_rows_for_one_question(self, tmp_path: Path) -> None:
+        """Two retrievals of one question do not say which join or instant is its."""
+        root = tmp_path / "runs"
+        source, source_dir = await _ingest(root, tmp_path)
+        path = source_dir / "records.jsonl"
+        lines = path.read_text(encoding="utf-8").splitlines()
+        path.write_text("".join(f"{line}\n" for line in [*lines, lines[0]]), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="more than once"):
+            load_reused_run(root, source.run_id)
 
     async def test_a_scored_run_reusing_a_smoke_run(self, tmp_path: Path) -> None:
         """A smoke run may have distilled through an injected observer, and nothing
