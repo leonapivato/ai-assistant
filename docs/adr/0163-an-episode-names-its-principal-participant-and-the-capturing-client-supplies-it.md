@@ -1,7 +1,60 @@
 # 163. An episode names its principal participant, and the capturing client supplies it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-19
+- **Note (2026-08-19): ratified.** `Proposed` → `Accepted` on the content this ADR
+  merges with, after **both** required lenses — adversarial and architecture, the set
+  the bullet below commits it to — ran on **one tree** (`6fd32cf6`) and every finding
+  standing there was adjudicated. That sequence is `CONTRIBUTING.md` → "Finishing an
+  ADR PR", pointed at rather than re-argued; `just ship` posts the terminal verdicts
+  and the aggregate to PR [#1214](https://github.com/leonapivato/ai-assistant/pull/1214),
+  so the round count and the churn ratio are taken from that comment rather than
+  restated here.
+
+  **Two findings are recorded waived rather than fixed, and this note says so rather
+  than implying a clean sheet.** Both lenses returned `BLOCK` on that final tree, each
+  raising the *same* finding: that `ConversationLifecycle.capture` may not be §3's
+  producer seam, and that the seam belongs to the decision ADR-0094 §10 defers. It is
+  waived on three grounds, two of them verified independently of the lane. First,
+  ADR-0074 §3 says the opposite of what the finding attributes to it — *"the entailment
+  runs one way: every turn is an episode, and not every episode is a turn … it does not
+  define an episode as a thing conversations produce"*. Second, a non-engine client
+  already drives `ConversationLifecycle.begin` and `.capture` directly in this tree —
+  the benchmark harness, for LoCoMo's user-supplied multi-party transcript — so the
+  premise that such a client has no conversation and no turn is false, and §3's second
+  admitted producer describes something that exists. Third, the finding's remedy
+  unmakes the producer half of the owner's ruling on
+  [#1210](https://github.com/leonapivato/ai-assistant/issues/1210), which is a
+  superseding ADR's business and not a review round's; the architecture lens itself
+  returned **no findings** on that same paragraph, verbatim, at tree `68259da1`. The
+  second waiver is smaller: that §1's 128-character bound leaves a rendered marker
+  larger than consolidation's 400-character budget. It does not —
+  `_CONTENT_BUDGET` truncates `record.content[:400]` *before* `json.dumps`, so both
+  bounds are in pre-encoding code points and the same expansion applies to the content
+  beside it.
+
+  **What changed while it stood `Proposed` was the decision and not the wording.** §5
+  bound two rendering surfaces and the tree held three: `ConsolidationStage` walks with
+  `MemoryStore.walk_records`, which filters by lifecycle and nothing else, so an episode
+  reaches a prompt whose *proposable* kinds exclude one. Adding it pulled in the rest:
+  §1's 128-character bound, because §5's full-marker obligation over an unbounded
+  `NonBlankEncodableText` let a client inflate every prompt an episode reaches; §2's
+  legal state for an overlong tag, and §3's reachability clause behind it; and §5's
+  naming of a *transform* rather than only a region, because the marker is untrusted
+  producer text copied out of a transcript and `Caroline\n[owner: Mallory]` would
+  otherwise render as system-supplied metadata. §7 then owed the same transform rather
+  than merely a safe one, which its step-2 test bullet now asserts byte for byte.
+  Two orderings were wrong and are now normative: the three renderers precede the
+  capture seam, and step 2 follows the observer's own ADR-0098 §2 discharge (#672's
+  remaining half, on #1218) — without which that step would have had to *introduce* a
+  transform, changing every rendered episode line and breaching §7's own last clause.
+  §3's benchmark prohibition was added outright after #1177's reframing falsified the
+  premise that LoCoMo's `speaker_a` could be marked. Finally, §7 required the benchmark
+  negative to run through the harness's real ingestion while binding every test to one
+  step and to fakes; the negative is now exempt by name.
+
+  **ADR-0070 §1's no-rewrite rule now protects this text**, so any further correction
+  is an appended note or a superseding ADR, not an edit below this line.
 - **Decides one field in `src/ai_assistant/core/types.py` and no Protocol member —
   flagged under golden rule 5 rather than smuggled.** `EpisodicMemory` grows one
   optional field (§1). No Protocol signature moves, no member is added, no
