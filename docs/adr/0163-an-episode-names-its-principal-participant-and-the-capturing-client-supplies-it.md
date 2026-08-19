@@ -252,10 +252,14 @@ rather than a second, larger payload.
 
 > **Normative.** Where a producer renders `content` in which the speakers are
 > distinguishable and knows which of them is the owner, it renders a tag for that
-> speaker and states it as `principal`. The marker is not optional for such a
-> producer: the field's optionality exists for the turn, whose principal is
-> structural (§3), and for an episode that records no distinguishable speakers at
-> all.
+> speaker — one inside §1's bound — and states it as `principal`. The marker is not
+> optional for such a producer: the field's optionality exists for the turn, whose
+> principal is structural (§3), and for an episode that records no distinguishable
+> speakers at all. A producer that did **not** author the rendering, and for which
+> the only tag the `content` uses exceeds §1's bound, states no marker rather than a
+> truncated, shortened or invented one; that episode is an untagged multi-party
+> episode and is governed as one — by §3's last clause and §6's exception — rather
+> than by a new state of this field.
 
 > **Normative.** `principal` resolves to nothing beyond the record that carries it.
 > Nothing matches two records' markers, normalises, case-folds, aliases, strips or
@@ -303,6 +307,21 @@ perfectly well which speaker is the owner, and state nothing — leaving the epi
 in the second row by choice rather than by limitation. The clause closes that, and
 it is stated as a producer obligation rather than a check, for the fourth clause's
 reason.
+
+**§1's bound sits inside the second clause rather than against it.** A producer in
+the first row is the one *writing* the tags into `content`, so choosing one inside
+128 characters is part of rendering rather than a constraint on it, and a label that
+long is not a speaker tag by any reading. The residue is a producer *relaying* a
+rendering it did not author — a transcript arriving with labels somebody else chose
+— where the only tag the content uses could in principle exceed the bound. That
+producer states nothing, and what it stores is then indistinguishable from the
+second row: a multi-party episode carrying no marker, governed by exactly the rules
+that govern one. §3's last clause defers whether such an episode may be observed at
+all, and §6's exception is the only rule that would ever act on it. What the bound
+may never buy is a *different* tag. A shortened or invented one is a marker the
+`content` does not use, which the first clause refuses outright and which is
+strictly worse than none: it names a speaker the text does not show, and §5 would
+render that name to a model as the owner.
 
 **The third clause answers the objection this ADR most has to answer.** ADR-0100
 §3 states that "there is no user identity anywhere in this system", and a field
@@ -718,7 +737,9 @@ belongs to the sensor lane that first has one.
   blank or whitespace-only marker — under a bare `EncodableText | None`,
   `principal="  "` would be stored and rendered as an owner marker, §1's two states
   quietly becoming three — and a marker of 129 characters, which is what holds the
-  bound §5's full-rendering clause depends on.
+  bound §5's full-rendering clause depends on. That refusal is the whole mechanical
+  half of the bound; the producer half is a producer obligation like §2's others and
+  gets no construction-time check, per §2's last clause.
 - **Step 2, `learning`.** The observation prompt built from a **constructed**
   `EpisodicMemory` carrying a marker states it, and one built from a record without
   a marker renders nothing in its place (§5); and the rendered region is
