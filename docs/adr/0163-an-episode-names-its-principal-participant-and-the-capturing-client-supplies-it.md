@@ -582,34 +582,48 @@ later reader from "fixing" the projection in either direction without an ADR.
 > `orchestration`, `learning` and `planning` is therefore not a permitted shape for
 > it, whatever a dispatch plan says.
 
-The work decomposes at the subsystem seams, and the order is forced by dependency
-rather than chosen. Each step is a change of its own, with its own tests:
+The work decomposes at the subsystem seams, and the order is forced rather than
+chosen — by dependency for step 1, and by §5 for the rest. Each step is a change of
+its own, with its own tests:
 
 1. **`core`** — the field on `EpisodicMemory` in `src/ai_assistant/core/types.py`,
    with a docstring carrying §2's discipline and §4's reading of absence, in the
    form `about_person`'s docstring already takes for ADR-0100's clauses. It lands
    first because everything below names it, and it is safe alone: the field is
    optional and defaulted, so nothing changes behaviour until a producer sets one.
-2. **`orchestration`** — the keyword on `ConversationLifecycle.capture`, defaulting
-   to `None`, threaded into the `EpisodicMemory` it builds, with the recorder's
-   docstring stating that the engine's own capture path passes none and why (§3).
-   This is the seam a spoke will eventually use and the one §7's synthetic test
-   exercises.
-3. **`learning`** — the observation prompt's rendering, in `learning/observer.py`'s
+2. **`learning`** — the observation prompt's rendering, in `learning/observer.py`'s
    batch renderer, beside the localised instant ADR-0156 §2 put there, and the batch
    renderer's docstring updated, since it currently states the payload enumeration
    in terms ("**The payload is the batch and nothing else** … each episode's
    canonical ``content`` …, the label the model cites it by, and — since ADR-0156 §2
    — that episode's own ``occurred_at``").
-4. **`planning`** — the record renderer, non-forgeably (§5). **This one lands after
-   #1210's lane 2.1**, which is rewriting that same renderer for #1194; taking the
-   two in the other order would put two lanes in one file.
+3. **`planning`** — the record renderer, non-forgeably (§5). **This one lands after
+   #1210's lane 2.1**, which rewrote that same renderer for #1194 and merged as
+   [#1213](https://github.com/leonapivato/ai-assistant/pull/1213); taking the two in
+   the other order would have put two lanes in one file.
+4. **`orchestration`** — the keyword on `ConversationLifecycle.capture`, defaulting
+   to `None`, threaded into the `EpisodicMemory` it builds, with the recorder's
+   docstring stating that the engine's own capture path passes none and why (§3).
+   This is the seam a spoke will eventually use and the one §7's synthetic test
+   exercises. **It lands last**, for the reason below.
 
-Steps 2, 3 and 4 are independent of each other and may land in any order or in
-parallel once step 1 has merged. **Nothing in the harness's corpora changes at any
-step**, per §3's first clause: no loader and no ingestion path is touched, and the
-harness's only obligation is the negative assertion below, which rides with
-whichever step is convenient.
+> **Normative.** Steps 2 and 3 are independent of each other and may land in any
+> order or in parallel once step 1 has merged. **Both precede step 4**: no change
+> may enable `ConversationLifecycle.capture` to accept or store a marker until
+> every surface §5 binds already renders one.
+
+The consumers come before the producer because the reverse order admits exactly the
+misattribution §5 exists to prevent. A capture seam that stores a marker no surface
+yet renders would let a multi-speaker episode reach a model as undifferentiated
+speech while the system holds the correction and does not state it — for the whole
+window between that merge and the renderers', and §5's first clause is unconditional
+in that window as in any other. The safe order costs nothing to take: until step 4
+merges no episode in the tree states a marker, so steps 2 and 3 change no rendered
+byte and can be verified only against constructed records, which is what their tests
+below already do. **Nothing in the harness's corpora changes at any step**, per §3's
+first clause: no loader and no ingestion path is touched, and the harness's only
+obligation is the negative assertion below, which rides with whichever step is
+convenient.
 Each test belongs to the step that owes it, mirrors that step's package, and uses
 fakes for every other subsystem — `CLAUDE.md`'s testing rule, which is the same rule
 the decomposition above obeys. **No test spans two of these steps**, and the
@@ -620,14 +634,14 @@ belongs to the sensor lane that first has one.
 - **Step 1, `core`.** A record round-tripping a marker byte for byte (§2). A record
   serialised without the field decoding with none (§4) — the legacy-blob case, which
   is what makes the no-migration ruling checkable.
-- **Step 2, `orchestration`.** A marker supplied to `ConversationLifecycle.capture`
-  reaching the stored `EpisodicMemory` unchanged, and the engine's own capture path
-  storing none (§3). This is the seam a spoke will use, exercised without a spoke.
-- **Step 3, `learning`.** The observation prompt built from a **constructed**
+- **Step 2, `learning`.** The observation prompt built from a **constructed**
   `EpisodicMemory` carrying a marker states it, and one built from a record without
   a marker renders nothing in its place (§5); and the rendered region is
   non-forgeable from inside the episode's own `content` (§5).
-- **Step 4, `planning`.** The same two assertions for the record renderer.
+- **Step 3, `planning`.** The same two assertions for the record renderer.
+- **Step 4, `orchestration`.** A marker supplied to `ConversationLifecycle.capture`
+  reaching the stored `EpisodicMemory` unchanged, and the engine's own capture path
+  storing none (§3). This is the seam a spoke will use, exercised without a spoke.
 - **The negative, in `benchmarks`.** A LoCoMo session and a LongMemEval session
   driven through the harness's own ingestion, asserting the captured episodes carry
   **no** marker. This is the guard on §3's first clause and the most valuable test
