@@ -293,17 +293,19 @@ above competes with no rule of ADR-0159's.** ADR-0159 §3's discard binds the
 consulted the model about. A label the reply carries for any other record — including a
 member of the conflict set that fell beyond the bound … — is discarded." That happens on
 the reconciler's side of the `memory`-internal seam, before anything crosses to this
-writer. So a returned mapping still carrying a label for a member beyond
-`reconciler_max_conflicts` is already the output of a reconciler that did not conform,
-and the whole-mapping clause meets it as it meets any other non-conforming value —
-costing the crossing the relations it therefore does not hold, which is ADR-0159 §6's
-admitted cost and not a second discard rule. The writer is **not** asked to make the
-consulted/beyond-bound distinction and cannot: it validates *values* for the members it
-reads, and *which members a request covered* stays with the reconciler, where §6 and §9
-below leave it in terms. `MemoryIngestor._relations_for` has exactly that shape today —
-it ranges over `conflicts` and never over a consulted set, because it is not the layer
-that knows one. §7 pins the mixed case rather than leaving an implementer to meet it
-fresh.
+writer. So a returned mapping still carrying such an entry is already the output of a
+reconciler that did not conform, and the clauses here do not re-derive §3's rule at the
+writer. They rule on **values**: a non-member beyond-bound value fails the mapping whole
+exactly as any other non-member value does, and the crossing holds the relations it
+therefore does not hold, which is ADR-0159 §6's admitted cost. Whether the writer should
+*also* refuse a **well-formed** beyond-bound label — which it cannot tell from a
+consulted one — is ADR-0159's enforcement question and §9 declines it in terms; issue
+#1225 records it. Deciding it here would need the consulted set carried across the seam,
+which §6 and §9 decline ("which members a request covered is not emitted"; "the
+economics ADR-0159 §3 deliberately leaves inside the reconciler"), and
+`MemoryIngestor._relations_for` has the matching shape today — it ranges over
+`conflicts` and never over a consulted set, because it is not the layer that knows one.
+§7 pins the mixed case rather than leaving an implementer to meet it fresh.
 
 **A crossing that reconciled nothing observed a zero; it did not fail to observe.**
 ADR-0119 §3 is the clause under strain here — "an absent key means *not observed* and
@@ -550,14 +552,14 @@ The lane owes:
   `reconciler_failed` and leaves every model key at zero for it — the whole-mapping
   clause, and the case where a partial install would make one trace report a model label
   beside an answered count of zero; that on a conflict set **longer than
-  `reconciler_max_conflicts`** a returned mapping carrying a valid label for a member
-  within the bound **and** an entry for a member beyond it is ruled on the values alone
-  — a valid beyond-bound value installs like any other, and a non-member beyond-bound
-  value makes the mapping non-conforming in whole, leaving both members under
-  `relations_unlabelled` and counting the proposal under `reconciler_failed` — pinning
-  that the writer reads the resolved conflict set and holds no consulted set to except
-  the second entry from, since a mapping carrying that entry at all is already the
-  output of a reconciler ADR-0159 §3 required to discard it; that a report of
+  `reconciler_max_conflicts`** a returned mapping pairing a valid label for a member
+  **within** the bound with a **non-member value for a member beyond** it installs
+  neither, leaves both under `relations_unlabelled` and counts the proposal under
+  `reconciler_failed`, pinning that the writer reads the resolved conflict set and
+  holds no consulted set to except the second entry from — a mapping carrying that
+  entry at all is already the output of a reconciler ADR-0159 §3 required to discard
+  it, and what the writer does with a *well-formed* beyond-bound label is §9's
+  undecided question rather than a test here; that a report of
   `unconsulted` and a report of `failed`, each arriving with a model label, discard
   that label, leave the member unlabelled and count the proposal under
   `reconciler_failed` — the two combinations that would otherwise let one trace deny
@@ -606,18 +608,19 @@ and recorded among the alternatives. It records itself as ratified on its second
 flip.
 Nothing implements against this until it has merged (ADR-0015 §5).
 
-**Most rounds so far have changed this text, and five of them narrowed a claim it had no
+**Most rounds so far have changed this text, and six of them narrowed a claim it had no
 right to make** — that a positive contradiction count implicated ADR-0159 §4's purity
 conditions specifically; that a figure over these keys was a crossing-level figure; that
 a zero model count meant nothing was returned; that `reconciler_unconsulted` measured
 certainty; and, in the `Consequences` bullet an operator is likeliest to act on, that a
 zero contradiction count was a statement about the model even where the three qualifier
-keys account for the crossing and no model answered at all. Another found the defect
-that reshaped the decision: `ModelBackedReconciler.reconcile` absorbs its own provider
-failures, so a key counted at the writer could not have distinguished a broken provider
-from a silent model, which is why §3 takes the outcome across the reconciler seam at
-all. That is recorded here because it is the evidence for §3's shape, not as process
-narration.
+keys account for the crossing and no model answered at all, and that a positive one
+placed the contradiction in the proposal the absent retirement belonged to — the join §6
+rules unavailable on a reading. Another found the defect that reshaped the decision:
+`ModelBackedReconciler.reconcile` absorbs its own provider failures, so a key counted at
+the writer could not have distinguished a broken provider from a silent model, which is
+why §3 takes the outcome across the reconciler seam at all. That is recorded here
+because it is the evidence for §3's shape, not as process narration.
 
 ### 8. What this records against earlier ADRs, under ADR-0082 §1
 
@@ -699,6 +702,14 @@ act differently, or read one of its clauses more widely than it now holds?
   economics ADR-0159 §3 deliberately leaves inside the reconciler. Taking the second
   as well is available without disturbing any contract and is not needed for #1209's
   question.
+- **Whether a writer should refuse a well-formed label for a member beyond
+  `reconciler_max_conflicts`.** ADR-0159 §3 obliges the **reconciler** to discard such a
+  label, so the question arises only for a reconciler that already broke that rule, and
+  the writer cannot tell one from a consulted member's label without the consulted set
+  the bullet above declines to carry. This ADR neither requires nor forbids installing
+  it: it observes what stood and moves no installation rule, and that rule is ADR-0159's
+  — its bound, its enforcement and its seam. Issue #1225 records the gap and the
+  candidate resolutions, none ruled.
 - **The right value of `reconciler_max_conflicts`**, which stays where ADR-0159 §12
   left it — an empirical question a pilot arm answers. §5 makes the value readable
   and takes no view on it.
@@ -712,11 +723,16 @@ act differently, or read one of its clauses more widely than it now holds?
 
 - **#1209's question becomes answerable, and it is the question that decides what to
   do next.** On a pilot run reporting zero supersessions, a **positive**
-  `relations_model_contradicts` says a model contradiction **stood** and that the arm
-  declined to act on it, and points at ADR-0159 §4. It does **not** say which of §4's
-  bars declined — an `EXTERNAL` contradiction outside the target class and a
-  contradiction standing beside a `RESTATES` member present as the same positive count
-  against the same zero, and §6 says so.
+  `relations_model_contradicts` says a model contradiction **stood somewhere in the
+  crossing** and that no retirement followed in it. That is the whole of the join: §6
+  rules that a pair's relation is not joinable to the ruling that followed it, exact on
+  a **one-proposal** crossing — every `MemoryIngestor.ingest` call — and not on a
+  reading, so on a reading the count does not say that the proposal the contradiction
+  belonged to is the one ruled without a retirement. Where the join is exact it points
+  at ADR-0159 §4, and even there it does **not** say which of §4's bars declined — an
+  `EXTERNAL` contradiction outside the target class and a contradiction standing beside
+  a `RESTATES` member present as the same positive count against the same zero, and §6
+  says so.
 - **A zero contradiction count is read against the answered count first, and says
   nothing about the model until it is.** `relations_model_contradicts = 0` means the
   model was silent on contradiction only over proposals **whose model rung answered**
