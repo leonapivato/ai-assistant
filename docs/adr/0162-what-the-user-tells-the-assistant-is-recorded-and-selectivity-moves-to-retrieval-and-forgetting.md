@@ -179,9 +179,11 @@ two cardinality controls one of which is fixed by a ratified clause (§9).
 
 > **Normative.** For an episode recording what the user said to the assistant, the
 > observation stage proposes one record for each distinct thing the user stated that
-> a later question could ask about: an event that happened, a person, place,
-> organisation or thing named, a durable fact, a preference, a workflow. Pure
-> conversational filler is what it passes over, and is the only thing it passes over.
+> a later question could ask about — an event that happened, a person, place,
+> organisation or thing named, a durable fact, a preference, a workflow — **up to the
+> per-pass bound §6 sets**, which is the one exception and which §6 makes visible when
+> it binds. Pure conversational filler is what it passes over, and is the only thing
+> it passes over.
 
 > **Normative.** That clause replaces ADR-0077 §2's warrant bar for such an episode.
 > That a thing merely happened, that it may not change a later answer, and that
@@ -405,8 +407,15 @@ lane's call and not this ADR's.
 > §2's ground for the figure does not survive with the figure.
 
 > **Normative.** `ObservationOutcome.discarded_over_limit` above zero is read as the
-> bound binding where it should not, and the value is raised. It is never read as the
-> intended steady state.
+> bound binding where it should not. It is never read as the intended steady state.
+
+> **Normative.** A pass in which the bound binds is an **incomplete pass** rather
+> than a compliant one: §1's obligation is met up to the bound and no further, and
+> `discarded_over_limit` is what says so. No implementation may treat a truncated
+> return as satisfying §1.
+
+> **Normative.** The response to a binding bound is to raise
+> `observation_max_proposals`, to lower `observation_batch_size`, or both.
 
 **Why the cap cannot be allowed to bind at all under §1, which is a stronger claim
 than "40 is roomy".** The cap truncates the producer's return value, and the observer
@@ -416,8 +425,32 @@ cap discarded the *least* selective tail of an already-selected set, and ADR-007
 own remedy applied — "a batch that genuinely yields more durable beliefs than that is
 a batch worth observing twice". Under §1 there is no selection to be the tail of: the
 model emits one record per thing said, in whatever order it read them, and truncation
-drops facts by position. A cap that binds under complete intake is a silent,
-content-arbitrary loss of exactly the material this ADR exists to stop losing.
+drops facts by position. A cap that binds under complete intake is a content-arbitrary
+loss of exactly the material this ADR exists to stop losing — arbitrary because
+position in a model's reply is not a ranking, and nothing downstream can tell a
+truncated pass's output from a complete one's without the counter.
+
+**Why the bound is an exception on §1 rather than a tension with it, and why the two
+knobs together always close it.** Two normative clauses that can both be in force and
+cannot both be satisfied would be a defect in this document, so §1's clause carries
+the bound as its own exception and §6 carries the report. The remaining question is
+whether a deployment can always *reach* a configuration in which §1 holds in full, and
+it can: `observation_max_proposals` bounds records per pass while
+`observation_batch_size` bounds the episodes a pass reads, and distinct things stated
+scale with the latter. Raising the cap alone is the move that merely relocates the
+boundary — the reviewer's richer batch always exists — while halving the batch halves
+the material each pass must fit, so for any finite batch some pair of values satisfies
+§1. The two are a pair and §6's third clause names both.
+
+**And nothing is destroyed when the bound does bind**, which is what keeps an
+incomplete pass a recoverable state rather than a loss. ADR-0077 §2's reasoning for
+discarding rather than queueing is untouched and is the reason: "a queue is durable
+state this ADR does not ratify, and the episodes remain in the store, so a later run
+over the same batch can propose what this one dropped". The counter says a pass was
+incomplete; the episodes it read are still there to be observed again under a
+configuration that fits them. What this ADR does not do is *automate* that second run
+— that is #1179's second half, left open in §11 for want of any evidence about what
+should trigger it.
 
 **Why 40.** The probe measured 8.7, 9.1 and 9.0 proposals per pass across three
 conversations at `observation_batch_size` 20, under a cap of 60 that never bound. 40
@@ -456,6 +489,12 @@ ADR-0077 §3 for the setting; the setting is ruled in §2.)
 
 > **Normative.** *k* is at least 1 and at most `observation_batch_size // 2`. The
 > value inside that bound is the implementing lane's.
+
+> **Normative.** Where `observation_batch_size` is 1 that bound is empty and *k* is
+> **0**: the clauses above are satisfied vacuously and the deployment forgoes this
+> section's remedy. An overlap of 1 on a window of 1 advances the tiling by nothing,
+> so no value satisfies progress and overlap together — a property of a one-turn
+> window rather than something this section can repair.
 
 > **Normative.** The product's explicit-trigger path tiles nothing today, so these
 > clauses bind the benchmark harness's ingestion driver now and any durable-cursor
