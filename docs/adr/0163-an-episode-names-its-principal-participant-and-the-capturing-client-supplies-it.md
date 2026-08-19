@@ -764,6 +764,14 @@ end-to-end path from a captured multi-party episode to a distilled belief is
 deliberately not asserted here: it needs a producer that does not exist yet, so it
 belongs to the sensor lane that first has one.
 
+**The benchmark negative below is the one exception, and it is exempt by name.** It
+lives in `tests/benchmarks/`, mirrors `benchmarks/` rather than any step's package,
+and drives the harness's real ingestion — `ConversationLifecycle.capture` and the
+observation pass it triggers — because faking those would fake the very path whose
+output it asserts. It is a regression guard on §3's first clause rather than a unit
+test of any step, so the sentence above binds the five step tests and not it. It
+still asserts nothing about rendering, and so spans no renderer step.
+
 - **Step 1, `core`.** A record round-tripping a marker byte for byte (§2). A record
   serialised without the field decoding with none (§4) — the legacy-blob case, which
   is what makes the no-migration ruling checkable. And the two refusals that pin
