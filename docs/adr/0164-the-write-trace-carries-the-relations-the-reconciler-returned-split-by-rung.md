@@ -1,6 +1,6 @@
 # 164. The write trace carries the relations the reconciler returned, split by rung
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-19
 
 ## Context
@@ -489,9 +489,21 @@ clause that decides it: no contract surface moves — nothing in `core/types.py`
 `core/protocols.py` changes, and the vocabulary this ADR names is a metric-key
 roster ADR-0119 §2 places in the emitting module. `CONTRIBUTING.md` → "Finishing an
 ADR PR" holds the sequence and is pointed at rather than re-argued: drafted, reviewed
-and revised as `Proposed`, with the status flipped only once the required review
-returned clean on one tree, and the required review re-run on the flipped tree.
-Nothing implements against this until it has merged (ADR-0015 §5).
+and revised as `Proposed` over six rounds, with the status flipped only once
+adversarial returned **APPROVE** with no findings on one tree, and that review re-run
+on the flipped tree. Nothing implements against this until it has merged (ADR-0015
+§5).
+
+**Five of those six rounds changed this text, and four of them narrowed a claim it
+had no right to make** — that a positive contradiction count implicated ADR-0159
+§4's purity conditions specifically; that a figure over these keys was a
+crossing-level figure; that a zero model count meant nothing was returned; that
+`reconciler_unconsulted` measured certainty. The fifth found the defect that reshaped
+the decision: `ModelBackedReconciler.reconcile` absorbs its own provider failures, so
+a key counted at the writer could not have distinguished a broken provider from a
+silent model, which is why §3 takes the outcome across the reconciler seam at all.
+That is recorded here because it is the evidence for §3's shape, not as process
+narration.
 
 ### 8. What this records against earlier ADRs, under ADR-0082 §1
 
