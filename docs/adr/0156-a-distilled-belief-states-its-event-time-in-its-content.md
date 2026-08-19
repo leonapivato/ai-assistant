@@ -1,6 +1,6 @@
 # 156. A distilled belief states its event time in its content, and no record type grows a field for it
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0162 (§2's fourth clause, in the respect that it makes ADR-0077 §2's bar the standing test for an episode recording what the user said to the assistant)
 - Date: 2026-08-15
 - **Not a substantive contract ADR; contract-surface only for the review set, and
   the two are different questions.** [ADR-0015](0015-simplify-the-agent-workflow.md)
@@ -106,6 +106,41 @@
   taken from the model); ADR-0109 §3 (unknown currency), §4 (what a producer
   supplies and who computes it); ADR-0112 §9 (no quantity joins the retrieval
   order); ADR-0128 §1 (every eligibility predicate binds before the ranking cut).
+- Partially superseded: 2026-08-19 by ADR-0162 — **§2's fourth clause is replaced
+  in one respect: it makes ADR-0077 §2's bar the standing test, and for an episode
+  recording what the user said to the assistant there is no longer such a bar to
+  apply. Everything the clause was *for* survives, restated. The rest of this ADR
+  stands whole.** The clause is *"A temporal anchor never widens what may be
+  proposed. ADR-0077 §2's bar — a belief must be about the user and would change a
+  later answer, and the exchange is not summarised — is applied unchanged, and the
+  availability of a date is not a reason to propose a belief that bar would otherwise
+  refuse."*
+  [ADR-0162](0162-what-the-user-tells-the-assistant-is-recorded-and-selectivity-moves-to-retrieval-and-forgetting.md)
+  §1 replaces that bar for such an episode, and §4 restates the clause's own effect in
+  the new terms: a date is neither a reason to record something the intake rule would
+  not record, nor a reason to withhold something it would. For every other episode
+  ADR-0162 §2 leaves ADR-0077 §2's bar in force, and this clause with it.
+
+  **A partial supersession rather than an amendment**, on
+  [ADR-0070](0070-amendment-and-supersession-rules.md) §1's test — a reader holding
+  only this ADR applies a test that is no longer there, and "a change to what was
+  decided is anything a reader would act on differently". It is the same
+  classification, and for the same stated reason, that this ADR made of ADR-0077 §3's
+  payload sentence in its own header.
+
+  **What is untouched, and one clause matters more after this than before.** §2's
+  first three clauses stand: the prompt states each episode's `occurred_at` in the
+  configured local calendar; a belief whose evidence establishes a time states it; and
+  — the one that gains weight — where the evidence establishes no such time the belief
+  states none, an episode's `occurred_at` alone never supplying one. ADR-0162 §1
+  admits far more datable records, so the third clause is what stops a complete intake
+  from stamping the day of the telling onto every trait it records, and ADR-0162 §4
+  binds it in terms. §1, §3, §4, §5, §6, §7 and §8 stand whole.
+
+  ADR-0162 lands **in the same change as this record**, the existence condition
+  ADR-0083 §15 states, so the `Status` line never names an ADR that does not exist.
+  Appended per ADR-0070 §1: no text below is rewritten, and §2's fourth clause stands
+  exactly as written. Refs #1210, #1029.
 
 ## Context
 

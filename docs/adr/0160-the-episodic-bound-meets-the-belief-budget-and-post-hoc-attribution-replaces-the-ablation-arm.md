@@ -1,6 +1,6 @@
 # 160. The episodic bound meets the belief budget, and post-hoc attribution replaces the ablation arm
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0162 (§1's episodic bound value of 15, and §1's clause fixing the evidence that moves it)
 - Date: 2026-08-16
 - **Partially supersedes:**
   [ADR-0158](0158-an-episode-may-supplement-the-answering-prompt-and-never-shares-the-belief-budget.md)
@@ -51,6 +51,50 @@
   the document passes through, so the ratifying commit changes the `Status` line and
   nothing else.
 - Refs #1190, #1029, #1187, #1189, #1186.
+- Partially superseded: 2026-08-19 by ADR-0162 — **§1's two clauses are replaced:
+  the episodic bound becomes 10 against a belief budget of 30, and the evidence that
+  moves the bound widens to admit measured retrieval reach. §2, §3, §4, §5, §6 and
+  §7's mechanism stand.** The replaced clauses are *"The configured episodic bound is
+  **15**"* and *"The episodic bound moves on the post-hoc attribution §3 requires,
+  read off a scored benchmark run"*.
+  [ADR-0162](0162-what-the-user-tells-the-assistant-is-recorded-and-selectivity-moves-to-retrieval-and-forgetting.md)
+  §9 sets 30 and 10 on #1210's complete-intake probe, which measured union
+  all-gold-reached at 85.1% for 30+10 against 79.8% for 15+15 and 83.3% for 20+20.
+  The remainder of the second clause — *"No separately registered arm is owed for
+  it"* — **stands** and ADR-0162 §9 relies on it.
+
+  **Both clauses move together, and that is the reason this is a supersession rather
+  than a re-tuning.** §1's second clause admits only post-hoc attribution off a scored
+  run, and the probe is a retrieval-reach measurement with no answering and no
+  judging; a reader holding only this ADR would refuse to move the bound on it. Moving
+  the number while leaving standing the rule that forbids moving it on that evidence
+  would leave the corpus contradicting itself in the direction hardest to notice. Both
+  are rules a reader obeys, so [ADR-0070](0070-amendment-and-supersession-rules.md)
+  §1's test lands on partial supersession exactly as it did for this ADR's own
+  replacement of ADR-0158 §3.
+
+  **What this ADR ruled that ADR-0162 leans on rather than unpicks.** §2's admission
+  that a bound *equal* to the belief budget is permitted is untouched and simply not
+  exercised — at 10 against 30, ADR-0158 §3's ceiling is satisfied with slack, and the
+  coupling §2 warned of (a falling belief budget dragging the episodic bound down) is
+  not engaged because the belief budget rises. §3's post-hoc attribution obligation
+  stands and is what re-tests both of ADR-0162 §9's values on pilot 5. §5's refusal to
+  fix a byte bound stands, and ADR-0162 §9 states its own two integers provisional
+  against it. §7's construction-time refusal — a stated episodic bound may not exceed
+  the belief budget — is kept, and §7's requirement that `app/composition.py` and
+  `orchestration/loop.py` hold their figures equal is the mechanism ADR-0162 §9
+  restates for its own lane.
+
+  **§6's sentence "`RETRIEVAL_LIMIT` stays 15" is not superseded, because it obligates
+  nothing.** It sits in unmarked text of a marked ADR, which ADR-0089 §3 reads for
+  meaning and never for obligation, and §6 is this ADR's list of what it *does not*
+  decide. ADR-0162 §9 moves that constant as the composition-root tuning change its
+  5→15 move already was, and says so rather than leaving the absence of a record to be
+  read as an oversight.
+
+  ADR-0162 lands **in the same change as this record**, the existence condition
+  ADR-0083 §15 states. Appended per ADR-0070 §1: no text below is rewritten, and §1's
+  two clauses stand exactly as written. Refs #1210, #1029.
 
 ## Context
 

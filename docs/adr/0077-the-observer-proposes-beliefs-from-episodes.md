@@ -1,6 +1,6 @@
 # 77. The observer proposes beliefs from episodes, through the gate, on a named route
 
-- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise) and ADR-0156 (§3's sentence enumerating what the observation prompt's payload carries)
+- Status: Partially superseded by ADR-0084 (§10 item 7's placement of the façade's observation result outside contract surface, and the header's restatement of that premise) and ADR-0156 (§3's sentence enumerating what the observation prompt's payload carries) and ADR-0162 (§2's warrant bar, as it reaches an episode recording what the user said to the assistant; and the proposal bound's value of 5 together with the sentence grounding it)
 - Date: 2026-07-28
 - Partially superseded: 2026-07-31 by ADR-0084 — **§10 item 7's claim that the
   façade's observation result is an `orchestration` type and not contract surface
@@ -177,6 +177,63 @@
   names an ADR that does not exist — the hazard ADR-0070 §1 guards against.
   Appended per ADR-0070 §1: no text below is rewritten, and §3's replaced sentence
   stands exactly as written. Refs #1029, #1163.
+- Partially superseded: 2026-08-19 by ADR-0162 — **§2's warrant bar is replaced
+  for an episode recording what the user said to the assistant, and the proposal
+  bound's value of 5 is replaced outright; every other clause of §2 and every other
+  section of this ADR stand.** The replaced warrant sentences are *"The bar for
+  proposing at all is durable usefulness, not interestingness"*, *"A proposal is
+  warranted only when the belief is **about the user** and would change a later
+  answer — a preference, a durable fact about them or their world, a workflow they
+  follow"*, and *"Summarising the exchange is the failure mode: it turns the belief
+  store into a second transcript, at indefinite retention, behind the surface that
+  answers 'what do you believe about me'"*. The replaced bound clauses are the figure
+  in *"`Settings` gains `observation_max_proposals: int`, **positive, defaulting to
+  5**"* and *"Five is the selectivity bar above, in numbers: a batch that genuinely
+  yields more durable beliefs than that is a batch worth observing twice"*.
+  [ADR-0162](0162-what-the-user-tells-the-assistant-is-recorded-and-selectivity-moves-to-retrieval-and-forgetting.md)
+  §1 replaces the bar with a recording rule — one record for each distinct thing the
+  user stated that a later question could ask about, filler alone passed over — and
+  §6 sets the default to 40 on a different ground, the bound being a cost and egress
+  control rather than the bar expressed as a number.
+
+  **The scope is bounded by *episode class* rather than by clause, which is unusual
+  and is the point.** ADR-0162 §2 keeps the replaced sentences in force, verbatim, for
+  an episode a reader ingested (ADR-0097) or a sensor captured (ADR-0094): the
+  argument for removing the bar is that the user *chose* to tell the assistant, and
+  that argument does not reach content arriving whether or not they meant it to. So
+  this ADR's bar is not dead text; it is the live rule for every input except the one
+  ADR-0162 §1 names.
+
+  **This is a partial supersession and not an amendment**, on
+  [ADR-0070](0070-amendment-and-supersession-rules.md) §1's test rather than the
+  author's preference: an amendment is available "only when the amendment changes no
+  decision", such that a reader acts "**identically** before and after". A reader
+  holding only this ADR builds an observer that refuses to record what merely happened
+  and caps its return at five, which is precisely what ADR-0162 requires it to stop
+  doing. Both replaced passages are rules an implementer obeys rather than
+  explanations of one — the discriminator ADR-0156's own header states, and the side
+  of the line ADR-0080's replacement of ADR-0045 §4 sits on.
+
+  **Not replaced, and it is nearly all of this ADR.** Three further clauses of §2
+  stand: the three kinds an observer may propose and the refusal to propose an
+  `EpisodicMemory` — which ADR-0162 §4 relies on to rule that an event is recorded as
+  a `SemanticMemory` and not as a manufactured episode; the two epistemic steps and
+  ADR-0072 §3's test between them; and `sensitivity` as `PERSONAL` on every proposal
+  with the observer-side category taxonomy declined. That the bound exists, that it is
+  positive, that excess is discarded rather than queued, and that it binds the
+  producer's return value are untouched. §1, §3 (as this line's ADR-0156 pair already
+  partially superseded it), §4, §5, §6, §7, §8, §9, §10 and §11 stand whole — and §5's
+  evidence discipline binds more records rather than fewer, ADR-0162 §1 restating it
+  in terms for that reason.
+
+  **The `Status` line accumulates a third pair rather than being replaced**
+  (ADR-0070 §4): the ADR-0084 and ADR-0156 pairs are kept and `and ADR-0162 (…)` added
+  on the same physical line. The scope names clauses and carries no `ADR-NNNN` token,
+  so §4's extraction invariant holds and all three targets are real. ADR-0162 lands
+  **in the same change as this record**, the existence condition
+  [ADR-0083](0083-the-hub-is-a-resident-process.md) §15 states, so this line never
+  names an ADR that does not exist. Appended per ADR-0070 §1: no text below is
+  rewritten, and the replaced sentences stand exactly as written. Refs #1210, #1029.
 - Note (2026-08-06): **§8's sentence filing the cursor's ownership with the
   resident process is narrowed by
   [ADR-0111](0111-a-scheduled-walk-is-chunked-and-resumes-from-a-durable-cursor.md);
