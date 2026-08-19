@@ -215,11 +215,17 @@ That clause exists because the word carries a second meaning in this corpus's
 neighbourhood and a later reader could import it. The field says which voice in one
 recording belongs to the hub's owner. It authorises nothing.
 
-### 2. The value is a tag the episode's own `content` already uses, and it resolves to nothing
+### 2. The value is a tag the episode's own `content` uses, it is owed where it is stateable, and it resolves to nothing
 
 > **Normative.** A producer sets `principal` only to a speaker tag the episode's own
-> `content` already uses for that speaker, byte for byte. A producer whose `content`
-> carries no such tag sets none.
+> `content` already uses for that speaker, byte for byte.
+
+> **Normative.** Where a producer renders `content` in which the speakers are
+> distinguishable and knows which of them is the owner, it renders a tag for that
+> speaker and states it as `principal`. The marker is not optional for such a
+> producer: the field's optionality exists for the turn, whose principal is
+> structural (§3), and for an episode that records no distinguishable speakers at
+> all.
 
 > **Normative.** `principal` resolves to nothing beyond the record that carries it.
 > Nothing matches two records' markers, normalises, case-folds, aliases, strips or
@@ -242,7 +248,27 @@ value would be a genuinely new class of data — a name the producer knows and t
 episode does not record — and would have to be argued as one. This clause refuses
 that outright and is why the argument is not needed.
 
-**The second clause answers the objection this ADR most has to answer.** ADR-0100
+**The second clause is what stops the first from becoming a loophole**, and the
+pair is best read as a partition of the producer's situation:
+
+- **Speakers distinguishable, owner known.** The marker is *owed*, and the tag it
+  names is one the producer is putting into `content` anyway. This is the whole
+  case this ADR is for.
+- **Speakers distinguishable, owner not known.** No marker is stateable, and none
+  may be guessed (§3). This is diarization and identity — #691's, not this ADR's
+  (§8) — and §3's producer clauses record that no producer this ADR admits can
+  reach the state.
+- **Speakers not distinguishable.** There is no tag for a marker to name and
+  nothing a marker could fix: undifferentiated transcript text is a capture-quality
+  question, and a field naming a speaker cannot answer it.
+
+Without the second clause a producer could render a tagged transcript, know
+perfectly well which speaker is the owner, and state nothing — leaving the episode
+in the second row by choice rather than by limitation. The clause closes that, and
+it is stated as a producer obligation rather than a check, for the fourth clause's
+reason.
+
+**The third clause answers the objection this ADR most has to answer.** ADR-0100
 §3 states that "there is no user identity anywhere in this system", and a field
 naming the user looks like one. It is not, and the difference is the same one
 ADR-0100 §6 draws for `about_person`: "**A label, resolving to nothing** … Not an
@@ -253,7 +279,7 @@ accumulates: a hundred episodes carrying `"Caroline"` do not thereby know a
 Caroline, are not thereby joinable, and give no surface a person to enumerate. What
 would create an identity is a join, and the clause forbids every join by name.
 
-**The third clause is a refusal with a precedent.** A validator asserting the tag
+**The fourth clause is a refusal with a precedent.** A validator asserting the tag
 occurs in `content` would be cheap to write and wrong twice over: it would decide a
 matching rule — substring? prefix? case-sensitive? — that belongs to no ADR, and it
 would fail records whose rendering places the tag somewhere a naive scan misses,
@@ -291,7 +317,7 @@ and no user act to point at when it is wrong.
 **The third clause keeps the field honest in the common case.** Every episode in
 production today is a turn, and stamping a constant marker on all of them would put
 noise in the field for no reader — the same argument the recorder already makes for
-`participants`, applied to the field beside it. §4's third clause is what makes
+`participants`, applied to the field beside it. §4's fourth clause is what makes
 the omission correct rather than merely economical.
 
 **The seam is a keyword on capture, and it is not contract surface.**
@@ -316,6 +342,29 @@ harness that captures those episodes without a marker leaves the ADR untested. �
 carries the pre-registration obligation that goes with changing a measured
 pipeline.
 
+> **Normative.** This ADR admits exactly two producers of episodes: the conversation
+> capture path, which records turns and states no marker, and a client driving that
+> path directly, which states one where §2's second clause obliges it. It admits no
+> producer that can deliver an episode recording several distinguishable speakers
+> without a marker.
+
+> **Normative.** A later decision that admits such a producer — the sensor
+> submission surface ADR-0094 §10 defers — rules at that time whether an episode
+> recording distinguishable speakers with no marker is eligible to be observed at
+> all. This ADR neither grants nor denies that eligibility, and §4's protection of
+> an absent marker does not decide it.
+
+**These two clauses are the honest statement of this ADR's reach, and they are
+worth stating rather than leaving to be inferred.** The state a reviewer will reach
+for — a multi-party episode arriving at the observer with no marker, so that the
+producer must again guess whose beliefs it is writing from the same ambiguous text
+— is *unreachable under the producers named above*: a turn has no ambiguity to
+resolve, and a client capturing named speakers owes the marker under §2. It becomes
+reachable the day a spoke can submit a captured conversation, and that is the day
+the eligibility question has both a producer to attach to and evidence about how
+often diarization actually fails. Deciding it now would be ratifying a
+withholding rule against a producer whose failure modes nobody has seen.
+
 ### 4. Absence says no marker was stated, and says nothing else
 
 > **Normative.** `principal` absent means no marker was stated. It is not
@@ -323,8 +372,13 @@ pipeline.
 > episode records; and it is not an assertion that they are not.
 
 > **Normative.** No reader, renderer, store, policy or surface may withhold,
-> downrank, exclude, or degrade an episode on the ground that it states no
-> `principal`, nor infer a principal for one (§3).
+> downrank, exclude, degrade or retain differently an episode on the ground that it
+> states no `principal`, nor infer a principal for one (§3).
+
+> **Normative.** The clause above binds retrieval, ranking, rendering, retention and
+> the write gate. It does **not** reach the question of which episodes are eligible
+> to be observed at all, which §3's last clause leaves to the decision that admits a
+> producer able to raise it.
 
 > **Normative.** Where an episode is a conversation turn (ADR-0074 §3), an absent
 > marker leaves that producer's structural premise exactly as it stands: the
@@ -332,7 +386,7 @@ pipeline.
 > and about the shape of what it records, not a meaning of this field, and no
 > reader may extend it to an episode from another producer.
 
-**The third clause is separated from the first deliberately, and the separation is
+**The fourth clause is separated from the first deliberately, and the separation is
 the whole of this section.** The tempting shorter rule — *absent means the episode
 is an owner↔assistant exchange* — is false about the kind, and ADR-0074 §3 says so
 in the same breath it establishes the premise: "**the entailment runs one way:
@@ -354,7 +408,7 @@ records that "**The blob stays the truth and the column is a derived index** …
 every read decodes the record from ``data``", so a record written before this field
 existed decodes with the default and states no marker — which is exactly right for
 it, since every episode written before this field existed is a turn (§3) and the
-third clause reads it as one. **No migration, no backfill and no column are owed**,
+fourth clause reads it as one. **No migration, no backfill and no column are owed**,
 and none may be added: `about_person` has a nullable column because ADR-0101 gives
 it a predicate to sit under, and §6 below gives `principal` none.
 
@@ -429,7 +483,7 @@ as ADR-0162 §2 leaves it standing for a captured episode, and ADR-0100's
 **Nothing here is a capability being withheld; it is a field being kept to one job.**
 Each of the listed inputs is a place where a later lane could reach for the marker
 because it is conveniently present, and each would turn a rendering aid into an
-epistemic instrument that §2's second clause has just refused to give it standing
+epistemic instrument that §2's third clause has just refused to give it standing
 for. A retrieval filter on `principal` would be the join §2 forbids, wearing a
 predicate.
 
@@ -449,7 +503,7 @@ later reader from "fixing" the projection in either direction without an ADR.
 The lane is #1210's 2.5. It owes, and owes nothing beyond:
 
 - The field on `EpisodicMemory` in `src/ai_assistant/core/types.py`, with a
-  docstring carrying §2's two-clause discipline and §4's reading of absence — the
+  docstring carrying §2's discipline and §4's reading of absence — the
   form `about_person`'s docstring already takes for ADR-0100's clauses.
 - The keyword on `ConversationLifecycle.capture`, defaulting to `None`, threaded
   into the `EpisodicMemory` it builds, with the recorder's docstring stating that
@@ -463,7 +517,7 @@ The lane is #1210's 2.5. It owes, and owes nothing beyond:
 - The planner's record renderer, non-forgeably (§5). **This lane lands after
   #1210's lane 2.1**, which is rewriting that same renderer for #1194;
   taking the two in the other order would put two lanes in one file.
-- The harness, per §3's last clause: LoCoMo's `speaker_a`, matching the tag
+- The harness, per §3's harness clause: LoCoMo's `speaker_a`, matching the tag
   `benchmarks/memory/corpora/locomo.py` already prefixes to each utterance;
   nothing for LongMemEval.
 - Tests: a record written without the field decoding from a stored blob and
@@ -486,7 +540,7 @@ or `about_person` from the marker (§6), or change the observer's utility bar (�
 
 - **What names a person, how one is enrolled, and how an utterance is attributed to
   a speaker.** That is diarization and identity, it is #691's, and this ADR adds no
-  tenth ADR reference pointing there by deciding any of it. §2's second clause is
+  tenth ADR reference pointing there by deciding any of it. §2's third clause is
   precisely the boundary: this decision consumes a label a client already computed
   and refuses to give it any meaning outside its record.
 - **Whether two markers in different episodes denote the same speaker.** §2 forbids
@@ -505,6 +559,12 @@ or `about_person` from the marker (§6), or change the observer's utility bar (�
 - **The sensor submission surface** by which a spoke delivers a captured episode to
   the hub. ADR-0094 §10 defers it and this ADR does not open it; §3's seam is the
   existing capture path, which is why a docs-only decision is testable today.
+- **Whether an episode recording distinguishable speakers with no marker is
+  eligible to be observed at all.** §3's last clause defers it with the producer
+  that first makes it reachable, and §4's third clause keeps the absence rule from
+  pre-empting it. No producer this ADR admits can create that episode, so the
+  deferral costs nothing today and the decision, when it is taken, will have a
+  producer's measured failure rate to take it against.
 - **How an episode says positively that the owner is *not* among its speakers** — a
   room the user is not in. §4's first clause makes absence say nothing either way,
   so no such episode is misdescribed today; what is deferred is a way to state the
@@ -530,7 +590,7 @@ lane updates #1162 to say so rather than closing it.
   multi-party producer exists yet.
 - **The LoCoMo arm becomes an honest measurement instead of a known-invalid one.**
   #1162 records the harness's first-person mapping as a validity limitation; with
-  §3's last clause the corpus is captured as what it is. Whether the score moves is
+  §3's harness clause the corpus is captured as what it is. Whether the score moves is
   a measurement, pre-registered under §7, and this ADR predicts nothing about it.
 - **`EpisodicMemory` gains a third participant-shaped field**, and three is where a
   reader starts needing to be told which is which. §6's second clause and the
@@ -542,7 +602,7 @@ lane updates #1162 to say so rather than closing it.
   two known sites, so a new one inherits the rule instead of being forgotten by it.
 - **What would trigger revisiting this.** A producer that needs to mark more than
   one participant, or to record an episode with no owner in it; a decision that
-  gives labels cross-record meaning (#691), which would make §2's second clause the
+  gives labels cross-record meaning (#691), which would make §2's third clause the
   thing standing in the way rather than the thing protecting the design; or a
   measured finding that stating the marker changes *what* the observer proposes
   rather than *whom* it proposes it about, which §5's fourth clause forbids and
