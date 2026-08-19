@@ -558,7 +558,8 @@ names, arriving through the field §5 added rather than through the content it s
 beside, and it is why the clause above names a transform rather than only a region.
 Each bound surface already has one to reuse: `json.dumps` in the consolidation
 renderer, `_quoted_span` in the planner's, and whatever the observer's batch
-renderer discharges ADR-0098 §2 with when #672's remaining half lands.
+renderer discharges ADR-0098 §2 with when #672's remaining half lands, which is why
+§7 orders that step behind it rather than beside the other two.
 
 **All three bound surfaces are ones where the misattribution is live.** The
 observation prompt is where beliefs are minted, so it is the obvious one. The
@@ -707,7 +708,16 @@ its own, with its own tests:
    renderer's docstring updated, since it currently states the payload enumeration
    in terms ("**The payload is the batch and nothing else** … each episode's
    canonical ``content`` …, the label the model cites it by, and — since ADR-0156 §2
-   — that episode's own ``occurred_at``").
+   — that episode's own ``occurred_at``"). **This one lands after the observer's
+   own ADR-0098 §2 discharge** — #672's remaining half, which
+   [#1218](https://github.com/leonapivato/ai-assistant/issues/1218) records as still
+   outstanding. `_render_batch` interpolates each `record.content` raw into a
+   line-oriented block today, so it applies no target-safe transform for §5's clause
+   to reuse and this step would otherwise have to introduce one — which re-renders
+   every existing episode, since escaping is not byte-preserving, and is precisely
+   the measured change the last clause of this section forbids this lane. Taken in
+   the stated order the step adds a marker to a transform its surface already
+   applies, as steps 3 and 4 do.
 3. **`planning`** — the record renderer, non-forgeably (§5). **This one lands after
    #1210's lane 2.1**, which rewrote that same renderer for #1194 and merged as
    [#1213](https://github.com/leonapivato/ai-assistant/pull/1213); taking the two in
@@ -722,8 +732,9 @@ its own, with its own tests:
    This is the seam a spoke will eventually use and the one §7's synthetic test
    exercises. **It lands last**, for the reason below.
 
-> **Normative.** Steps 2, 3 and 4 are independent of each other and may land in any
-> order or in parallel once step 1 has merged. **All three precede step 5**: no
+> **Normative.** Steps 2, 3 and 4 are independent **of each other** and may land in
+> any order or in parallel once step 1 has merged — and, for step 2, once the
+> discharge it names has landed. **All three precede step 5**: no
 > change may enable `ConversationLifecycle.capture` to accept or store a marker
 > until every surface §5 binds already renders one.
 
@@ -740,8 +751,9 @@ speech while the system holds the correction and does not state it — for the w
 window between that merge and the renderers', and §5's first clause is unconditional
 in that window as in any other. The safe order costs nothing to take: until step 5
 merges no episode in the tree states a marker, so steps 2, 3 and 4 change no rendered
-byte and can be verified only against constructed records, which is what their tests
-below already do. **Nothing in the harness's corpora changes at any step**, per §3's
+byte — each reuses a transform its own surface already applies, which is what step
+2's dependency above exists to secure — and can be verified only against constructed
+records, which is what their tests below already do. **Nothing in the harness's corpora changes at any step**, per §3's
 first clause: no loader and no ingestion path is touched, and the harness's only
 obligation is the negative assertion below, which rides with whichever step is
 convenient.
