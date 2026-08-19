@@ -12,11 +12,13 @@ tile, and the pass count is the honest cost of ingesting that case.
 The last *k* **episodes** of one window are the first *k* of the next. Where every
 turn resolves that is simply a pass every ``batch_size - k`` captures; where one does
 not it is not, because the stage's window is ``batch_size`` *turns* and skips a turn
-whose episode no longer resolves (ADR-0074 §5). So the driver records which turn
-positions stored an episode and schedules the next pass to *begin* at the position of
-the current window's *k*-th episode from the end, which delivers the clause with a gap
-in the window or without one. The loss it closes is a fact stated across a window
-boundary — the
+whose episode no longer resolves (ADR-0074 §5). So the driver schedules on the store's
+own ``ConversationTurn.ordinal`` rather than on its capture count — the one exact
+answer to where a turn sits, and the one thing ``CaptureReport`` cannot give it
+(#1075) — and fires the next pass when the window would *begin* at the current
+window's *k*-th episode from the end. That delivers the clause with a gap in the
+window, with an append that never landed, or with neither. The loss it closes is a
+fact stated across a window boundary — the
 user names a trip in the last turn of one window and says where they went in the
 first turn of the next, visible to neither pass as a whole. Under ADR-0077 §2's
 warrant bar that was rare, because a fragment cleared the bar seldom enough to be
@@ -461,89 +463,68 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
     conversation = await harness.lifecycle.begin(None)
     summary = IngestionSummary(conversation_id=conversation.id)
 
-    # **The schedule is kept in turn positions, and the overlap is measured in
-    # episodes.** ADR-0162 §7's clause is about episodes — "the last *k* episodes of
-    # one window are the first *k* of the next" — while ``ObservationStage``'s window
-    # is the conversation's most recent ``batch_size`` **turns** and it skips a turn
-    # whose episode no longer resolves, without backfilling (ADR-0074 §5). Where every
-    # turn resolves the two are the same sequence and a pass every ``batch_size -
-    # overlap`` captures satisfies §7 exactly. Where one does not, they diverge: a
-    # window of ``batch_size`` turns holding a gap carries fewer than ``overlap``
-    # episodes into the next one, and the clause quietly under-delivers.
+    # **The schedule is kept in store-allocated turn ordinals, and the overlap is
+    # measured in episodes.** ADR-0162 §7's clause is about episodes — "the last *k*
+    # episodes of one window are the first *k* of the next" — while
+    # ``ObservationStage``'s window is the conversation's most recent ``batch_size``
+    # **turns**, and it skips a turn whose episode no longer resolves without
+    # backfilling (ADR-0074 §5). The two sequences are not the same one, so a driver
+    # pacing on its own capture count delivers §7 only while nothing fails.
     #
-    # So the driver records **which turn positions landed an episode** and schedules
-    # off those. After a pass over turns ``[start, turns]`` it takes that window's
-    # episode-bearing positions, picks the ``overlap``-th from the end, and fires the
-    # next pass when the window would *begin* there — which makes exactly those
-    # ``overlap`` episodes the next window's prefix, gap or no gap. ``_next_pass_at``
-    # is that arithmetic and nothing else.
+    # So the driver reads the conversation's own ordinal after every capture and
+    # schedules on that. ``ConversationTurn.ordinal`` is allocated by the store, dense
+    # and monotonic within its conversation (ADR-0074 §3), which makes it the one
+    # exact answer to "where is this turn in the window" — and the one thing
+    # ``CaptureReport`` cannot supply, because it reports a lost **append** and a lost
+    # **episode** identically (#1075, whose title says in terms that a driver's cadence
+    # needs the distinction). An unappended turn does not move the ordinal and an
+    # unresolvable one does, which is exactly the distinction the schedule needs, taken
+    # from the store rather than guessed from the report. One row per capture, against
+    # a model call per pass.
     #
-    # **A capture that stored nothing buys no pass of its own.** A lost append records
-    # no turn at all and an episode write that never landed leaves an unresolvable
-    # one, so a stretch of them adds nothing a pass could read while still advancing
-    # the position counter — and at the extreme the pass re-reads exactly the window
-    # the last one read: a duplicate model call, on a paid run, proposing what the
-    # gate will fold. That was already reachable before §7 after ``batch_size`` such
-    # captures in a row and the overlap makes it reachable sooner, so the trigger asks
-    # whether an episode has landed since the last pass. It is keyed on the episode id
-    # alone rather than on ``degraded``, which is the conservative direction: a report
-    # that is degraded and still carries an id has something a pass can read.
+    # After a pass over the turns ending at ``through``, :func:`_next_pass_at` takes
+    # that window's episode-bearing ordinals, picks the ``overlap``-th from the end,
+    # and fires the next pass when the window would *begin* there — which makes exactly
+    # those ``overlap`` episodes the next window's prefix, gap or no gap.
     #
-    # **That gate postpones a pass and never cancels one.** ``turns`` still counts
-    # every capture, for the reason below, so postponing can carry it past the
-    # scheduled position — hence ``>=`` rather than ``==``. Nothing readable is
-    # skipped: a stretch that skipped a pass is by construction a stretch in which
-    # nothing was stored, and the pass fires on the first capture that lands.
+    # **A capture that stored nothing buys no pass of its own.** A window whose new
+    # turns all failed their episode write reads a strict subset of what the last pass
+    # read: a duplicate model call, on a paid run, proposing what the gate will fold.
+    # So the trigger also asks whether an episode has landed since the last pass, keyed
+    # on the episode id alone rather than on ``degraded`` — the conservative direction,
+    # because a report that is degraded and still carries an id has something to read.
     #
-    # **The positions are capture counts, so the schedule is exact for every failure
-    # this driver can see and approximate for the one it cannot.** An episode-stage
-    # failure leaves the turn appended, so a position is still a turn and the
-    # arithmetic above delivers §7's identity with the gap in it. A *lost append*
-    # records no turn at all, and `CaptureReport` reports the two identically — that
-    # is #1075, whose title says in terms that a driver's cadence needs the
-    # distinction — so under one the positions run ahead of the conversation.
-    #
-    # The direction of that error is the pre-existing safe one the comment below
-    # argues for, and it is worth stating as a bound rather than left as "approximate":
-    # over-counting fires a pass *earlier* in real turns than intended, so the next
-    # window begins at or before the episode the carry aimed at and therefore still
-    # **contains** the whole carried tail — §7's remedy is delivered, and what is lost
-    # is only its position as the window's literal prefix, plus some duplicated passes.
-    # Closing it exactly needs #1075 and a change in `orchestration`, which is not this
-    # module's to make; a floor on the schedule would buy the append case by breaking
-    # the episode-stage case, because the driver cannot tell which one it is in.
-    turns = 0
+    # **That gate postpones a pass and never cancels one**, which is why the ordinal
+    # test is ``>=`` and not ``==``: postponing can carry the conversation past the
+    # scheduled ordinal, and the pass then fires on the first capture that lands. What
+    # a long postponement can cost is the carried tail's *position* — the window slides
+    # while nothing is stored — and that costs §7 nothing, because a stretch that stored
+    # nothing has no new fact for the tail to be joined to.
     landed: list[int] = []
     observed_through = 0
-    next_at = batch_size
+    next_at: int | None = None
     for session in case.sessions:
         harness.clock.set(session.occurred_at)
         for exchange in exchanges_of(session):
             report = await harness.lifecycle.capture(
                 conversation.id, content=exchange.content, outcome=exchange.outcome
             )
-            # **Counted before it is classified, because the window counts turns and
-            # this loop cannot see which kind of degradation it got.** `capture` writes
-            # the index entry first and the episode second, so an episode-stage failure
-            # leaves a turn in the conversation carrying an id that no longer resolves.
-            # `ObservationStage` reads the most recent `batch_size` *turns* and skips an
-            # unresolvable one **without backfilling** (ADR-0074 §5), so that turn still
-            # holds a slot. Pacing on successful captures alone would therefore let an
-            # earlier, perfectly good episode fall out of every window that is ever
-            # read — never distilled, and silently, which biases the very retrieval the
-            # pilot measures.
-            #
-            # A lost *append* records no turn and holds no slot, but `CaptureReport`
-            # reports both failures identically (#1075), so this counts every capture
-            # and takes the safe direction: `batch_size` is "a maximum, not a quota",
-            # so over-counting under-fills a window, where under-counting drops
-            # episodes.
-            turns += 1
+            # **Read before it is classified, because the window is turns and this
+            # loop cannot see from the report which kind of degradation it got.**
+            # `capture` writes the index entry first and the episode second, so an
+            # episode-stage failure leaves a turn in the conversation carrying an id
+            # that no longer resolves; `ObservationStage` reads the most recent
+            # `batch_size` *turns* and skips an unresolvable one **without
+            # backfilling** (ADR-0074 §5), so that turn still holds a slot. A lost
+            # append records no turn and holds none. The store's own ordinal is what
+            # separates them, and it is why this is read rather than counted.
+            ordinal = await _tail_ordinal(harness, conversation.id)
+            next_at = ordinal + batch_size - 1 if next_at is None and ordinal else next_at
             # Recorded off the episode id alone rather than off the branch below,
             # which is the conservative direction: a report that is `degraded` and
             # still carries an id has something a pass can read.
             if report.episode_id is not None:
-                landed.append(turns)
+                landed.append(ordinal)
             if report.degraded or report.episode_id is None:
                 summary.turns_degraded += 1
             else:
@@ -557,34 +538,88 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
                 # stored".
                 for key in exchange.evidence_keys:
                     summary.evidence_episodes.setdefault(key, []).append(report.episode_id)
-            if turns >= next_at and landed and landed[-1] > observed_through:
+            if _pass_is_due(
+                ordinal=ordinal,
+                next_at=next_at,
+                landed=landed,
+                observed_through=observed_through,
+            ):
                 await _observe(harness, conversation.id, summary)
                 next_at = _next_pass_at(
-                    landed, through=turns, batch_size=batch_size, overlap=overlap
+                    landed, through=ordinal, batch_size=batch_size, overlap=overlap
                 )
-                observed_through = turns
+                observed_through = ordinal
     if landed and landed[-1] > observed_through:
         await _observe(harness, conversation.id, summary)
     return summary
 
 
-def _next_pass_at(landed: Sequence[int], *, through: int, batch_size: int, overlap: int) -> int:
-    """The turn position at which the next pass's window begins where §7 asks.
+def _pass_is_due(
+    *, ordinal: int, next_at: int | None, landed: Sequence[int], observed_through: int
+) -> bool:
+    """Whether the conversation has reached the scheduled window with something new.
 
-    A pass has just read the turns ``[through - batch_size + 1, through]``. ADR-0162
-    §7 requires the last ``overlap`` **episodes** of that window to be the first
-    ``overlap`` of the next, so the next window must *begin* at the position of this
-    window's ``overlap``-th episode from the end — and a window of ``batch_size``
-    turns beginning there ends ``batch_size - 1`` later, which is the answer.
+    Two conditions and both are load-bearing. The conversation's most recent turn is
+    at or past the ordinal :func:`_next_pass_at` named, so the window begins where
+    ADR-0162 §7 asks; and an episode has landed since the last pass, so the window
+    holds something that pass did not read.
 
     Args:
-        landed: Every turn position that stored an episode, in order.
-        through: The last turn position the pass just read.
+        ordinal: The conversation's most recent turn ordinal, 0 where it has none.
+        next_at: The scheduled ordinal, or ``None`` before the first turn lands.
+        landed: The ordinal of every turn that stored an episode, in order.
+        observed_through: The ordinal the last pass read through, 0 before any.
+
+    Returns:
+        Whether to observe now.
+    """
+    if next_at is None or ordinal < next_at:
+        return False
+    return bool(landed) and landed[-1] > observed_through
+
+
+async def _tail_ordinal(harness: Harness, conversation_id: str) -> int:
+    """The ordinal of the conversation's most recent turn, or 0 where it has none.
+
+    The one exact answer to "did that capture put a turn in the conversation, and
+    where". ``ConversationTurn.ordinal`` is store-allocated, dense and monotonic
+    within its conversation (ADR-0074 §3), so a lost append leaves it where it was and
+    an episode-stage failure advances it — the distinction ``CaptureReport`` cannot
+    make (#1075) and this driver's schedule needs. Read through the ratified
+    ``ConversationStore.turns`` contract, one row, and never derived from an episode
+    id: an id is opaque and a driver reading a position out of one would be inventing
+    a second id space beside the store's own.
+
+    Args:
+        harness: The wired pipeline, whose conversation store this reads.
+        conversation_id: The conversation.
+
+    Returns:
+        The last ordinal, or 0 for a conversation with no turns yet — below
+        ``FIRST_TURN_ORDINAL`` by construction, so it can never be mistaken for one.
+    """
+    tail = await harness.conversations.turns(conversation_id, limit=1)
+    return tail[-1].ordinal if tail else 0
+
+
+def _next_pass_at(landed: Sequence[int], *, through: int, batch_size: int, overlap: int) -> int:
+    """The ordinal at which the next pass's window begins where §7 asks.
+
+    A pass has just read the turns ``[through - batch_size + 1, through]``, in
+    ordinals. ADR-0162 §7 requires the last ``overlap`` **episodes** of that window to
+    be the first ``overlap`` of the next, so the next window must *begin* at the
+    ordinal of this window's ``overlap``-th episode from the end — and a window of
+    ``batch_size`` turns beginning there ends ``batch_size - 1`` later, which is the
+    answer.
+
+    Args:
+        landed: The ordinal of every turn that stored an episode, in order.
+        through: The last ordinal the pass just read.
         batch_size: The window, in turns.
         overlap: §7's *k*, already clamped into its bound by :func:`_overlap_of`.
 
     Returns:
-        The turn count at which the next pass is due.
+        The ordinal at which the next pass is due.
 
     **The two degenerate cases carry no overlap, and both are §7's own.** An
     ``overlap`` of 0 is the batch of 1 the section rules explicitly, and a window that
