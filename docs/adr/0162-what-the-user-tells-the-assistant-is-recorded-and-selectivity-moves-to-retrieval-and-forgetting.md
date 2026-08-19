@@ -593,14 +593,15 @@ an obligation on a lane that owes nothing for it.
 > **Normative.** An episode is cited whole. A record cites the episode and never one
 > half of it, and ADR-0077 §5's floor counts distinct episode ids exactly as before.
 
-> **Normative.** What the assistant said does support a record about **the exchange
-> itself** — what it was asked, what it answered or did, and when. That is a record of
-> something that happened, which the `outcome` field witnesses.
+> **Normative.** What the assistant said **independently supports** a record of its
+> own act: that it was asked something, that it answered or did a particular thing,
+> and when. That is a record of something that happened, which the `outcome` field
+> witnesses, and it needs no further ground.
 
-> **Normative.** A record whose only support is a proposition the assistant
-> *asserted* — rather than something the user said, or the fact that the assistant
-> said it — is **not proposed**. `outcome` corroborates and contextualises a record
-> grounded in what the user said; it never independently justifies one.
+> **Normative.** What the assistant said **never supports** a record that adopts the
+> proposition it asserted as a fact about the world or about the user. Such a record
+> is proposed only where the user said it; `outcome` may corroborate or contextualise
+> one grounded that way and supplies no warrant of its own for it.
 
 > **Normative.** What the assistant said is evidence about what happened and never a
 > licence to propose an `EpisodicMemory`. ADR-0077 §2's refusal stands.
@@ -634,18 +635,24 @@ exist to prevent. The prompt shows two texts for one label; the floor counts lab
 **Why the assistant's assertions are not the user's, which is the same boundary §1 and
 §2 rest on and the one this section could most easily have breached.** §1's rule is
 that the user *told* the assistant something, and the assistant's own answer is not
-that: it is the system's output. Admitting it as independent warrant would let the
-assistant launder its own assertions into the user's model — the assistant answers
+that: it is the system's output. The two clauses above therefore partition by **what a
+record claims** rather than by how much support it has — an act the assistant
+performed, which the episode witnesses, against a proposition it asserted, which the
+episode witnesses only the *saying* of. Admitting the proposition as warrant would let
+the assistant launder its own assertions into the user's model — the assistant answers
 "Paris is the capital of France", or worse a guess about the user, and a pass later
 that assertion is a belief with the user's model behind it and an episode as its
 citation. It is the same shape as the failure ADR-0077 §2 refuses one layer down when
 it forbids a model-authored episode, "a fabricated event wearing the type reserved for
 witnessed ones" that "later beliefs would *cite* as though it were evidence". Here the
 fabrication would be a *belief* rather than an episode, and the type it wears is the
-user's world model. What is legitimately supported is the record of the exchange —
-"the assistant recommended the coastal route on 3 May" is something that happened and
-the `outcome` field witnesses it, and it is precisely the material LongMemEval's
-single-session-assistant questions ask about (#1029 scores that arm at 50%).
+user's world model. What is legitimately supported, on the `outcome` alone, is the act
+— "the assistant recommended the coastal route on 3 May" is something that happened,
+and it is precisely the material LongMemEval's single-session-assistant questions ask
+about (#1029 scores that arm at 50%). What is not is the proposition inside it: that
+the coastal route *is* the better one is a claim about the world, and the assistant
+having said so is not the user having said so. The same episode supports the first and
+not the second, which is why the line is drawn at the record and not at the evidence.
 
 **This is a producer-side obligation and it is not mechanically checkable, which is
 said rather than glossed.** Which proposition supports a record is a fact about
