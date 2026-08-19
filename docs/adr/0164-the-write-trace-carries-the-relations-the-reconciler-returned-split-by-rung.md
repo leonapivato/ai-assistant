@@ -498,7 +498,7 @@ no member is labelled `RESTATES` — two independent bars, and §4 keeps them ap
 deliberately: an `EXTERNAL` member "is never *named* by either exception, and it
 counts in both purity conditions exactly as any other member does". So a stream
 carrying `relations_model_contradicts` above zero beside `decisions_supersede` at
-zero says a contradiction was held and no retirement followed, and does not say
+zero says a contradiction was held and no supersession followed, and does not say
 whether the target class excluded it, a purity condition blocked it, or both.
 Narrowing that needs the member's `provenance.source` and the pair it belonged to,
 which the clause above and §2 put out of reach.
@@ -517,12 +517,15 @@ unobservable in the ruling", and this ADR does not make it observable in the tra
 either. What remains, read with §5's configured bound beside `relations_unlabelled`,
 is a bound on the consulted set rather than the set itself.
 
-**And a model label that was returned but discarded is not counted.** §3 counts the
-label that **stands**, so a reconciler answering `CONTRADICTS` about a pair the
-certain rung already labelled leaves every model key at zero for it. ADR-0159 §3
-makes such a reconciler non-conforming, which is why this is the right count and not
-a gap — but a zero model count is a statement about labels *held*, not about strings
-a model emitted.
+**And a model label that was returned but discarded is not counted, and neither is one
+discarded before it was returned.** §3 counts the label that **stands**, so a
+reconciler answering `CONTRADICTS` about a pair the certain rung already labelled
+leaves every model key at zero for it. ADR-0159 §3 makes such a reconciler
+non-conforming, which is why this is the right count and not a gap. A **conforming**
+reconciler reaches the same zero by the other route: §3 requires it to discard a label
+for a member beyond `reconciler_max_conflicts` before it returns, so a model that did
+say `CONTRADICTS` there is never counted here either. Either way a zero model count is
+a statement about labels *held*, not about strings a model emitted.
 
 **And a model key is a statement about what the reconciler reported, not an
 independently verified fact about a provider.** §3's coherence clause rejects a report
@@ -677,15 +680,15 @@ conditions specifically; that a figure over these keys was a crossing-level figu
 a zero model count meant nothing was returned; that `reconciler_unconsulted` measured
 certainty; that a zero contradiction count was a statement about the model even where
 the three qualifier keys account for the crossing and no model answered at all; that a
-positive one placed the contradiction in the proposal the absent retirement belonged to,
-the join §6 rules unavailable on a reading; that the outcome report reached no ruling at
-all, when it reaches one by the single route ADR-0159 §6 admits; and that a positive
-model key *entailed* a model answer, when it entails a reported one and the rest is the
-reconciler's conformance. Another found the defect that reshaped the decision:
-`ModelBackedReconciler.reconcile` absorbs its own provider failures, so a key counted at
-the writer could not have distinguished a failed determination from a silent model,
-which is why §3 takes the outcome across the reconciler seam at all. That is recorded
-here because it is the evidence for §3's shape, not as process narration.
+positive one placed the contradiction in the proposal the absent supersession belonged
+to, the join §6 rules unavailable on a reading; that the outcome report reached no
+ruling at all, when it reaches one by the single route ADR-0159 §6 admits; and that a
+positive model key *entailed* a model answer, when it entails a reported one and the
+rest is the reconciler's conformance. Another found the defect that reshaped the
+decision: `ModelBackedReconciler.reconcile` absorbs its own provider failures, so a key
+counted at the writer could not have distinguished a failed determination from a silent
+model, which is why §3 takes the outcome across the reconciler seam at all. That is
+recorded here because it is the evidence for §3's shape, not as process narration.
 
 ### 8. What this records against earlier ADRs, under ADR-0082 §1
 
@@ -786,37 +789,41 @@ act differently, or read one of its clauses more widely than it now holds?
 
 ## Consequences
 
-- **#1209's question becomes answerable, and it is the question that decides what to
-  do next.** On a pilot run reporting zero supersessions, a **positive**
+- **#1209's question becomes answerable, and it is the question that decides what to do
+  next.** On a pilot run reporting zero supersessions, a **positive**
   `relations_model_contradicts` says a model contradiction **stood somewhere in the
-  crossing** and that no retirement followed in it. That is the whole of the join: §6
-  rules that a pair's relation is not joinable to the ruling that followed it, exact on
-  a **one-proposal** crossing — every `MemoryIngestor.ingest` call — and not on a
-  reading, so on a reading the count does not say that the proposal the contradiction
-  belonged to is the one ruled without a retirement. Where the join is exact it points
-  at ADR-0159 §4, and even there it does **not** say which of §4's bars declined — an
-  `EXTERNAL` contradiction outside the target class and a contradiction standing beside
-  a `RESTATES` member present as the same positive count against the same zero, and §6
-  says so.
+  crossing** and that no **supersession** followed in it — not that no retirement did,
+  since a reading's coverage reconciliation retires under `closed`, a key this bullet
+  does not read. That is the whole of the join: §6 rules that a pair's relation is not
+  joinable to the ruling that followed it, exact on a **one-proposal** crossing — every
+  `MemoryIngestor.ingest` call — and not on a reading, so on a reading the count does
+  not say that the proposal the contradiction belonged to is the one ruled without a
+  supersession. Where the join is exact it points at ADR-0159 §4, and even there it does
+  **not** say which of §4's bars declined — an `EXTERNAL` contradiction outside the
+  target class and a contradiction standing beside a `RESTATES` member present as the
+  same positive count against the same zero, and §6 says so.
 - **A zero contradiction count is read against the answered count first, and says
-  nothing about the model until it is.** `relations_model_contradicts = 0` means the
-  model was silent on contradiction only over proposals **whose model rung answered**
-  — §3's `reconciled` less `reconciler_absent`, `reconciler_failed` and
-  `reconciler_unconsulted` — and only there does it point at the prompt, the bound or
-  ADR-0159 §3's temporal clause (read with §6's discard note: on a conforming
-  reconciler, no contradiction standing is the same as none being returned). Each of
+  nothing about the model until it is.** `relations_model_contradicts = 0` means **no
+  model-rung `CONTRADICTS` label was returned by the reconciler and stood**, and it says
+  even that only over proposals **whose model rung answered** — §3's `reconciled` less
+  `reconciler_absent`, `reconciler_failed` and `reconciler_unconsulted`. It is not a
+  statement that the model was silent, and a reply the reconciler discarded before
+  returning is **outside its meaning**: ADR-0159 §3 requires a **conforming** reconciler
+  to discard a label for a member beyond `reconciler_max_conflicts`, so a model that did
+  say `CONTRADICTS` there leaves this zero standing (§6). Read that way, and only there,
+  does the zero point at the prompt, the bound or ADR-0159 §3's temporal clause. Each of
   those three qualifiers yields that same zero with **no model answer behind it at
-  all**, so where they account for the crossing the zero is not evidence about the
-  model and the prompt is the wrong place to look. Read the qualifier keys first, and
-  read the three apart, because they do not all say the same thing.
-  `reconciler_absent` and `reconciler_unconsulted` mean **no request was made**, so an
-  operator who skips them will investigate a prompt that was never sent.
-  `reconciler_failed` says only that the **determination was unusable**, and takes no
-  view on whether a request was made: §3 counts under it both a request that yielded no
-  readable answer and a non-conforming reconciler the writer's guard absorbed, and the
-  second of those need never have reached a provider. So this key sends an operator to
-  the reconciler — its conformance, and its own logs — before the provider or the
-  route, because the trace does not say which of the two arms produced the count.
+  all**, so where they account for the crossing the zero is not evidence about the model
+  and the prompt is the wrong place to look. Read the qualifier keys first, and read the
+  three apart, because they do not all say the same thing. `reconciler_absent` and
+  `reconciler_unconsulted` mean **no request was made**, so an operator who skips them
+  will investigate a prompt that was never sent. `reconciler_failed` says only that the
+  **determination was unusable**, and takes no view on whether a request was made: §3
+  counts under it both a request that yielded no readable answer and a non-conforming
+  reconciler the writer's guard absorbed, and the second of those need never have
+  reached a provider. So this key sends an operator to the reconciler — its conformance,
+  and its own logs — before the provider or the route, because the trace does not say
+  which of the two arms produced the count.
 - **The floor deployment becomes visible for the first time.** `reconciler_absent`,
   `reconciler_failed` and `reconciler_unconsulted` distinguish a hub running ADR-0159
   §6's ratified floor, a hub whose reconciler cannot deliver a usable determination, a
