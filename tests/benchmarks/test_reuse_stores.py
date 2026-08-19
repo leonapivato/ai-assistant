@@ -679,6 +679,19 @@ class TestALoadThatCannotBeARun:
         with pytest.raises(ValueError, match="do not describe one run"):
             load_reused_run(root, first.run_id)
 
+    async def test_rows_of_one_case_that_disagree_about_its_ingestion(self, tmp_path: Path) -> None:
+        """The summary is denormalised onto every row, so there is no first row to
+        prefer — and the figures are the denominators P8 is read against."""
+        root = tmp_path / "runs"
+        source, source_dir = await _ingest(root, tmp_path)
+        path = source_dir / "records.jsonl"
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+        rows[1]["ingestion"]["turns_captured"] += 1
+        path.write_text("".join(f"{json.dumps(row)}\n" for row in rows), encoding="utf-8")
+
+        with pytest.raises(ValueError, match="disagree about what ingesting it reported"):
+            load_reused_run(root, source.run_id)
+
     async def test_a_run_that_wrote_no_records(self, tmp_path: Path) -> None:
         root = tmp_path / "runs"
         source, source_dir = await _ingest(root, tmp_path)
