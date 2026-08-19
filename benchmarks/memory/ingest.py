@@ -9,9 +9,14 @@ captures a batch, observes it, captures the next, observes that: the full window
 tile, and the pass count is the honest cost of ingesting that case.
 
 **And consecutive windows overlap by design, not only at the end** (ADR-0162 §7).
-The last *k* episodes of one window are the first *k* of the next, which the driver
-buys by advancing ``batch_size - k`` captures between passes instead of
-``batch_size``. The loss it closes is a fact stated across a window boundary — the
+The last *k* **episodes** of one window are the first *k* of the next. Where every
+turn resolves that is simply a pass every ``batch_size - k`` captures; where one does
+not it is not, because the stage's window is ``batch_size`` *turns* and skips a turn
+whose episode no longer resolves (ADR-0074 §5). So the driver records which turn
+positions stored an episode and schedules the next pass to *begin* at the position of
+the current window's *k*-th episode from the end, which delivers the clause with a gap
+in the window or without one. The loss it closes is a fact stated across a window
+boundary — the
 user names a trip in the last turn of one window and says where they went in the
 first turn of the next, visible to neither pass as a whole. Under ADR-0077 §2's
 warrant bar that was rare, because a fragment cleared the bar seldom enough to be
@@ -456,38 +461,49 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
     conversation = await harness.lifecycle.begin(None)
     summary = IngestionSummary(conversation_id=conversation.id)
 
-    # **Three counters, because the trigger is about a whole window and only one of
-    # them is turns this loop captured.** ``pending`` is new turns since the last
-    # pass; ``carried`` is how many of the *previous* window the next one will read
-    # again, which is 0 until a pass has run and ``overlap`` after every one
-    # (ADR-0162 §7). A pass fires when the two together fill a window, so consecutive
-    # passes are ``batch_size - overlap`` captures apart and consecutive windows share
-    # exactly ``overlap`` episodes. Resetting ``pending`` to 0 rather than to
-    # ``overlap`` is half of what keeps a pass from re-reading a window wholly
-    # contained in the one before it: without it the closing flush would fire on the
-    # carried tail alone.
+    # **The schedule is kept in turn positions, and the overlap is measured in
+    # episodes.** ADR-0162 §7's clause is about episodes — "the last *k* episodes of
+    # one window are the first *k* of the next" — while ``ObservationStage``'s window
+    # is the conversation's most recent ``batch_size`` **turns** and it skips a turn
+    # whose episode no longer resolves, without backfilling (ADR-0074 §5). Where every
+    # turn resolves the two are the same sequence and a pass every ``batch_size -
+    # overlap`` captures satisfies §7 exactly. Where one does not, they diverge: a
+    # window of ``batch_size`` turns holding a gap carries fewer than ``overlap``
+    # episodes into the next one, and the clause quietly under-delivers.
     #
-    # ``observable`` is the other half, and it is what the overlap made worth having.
-    # A capture reporting **no episode** — a lost append, which records no turn at
-    # all, or an episode write that never landed — adds nothing a pass could read, so
-    # a window filled only with those re-reads exactly what the previous pass read:
-    # a duplicate model call, on a paid run, proposing what the gate will fold. That
-    # was already reachable before this section, after ``batch_size`` such captures
-    # in a row; the overlap makes it reachable after ``batch_size - overlap``, which
-    # is enough to close it here rather than leave it. So a pass fires only where at
-    # least one episode has landed since the last one.
+    # So the driver records **which turn positions landed an episode** and schedules
+    # off those. After a pass over turns ``[start, turns]`` it takes that window's
+    # episode-bearing positions, picks the ``overlap``-th from the end, and fires the
+    # next pass when the window would *begin* there — which makes exactly those
+    # ``overlap`` episodes the next window's prefix, gap or no gap. ``_next_pass_at``
+    # is that arithmetic and nothing else.
     #
-    # **The gate suppresses no episode, and the ``>=`` is why.** ``pending`` still
-    # counts every capture, degraded or not, for the reason below — the window counts
-    # turns and this loop cannot see which kind of degradation it got. Postponing on
-    # ``observable`` can therefore carry ``pending`` past the threshold, so the test
-    # is ``>=`` and not ``==``: the pass fires on the very first capture that lands an
-    # episode, with that episode the most recent turn in the window. Nothing that
-    # could have been read is skipped, because a stretch that skipped a pass is by
-    # construction a stretch in which nothing was stored.
-    pending = 0
-    carried = 0
-    observable = 0
+    # **A capture that stored nothing buys no pass of its own.** A lost append records
+    # no turn at all and an episode write that never landed leaves an unresolvable
+    # one, so a stretch of them adds nothing a pass could read while still advancing
+    # the position counter — and at the extreme the pass re-reads exactly the window
+    # the last one read: a duplicate model call, on a paid run, proposing what the
+    # gate will fold. That was already reachable before §7 after ``batch_size`` such
+    # captures in a row and the overlap makes it reachable sooner, so the trigger asks
+    # whether an episode has landed since the last pass. It is keyed on the episode id
+    # alone rather than on ``degraded``, which is the conservative direction: a report
+    # that is degraded and still carries an id has something a pass can read.
+    #
+    # **That gate postpones a pass and never cancels one.** ``turns`` still counts
+    # every capture, for the reason below, so postponing can carry it past the
+    # scheduled position — hence ``>=`` rather than ``==``. Nothing readable is
+    # skipped: a stretch that skipped a pass is by construction a stretch in which
+    # nothing was stored, and the pass fires on the first capture that lands.
+    #
+    # (The positions are the driver's own count of captures, which a lost *append*
+    # over-counts because `CaptureReport` reports both failures identically (#1075).
+    # That is the pre-existing safe direction the comment below argues for, and this
+    # scheduling inherits it: over-counting under-fills a window, where under-counting
+    # drops episodes.)
+    turns = 0
+    landed: list[int] = []
+    observed_through = 0
+    next_at = batch_size
     for session in case.sessions:
         harness.clock.set(session.occurred_at)
         for exchange in exchanges_of(session):
@@ -510,13 +526,12 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
             # and takes the safe direction: `batch_size` is "a maximum, not a quota",
             # so over-counting under-fills a window, where under-counting drops
             # episodes.
-            pending += 1
-            # Keyed on the episode alone rather than on the branch below, which is
-            # the conservative direction: a report that is `degraded` and still
-            # carries an episode id has something a pass can read, and a gate that
-            # let the flag alone suppress a pass would be able to skip it.
+            turns += 1
+            # Recorded off the episode id alone rather than off the branch below,
+            # which is the conservative direction: a report that is `degraded` and
+            # still carries an id has something a pass can read.
             if report.episode_id is not None:
-                observable += 1
+                landed.append(turns)
             if report.degraded or report.episode_id is None:
                 summary.turns_degraded += 1
             else:
@@ -530,14 +545,48 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
                 # stored".
                 for key in exchange.evidence_keys:
                     summary.evidence_episodes.setdefault(key, []).append(report.episode_id)
-            if observable and pending + carried >= batch_size:
+            if turns >= next_at and landed and landed[-1] > observed_through:
                 await _observe(harness, conversation.id, summary)
-                pending = 0
-                carried = overlap
-                observable = 0
-    if observable:
+                next_at = _next_pass_at(
+                    landed, through=turns, batch_size=batch_size, overlap=overlap
+                )
+                observed_through = turns
+    if landed and landed[-1] > observed_through:
         await _observe(harness, conversation.id, summary)
     return summary
+
+
+def _next_pass_at(landed: Sequence[int], *, through: int, batch_size: int, overlap: int) -> int:
+    """The turn position at which the next pass's window begins where §7 asks.
+
+    A pass has just read the turns ``[through - batch_size + 1, through]``. ADR-0162
+    §7 requires the last ``overlap`` **episodes** of that window to be the first
+    ``overlap`` of the next, so the next window must *begin* at the position of this
+    window's ``overlap``-th episode from the end — and a window of ``batch_size``
+    turns beginning there ends ``batch_size - 1`` later, which is the answer.
+
+    Args:
+        landed: Every turn position that stored an episode, in order.
+        through: The last turn position the pass just read.
+        batch_size: The window, in turns.
+        overlap: §7's *k*, already clamped into its bound by :func:`_overlap_of`.
+
+    Returns:
+        The turn count at which the next pass is due.
+
+    **The two degenerate cases carry no overlap, and both are §7's own.** An
+    ``overlap`` of 0 is the batch of 1 the section rules explicitly, and a window that
+    held *fewer* than ``overlap`` episodes has a gap wider than the carry — in both
+    the next window starts after this one ends, which is the pre-§7 tiling rather than
+    a breach of it. A window that held some but fewer than ``overlap`` carries all of
+    them, which is the most §7 can ask of it.
+    """
+    if overlap == 0:
+        return through + batch_size
+    window = [position for position in landed if position > through - batch_size]
+    if not window:
+        return through + batch_size
+    return window[max(0, len(window) - overlap)] + batch_size - 1
 
 
 async def _observe(harness: Harness, conversation_id: str, summary: IngestionSummary) -> None:
