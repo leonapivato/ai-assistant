@@ -473,10 +473,19 @@ def refuse_ineligible_reuse(  # noqa: PLR0913 — one parameter per precondition
     manifest (:data:`INHERITED_FIELDS`) rather than refused on, because the stores are
     already written and nothing an answering pass does can be affected by it.
 
-    1. **The source run must have finished.** An aborted run stopped mid-case, and the
-       case it stopped in keeps its databases whatever ``--keep-stores`` said — so its
-       store holds a conversation that was half distilled, with no artifact saying
-       which half. There is no way to answer honestly over that.
+    1. **The source run must have finished**, and the manifest saying so is not
+       enough on its own. An aborted run stopped mid-case, and the case it stopped in
+       keeps its databases whatever ``--keep-stores`` said — so its store holds a
+       conversation that was half distilled, with no artifact saying which half. There
+       is no way to answer honestly over that. A run *killed outright* leaves no
+       ``aborted`` behind to say any of this: the manifest is written before the first
+       case and rewritten only at the end, so a ``SIGKILL`` between them leaves a
+       whole-looking manifest beside a partial ``records.jsonl``. So the rows are
+       counted too. A finished run writes exactly one row per question on either phase
+       — the synchronous path appends each as it is answered, the batch path writes
+       them all once every case is closed — so a row count short of
+       ``question_count`` is a run that stopped without saying so, and reusing it
+       would have this run's ``reused_from`` present an incomplete run as a whole one.
     2. **Same corpus, same revision.** Different data behind the same key is different
        data; the questions would be asked of memories from another conversation.
     3. **Same session bound.** A shortened history is a different memory, and it also
@@ -536,6 +545,16 @@ def refuse_ineligible_reuse(  # noqa: PLR0913 — one parameter per precondition
             f"run {reused.run_id} aborted ({source.aborted}) and cannot be reused: the "
             f"case it stopped in keeps a half-ingested store, and nothing in the "
             f"artifacts says which case that was."
+        )
+        raise ValueError(msg)
+    if len(reused.joins) != source.question_count:
+        msg = (
+            f"run {reused.run_id} recorded {len(reused.joins)} rows for the "
+            f"{source.question_count} questions its manifest plans, so it stopped "
+            f"before it finished: a run killed outright leaves no `aborted` behind to "
+            f"say so. A finished run writes exactly one row per question on either "
+            f"phase, and this run's provenance would name an incomplete run as a "
+            f"whole one."
         )
         raise ValueError(msg)
     for label, mine, theirs in (
