@@ -142,7 +142,9 @@ def _overlap_of(batch_size: int) -> int:
     to the arithmetic.** The bound is empty there and the deployment forgoes the
     section's remedy: an overlap of 1 on a window of 1 advances the tiling by nothing,
     so no value satisfies progress and overlap together. ``1 // 2`` is 0, so the
-    expression states that case rather than special-casing it.
+    expression states that case rather than special-casing it. That reason is general
+    and §7 names one instance of it here; ADR-0162's amendment of 2026-08-19 records
+    the other, which :func:`_next_pass_at` carries.
     """
     return min(_TILE_OVERLAP, batch_size // 2)
 
@@ -651,27 +653,35 @@ def _next_pass_at(landed: Sequence[int], *, through: int, batch_size: int, overl
     Returns:
         The ordinal at which the next pass is due.
 
-    **A window holding no more episodes than the carry is outside the clause's
-    protasis, and that is the text rather than an exception to it.** §7 binds "where
-    consecutive observation passes **tile a sequence of episodes rather than re-reading
-    one window**". Where the gaps in a window leave it with *k* episodes or fewer, the
-    only start that makes its last *k* episodes the next window's prefix is the start
-    it already has — so the identity there *is* re-reading one window, which is the
-    case the clause's own opening words exclude rather than govern. §7 says the same
-    thing in its own voice one clause later, of the one-turn window: "no value
-    satisfies progress and overlap together — a property of a one-turn window rather
-    than something this section can repair". A window whose episodes are down to the
-    carry has acquired that property, and this section cannot repair it either.
+    **A window holding no more than *k* episodes is ADR-0162's amendment of
+    2026-08-19, and the floor below is its clause.** §7 rules the overlap and names one
+    exception, the one-turn window, with the reason that carries it: "no value
+    satisfies progress and overlap together". The amendment records the second instance
+    of that same property — a window whose episodes have thinned to *k* or fewer — and
+    rules it as a **floor rather than a cap**: "the next window begins strictly after
+    the turn this one began at, and carries every episode of this one from that start
+    onward", and "where honouring the overlap in full already begins the next window
+    later than this one began, this clause asks for nothing further".
 
-    So the start is floored at one turn past this window's: the least advance there is,
-    carrying the most the window has left to give, and never a step that stands still.
-    It is reachable only after ``batch_size - overlap`` episode-write failures inside
-    one window, which is a store failing repeatedly and is counted as
-    :attr:`IngestionSummary.turns_degraded` where a reader will see it.
+    That is exactly ``max(aimed, this window's start + 1)``. A window holding **more**
+    than *k* episodes hands over a proper tail, which begins later than the window
+    does, so ``aimed`` wins and the floor is never its binding constraint — §7 governs
+    it whole and unchanged. A thinned window whose episodes begin later than it does is
+    the same case for the same reason. The floor binds only where the demanded window
+    would begin where this one began, which is a window the tiling could never leave.
 
-    An ``overlap`` of 0 is §7's explicit exception, the batch of 1, and a window that
-    held no episode at all has nothing to aim at; both fall back to the next
-    non-overlapping window.
+    A window reaches that state only when at least ``batch_size - overlap`` of its
+    turns carry no resolvable episode — a failed episode write, an expiry or a
+    ``forget`` alike (ADR-0077 §8), which is why this turns on the shape rather than
+    the cause — and a harness run in which it can arise already carries a non-zero
+    :attr:`IngestionSummary.turns_degraded`.
+
+    An ``overlap`` of 0 is §7's own first exception, the batch of 1. A window that
+    resolved no episode at all carries nothing whatever it aims at — the amendment says
+    the carry "is empty where the window resolved no episode at all" — so it takes the
+    next non-overlapping window rather than walking a barren stretch one turn at a
+    time; every turn it skips holds nothing, and the window it lands on covers all of
+    them.
     """
     if overlap == 0:
         return through + batch_size
