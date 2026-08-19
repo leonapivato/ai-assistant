@@ -538,12 +538,7 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
                 # stored".
                 for key in exchange.evidence_keys:
                     summary.evidence_episodes.setdefault(key, []).append(report.episode_id)
-            if _pass_is_due(
-                ordinal=ordinal,
-                next_at=next_at,
-                landed=landed,
-                observed_through=observed_through,
-            ):
+            if _pass_is_due(ordinal=ordinal, next_at=next_at, observed_through=observed_through):
                 await _observe(harness, conversation.id, summary)
                 next_at = _next_pass_at(
                     landed, through=ordinal, batch_size=batch_size, overlap=overlap
@@ -554,20 +549,32 @@ async def ingest_case(harness: Harness, case: BenchCase, *, batch_size: int) -> 
     return summary
 
 
-def _pass_is_due(
-    *, ordinal: int, next_at: int | None, landed: Sequence[int], observed_through: int
-) -> bool:
-    """Whether the conversation has reached the scheduled window with something new.
+def _pass_is_due(*, ordinal: int, next_at: int | None, observed_through: int) -> bool:
+    """Whether the conversation has reached the scheduled window and has moved.
 
-    Two conditions and both are load-bearing. The conversation's most recent turn is
-    at or past the ordinal :func:`_next_pass_at` named, so the window begins where
-    ADR-0162 §7 asks; and an episode has landed since the last pass, so the window
-    holds something that pass did not read.
+    Two conditions and both are load-bearing, and neither of them is "an episode
+    landed". The conversation's most recent turn is at or past the ordinal
+    :func:`_next_pass_at` named, so the window begins where ADR-0162 §7 asks; and the
+    conversation has advanced since the last pass, so this is not the identical window
+    read twice.
+
+    **A due pass is never deferred for want of a new episode**, which is the
+    difference between this and a gate on ``landed``. A stretch of episode-write
+    failures still moves the conversation, so deferring past the due ordinal would let
+    the window slide off the carried tail — the boundary §7 exists to preserve — to
+    save a pass. §7 admits one exception and it is not that one. The pass such a
+    stretch buys reads a window with gaps in it and no new episode, which is a wasted
+    call and is the price of the boundary.
+
+    **What the second condition rules out is the window that has not moved at all.** A
+    lost append records no turn, so the ordinal stands still; without this the driver
+    would re-read one window on every subsequent capture. It is stated on the ordinal
+    rather than on ``landed`` because it is the *window* that must differ, and a
+    window that slid holds different evidence whether or not any of it is new.
 
     Args:
         ordinal: The conversation's most recent turn ordinal, 0 where it has none.
         next_at: The scheduled ordinal, or ``None`` before the first turn lands.
-        landed: The ordinal of every turn that stored an episode, in order.
         observed_through: The ordinal the last pass read through, 0 before any.
 
     Returns:
@@ -575,7 +582,7 @@ def _pass_is_due(
     """
     if next_at is None or ordinal < next_at:
         return False
-    return bool(landed) and landed[-1] > observed_through
+    return ordinal > observed_through
 
 
 async def _tail_ordinal(harness: Harness, conversation_id: str) -> int:
@@ -621,19 +628,27 @@ def _next_pass_at(landed: Sequence[int], *, through: int, batch_size: int, overl
     Returns:
         The ordinal at which the next pass is due.
 
-    **The two degenerate cases carry no overlap, and both are §7's own.** An
-    ``overlap`` of 0 is the batch of 1 the section rules explicitly, and a window that
-    held *fewer* than ``overlap`` episodes has a gap wider than the carry — in both
-    the next window starts after this one ends, which is the pre-§7 tiling rather than
-    a breach of it. A window that held some but fewer than ``overlap`` carries all of
-    them, which is the most §7 can ask of it.
+    **Progress is the floor, and §7 says why in its own voice.** Where a window holds
+    no more episodes than the carry asks for, aiming the next window at the
+    ``overlap``-th from the end aims it at where this one already began: "no value
+    satisfies progress and overlap together", which the section says of a one-turn
+    window and which is the same shape here — a window whose gaps leave it with *k*
+    episodes or fewer. So the start is floored at one turn past this window's, which
+    advances the tiling by the least it can and carries the most the window has left
+    to give. It is reachable only after ``batch_size - overlap`` episode-write
+    failures inside one window.
+
+    An ``overlap`` of 0 is §7's explicit exception, the batch of 1, and a window that
+    held no episode at all has nothing to aim at; both fall back to the next
+    non-overlapping window.
     """
     if overlap == 0:
         return through + batch_size
     window = [position for position in landed if position > through - batch_size]
     if not window:
         return through + batch_size
-    return window[max(0, len(window) - overlap)] + batch_size - 1
+    aimed = window[max(0, len(window) - overlap)]
+    return max(aimed, through - batch_size + 2) + batch_size - 1
 
 
 async def _observe(harness: Harness, conversation_id: str, summary: IngestionSummary) -> None:
