@@ -320,8 +320,9 @@ def load_reused_run(output_root: Path, run_id: str) -> ReusedRun:
         ValueError: If ``run_id`` is not a single path component; if the directory does
             not exist; if it holds no readable ``manifest.json`` or ``records.jsonl``;
             if those artifacts name a different run from each other or from the
-            directory; if two rows claim one question; or if a case's rows disagree
-            about what ingesting it reported. Every one is a refusal rather
+            directory; if two rows claim one question; if a case's rows disagree
+            about what ingesting it reported; or if a row's ``asked_at`` is not a
+            timezone-aware instant. Every one is a refusal rather
             than an empty result: a run that cannot be read cannot be reused, and
             discovering that after a corpus fetch would be the expensive place to find
             out.
@@ -399,7 +400,7 @@ def load_reused_run(output_root: Path, run_id: str) -> ReusedRun:
             raise ValueError(msg)
         joins[key] = record.evidence_episode_ids
         evidence[key] = record.evidence
-        asked_at[key] = record.asked_at
+        asked_at[key] = _checked_instant(record, run_id=run_id)
     return ReusedRun(
         run_dir=run_dir,
         manifest=manifest,
@@ -409,6 +410,41 @@ def load_reused_run(output_root: Path, run_id: str) -> ReusedRun:
         evidence=evidence,
         asked_at=asked_at,
     )
+
+
+def _checked_instant(record: QuestionRecord, *, run_id: str) -> str:
+    """The instant a row says it was answered at, refused unless a clock would take it.
+
+    **Checked at load, so the refusal is preflight.** The value is read back off a file
+    and handed to :class:`~benchmarks.memory.clock.BenchmarkClock`, which refuses a
+    naive instant — but by the time a case is being answered the manifest is written
+    and the stores are staged, so a run that failed there would leave a directory that
+    looks like a run. There is nothing to gain by discovering it late: a row whose
+    instant no clock would accept is a row this harness did not write.
+
+    Args:
+        record: The source row.
+        run_id: The run it came from, for the message.
+
+    Returns:
+        The instant, unchanged, as the string the gate compares.
+
+    Raises:
+        ValueError: If it is not an ISO-8601 instant, or carries no determinate offset.
+    """
+    complaint = (
+        f"run {run_id} recorded question {record.question_id!r} of case "
+        f"{record.case_key!r} as answered at {record.asked_at!r}, which is not a "
+        f"timezone-aware instant: a reused run retrieves at that reading, and the "
+        f"benchmark clock refuses one it cannot place."
+    )
+    try:
+        instant = datetime.fromisoformat(record.asked_at)
+    except ValueError as exc:
+        raise ValueError(complaint) from exc
+    if instant.tzinfo is None or instant.tzinfo.utcoffset(instant) is None:
+        raise ValueError(complaint)
+    return record.asked_at
 
 
 def refuse_ineligible_reuse(  # noqa: PLR0913 — one parameter per precondition, and bundling them into a config object would hide which ones a caller left at a default
