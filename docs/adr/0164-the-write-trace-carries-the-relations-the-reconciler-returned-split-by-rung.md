@@ -171,6 +171,13 @@ a contract ADR with an architecture lens; it is not one.
 > **Normative.** Proposals whose model rung answered are `reconciled` less the three
 > keys that qualify it, and no key counts them.
 
+> **Normative.** The three qualifying keys are mutually exclusive — a proposal counts
+> under at most one of them — and each counts only proposals `reconciled` counts. A
+> proposal ingested by a writer holding no reconciler counts under `reconciler_absent`
+> alone and never under `reconciler_unconsulted`, which is a statement about a
+> reconciler that ran. So the three sum to at most `reconciled` and the answered count
+> is exactly the remainder.
+
 > **Normative.** The reconciler reports which of those outcomes it took, across the
 > `memory`-internal seam ADR-0159 §2 keeps inside this subsystem, beside the
 > relations it returns.
@@ -203,13 +210,27 @@ a contract ADR with an architecture lens; it is not one.
 > count records the label that stands.
 
 > **Normative.** The writer installs a reconciler's relation for a member only where
-> the value **is** a `ConflictRelation` member. Any other value leaves that member
-> unlabelled and counts its proposal under `reconciler_failed`.
+> the value **is** a `ConflictRelation` member. A reply supplying any other value for
+> a member the writer reads it for is **non-conforming in whole**: no label from that
+> reply installs, every member it would have labelled stays unlabelled, and the
+> proposal counts under `reconciler_failed`.
 
-> **Normative.** The ten keys are observed exactly when the six `decisions_*` keys
-> are, are written in the same statement, and carry the same reading of ADR-0119 §3:
-> present with a zero on a crossing that observed the quantity and reached none of
-> it, absent together where the crossing observed nothing.
+> **Normative.** The members a reply is read for are this crossing's resolved
+> conflict set less those the certain rung labelled. An id the reply invented is
+> dropped unread (ADR-0159 §8) and a value for a member the certain rung labelled is
+> discarded unread (ADR-0159 §3), so neither can make a reply non-conforming.
+
+> **Normative.** Where a crossing's reading is taken, the ten keys are **present**,
+> each carrying the count it reached, zero included. That includes a crossing in
+> which ADR-0159 §2's invocation condition excluded every proposal: the condition was
+> evaluated, and `reconciled = 0` beside nine other zeros is what that evaluation
+> found.
+
+> **Normative.** The ten keys are **absent** only where no reading is taken at all —
+> a fault path carrying the entry quantities alone, or ADR-0119 §5's mapper that
+> raised. The six `decisions_*` keys are absent on exactly those paths and present on
+> exactly the others, so the ten are observed exactly when the six are, are written in
+> the same statement, and no crossing carries one set without the other.
 
 **Coherence is what makes a positive model count mean anything, and it is the
 property #1209 actually needs.** With the clause, `relations_model_restates`,
@@ -246,6 +267,32 @@ a value that is not a member is unlabelled to the arm today, by the same `is`. A
 this is ADR-0159 §3's absorption of a non-conforming reconciler reaching *values*,
 where `MemoryIngestor._relations_for`'s existing guard reaches shapes — "a reconciler
 that *returns* something unusable… is as non-conforming as one that raises".
+
+**And it is the whole reply that fails, because partial trust is what would make the
+arithmetic lie.** A reply carrying one valid `ADDS` and one bare `"contradicts"` could
+install the valid label and count its proposal `reconciler_failed` — and then one
+trace would say a model label stood *and*, through the answered arithmetic above, that
+no model rung answered on that proposal. Discarding the reply whole is the arm that
+keeps both statements true, and it is the shape `_relations_for` already has: its
+guard's `except Exception: return own` discards the entire `determined`, not the
+member that failed. The rejected alternative is to keep the valid labels and add an
+eleventh key for a partly malformed reply; it buys a distinction nobody has asked for,
+and it leaves `answered` needing a footnote in every report that states it.
+
+**A crossing that reconciled nothing observed a zero; it did not fail to observe.**
+ADR-0119 §3 is the clause under strain here — "an absent key means *not observed* and
+never zero", and an emitter "may not substitute one for the other" — and the
+substitution it forbids is available in both directions. A crossing whose proposals
+ADR-0159 §2 all excluded **did** evaluate the invocation condition, on every proposal,
+and found none of them admitted; `reconciled = 0` is that finding. Making the ten
+absent there would record it identically to a crossing that faulted before any reading
+was taken, which is the one distinction a reader of this stream cannot afford to lose:
+"the reconciler was never reached" and "the trace never got that far" call for opposite
+responses. The asymmetry is already in the tree rather than invented here.
+`_reconciliation_reading` fills every `decisions_*` key with a zero because "a
+completed ingest observed every kind"; `MemoryIngestor.ingest` passes `observing` no
+`partial` reading, so a fault there carries `proposals` and none of the six. The ten
+ride that existing split rather than a new one.
 
 **The two units are different populations and conflating them is the trap.**
 ADR-0159 §2's condition is a property of a proposal; a relation is a property of a
@@ -438,7 +485,9 @@ The lane owes:
   the one-request clause and the discard rule are ADR-0159 §3's and are untouched.
 - `src/ai_assistant/memory/ingest.py` — the observation of each quantity in §3 at the
   point it is known, carried to the reading through the writer's own internal types,
-  and written in the statement that writes the decision counts.
+  and written in the statement that writes the decision counts. §3's whole-reply
+  clause reaches this file too: `_relations_for` installs member by member today, so
+  the values it reads are validated before any of them installs.
 - `src/ai_assistant/service/configuration.py` — the allowlist entry of §5.
 - Tests under `tests/memory/` against the emitted trace, pinning at least: that a
   member the certain predicate labels is counted under
@@ -450,7 +499,9 @@ The lane owes:
   conflict set counts in `reconciled` and contributes nothing to
   `relations_offered`; that a writer holding no reconciler emits `reconciler_absent`
   and still counts the certain rung's labels, on the same ingest for which `decide`
-  receives `None`; that a reconciler raising is counted under
+  receives `None`, with `reconciler_unconsulted` at zero on that trace — the
+  exclusivity clause, and the one overlap the two keys' wording invites; that a
+  reconciler raising is counted under
   `reconciler_failed` — and, because that is the finding this ADR nearly got wrong,
   a test driving a **raising `ModelProvider`** through the real reconciler rather
   than a reconciler stub, since `ModelBackedReconciler.reconcile` absorbs a provider
@@ -467,13 +518,26 @@ The lane owes:
   `ConflictRelation`
   member but not one — the bare string a `StrEnum` makes equal to it and hashable
   with it — leaves the member unlabelled, counts its proposal under
-  `reconciler_failed`, and costs the crossing no trace; that a report of
+  `reconciler_failed`, and costs the crossing no trace; that a reply pairing **one
+  valid member value with one such non-member value** installs *neither*, leaves both
+  members under `relations_unlabelled`, counts its proposal under `reconciler_failed`
+  and leaves every model key at zero for it — the whole-reply clause, and the case
+  where a partial install would make one trace report a model label beside an
+  answered count of zero; that a report of
   `unconsulted` and a report of `failed`, each arriving with a model label, discard
   that label, leave the member unlabelled and count the proposal under
   `reconciler_failed` — the two combinations that would otherwise let one trace deny
-  itself; that a proposal §2's condition
-  excludes carries none of the ten in
-  its contribution while `proposals` still counts it; that an `ingest_reading` whose
+  itself; that each of the three **non-raising** shapes
+  `MemoryIngestor._relations_for`'s guard already absorbs — a reconciler returning
+  `None`, one returning a non-mapping, and one returning a mapping whose lookup
+  raises — retains the certain rung's labels, leaves the remaining offered pairs under
+  `relations_unlabelled`, and counts its proposal under `reconciler_failed`, since
+  those are the paths on which an implementation can keep today's silent fallback and
+  still pass every other test here; that a proposal §2's condition
+  excludes contributes zero to each of the ten
+  while `proposals` still counts it, and that a crossing **all** of whose proposals
+  §2 excludes emits the ten present at zero rather than absent, beside the six
+  `decisions_*` keys; that an `ingest_reading` whose
   **second** proposal raises after the first was applied emits the first's relation
   keys on the fault path's partial reading, beside the `decisions_*` keys it already
   emits there, since §3 binds the two sets to one observation; and totality over
@@ -494,7 +558,13 @@ on one tree, and that review re-run on the flipped tree. **This ADR takes step 3
 recovery route**: adversarial returned `APPROVE` at round 6, the status was flipped,
 and a fresh reviewer session found three defects on the flipped tree — so the status
 is returned to `Proposed` and the sequence re-enters at step 1, as ADR-0127 and
-ADR-0133 each did on their own PRs. It records itself as ratified on its second flip.
+ADR-0133 each did on their own PRs. Two of the three were taken in full — the
+whole-reply clause and the three non-raising test cases above. The third named a real
+ambiguity in the key-presence clause and a direction that would have closed it by
+making the ten keys absent where nothing reconciled; the ambiguity is closed by
+stating the two cases apart, and the direction is refused on ADR-0119 §3's own text
+and recorded among the alternatives. It records itself as ratified on its second
+flip.
 Nothing implements against this until it has merged (ADR-0015 §5).
 
 **Most rounds so far have changed this text, and four of them narrowed a claim it
@@ -662,6 +732,20 @@ act differently, or read one of its clauses more widely than it now holds?
   §8's own ground, and more strongly than for decision counts: a relation is a
   statement about a pair made during one ingest and written to no row, so there is
   nothing to derive it from once the crossing ends.
+- **Preserving the valid labels in a partly malformed reply, under an eleventh key
+  for "the reply was partly malformed".** Rejected in §3. It keeps a label from a
+  component that has already returned one unusable value, and it either breaks the
+  answered arithmetic — a proposal counted `reconciler_failed` while a model label of
+  its own stands — or forces `answered` to be stated with an exception clause wherever
+  it is read. Discarding the reply whole costs a conforming reconciler nothing and is
+  the shape `_relations_for`'s existing guard already takes.
+- **Making the ten keys absent on a crossing that reconciled nothing.** Rejected in
+  §3. It reads ADR-0159 §2's invocation condition excluding every proposal as an
+  absence of observation, when the condition was evaluated and found none admitted —
+  so it would record that crossing identically to one that faulted before any reading
+  was taken, the substitution ADR-0119 §3 forbids in terms. The ambiguity that
+  suggested it was real and is closed by stating the two cases apart, not by moving
+  the boundary.
 - **Leaving it to lane 2.6's discretion under ADR-0119 §2.** Mechanically available —
   nothing in the gate or the import contracts would have stopped it. Rejected because
   ADR-0159 §12 reserved it, because the corpus's test is whether an ADR's text
