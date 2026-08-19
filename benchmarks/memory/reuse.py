@@ -517,10 +517,22 @@ def _refuse_unusable_cases(reused: ReusedRun, cases: Sequence[BenchCase]) -> Non
         reused: The source run.
         cases: The cases this run will work on.
 
+    **The instant each question is compared at is walked, not assigned.** The
+    benchmark clock is one moving reading: ingestion leaves it at the last session and
+    each question that states an instant moves it, so a question stating none is asked
+    at whatever the question *before* it left behind — which is the last session only
+    when no earlier question stated one. Reproducing that walk here is what keeps the
+    gate from refusing a case reusing its own source run.
+
+    Args:
+        reused: The source run.
+        cases: The cases this run will work on.
+
     Raises:
         ValueError: If a case kept no memory store, if the source recorded no row for
-            one of its questions, or if such a row carries different corpus pointers
-            from the ones the join would be attached to.
+            one of its questions, if such a row carries different corpus pointers from
+            the ones the join would be attached to, or if the case puts a question at
+            an instant the source did not answer it at.
     """
     for case in cases:
         store = reused.stores_for(case) / REQUIRED_STORE
@@ -531,12 +543,15 @@ def _refuse_unusable_cases(reused: ReusedRun, cases: Sequence[BenchCase]) -> Non
                 f"--keep-stores can be reused."
             )
             raise ValueError(msg)
+        instant = case.sessions[-1].occurred_at
         for question in case.questions:
-            _refuse_uncarriable_question(reused, case, question)
+            if question.asked_at is not None:
+                instant = question.asked_at
+            _refuse_uncarriable_question(reused, case, question, instant)
 
 
 def _refuse_uncarriable_question(
-    reused: ReusedRun, case: BenchCase, question: BenchQuestion
+    reused: ReusedRun, case: BenchCase, question: BenchQuestion, instant: datetime
 ) -> None:
     """Refuse a question whose row is missing, misaligned, or answered at another time.
 
@@ -546,6 +561,10 @@ def _refuse_uncarriable_question(
         reused: The source run.
         case: The case the question belongs to.
         question: The question.
+        instant: Where this case puts the question — its own stated instant, or
+            wherever the clock stood after the questions before it. Walked by the
+            caller, because it is a property of the sequence rather than of the
+            question.
 
     Raises:
         ValueError: If the source recorded no row for it; if that row's corpus
@@ -580,9 +599,6 @@ def _refuse_uncarriable_question(
             f"would drop a pointer out of P8's split silently."
         )
         raise ValueError(msg)
-    # What this case says the question is asked at: its own instant where it states
-    # one, and otherwise wherever ingesting it would have left the clock.
-    instant = question.asked_at if question.asked_at is not None else case.sessions[-1].occurred_at
     if reused.asked_at[key] != instant.isoformat():
         msg = (
             f"run {reused.run_id} answered question {question.question_id!r} of case "
