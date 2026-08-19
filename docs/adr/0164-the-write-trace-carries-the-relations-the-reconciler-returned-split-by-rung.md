@@ -11,10 +11,10 @@
 
   **This ADR was flipped once before and returned to `Proposed`.** A fresh reviewer
   session found three defects on the first flipped tree, so the status went back and the
-  sequence re-entered at step 1 (§7). The loop that followed ran under three successive
-  holders on ADR-0138 §1's handoff rule; what each round bought is recorded in §7 and in
-  `Alternatives considered`, where every refused direction is answerable without this
-  PR's history.
+  sequence re-entered at step 1 (§7). The loop that followed ran under successive
+  holders on ADR-0138 §1's handoff rule, and what each round bought is recorded in §7
+  and in `Alternatives considered`, where every refused direction is answerable without
+  this PR's history.
 
 ## Context
 
@@ -527,17 +527,24 @@ for a member beyond `reconciler_max_conflicts` before it returns, so a model tha
 say `CONTRADICTS` there is never counted here either. Either way a zero model count is
 a statement about labels *held*, not about strings a model emitted.
 
-**And a model key is a statement about what the reconciler reported, not an
-independently verified fact about a provider.** §3's coherence clause rejects a report
-that claims *less* than the labels beside it — `unconsulted` or `failed` arriving with
-model labels — because that incoherence is visible at the writer. The symmetric lie is
-not: a reconciler reporting `answered` while having made no request produces a positive
-model count the writer cannot distinguish from a true one, because verifying it would
-mean observing the provider call, which lives inside the reconciler on ADR-0159 §3's
-ground. Such a reconciler is non-conforming, exactly as one fabricating labels is, and
-this instrument inherits that trust rather than replacing it. What the keys measure
-without qualification is what the reconciler *reported*; that this equals what a model
-did is a property of a conforming reconciler.
+**And a model key — like the outcome keys beside it — is a statement about what the
+reconciler reported, not an independently verified fact about a provider.** §3's
+coherence clause rejects a report that claims *less* than the labels beside it —
+`unconsulted` or `failed` arriving with model labels — because that incoherence is
+visible at the writer. The symmetric lie is not: a reconciler reporting `answered`
+while having made no request produces a positive model count the writer cannot
+distinguish from a true one, because verifying it would mean observing the provider
+call, which lives inside the reconciler on ADR-0159 §3's ground. Such a reconciler is
+non-conforming, exactly as one fabricating labels is, and this instrument inherits
+that trust rather than replacing it. What the keys measure without qualification is
+what the reconciler *reported*; that this equals what a model did is a property of a
+conforming reconciler. The rule is the same for the outcome keys: `reconciler_failed`
+and `reconciler_unconsulted` record the outcome the reconciler *reported*, and the
+symmetric lie is invisible there too — a reconciler that made a request, returned an
+empty mapping and reported `unconsulted` is an underclaim with **no labels beside
+it**, and labels beside it are what §3's clause needs to see one. `reconciler_absent`
+is the single exception, because it is read from no report at all: the writer holds no
+reconciler and observes that itself, so it alone establishes that no request was made.
 
 **A pair's relation is not joinable to the ruling that followed it.** The trace says
 six proposals ruled `ACCEPT` and says three pairs were labelled `CONTRADICTS`; it
@@ -826,24 +833,29 @@ act differently, or read one of its clauses more widely than it now holds?
   those three qualifiers yields that same zero with **no model answer behind it at
   all**, so where they account for the crossing the zero is not evidence about the model
   and the prompt is the wrong place to look. Read the qualifier keys first, and read the
-  three apart, because they do not all say the same thing. `reconciler_absent` and
-  `reconciler_unconsulted` mean **no request was made**, so an operator who skips them
-  will investigate a prompt that was never sent. `reconciler_failed` says only that the
-  **determination was unusable**, and takes no view on whether a request was made: §3
-  counts under it both a request that yielded no readable answer and a non-conforming
-  reconciler the writer's guard absorbed, and the second of those need never have
-  reached a provider. So this key sends an operator to the reconciler — its conformance,
-  and its own logs — before the provider or the route, because the trace does not say
-  which of the two arms produced the count.
+  three apart, because they do not all say the same thing. `reconciler_absent` is the
+  writer's own observation that it held no reconciler, so it means **no request was
+  made**. `reconciler_unconsulted` means the reconciler **reported** that it made
+  none, and — on a **conforming** reconciler — that none was made (§6). Under either
+  reading an operator who skips them will investigate a prompt that was never sent.
+  `reconciler_failed` says only that the **determination was unusable**, and takes no
+  view on whether a request was made: §3 counts under it both a request that yielded
+  no readable answer and a non-conforming reconciler the writer's guard absorbed, and
+  the second of those need never have reached a provider. So this key sends an
+  operator to the reconciler — its conformance, and its own logs — before the provider
+  or the route, because the trace does not say which of the two arms produced the
+  count.
 - **The floor deployment becomes visible for the first time.** `reconciler_absent`,
   `reconciler_failed` and `reconciler_unconsulted` distinguish a hub running ADR-0159
   §6's ratified floor, a hub whose reconciler cannot deliver a usable determination, a
-  hub whose model is never asked at all, and a hub whose model is asked and adds
-  nothing — four states that
+  hub whose reconciler reports asking no model at all, and a hub whose model is asked
+  and adds nothing — four states that
   today all present as an unremarkable run of `ACCEPT`s. `reconciler_unconsulted` is
   read with `relations_offered` beside it, because it does not say *why* nothing was
-  asked (§3). Three of them need the reconciler's own report, because it absorbs its
-  failures itself and the writer sees only a mapping (§3).
+  asked (§3). Three of them rest on the reconciler's own report, because it absorbs its
+  failures itself and the writer sees only a mapping (§3), so each is the state
+  **reported** and, on a **conforming** reconciler, the state that obtains (§6). Only
+  `reconciler_absent` is the writer's own observation.
 - **The write trace grows by ten integers per crossing**, and one number joins the
   startup stamp. Both are small against what the envelope already carries, and the
   keys ride the statement that writes the decision counts rather than adding a
