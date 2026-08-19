@@ -767,14 +767,25 @@ belongs to the sensor lane that first has one.
   a marker renders nothing in its place (§5); and the rendered region is
   non-forgeable both from inside the episode's own `content` **and from inside the
   marker** — a marker holding a line separator and a plausible label does not open a
-  second field (§5).
+  second field (§5). And **the transform is the same one**, which no assertion above
+  can see: an episode whose `content` contains its tag and whose `principal` is that
+  tag, the tag carrying a non-ASCII character and escape-sensitive ones (`é`, a
+  quote, a backslash), asserting that the characters the surface emitted for that tag
+  inside the rendered `content` occur **byte for byte** in what it emitted for the
+  marker. Two different-but-both-safe transforms — an ASCII-escaping one for the
+  content beside a Unicode-preserving one for the marker — pass every assertion
+  before this one while the rendered tag stops matching the text the surface
+  rendered, which is the state §5's "same transform, not merely some transform"
+  exists to forbid.
 - **Step 3, `planning`.** The same assertions for the record renderer.
 - **Step 4, `orchestration`.** The same assertions for the consolidation
   prompt, built from a chunk containing a **constructed** marked episode — which
   doubles as the assertion that an episode reaches this prompt at all, the fact the
-  step exists for. And the truncation case §5's fourth clause rules: an episode
-  whose `content` exceeds the prompt's per-record budget and whose tag first occurs
-  past it still renders its marker, whole.
+  step exists for. The inherited agreement assertion keeps its tag inside the
+  rendered prefix, so that it and the truncation case stay two records rather than
+  one that contradicts itself. And the truncation case §5's fourth clause rules: an
+  episode whose `content` exceeds the prompt's per-record budget and whose tag first
+  occurs past it still renders its marker, whole.
 - **Step 5, `orchestration`.** A marker supplied to `ConversationLifecycle.capture`
   reaching the stored `EpisodicMemory` unchanged, and the engine's own capture path
   storing none (§3). This is the seam a spoke will use, exercised without a spoke.
