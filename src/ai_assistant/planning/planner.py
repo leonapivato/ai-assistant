@@ -527,12 +527,13 @@ def _quoted_span(value: str) -> str:
     ``source`` — however it was constructed — can open a second bullet, forge a
     second source, or reopen the "Current context:" heading.
 
-    It is deliberately **not** applied to :func:`_render_record`'s memory content.
-    ADR-0098 §9 states that obligation separately, on the prompt-assembly lane
-    filed as #672, which owes ``_render_record`` and ``observer._render_batch``
-    §2 in full along with ADR-0072 §6's band-and-confidence rendering. This lane
-    owes §9's third bullet — §2 "for any facet field that is ever rendered into a
-    prompt" — and discharges that and nothing more.
+    :func:`_render_record` now applies it too, to the two spans a memory record
+    controls. It used not to: ADR-0098 §9 states that obligation separately, on the
+    prompt-assembly lane filed as #672, and the facet lane discharged §9's third
+    bullet — §2 "for any facet field that is ever rendered into a prompt" — and
+    nothing more. #672's planner half has since landed and reuses this function
+    rather than inventing a second transform, which is the point of naming it here.
+    ``observer._render_batch`` is still owed §2 and is what keeps #672 open.
 
     Args:
         value: The held string, verbatim as this system carries it.
@@ -587,9 +588,9 @@ def _render_record(record: MemoryRecord) -> str:
     that puts the other speaker's turn in it. One label has to be true of both, and
     §4's own is.
 
-    **The instant is this prompt's own frame, which is UTC** (FLAG, and see the
-    issue this lane files). ADR-0156 §2's local-calendar clause is scoped in terms
-    to *the observation prompt*, and §3's to resolving a relative expression at
+    **The instant is this prompt's own frame, which is UTC** (#1215). ADR-0156 §2's
+    local-calendar clause is scoped in terms to *the observation prompt*, and §3's
+    to resolving a relative expression at
     distillation; neither reaches ``planning``, which resolves nothing and holds no
     zone — ``CurrentContext`` carries none, and taking one would be a second
     timezone source to argue (ADR-0008 §6). What this renderer can be is
