@@ -20,6 +20,7 @@ and the only place it is visible is the batches the observer was actually handed
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from itertools import pairwise
 from typing import TYPE_CHECKING
 
 import pytest
@@ -185,6 +186,132 @@ async def test_a_carried_tail_alone_never_buys_a_closing_pass(tmp_path: Path) ->
 
     assert len(windows) == 1
     assert len(windows[0]) == 6
+
+
+async def _windows_with_gaps(
+    tmp_path: Path, *, turns: int, batch_size: int, unresolvable: set[int]
+) -> list[list[str]]:
+    """Ingest ``turns`` where the captures in ``unresolvable`` store no episode.
+
+    The failure simulated is the *episode-stage* one, which is the case that matters
+    for §7: the turn is appended and holds a slot in every window that reaches it,
+    and ``ObservationStage`` skips it without backfilling (ADR-0074 §5). So the window
+    is ``batch_size`` turns and fewer than ``batch_size`` episodes, which is exactly
+    where turn-paced tiling and episode-counted overlap come apart.
+
+    Args:
+        tmp_path: The test's directory.
+        turns: How many utterances to capture.
+        batch_size: The window the stage is built with.
+        unresolvable: 1-based capture positions whose episode is deleted after the
+            turn is appended.
+
+    Returns:
+        One list of episode ids per observation pass, in pass order.
+    """
+    settings = _settings(tmp_path, batch_size=batch_size)
+    observer = FakeObserver(beliefs=[], max_batch_size=batch_size)
+    harness = build_harness(settings, data_dir=tmp_path / "case", observer=observer)
+    real_capture = harness.lifecycle.capture
+    position = 0
+
+    async def _capture(conversation_id: str, *, content: str, **kwargs: object) -> CaptureReport:
+        """Capture for real, then destroy the episode where this position is named.
+
+        Args:
+            conversation_id: The conversation.
+            content: The user half.
+            kwargs: Relayed.
+
+        Returns:
+            The real report, or a degraded one whose turn stands and whose episode
+            does not.
+        """
+        nonlocal position
+        position += 1
+        report = await real_capture(conversation_id, content=content, **kwargs)  # type: ignore[arg-type]
+        if position not in unresolvable or report.episode_id is None:
+            return report
+        await harness.store.delete(report.episode_id)
+        return CaptureReport(conversation_id=conversation_id, degraded=True)
+
+    try:
+        harness.lifecycle.capture = _capture  # type: ignore[method-assign]
+        await ingest_case(harness, _case(turns), batch_size=batch_size)
+    finally:
+        harness.close()
+    return [[record.id for record in batch] for batch in observer.batches]
+
+
+async def test_a_gap_in_a_window_does_not_shrink_the_overlap_it_carries(
+    tmp_path: Path,
+) -> None:
+    """§7 counts **episodes**, and a window of turns can hold fewer of them.
+
+    ``ObservationStage``'s window is the conversation's most recent ``batch_size``
+    *turns*, and a turn whose episode no longer resolves still holds a slot in it
+    (ADR-0074 §5). A driver pacing purely on captures therefore satisfies §7 only
+    while every turn resolves: put one gap in the first window and its last three
+    *episodes* stop being the next window's first three, because the next window's
+    six turns contain only five episodes and start a position too late.
+
+    This is the shape the architecture lens named, run as it described it — six
+    captures with the sixth's episode destroyed, then three more that land — and the
+    assertion is §7's identity itself rather than a pass count.
+    """
+    batch_size = 6
+    overlap = _overlap_of(batch_size)
+
+    windows = await _windows_with_gaps(tmp_path, turns=9, batch_size=batch_size, unresolvable={6})
+
+    assert overlap == 3
+    assert len(windows) >= 2
+    assert len(windows[0]) == batch_size - 1, "the gap costs the first window an episode"
+    assert windows[0][-overlap:] == windows[1][:overlap]
+
+
+@pytest.mark.parametrize(
+    "unresolvable",
+    [{2}, {5}, {6}, {2, 6}, {4, 5}],
+    ids=["early", "in-the-carry", "at-the-edge", "two-apart", "two-adjacent"],
+)
+async def test_the_overlap_identity_holds_wherever_the_gap_falls(
+    tmp_path: Path, unresolvable: set[int]
+) -> None:
+    """The same identity, over the positions a gap can take relative to the carry.
+
+    A gap before the carried tail, inside it, and at the window's own edge each move
+    a different part of the arithmetic, and two gaps test that the carry is counted
+    rather than measured off a fixed offset. Parametrised rather than argued, because
+    the failure mode is an off-by-one that one position would hide.
+
+    **The closing pass is held to a weaker claim, and that predates ADR-0162.** A case
+    whose turn count does not land on the schedule ends with a remainder, and the read
+    has no offset — the module docstring says so — so the last pass re-reads more of
+    the previous window than the carry asks for. Overlapping by *more* than *k* is not
+    a breach of a clause that puts *k* episodes into the next window; what would be is
+    losing them, so the final pair is checked for exactly that.
+    """
+    batch_size = 6
+    overlap = _overlap_of(batch_size)
+
+    windows = await _windows_with_gaps(
+        tmp_path, turns=12, batch_size=batch_size, unresolvable=unresolvable
+    )
+
+    assert len(windows) >= 3, "enough passes for the identity to be tested on its own"
+    for earlier, later in pairwise(windows[:-1]):
+        carried = min(overlap, len(earlier))
+        assert earlier[-carried:] == later[:carried], (
+            f"§7's identity failed between scheduled windows, gaps at {unresolvable}"
+        )
+    earlier, later = windows[-2], windows[-1]
+    carried = min(overlap, len(earlier))
+    tail = earlier[-carried:]
+    assert tail
+    assert any(later[index : index + carried] == tail for index in range(len(later))), (
+        f"the closing pass lost the carried tail, gaps at {unresolvable}"
+    )
 
 
 async def test_captures_that_store_no_episode_buy_no_pass_of_their_own(
