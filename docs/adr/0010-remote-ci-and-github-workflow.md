@@ -1,7 +1,45 @@
 # 10. Remote CI and the GitHub collaboration workflow
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0167 (the "Branch protection (pragmatic)" clause's administrator-bypass and approving-review bullets, and the settings-change route to tightening)
 - Date: 2026-07-18
+- Partially superseded: 2026-08-20 by ADR-0167 — **the branch protection named
+  below is not the branch protection this repository runs, and the configuration
+  is now the decision; everything this ADR decided about the remote gate, PR
+  integration and the merge method stands.**
+  [ADR-0167](0167-the-gate-binds-the-merge-path-the-admin-bypass-is-deliberate-and-no-approval-is-required.md)
+  records what `gh api repos/{owner}/{repo}/branches/main/protection` returns:
+  `enforce_admins` is **false**, which exempts repository administrators from
+  every protection above it — the required `gate` check included — and
+  `required_approving_review_count` is **0**, not one.
+
+  **Replaced — the "Branch protection (pragmatic)" clause's administrator-bypass
+  and approving-review bullets.** Its first bullet's "enforced for **everyone,
+  with no bypass**", as a claim about the mechanism: ADR-0167 §2 keeps the
+  conduct half of it word for word — nothing crosses the gate red, whatever the
+  flag mechanically reaches — and replaces the claim that nothing can. Its
+  "Require **one approving review**" bullet, retired by the owner's 2026-07-29
+  ruling that the Codex review and the `gate` are the whole pre-merge bar
+  (ADR-0167 §4). And its fourth bullet's exemption of administrators from "the
+  review/up-to-date restrictions" alone, which is not the exemption that exists:
+  the toggle is all-or-nothing, which is **why** the split this clause specified
+  was never configurable (ADR-0167 §3).
+
+  **Replaced — the settings-change route to tightening.** The Alternatives
+  sentence "We chose the pragmatic variant … and can tighten to strict if the
+  team or the blast radius grows — a settings change, not a new ADR", and the
+  Revisit bullet in Consequences that names the same tightening. ADR-0167 §5
+  ratifies `enforce_admins: false` as a decision, so enabling it now takes an ADR
+  superseding ADR-0167; §6 states the fact that re-opens the question — a second
+  person able to merge.
+
+  **What stands.** The up-to-date and linear-history bullet is configured exactly
+  as ratified here, and ADR-0167 §1 re-states it rather than re-deciding it. The
+  "Remote gate", "Pull-request integration" and "Merge method" clauses are
+  untouched, as is the 2026-07-19 amendment except where its settings list
+  restates the bullets above, which is read through them. Nothing in this ADR's
+  text is rewritten (ADR-0070 §1), and the record sits in this note rather than
+  as a `Status` qualifier because the line now leads with the supersession token
+  (ADR-0082 §2).
 
 ## Context
 
