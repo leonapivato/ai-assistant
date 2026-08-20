@@ -25,9 +25,13 @@
   the ruling authorised, on the ruling's own principle.
 
   **ADR-0165's own §§2–3 exemption is not applied to itself.** It is not law until
-  this merges, so `CONTRIBUTING.md` → "Finishing an ADR PR" step 3's re-run was run
-  in full — and this ratification commit carries §9's two records besides, which
-  puts it outside the exempt shape in any case.
+  this merges, so `CONTRIBUTING.md` → "Finishing an ADR PR" step 3's re-run is owed
+  in full on the tree this note sits on — and this ratification commit carries §9's
+  two records besides, which puts it outside the exempt shape in any case. The
+  tree named above is the one step 2 required the set to be green on before the
+  flip; a note can never cite the round that covers the tree it is written into,
+  which is why it cites the one that earned the flip and leaves the re-run to
+  `just ship`'s coverage check.
 - **What this changes and what it does not.** It retains ADR-0015 §5's
   dispatch-time numbering unchanged, and it relaxes exactly one thing: which
   commit's content the review-coverage rule is evaluated against, in one
