@@ -4889,14 +4889,14 @@ def _why(belief: Belief | BeliefSummary) -> str:
     :class:`~ai_assistant.core.types.Provenance` makes one mandatory exactly on this
     band (ADR-0092 §1). What drops them is the projection — neither
     :class:`~ai_assistant.core.types.Belief` nor
-    :class:`~ai_assistant.core.types.BeliefSummary` has anywhere to put one (**#754**;
-    its predecessors #711 and #568 are both closed, the second by ADR-0107, whose §10
-    keeps this question open by name). So "not recorded" would err in the direction
-    ADR-0073 §4 forgives least: a user auditing what is held about them would read it
-    as "you did not keep it", the inverse of the truth, on the one band whose whole
-    purpose is provenance. ADR-0098 §8 reads this branch as evidence that the belief
-    surface carries no attestation — and it still is, in words that are also true of
-    the store.
+    :class:`~ai_assistant.core.types.BeliefSummary` has anywhere to put one (**#1276**,
+    which ADR-0107 §10 keeps open by name and ADR-0073 §4's ``ATTESTED`` gate assigns
+    to the lane holding the first ``EXTERNAL`` producer). So "not recorded" would err
+    in the direction ADR-0073 §4 forgives least: a user auditing what is held about
+    them would read it as "you did not keep it", the inverse of the truth, on the one
+    band whose whole purpose is provenance. ADR-0098 §8 reads this branch as evidence
+    that the belief surface carries no attestation — and it still is, in words that
+    are also true of the store.
     """
     match belief.band:
         case BeliefBand.ASSERTED:
