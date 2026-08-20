@@ -2,6 +2,59 @@
 
 - Status: Accepted
 - Date: 2026-07-24
+- Amended: 2026-08-20 (a citation correction — the single-user premise this
+  decision is scoped to is ruled by **ADR-0099 §1**, not by ADR-0002). Every
+  citation of ADR-0002 in the ratified text below attributes a *single-user*
+  premise to it, six times: "under ADR-0002's single-user local-first
+  architecture", "under ADR-0002's single-user local-first model there is no
+  second party in the process for the gate to defend the user against", "a threat
+  outside ADR-0002's declared model", "the single-user principal that ADR-0002 and
+  ADR-0004 §7 place inside the trust boundary", "a future multi-principal
+  deployment that steps outside ADR-0002's single-user assumption", and "This
+  decision is scoped to ADR-0002's single-user local-first model". **ADR-0002
+  decides no such thing.** As merged it decides language and tooling,
+  architecture, the model layer, the interface, persistence ("Local-first by
+  default: SQLite with `sqlite-vec` for embedding search") and workflow/CI, and it
+  contains the word "user" zero times. It rules *local-first*; it never rules
+  *single-user*.
+
+  **The premise is sound; what it lacked was a source, and it now has one.** When
+  this ADR was written the corpus relied on single-principal everywhere without
+  ratifying it anywhere: ADR-0004 *reasons* about "a single-user local app" while
+  deciding an encryption default, ADR-0036 §3 records that the permission layer
+  "records that a human answered, not which human" (#113), and ADR-0097 §1 rules
+  that "the grant is not keyed to a user". None of those is the ruling this ADR
+  cites, and the citation named the nearest foundational-sounding ADR instead.
+  **ADR-0099 §1 (2026-08-04) supplies the ruling**: "A hub has exactly one
+  principal: the owner." Read each ADR-0002 citation above as ADR-0099 §1.
+  ADR-0002 stays correctly cited for local-first persistence and for nothing else,
+  and ADR-0004 §7 stays correctly cited in the fourth quotation for the audit
+  trail's transparency job, which is its own.
+
+  **Nothing decided changes and no reader acts differently as to the decision**,
+  which is ADR-0070 §1's own test applied to this note. #259 is still WONTFIX on
+  the same reasoning, `StepExecutor`'s four-collaborator construction contract
+  still stands, and the revisit condition is unchanged and still live — ADR-0099
+  §1 names this ADR's "multi-principal or multi-tenant deployment" trigger
+  alongside ADR-0097 §12's and says the two "both stand exactly as written", while
+  its §3 rules only that a household member is not the route by which that day
+  arrives. What changes is which document a reader
+  following the pointer arrives at, and that is ADR-0070 §1's enumerated **broken
+  cross-reference**, which its own §1 note (2026-07-31) settles as an amendment
+  rather than a supersession: the corrected citation is not something this ADR
+  *decided*. So it is recorded as this appended dated note and the ratified text
+  below is **not** rewritten.
+
+  **No `Status` edit is owed, and that is ruled rather than assumed.** The defect
+  is in this ADR's own words — ADR-0082 §1's bucket 1, per its 2026-07-31 note,
+  which places "a factual misstatement that predates the ADR" there as a stale
+  phrase — so no other ADR is the cause and ADR-0070 §1's appended dated note is
+  the whole record (ADR-0082 §1). ADR-0099 §6 separately applied ADR-0082 §1's
+  test to this ADR and concluded that "no sentence of ADR-0058 becomes false or
+  over-wide, so no record is owed against it"; that ruling is honoured here, not
+  re-taken. ADR-0099 §6 also stated this finding and filed it as **#685**,
+  declining to fix another ADR's text from that lane; this note is that fix. Refs
+  #685, ADR-0099 §1 and §6.
 
 ## Context
 
