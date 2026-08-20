@@ -459,9 +459,7 @@ def reconciler_spec(settings: Settings) -> str:
     )
 
 
-def build_reconciler(
-    settings: Settings, *, model: ModelProvider | None = None, guard: SpendGuard | None = None
-) -> Reconciliation:
+def build_reconciler(settings: Settings) -> Reconciliation:
     """Construct ADR-0159's reconciler as the composition root constructs it.
 
     ``app/composition.py`` wires ``ModelBackedReconciler`` unconditionally — the route
@@ -478,38 +476,38 @@ def build_reconciler(
     what ADR-0159 §3 requires of this seam and is already why this module's answering
     and observation seams have that shape.
 
-    **The guard reaches this seam, and it has to.** A reconciler labels at most one
-    request per proposal, so a LoCoMo case's ingestion carries thousands of them —
-    a paid seam the run's ceiling did not cover would make ``--max-model-calls`` a
-    bound on a strict subset of what the run spends. :func:`~benchmarks.memory.run.
-    plan_run` counts them for the same reason, so the ceiling stays readable off the
-    plan in the currency the plan is written in.
+    **It takes no ``guard``, and the omission is the design rather than an oversight.**
+    The reconciler is a paid seam and the run's ceiling must cover it — a bound on a
+    strict subset of what a run spends is what makes ``--max-model-calls`` mean less
+    than it says, and :func:`~benchmarks.memory.run.plan_run` counts these calls for
+    that reason. But a seam two functions can each wrap is a seam charged twice, and a
+    doubled charge here is not merely wasteful, it is **silent**: ADR-0159 §3's
+    never-raises clause turns the inner wrapper's refusal into an unlabelled conflict
+    set rather than an error, so a run would exhaust its ceiling on reconciliations
+    that never sent a request. Exactly one layer therefore wraps —
+    :func:`build_harness`, the one holding the guard and the only place a built
+    reconciler and an injected one meet — and a caller cannot opt into the other
+    arrangement because there is no argument here through which to ask for it.
 
-    **What the guard cannot do here is stop the run at this seam**, and that is
-    ADR-0159 §3's never-raises clause rather than a gap in the wrap: the reconciler
-    catches ``Exception`` around its own request, so a ``RunAbortedError`` raised by
-    the guard is converted into an unlabelled conflict set exactly as a model error
-    is. The bound still holds — ``charge`` refuses before the call, so nothing is
-    spent past it — and the run still stops, at the next answering or observation
-    call, which is guarded by something that lets the abort out. What a reader must
-    not conclude from a run's ``reconciler_failed`` count alone is that the model
+    **What the guard cannot do at that seam is stop the run there**, by the same §3
+    clause: the reconciler catches ``Exception`` around its own request, so a
+    ``RunAbortedError`` becomes an unlabelled conflict set exactly as a model error
+    does. The bound still holds — ``charge`` refuses before the call, so nothing is
+    spent past it — and the run still stops, at the next answering or observation call,
+    which is guarded by something that lets the abort out. What a reader must not
+    conclude from a run's ``reconciler_failed`` count alone is that the model
     misbehaved; a run that also aborted may have been reporting its own ceiling.
 
     Args:
         settings: Loaded application settings — the route, the bound, and the
             resilience knobs :func:`build_model_provider` reads.
-        model: Override the labelling seam. Supplied by tests, which must make no live
-            model call; ``None`` builds the configured route. An injected reconciler
-            reaches ``refuse_ineligible_scored_run`` clause 5 through
-            :func:`~benchmarks.memory.run.execute_run`, so a *scored* run cannot carry
-            one.
-        guard: The run's spend guard, or ``None`` for an unguarded seam. Applied to a
-            provider built here **and** to an injected one, for the reason
-            :func:`build_harness` applies it to an injected answering seam: an
-            injected provider stands in for a call the run would otherwise have made.
 
     Returns:
-        The reconciler and the manifest's account of it, as one value.
+        The reconciler and the manifest's account of it, as one value, **unguarded**.
+        A test wanting an offline seam constructs :class:`Reconciliation` directly,
+        which is what ``tests/benchmarks/harness_reconcilers.py`` does; there is no
+        override here, because an override would be a second way to reach the wrapping
+        decision this function deliberately does not make.
 
     Raises:
         ConfigurationError: If the reconciler's route names a vendor unknown to
@@ -519,13 +517,10 @@ def build_reconciler(
             the route repeats ``default_model``.
     """
     route = reconciler_spec(settings)
-    provider = (
-        build_model_provider(settings, route, guard=guard)
-        if model is None
-        else (model if guard is None else guard.wrap(model))
-    )
     return Reconciliation(
-        model=provider, route=route, max_conflicts=settings.reconciler_max_conflicts
+        model=build_model_provider(settings, route),
+        route=route,
+        max_conflicts=settings.reconciler_max_conflicts,
     )
 
 
@@ -666,11 +661,13 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
     # SQLite connections it then has no ``Harness`` to hand back for closing. The
     # observer below is still built after them — a pre-existing leak on the same shape,
     # left alone here rather than widened into (#1300).
-    reconciliation = (
-        build_reconciler(settings, guard=guard)
-        if reconciler is None
-        else (reconciler if guard is None else reconciler.guarded_by(guard))
-    )
+    #
+    # **This is the one place the reconciler meets the guard**, whether it was built
+    # here or handed down by a run — because a seam two layers can each wrap is a seam
+    # charged twice, and ADR-0159 §3's never-raises clause would make the doubled charge
+    # invisible. `build_reconciler` therefore takes no guard at all.
+    configured = reconciler if reconciler is not None else build_reconciler(settings)
+    reconciliation = configured if guard is None else configured.guarded_by(guard)
 
     traces = SqliteTraceStore(path=data_dir / "traces.db")
     # `now` is the benchmark clock; `traces_now` is left at its wall-clock default,
