@@ -70,10 +70,18 @@ configuration ratified below.
 
 ### 1. The protection on `main`, as configured and as ratified
 
-> **Normative.** The `main` branch stays protected so that a merge requires a
-> pull request, the `gate` status check green, and the branch up to date with
-> `main`; the branch keeps linear history and admits neither force-pushes nor
-> deletions.
+> **Normative.** `main` stays configured with a pull request required, the `gate`
+> status check required, `strict` up-to-date enforcement on, linear history
+> required, and force-pushes and deletions forbidden — the settings §3's
+> administrator bypass is the one documented exception to.
+
+**This section is about the settings, and §2 and §3 are about what a merge
+therefore has to satisfy.** They are deliberately not the same sentence. The
+protection above binds every merge on the normal path (§2); the administrator
+bypass §3 ratifies stands outside it, which is exactly the property that makes §2
+scope its requirement to that path and §3 name the one case the bypass is
+reached for. Reading this clause as a universal claim about *every* merge would
+contradict §3 in the same Decision, and it is not one.
 
 That is items 1 (in its status-check half) and 3 of ADR-0010's clause, unchanged
 in effect, plus the pull-request requirement ADR-0010 decided in its
@@ -89,12 +97,19 @@ rather than replacing it.
 ### 2. The `gate` binds the normal merge path; the conduct rule binds the other one
 
 > **Normative.** Every merge on the normal path — a pull request, the only path a
-> lane uses — requires the `gate` check green on content that is up to date with
-> `main`.
+> lane uses — requires the `gate` check green, on content up to date with `main`
+> except where §3's bypass is reached for the stale-check case §3 names.
 
 > **Normative.** Nothing crosses the gate red. An administrator bypass is never
 > used to merge a pull request whose `gate` is failing, whatever the flag
 > mechanically reaches.
+
+**The two clauses are asymmetric on purpose.** The up-to-date requirement has an
+exception and the green-`gate` requirement has none, because they are not the
+same kind of thing: a stale `strict` check says the branch is behind, which is a
+fact about ordering that a human can assess and a rebase would resolve, while a
+red `gate` says the content is broken. §3's bypass is granted against the first
+and refused against the second, which is the whole of the asymmetry.
 
 ADR-0010's item 1 said one thing about two levels, and they come apart here. As a
 statement about the **mechanism** — "enforced for everyone, with no bypass" — it
