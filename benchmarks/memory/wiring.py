@@ -703,10 +703,20 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
         tombstone_grace=settings.conversation_tombstone_grace,
         now=clock,
     )
+    # `now` is the benchmark clock here too, unlike in the composition root — which is
+    # not a deviation from the product but the same deviation the stores above make, and
+    # for the same reason: `retention` is applied against the clock the run is on, so a
+    # queue admitted and expired in wall time while the run lives in corpus time holds a
+    # TTL measured on a different axis from the histories it defers proposals about.
+    # Nothing published reads the queue today — `proposals_deferred` is counted off the
+    # write path's rulings, not off this store — so this corrects a record rather than a
+    # number (#1296), which is exactly why it went unnoticed: the seam that is measured
+    # by nothing is the one that stays wrong.
     deferrals = SqliteDeferralStore(
         path=data_dir / "deferrals.db",
         retention=settings.deferral_ttl,
         queue_limit=settings.deferral_queue_limit,
+        now=clock,
     )
     # `conflict_limit` is passed for the reason the composition root passes it: the
     # figure a trace records should be one this layer chose rather than one a default

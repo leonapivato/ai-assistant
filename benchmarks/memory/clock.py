@@ -10,9 +10,17 @@ shown a history it never had.
 
 So the harness runs on a clock it moves: set to a session's stated instant while that
 session is captured and distilled, and to the question's stated instant while it is
-answered. Every seam that takes an injectable clock is given this one — capture,
-the memory store's liveness axes, the ingestor, and the observer — so a run has one
-notion of "now" rather than four.
+answered. Every seam that takes an injectable clock is given this one — capture, the
+memory store's liveness axes, the ingestor, the observer, and the deferral queue's
+admission and expiry — so a run has one notion of "now" rather than five.
+
+**That is a claim about the wiring, so it is checked there.** The deferral queue was
+missing from it for as long as the sentence has existed (#1296): the store took its
+wall-clock default while everything beside it ran on the corpus's time, and nothing
+failed, because no measurement reads the queue. A seam left on the wall is not visible
+in a score — it is visible in a database a later reader believes — so
+``tests/benchmarks/test_harness_contracts.py`` pins the wiring rather than trusting
+this paragraph to stay true.
 
 **Two clocks stay on the wall, deliberately.** ``SqliteMemoryStore``'s ``traces_now``
 is separate from its ``now`` for a reason ADR-0119 §5 states — a trace must not change
