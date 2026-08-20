@@ -824,9 +824,22 @@ async def test_a_ruling_outside_an_operation_omits_the_reference_rather_than_inv
 ) -> None:
     """ADR-0119 §4: "``None`` is the honest answer outside an operation".
 
-    A reconsideration sweep and a producer's tick both reach this seam from a
-    scheduler job, so the reference is genuinely absent rather than merely
-    unusual.
+    **The caller here is a test reaching the store directly**, which is one of the
+    two genuine ``None`` cases ``core/correlation.py`` names — "a hub startup, a
+    test calling a subsystem directly" — and the only one this seam can be put in
+    without an engine.
+
+    An earlier version of this docstring named the reconsideration sweep and the
+    producer's tick instead, and **both in fact carry the reference** (#1288).
+    ADR-0083 §8 rules that "every scheduler job is a public ``Engine`` call", so a
+    sweep arrives through ``Engine._tracked``, which opens ``correlated_operation``
+    before the store is touched; ADR-0119 §3 reads the two together in terms — a
+    scheduled run and a user's turn "are all one ``AssistantEngine`` operation,
+    distinguished by the seam label and the outcome". The assertion below was never
+    affected, but the reason would have told the next reader that a whole class of
+    production traces carries no correlation when every one of them does.
+    ``tests/orchestration/test_engine_notifications.py`` pins the positive half,
+    whose absence is what let the claim stand.
     """
     store = make_store()
 
