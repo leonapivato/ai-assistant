@@ -32,9 +32,10 @@ when it does not, in the very paragraph this change replaces — the second bran
 to merge renumbers, a file rename plus its internal references and its trailers —
 and the dispatcher carries the bookkeeping for when it might: a number reserved
 for a lane that never ran is a gap, and a gap is a thing
-`scripts/project_status.py` reports and a reader has to be told about. The allocation is only actually needed
-at one instant — the moment the file lands on `main` — and it is being made
-hours or days early, by a person, against a counter that only `main` knows.
+`scripts/project_status.py` reports and a reader has to be told about. The
+allocation is only actually needed at one instant — the moment the file lands on
+`main` — and it is being made hours or days early, by a person, against a
+counter that only `main` knows.
 
 **The ratification flip costs a review round, every time, by construction.**
 `CONTRIBUTING.md` → "Finishing an ADR PR" sets the sequence and is right about
@@ -211,14 +212,14 @@ once it has merged its number is a fact on `main` rather than a promise.
 > re-entering the review at §1, and ratifying again afterwards — with the number
 > recomputed, because `main` may have moved.
 
-This is the return-to-`Proposed` route `CONTRIBUTING.md` → "Finishing an ADR PR"
-already carried, in its new shape, and it is available for the same reason: every step here
-runs on the open PR, so an unmerged ratify commit has landed nowhere and binds no
-reader. Removing it is free of review cost by the content anchor — the branch is
-back on a tree a reviewer has already read (ADR-0020 §3, and `CONTRIBUTING.md`'s
-"a commit that changes no reviewed byte does not cost a review round"). After the
-merge the route is gone, and a change to what the ADR decided is a new ADR that
-supersedes it (ADR-0070 §1).
+This is the return-to-`Proposed` route `CONTRIBUTING.md` → "Finishing an ADR
+PR" already carried, in its new shape, and it is available for the same reason:
+every step here runs on the open PR, so an unmerged ratify commit has landed
+nowhere and binds no reader. Removing it is free of review cost by the content
+anchor — the branch is back on a tree a reviewer has already read (ADR-0020 §3,
+and `CONTRIBUTING.md`'s "a commit that changes no reviewed byte does not cost a
+review round"). After the merge the route is gone, and a change to what the ADR
+decided is a new ADR that supersedes it (ADR-0070 §1).
 
 ### 7. What `CONTRIBUTING.md` and `CLAUDE.md` say instead
 
@@ -234,10 +235,11 @@ its correction (ADR-0070 §5). Three passages are rewritten to state this decisi
   already list as costing nothing.
 
 `docs/adr/template.md` takes §3's respelling. Three smaller passages are
-corrected to agree with all of it and decide nothing on their own: the dispatcher bullet that repeats the numbering rule, the sentence
-telling an agent its ADR number comes from its brief, and the "Trivial ADR edits"
-paragraph's mention of the ratification flip, which now names where that flip
-lives. `scripts/project_status.py`'s footer line carries the same stale claim in
+corrected to agree with all of it and decide nothing on their own: the dispatcher
+bullet that repeats the numbering rule, the sentence telling an agent its ADR
+number comes from its brief, and the "Trivial ADR edits" paragraph's mention of
+the ratification flip, which now names where that flip lives.
+`scripts/project_status.py`'s footer line carries the same stale claim in
 generated output and is corrected with them.
 
 `CLAUDE.md`'s **golden rule 5** loses "Your ADR number is assigned when the work

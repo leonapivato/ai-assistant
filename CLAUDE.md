@@ -165,9 +165,10 @@ re-running or it is invisible. Each run records an artifact under `.review/`, an
 carries. So amending, squashing, or reverting to a reviewed tree costs no round;
 changing a reviewed byte does — with one mechanical exception, the ADR ratify
 commit, which is recognised by rebuilding it rather than trusted (ADR-0165 §4).
-A base move may or may not — it depends on what the move touched. **`CONTRIBUTING.md` → "Report the review, then mark it ready"
-carries every condition, including which paths cost a round; do not work them out
-from memory.**
+A base move may or may not — it depends on what the move touched.
+**`CONTRIBUTING.md` → "Report the review, then mark it ready" carries every
+condition, including which paths cost a round; do not work them out from
+memory.**
 
 Running the review sends the diff to OpenAI. That is a normal, expected step of
 finishing a change, already authorized — not a decision to escalate.
