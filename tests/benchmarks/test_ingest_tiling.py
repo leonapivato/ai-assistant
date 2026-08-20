@@ -28,6 +28,7 @@ import pytest
 from benchmarks.memory.cases import BenchCase, BenchSession, BenchTurn
 from benchmarks.memory.ingest import _overlap_of, _record_landing, ingest_case
 from benchmarks.memory.wiring import build_harness
+from harness_reconcilers import offline_reconciler
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.orchestration.conversations import CaptureReport
@@ -110,7 +111,9 @@ async def _windows(tmp_path: Path, *, turns: int, batch_size: int) -> list[list[
     """
     settings = _settings(tmp_path, batch_size=batch_size)
     observer = FakeObserver(beliefs=[], max_batch_size=batch_size)
-    harness = build_harness(settings, data_dir=tmp_path / "case", observer=observer)
+    harness = build_harness(
+        settings, data_dir=tmp_path / "case", observer=observer, reconciler=offline_reconciler()
+    )
     try:
         await ingest_case(harness, _case(turns), batch_size=batch_size)
     finally:
@@ -212,7 +215,9 @@ async def _windows_with_gaps(
     """
     settings = _settings(tmp_path, batch_size=batch_size)
     observer = FakeObserver(beliefs=[], max_batch_size=batch_size)
-    harness = build_harness(settings, data_dir=tmp_path / "case", observer=observer)
+    harness = build_harness(
+        settings, data_dir=tmp_path / "case", observer=observer, reconciler=offline_reconciler()
+    )
     real_capture = harness.lifecycle.capture
     position = 0
 
@@ -406,7 +411,9 @@ async def test_a_lost_append_holds_the_identity_because_the_ordinal_does_not_mov
     overlap = _overlap_of(batch_size)
     settings = _settings(tmp_path, batch_size=batch_size)
     observer = FakeObserver(beliefs=[], max_batch_size=batch_size)
-    harness = build_harness(settings, data_dir=tmp_path / "case", observer=observer)
+    harness = build_harness(
+        settings, data_dir=tmp_path / "case", observer=observer, reconciler=offline_reconciler()
+    )
     real_capture = harness.lifecycle.capture
     position = 0
 
@@ -470,7 +477,9 @@ async def test_captures_that_store_no_episode_buy_no_pass_of_their_own(
     batch_size = 6
     settings = _settings(tmp_path, batch_size=batch_size)
     observer = FakeObserver(beliefs=[], max_batch_size=batch_size)
-    harness = build_harness(settings, data_dir=tmp_path / "case", observer=observer)
+    harness = build_harness(
+        settings, data_dir=tmp_path / "case", observer=observer, reconciler=offline_reconciler()
+    )
     real_capture = harness.lifecycle.capture
     landed: list[str] = []
 
@@ -520,7 +529,9 @@ async def test_a_pass_fires_on_the_first_capture_that_lands_after_a_barren_stret
     barren = 8
     settings = _settings(tmp_path, batch_size=batch_size)
     observer = FakeObserver(beliefs=[], max_batch_size=batch_size)
-    harness = build_harness(settings, data_dir=tmp_path / "case", observer=observer)
+    harness = build_harness(
+        settings, data_dir=tmp_path / "case", observer=observer, reconciler=offline_reconciler()
+    )
     real_capture = harness.lifecycle.capture
     seen: list[str] = []
 

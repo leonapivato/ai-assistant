@@ -47,6 +47,7 @@ from benchmarks.memory.ingest import ingest_case
 from benchmarks.memory.records import RunMode
 from benchmarks.memory.run import execute_run, plan_run
 from benchmarks.memory.wiring import build_harness
+from harness_reconcilers import offline_reconciler
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import MemoryStoreError
@@ -156,6 +157,7 @@ def _harness(tmp_path: Path, *, observer: FakeObserver) -> Harness:
         data_dir=tmp_path / "case",
         model=FakeModelProvider("Juno"),
         observer=observer,
+        reconciler=offline_reconciler(),
     )
 
 
@@ -456,6 +458,7 @@ async def test_a_failed_episodic_read_ends_the_run_rather_than_publishing_belief
             settings=_settings(tmp_path),
             model=FakeModelProvider("Juno"),
             observer=FakeObserver(max_batch_size=BATCH),
+            reconciler=offline_reconciler(),
         )
 
     assert tuple(BELIEF_KINDS) in asked, "the belief read never happened, so the run died earlier"

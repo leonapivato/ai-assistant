@@ -26,6 +26,7 @@ from benchmarks.memory.ingest import ingest_case
 from benchmarks.memory.records import QuestionRecord, RunMode, read_jsonl
 from benchmarks.memory.run import case_dir_name, execute_run, plan_run
 from benchmarks.memory.wiring import build_harness
+from harness_reconcilers import offline_reconciler
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import MemoryKind
@@ -138,6 +139,7 @@ async def _records(tmp_path: Path) -> tuple[tuple[QuestionRecord, ...], Path]:
         settings=_settings(tmp_path),
         model=FakeModelProvider("a cat"),
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
     run_dir = root / manifest.run_id
     return read_jsonl(run_dir / "records.jsonl", QuestionRecord), run_dir
@@ -153,6 +155,7 @@ async def test_ingestion_maps_every_pointer_of_an_exchange_to_the_episode_it_bec
         data_dir=tmp_path / "case",
         model=FakeModelProvider("x"),
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
     try:
         summary = await ingest_case(harness, _case(), batch_size=BATCH)
@@ -176,6 +179,7 @@ async def test_a_degraded_capture_leaves_its_pointers_unmapped(tmp_path: Path) -
         data_dir=tmp_path / "case",
         model=FakeModelProvider("x"),
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
     real_capture = harness.lifecycle.capture
 
@@ -292,6 +296,7 @@ async def test_a_retrieved_episode_stands_on_its_own_id(tmp_path: Path) -> None:
         data_dir=tmp_path / "case",
         model=FakeModelProvider("a dog"),
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
     try:
         await ingest_case(harness, _case(), batch_size=BATCH)
@@ -331,6 +336,7 @@ async def test_the_split_credits_an_answer_the_supplement_alone_supported(
         data_dir=tmp_path / "case",
         model=FakeModelProvider("a dog"),
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
     try:
         summary = await ingest_case(harness, _case(), batch_size=BATCH)
@@ -362,6 +368,7 @@ async def test_a_belief_still_reports_only_the_episodes_it_cites(tmp_path: Path)
         data_dir=tmp_path / "case",
         model=FakeModelProvider("a dog"),
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
     try:
         await ingest_case(harness, _case(), batch_size=BATCH)

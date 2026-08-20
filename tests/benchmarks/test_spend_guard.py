@@ -34,6 +34,7 @@ from benchmarks.memory.spend import (
     is_credit_exhaustion,
 )
 from benchmarks.memory.wiring import build_harness
+from harness_reconcilers import offline_reconciler
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import (
@@ -297,6 +298,7 @@ async def test_a_credit_refusal_stops_the_run_and_leaves_its_records(tmp_path: P
         settings=_settings(tmp_path),
         model=provider,
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
 
     assert manifest.aborted is not None
@@ -328,6 +330,7 @@ async def test_a_reached_ceiling_stops_the_run_and_records_the_bound(tmp_path: P
         model=FakeModelProvider("a dog"),
         observer=FakeObserver(max_batch_size=BATCH),
         max_model_calls=1,
+        reconciler=offline_reconciler(),
     )
 
     assert manifest.model_call_ceiling == 1
@@ -358,6 +361,7 @@ async def test_an_unbounded_run_records_no_abort(tmp_path: Path) -> None:
         settings=_settings(tmp_path),
         model=FakeModelProvider("a dog"),
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
 
     assert manifest.aborted is None
@@ -389,6 +393,7 @@ async def test_an_unrelated_provider_failure_is_still_one_ungraded_question(
         settings=_settings(tmp_path),
         model=provider,
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
 
     assert manifest.aborted is None
@@ -446,7 +451,9 @@ def test_a_built_observer_spends_the_run_budget(tmp_path: Path) -> None:
         data_dir=tmp_path, embedder=EmbedderKind.HASHING, default_model="anthropic:claude-x"
     )
     guard = SpendGuard(limit=7)
-    harness = build_harness(settings, data_dir=tmp_path / "case", guard=guard)
+    harness = build_harness(
+        settings, data_dir=tmp_path / "case", guard=guard, reconciler=offline_reconciler()
+    )
     try:
         observer = harness.observation._observer
         assert isinstance(observer, ModelBackedObserver)
@@ -481,6 +488,7 @@ def test_an_injected_observer_is_outside_the_run_budget(tmp_path: Path) -> None:
         model=FakeModelProvider("a dog"),
         observer=injected,
         guard=guard,
+        reconciler=offline_reconciler(),
     )
     try:
         assert harness.observation._observer is injected

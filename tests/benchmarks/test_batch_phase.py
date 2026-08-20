@@ -42,6 +42,7 @@ from benchmarks.memory.records import QuestionRecord, RunMode, RunPhase, read_js
 from benchmarks.memory.run import BATCHES_FILE, execute_run, plan_run
 from benchmarks.memory.select import first_sessions
 from benchmarks.memory.wiring import BATCH_PROVIDER
+from harness_reconcilers import offline_reconciler
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
@@ -259,6 +260,7 @@ async def _run(  # noqa: PLR0913 — each argument is one axis a test varies, an
         preregistration_final=preregistration_final,
         poll=poll if poll is not None else PollPolicy(interval=0.0, timeout=30.0),
         max_model_calls=max_model_calls,
+        reconciler=offline_reconciler(),
     )
     return manifest, root / manifest.run_id
 

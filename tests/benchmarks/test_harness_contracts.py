@@ -1,9 +1,16 @@
-"""The four places the harness copies or mirrors something the package owns.
+"""The places the harness copies or mirrors something the package owns.
 
 Each of them is a silent-staleness hazard: a literal that stops matching, a limit that
 stops tracking the composition root, a refusal that stops being enforced, a read whose
 shape drifts from the one the product performs. None is caught by a type check, so each
 has a test.
+
+**Since #1293 that includes the write path's argument list, and not only its numbers.**
+The budgets, the routes and the observer's calendar were each pinned here — and
+``build_harness`` still constructed ``MemoryIngestor`` without the ``reconciler`` the
+composition root passes it, for two published pilots, because no test asserted anything
+about *which arguments* the two calls carry. Pinning a chosen list would have the same
+hole one argument further on, so the test below compares the calls themselves.
 """
 
 from __future__ import annotations
@@ -11,12 +18,13 @@ from __future__ import annotations
 import dataclasses
 import hashlib
 import urllib.request
-from typing import TYPE_CHECKING
+from contextlib import contextmanager
+from typing import TYPE_CHECKING, Any
 from unittest import mock
 from zoneinfo import ZoneInfo
 
 import pytest
-from benchmarks.memory import answer, records
+from benchmarks.memory import answer, records, wiring
 from benchmarks.memory.corpora import fetch as fetch_module
 from benchmarks.memory.corpora.fetch import (
     CorpusFetchError,
@@ -31,15 +39,19 @@ from benchmarks.memory.run import (
     check_credentials_for,
     refuse_ineligible_scored_run,
 )
-from benchmarks.memory.wiring import build_harness
+from benchmarks.memory.wiring import build_harness, build_reconciler, reconciler_spec
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
+    from types import ModuleType
 
 from ai_assistant.app import composition
+from ai_assistant.app.composition import build_engine
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.learning import ModelBackedObserver
+from ai_assistant.memory import MemoryIngestor, ModelBackedReconciler
 from ai_assistant.memory import traces as memory_traces
 from ai_assistant.orchestration import loop as orchestration_loop
 from ai_assistant.testing import FakeModelProvider, FakeObserver
@@ -166,6 +178,208 @@ def test_the_supplement_reads_the_kinds_and_bands_the_loop_reads() -> None:
     """
     assert answer.SUPPLEMENT_KINDS == orchestration_loop._SUPPLEMENT_KINDS
     assert answer.SUPPLEMENT_BANDS == orchestration_loop._SUPPLEMENT_BANDS
+
+
+@contextmanager
+def _recorded_ingestor(module: ModuleType) -> Iterator[dict[str, Any]]:
+    """Capture the keyword arguments ``module`` constructs its ``MemoryIngestor`` with.
+
+    The real class is still constructed and handed back, so the composition under test
+    goes on working — this observes the call rather than replacing the object.
+
+    Args:
+        module: The composition root to watch. It must bind ``MemoryIngestor`` as a
+            module attribute, which both roots do.
+
+    Yields:
+        The mapping, empty until the build inside the block runs.
+    """
+    captured: dict[str, Any] = {}
+
+    def _record(**kwargs: Any) -> MemoryIngestor:
+        if captured:
+            pytest.fail(f"{module.__name__} built more than one MemoryIngestor")
+        captured.update(kwargs)
+        return MemoryIngestor(**kwargs)
+
+    with mock.patch.object(module, "MemoryIngestor", _record):
+        yield captured
+
+
+async def test_the_harness_ingestor_is_built_from_the_composition_root_s_arguments(
+    tmp_path: Path,
+) -> None:
+    """The write path's equivalence guard, in the shape #1181 forced for the read path.
+
+    **This is the test #1293 did not have.** The budgets, the routes and the observer's
+    calendar were each pinned above, and none of them could see that ``build_harness``
+    passed no ``reconciler`` while the composition root passed one: the hole was in the
+    *argument list*, which nothing compared. So this compares the calls rather than a
+    chosen list of their contents — a keyword added to one root and not the other fails
+    here whatever it is called and whatever it carries.
+
+    ``now`` is the one permitted difference, and it is the module's first documented
+    deviation: the harness runs on the corpus's clock (``BenchmarkClock``) where the
+    product runs on the wall clock, which is a difference the benchmark exists to have.
+    It is asserted as an exact set rather than skipped, so a *second* harness-only
+    argument cannot slip in beside it.
+
+    The settings deliberately name a reconciler route and a bound that are not the
+    defaults, so the two roots agreeing is a fact about what they read rather than about
+    what they both left alone.
+    """
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-answers",
+        reconciler_model="anthropic:claude-reconciles",
+        reconciler_max_conflicts=7,
+    )
+
+    with _recorded_ingestor(composition) as product:
+        engine = build_engine(settings, data_dir=tmp_path / "product")
+        await engine.aclose()
+    with _recorded_ingestor(wiring) as harness_arguments:
+        harness = build_harness(
+            settings,
+            data_dir=tmp_path / "harness",
+            model=FakeModelProvider(),
+            observer=FakeObserver(),
+        )
+        harness.close()
+
+    assert set(product) - set(harness_arguments) == set()
+    assert set(harness_arguments) - set(product) == {"now"}
+    # The collaborators are distinct instances over distinct directories, so the
+    # comparison is of *shape*: the harness must not quietly substitute another store,
+    # another policy or another trace sink for the one the product wires.
+    for name in ("store", "policy", "traces_sink", "reconciler"):
+        assert type(harness_arguments[name]) is type(product[name]), name
+    assert harness_arguments["conflict_limit"] == product["conflict_limit"]
+
+
+async def test_the_harness_reconciler_labels_where_the_product_s_would(
+    tmp_path: Path,
+) -> None:
+    """ADR-0159 §3's two configured facts, on the same settings, from both roots.
+
+    Equal *classes* would be satisfied by a reconciler pointed at another model under
+    another bound, which is a different mechanism wearing the right type. The provider
+    is compared by shape for the same reason the objects above are: §3 requires one
+    route with retry and no routing, and a harness that wrapped a router here would
+    measure a fallback the product does not have on this seam.
+    """
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-answers",
+        reconciler_model="anthropic:claude-reconciles",
+        reconciler_max_conflicts=7,
+    )
+
+    with _recorded_ingestor(composition) as product:
+        engine = build_engine(settings, data_dir=tmp_path / "product")
+        await engine.aclose()
+    with _recorded_ingestor(wiring) as harness_arguments:
+        harness = build_harness(
+            settings,
+            data_dir=tmp_path / "harness",
+            model=FakeModelProvider(),
+            observer=FakeObserver(),
+        )
+        harness.close()
+
+    theirs, ours = product["reconciler"], harness_arguments["reconciler"]
+    assert isinstance(theirs, ModelBackedReconciler)
+    assert isinstance(ours, ModelBackedReconciler)
+    assert ours._route == theirs._route == "anthropic:claude-reconciles"
+    assert ours._max_conflicts == theirs._max_conflicts == 7
+    assert type(ours._model) is type(theirs._model)
+
+
+def test_the_harness_resolves_the_reconciler_route_the_composition_root_resolves(
+    tmp_path: Path,
+) -> None:
+    """``_reconciler_spec`` is private, so the harness spells it; this keeps the copy
+    honest, in the shape the copied trace keys above are kept honest.
+
+    Both branches are exercised, because the fallback is the one that carries ADR-0159
+    §3's property: an unset ``reconciler_model`` names no provider the operator did not
+    already configure, so leaving it alone cannot breach ADR-0004 §2.
+    """
+    unset = Settings(
+        data_dir=tmp_path,
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-answers",
+    )
+    named = unset.model_copy(update={"reconciler_model": "openai:gpt-reconciles"})
+
+    for settings in (unset, named):
+        assert reconciler_spec(settings) == composition._reconciler_spec(settings)
+    # And not vacuously equal on both sides of the branch.
+    assert reconciler_spec(unset) == "anthropic:claude-answers"
+    assert reconciler_spec(named) == "openai:gpt-reconciles"
+
+
+def test_a_harness_reports_the_reconciler_it_built(tmp_path: Path) -> None:
+    """The manifest's field is read off this, so it has to name the object's own facts.
+
+    Not the settings': #1293's whole failure was a provenance claim assembled from
+    ``Settings`` while the ingestor held nothing, and a description that merely repeated
+    its inputs would leave that possible one layer up.
+    """
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-answers",
+        reconciler_model="anthropic:claude-reconciles",
+        reconciler_max_conflicts=7,
+    )
+    harness = build_harness(
+        settings,
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider(),
+        observer=FakeObserver(),
+    )
+    try:
+        built = harness.reconciliation
+        assert built.route == "anthropic:claude-reconciles"
+        assert built.max_conflicts == 7
+        assert built.name == (
+            "ModelBackedReconciler(route=anthropic:claude-reconciles, max_conflicts=7)"
+        )
+    finally:
+        harness.close()
+
+
+def test_an_injected_reconciler_is_the_one_the_harness_reports(tmp_path: Path) -> None:
+    """A run builds one reconciler and shares it, so the harness must report what it was
+    handed rather than what the settings would have produced.
+
+    This is the property that makes ``manifest.reconciler`` an account of an object:
+    the settings here name a route the assertion below refuses to see, so a field
+    rebuilt from them cannot pass.
+    """
+    settings = Settings(
+        data_dir=tmp_path / "data",
+        embedder=EmbedderKind.HASHING,
+        default_model="anthropic:claude-answers",
+        reconciler_model="anthropic:claude-configured",
+    )
+    injected = build_reconciler(settings.model_copy(update={"reconciler_model": None}))
+    harness = build_harness(
+        settings,
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider(),
+        observer=FakeObserver(),
+        reconciler=injected,
+    )
+    try:
+        assert harness.reconciliation is injected
+        assert harness.reconciliation.route == "anthropic:claude-answers"
+        assert "claude-configured" not in harness.reconciliation.name
+    finally:
+        harness.close()
 
 
 def test_the_harness_reports_the_routes_the_settings_name(tmp_path: Path) -> None:
