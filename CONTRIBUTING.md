@@ -90,15 +90,16 @@ satisfies either anchor** (ADR-0166). So an anchor is the four static steps plus
 form of it — and the choice is yours at each anchor independently, with no
 justification owed and no reviewer entitled to require a particular one.
 
-**What discharges an anchor is a run that collected the whole suite** — not a
-command name. `just test-fast` forwards its arguments to `pytest`, so
-`just test-fast -k something` is a scoped selection and discharges nothing;
-so does any other filtering option, from any source, including `PYTEST_ADDOPTS`
-in your environment, which narrows `just check` exactly as readily (issue #1243).
-The filtering set is `-k`, `-m`, `-x`, `--lf`, `--ff`, `--deselect`, `--ignore`,
-`--ignore-glob` and a path or nodeid argument; `-n 4` and `-q` narrow nothing and
-are fine. **Read your own summary line** — the counts are the check. What
-ADR-0166 bought is a second *complete* run, not a licence to select.
+**What discharges an anchor is a run that collected the whole suite and executed
+it to a passing result** — not a command name. Anything that leaves it short
+leaves you with a scoped selection instead, whatever caused it and wherever it
+came from: a filtering option (`-k`, `-m`, `--lf`, `--ff`, `--deselect`,
+`--ignore`, `--ignore-glob`, a path or nodeid), an early stop (`-x`,
+`--maxfail`), or a collect-only mode — passed as a recipe argument, since
+`test-fast` forwards them, or sitting in `PYTEST_ADDOPTS` in your environment,
+which narrows `just check` exactly as readily (issue #1243). `-n 4` and `-q`
+change nothing that matters. **Read your own summary line** — the counts are the
+check. What ADR-0166 bought is a second *complete* run, not a licence to select.
 
 **What you give up by choosing it, and when not to.** `just test-fast` deselects
 `tests/core/test_protocol_triad.py` — 31 tests, and the mechanical enforcement of

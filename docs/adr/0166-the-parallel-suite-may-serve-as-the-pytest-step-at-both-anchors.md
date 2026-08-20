@@ -108,32 +108,43 @@ ADR-0136 §1's anchors, at the running agent's discretion.**
 > and no reviewer may require a particular one.
 
 > **Normative.** An anchor is discharged only by a run that **collected the whole
-> suite** — every test the tree declares, less the one file `just test-fast`
-> deselects. A run narrowed by a filtering option discharges nothing and is a
-> scoped selection under ADR-0136 §2, **whatever the source of the option**: an
-> argument to the recipe (`test-fast *args` forwards them to `pytest`),
-> `PYTEST_ADDOPTS`, a local `addopts`, or a disabled plugin. The filtering options
-> are the set `tests/conftest.py` records as `_FILTERING_OPTIONS` — `-k`, `-m`,
-> `-x`, `--lf`, `--ff`, `--deselect`, `--ignore`, `--ignore-glob` — plus a path or
-> a nodeid argument. An option that narrows nothing (`-n 4`, `-q`) leaves the
-> discharge intact.
+> suite and executed it to a passing result** — every test the tree declares, less
+> the one file `just test-fast` deselects, actually run, with no failure and no
+> skip beyond those the suite's own conditions declare. A run that falls short of
+> that discharges nothing and is a scoped selection under ADR-0136 §2, **whatever
+> made it fall short**: a filtering option (`-k`, `-m`, `--lf`, `--ff`,
+> `--deselect`, `--ignore`, `--ignore-glob`, a path or a nodeid — the set
+> `tests/conftest.py` records as `_FILTERING_OPTIONS`), an early stop (`-x`,
+> `--maxfail`), or a mode that collects without executing (`--collect-only`), and
+> **whatever its source**: an argument to the recipe (`test-fast *args` forwards
+> them to `pytest`), `PYTEST_ADDOPTS`, a local `addopts`, or a disabled plugin. An
+> option that changes neither what is collected nor whether it runs (`-n 4`, `-q`)
+> leaves the discharge intact.
 
 > **Normative.** ADR-0136 §6's clause "running it satisfies neither anchor unless
-> it runs the whole suite" no longer governs `just test-fast` where nothing
-> narrowed what it collected, whose one deselection is named and accepted in §3
-> below. It continues to govern every narrowed invocation of that recipe.
+> it runs the whole suite" no longer governs a `just test-fast` run meeting the
+> clause above, whose one deselection is named and accepted in §3 below. It
+> continues to govern every run of that recipe that does not.
 
 The permission is unconditional because the ruling is. It is stated as "either
 anchor" rather than "both" to leave no reading on which the two anchors take
 different runs: each anchor is discharged independently, and a branch may satisfy
 one with `just test-fast` and the other with the serial suite in either order.
 
-**The clause is a property of the run, not of the command line, because the
-command line is not the only way to narrow one.** `PYTEST_ADDOPTS='-k something'`
-reaches pytest through the environment and no inspection of the argv would see
-it. Written against the argv the rule would have been exactly as wide as the ways
-an author happens to know about, which is the shape of rule this ADR is trying not
-to write.
+**The second clause is a property of the run's outcome, not of the command line,
+and it is written that way on purpose.** The command line is not the only way to narrow
+a run — `PYTEST_ADDOPTS='-k something'` reaches pytest through the environment and
+no inspection of the argv would see it — and narrowing is not the only way to fall
+short of a suite that ran: `--collect-only` collects everything and executes
+nothing. A rule written against a list of flags would be exactly as wide as the
+ways an author happens to know about, and every invocation not on the list would
+read as permitted. Stated as an outcome, the flags in the clause are examples of
+how a run falls short rather than the definition of it, so a mode nobody here
+thought of is already outside.
+
+This does not add a requirement ADR-0136 did not have. §1 says the gate "is run,
+and passes"; that clause is retained whole (§4), and this one says what "the
+suite" in it now means. The two are read together, and neither alone.
 
 Two things bound what that clause is carrying. First, **the exposure is neither
 new nor this ADR's**: the same variable narrows `uv run pytest` and `just check`
@@ -156,9 +167,9 @@ command name" — and this ADR does name a command, so the argument that made §
 right has to be answered rather than dropped. It is answered by not letting the
 name do the work: what §1 admits is a *run that collected the whole suite*, and
 `just test-fast` is named only as the way to produce one 31 tests short of it. The
-moment anything narrows the collection further, from any source, it stops being
-the thing §1 admits. What ADR-0166 buys is a second *complete* run,
-not a licence to select.
+moment anything leaves that run short — narrowed, stopped early, or never
+executed — it stops being the thing §1 admits. What ADR-0166 buys is a second
+*complete* run, not a licence to select.
 
 **This is a rule and not a mechanism, exactly as ADR-0136's anchors are.** Nothing
 fires before `gh pr ready` to check that any anchor ran at all — ADR-0136's

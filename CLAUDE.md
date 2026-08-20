@@ -121,9 +121,10 @@ the obligation.
 **The anchor's `pytest` step is the serial suite *or* a bare `just test-fast`**
 (the suite across cores, about a minute — ADR-0166), your call at each anchor, no
 justification owed. What discharges an anchor is a run that **collected the whole
-suite**, so a filtering option from any source — a recipe argument, a
-`PYTEST_ADDOPTS` in your environment — makes it a scoped selection instead; read
-the summary line. `just test-fast` also deselects
+suite and executed it to a passing result**, so anything leaving it short — a
+filtering option, an early stop, a collect-only mode, passed as a recipe argument
+or sitting in `PYTEST_ADDOPTS` — makes it a scoped selection instead; read the
+summary line. `just test-fast` also deselects
 `tests/core/test_protocol_triad.py`, and nothing else, so prefer the serial run
 when your diff touches a Protocol or a canonical fake; CI catches a triad gap
 either way.
