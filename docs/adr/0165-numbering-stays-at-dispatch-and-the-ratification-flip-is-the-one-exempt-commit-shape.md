@@ -144,9 +144,9 @@ been, and cites its own number in its own text.
 > not an addition, deletion, rename, copy or binary change; the two blobs are
 > identical except on header lines, meaning lines preceding the file's first line
 > beginning `## `; the differing `Status` line reads exactly `- Status: Proposed`
-> in `P` and exactly `- Status: Accepted` in `C`; at most one further line
-> differs, and only the `- Date:` line may, with its value in `P` and in `C` each
-> matching four digits, a hyphen, two digits, a hyphen and two digits.
+> in `P` and exactly `- Status: Accepted` in `C`; and at most one further line
+> differs, which may only be the `- Date:` header line and may only take the
+> value `C`'s **own author date** carries, rendered `YYYY-MM-DD`.
 
 Every clause of that predicate is there to remove a way for content no reviewer
 read to ride along. One path, because a second file is unbounded. Modified and
@@ -156,9 +156,19 @@ a byte-identical patch identity can cover content nobody saw. Header lines only,
 because the Context, Decision and Consequences are the decision. Exact string
 equality on both `Status` values rather than a prefix match, because a prefix
 match on `Accepted` is precisely the defect PR #1242's round found: it silently
-deleted a qualifier the line carried. The `- Date:` clause is admitted because
-amendment 3 names it, and bounded to a date-shaped value on both sides because a
-free-form line is a channel.
+deleted a qualifier the line carried.
+
+**The `- Date:` clause is admitted because amendment 3 names the date stamp as
+part of the shape, and it is bound to the commit's own author date because
+anything looser is a channel.** A merely date-*shaped* value would let an
+unreviewed commit write `- Date: 1970-01-01`, which is historical metadata a
+reviewer could have rejected — the round-1 finding on this ADR, and correct. Tied
+to the author date the line is not free at all: it is a function of the commit
+being judged, so the recogniser reads it from `C` rather than trusting it, and
+"stamp the ratification date" is the only thing it can express. The author date
+rather than the committer date, because a rebase rewrites the second and
+preserves the first, and a lane that rebases before its final push must not
+thereby lose the exemption.
 
 > **Normative.** One implementation of §2's predicate serves both sides: the
 > recipe that *makes* a ratification flip and the check that *recognises* one are
@@ -485,11 +495,16 @@ would refuse it.
 rejected on the merits — it binds harder — but declined as scope here, and named
 as this ADR's Revisit condition (§5).
 
-**Drop the `- Date:` clause from §2's predicate.** It fired once in 121
-ratification commits, and dropping it would make the predicate one line shorter.
-Declined because amendment 3 names the date stamp as part of the shape, and
-bounding it to a date-shaped value on both sides costs one regular expression. If
-it never fires, a later narrowing is available and cheap.
+**Drop the `- Date:` clause from §2's predicate, or leave it merely
+date-shaped.** The first fired once in 121 ratification commits and would make
+the predicate one line shorter; the second is what this ADR proposed at round 1
+and is wrong, because a date-shaped value is still a value an unreviewed commit
+chooses. Neither is taken. Amendment 3 names the date stamp as part of the shape,
+so dropping it narrows the ruling rather than recording it; and tying the value to
+the commit's own author date removes the choice entirely, at the cost of one
+comparison, which is a smaller predicate than a regular expression over a free
+value. If the clause never fires, a later narrowing to one line stays available
+and cheap.
 
 ## Consequences
 
