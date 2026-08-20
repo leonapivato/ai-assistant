@@ -1980,3 +1980,19 @@ move to `Accepted` triggers nothing.
   reaches `ConversationLifecycle.export`, so adding one would be widening the
   surface under cover of pinning it — and ADR-0084 §5's argument for promoting the
   whole surface is an argument about the surface that *exists*.
+
+## Note (2026-08-20): §4's bare "§8" is ADR-0084 §8
+
+**A citation correction under ADR-0070 §1, appended rather than edited in; no
+decision changes.**
+
+§4's "Relocating an enum is not redefining it" paragraph reads: "`Disposition`
+keeps its five members and everything ADR-0037 ratified about them, including
+§8's refusal of a `FAILED` member". The bare `§8` there is **ADR-0084 §8** — "The
+disposition is the gate's verdict, not the step's outcome" — which is where that
+refusal was ratified, and which §7 of this ADR already names in full. It is not
+ADR-0037 §8, which does not exist (ADR-0037 has six numbered sections), and not
+this ADR's own §8, which is the size limit.
+
+ADR-0084 §4's own use of the same phrase needs no such note: there the bare `§8`
+is a reference to that ADR's own section, and it resolves. (#1109)

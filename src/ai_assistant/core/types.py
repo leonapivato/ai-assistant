@@ -8065,9 +8065,9 @@ class Disposition(StrEnum):
     be told, not an error.
 
     **Relocating an enum is not redefining it** (ADR-0084 §4). It kept its members
-    and everything ADR-0037 ratified about them, including §8's refusal of a
-    ``FAILED`` member, and the ``StrEnum`` base is unchanged so every existing
-    value string is byte-identical on the wire.
+    and everything ADR-0037 ratified about them, ADR-0084 §8's refusal to add a
+    ``FAILED`` member is unaffected by the move, and the ``StrEnum`` base is
+    unchanged so every existing value string is byte-identical on the wire.
 
     ``INVALID_PARAMETERS`` is ADR-0145 §4's addition and ``EGRESS_UNBINDABLE`` is
     ADR-0152 §9's, and adding a member is additive on the wire for the same reason
