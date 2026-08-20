@@ -475,10 +475,17 @@ async def submit_and_settle(
     # next instant, the file is what says a paid job exists.
     session.on_batch(BatchRef.of(handle, kind=kind, item_count=len(items)))
     # Here, rather than after the fetch, for the reason the file above is written here:
-    # what has happened by this line is that a provider accepted a billable job. A run
-    # whose batch then times out or whose fetch fails still stops cleanly and still
-    # rewrites its manifest, and a ledger that had recorded nothing would leave that
+    # what has happened by this line is that a provider accepted a billable job. A batch
+    # that then never settles stops the run cleanly through `RunAbortedError`, which
+    # rewrites the manifest — and a ledger that had recorded nothing would leave that
     # manifest describing a run whose largest single act is missing from it.
+    #
+    # **A `fetch` that raises is a different exit and this does not save it** (#1307): a
+    # `ModelError` out of `fetch` leaves `execute_run` past every handler, so no rewrite
+    # happens and the on-disk manifest stays the pre-run one — which is the tree's
+    # standing treatment of a traceback death (`RunManifest.aborted`: such a run "left no
+    # manifest claim either way"), and is why `batches.jsonl` rather than the manifest is
+    # the guard for a paid job.
     _report_submitted(session, kind=kind, items=items, model=model)
     session.announce(
         f"submitted {kind} batch {handle.batch_id} ({len(items)} items) under "

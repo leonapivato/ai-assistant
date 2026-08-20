@@ -602,9 +602,11 @@ class RunManifest(BaseModel):
             both.
 
             The field is written by rewriting ``manifest.json`` at the end of the
-            run. **The manifest is rewritten at most once**, after the last case, to
-            record this and ``batches`` — both being facts a run only has once it is
-            over. It is otherwise written once before any case runs, so an interrupted
+            run. **The manifest is rewritten exactly once**, after the last case, to
+            record this, ``batches`` and ``usage`` — each being a fact a run only has
+            once it is over. (It was rewritten only on a run that aborted or batched
+            until ``usage`` joined them, which every run has.) It is otherwise written
+            once before any case runs, so an interrupted
             run still says what it was, and the orphan guard that must survive an
             interruption is ``batches.jsonl`` rather than this file.
     """
