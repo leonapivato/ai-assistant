@@ -1,9 +1,18 @@
 """The overlay agent, spoken to over a socket that behaves like the real one.
 
 ADR-0124 §3 and §4 fix what this seam may and may not do, and both are testable
-here because the daemon is reached over a Unix socket: a fake one that speaks the
-same HTTP/1.1 answers exercises the parsing, the refusals and the "never from the
-peer" rule without a Tailscale installation.
+here because the daemon is reached over a Unix socket: a fake one that answers the
+way ``tailscaled`` answers exercises the parsing, the refusals and the "never from
+the peer" rule without a Tailscale installation.
+
+**"The way ``tailscaled`` answers" is the load-bearing half** (#1309). The fake here
+used to answer an unchunked HTTP/1.1 body and to carry ``StableID`` in the ``status``
+endpoint's ``Self`` — encoding the same two assumptions the code made, so a suite
+that was green throughout could not talk to a real daemon at all. It now does what
+was observed of the live one: Go's ``net/http`` frames an unmeasured HTTP/1.1
+response as ``Transfer-Encoding: chunked`` however ``Connection: close`` reads, and
+answers HTTP/1.0 unframed; ``status`` names a node's stable identifier ``ID``
+(``ipnstate.PeerStatus``) where ``whois`` names it ``StableID`` (``tailcfg.Node``).
 """
 
 from __future__ import annotations
@@ -29,14 +38,18 @@ from ai_assistant.wire.address import sun_path_limit
 from ai_assistant.wire.errors import ProtocolError
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable, Callable
     from pathlib import Path
 
 _HUB_ID: Final = "nHUBAAAACNTRL"
 _DEVICE: Final = "nLAPTOP1CNTRL"
 
 _STATUS: Final[dict[str, Any]] = {
-    "Self": {"StableID": _HUB_ID, "TailscaleIPs": ["100.64.0.9", "fd7a:115c:a1e0::9"]},
+    # `ID`, not `StableID`: `status` answers with an `ipnstate.PeerStatus`, which is
+    # a different Go type from `whois`'s `tailcfg.Node` and names the same identity
+    # differently. Verified against tailscaled: `status` Self.ID equals `whois`
+    # Node.StableID for the same node (#1309).
+    "Self": {"ID": _HUB_ID, "TailscaleIPs": ["100.64.0.9", "fd7a:115c:a1e0::9"]},
 }
 _WHOIS: Final[dict[str, Any]] = {
     "Node": {"StableID": _DEVICE, "Name": "laptop.example.ts.net"},
@@ -44,11 +57,36 @@ _WHOIS: Final[dict[str, Any]] = {
 }
 
 
+def _chunked(body: bytes) -> bytes:
+    """One body in the framing Go's ``net/http`` puts on an unmeasured 1.1 response."""
+    return b"%x\r\n%s\r\n0\r\n\r\n" % (len(body), body) if body else b"0\r\n\r\n"
+
+
 @contextlib.asynccontextmanager
 async def _daemon(
-    tmp_path: Path, answers: dict[str, tuple[int, bytes]]
+    tmp_path: Path,
+    answers: dict[str, tuple[int, bytes]],
+    *,
+    requests: list[str] | None = None,
+    always_chunk: bool = False,
 ) -> AsyncIterator[tuple[TailscaleAgent, list[str]]]:
-    """A fake local API on a Unix socket, and the paths it was asked for."""
+    """A fake local API on a Unix socket, and the paths it was asked for.
+
+    It answers the way the real daemon was observed to answer (#1309): an HTTP/1.1
+    request is framed ``Transfer-Encoding: chunked`` — Go's ``net/http`` does that to
+    a response it has not measured whatever ``Connection: close`` says, which is what
+    made every query fail against a live tailscaled — and an HTTP/1.0 request is
+    answered unframed, ending at close.
+
+    Args:
+        tmp_path: Where the socket is placed.
+        answers: What to answer per path, without its query string.
+        requests: If given, receives each raw request line, so a test can pin what
+            was actually asked rather than inferring it from what came back.
+        always_chunk: Frame the answer whatever version was asked in — a daemon
+            behaving worse than the observed one, which the client must refuse rather
+            than mis-read.
+    """
     asked: list[str] = []
 
     async def _serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
@@ -60,10 +98,22 @@ async def _daemon(
             # refusal rather than as an unretrieved task exception.
             writer.close()
             return
-        path = request.split(b"\r\n", 1)[0].split(b" ")[1].decode()
+        line = request.split(b"\r\n", 1)[0]
+        if requests is not None:
+            requests.append(line.decode())
+        path = line.split(b" ")[1].decode()
         asked.append(path)
+        version = line.split(b" ")[2].decode()
         status, body = answers.get(path.split("?")[0], (404, b""))
-        head = f"HTTP/1.1 {status} X\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+        if always_chunk or version == "HTTP/1.1":
+            head = (
+                f"{version} {status} X\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
+            )
+            body = _chunked(body)
+        else:
+            head = (
+                f"{version} {status} X\r\nContent-Length: {len(body)}\r\nConnection: close\r\n\r\n"
+            )
         writer.write(head.encode())
         # Written in two pieces so a client that read one packet and called it the
         # body fails here rather than on a machine with more overlay members.
@@ -202,7 +252,7 @@ async def test_a_status_naming_no_node_for_this_machine_is_refused(tmp_path: Pat
 async def test_a_status_with_no_addresses_is_refused(tmp_path: Path) -> None:
     """The discriminating half of the clause above: an identity alone does not let
     the hub decide whether the address it was configured with is on the overlay."""
-    async with _daemon(tmp_path, {"/localapi/v0/status": _ok({"Self": {"StableID": _HUB_ID}})}) as (
+    async with _daemon(tmp_path, {"/localapi/v0/status": _ok({"Self": {"ID": _HUB_ID}})}) as (
         agent,
         _,
     ):
@@ -247,7 +297,7 @@ async def test_this_machines_identity_with_no_utf8_form_is_refused_too(
     """The same value on the startup path, where it would otherwise escape the
     configuration-error clause and turn a legible stay-down refusal into an
     unclassified fault."""
-    surrogate = {"Self": {"StableID": "\ud800", "TailscaleIPs": ["100.64.0.9"]}}
+    surrogate = {"Self": {"ID": "\ud800", "TailscaleIPs": ["100.64.0.9"]}}
     async with _daemon(tmp_path, {"/localapi/v0/status": _ok_lenient(surrogate)}) as (agent, _):
         with pytest.raises(OverlayIdentityUnavailableError, match="no UTF-8 form"):
             await agent.hub_identity()
@@ -271,6 +321,92 @@ async def test_an_identity_at_the_bound_is_accepted(tmp_path: Path) -> None:
     longest = {"Node": {"StableID": "n" * MAX_OVERLAY_IDENTITY_BYTES}}
     async with _daemon(tmp_path, {"/localapi/v0/whois": _ok(longest)}) as (agent, _):
         assert await agent.identify("100.64.0.11", 41234) == "n" * MAX_OVERLAY_IDENTITY_BYTES
+
+
+# --- Speaking to a daemon that answers like the real one (#1309) ------------
+#
+# Both defects here were invisible to a green suite, because the fake encoded the
+# same assumptions the code did. These pin the daemon's observed behaviour rather
+# than the code's expectation of it, so a regression to either shows up as a failure
+# here instead of as a hub that exits 78 on a machine with Tailscale installed.
+
+
+async def test_the_query_asks_in_the_version_that_needs_no_framing(tmp_path: Path) -> None:
+    """The request line is the whole fix for the first defect, so it is pinned.
+
+    Asked in HTTP/1.1, Go's ``net/http`` frames an unmeasured response
+    ``Transfer-Encoding: chunked`` however ``Connection: close`` reads it — so the
+    read-to-EOF body carries chunk-size lines and fails ``json.loads``, which is every
+    query against a real daemon failing. HTTP/1.0 has no chunked encoding to reach
+    for, which is what lets this stay a fixed ``GET`` and no parser (ADR-0124 §3).
+    """
+    lines: list[str] = []
+    async with _daemon(tmp_path, {"/localapi/v0/status": _ok(_STATUS)}, requests=lines) as (
+        agent,
+        _,
+    ):
+        await agent.hub_identity()
+
+    assert lines == ["GET /localapi/v0/status HTTP/1.0"]
+
+
+async def test_a_framed_answer_is_refused_by_its_framing_and_not_by_its_content(
+    tmp_path: Path,
+) -> None:
+    """The fail-closed half: a daemon that frames anyway must not be mis-read.
+
+    Nothing stops a future daemon — or a proxy in front of one — framing a response
+    this transport cannot unwrap, and the failure that costs is the one #1309 records:
+    the chunk-size lines reach ``json.loads`` and the hub reports an agent "answering
+    with something that is not JSON", sending an operator to look at the daemon's
+    content when the problem is its envelope. Refused by name instead, and the
+    refusal is ADR-0124 §4's, which is the same one every other way of not knowing
+    takes.
+    """
+    async with _daemon(tmp_path, {"/localapi/v0/whois": _ok(_WHOIS)}, always_chunk=True) as (
+        agent,
+        _,
+    ):
+        with pytest.raises(OverlayIdentityUnavailableError, match="framed its answer"):
+            await agent.identify("100.64.0.11", 41234)
+
+
+@pytest.mark.parametrize(
+    ("path", "answer", "ask"),
+    [
+        # The `whois` record's member, on the `status` endpoint — the shape the hub
+        # read for as long as this seam existed, and one no real daemon sends.
+        (
+            "/localapi/v0/status",
+            {"Self": {"StableID": _HUB_ID, "TailscaleIPs": ["100.64.0.9"]}},
+            lambda agent: agent.hub_identity(),
+        ),
+        # And the converse: `status`'s member on a `tailcfg.Node`.
+        (
+            "/localapi/v0/whois",
+            {"Node": {"ID": _DEVICE}},
+            lambda agent: agent.identify("100.64.0.11", 41234),
+        ),
+    ],
+)
+async def test_a_record_is_read_by_the_member_that_endpoint_actually_carries(
+    path: str,
+    answer: dict[str, Any],
+    ask: Callable[[TailscaleAgent], Awaitable[object]],
+    tmp_path: Path,
+) -> None:
+    """The two endpoints answer with two Go types, and they name the identity apart.
+
+    ``status``'s ``Self`` is an ``ipnstate.PeerStatus`` (``ID``); ``whois``'s ``Node``
+    is a ``tailcfg.Node`` (``StableID``). Reading the wrong one finds nothing at all,
+    which is why the hub's startup query could never have worked against a real
+    daemon. Each is read by its own member rather than by trying both, because a
+    fallback would look for a member the type it is reading does not define — a guess
+    at the seam that exists to refuse guesses (ADR-0124 §6).
+    """
+    async with _daemon(tmp_path, {path: _ok(answer)}) as (agent, _):
+        with pytest.raises(OverlayIdentityUnavailableError, match="no stable identity"):
+            await ask(agent)
 
 
 # --- The custody conditions on a configured socket (#918) -------------------
