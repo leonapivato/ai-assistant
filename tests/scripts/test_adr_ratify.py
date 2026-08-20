@@ -360,6 +360,30 @@ def test_a_stale_tracking_ref_does_not_let_the_ratification_through(tmp_path: Pa
     assert not any(p.name.startswith("0101-a-decision") for p in (repo / "docs" / "adr").iterdir())
 
 
+def test_a_hook_that_rejects_the_commit_leaves_no_dirt_behind(tmp_path: Path) -> None:
+    """ "Restored" has to mean the next run can start, not just that HEAD moved back.
+
+    A commit hook that writes something and then rejects the commit is the case
+    ``git reset --hard`` alone does not cover: the file it wrote is untracked, so
+    the reset preserves it, and the *next* run — this one or `ship` — refuses on
+    a dirty tree having just been told the branch was restored.
+    """
+    repo = _adr_repo(tmp_path / "repo")
+    before = _git(repo, "rev-parse", "HEAD")
+    hook = repo / ".git" / "hooks" / "pre-commit"
+    hook.write_text("#!/bin/sh\nprintf 'x\\n' > hook-scratch.txt\nexit 1\n")
+    hook.chmod(0o755)
+
+    produced = _run(repo, "ratify", "--date", "2026-08-20")
+
+    assert produced.returncode == 1
+    assert "the branch is restored" in produced.stderr
+    assert _git(repo, "rev-parse", "HEAD") == before
+    assert _git(repo, "status", "--porcelain") == ""
+    assert not (repo / "hook-scratch.txt").exists()
+    assert (repo / "docs" / "adr" / "a-decision-worth-recording.md").exists()
+
+
 def test_the_run_offers_no_way_to_choose_a_different_base() -> None:
     """Every escape here is an escape from the property the exemption rests on."""
     help_text = _run(Path(__file__).parents[2], "ratify", "--help").stdout

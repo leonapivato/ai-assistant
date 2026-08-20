@@ -630,8 +630,19 @@ def _ratify(args: argparse.Namespace) -> int:
         # full disk or an I/O error there leaves the rename staged and no commit,
         # which is exactly the half-applied state this recovery exists to undo,
         # and it is not a ShapeError.
+        #
+        # `reset --hard` restores tracked files and nothing else, so on its own it
+        # leaves behind anything the failed attempt created but never tracked —
+        # the renamed file before it was staged, or a file a commit hook wrote on
+        # its way to rejecting the commit. Either one makes the *next* run refuse
+        # on a dirty tree, having just been told the branch was restored.
+        # `clean -fd` is exact rather than broad here, and only because of the
+        # precondition: `_refuse_unless_ready` required `git status --porcelain`
+        # to be empty, which counts untracked files, so everything it removes was
+        # created by this attempt. Ignored paths are left alone (no `-x`), which
+        # is what keeps `.review/` where it is.
         _git("reset", "--hard", before, cwd=root)
-        (root / new_path).unlink(missing_ok=True)
+        _git("clean", "-fdq", cwd=root)
         raise ShapeError(f"{exc} — the branch is restored to {before[:12]}") from exc
 
     print(f"ratified {path} → {new_path} as ADR-{number:04d} ({date})")
