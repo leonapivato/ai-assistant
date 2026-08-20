@@ -475,7 +475,49 @@ The mechanics of the role — clone inventory, brief contents, what to re-check
 before believing a report, merge sequencing — live in the `dispatch-agents`
 skill, alongside `pre-dispatch-survey`, which establishes the state its briefs
 are written against. Neither decides *what* the work is: `docs/roadmap.md` owns
-scope, and its legs are ordered.
+scope, and each of its tracks orders its own milestones.
+
+## The tracker
+
+GitHub issues are the whole tracker — ADR-0015 deleted the in-repo coordination
+files and did not replace them. Labels are how work is found, and they are a
+small fixed set (#1226 §6).
+
+**Track labels — at most one per issue.** A track is a standing program of work
+with a purpose, ordered milestones and driveable exits; `docs/roadmap.md` carries
+each one's shape and each track's issue carries its live state.
+
+- `track:web-client` — the browser client: gateway, conversation and
+  notifications, control surfaces, first-run. Live record: #1230.
+- `track:memory` — learning and memory quality, and the evaluation harness.
+  Live record: #1231.
+- `backlog` — **a label, not a track**: triaged, and on *no* track. It marks
+  opportunistic hardening and debt, and it is what distinguishes a triaged issue
+  from one nobody has looked at yet. Census: #1232.
+
+*At most one* `track:*` is the rule with teeth. An issue that would carry two is
+a finding that belongs to a subsystem another track has a lane open in: file it
+to the track that holds that subsystem, not to both (`docs/roadmap.md` →
+"Concurrency"). `backlog` is not a `track:*` label, and an issue carries it
+*instead of* one, never alongside.
+
+**Kind labels**, orthogonal to the track:
+
+- `ruling` — needs the owner. **`gh issue list -l ruling` is the return brief**:
+  it is what the owner reads when they come back, so it is the one label applied
+  the moment the issue is filed rather than lazily.
+- `batch` — a dispatch record: the lanes, the ADRs they carry, the run, the
+  outcome.
+- `qa` — a QA-run record (`.claude/skills/qa-leg`), the evidence a milestone's
+  exit is ruled on.
+
+Add another label on evidence, not in advance.
+
+**Label existing issues lazily, as you touch them.** There is no sweep owed and
+no obligation to label an issue you merely read; the labels become true as work
+passes through them. `ruling` is the exception above — an issue the owner owes a
+decision on is unreachable in the return brief until it carries one, so label it
+immediately.
 
 ## Git & commits
 
