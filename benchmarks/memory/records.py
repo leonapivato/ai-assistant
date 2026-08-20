@@ -26,6 +26,7 @@ from typing import TYPE_CHECKING, Final
 from pydantic import BaseModel, ConfigDict, Field
 
 from ai_assistant.core.types import BatchHandle, TraceKind, TraceRecordSet, TraceRef
+from benchmarks.memory.usage import UsageTotals
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -325,6 +326,20 @@ class QuestionRecord(BaseModel):
         context_chars: How large the rendered context block was. A crude proxy for
             how much the model had to read, kept because it costs nothing and a run
             whose contexts are near-empty is one to look at before its scores.
+        usage: What this question's own model calls sent and got back — the answering
+            call and, where one was made, the judging call. ``None`` on an artifact
+            written before the field existed, which is every run up to and including
+            pilot-5.
+
+            **The one figure it does not carry is tokens**, and it says so rather than
+            leaving them absent: no token count crosses the ``ai_assistant`` model seam,
+            so the harness measures characters and marks the token slots unavailable
+            (:mod:`benchmarks.memory.usage`, and #1305 for the contract surface that
+            would change it). Nothing here divides one into the other.
+
+            A question whose answering call failed still has a row here, carrying its
+            prompt and no reply — which is what distinguishes a question that cost
+            nothing from one that was paid for and produced no answer.
         ingestion: The case's ingestion summary, repeated on every record of that
             case. Denormalised deliberately: a JSONL line that cannot be read on its
             own is a format that invites a join, and the file is small.
@@ -364,6 +379,7 @@ class QuestionRecord(BaseModel):
     telemetry: RetrievalTelemetry
     asked_at: str
     context_chars: int
+    usage: UsageTotals | None = None
     ingestion: dict[str, int | float | str | list[str]]
 
 
@@ -547,6 +563,33 @@ class RunManifest(BaseModel):
             carries a ``reused_from`` marker beside the source's figures, so a reader
             holding one JSONL line and no manifest is not misled either.
 
+        usage: What every model call this run made sent and got back, by phase and by
+            route — #1292's "run totals (by model, by phase)". ``None`` on an artifact
+            written before the field existed.
+
+            **Read it against ``model_call_ceiling`` and against the plan.** The ``calls``
+            column is the same currency :func:`~benchmarks.memory.run.plan_run` reports
+            and :class:`~benchmarks.memory.spend.SpendGuard` charges, so a plan's four
+            rows and this object's four phases are directly comparable — which is the
+            first time a finished run has been able to say which of the planner's bounds
+            were tight.
+
+            **It is not a bill and carries no token count.** The reason is the ``core``
+            contract surface rather than an omission here: nothing crossing the model
+            seam carries usage (#1305), so the token slots are present, empty, and
+            carry :data:`~benchmarks.memory.usage.TOKENS_UNAVAILABLE` saying why. What
+            it does carry is the *shares*, measured — which is what turns one re-fetched
+            provider total into an apportioned account instead of a guess.
+
+            **It covers what the guard covers, no more.** An injected ``observer`` or
+            ``grader`` spends outside it, exactly as it spends outside the ceiling; a
+            scored run has no injected seam (clause 5 of
+            :func:`~benchmarks.memory.run.refuse_ineligible_scored_run`), so a scored
+            run's ledger is whole.
+
+            A **reused** run's ledger records only what *this* process spent: the
+            ingestion phases are absent, because it did none. The source run's are in
+            the source run's manifest.
         aborted: Why the run stopped before finishing, or ``None`` where it ran to
             completion.
 
@@ -600,6 +643,7 @@ class RunManifest(BaseModel):
     notes: str = ""
     model_call_ceiling: int | None = None
     reused_from: ReuseRef | None = None
+    usage: UsageTotals | None = None
     aborted: str | None = None
 
 

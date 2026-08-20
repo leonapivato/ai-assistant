@@ -88,6 +88,7 @@ from ai_assistant.orchestration import (
     ObservationStage,
 )
 from benchmarks.memory.clock import BenchmarkClock
+from benchmarks.memory.usage import UsagePhase
 
 if TYPE_CHECKING:
     from contextlib import AbstractAsyncContextManager
@@ -227,7 +228,13 @@ class Reconciliation:
             provider is what it holds; nothing else about it moves.
         """
         return Reconciliation(
-            model=guard.wrap(self.model), route=self.route, max_conflicts=self.max_conflicts
+            # `RECONCILIATION` and not `OBSERVATION`, although both are ingestion: the
+            # two are separate rows in the ledger because `plan_run` can bound only one
+            # of them tightly (`RunPlan.reconciler_calls` is a ceiling pilot-5 put five
+            # times above the truth), so a measured figure here is what nothing else has.
+            model=guard.wrap(self.model, phase=UsagePhase.RECONCILIATION, route=self.route),
+            route=self.route,
+            max_conflicts=self.max_conflicts,
         )
 
     @property
@@ -423,7 +430,7 @@ def build_embedder(settings: Settings) -> Embedder:
 
 
 def build_model_provider(
-    settings: Settings, spec: str, *, guard: SpendGuard | None = None
+    settings: Settings, spec: str, *, phase: UsagePhase, guard: SpendGuard | None = None
 ) -> ModelProvider:
     """One route, with retry and without routing.
 
@@ -437,6 +444,13 @@ def build_model_provider(
     Args:
         settings: Loaded application settings — the resilience knobs only.
         spec: The ``"provider:model"`` spec to use.
+        phase: Which of the run's paid seams this provider is being built to be. Required
+            rather than defaulted, and required even where no ``guard`` is passed: the
+            same three call sites build this seam for three different phases, and a
+            default would put whichever one forgot to say into somebody else's ledger row
+            under a route they share. An unguarded provider records nothing, so the value
+            is unused there — it is still asked for, because a parameter that is only
+            sometimes load-bearing is one a caller learns to leave out.
         guard: The run's spend guard, or ``None`` for an unguarded provider. Applied
             **outside** the retry, so a retried call is charged once — which is what
             ``plan_run`` counts, and therefore what a ceiling read off the plan means.
@@ -452,7 +466,7 @@ def build_model_provider(
     built: ModelProvider = RetryingProvider(
         PydanticAIProvider(spec), policy=RetryPolicy.from_settings(settings)
     )
-    return built if guard is None else guard.wrap(built)
+    return built if guard is None else guard.wrap(built, phase=phase, route=spec)
 
 
 def reconciler_spec(settings: Settings) -> str:
@@ -538,7 +552,9 @@ def build_reconciler(settings: Settings) -> Reconciliation:
     """
     route = reconciler_spec(settings)
     return Reconciliation(
-        model=build_model_provider(settings, route),
+        # Unguarded here by design (above), so the phase labels nothing yet — it is
+        # applied by `Reconciliation.guarded_by`, at the one layer that wraps.
+        model=build_model_provider(settings, route, phase=UsagePhase.RECONCILIATION),
         route=route,
         max_conflicts=settings.reconciler_max_conflicts,
     )
@@ -672,9 +688,13 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
         settings.observer_model if settings.observer_model is not None else settings.default_model
     )
     answering = (
-        build_model_provider(settings, model_route, guard=guard)
+        build_model_provider(settings, model_route, phase=UsagePhase.ANSWERING, guard=guard)
         if model is None
-        else (model if guard is None else guard.wrap(model))
+        else (
+            model
+            if guard is None
+            else guard.wrap(model, phase=UsagePhase.ANSWERING, route=model_route)
+        )
     )
     # Above the stores, with the answering seam and for its reason: a reconciler route
     # naming an uninstalled vendor should fail before this function has opened four
@@ -758,7 +778,9 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
             # no event times in the observation prompt while reporting a healthy run,
             # so the measurement of ADR-0156 would be void rather than negative (#1171).
             else ModelBackedObserver(
-                build_model_provider(settings, observer_route, guard=guard),
+                build_model_provider(
+                    settings, observer_route, phase=UsagePhase.OBSERVATION, guard=guard
+                ),
                 now=clock,
                 timezone=settings.timezone,
                 max_batch_size=settings.observation_batch_size,

@@ -56,6 +56,7 @@ from ai_assistant.core.types import BatchOutcomeKind, BatchRequest, BatchState
 from benchmarks.memory.grade import Grading, Verdict, grading_from_reply, judge_messages
 from benchmarks.memory.records import BatchRef
 from benchmarks.memory.spend import RunAbortedError, SpendGuard
+from benchmarks.memory.usage import BatchItemUsage, UsagePhase, prompt_chars
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -73,8 +74,10 @@ __all__ = [
     "ITEM_ID_PATTERN",
     "JUDGE_BATCH",
     "JUDGE_ITEM_SUFFIX",
+    "PHASE_BY_BATCH",
     "BatchFile",
     "BatchSession",
+    "BatchUsage",
     "PollPolicy",
     "PreparedQuestion",
     "answer_batch",
@@ -86,6 +89,18 @@ __all__ = [
 #: The two batches a run submits, named in ``batches.jsonl`` and in the manifest.
 ANSWER_BATCH: Final = "answer"
 JUDGE_BATCH: Final = "judge"
+
+#: Which ledger phase each of the two batches spends on.
+#:
+#: A mapping rather than a conditional at the one call site, so that a third batch — were
+#: one ever added — fails with a ``KeyError`` naming itself rather than quietly acquiring
+#: the phase whichever branch happened to be the ``else``. That is the same discipline
+#: ``BatchFailureKind``'s disposition tables use, and for the same reason: a new member
+#: must not inherit a classification nobody chose.
+PHASE_BY_BATCH: Final[Mapping[str, UsagePhase]] = {
+    ANSWER_BATCH: UsagePhase.ANSWERING,
+    JUDGE_BATCH: UsagePhase.JUDGING,
+}
 
 #: How long to wait between polls. A minute, because ADR-0143 §2 makes ``poll`` one
 #: bounded exchange and a batch takes tens of minutes: polling faster buys nothing
@@ -312,6 +327,17 @@ class PreparedQuestion:
 #: What a caller does with a batch the provider has just accepted.
 type BatchFile = Callable[[BatchRef], None]
 
+#: What a caller does with one settled item's measured usage.
+#:
+#: **Attribution here has to be explicit, because the batched phase has no "current"
+#: question to be inside.** On the synchronous path the run is one question at a time and
+#: :class:`~benchmarks.memory.usage.UsageLedger`'s scope is enough; here every question is
+#: retrieved for, all of them are submitted at once, and the answers arrive hours later
+#: after each case's stores have been closed and deleted. So the item reports its own
+#: figures and the caller joins them back by ``item_id``, which is the same join ADR-0143
+#: §4 already requires for the outcomes themselves.
+type BatchUsage = Callable[[BatchItemUsage], None]
+
 
 @dataclass(frozen=True, slots=True)
 class BatchSession:
@@ -333,6 +359,16 @@ class BatchSession:
         on_batch: Called with each accepted batch **before anything waits on it**.
         poll: How long to wait and how often to ask.
         announce: Where to print progress for an operator watching a paid run.
+        route: The ``"provider:model"`` spec the answering batch goes to — the run's
+            answering route, which is what :func:`~benchmarks.memory.wiring.build_batch_completer`
+            gives the completer as its default. Carried here because a submission that
+            passes no per-batch override has no other way to say where it went, and a
+            ledger row reading ``route=""`` would be a measurement nobody could attribute
+            to a model. The judge batch names its own route at submission and does not
+            read this.
+        on_usage: Called once per settled item with what it sent and got back, or
+            ``None`` to record nothing. Default ``None`` so a caller assembling a session
+            for a test is not obliged to care.
     """
 
     completer: BatchCompleter
@@ -341,6 +377,8 @@ class BatchSession:
     on_batch: BatchFile
     poll: PollPolicy
     announce: Callable[[str], None]
+    route: str = ""
+    on_usage: BatchUsage | None = None
 
 
 def _outcome_failure(outcome: BatchItemOutcome | None) -> str | None:
@@ -442,7 +480,50 @@ async def submit_and_settle(
     )
     await _wait_for(session, handle, kind=kind)
     outcomes = await session.completer.fetch(handle)
-    return {outcome.item_id: outcome for outcome in outcomes}
+    settled = {outcome.item_id: outcome for outcome in outcomes}
+    _report_usage(session, kind=kind, items=items, outcomes=settled, model=model)
+    return settled
+
+
+def _report_usage(
+    session: BatchSession,
+    *,
+    kind: str,
+    items: Sequence[BatchRequest],
+    outcomes: Mapping[str, BatchItemOutcome],
+    model: str | None,
+) -> None:
+    """Report what each submitted item sent and got back.
+
+    **Driven off ``items`` rather than off ``outcomes``, and the direction matters.**
+    ADR-0143 §4 promises one outcome per submitted item, but an item whose outcome is
+    missing, expired, cancelled or failed is exactly the item an operator reading a bill
+    most needs to see: it was submitted, so it was charged, and it bought nothing. Walking
+    the outcomes instead would drop those rows and make a partly-failed batch look cheaper
+    than it was.
+
+    Args:
+        session: The run's session, for its recorder and its default route.
+        kind: :data:`ANSWER_BATCH` or :data:`JUDGE_BATCH`.
+        items: What was submitted.
+        outcomes: What came back, keyed by ``item_id``.
+        model: The per-batch route override, or ``None`` for the completer's default.
+    """
+    if session.on_usage is None:
+        return
+    phase = PHASE_BY_BATCH[kind]
+    route = model if model is not None else session.route
+    for item in items:
+        reply, _failure = _reply_of(outcomes.get(item.item_id))
+        session.on_usage(
+            BatchItemUsage(
+                item_id=item.item_id,
+                phase=phase,
+                route=route,
+                prompt_chars=prompt_chars(item.messages),
+                reply_chars=len(reply),
+            )
+        )
 
 
 async def _wait_for(session: BatchSession, handle: BatchHandle, *, kind: str) -> None:
