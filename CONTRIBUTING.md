@@ -631,7 +631,10 @@ content, and a linear history where each commit keeps its `Refs:` trailer.
   entire human one. Note in the PR description any `blocker`/`major` finding you
   waived, with its rationale, and link the issues you filed for findings you
   deferred. **A merge therefore needs no `--admin`:** reach for the bypass only
-  to override a genuinely red or stale gate, and say why in the PR.
+  for a *stale* gate — a branch `strict` is holding because it is behind `main`
+  — and say why in the PR. A **red** gate is never a case for it: ADR-0010 rules
+  that nothing crosses the gate red, whatever the flag mechanically reaches (see
+  the divergence note below).
 - **Rebase and merge.** Rebase your branch onto `main` and merge via GitHub's
   *Rebase and merge* so linear history holds and each commit keeps its
   `Refs: ADR-NNNN` trailer. Delete the branch after merge.
