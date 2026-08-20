@@ -215,7 +215,7 @@ the work:
 
 ```bash
 just ship        # posts the recorded review(s) to the PR
-gh pr ready      # flip it out of draft
+just ready       # flip it out of draft — refuses on an unratified ADR
 ```
 
 **An agent does not ask permission for any of this** — not to run the review,
@@ -242,6 +242,29 @@ accepted (ADR-0027 §2):
 
 It also refuses on a dirty tree, on `main`, and when the PR head is behind local
 `HEAD`.
+
+**One commit shape is exempt, and it is one line** (ADR-0165 §2): a `HEAD` that
+modifies exactly one `docs/adr/NNNN-*.md`, turning the header's single
+`- Status: Proposed` into `- Status: Accepted` and changing no other byte — the
+`- Date:` line included. There, and only there, the two content inputs above are
+read from `HEAD`'s **parent**, because the decision text such a commit ratifies
+is byte for byte the text the reviewer already returned green on. `just
+adr-ratify` makes that commit and `ship` recognises it by rebuilding the file
+from its parent's with the same transform, so producer and recogniser cannot
+drift apart; `ship` then discloses the exemption in the comment it posts (§4).
+The re-anchoring is not recursive, and it changes nothing about the floor or the
+drift record below — those govern a *base move*, not a commit the PR carries.
+Everything larger — a ratification note, an amendment record, a restamped date, a
+second ADR — falls outside the shape and costs its round. "Finishing an ADR PR"
+carries the sequence.
+
+**`just ready`, not bare `gh pr ready`.** It is the documented recipe, and it
+refuses to leave draft while an ADR this PR adds or modifies still reads
+`- Status: Proposed`, naming the file (ADR-0165 §5, issue #1044). Typing `gh pr
+ready` directly is not stopped by it — that command is GitHub's, not this
+repository's — which is an accepted limit rather than one engineered around: both
+of #1044's occurrences were lanes following the documented sequence and skipping
+a step of it.
 
 **Before pushing a rebase, ask `ship` which path applies rather than working it
 out** — `scripts/ship.sh --drill` (`just drill`) runs this same acceptance rule
@@ -385,26 +408,48 @@ something. It is written down once here so a lane does not re-derive it:
    for one deciding a contract surface ("Stop when the required reviews are
    green").
 2. **Flip `Proposed` → `Accepted` only once that whole set is green on one
-   tree.** Two lenses that came back clean on trees the ADR has since moved off
-   have not agreed with each other about the thing being ratified. Ratifying
-   ahead of them ratifies a decision the reviewer was still entitled to change.
-   The flip itself is a permitted in-place header edit (ADR-0070 §1).
-3. **Then re-run the required reviews on the flipped tree.** This is not a
-   judgement call and not a symptom of anything: the flip edits a reviewed byte,
-   so the recorded tree no longer equals `HEAD`'s and the unmoved-base path
-   refuses — "(a) — ADR-0020 §3 exactly as written. The tree is the whole test
-   here.", in `scripts/ship.sh`'s artifact-selection loop. The moved-base path
-   does not rescue it either, since the flip changes the reviewed patch identity
-   as well. "Trivial ADR edits" above says the flip earns no review *of the edit
-   itself*, and it does not — nothing in the re-run triages a status line. What
-   the re-run buys is **coverage**, which is mechanical, and no exemption in this
-   document lifts it. **ADR-0020 is not in tension with this step; it is what
-   obliges it.** Its §3 keeps the tree comparison mechanical — a review "taken
-   against different content or a different base" will "still fail, mechanically,
-   as before" — so ADR-0020 is itself the rule under which the flipped tree is
-   refused, and it cannot both mandate that refusal and forbid the round that
-   clears it. The round is cheap by construction: the flipped tree differs from
-   the one already judged by a status line.
+   tree**, and make the flip with **`just adr-ratify`**. Two lenses that came
+   back clean on trees the ADR has since moved off have not agreed with each
+   other about the thing being ratified. Ratifying ahead of them ratifies a
+   decision the reviewer was still entitled to change. The flip itself is a
+   permitted in-place header edit (ADR-0070 §1).
+3. **Then re-run the required reviews on the flipped tree — unless the flip
+   commit is the one exempt shape, in which case there is nothing to re-run.**
+   ADR-0165 §2 defines that shape and it is one line: **one ADR file, the
+   header's single `- Status: Proposed` becoming `- Status: Accepted`, and no
+   other byte — the `- Date:` line included.** `just adr-ratify` makes exactly
+   that commit, and `ship` recognises it by rebuilding the file from its parent's
+   with the same transform, so the two cannot disagree. Where `HEAD` is that
+   shape, ADR-0027 §2's acceptance loop reads `HEAD`'s **parent** for the tree
+   and the patch identity it compares — the decision text the flip ratifies is
+   byte for byte the text the reviewer already returned green on — and `ship`
+   says so in the comment it posts (ADR-0165 §4). The re-anchoring stops there:
+   it is not recursive, and it touches neither ADR-0027 §3's floor nor §4's
+   drift record, which govern a base move rather than a commit the PR carries.
+
+   **Anything larger costs the round, exactly as before**, and that is the
+   fail-closed direction rather than an oversight: a flip commit that also
+   appends a ratification note, or applies the amendment records the ADR
+   schedules for its own ratification, or restamps the `- Date:` line, or fixes a
+   typo, or flips two ADRs at once, carries text no reviewer has read. So it
+   falls outside the shape, and the round it costs is a real one. You choose:
+   write the note and pay, or keep the flip bare and don't. Both are correct.
+
+   When the round *is* owed, it is not a judgement call and not a symptom of
+   anything: the flip edits a reviewed byte, so the recorded tree no longer
+   equals `HEAD`'s and the unmoved-base path refuses — "(a) — ADR-0020 §3 exactly
+   as written. The tree is the whole test here.", in `scripts/ship.sh`'s
+   artifact-selection loop. The moved-base path does not rescue it either, since
+   the flip changes the reviewed patch identity as well. "Trivial ADR edits"
+   above says the flip earns no review *of the edit itself*, and it does not —
+   nothing in the re-run triages a status line. What the re-run buys is
+   **coverage**, which is mechanical. **ADR-0020 is not in tension with this
+   step; it is what obliges it.** Its §3 keeps the tree comparison mechanical — a
+   review "taken against different content or a different base" will "still fail,
+   mechanically, as before" — so ADR-0020 is itself the rule under which the
+   flipped tree is refused, and it cannot both mandate that refusal and forbid
+   the round that clears it. The round is cheap by construction: the flipped tree
+   differs from the one already judged by a status line.
 
    **This does not turn a green set into a checkpoint.** What "Stop when the
    required reviews are green" forbids is committing *again to improve* content a
@@ -430,8 +475,15 @@ something. It is written down once here so a lane does not re-derive it:
    after". So the corrected decision earns the whole required set green on the
    corrected `Proposed` tree before it is flipped a second time — which is why an
    ADR taking this route records itself as ratified *on its second flip*.
-4. **`just ship`, then `gh pr ready`, then merge** — on your own judgement, like
-   any other change ("Report the review, then mark it ready").
+4. **`just ship`, then `just ready`, then merge** — on your own judgement, like
+   any other change ("Report the review, then mark it ready"). `just ready` is
+   the documented way out of draft and the only one carrying ADR-0165 §5's
+   guard: it refuses while any ADR this PR adds or modifies still reads
+   `- Status: Proposed`, and names the file. That is issue #1044 — two lanes in
+   two days shipped ready with the flip never made, and nothing mechanical caught
+   either. The refusal sits at the ready boundary and nowhere else, because an
+   ADR is `Proposed` for its whole reviewed life and `just ship` must keep
+   posting intermediate rounds on one.
 5. **Nothing implements against the ADR until that merge** (ADR-0015 §5, golden
    rule 5).
 
@@ -561,10 +613,12 @@ content, and a linear history where each commit keeps its `Refs:` trailer.
   commit, open it as a **draft**, before the work is done. CI runs on every push
   so you get the gate continuously, and the dispatcher can see your direction
   (and any contract change) while redirecting is still cheap. Mark it **ready for
-  review** when the change is complete — your call, made without asking (see
-  "Report the review, then mark it ready"). Nothing automated fires on that
-  transition (ADR-0015); it is the signal to the dispatcher that the lane is done
-  and ready to be verified and merged.
+  review** with `just ready` when the change is complete — your call, made
+  without asking (see "Report the review, then mark it ready"). Nothing automated
+  fires on the transition itself (ADR-0015); it is the signal to the dispatcher
+  that the lane is done and ready to be verified and merged. What `just ready`
+  adds runs *before* it: ADR-0165 §5's refusal on an ADR still standing
+  `Proposed`.
 - **CI gates the PR.** The `gate` workflow runs the full Definition-of-Done gate
   on every PR and push; a PR cannot merge while it is red. This is enforced for
   everyone. Run the full gate locally at ADR-0136's two anchors anyway — CI is

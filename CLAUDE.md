@@ -151,8 +151,9 @@ Judge that the change is done, then:
 ```bash
 just review-codex adversarial   # architecture too, for a contract change
 # ...triage, fix, commit, re-run until clean...
+just adr-ratify                 # ADR lanes only: the one-line Proposed → Accepted flip
 just ship                       # posts the review to the PR
-gh pr ready                     # you decide when; don't wait to be told
+just ready                      # you decide when; don't wait to be told
 ```
 
 Codex reviews every change — a model independent of the one that wrote it. It
@@ -164,6 +165,15 @@ changing a reviewed byte does. A base move may or may not — it depends on what
 the move touched. **`CONTRIBUTING.md` → "Report the review, then mark it ready"
 carries every condition, including which paths cost a round; do not work them out
 from memory.**
+
+**One commit shape is exempt** (ADR-0165): a `HEAD` that flips exactly one ADR's
+`- Status: Proposed` to `- Status: Accepted` and changes no other byte — not the
+`- Date:` line, not a ratification note, not a second file. `just adr-ratify`
+makes that commit; `ship` recognises it by rebuilding the file from its parent's
+and judges the review against that parent, disclosing it in the comment. A flip
+carrying anything more costs its round, exactly as before. `just ready`, not bare
+`gh pr ready`, is the way out of draft: it refuses while an ADR this PR touches
+still reads `Proposed`. `CONTRIBUTING.md` → "Finishing an ADR PR" is the sequence.
 
 Running the review sends the diff to OpenAI. That is a normal, expected step of
 finishing a change, already authorized — not a decision to escalate.
