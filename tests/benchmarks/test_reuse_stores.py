@@ -45,6 +45,7 @@ from benchmarks.memory.reuse import (
 )
 from benchmarks.memory.run import execute_run, plan_run
 from benchmarks.memory.select import first_sessions
+from harness_reconcilers import offline_reconciler
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.testing import FakeModelProvider, FakeObserver
@@ -53,6 +54,8 @@ from ai_assistant.testing.batch import FakeBatchCompleter, ProgrammedOutcome
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
+
+    from benchmarks.memory.wiring import Reconciliation
 
     from ai_assistant.core.protocols import Observer
     from ai_assistant.core.types import (
@@ -209,6 +212,7 @@ async def _ingest(  # noqa: PLR0913 — each argument is one axis a test varies,
         model=FakeModelProvider("a dog"),
         observer=observer if observer is not None else FakeObserver(max_batch_size=BATCH),
         keep_stores=keep_stores,
+        reconciler=offline_reconciler(),
     )
     return manifest, root / manifest.run_id
 
@@ -225,6 +229,7 @@ async def _reanswer(  # noqa: PLR0913 — as above: one argument per axis a case
     phase: RunPhase = RunPhase.SYNC,
     completer: _SettlingCompleter | None = None,
     keep_stores: bool = False,
+    reconciler: Reconciliation | None = None,
 ) -> tuple[RunManifest, Path]:
     """Answer the same cases again over ``source_id``'s stores.
 
@@ -240,6 +245,10 @@ async def _reanswer(  # noqa: PLR0913 — as above: one argument per axis a case
         phase: Synchronous or batched.
         completer: The bulk-inference seam, under ``BATCH``.
         keep_stores: Whether this run's own copies survive it.
+        reconciler: ADR-0159's reconciler this run wires, defaulting to a fresh offline
+            one. A reused run never reaches it — which is the point of the argument: a
+            case can give this run a *distinguishable* reconciler and check that the
+            manifest still names the one that ingested.
 
     Returns:
         The manifest and the run's directory.
@@ -259,6 +268,7 @@ async def _reanswer(  # noqa: PLR0913 — as above: one argument per axis a case
         issuer=ISSUER,
         poll=PollPolicy(interval=0.0, timeout=5.0),
         keep_stores=keep_stores,
+        reconciler=reconciler if reconciler is not None else offline_reconciler(),
     )
     return manifest, root / manifest.run_id
 
@@ -554,6 +564,26 @@ class TestTheArtifactsSayItDidNotIngest:
         manifest, _ = await _ingest(tmp_path / "runs", tmp_path)
 
         assert manifest.reused_from is None
+
+    async def test_the_reconciler_named_is_the_one_that_ingested(self, tmp_path: Path) -> None:
+        """A reused pass writes no belief and so crosses no conflict.
+
+        Reporting *its* reconciler would have the manifest claim ADR-0159 ruled on
+        crossings that never happened — the same false provenance #1293 records, one
+        run removed. This run is given a deliberately distinguishable reconciler so a
+        field left describing the wrong object cannot pass by coincidence.
+        """
+        root = tmp_path / "runs"
+        source, _ = await _ingest(root, tmp_path)
+
+        manifest, _ = await _reanswer(
+            root, tmp_path, source.run_id, reconciler=offline_reconciler(max_conflicts=9)
+        )
+
+        assert manifest.reconciler == source.reconciler
+        assert manifest.reconciler is not None
+        assert "max_conflicts=3" in manifest.reconciler
+        assert "max_conflicts=9" not in manifest.reconciler
 
     async def test_the_observer_side_fields_describe_the_run_that_distilled(
         self, tmp_path: Path

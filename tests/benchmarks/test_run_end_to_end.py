@@ -29,6 +29,7 @@ from benchmarks.memory.records import QuestionRecord, RunManifest, RunMode, read
 from benchmarks.memory.run import case_dir_name, execute_run, plan_run
 from benchmarks.memory.select import first_questions, first_sessions
 from benchmarks.memory.wiring import build_harness
+from harness_reconcilers import OFFLINE_ROUTE, offline_reconciler
 
 from ai_assistant.app import composition
 from ai_assistant.core.config import EmbedderKind, Settings
@@ -189,6 +190,7 @@ async def _run(
         settings=settings,
         model=FakeModelProvider("a dog"),
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
     return manifest, root / manifest.run_id
 
@@ -203,12 +205,38 @@ def test_plan_counts_exchanges_and_passes_without_touching_anything() -> None:
     assert plan.observation_calls == 2
     assert plan.answer_calls == 2
     assert plan.judge_calls == 1  # the unanswerable one needs no judge call
-    assert plan.model_calls == 5
+    # One reconciler request per proposal at most, and a pass yields at most
+    # `max_proposals` of them — the loosest of the four bounds, and the reason it is
+    # its own field rather than folded silently into the total (#1293).
+    assert plan.reconciler_calls == 6
+    assert plan.model_calls == 11
+
+
+def test_the_plan_s_total_leaves_out_no_seam_that_spends() -> None:
+    """A seam missing from the total is a seam ``--max-model-calls`` does not bound.
+
+    Not hypothetical: the reconciler spent nothing for two pilots because it was never
+    wired (#1293), and the first thing wiring it does is put thousands of paid calls
+    behind a ceiling computed without them. Stated over the fields rather than a
+    literal, so the next seam to arrive fails here unless it is counted.
+    """
+    plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS)
+
+    assert plan.model_calls == (
+        plan.observation_calls + plan.answer_calls + plan.judge_calls + plan.reconciler_calls
+    )
 
 
 def test_plan_refuses_a_non_positive_batch() -> None:
     with pytest.raises(ValueError, match="must be positive"):
         plan_run(LOCOMO, (_case(),), batch_size=0, max_proposals=PROPOSALS)
+
+
+def test_plan_refuses_a_non_positive_proposal_ceiling() -> None:
+    """The bound the reconciler's ceiling is computed from, refused on the terms the
+    batch size beside it is refused on."""
+    with pytest.raises(ValueError, match="max_proposals must be positive"):
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=0)
 
 
 async def test_a_run_writes_a_manifest_naming_its_mode(tmp_path: Path) -> None:
@@ -236,6 +264,41 @@ async def test_the_manifest_records_the_configuration_rather_than_describing_it(
     assert manifest.answer_prompt.startswith("You are answering a question")
     # The offline grader makes no model call, so there is no judge prompt to record.
     assert manifest.judge_prompt is None
+
+
+async def test_the_manifest_names_the_reconciler_that_was_built_not_the_one_configured(
+    tmp_path: Path,
+) -> None:
+    """#1293's failure, made unreachable: the field is an account of an object.
+
+    Two pilots exported ``ASSISTANT_RECONCILER_MODEL`` and recorded it while
+    ``build_harness`` passed no reconciler at all, so the manifest named a mechanism
+    that had never run. A field assembled from ``Settings`` cannot tell those apart —
+    it is true either way. This run therefore configures one route and injects a
+    reconciler naming another, and asserts the manifest reports what was *built*: a
+    field rebuilt from the settings would say ``claude-configured`` here.
+    """
+    settings = _settings(tmp_path).model_copy(
+        update={"reconciler_model": "anthropic:claude-configured"}
+    )
+    root = tmp_path / "runs"
+    manifest = await execute_run(
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
+        output_root=root,
+        mode=RunMode.SMOKE,
+        corpus_digests={},
+        settings=settings,
+        model=FakeModelProvider("a dog"),
+        observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
+    )
+
+    written = json.loads((root / manifest.run_id / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest.reconciler is not None
+    assert OFFLINE_ROUTE in manifest.reconciler
+    assert "claude-configured" not in manifest.reconciler
+    # And it reached the artifact, which is the only copy an analysis has.
+    assert written["reconciler"] == manifest.reconciler
 
 
 async def test_a_manifest_written_before_the_episodic_supplement_still_loads(
@@ -401,6 +464,7 @@ async def test_the_answer_reads_only_retrieved_context(tmp_path: Path) -> None:
         settings=settings,
         model=model,
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
 
     sent = "\n".join(message.content for message in model.calls[0].messages)
@@ -459,6 +523,7 @@ async def test_keeping_the_stores_is_available(tmp_path: Path) -> None:
         model=FakeModelProvider("a dog"),
         observer=FakeObserver(max_batch_size=BATCH),
         keep_stores=True,
+        reconciler=offline_reconciler(),
     )
 
     kept = root / manifest.run_id / "cases" / case_dir_name("conv-test")
@@ -498,6 +563,7 @@ async def test_colliding_keys_get_their_own_stores(tmp_path: Path) -> None:
         model=FakeModelProvider("a dog"),
         observer=FakeObserver(max_batch_size=BATCH),
         keep_stores=True,
+        reconciler=offline_reconciler(),
     )
 
     run_dir = root / manifest.run_id
@@ -523,7 +589,11 @@ async def test_a_degraded_capture_does_not_cost_the_episode_before_it(tmp_path: 
     settings = _settings(tmp_path)
     observer = FakeObserver(max_batch_size=BATCH)
     harness = build_harness(
-        settings, data_dir=tmp_path / "case", model=FakeModelProvider("x"), observer=observer
+        settings,
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider("x"),
+        observer=observer,
+        reconciler=offline_reconciler(),
     )
     real_capture = harness.lifecycle.capture
     # The *middle* exchange of three, so the degraded turn sits between two successes.
@@ -614,6 +684,7 @@ async def test_an_answering_failure_does_not_end_the_run(tmp_path: Path) -> None
         settings=_settings(tmp_path),
         model=model,
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
 
     records = read_jsonl(tmp_path / "runs" / manifest.run_id / "records.jsonl", QuestionRecord)
@@ -640,6 +711,7 @@ async def test_a_failed_answer_keeps_the_retrieval_it_actually_made(
         settings=_settings(tmp_path),
         model=_FailsOnceProvider(fail_on=1),
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
 
     failed = read_jsonl(tmp_path / "runs" / manifest.run_id / "records.jsonl", QuestionRecord)[0]
@@ -664,6 +736,7 @@ async def test_the_manifest_records_a_session_bound(tmp_path: Path) -> None:
         model=FakeModelProvider("a dog"),
         observer=FakeObserver(max_batch_size=BATCH),
         max_sessions=2,
+        reconciler=offline_reconciler(),
     )
 
     assert manifest.max_sessions == 2
@@ -699,6 +772,7 @@ async def test_a_scored_run_cannot_truncate_in_selection_and_declare_nothing(
             grader_kind="model",
             preregistration_final=True,
             max_sessions=0,
+            reconciler=offline_reconciler(),
         )
 
     assert not (tmp_path / "runs").exists()
@@ -722,6 +796,7 @@ async def test_a_scored_run_sees_a_bound_a_question_limit_passed_through(
             settings=settings,
             grader_kind="model",
             preregistration_final=True,
+            reconciler=offline_reconciler(),
         )
 
 
@@ -743,6 +818,7 @@ async def test_a_scored_run_is_refused_when_the_plan_records_no_selection(
             settings=settings,
             grader_kind="model",
             preregistration_final=True,
+            reconciler=offline_reconciler(),
         )
 
 
@@ -758,6 +834,7 @@ async def test_the_manifest_records_a_bound_no_caller_declared(tmp_path: Path) -
         settings=_settings(tmp_path),
         model=FakeModelProvider("a dog"),
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
 
     assert manifest.max_sessions == 1
@@ -782,6 +859,7 @@ async def test_a_declaration_that_disagrees_with_the_plan_is_refused(
             model=FakeModelProvider("a dog"),
             observer=FakeObserver(max_batch_size=BATCH),
             max_sessions=0,
+            reconciler=offline_reconciler(),
         )
 
     assert not (tmp_path / "runs").exists()
@@ -802,6 +880,7 @@ async def test_a_bound_the_selection_never_reached_is_no_contradiction(
         model=FakeModelProvider("a dog"),
         observer=FakeObserver(max_batch_size=BATCH),
         max_sessions=99,
+        reconciler=offline_reconciler(),
     )
 
     assert manifest.max_sessions == 0
@@ -820,6 +899,7 @@ async def test_execute_run_refuses_an_ineligible_scored_run_itself(tmp_path: Pat
             settings=_settings(tmp_path),
             model=FakeModelProvider("a dog"),
             observer=FakeObserver(max_batch_size=BATCH),
+            reconciler=offline_reconciler(),
         )
 
     assert not (tmp_path / "runs").exists()
@@ -843,6 +923,7 @@ async def test_execute_run_refuses_a_scored_run_on_the_hashing_embedder(
             model=FakeModelProvider("a dog"),
             observer=FakeObserver(max_batch_size=BATCH),
             preregistration_final=True,
+            reconciler=offline_reconciler(),
         )
 
 
@@ -865,6 +946,7 @@ async def test_execute_run_refuses_a_scored_run_judged_by_the_exact_grader(
             settings=settings,
             grader_kind="exact",
             preregistration_final=True,
+            reconciler=offline_reconciler(),
         )
 
 
@@ -891,6 +973,7 @@ async def test_execute_run_refuses_a_scored_run_with_an_injected_seam(
             model=FakeModelProvider("a dog"),
             observer=FakeObserver(max_batch_size=BATCH),
             preregistration_final=True,
+            reconciler=offline_reconciler(),
         )
 
 
@@ -914,6 +997,7 @@ async def test_execute_run_names_every_injected_seam_in_its_refusal(
             model=FakeModelProvider("a dog"),
             observer=FakeObserver(max_batch_size=BATCH),
             preregistration_final=True,
+            reconciler=offline_reconciler(),
         )
 
     assert "grader, model, observer" in str(caught.value)
@@ -932,6 +1016,7 @@ async def test_the_gate_is_not_bypassed_by_the_mode_s_bare_string(tmp_path: Path
             settings=_settings(tmp_path),
             model=FakeModelProvider("a dog"),
             observer=FakeObserver(max_batch_size=BATCH),
+            reconciler=offline_reconciler(),
         )
 
     assert not (tmp_path / "runs").exists()
@@ -948,6 +1033,7 @@ async def test_an_unknown_mode_is_refused_rather_than_written(tmp_path: Path) ->
             settings=_settings(tmp_path),
             model=FakeModelProvider("a dog"),
             observer=FakeObserver(max_batch_size=BATCH),
+            reconciler=offline_reconciler(),
         )
 
 
@@ -971,6 +1057,7 @@ async def test_a_real_judge_beside_fake_seams_still_checks_credentials(
             grader_kind="model",
             model=FakeModelProvider("a dog"),
             observer=FakeObserver(max_batch_size=BATCH),
+            reconciler=offline_reconciler(),
         )
 
 
@@ -998,4 +1085,5 @@ async def test_a_non_boolean_confirmation_does_not_admit_a_scored_run(
             model=FakeModelProvider("a dog"),
             observer=FakeObserver(max_batch_size=BATCH),
             preregistration_final=confirmation,  # type: ignore[arg-type]  # the point of the test
+            reconciler=offline_reconciler(),
         )

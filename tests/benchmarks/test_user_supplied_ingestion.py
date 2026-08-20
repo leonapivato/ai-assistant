@@ -24,6 +24,7 @@ import pytest
 from benchmarks.memory.corpora import locomo
 from benchmarks.memory.ingest import IngestionSummary, exchanges_of, ingest_case
 from benchmarks.memory.wiring import build_harness
+from harness_reconcilers import offline_reconciler
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import (
@@ -195,6 +196,7 @@ async def _ingest(case_file: Path, tmp_path: Path) -> IngestionSummary:
         _settings(tmp_path),
         data_dir=tmp_path / "case",
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
     try:
         return await ingest_case(harness, case, batch_size=BATCH)
@@ -217,6 +219,7 @@ async def _episodes(case_file: Path, tmp_path: Path) -> tuple[EpisodicMemory, ..
         _settings(tmp_path),
         data_dir=tmp_path / "case",
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
     try:
         summary = await ingest_case(harness, case, batch_size=BATCH)

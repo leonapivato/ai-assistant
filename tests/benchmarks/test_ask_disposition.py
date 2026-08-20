@@ -31,6 +31,7 @@ from benchmarks.memory.ingest import IngestionSummary, ingest_case
 from benchmarks.memory.records import QuestionRecord, RunMode, read_jsonl
 from benchmarks.memory.run import execute_run, plan_run
 from benchmarks.memory.wiring import build_harness
+from harness_reconcilers import offline_reconciler
 
 from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.types import (
@@ -187,6 +188,7 @@ async def test_an_ask_user_ruling_is_counted_rather_than_dropped(tmp_path: Path)
         data_dir=tmp_path / "case",
         model=FakeModelProvider("x"),
         observer=_SecretObserver(),
+        reconciler=offline_reconciler(),
     )
     try:
         summary = await ingest_case(harness, _case(), batch_size=BATCH)
@@ -206,6 +208,7 @@ async def test_a_run_that_asks_nothing_reports_a_zero_ask_rate(tmp_path: Path) -
         data_dir=tmp_path / "case",
         model=FakeModelProvider("x"),
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
     try:
         summary = await ingest_case(harness, _case(), batch_size=BATCH)
@@ -252,6 +255,7 @@ async def test_every_record_reports_the_ask_rate_beside_the_run(tmp_path: Path) 
         settings=_settings(tmp_path),
         model=FakeModelProvider("hunter2"),
         observer=_SecretObserver(),
+        reconciler=offline_reconciler(),
     )
 
     records = read_jsonl(root / manifest.run_id / "records.jsonl", QuestionRecord)

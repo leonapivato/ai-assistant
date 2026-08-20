@@ -23,6 +23,7 @@ from benchmarks.memory.answer import answer_question
 from benchmarks.memory.cases import BenchCase, BenchQuestion, BenchSession, BenchTurn
 from benchmarks.memory.ingest import ingest_case
 from benchmarks.memory.wiring import build_harness
+from harness_reconcilers import offline_reconciler
 
 from ai_assistant.app.composition import CONFLICT_LIMIT, RETRIEVAL_LIMIT
 from ai_assistant.core.config import EmbedderKind, Settings
@@ -105,6 +106,7 @@ async def _retrieval_traces(tmp_path: Path) -> tuple[tuple[EvaluationTrace, ...]
         data_dir=tmp_path / "case",
         model=FakeModelProvider("Juno"),
         observer=FakeObserver(max_batch_size=BATCH),
+        reconciler=offline_reconciler(),
     )
     try:
         await ingest_case(harness, case, batch_size=BATCH)
