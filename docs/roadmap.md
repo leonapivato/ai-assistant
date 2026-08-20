@@ -142,9 +142,9 @@ does not close.**
 Work proceeds in **pilots**. Each pilot is a `batch` issue — the probes, the
 ADRs, the lanes, the run and the error anatomy — and its results land as an
 addendum on #1029; a run aborted on credit is recorded as void rather than
-quietly redone. The current pilot is **#1210**; #1231 names it, the measured
-baseline, and what the next pilot is shaped by, and moves when the next one
-opens.
+quietly redone. **#1231 names whichever pilot is open**, the baseline it is
+measured against, and what the next one is shaped by; the pilot it named when
+tracks replaced arcs was #1210.
 
 The standing questions the track carries — forgetting, which the complete-intake
 ruling names as the destination of the selectivity it removed from intake;
@@ -175,9 +175,9 @@ tracker — so the claim decays into them rather than into this document.
 | VISION promise | Where it stands |
 | --- | --- |
 | Understood — a persistent user model | ADR-0072 (profile and inferred model are bands of one store), ADR-0005/0038/0040/0050 (provenance and the supersession law), ADR-0077 (the observer proposes beliefs from episodes). The mechanism is decided; how well it holds is `track:memory` (#1231, #1029) |
-| In Control — inspect, correct, restrict, delete | *Inspect and correct*: ADR-0073 — the band-scoped read is an enumeration, killing a belief is show-then-confirm, and correcting is `learn`. *Delete*: ADR-0004 §6's whole-installation delete has its surface in ADR-0126 (`ai-assistant-purge`). *Restrict*: ADR-0097/0102/0133/0139's grants, enforced on the facet, ingest and notify paths, with CLI doors today and a browser surface at milestone 15. *Export* has no interface at all (ADR-0004 §6, ADR-0073 §10, #692) |
+| In Control — inspect, correct, restrict, delete | *Inspect and correct*: ADR-0073 — the band-scoped read is an enumeration, killing a belief is show-then-confirm, and correcting is `learn`. *Delete*: ADR-0004 §6's whole-installation delete has its surface in ADR-0126 (`ai-assistant-purge`). *Restrict*: ADR-0097/0102/0133/0139's grants, enforced on the facet, ingest and notify paths — ADR-0102 gives them their CLI doors and milestone 15 their browser surface. *Export*'s missing interface is #692 (ADR-0004 §6, ADR-0073 §10) |
 | More Capable Over Time | ADR-0009/0022 for the explicit loop, ADR-0077 for the ambient one; ADR-0119/0120 are the instrument that judges it. Whether it is improving is `track:memory`'s pre-registered exits, and the owner's measures gate (#881) is what acts on the answer once real usage exists |
-| Context determines usefulness | ADR-0008's facets, fed by readers (ADR-0093/0095/0140) and rendered into the prompt (ADR-0096; #1082 was the gap that left the arm vacuous until it closed). Device as a context facet, a permission input and the audit trail's "approved from where" waits on #920 |
+| Context determines usefulness | ADR-0008's facets, fed by readers (ADR-0093/0095/0140) and rendered into the prompt (ADR-0096; #1082 is the gap that had left that arm vacuous). Device as a context facet, a permission input and the audit trail's "approved from where" is #920 |
 | Supported — acts across tools | The seam is decided and attested: ADR-0154 designates `tools/` as the egress seam, ADR-0148 rules an egress call authorised as one whole, ADR-0151/0152 give the connection surface and the derived binding, ADR-0157 the flat-form widening. Breadth of connectors is opportunistic (`backlog`), not a milestone |
 | Proactivity that earns its place | ADR-0130 (a notification is a proposal; only a perishable one earns an interruption) and ADR-0131 (it travels as an answer the device asked for), with ADR-0134/0135 around delivery. The first push *consumer* is milestone 14; whether the proactivity is welcome is the owner's deferred experiential ruling (#879); the delivery seam's full contract is #975 |
 | Free to choose models | ADR-0002/0011/0013/0061/0062 — decided; on no track |
@@ -191,18 +191,21 @@ a known debt of the plan rather than an oversight. A **commitment ledger** and a
 
 ## Closed arcs
 
-The arc concept is retired (#1226 §2): tracks are peers, there is no arc-level
-closure, and nothing below is re-derived here. One pointer each, to the record.
+The arc concept is retired (#1226 §2): tracks are peers, and there is no
+arc-level closure. Nothing about the three arcs that ran under it is re-derived
+here — each line below is a pointer at the record that holds the rulings, which
+is where their exits were ruled and where any later reading of them belongs.
 
 - **The first vertical** — seven core artifacts and one closed learning loop.
-  No ruling issue; the ADR ledger and this file's git history are its record.
-- **Accumulation (legs 1–8)** — leg 8's exit ruled met on **#878**, on the
-  evidence of the QA run **#862**.
+  No ruling issue: the ADR ledger and this file's git history are its record.
+- **Accumulation (legs 1–8)** — the exit ruling is on **#878**, the QA run it
+  was ruled on is **#862**.
 - **Inhabitation (legs 9–12)** — direction, the measures gate and the box
-  migration ruled on **#879**; all four legs closed there on mechanism exits,
-  on the QA runs #919, #978, #1081 and #1159.
+  migration are ruled on **#879**, which also carries each leg's mechanism-exit
+  record and the QA runs behind them (#919, #978, #1081, #1159).
 
-The inhabitation arc's **owner-side half is deferred, not waived**: daily use,
-leg 10's experiential exit, the measures gate (#881), the #829 consolidation
-window, and the box migration (stance 6). Those sit on the return brief with
-everything else the owner owes a decision on — `gh issue list -l ruling`.
+#879 is also where the inhabitation arc's **owner-side half** sits — deferred,
+not waived: daily use, leg 10's experiential exit, the measures gate (#881), the
+#829 consolidation window, and the box migration (stance 6). Those and every
+other decision the owner owes are reached the one way the tracker offers,
+`gh issue list -l ruling`, rather than from a list kept here.
