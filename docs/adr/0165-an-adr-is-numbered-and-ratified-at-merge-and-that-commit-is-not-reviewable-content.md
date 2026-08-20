@@ -136,6 +136,23 @@ two-merger premise does not arise here in the first place. Neither of those is
 load-bearing on its own; a repository that dropped `strict` while devolving
 merges to several parties would have to re-earn this property some other way.
 
+**The one route past that is the administrator bypass, and it is named rather
+than left to be discovered.** `--admin` merges past the `strict` check as it
+merges past a red `gate` (`CONTRIBUTING.md` → "Working on GitHub"), so an
+emergency override on a stale ADR branch lands a ratify commit whose number
+`main` has already taken. The two files have different slugs, so nothing
+conflicts and nothing fails: `load_adrs` in `scripts/check_citations.py` keys
+the corpus on the number, so the second file silently shadows the first and a
+citation to that number resolves to whichever sorts last. The remedy is the
+renumbering `CONTRIBUTING.md` used to carry as its collision fallback, applied
+after the fact. This is not a property peculiar to this mechanism — the bypass
+is defined as bypassing *evidence*, and every mechanical guarantee in this
+repository has the same escape — but a rule whose safety rests on a protection
+setting should say which act defeats it. **Revisit if** the bypass is ever used
+on an ADR branch, which would argue for making the duplicate loud: a check that
+no two files under `docs/adr/` share a number costs little and fails on `main`
+rather than shadowing.
+
 `just adr-ratify` produces the commit — a recipe this ADR specifies and does not
 deliver. It is built by the follow-on implementation lane (§7), briefed once this
 ADR merges, which is the ordinary ratify-before-build sequence and not a gap: §4's
