@@ -43,8 +43,10 @@ this with a bare ``python3`` — no environment, no import of the package.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -562,26 +564,21 @@ def _locate_adr(root: Path) -> str:
 
 
 def _refuse_unless_a_regular_file(root: Path, path: str) -> None:
-    """Refuse unless ``path`` is a regular file in HEAD's tree and on disk.
+    """Refuse early unless ``path`` is a regular file in HEAD's tree.
 
-    This guards the **write**, not the shape. ``Path.write_text`` follows a
-    symlink, so a tracked ``docs/adr/NNNN-*.md`` whose blob is a *link target*
-    would have the rendered text written through it — to a file outside the
-    repository, which ``git reset --hard`` cannot restore because it was never
-    tracked. A link target is text like any other, so nothing upstream of here
-    notices: ``git show`` returns it, and a target crafted to carry a
-    ``- Status: Proposed`` line renders cleanly.
-
-    The mode is read from **HEAD's tree**, which is the same authority the
-    recogniser uses, and the working-tree link check is belt-and-braces for the
-    same file — cheap, and it fails closed if the two ever disagree.
+    This is a **fast failure with a good message**, not the safety boundary —
+    :func:`_write_regular` is that, because any check made here is a statement
+    about a moment that has passed by the time the write runs. It is kept because
+    reading the mode from HEAD's tree is the same authority the recogniser uses,
+    and a run that cannot possibly succeed should say so before it starts
+    changing anything.
 
     Args:
         root: The work tree root.
         path: The repository-relative path to write.
 
     Raises:
-        ShapeError: If the path is not a regular file.
+        ShapeError: If the path is not a regular file in HEAD's tree.
     """
     entry = _git("ls-tree", "-z", "--", "HEAD", path, cwd=root).split("\0")[0]
     if not entry:
@@ -592,8 +589,43 @@ def _refuse_unless_a_regular_file(root: Path, path: str) -> None:
             f"{path!r} is a {mode} entry in HEAD's tree, not a regular file — refusing to "
             "write through it (a symlink's content is a path, and writing follows it)"
         )
-    if (root / path).is_symlink():
-        raise ShapeError(f"{path!r} is a symlink in the working tree — refusing to write it")
+
+
+def _write_regular(target: Path, text: str) -> None:
+    """Write ``text`` to ``target``, refusing to follow a link or open a device.
+
+    ``Path.write_text`` follows a symlink, so a ``docs/adr/NNNN-*.md`` that is
+    one — tracked as a link, or swapped for one after any check — would have the
+    rendered text written to a file outside the repository, which was never
+    tracked and is therefore outside everything ``git reset --hard`` can restore.
+
+    A check followed by a plain write cannot close that: it is a statement about
+    a moment that has passed. The descriptor is what closes it, so the decision
+    and the write are made about the **same object**:
+
+    * ``O_NOFOLLOW`` makes the open itself fail (``ELOOP``) on a symlink, so
+      there is no window between deciding and writing.
+    * ``O_NONBLOCK`` is not about speed: ``O_NOFOLLOW`` does not exclude a FIFO,
+      and opening one for writing blocks until a reader appears — a hang rather
+      than a refusal. On a regular file it does nothing.
+    * ``fstat`` on the open descriptor then refuses anything that is not a
+      regular file, which is the check the two flags cannot make themselves.
+
+    Args:
+        target: The absolute path to write.
+        text: The content.
+
+    Raises:
+        ShapeError: If the opened object is not a regular file.
+        OSError: If the path is a symlink, or the write fails.
+    """
+    fd = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ShapeError(f"{target} is not a regular file — refusing to write it")
+        os.write(fd, text.encode("utf-8"))
+    finally:
+        os.close(fd)
 
 
 _MESSAGE = """docs(adr): ratify ADR-{number:04d}
@@ -643,7 +675,7 @@ def _ratify(args: argparse.Namespace) -> int:
     # a hook that rejected the commit is worse than either. Restoring is safe
     # precisely because `_refuse_unless_ready` verified the tree clean.
     try:
-        (root / path).write_text(rendered, encoding="utf-8")
+        _write_regular(root / path, rendered)
         _git("add", "--", path, cwd=root)
         _git("commit", "-m", _MESSAGE.format(number=number), cwd=root)
         check_commit(root, "HEAD")

@@ -439,6 +439,35 @@ def test_ratify_will_not_write_through_a_symlinked_adr(tmp_path: Path) -> None:
     assert outside.read_text() == "not the repository's to touch\n"
 
 
+def test_ratify_will_not_follow_a_symlink_swapped_in_after_the_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A check followed by a plain write cannot close this; the descriptor does.
+
+    Any mode test is a statement about a moment that has passed by the time the
+    write runs, so the replacement is simulated at exactly that seam: the early
+    check is made to pass and to leave a symlink behind it. ``O_NOFOLLOW`` then
+    fails the open itself, because the decision and the write are made about the
+    same object rather than about the same path.
+    """
+    repo = _adr_repo(tmp_path / "repo")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not the repository's to touch\n")
+    monkeypatch.chdir(repo)
+
+    def _pass_then_swap(root: Path, path: str) -> None:
+        (root / path).unlink()
+        (root / path).symlink_to(outside)
+
+    monkeypatch.setattr(_MODULE, "_refuse_unless_a_regular_file", _pass_then_swap)
+
+    with pytest.raises(_MODULE.ShapeError, match="branch is restored"):
+        _MODULE._ratify(_MODULE._parser().parse_args(["ratify"]))
+
+    assert outside.read_text() == "not the repository's to touch\n"
+    assert _git(repo, "log", "-1", "--pretty=%s") == "docs(adr): draft the decision"
+
+
 def test_a_merge_commit_is_not_a_ratification(tmp_path: Path) -> None:
     """Two parents means no single blob to rebuild from, so the shape is undefined."""
     repo = _adr_repo(tmp_path / "repo")
@@ -557,10 +586,10 @@ def test_a_write_failure_before_the_commit_restores_the_branch(
     before = _git(repo, "rev-parse", "HEAD")
     monkeypatch.chdir(repo)
 
-    def _no_space(*_args: object, **_kwargs: object) -> int:
+    def _no_space(*_args: object, **_kwargs: object) -> None:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(Path, "write_text", _no_space)
+    monkeypatch.setattr(_MODULE, "_write_regular", _no_space)
     args = _MODULE._parser().parse_args(["ratify"])
 
     with pytest.raises(_MODULE.ShapeError, match="branch is restored"):
