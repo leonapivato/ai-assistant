@@ -274,8 +274,8 @@ Then two things the owner cannot get anywhere else:
   proposal. Scope is the owner's; a proposal they can approve or redirect is
   useful, a decision presented as settled is not.
 - **Drift from the plan, said plainly.** If the batch has moved away from the
-  leg's exit test, or a leg is being satisfied incidentally by work aimed
-  elsewhere, say so here in the fact sections — drift is a comparison between the
+  milestone's exit test, or a milestone is being satisfied incidentally by work
+  aimed elsewhere, say so here in the fact sections — drift is a comparison between the
   ratified plan and the tree, which is checkable, and it does not belong in §6
   with the hunches.
 

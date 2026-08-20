@@ -652,8 +652,12 @@ content, and a linear history where each commit keeps its `Refs:` trailer.
   for a document read at the moment someone reaches for the bypass. Reconciling
   the two — tighten the settings and lose the emergency hatch, or record the
   deviation under ADR-0010's own Revisit clause — is a decision and not a
-  wording fix, and it is **issue #1246**. Until it is ruled, treat the bypass as
-  reaching the gate and behave accordingly.
+  wording fix, and it is **issue #1246**. Until it is ruled, **ADR-0010's rule
+  binds conduct even where the toggle does not enforce it**: nothing crosses the
+  gate red, and a bypass that mechanically *can* reach the gate is not licence to
+  use it for that. The two sentences above describe the blast radius of the flag,
+  so that whoever reaches for it knows what they are actually overriding; they
+  authorise nothing.
 
 ### Coordinating parallel work
 
