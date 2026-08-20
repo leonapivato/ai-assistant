@@ -400,10 +400,10 @@ anyway.
   unnumbered**, because `_ADR_FILENAME_RE` in `scripts/check_citations.py`
   requires four leading digits in the filename and `_ADR_FILE_RE` in
   `scripts/project_status.py` requires leading digits at all. Neither errors on
-  the file; both skip it. The check does still run before
-  the merge — the ratify commit is pushed to the PR, and CI runs the full gate on
-  every push (ADR-0010) — so a broken citation in a new ADR fails on the PR, one
-  commit later than it used to. Broadening either script to read the unnumbered
+  the file; both skip it. The check does still run before the merge — the ratify
+  commit is pushed to the PR, and CI runs the full gate on every push (ADR-0010)
+  — so a broken citation in a new ADR fails on the PR, one commit later than it
+  used to. Broadening either script to read the unnumbered
   file is not done here; it would mean teaching them a second filename shape for
   a window that lasts one commit.
 - **The merge grows a CI wait.** The ratify commit is a push to the PR, so the
