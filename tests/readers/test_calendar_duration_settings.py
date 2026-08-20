@@ -79,6 +79,26 @@ _INTERVAL: Final = f"{_PREFIX}CALENDAR_READER_INTERVAL"
 #: own cross-field rule and therefore its own failure mode for one spelling.
 _UPCOMING: Final = f"{_PREFIX}CALENDAR_UPCOMING_INTERVAL"
 
+#: Every calendar duration setting a case can vary **on its own**, as
+#: ``(variable, field)``. The note quantifies over "every duration setting" on this
+#: chain and says the refusal is "the same for every duration setting here", so the
+#: spelling cases below run over all of them rather than over the one the note's
+#: example happens to arm — a promise about a set is not pinned by a case about one
+#: member, and three of these use a different type alias
+#: (``_DurationSetting``) from the two the note's own examples name.
+#:
+#: ``calendar_upcoming_interval`` is deliberately absent: it cannot be varied alone,
+#: because ADR-0132 §4 ties it to the lead. It has its own cases at the foot of this
+#: module, and :func:`test_the_roster_is_every_calendar_duration_setting` is what
+#: keeps the two halves adding up to the whole.
+_VARIED: Final = [
+    pytest.param(f"{_PREFIX}CALENDAR_READER_INTERVAL", "calendar_reader_interval", id="interval"),
+    pytest.param(f"{_PREFIX}CALENDAR_UPCOMING_LEAD", "calendar_upcoming_lead", id="lead"),
+    pytest.param(f"{_PREFIX}CALENDAR_WINDOW_PAST", "calendar_window_past", id="window-past"),
+    pytest.param(f"{_PREFIX}CALENDAR_WINDOW_FUTURE", "calendar_window_future", id="window-future"),
+    pytest.param(f"{_PREFIX}CALENDAR_READ_TIMEOUT", "calendar_read_timeout", id="read-timeout"),
+]
+
 
 @pytest.fixture(autouse=True)
 def _only_this_case_configures(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -138,8 +158,13 @@ def _refusals(exc: ValidationError) -> list[str]:
         pytest.param("15:00", timedelta(hours=15), id="clock-fifteen-hours"),
     ],
 )
+@pytest.mark.parametrize(("variable", "field"), _VARIED)
 def test_each_documented_spelling_loads_to_the_duration_the_note_states(
-    monkeypatch: pytest.MonkeyPatch, spelling: str, duration: timedelta
+    monkeypatch: pytest.MonkeyPatch,
+    spelling: str,
+    duration: timedelta,
+    variable: str,
+    field: str,
 ) -> None:
     """The note's table, asserted through the environment it describes.
 
@@ -148,10 +173,17 @@ def test_each_documented_spelling_loads_to_the_duration_the_note_states(
     tokenizer change that made the last of these fifteen minutes would leave the
     documented advice ("write the full ``HH:MM:SS`` and none of that arises")
     solving a problem nobody has while the real one went unmentioned.
-    """
-    _armed(monkeypatch, **{_INTERVAL: spelling})
 
-    assert Settings().calendar_reader_interval == duration
+    Crossed with every setting the claim is made about, because the claim is made
+    about all of them: a regression confined to one field — an alias narrowed, a
+    validator added ahead of the parse — would otherwise pass while the note went
+    on promising the same behaviour for the rest. Each value here is inside every
+    bound on every field in the roster, so what a case observes is the *parse* and
+    never a range refusal.
+    """
+    _armed(monkeypatch, **{variable: spelling})
+
+    assert getattr(Settings(), field) == duration
 
 
 def test_a_fifteen_hour_interval_is_hours_and_is_not_fifteen_minutes(
@@ -194,8 +226,9 @@ def test_a_fifteen_hour_interval_is_hours_and_is_not_fifteen_minutes(
         pytest.param("300", id="bare-three-hundred"),
     ],
 )
+@pytest.mark.parametrize(("variable", "field"), _VARIED)
 def test_a_spelling_the_note_calls_refused_is_refused_at_load(
-    monkeypatch: pytest.MonkeyPatch, spelling: str
+    monkeypatch: pytest.MonkeyPatch, spelling: str, variable: str, field: str
 ) -> None:
     """Refused as a *parse*, which is the classification the note leans on.
 
@@ -204,13 +237,19 @@ def test_a_spelling_the_note_calls_refused_is_refused_at_load(
     The distinction is the note's: it tells an operator that ``15`` is rejected by
     the parser while ``15:00`` is accepted by it and only sometimes caught later,
     and those two sentences are true of different code.
+
+    **Exactly one error**, and that is the assertion doing the work on the two
+    nullable fields: their annotation is a union, so a parse that reported one error
+    per member would be a different operator experience for the same mistake, and
+    the note describes one.
     """
-    _armed(monkeypatch, **{_INTERVAL: spelling})
+    _armed(monkeypatch, **{variable: spelling})
 
     with pytest.raises(ValidationError) as refusal:
         Settings()
 
     assert _refusals(refusal.value) == ["time_delta_parsing"]
+    assert refusal.value.errors()[0]["loc"] == (field,)
 
 
 def test_a_bare_number_of_seconds_names_an_identifier_nobody_typed(
@@ -310,3 +349,32 @@ def test_an_armed_producer_without_a_source_is_refused_before_the_lead_rule(
 
     with pytest.raises(ValidationError, match="needs a source to read"):
         Settings()
+
+
+# --- the roster is the whole of what "every duration setting" means ----------
+
+
+def test_the_roster_is_every_calendar_duration_setting() -> None:
+    """A seventh calendar duration added later fails here rather than going unpinned.
+
+    The note's promise is universally quantified — "every duration setting takes
+    either an ISO-8601 duration or an ``HH:MM:SS`` clock string" — so a module that
+    pinned a hand-written list would answer that promise for as long as the list
+    happened to be complete and silently stop the day it was not. The set is
+    therefore read off :class:`Settings` itself and compared, which makes the
+    quantifier the test's subject instead of the author's memory.
+
+    ``calendar_upcoming_interval`` is on the right of the comparison rather than in
+    the roster because it cannot be varied alone: ADR-0132 §4 requires a strictly
+    greater lead, so a spelling case on it is a case about two settings. Its
+    spellings are pinned by the coherence cases above, which is why it is named here
+    rather than excluded by a predicate that would also have swallowed a seventh.
+    """
+    durations = {
+        name
+        for name, field in Settings.model_fields.items()
+        if name.startswith("calendar_") and field.annotation in (timedelta, timedelta | None)
+    }
+    roster = {str(case.values[1]) for case in _VARIED}
+
+    assert roster | {"calendar_upcoming_interval"} == durations
