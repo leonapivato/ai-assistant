@@ -503,9 +503,11 @@ to the track that holds that subsystem, not to both (`docs/roadmap.md` →
 
 **Kind labels**, orthogonal to the track:
 
-- `ruling` — needs the owner. **`gh issue list -l ruling` is the return brief**:
-  it is what the owner reads when they come back, so it is the one label applied
-  the moment the issue is filed rather than lazily.
+- `ruling` — needs the owner. **The return brief is the `ruling` query** —
+  `gh issue list -l ruling`, whole, so raise `--limit` past its default of 30 if
+  the queue ever runs long enough to page. It is what the owner reads when they
+  come back, so it is the one label applied the moment the issue is filed rather
+  than lazily.
 - `batch` — a dispatch record: the lanes, the ADRs they carry, the run, the
   outcome.
 - `qa` — a QA-run record (`.claude/skills/qa-leg`), the evidence a milestone's
