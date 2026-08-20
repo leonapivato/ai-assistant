@@ -255,17 +255,18 @@ as unmeasured is a fact the owner can act on.
 
 ## 8. Grand scheme
 
-Where this batch sits in its leg, the leg in its arc, and how much of the leg's
-**exit condition** is satisfied — quoted from the roadmap or the ADR that states
-it, with which parts are met and which are not. Not a percentage: an exit test
-is a set of clauses, and "60% done" hides which 40%.
+Where this batch sits in its track's open milestone, and how much of that
+milestone's **exit test** is satisfied — quoted from the roadmap, the track's own
+issue, or the ADR that states it, with which parts are met and which are not. Not
+a percentage: an exit test is a set of clauses, and "60% done" hides which 40%.
 
 **Read the plan off the surveyed commit, not off memory.** Scope lives in
 `docs/roadmap.md` and the ADRs (`pre-dispatch-survey` §2), and the plan changes
-by ratification without telling your context. This is also why no leg, arc, or
-current-plan fact is written into this skill: a living document carries rules,
-never a snapshot of what the plan currently is (ADR-0019), and a snapshot here
-would rot while still reading as authoritative.
+by ratification without telling your context — the tracks that replaced arcs and
+legs (#1226 §2) are themselves an instance of it. This is also why no track,
+milestone, or current-plan fact is written into this skill: a living document
+carries rules, never a snapshot of what the plan currently is (ADR-0019), and a
+snapshot here would rot while still reading as authoritative.
 
 Then two things the owner cannot get anywhere else:
 

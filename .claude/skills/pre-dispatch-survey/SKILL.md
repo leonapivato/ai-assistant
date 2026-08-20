@@ -76,19 +76,23 @@ ledger file; do not look for one.
 
 ## 2. Scope comes from the roadmap, not from this skill
 
-`docs/roadmap.md` states the legs **in order**, and says each one *"decomposes
-into ADR-backed slices when it is dispatched, contract first."* The gap register
-maps each `VISION.md` promise to the legs that close it, and "Parked" records
-what was deliberately deferred and behind what.
+`docs/roadmap.md` carries the standing **tracks** (#1226 §2): each one's
+purpose, its milestones ordered by **dependency alone** with an exit test on
+each, and what it defers. A track's *live* state — which milestone is open, what
+closed — is not in the file; it is on the track's own issue, which the file
+points at. The gap register maps each `VISION.md` promise to the ADRs and issues
+that hold it.
 
 So the scope question is already answered on disk, by the operator. This skill's
 job is to say what state that plan meets, not to re-derive the plan. Two things
 follow:
 
-- **Read the surveyed roadmap and take the current leg from it.** Where the
-  roadmap and the survey disagree — a leg's slice looks already built, or a
-  parked item has an open PR — **name the discrepancy and stop** rather than
-  resolving it yourself. That is an operator decision.
+- **Read the surveyed roadmap, then the track issue it points at, and take the
+  open milestone from there.** The issue is newer than the file and wins where
+  they differ. Where any of the three and the survey disagree — a milestone's
+  slice looks already built, or a deferred item has an open PR — **name the
+  discrepancy and stop** rather than resolving it yourself. That is an operator
+  decision.
 - **Do not encode a scope test here.** A previous revision of this skill gated
   candidates on the roadmap's then-current "first-vertical seven artifacts". The
   roadmap was reoriented to the accumulation legs and the gate silently admitted
@@ -98,7 +102,8 @@ follow:
 
 ## 3. Check the batch for collisions
 
-Slices within a leg are not automatically independent. Before proposing a batch:
+Slices within a milestone are not automatically independent. Before proposing a
+batch:
 
 - **`core/protocols.py` and `core/types.py` are the high-collision surface.**
   One lane holds them at a time. Two lanes both touching `core/` are not
@@ -114,8 +119,11 @@ Slices within a leg are not automatically independent. Before proposing a batch:
   `core/types.py`, or neither. A Protocol method can take or return a type that
   does not exist yet, and public data crossing a subsystem boundary must live in
   `core/types.py`.
-- **The roadmap's leg order is a dependency order.** Slices from a later leg are
-  not parallel work just because they touch different files.
+- **A track's milestone order is a dependency order** (#1226 §2). Slices from a
+  later milestone are not parallel work just because they touch different files.
+  Across tracks there is no order at all — lanes take clones and review quota
+  first-come-first-served (`docs/roadmap.md` → "Concurrency") — but two tracks'
+  lanes must not hold the same subsystem at once.
 
 ### New machinery in more than one subsystem is more than one lane
 
@@ -189,10 +197,12 @@ against.
 One issue for the batch, not one per lane. It records what is being dispatched —
 in-flight state belongs in the tracker (ADR-0015), not in a document.
 
-- **Title** names the batch (e.g. "Leg 1 slices: profile ADR + inspection
-  surface").
-- **Why**: 2–3 sentences tying the batch to the roadmap leg and the `VISION.md`
-  principle its exit test serves.
+- **Title** names the batch (e.g. "Milestone 13 slices: gateway ADR +
+  enrolment surface").
+- **Labels**: `batch`, plus the one `track:*` label the batch sits on
+  (`CONTRIBUTING.md` → "The tracker"; at most one track label per issue).
+- **Why**: 2–3 sentences tying the batch to its track's open milestone and the
+  `VISION.md` principle that milestone's exit test serves.
 - **One checklist section per lane**, each with: what it delivers, a proposed
   `<area>/<slug>` branch name, and whether it touches `core/protocols.py`,
   `core/types.py`, or both.

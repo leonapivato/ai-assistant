@@ -12,10 +12,12 @@ in the personalization and orchestration surrounding it.
 
 ## Status
 
-Pre-alpha. The project skeleton, tooling, and the `models` and `memory`
-subsystems have landed. See [`VISION.md`](VISION.md) for what we are building and
-why, `docs/roadmap.md` for the build sequence and status, and `docs/adr/` for
-ratified decisions.
+Pre-alpha. See [`VISION.md`](VISION.md) for what we are building and why,
+`docs/roadmap.md` for the live plan — the standing tracks, their milestones and
+the exit test each one closes on — and `docs/adr/` for ratified decisions. The
+roadmap is a plan and not a status board: what has landed, what is open and what
+is deferred live in the GitHub issue tracker (`CONTRIBUTING.md` → "The
+tracker").
 
 ## Requirements
 
