@@ -643,6 +643,18 @@ content, and a linear history where each commit keeps its `Refs:` trailer.
   reason to trust the merge, so the bypass is for a genuine emergency and the
   reason goes in the PR.
 
+  **ADR-0010's ratified text reads differently, and the gap is open, not
+  settled.** Its Decision requires `gate` "for **everyone, with no bypass**"
+  while excluding administrators from the review and up-to-date restrictions —
+  a split GitHub's classic protection cannot express, because the switch that
+  exempts administrators is one all-or-nothing toggle. What the two sentences
+  above describe is the toggle as it actually stands, which is the honest thing
+  for a document read at the moment someone reaches for the bypass. Reconciling
+  the two — tighten the settings and lose the emergency hatch, or record the
+  deviation under ADR-0010's own Revisit clause — is a decision and not a
+  wording fix, and it is **issue #1246**. Until it is ruled, treat the bypass as
+  reaching the gate and behave accordingly.
+
 ### Coordinating parallel work
 
 **One clone per agent** (ADR-0015). An agent is dispatched by hand into a
