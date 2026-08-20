@@ -19,6 +19,7 @@ import dataclasses
 import hashlib
 import urllib.request
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from unittest import mock
@@ -545,6 +546,41 @@ def test_the_harness_gives_the_observer_the_configured_timezone(tmp_path: Path) 
         observer = harness.observation._observer
         assert isinstance(observer, ModelBackedObserver)
         assert observer._zone == ZoneInfo("Pacific/Kiritimati")
+    finally:
+        harness.close()
+
+
+def test_the_deferral_queue_runs_on_the_benchmark_clock(tmp_path: Path) -> None:
+    """``clock.py``'s "every seam" claim, checked against the wiring rather than read.
+
+    ``SqliteDeferralStore`` was the one seam in ``build_harness`` that takes an
+    injectable clock and was not given the run's, so admission and expiry were stamped
+    in wall time while the histories they defer proposals about lived in corpus time —
+    and ``retention`` was therefore a TTL measured on a different axis from the data
+    (#1296). Nothing failed and no published number moved, because no measurement reads
+    the queue; that is precisely why the module docstring could go on claiming
+    otherwise, and why the claim needs a test rather than a reader.
+
+    **Two moves, not one.** A store handed a captured instant instead of the clock
+    would satisfy a single reading, and the property is that it holds the live clock
+    the driver moves between sessions. Both instants are years from the wall, so the
+    default could not pass either.
+    """
+    settings = Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING)
+    harness = build_harness(
+        settings,
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider(),
+        observer=FakeObserver(),
+    )
+    try:
+        first = datetime(2023, 5, 20, 9, 30, tzinfo=UTC)
+        harness.clock.set(first)
+        assert harness.deferrals._now() == first
+
+        second = datetime(2024, 11, 2, 17, 45, tzinfo=UTC)
+        harness.clock.set(second)
+        assert harness.deferrals._now() == second
     finally:
         harness.close()
 
