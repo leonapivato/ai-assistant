@@ -598,11 +598,15 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # nothing else.
         traces = SqliteTraceStore(path=directory / "traces.db")
         opened.append(traces.close)
-        # ADR-0119 §8's ``RETRIEVAL`` emitter is *inside* this store, because the
-        # per-predicate exclusion counts #824's trigger needs exist nowhere else:
-        # "a retrieval trace emitted one layer up would satisfy the letter of 'we
-        # have retrieval telemetry' and be blind to the exact thing #824 watches
-        # for". This is the wiring point that arms it.
+        # ADR-0119 §8's ``RETRIEVAL`` emitter is *inside* this store, because what
+        # the trace reports about a read is observable only here: the ``limit``
+        # asked for, the ``fetch_k`` the KNN was actually given after the clamp, the
+        # candidate count and the band split. A trace emitted one layer up would
+        # satisfy the letter of "we have retrieval telemetry" and see none of them.
+        # Which of §8's keys still carry a signal is ``memory/traces.py``'s to say
+        # and not this comment's — it documents each key against the decision that
+        # set it, several of them structurally zero since ADR-0128 §1 and kept
+        # rather than dropped by §3. This is the wiring point that arms the emitter.
         memory = SqliteMemoryStore(
             path=directory / "memory.db", embedder=embedder, traces_sink=traces
         )

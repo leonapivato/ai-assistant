@@ -800,9 +800,9 @@ async def test_a_window_ending_inside_a_spring_gap_resolves_to_the_transition(
     transition finds the record not due and the user waits another whole
     interval, five minutes by default.
 
-    The canonical fake still stops at a second and still answers the earlier way
-    for three of these four; #955 holds aligning it and putting this clause in
-    the shared suite, both of which need files outside this lane's fence.
+    The canonical fake bisects the same way, and the clause is in the shared
+    suite: ``tests/core/notification_contract.py`` holds every implementation to
+    these endpoints.
     """
     transition = datetime(2026, 3, 8, 7, 0, tzinfo=UTC)
     # 01:30 EST, inside the window and before the gap.

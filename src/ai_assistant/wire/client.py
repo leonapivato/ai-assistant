@@ -143,8 +143,11 @@ class Opened:
 class HubClient:
     """Everything a client of the promoted surface does once it has a connection.
 
-    The nineteen methods, the request/reply exchange, the handshake and the frame
-    limits — all of which ADR-0124 §9 requires to be *identical* on both transports,
+    Every method the promoted surface declares — the set
+    :data:`~ai_assistant.wire.surface.METHODS` reads off
+    :class:`~ai_assistant.core.protocols.AssistantEngine` rather than a count
+    written here — plus the request/reply exchange, the handshake and the frame
+    limits, all of which ADR-0124 §9 requires to be *identical* on both transports,
     since the hop "adds no member to the connect exchange, changes no frame's
     encoding, and changes no method's arguments or results".
 
@@ -215,7 +218,7 @@ class HubClient:
         await hang_up(writer)
         del reader
 
-    # --- the nineteen methods ---------------------------------------------
+    # --- the promoted surface's methods ------------------------------------
 
     async def converse(
         self,

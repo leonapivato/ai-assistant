@@ -316,10 +316,10 @@ class DefaultNotificationPolicy:
         about twenty more halvings of a one-hour bracket, once per held record
         behind a quiet window that ends inside a spring-forward gap.
 
-        The canonical fake still stops at a second and so still answers the
-        earlier way; #955 holds aligning the two and putting the clause in the
-        shared suite, which needs the ``ai_assistant.testing`` this lane's fence
-        excludes.
+        The canonical fake bisects the same way, and the clause is in the shared
+        suite: ``tests/core/notification_contract.py`` holds every implementation
+        to the same endpoints, so the guarantee is pinned there rather than
+        described here.
 
         Args:
             before: An instant at the old offset.

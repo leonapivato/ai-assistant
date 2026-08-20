@@ -8178,8 +8178,10 @@ class StepOutcome(BaseModel):
     it.
 
     Attributes:
-        disposition: Which of the five outcomes the step reached — the gate's
-            verdict, and not the step's own result.
+        disposition: Which :class:`Disposition` the step reached — the gate's
+            verdict, and not the step's own result. The members are that enum's
+            to enumerate; a count written here goes stale the next time one is
+            added.
         state: The durable execution state after the last transition committed.
         step_id: The plan step this pass drove. Required and never ``None``: a
             turn whose plan had no step returns ``TurnOutcome(step=None)`` and
@@ -8199,7 +8201,7 @@ class StepOutcome(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    disposition: Disposition = Field(description="Which of the five outcomes the step reached.")
+    disposition: Disposition = Field(description="Which Disposition the step reached.")
     state: ExecutionState = Field(
         description="Durable execution state after the last transition committed."
     )
