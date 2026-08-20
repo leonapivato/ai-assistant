@@ -154,7 +154,7 @@ interruption. In the order they can be performed:
    and ``5:00`` is refused outright. Write the full ``HH:MM:SS`` and none of
    that arises. The wrong-by-a-factor-of-sixty form is the one that costs an
    afternoon, because it *loads*: ``ASSISTANT_CALENDAR_READER_INTERVAL=15:00``
-   arms a read four times a day and reports health throughout. On the pair
+   arms a read every fifteen **hours** and nothing refuses it. On the pair
    above it happens to be refused at the defaults, but only because the lead
    rule below catches a lead no greater than the interval — that is a
    coherence rule about the two settings, not a guard on the form.
