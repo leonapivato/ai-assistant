@@ -155,14 +155,27 @@ self-references in its body, and ADR-0070 §1 permits in-place edits to the head
 lines alone and says ratified decision text is never rewritten. §4 amends
 ADR-0070 §1's ratifying-edit clause, which acts on a document still `Proposed`;
 it does not touch the append-only rule, and nothing here authorises a
-post-ratification renumbering. So the answer is prevention rather than recovery:
-the bypass is not used on an ADR branch. This is not a weakness peculiar to this
+post-ratification renumbering. So the answer is prevention and detection rather
+than recovery — the bypass is not used on an ADR branch, and the check below
+catches it on `main` if it is. This is not a weakness peculiar to this
 mechanism — the bypass is defined as bypassing evidence, and the pre-merge
 renumbering it defeats was equally defeated by it — but a rule whose safety rests
 on a protection setting should say which act defeats it and what the damage then
-is. **Revisit if** the bypass is ever used on an ADR branch, which would argue
-for making the duplicate loud rather than leaving it shadowing: a check that no
-two files under `docs/adr/` share a number costs little and fails on `main`.
+is.
+
+> **Normative.** Because the shadowing is the part that makes this unrecoverable
+> rather than merely wrong, §7's follow-on lane also adds a check that no two
+> files under `docs/adr/` parse to the same number, in the required `gate`. That
+> check does not stop the bypass — nothing an ADR decides can, and a stale branch
+> is by construction a tree CI has not seen in combination — but ADR-0010 requires
+> `gate` of "everyone, with no bypass", so the duplicate fails on `main` at the
+> first push after it lands instead of sitting undetected behind a dict key.
+
+Whether the bypass itself should stop being available on this path is ADR-0010's
+to decide and not this ADR's: its own Revisit clause is "an incident shows the
+pragmatic bypass was abused: tighten to strict protection (include
+administrators)", and a duplicate ADR number reaching `main` by bypass is exactly
+such an incident. What is decided here is that it will be *seen*.
 
 `just adr-ratify` produces the commit — a recipe this ADR specifies and does not
 deliver. It is built by the follow-on implementation lane (§7), briefed once this
@@ -316,13 +329,14 @@ decided is a new ADR that supersedes it (ADR-0070 §1).
 That lane delivers `scripts/adr_ratify.py` and its tests, `scripts/ship.sh`'s §4
 exemption and its disclosure, the `just adr-ratify` recipe, the `CLAUDE.md`,
 `CONTRIBUTING.md` and `docs/adr/template.md` corrections below,
-`scripts/project_status.py`'s footer line, and §8's edits to ADR-0015, ADR-0027
-and ADR-0070 — which ADR-0019 keeps out of this PR in any case, since they may
-not be written while this document stands `Proposed` and it stands `Proposed`
-throughout its review. A worked implementation of all of it exists and was
-reviewed to seven adversarial rounds on this ADR's own branch before the lane was
-split; PR #1242 records the pre-trim head it can be restored from, so the
-follow-on starts from that rather than from nothing.
+`scripts/project_status.py`'s footer line, §2's duplicate-number check in the
+`gate`, and §8's edits to ADR-0015, ADR-0027 and ADR-0070 — which ADR-0019 keeps
+out of this PR in any case, since they may not be written while this document
+stands `Proposed` and it stands `Proposed` throughout its review. A worked
+implementation of all of it exists and was reviewed to seven adversarial rounds
+on this ADR's own branch before the lane was split; PR #1242 records the
+pre-trim head it can be restored from, so the follow-on starts from that rather
+than from nothing.
 
 `CONTRIBUTING.md` is ratified by ADR-0003, so an ADR outranks it and may direct
 its correction (ADR-0070 §5). Three passages are rewritten by that lane to state
