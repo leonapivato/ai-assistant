@@ -347,6 +347,30 @@ def test_the_same_one_line_flip_outside_docs_adr_is_not_a_ratification(tmp_path:
     assert "not a numbered ADR" in checked.stderr
 
 
+def test_a_binary_adr_is_not_a_ratification(tmp_path: Path) -> None:
+    """ADR-0165 §2 excludes a binary change, and a UTF-8 decode does not enforce it.
+
+    ``0x00`` is a valid encoding of U+0000, so a blob carrying an ADR header and
+    a NUL in its body decodes cleanly and reconstructs byte for byte — while git
+    classifies it as binary and renders no hunks for it.
+    """
+    repo = _adr_repo(tmp_path / "repo")
+    adr = repo / _ADR_PATH
+    adr.write_bytes(_PROPOSED.encode().replace(b"## Consequences", b"\x00## Consequences"))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "docs(adr): a blob git reads as binary")
+    adr.write_bytes(
+        adr.read_bytes().replace(b"- Status: Proposed\n- Date", b"- Status: Accepted\n- Date", 1)
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "docs(adr): flip it")
+
+    checked = _run(repo, "check-shape", "HEAD")
+
+    assert checked.returncode == 1
+    assert "binary" in checked.stderr
+
+
 def test_a_merge_commit_is_not_a_ratification(tmp_path: Path) -> None:
     """Two parents means no single blob to rebuild from, so the shape is undefined."""
     repo = _adr_repo(tmp_path / "repo")
@@ -578,6 +602,38 @@ def test_the_ready_guard_still_refuses_a_caveated_proposed_line(tmp_path: Path) 
     )
     repo = _pr_repo(tmp_path / "repo", tmp_path, body=caveated)
 
+    guard = _run_guard(repo, tmp_path)
+
+    assert guard.returncode == 1
+    assert _ADR_PATH in guard.stderr
+
+
+def test_the_ready_guard_sees_an_adr_replaced_by_a_symlink(tmp_path: Path) -> None:
+    """A type change is a modification; naming only ``A``/``M`` was the fail-open spelling.
+
+    Git reports an ADR replaced by a symlink as ``T``, and the symlink's blob is
+    its target text — which can carry the header line the guard is looking for.
+    """
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    # The ADR has to be on the BASE for the branch's change to be a type change
+    # rather than an addition.
+    _git(repo, "checkout", "-q", "main")
+    (repo / "docs" / "adr").mkdir(parents=True)
+    (repo / _ADR_PATH).write_text(_PROPOSED.replace("- Status: Proposed", "- Status: Accepted", 1))
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "docs(adr): the ratified decision")
+    _git(repo, "push", "-q", "origin", "main")
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "rebase", "-q", "main")
+    adr = repo / _ADR_PATH
+    adr.unlink()
+    adr.symlink_to("- Status: Proposed")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "docs(adr): replace it with a link")
+    _fake_gh(tmp_path / "bin")
+
+    assert "T" in _git(repo, "diff", "--name-status", "main...HEAD")
     guard = _run_guard(repo, tmp_path)
 
     assert guard.returncode == 1
