@@ -1,7 +1,17 @@
 # 20. Making the review loop terminate
 
-- Status: Accepted, §3 amended by ADR-0025 and ADR-0027; Consequences' advisory-aggregate clause amended by ADR-0138
+- Status: Accepted, §3 amended by ADR-0025, ADR-0027 and ADR-0165; Consequences' advisory-aggregate clause amended by ADR-0138
 - Date: 2026-07-20
+- Amended: 2026-08-20 by
+  [ADR-0165](0165-numbering-stays-at-dispatch-and-the-ratification-flip-is-the-one-exempt-commit-shape.md)
+  — §3's acceptance rule compares the artifact's recorded tree against `HEAD`'s
+  tree. Where `HEAD` is a **ratification flip** as ADR-0165 §2 defines it — one
+  ADR file, one changed line, `Status` `Proposed` to `Accepted` and nothing else —
+  the comparison is made against `HEAD`'s parent instead, so the review that
+  covered the `Proposed` tree covers the `Accepted` one and the flip costs no
+  round. Nothing else in §3 moves: the anchor is still content and not the commit,
+  the base half is still ADR-0027 §2's, and every commit that is not a
+  ratification flip is still judged against its own tree.
 - **Amended: 2026-08-12 by
   [ADR-0138](0138-a-dispatched-lane-hands-its-loop-to-a-successor-at-a-counted-threshold.md)
   (Consequences — a dispatched lane may no longer ignore the printed aggregate
