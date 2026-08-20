@@ -56,7 +56,7 @@ Most of both lists should surface in the pre-flight, before you have written any
 
 ## Finishing
 
-`CONTRIBUTING.md` owns the mechanics; four duties are easy to drop in a dispatched lane:
+`CONTRIBUTING.md` owns the mechanics; five duties are easy to drop in a dispatched lane:
 
 - **Open the draft PR early — as soon as you have a branch and a first commit, before the work is done**, so CI gates every push and the coordinator can see your direction (and any contract change) while it is still cheap to redirect. Your pre-flight goes in its description.
 - **Put the review outcome in the PR description**, not only in your report to the coordinator: any `blocker`/`major` finding you waived with its rationale, and links to the issues you filed for what you deferred. Your report reaches one reader; the PR is the audit trail.

@@ -39,9 +39,10 @@ imports:
 test *args:
     uv run pytest "$@"
 
-# The test leg of ADR-0136 §2's fast gate — the whole suite, distributed, for the
-# rounds *between* §1's two anchors. It is neither anchor: §1 requires the suite
-# and not a command name, and both anchors run `just check`, as CI does.
+# The whole suite, distributed: ADR-0136 §2's fast gate for the rounds *between*
+# §1's two anchors, and — since ADR-0166 §1, where nothing narrowed what it
+# collected — the `pytest` step at either anchor as well. What discharges an
+# anchor is the run and not the command name, so read the summary line.
 #
 # Two flags here are load-bearing rather than tuning, so neither should be
 # dropped without reading what it buys.
