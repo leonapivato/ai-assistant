@@ -72,6 +72,12 @@ _ADR_PATH_RE = re.compile(r"^docs/adr/(\d{4})-.+\.md$")
 # keeps the letter while moving a field, so both are read rather than one.
 _RAW_FIELDS = 5
 
+# The git tree modes an ADR document may have. `120000` (symlink) and `160000`
+# (gitlink) are excluded: a symlink's blob is its target *path*, which is neither
+# an ADR nor safe to write through, and neither is a file this predicate should
+# ever have an opinion about.
+_REGULAR_MODES = ("100644", "100755")
+
 
 class ShapeError(Exception):
     """The input is not in the shape this module requires.
@@ -372,6 +378,11 @@ def _sole_modified_path(root: Path, parent: str, sha: str) -> tuple[str, str, st
         )
     if src_mode != dst_mode:
         raise ShapeError(f"{sha[:12]} changes the file mode {src_mode} → {dst_mode}")
+    if src_mode not in _REGULAR_MODES:
+        raise ShapeError(
+            f"{sha[:12]} touches a {src_mode} entry, not a regular file — a symlink or a "
+            "gitlink is not an ADR document, whatever its blob happens to say"
+        )
     _refuse_a_binary_entry(root, parent, sha, fields[1])
     return fields[1], src_blob, dst_blob
 
@@ -550,6 +561,41 @@ def _locate_adr(root: Path) -> str:
     return candidates[0]
 
 
+def _refuse_unless_a_regular_file(root: Path, path: str) -> None:
+    """Refuse unless ``path`` is a regular file in HEAD's tree and on disk.
+
+    This guards the **write**, not the shape. ``Path.write_text`` follows a
+    symlink, so a tracked ``docs/adr/NNNN-*.md`` whose blob is a *link target*
+    would have the rendered text written through it — to a file outside the
+    repository, which ``git reset --hard`` cannot restore because it was never
+    tracked. A link target is text like any other, so nothing upstream of here
+    notices: ``git show`` returns it, and a target crafted to carry a
+    ``- Status: Proposed`` line renders cleanly.
+
+    The mode is read from **HEAD's tree**, which is the same authority the
+    recogniser uses, and the working-tree link check is belt-and-braces for the
+    same file — cheap, and it fails closed if the two ever disagree.
+
+    Args:
+        root: The work tree root.
+        path: The repository-relative path to write.
+
+    Raises:
+        ShapeError: If the path is not a regular file.
+    """
+    entry = _git("ls-tree", "-z", "--", "HEAD", path, cwd=root).split("\0")[0]
+    if not entry:
+        raise ShapeError(f"{path!r} is not in HEAD's tree")
+    mode = entry.split()[0]
+    if mode not in _REGULAR_MODES:
+        raise ShapeError(
+            f"{path!r} is a {mode} entry in HEAD's tree, not a regular file — refusing to "
+            "write through it (a symlink's content is a path, and writing follows it)"
+        )
+    if (root / path).is_symlink():
+        raise ShapeError(f"{path!r} is a symlink in the working tree — refusing to write it")
+
+
 _MESSAGE = """docs(adr): ratify ADR-{number:04d}
 
 The ratification flip (ADR-0165 §2): the header's one `- Status: Proposed` line
@@ -580,6 +626,7 @@ def _ratify(args: argparse.Namespace) -> int:
 
     path: str = args.adr or _locate_adr(root)
     number = adr_number(path)
+    _refuse_unless_a_regular_file(root, path)
     rendered = render_ratified(_git("show", f"HEAD:{path}", cwd=root))
 
     if args.dry_run:
