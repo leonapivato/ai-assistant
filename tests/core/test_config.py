@@ -72,7 +72,7 @@ def test_log_level_is_normalised_to_upper_case(value: str) -> None:
 def test_embedder_defaults_to_on_device() -> None:
     # ADR-0006 §2's firm decision: on-device embedding is the default, so an unset
     # deployment gets semantic (and privacy-preserving) recall, not the non-semantic
-    # hashing stand-in (roadmap leg 2).
+    # hashing stand-in.
     assert Settings().embedder is EmbedderKind.ON_DEVICE
 
 

@@ -178,7 +178,7 @@ async def test_build_engine_wires_one_memory_store_into_both_the_loop_and_the_wr
 
 
 async def test_build_engine_wires_the_on_device_embedder_by_default(tmp_path: Path) -> None:
-    """The default settings wire the vendored on-device embedder (ADR-0006 §2, roadmap leg 2).
+    """The default settings wire the vendored on-device embedder (ADR-0006 §2).
 
     ADR-0006 §2's firm decision is that on-device embedding is the *default* — so an
     unconfigured deployment must get semantic recall, not the non-semantic

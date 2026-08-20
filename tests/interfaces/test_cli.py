@@ -629,7 +629,7 @@ def test_ask_rejects_an_unusable_timeout(bad: str) -> None:
     assert result.exit_code == 2  # Typer's usage-error code, before the engine is built
 
 
-# --- learn: the correction leg (roadmap leg 1; ADR-0042 §3, §6) ---------
+# --- learn: the correction leg (ADR-0042 §3, §6) ------------------------
 
 
 class _RecordingEngine:

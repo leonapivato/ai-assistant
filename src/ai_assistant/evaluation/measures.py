@@ -1,9 +1,10 @@
 """ADR-0120's three measures and ADR-0141's two, computed offline over the stream.
 
-`docs/roadmap.md`'s leg 8 exits when *"is the user model getting more accurate?"
-is answered by data, not opinion*, and names three of ``VISION.md``'s success
-measures. ADR-0119 built the stream they are computed over and deferred what each
-one *is*; ADR-0120 defines them, and this module is that definition in code.
+The exit test these serve — *"is the user model getting more accurate?" answered
+by data, not opinion* — is restated in ADR-0120's Context, which also names the
+three of ``VISION.md``'s success measures it takes as the data. ADR-0119 built the
+stream they are computed over and deferred what each one *is*; ADR-0120 defines
+them, and this module is that definition in code.
 
 **Every measure is a rate over one window, and the window and its settling are
 part of the figure** (§1). None of them carries a threshold, a target or a
