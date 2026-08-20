@@ -89,11 +89,12 @@ class PlannerContract:
         supplement. The signature did not change, so no triad is owed — but this
         suite's expectation moves with the wording, which is the review concern
         ``CONTRIBUTING.md`` names when a Protocol's meaning changes without its
-        shape. What a conforming planner may **not** do is read a relevance ranking
-        into the sequence, into any run of it: for a user who changes the subject
+        shape. What a conforming planner may **not** do is read a single relevance
+        order across the sequence: for a user who changes the subject
         mid-conversation, the tail is not the most relevant thing the store holds,
-        and the retrieved group's own order is the assembling consumer's (ADR-0072
-        §5, ADR-0113 §6) rather than a relevance rank.
+        and the retrieved group is composed under the assembling consumer's
+        precedence (ADR-0072 §5, ADR-0113 §6), relevance ordering the records only
+        within one precedence band.
         """
         plan = await planner.plan(_goal(), context=_context(), memories=())
         assert plan.goal_id == "g1"
