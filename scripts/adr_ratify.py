@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
 
 #: The token an unnumbered ADR carries wherever its own number will go. It is
 #: **reserved**: an ADR that needs to display the literal placeholder — quoting
@@ -115,13 +115,13 @@ def header_end(lines: Sequence[str]) -> int:
     return len(lines)
 
 
-def _sole_index(lines: Sequence[str], end: int, predicate: str, what: str) -> int:
-    """Return the one header line index satisfying ``predicate``.
+def _sole_index(lines: Sequence[str], end: int, matches: Callable[[str], bool], what: str) -> int:
+    """Return the one header line index satisfying ``matches``.
 
     Args:
         lines: The document's lines.
         end: The exclusive end of the header block.
-        predicate: A prefix the line must start with.
+        matches: The test a line must satisfy.
         what: What to call it in the error message.
 
     Returns:
@@ -130,7 +130,7 @@ def _sole_index(lines: Sequence[str], end: int, predicate: str, what: str) -> in
     Raises:
         ShapeError: If the header carries other than exactly one such line.
     """
-    found = [i for i in range(end) if lines[i].startswith(predicate)]
+    found = [i for i in range(end) if matches(lines[i])]
     if len(found) != 1:
         raise ShapeError(f"the header carries {len(found)} {what} lines, expected exactly 1")
     return found[0]
@@ -175,9 +175,20 @@ def render_ratified(text: str, number: int, date: str) -> str:
     lines[0] = f"# {number}. {heading.group(1)}"
 
     end = header_end(lines)
-    status_at = _sole_index(lines, end, _STATUS_PROPOSED, repr(_STATUS_PROPOSED))
+    # The status line matches EXACTLY, and the date line by prefix, and the
+    # asymmetry is the point. A date carries a value, so its prefix is all there
+    # is to match on. `Proposed` is a bare token (ADR-0070 §4), so a line that
+    # merely *starts* `- Status: Proposed` carries something more — a caveat, a
+    # condition, a note to the merger — and replacing the whole line would delete
+    # it while the reconstruction agreed, granting the exemption to a silent
+    # deletion of exactly the text most likely to say "not yet".
+    status_at = _sole_index(
+        lines, end, lambda line: line == _STATUS_PROPOSED, repr(_STATUS_PROPOSED)
+    )
     lines[status_at] = _STATUS_ACCEPTED
-    date_at = _sole_index(lines, end, _DATE_PREFIX, repr(_DATE_PREFIX.strip()))
+    date_at = _sole_index(
+        lines, end, lambda line: line.startswith(_DATE_PREFIX), repr(_DATE_PREFIX.strip())
+    )
     lines[date_at] = _DATE_PREFIX + date
 
     rendered = "\n".join(lines).replace(_SELF_REFERENCE, f"ADR-{number:04d}")
@@ -436,7 +447,11 @@ def _stamped_date(ratified: str) -> str:
             ISO date.
     """
     lines = ratified.split("\n")
-    date = lines[_sole_index(lines, header_end(lines), _DATE_PREFIX, "'- Date:'")]
+    date = lines[
+        _sole_index(
+            lines, header_end(lines), lambda line: line.startswith(_DATE_PREFIX), "'- Date:'"
+        )
+    ]
     value = date[len(_DATE_PREFIX) :]
     if not _ISO_DATE_RE.match(value):
         raise ShapeError("the stamped date is not YYYY-MM-DD: " + repr(value))

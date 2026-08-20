@@ -90,9 +90,19 @@ on which four digits the document was going to get.
 > **Normative.** It is taken by exactly one commit, whose whole content is: the
 > file renamed from `docs/adr/<slug>.md` to `docs/adr/NNNN-<slug>.md`; the H1's
 > `XXXX` replaced by the number, unpadded; every `ADR-XXXX` replaced by
-> `ADR-NNNN`, zero-padded; the header's one `- Status: Proposed` replaced by
-> `- Status: Accepted`; and the header's one `- Date:` line replaced by the
-> ratification date. **Nothing else.** This is the *ratify commit*.
+> `ADR-NNNN`, zero-padded; the header's one line reading exactly
+> `- Status: Proposed` replaced by `- Status: Accepted`; and the header's one
+> `- Date:` line replaced by the ratification date. **Nothing else.** This is the
+> *ratify commit*.
+
+The status line matches **exactly** where the date line matches by prefix, and
+the asymmetry is load-bearing. A date carries a value, so its prefix is all there
+is to match on; `Proposed` is a bare token (ADR-0070 §4), so a line that merely
+*starts* `- Status: Proposed` carries something further — a caveat, a condition,
+a note to the merger — and replacing the whole line would delete it. The
+reconstruction in §4 would agree, because it applies this same transform, and the
+exemption would then cover the silent deletion of exactly the text most likely to
+say "not yet".
 
 > **Normative.** The ratify commit is made by whoever merges the PR, immediately
 > before merging it and after the branch's final rebase. A lane does not make its

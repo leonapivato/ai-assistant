@@ -125,6 +125,50 @@ def test_refuses_a_document_that_does_not_stand_proposed() -> None:
         _MODULE.render_ratified(accepted, 166, "2026-08-20")
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        "- Status: Proposed — do not ratify until the migration lands",
+        "- Status: Proposed (blocked on #1234)",
+        "- Status:  Proposed",
+        "-  Status: Proposed",
+    ],
+)
+def test_refuses_a_status_line_that_is_not_exactly_proposed(status: str) -> None:
+    """The status line matches exactly; anything after it is somebody's caveat.
+
+    A prefix match would replace the whole line with ``- Status: Accepted``,
+    deleting the caveat — and the reconstruction would agree, because it applies
+    the same transform. That is the exemption granted to a silent deletion of
+    exactly the text most likely to say "not yet".
+    """
+    caveated = _PROPOSED.replace("- Status: Proposed\n", status + "\n", 1)
+
+    with pytest.raises(_MODULE.ShapeError, match="expected exactly 1"):
+        _MODULE.render_ratified(caveated, 166, "2026-08-20")
+
+
+def test_a_caveated_status_line_is_not_a_ratification(tmp_path: Path) -> None:
+    """And the recogniser refuses the commit, which is what ship rests on."""
+    repo = _adr_repo(tmp_path / "repo")
+    draft = repo / "docs" / "adr" / "a-decision-worth-recording.md"
+    draft.write_text(
+        _PROPOSED.replace("- Status: Proposed\n", "- Status: Proposed — do not ratify yet\n", 1)
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "docs(adr): caveat the status")
+    ratified = repo / "docs" / "adr" / "0101-a-decision-worth-recording.md"
+    ratified.write_text(_MODULE.render_ratified(_PROPOSED, 101, "2026-08-20"))
+    draft.unlink()
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "docs(adr): ratify over the caveat")
+
+    checked = _run(repo, "check-shape", "HEAD")
+
+    assert checked.returncode == 1
+    assert "expected exactly 1" in checked.stderr
+
+
 def test_refuses_when_a_placeholder_survives_the_substitution() -> None:
     """``XXXX`` is reserved for the ADR's own number, and the refusal is loud.
 
