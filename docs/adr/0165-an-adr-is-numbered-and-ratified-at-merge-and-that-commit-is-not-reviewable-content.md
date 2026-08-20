@@ -7,9 +7,9 @@
   ADR-0015 §5's other clause — a substantive contract ADR ships as its own PR,
   ratified before the implementation that depends on it — stands untouched.
 - Amends on ratification: ADR-0027 §2's acceptance rule, as to which commit's
-  content it reads (§4); and ADR-0070 §1, as to what a ratifying edit carries and
-  as to one bounded post-ratification renumbering (§2). The edits are **not** made
-  by this change; §8 records their exact form and why they wait (ADR-0019).
+  content it reads (§4); and ADR-0070 §1's ratifying-edit clause, as to what that
+  edit carries (§2). The edits are **not** made by this change; §8 records their
+  exact form and why they wait (ADR-0019).
 - Directs: `CONTRIBUTING.md`'s ADR-numbering paragraph, its "Finishing an ADR PR"
   sequence and its review-round conditions; `CLAUDE.md`'s golden rule 5; and
   `docs/adr/template.md`'s heading and its displayed placeholders (§§3, 7).
@@ -140,78 +140,17 @@ merges to several parties would have to re-earn this property some other way.
 than left to be discovered.** ADR-0010 excludes administrators from the review
 and up-to-date restrictions while requiring the `gate` check of "everyone, with
 no bypass", so what `--admin` overrides is precisely the `strict` check this
-paragraph depends on — CI still runs. An emergency override on a stale ADR branch
-therefore lands a ratify commit whose number `main` has already taken. The two
-files have different slugs, so nothing conflicts and nothing fails: `load_adrs`
-in `scripts/check_citations.py` keys the corpus on the number, so the
-later-sorting file silently shadows the other and a citation to that number
-resolves to one of them.
-
-**That duplicate has no clean repair, and this ADR does not pretend otherwise.**
-Renumbering one of them after the fact — the fallback `CONTRIBUTING.md` used to
-carry for a collision caught *before* merge — is not available once both are
-`Accepted` on `main`: it renames a ratified ADR and rewrites the `ADR-NNNN`
-self-references in its body, and ADR-0070 §1 permits in-place edits to the header
-lines alone and says ratified decision text is never rewritten. §4 amends
-ADR-0070 §1's ratifying-edit clause, which acts on a document still `Proposed`;
-it does not touch the append-only rule, and nothing here authorises a
-post-ratification renumbering **as an ordinary act**; the one narrow authorisation
-below is for a number that was never validly taken, and it is stated because the
-detection it pairs with would otherwise stop the repository. So the answer is
-prevention, detection and one bounded repair, in that order — the bypass is not
-used on an ADR branch, the check below catches it on `main` if it is, and the
-renumbering is authorised only for the document that took a number §2 refuses.
-This is not a weakness peculiar to this
-mechanism — the bypass is defined as bypassing evidence, and the pre-merge
-renumbering it defeats was equally defeated by it — but a rule whose safety rests
-on a protection setting should say which act defeats it and what the damage then
-is.
-
-> **Normative.** Because the shadowing is the part that makes this unrecoverable
-> rather than merely wrong, §7's follow-on lane also adds a check that no two
-> files under `docs/adr/` parse to the same number, in the required `gate`. That
-> check does not stop the bypass — nothing an ADR decides can, and a stale branch
-> is by construction a tree CI has not seen in combination — but ADR-0010 requires
-> `gate` of "everyone, with no bypass", so the duplicate fails on `main` at the
-> first push after it lands instead of sitting undetected behind a dict key.
-
-> **Normative.** That check fails on `main`, and a required check red on `main`
-> is red on every branch rebased onto it, so the repair is stated here rather
-> than left to be improvised under a stopped repository. Where two ADRs on `main`
-> share a number, the **later-merged** of the two is renumbered, by a commit
-> whose whole content is: the file renamed from `docs/adr/NNNN-<slug>.md` to
-> `docs/adr/MMMM-<slug>.md`, where `MMMM` is `max(main) + 1` computed as above;
-> the H1's number replaced by `MMMM`, unpadded; every `ADR-NNNN` self-reference
-> replaced by `ADR-MMMM`, zero-padded; and one appended dated header note
-> recording the renumbering and naming the document it collided with.
-> **Nothing else.** The `Status` and `Date` lines are not touched — the document
-> is already `Accepted` and its ratification date is a fact about when it landed.
-
-This is a **third transform**, distinct from the ratify commit's and from the
-ordinary amendment, and it is deliberately not folded into either. §4 does not
-recognise it and no exemption attaches: the repair commit is reviewed like any
-other commit, which is the right price for the one act in this ADR that edits a
-ratified document. Citations elsewhere in the corpus need no repointing — they
-were written against the number the *first* document holds, and it keeps it.
-
-This is also the one case in which ADR-0070 §1's append-only rule yields, and it
-yields on §1's own test rather than against it. The second document never validly
-took that number — §2 refuses a number that is not the next one, and the only
-reason the commit exists is that the bypass skipped the check which would have
-caught it — so the correction reconciles the file with what the rule always said,
-which is the "correcting a … line to match what actually landed" case §1 already
-permits, applied to the number rather than to the `Status`. What the substitution
-touches inside the Context, Decision and Consequences is the ADR's own number and
-nothing else: four digits that *name* the document rather than say anything in
-it. No sentence changes meaning, no reader acts differently, and the note is
-appended rather than written over anything. §8 records the amendment and its
-bounds.
-
-Whether the bypass itself should stop being available on this path is ADR-0010's
-to decide and not this ADR's: its own Revisit clause is "an incident shows the
-pragmatic bypass was abused: tighten to strict protection (include
-administrators)", and a duplicate ADR number reaching `main` by bypass is exactly
-such an incident. What is decided here is that it will be *seen*.
+paragraph depends on. An emergency override on a stale ADR branch therefore lands
+a ratify commit whose number `main` has already taken, and the duplicate is quiet
+rather than loud: the two files have different slugs, so nothing conflicts, and
+`load_adrs` in `scripts/check_citations.py` keys the corpus on the number, so the
+later-sorting file shadows the other. That residual is **ADR-0010's and not this
+ADR's** — the bypass is defined there as an escape hatch from evidence, and its
+own Revisit clause is "an incident shows the pragmatic bypass was abused: tighten
+to strict protection (include administrators)", which a duplicate ADR number
+reaching `main` would be. Making the collision loud rather than shadowing is
+tracked separately (issue #1245); nothing here authorises renumbering a ratified
+ADR to repair one, and ADR-0070 §1 does not permit it.
 
 `just adr-ratify` produces the commit — a recipe this ADR specifies and does not
 deliver. It is built by the follow-on implementation lane (§7), briefed once this
@@ -365,14 +304,13 @@ decided is a new ADR that supersedes it (ADR-0070 §1).
 That lane delivers `scripts/adr_ratify.py` and its tests, `scripts/ship.sh`'s §4
 exemption and its disclosure, the `just adr-ratify` recipe, the `CLAUDE.md`,
 `CONTRIBUTING.md` and `docs/adr/template.md` corrections below,
-`scripts/project_status.py`'s footer line, §2's duplicate-number check in the
-`gate`, and §8's edits to ADR-0015, ADR-0027 and ADR-0070 — which ADR-0019 keeps
-out of this PR in any case, since they may not be written while this document
-stands `Proposed` and it stands `Proposed` throughout its review. A worked
-implementation of all of it exists and was reviewed to seven adversarial rounds
-on this ADR's own branch before the lane was split; PR #1242 records the
-pre-trim head it can be restored from, so the follow-on starts from that rather
-than from nothing.
+`scripts/project_status.py`'s footer line, and §8's edits to ADR-0015, ADR-0027
+and ADR-0070 — which ADR-0019 keeps out of this PR in any case, since they may
+not be written while this document stands `Proposed` and it stands `Proposed`
+throughout its review. A worked implementation of all of it exists and was
+reviewed to seven adversarial rounds on this ADR's own branch before the lane
+was split; PR #1242 records the pre-trim head it can be restored from, so the
+follow-on starts from that rather than from nothing.
 
 `CONTRIBUTING.md` is ratified by ADR-0003, so an ADR outranks it and may direct
 its correction (ADR-0070 §5). Three passages are rewritten by that lane to state
@@ -462,26 +400,10 @@ step 1 already relies on. But a reader holding only ADR-0070 reads that bullet a
 naming the whole of what a ratifying act does, and after §2 it does more — it
 renames the file and substitutes the number in the body. Read that way the clause
 is over-wide, which is ADR-0082 §1's second limb again, so the record is owed.
-§2's duplicate repair is the second clause, and it is the stronger of the two.
-There the edited text *is* ratified: the later-merged of two ADRs sharing a
-number is renamed and its self-references substituted after it stands `Accepted`,
-which §1's "ratified decision text … is never rewritten" plainly does not
-contemplate. It is still an amendment and not a supersession, on §1's own test —
-what the substitution reaches inside the Context, Decision and Consequences is
-the ADR's own number and nothing else, no sentence changes meaning, no reader
-acts differently, and the number being corrected is one §2 refuses to issue, so
-the file is being reconciled with the rule rather than the rule with the file.
-But a reader holding only ADR-0070 would say no such edit is available at all,
-which is over-wide by exactly ADR-0082 §1's second limb, and the record is owed
-for it too.
-
-Both go in one note. ADR-0070's `Status` carries the leading `Partially
-superseded by ADR-0127 …` token, and ADR-0082 §2 is explicit that on such a line
-**no amendment qualifier is written**: the record is the appended dated note and
-that is the whole of it. So ADR-0070's `Status` line is **not** edited. The note
-states both clauses and, for the second, its bounds — the one anomaly it repairs,
-the commit shape it is confined to, that nothing else may ride it, and that it
-carries no review exemption.
+ADR-0070's `Status` carries the leading `Partially superseded by ADR-0127 …`
+token, and ADR-0082 §2 is explicit that on such a line **no amendment qualifier
+is written**: the record is the appended dated note and that is the whole of it.
+So ADR-0070's `Status` line is **not** edited.
 
 **ADR-0082 — no record, and this is a ruling, not an omission.** #1226 §5 names
 ADR-0082 alongside ADR-0070 as carrying a numbering line to be amended. It does
