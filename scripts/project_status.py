@@ -275,8 +275,8 @@ def render(root: Path) -> str:
     lines += [
         "",
         "Work in flight",
-        "  Open issues and pull requests on GitHub (ADR-0015); an ADR takes its",
-        "  number at merge, so a lane in flight has a slug and no number (ADR-0165).",
+        "  Open issues and pull requests on GitHub (ADR-0015); ADR numbers are",
+        "  assigned by whoever dispatches the work.",
     ]
     return "\n".join(lines)
 

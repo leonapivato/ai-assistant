@@ -108,27 +108,6 @@ test-fast *args:
 citations *args:
     uv run python scripts/check_citations.py "$@"
 
-# The one mechanical commit that ends an ADR lane (ADR-0165 §2). An ADR is
-# authored unnumbered under its slug, carries `XXXX` where its number will go,
-# and is reviewed as `Proposed`; this takes `max(main) + 1`, renames the file
-# onto it, substitutes the self-references, flips `Status` to `Accepted` and
-# stamps today's date. Nothing else — which is exactly why `just ship` accepts
-# the resulting head without a fresh review round (ADR-0165 §4), and why this
-# recipe refuses on a dirty tree, on `main`, or on an ADR that is not in that
-# shape rather than committing something the exemption would not recognise.
-#
-# `--dry-run` prints the number and the rename and changes nothing, and
-# `--number` *asserts* the number you expect rather than choosing one — it must
-# be `max(main) + 1` or the run refuses. There is deliberately no way to point it
-# at a different or a stale base: every such escape is an escape from the one
-# property `ship`'s exemption rests on. Extra args pass through, e.g.
-# `just adr-ratify --dry-run`.
-#
-# Last line, because `just --list` shows only that one: what this recipe writes.
-# Ratify the branch's unnumbered ADR — number, rename, Accepted, date (ADR-0165)
-adr-ratify *args:
-    uv run python scripts/adr_ratify.py ratify "$@"
-
 # Advisory dependency vulnerability audit
 audit:
     uv run pip-audit

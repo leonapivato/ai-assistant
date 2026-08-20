@@ -275,20 +275,6 @@ hash (a rename-only or mode-only entry), or a drift record too large to publish
 whole: each makes that path unavailable, leaving the unmoved-base test to judge
 the artifact, which a moved base fails.
 
-**One commit that does change reviewed bytes is exempt, and only one: the ADR
-ratify commit** (ADR-0165 §4). Where a PR's `HEAD` is exactly that commit — the
-unnumbered ADR renamed onto `max(main) + 1`, its `ADR-XXXX` self-references
-substituted, `Status` flipped to `Accepted`, the date stamped, and **nothing
-else** — the acceptance rule above is computed over its **parent** instead. Both
-paths still apply in full to that endpoint; nothing about the tree comparison,
-the patch identity, the floor or the drift disclosure is relaxed. The exemption
-is not granted on anyone's word: `ship` rebuilds the numbered file from the
-unnumbered one with the transform that produced it and compares bytes, so one
-further byte, a second path, a moved slug or any number but the next one all
-fail it, as does any condition that stops the test running. `ship` discloses the
-exemption in the comment it posts, naming the parent the reviews actually cover.
-See "Finishing an ADR PR".
-
 ### Stop when the required reviews are green
 
 **Every review the change requires coming back green is a terminal state, not a
@@ -353,9 +339,8 @@ author still owns ratification; the reviewer only surfaces blind spots (a missed
 alternative, inconsistency with a prior ADR, a seam that will not extend).
 
 **Trivial ADR edits** — an in-place amendment, the `Proposed` → `Accepted`
-ratification flip (which since ADR-0165 rides inside the merge-time ratify
-commit), or recording on an ADR's status that a superseding ADR has landed — are
-cheap and skip a separate review *of the edit itself*, not worth the
+ratification flip, or recording on an ADR's status that a superseding ADR has
+landed — are cheap and skip a separate review *of the edit itself*, not worth the
 round-trip. This is about *review cost*, and nothing else: it is not licence to
 rewrite a ratified decision in place, and it does not lift any review the ADR's
 substance requires. A substantive contract ADR is still reviewed while `Proposed`
@@ -379,78 +364,89 @@ throwaway branch to learn the shape, then discard it before opening the ADR PR �
 what must not happen is the implementation landing *with* the ADR that justifies
 it.
 
-**An ADR is authored unnumbered, and its number is taken at merge** (ADR-0165).
-The lane's PR is the ADR alone: `docs/adr/<slug>.md`, an `# XXXX. <title>`
-heading, `ADR-XXXX` wherever it refers to itself, `Status: Proposed` throughout
-the review. Whoever merges it then runs `just adr-ratify`, which takes
-`max(main) + 1`, renames the file onto that number, substitutes the
-self-references, flips `Status` to `Accepted` and stamps the date — and nothing
-else. A lane never picks a number and never ratifies its own ADR; an
-implementation lane reads the number off `main` after the merge. There is no
-shared counter to race and nothing to renumber, because the allocation is
-serialised behind the merge itself.
+**ADR numbers are assigned at dispatch,** by whoever hands out the work, not
+computed by the agent doing it. That removes the shared-counter race the old
+in-flight ledger tried and failed to arbitrate. If two branches still collide on
+a number, the second to merge renumbers — a file rename plus its internal
+`ADR-NNNN` references and `Refs:` trailers, no code change.
 
-### Finishing an ADR PR: `Proposed` and unnumbered through the reviews, ratified at merge
+### Finishing an ADR PR: `Proposed` through the reviews, `Accepted` on the way out
 
 An ADR PR ends in a fixed order, and each step is what makes the next one mean
-something. It is written down once here so a lane does not re-derive it. ADR-0165
-is the decision behind it; point at this block rather than re-arguing it.
+something. It is written down once here so a lane does not re-derive it:
 
-1. **Draft, review and revise it while it stands `Proposed` and unnumbered.**
-   That is the state in which a finding can still change the decision, and in
-   which the ADR's own text is *corrected* rather than annotated — ADR-0070 §1's
-   append-only protection is scoped by its own words to **ratified** decision
-   text, and ADR-0095 §7 works that adjudication through ("A `Proposed` ADR is by
+1. **Draft, review and revise it while it stands `Proposed`.** That is the state
+   in which a finding can still change the decision, and in which the ADR's own
+   text is *corrected* rather than annotated — ADR-0070 §1's append-only
+   protection is scoped by its own words to **ratified** decision text, and
+   ADR-0095 §7 works that adjudication through ("A `Proposed` ADR is by
    definition still in the state where review changes its text"). Run the whole
    required set here: adversarial for most ADRs, adversarial *and* architecture
    for one deciding a contract surface ("Stop when the required reviews are
    green").
-2. **`just ship`, then `gh pr ready` — on your own judgement**, once that whole
-   set is green on one tree ("Report the review, then mark it ready"). Two lenses
-   that came back clean on trees the ADR has since moved off have not agreed with
-   each other about the thing being ratified, so the set is green on **one** tree
-   or it is not green. The lane stops here: the document it hands over is
-   unnumbered and still says `Proposed`.
-3. **Whoever merges takes the number, with `just adr-ratify`** — after the
-   branch's final rebase and immediately before the merge, so the number is
-   `max(main) + 1` against the `main` the ADR actually lands on. One commit: the
-   file renamed onto its number, the `ADR-XXXX` self-references substituted,
-   `Status` flipped to `Accepted`, the date stamped, nothing else. Re-run
-   `just ship` afterwards if the posted comment should name the merged head; it
-   accepts, and it discloses the exemption in what it posts.
-4. **That commit costs no review round, and the exemption is mechanical rather
-   than granted.** `ship` recognises it by *rebuilding* the numbered file from the
-   unnumbered one with the same transform that produced it and comparing bytes,
-   then computes ADR-0027 §2's acceptance rule over the commit's **parent**. A
-   commit that changed one further byte, touched a second path, moved the slug or
-   took any number but its parent tree's maximum plus one is not recognised and
-   costs its round like anything else — and so does a ratify commit under any
-   condition that stops the test running at all, because it fails closed. Ask it
-   before you rely on it: `scripts/adr_ratify.py check-shape HEAD` prints the
-   ratified path, or says why not. **The exemption is from the Codex round, never
-   from the ruling** — the required set is green on the unnumbered tree *before*
-   the ratify commit is made, and nothing here detects a ratification that
-   skipped it.
-5. **A finding that arrives once the ratify commit exists** is folded by removing
-   that commit, returning the ADR to its unnumbered `Proposed` shape, and
-   re-entering at step 1 — then ratifying again, with the number recomputed
-   because `main` may have moved. This is a **pre-merge** move and only that:
-   every step here runs on the open PR, so an unmerged ratify commit has landed
-   nowhere and binds no reader. Removing it buys no round either, by the content
-   anchor: the branch is back on a tree a reviewer has already read. After the
-   merge the route is gone and a change to the decision is a new ADR that
-   supersedes it (ADR-0070 §1).
-6. **Nothing implements against the ADR until that merge** (ADR-0015 §5, golden
-   rule 5), and an implementation lane reads the number off `main` afterwards.
+2. **Flip `Proposed` → `Accepted` only once that whole set is green on one
+   tree.** Two lenses that came back clean on trees the ADR has since moved off
+   have not agreed with each other about the thing being ratified. Ratifying
+   ahead of them ratifies a decision the reviewer was still entitled to change.
+   The flip itself is a permitted in-place header edit (ADR-0070 §1).
+3. **Then re-run the required reviews on the flipped tree.** This is not a
+   judgement call and not a symptom of anything: the flip edits a reviewed byte,
+   so the recorded tree no longer equals `HEAD`'s and the unmoved-base path
+   refuses — "(a) — ADR-0020 §3 exactly as written. The tree is the whole test
+   here.", in `scripts/ship.sh`'s artifact-selection loop. The moved-base path
+   does not rescue it either, since the flip changes the reviewed patch identity
+   as well. "Trivial ADR edits" above says the flip earns no review *of the edit
+   itself*, and it does not — nothing in the re-run triages a status line. What
+   the re-run buys is **coverage**, which is mechanical, and no exemption in this
+   document lifts it. **ADR-0020 is not in tension with this step; it is what
+   obliges it.** Its §3 keeps the tree comparison mechanical — a review "taken
+   against different content or a different base" will "still fail, mechanically,
+   as before" — so ADR-0020 is itself the rule under which the flipped tree is
+   refused, and it cannot both mandate that refusal and forbid the round that
+   clears it. The round is cheap by construction: the flipped tree differs from
+   the one already judged by a status line.
 
-**The two ADRs that record the older sequence still record it accurately for
-their own PRs.** ADR-0130 §12 and ADR-0136 §7 each state a status "flipped only
-once both required reviews returned clean on one tree", with the required review
-re-run on the flipped tree — which is what the older step 3 asked for, before
-ADR-0165 took the flip out of the lane's PR. They are history, not the current route. An
-ADR recording its own ratification owes a line naming the set it ran and the
-outcome it got, plus a pointer here — not a paragraph reasoning the sequencing
-out from first principles.
+   **This does not turn a green set into a checkpoint.** What "Stop when the
+   required reviews are green" forbids is committing *again to improve* content a
+   reviewer has already judged. The flip improves nothing and reworks nothing —
+   it is the ratifying act the PR exists to perform, and without it nothing may
+   implement against the ADR at all (ADR-0015 §5). And a finding that does arrive
+   on that round is not stranded by the flip having happened: **return the ADR to
+   `Proposed` and re-enter at step 1.** This is a **pre-merge** move and only
+   that. Every step here runs on the open PR, so an `Accepted` flip sitting on the
+   branch has landed nowhere and binds no reader; restoring `Proposed` is then
+   ADR-0070 §1's *third* permitted in-place header edit — "correcting a `Status`
+   line to match what actually landed" — which is the clause ADR-0127 §3 invokes
+   for exactly this restoration, and the route ADR-0127 and ADR-0133 each took on
+   their own PRs. After the merge the route is gone and a change to the decision
+   is a new ADR that supersedes it (ADR-0070 §1), which is the whole reason the
+   flip waits for step 2's green set. ADR-0070 §1's no-rewrite rule protects
+   *ratified* decision text, and an ADR returned to `Proposed` before merge is not
+   that — so the correction stays an in-place edit rather than becoming a dated
+   note appended to a document one commit old. What the return does **not** buy is a
+   shortcut back to step 3: §1 is explicit that its permitted edit forms "bound
+   the append-only *form* of an edit, not the review a decision needs. A
+   substantive contract ADR is still reviewed while `Proposed` and ratified only
+   after". So the corrected decision earns the whole required set green on the
+   corrected `Proposed` tree before it is flipped a second time — which is why an
+   ADR taking this route records itself as ratified *on its second flip*.
+4. **`just ship`, then `gh pr ready`, then merge** — on your own judgement, like
+   any other change ("Report the review, then mark it ready").
+5. **Nothing implements against the ADR until that merge** (ADR-0015 §5, golden
+   rule 5).
+
+**Point at this block rather than re-arguing it.** ADR-0130 §12's status bullet
+is the worked precedent: drafted, reviewed and revised as `Proposed`, "its status
+flipped only once both required reviews returned clean on one tree", "Findings
+raised after the flip were folded the same way and both reviews re-run", and
+"nothing implements against §9 until this has merged". ADR-0136 §7 is the same
+bullet for a single-lens ADR: drafted, reviewed and revised as `Proposed`, with
+"the status flipped only once the required review returned clean on one tree,
+with the required review re-run on the flipped tree". Two ratified ADRs recording
+step 3 as the route they took is why this is a settled sequence to point at
+rather than one to re-argue. An ADR recording its own ratification owes a line
+naming the set it ran and the outcome it got, plus a pointer here — not a
+paragraph reasoning the sequencing out from first principles.
 
 ## The dispatcher
 
@@ -460,7 +456,7 @@ the rest of this document assumes it exists without naming it.
 
 The dispatcher:
 
-- **takes each ADR's number at merge**, with `just adr-ratify` (above);
+- **assigns ADR numbers** at dispatch (above);
 - **prevents lane collisions**, since nothing mechanical detects two agents
   working the same subsystem — ADR-0015 traded that check away deliberately;
 - **places each agent in its own clone** (ADR-0015 §2), never two in one, and
@@ -468,11 +464,10 @@ The dispatcher:
 - **decides merge order** where a contract ADR must land before the
   implementation depending on it (golden rule 5).
 
-Two things follow for **you, the agent**. Your lane's boundaries come from your
-brief, not from your own reading of the repo — where the brief conflicts with an
-issue the brief is newer, and where it conflicts with a ratified ADR, stop and
-say so rather than choosing. (Your ADR's *number* comes from neither: it is
-taken at merge, and you author unnumbered.) And the report you send back
+Two things follow for **you, the agent**. Your lane's boundaries and your ADR
+number come from your brief, not from your own reading of the repo — where the
+brief conflicts with an issue the brief is newer, and where it conflicts with a
+ratified ADR, stop and say so rather than choosing. And the report you send back
 is evidence: say what you actually verified and at which commit, because a gate
 run before a rebase is not a gate run against `main`.
 
