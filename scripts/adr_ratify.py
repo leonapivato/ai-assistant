@@ -257,11 +257,20 @@ def repo_root(start: Path) -> Path:
 
 
 def _blob(root: Path, blob_sha: str) -> str:
-    """Return a blob's content by object id.
+    """Return a blob's content by object id, refusing a binary one.
 
     Read by object id rather than by ``<rev>:<path>`` so no path resolution,
     attribute or filter can stand between the object the diff named and the bytes
     compared.
+
+    ADR-0165 §2 excludes a binary change from the shape, and a UTF-8 decode does
+    not enforce that on its own: ``0x00`` is a perfectly valid encoding of
+    U+0000, so a blob carrying an ADR header and a NUL in its body decodes,
+    reconstructs and would be recognised — while git classifies it as binary.
+    A NUL **anywhere** is refused here, which is deliberately stricter than
+    git's own heuristic (a NUL in the first 8000 bytes) and stricter in the
+    fail-closed direction: this predicate may refuse a flip git would have shown
+    as text, and may never accept one git calls binary on that ground.
 
     Args:
         root: The work tree root.
@@ -269,8 +278,24 @@ def _blob(root: Path, blob_sha: str) -> str:
 
     Returns:
         The content, decoded as UTF-8.
+
+    Raises:
+        ShapeError: If the blob is binary, or is not UTF-8.
     """
-    return _git("cat-file", "blob", blob_sha, cwd=root)
+    completed = _run_git(["cat-file", "blob", blob_sha], cwd=root)
+    if completed.returncode != 0:
+        raise ShapeError(
+            "git cat-file blob: " + completed.stderr.decode("utf-8", "replace").strip()
+        )
+    if b"\0" in completed.stdout:
+        raise ShapeError(
+            f"blob {blob_sha[:12]} carries a NUL byte, so git reads it as binary — "
+            "a binary change is outside the shape (ADR-0165 §2)"
+        )
+    try:
+        return completed.stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ShapeError(f"blob {blob_sha[:12]} is not UTF-8") from exc
 
 
 def _sole_parent(root: Path, commit: str) -> tuple[str, str]:
@@ -671,7 +696,14 @@ def pr_adr_paths(root: Path) -> list[str]:
         if index + 1 >= len(fields):
             raise ShapeError("unreadable --name-status output: a status with no path")
         path = fields[index + 1]
-        if status in ("A", "M") and _ADR_PATH_RE.match(path):
+        # Everything that is not a DELETION counts as added or modified. Naming
+        # `A` and `M` was the fail-OPEN spelling of the same intent: a type change
+        # (`T`) — an ADR replaced by a symlink whose target text carries the
+        # header — is reported as neither, and so is an unmerged entry (`U`) or a
+        # status git adds later. A deletion is excluded because there is nothing
+        # left at HEAD to read a status line out of, not because it is waved
+        # through.
+        if status[:1] != "D" and _ADR_PATH_RE.match(path):
             paths.append(path)
         index += 2
     return paths
