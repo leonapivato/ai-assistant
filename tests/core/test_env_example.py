@@ -21,7 +21,7 @@ push the file back toward being a drifting copy of ``config.py``, which is the
 shape the rule exists to prevent. The values are likewise disclaimed in the header
 as "examples of the *form*, not a record of the defaults", so pinning one would
 re-arm the staleness the file disclaims. The load case below asserts that the
-examples *parse*, and asserts nothing about what they parse to.
+examples *parse* and *arrive*, and asserts nothing about what they parse to.
 
 Refs #1277, #1273, #1021.
 """
@@ -43,26 +43,45 @@ if TYPE_CHECKING:
 #: root is a test that silently stops running.
 _ENV_EXAMPLE: Final = Path(__file__).resolve().parents[2] / ".env.example"
 
+#: ``Settings.model_config``'s ``env_prefix``, in the case ``config.py`` writes it
+#: and the file uses — which is **not** the only case the loader accepts.
+_PREFIX: Final = "ASSISTANT_"
+
 #: One commented assignment, as the file writes them: ``# ASSISTANT_NAME=value``.
+#:
 #: Anchored to the line start so a name merely *mentioned* in the prose — the
 #: header's "prefixed `ASSISTANT_`" — is not mistaken for a setting the file
 #: offers. Unprefixed entries (``OPENAI_API_KEY`` and the other provider
 #: credentials) are read by the provider SDKs rather than by ``Settings`` and are
 #: outside what this module can check.
-_ASSIGNMENT: Final = re.compile(r"^#\s*(ASSISTANT_[A-Z0-9_]+)=(.*)$")
-
-#: ``Settings.model_config``'s ``env_prefix``, as it is written in the file and in
-#: ``config.py`` — the case the file uses, not the only case the loader accepts.
-_PREFIX: Final = "ASSISTANT_"
+#:
+#: **Case-insensitive on purpose, though every line in the file today is upper
+#: case.** ``SettingsConfigDict`` leaves ``case_sensitive`` at its ``False``
+#: default, so ``assistant_log_level`` is a live assignment for an operator in
+#: exactly the way ``ASSISTANT_LOG_LEVEL`` is. A parser that only saw upper case
+#: would let a lower-case line into the file unchecked — unbound to any field, and
+#: invisible to the uniqueness case below, which is the one place where the two
+#: cases genuinely collide.
+_ASSIGNMENT: Final = re.compile(rf"^#\s*({_PREFIX}[A-Z0-9_]+)=(.*)$", re.IGNORECASE)
 
 
 def _assignments() -> list[tuple[str, str]]:
-    """Every commented ``ASSISTANT_*`` assignment in the file, in file order."""
+    """Every commented ``ASSISTANT_*`` assignment, verbatim and in file order.
+
+    The name is returned **as written** rather than normalised, because the load
+    case has to write back exactly the text an operator would uncomment. Every
+    case that compares names canonicalises for itself.
+    """
     return [
         (match.group(1), match.group(2))
         for line in _ENV_EXAMPLE.read_text(encoding="utf-8").splitlines()
         if (match := _ASSIGNMENT.match(line))
     ]
+
+
+def _fields() -> list[str]:
+    """The ``Settings`` field each assignment names, canonicalised, in file order."""
+    return [name.upper().removeprefix(_PREFIX).lower() for name, _ in _assignments()]
 
 
 def _variables() -> set[str]:
@@ -71,10 +90,10 @@ def _variables() -> set[str]:
 
 
 def test_the_example_file_offers_settings_to_set() -> None:
-    """A guard on the two cases below, which a regex that stopped matching passes.
+    """A guard on the cases below, which a regex that stopped matching passes.
 
-    Both of the real assertions are over a parsed set, and an empty set satisfies
-    a subset check and a load alike. So the count is pinned loosely — not to a
+    Every real assertion here is over a parsed set, and an empty set satisfies a
+    subset check and a load alike. So the count is pinned loosely — not to a
     number, which would make every added setting a failing test, but to the fact
     that the parse found a substantial file rather than nothing.
     """
@@ -87,39 +106,52 @@ def test_every_example_variable_is_a_real_settings_field() -> None:
     ``Settings.model_config`` sets ``env_prefix="ASSISTANT_"``, so the mapping is
     mechanical and the check is exact: uppercase the field name, prefix it, and
     the file may name nothing outside that set. Extra environment variables are
-    simply ignored at load, which is what makes this failure silent and worth a
-    test — the operator sets the variable, the feature stays off, and no error is
-    produced at any point.
+    simply ignored at load (``extra="ignore"``), which is what makes this failure
+    silent and worth a test — the operator sets the variable, the feature stays
+    off, and no error is produced at any point.
     """
-    offered = {name for name, _ in _assignments()}
+    offered = {name.upper() for name, _ in _assignments()}
 
     assert offered <= _variables(), sorted(offered - _variables())
 
 
-def test_the_example_file_names_each_variable_once() -> None:
-    """Two assignments of one name would leave an operator with a silent winner.
+def test_the_example_file_names_each_setting_once() -> None:
+    """Two assignments of one setting would leave an operator a silent winner.
 
     ``.env`` is last-wins, so a duplicate does not fail — it makes one of the two
     examples dead text, and which one is dead depends on file order rather than on
-    anything a reader can see.
+    anything a reader can see. Compared **after** canonicalisation, because the
+    loader is case-insensitive: ``ASSISTANT_LOG_LEVEL`` and ``assistant_log_level``
+    are one setting assigned twice, and that is the duplicate a reader is least
+    likely to spot unaided.
     """
-    offered = [name for name, _ in _assignments()]
+    named = _fields()
 
-    assert sorted(offered) == sorted(set(offered))
+    assert sorted(named) == sorted(set(named))
 
 
 def test_the_example_file_generates_a_loadable_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Uncommenting the whole file produces a ``.env`` that ``Settings`` accepts.
+    """Uncommenting the whole file produces a ``.env`` that arms what it advertises.
 
     This is the check PR #1275 ran by hand in a scratch directory and #1277 asked
     to be made repeatable. It is stronger than the name check and narrower than it
-    looks: it asserts that every example is *well-formed for its field* and that
-    the file's cross-field rules hold together — an interval with no path is
-    refused at load, and the file arms several of those pairs at once — while
-    asserting nothing about any value. A default that changes does not fail here;
-    an example that stops being a legal duration, timezone, route or UUID does.
+    looks: it asserts that every example is *well-formed for its field*, that the
+    file's cross-field rules hold together — an interval with no path is refused at
+    load, and the file arms several of those pairs at once — and that every
+    advertised variable actually **reaches** its setting, while asserting nothing
+    about any value. A default that changes does not fail here; an example that
+    stops being a legal duration, timezone, route or UUID does, and so does a
+    variable that stops being the name the loader looks for.
+
+    Arrival is read off ``model_fields_set``, which reports the fields that came in
+    as *input* rather than from a default. That is what makes the check exact where
+    a value comparison cannot be: ten of these examples are equal to their field's
+    default, so a setting silently ignored — a field that grew a validation alias,
+    say, while keeping its name and its line here — would be indistinguishable from
+    one that loaded. The relation is ``<=`` rather than equality because a model
+    validator may set further fields that no variable named.
 
     It loads through the mechanism an operator actually uses rather than through a
     private constructor argument: ``model_config`` sets ``env_file=".env"``, a
@@ -130,35 +162,20 @@ def test_the_example_file_generates_a_loadable_env(
     The environment is cleared first because environment variables outrank
     ``env_file`` in pydantic-settings' source order, so an ambient ``ASSISTANT_*``
     — a developer's own shell, or CI — would otherwise be what the case actually
-    loaded. It is cleared **case-insensitively**, and by sweeping the environment
-    rather than by deleting the names this module knows about:
-    ``SettingsConfigDict`` leaves ``case_sensitive`` at its ``False`` default, so
-    ``assistant_log_level`` is read exactly as ``ASSISTANT_LOG_LEVEL`` is, and a
-    stray lower-case one holding an invalid value would fail this case at
-    ``baseline`` — before the generated file was tested at all.
+    loaded. It is cleared by sweeping the environment case-insensitively rather
+    than by deleting the names this module knows about, for the same reason the
+    parser is case-insensitive: a stray lower-case one holding an invalid value
+    would fail this case at construction, before the generated file was reached.
     """
     for variable in list(os.environ):
         if variable.upper().startswith(_PREFIX):
             monkeypatch.delenv(variable, raising=False)
     monkeypatch.chdir(tmp_path)
-    baseline = Settings()
-    assignments = _assignments()
     Path(".env").write_text(
-        "".join(f"{name}={value}\n" for name, value in assignments), encoding="utf-8"
+        "".join(f"{name}={value}\n" for name, value in _assignments()), encoding="utf-8"
     )
 
     settings = Settings()
 
-    # That construction raised nothing is half the claim; the other half is that
-    # the file was *read*, which no exception can report — pydantic-settings
-    # ignores a variable it does not recognise rather than objecting. So the two
-    # loads are compared: something moved, and nothing moved that the file does
-    # not name.
-    offered = {name.removeprefix(_PREFIX).lower() for name, _ in assignments}
-    moved = {
-        field
-        for field in Settings.model_fields
-        if getattr(settings, field) != getattr(baseline, field)
-    }
-    assert moved, "the generated .env moved no setting, so it was not read at all"
-    assert moved <= offered, sorted(moved - offered)
+    advertised = set(_fields())
+    assert advertised <= settings.model_fields_set, sorted(advertised - settings.model_fields_set)
