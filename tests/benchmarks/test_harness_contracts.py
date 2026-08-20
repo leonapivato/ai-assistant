@@ -19,6 +19,7 @@ import dataclasses
 import hashlib
 import urllib.request
 from contextlib import contextmanager
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 from unittest import mock
 from zoneinfo import ZoneInfo
@@ -53,6 +54,7 @@ from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import MemoryIngestor, ModelBackedReconciler
 from ai_assistant.memory import traces as memory_traces
+from ai_assistant.models import BoundedEmbedder, HashingEmbedder
 from ai_assistant.orchestration import loop as orchestration_loop
 from ai_assistant.testing import FakeModelProvider, FakeObserver
 
@@ -178,6 +180,59 @@ def test_the_supplement_reads_the_kinds_and_bands_the_loop_reads() -> None:
     """
     assert answer.SUPPLEMENT_KINDS == orchestration_loop._SUPPLEMENT_KINDS
     assert answer.SUPPLEMENT_BANDS == orchestration_loop._SUPPLEMENT_BANDS
+
+
+class _CloudKind(StrEnum):
+    """A stand-in for an ``EmbedderKind`` this harness has no branch for.
+
+    None exists yet — two members do, and both are branched — so the refusal has to be
+    exercised against a member from outside the enum. The name is the one
+    ``tests/app/test_composition.py`` uses against the composition root's switch, for
+    the same reason ADR-0104 §4 gives: the third member most likely to arrive is a
+    cloud embedder, and the rule is decided while the case is hypothetical.
+    """
+
+    CLOUD = "somebody-elses-cloud"
+
+
+def test_an_embedder_kind_the_harness_cannot_build_is_refused_not_substituted(
+    tmp_path: Path,
+) -> None:
+    """The harness's embedder switch is exhaustive, as the composition root's is (#1295).
+
+    The failure this forecloses is not a crash, it is a **quiet substitution**: the old
+    ``else`` built the on-device model for anything that was not ``HASHING``, while
+    ``manifest.embedder`` records the kind the settings *name*. A run configured for an
+    unimplemented member would therefore have reported one embedding space and measured
+    another — the #1293 shape, and under ADR-0104 §4 a privacy fault too, since an
+    operator who authorised an off-device recipient would have got a different one.
+
+    Reaching the refusal proves the substitution is gone; ``mypy`` is what keeps a
+    *real* third member from getting here at all, since both members are branched and
+    the fall-through narrows to ``Never``. This is the runtime backstop under that.
+    """
+    settings = Settings(data_dir=tmp_path / "data", embedder=EmbedderKind.HASHING)
+    unbranched = settings.model_copy(update={"embedder": _CloudKind.CLOUD})
+
+    with pytest.raises(AssertionError, match="somebody-elses-cloud"):
+        wiring.build_embedder(unbranched)
+
+
+def test_the_harness_builds_the_kind_it_was_given_and_bounds_it(tmp_path: Path) -> None:
+    """The other half: an implemented member is built, and built bounded.
+
+    ADR-0118 §2's second clause is what the ``BoundedEmbedder`` wrap is for, and the
+    switch above returns through a single wrap so that no branch can escape it. Only
+    the hashing member is exercised here — the on-device one needs the vendored ONNX
+    artifact, which is ``tests/app``'s to cover and not something a harness test should
+    load.
+    """
+    settings = Settings(data_dir=tmp_path / "data", embedder=EmbedderKind.HASHING)
+
+    embedder = wiring.build_embedder(settings)
+
+    assert isinstance(embedder, BoundedEmbedder)
+    assert isinstance(embedder._inner, HashingEmbedder)
 
 
 @contextmanager

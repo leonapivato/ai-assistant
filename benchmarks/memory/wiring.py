@@ -52,7 +52,7 @@ asking a reader to keep them in step.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
 from ai_assistant.app.composition import (
     CONFLICT_LIMIT,
@@ -381,6 +381,10 @@ def build_embedder(settings: Settings) -> Embedder:
     the non-semantic QA embedder, which is useful for exercising plumbing without
     loading ONNX and is **not** a configuration any scored run may use.
 
+    The switch is **exhaustive**, as the composition root's is and for the reason the
+    refusing branch below records: a member with no branch is refused rather than built
+    as the on-device model (#1295).
+
     Args:
         settings: Loaded application settings.
 
@@ -391,7 +395,7 @@ def build_embedder(settings: Settings) -> Embedder:
     inner: Embedder
     if settings.embedder is EmbedderKind.HASHING:
         inner = HashingEmbedder()
-    else:
+    elif settings.embedder is EmbedderKind.ON_DEVICE:
         # Imported here rather than at module scope for the reason the composition
         # root gives: the import pulls in ONNX, and the hashing path must not pay it.
         from ai_assistant.models.fastembed_embedder import (  # noqa: PLC0415 — deferred so the hashing path never imports fastembed/ONNX
@@ -399,6 +403,22 @@ def build_embedder(settings: Settings) -> Embedder:
         )
 
         inner = FastEmbedEmbedder()
+    else:
+        # **Exhaustive, with no fall-through to the default, and the check is static** —
+        # `_build_configured_embedder`'s shape, mirrored here because the harness has
+        # the same hazard with a worse consequence. This was a bare `else` building the
+        # on-device model, so a member with no branch would be *built* as FastEmbed
+        # while `manifest.embedder` recorded the **configured** kind: a run reporting
+        # one embedding space and measuring another, which is #1293's false-provenance
+        # shape and not something a score can be read through. ADR-0104 §4 makes the
+        # same substitution a privacy fault the day a third member is a cloud embedder,
+        # since an authorised selection would report one recipient and use another.
+        # With both members branched above, `mypy` narrows this to `Never`, so **adding
+        # a member without a branch is a gate failure rather than a silent pilot**
+        # (#737). The call is the runtime backstop for a `Settings` built past
+        # pydantic's own validation, which is a programming error and is signalled as
+        # one.
+        assert_never(settings.embedder)
     return BoundedEmbedder.from_settings(inner, settings)
 
 
