@@ -660,9 +660,12 @@ async def execute_run(  # noqa: PLR0913, PLR0915 — every parameter is a distin
     # (#1293). Built even under `reuse`, where it reconciles nothing — the manifest's
     # field is then inherited from the source run, which is the run that did the
     # ingesting (`reuse.INHERITED_FIELDS`).
-    reconciliation = (
-        reconciler if reconciler is not None else build_reconciler(resolved, guard=guard)
-    )
+    #
+    # **Unguarded here.** `build_harness` puts it behind the guard, on the same line
+    # for a built reconciler and an injected one, so the seam is wrapped exactly once
+    # however it arrived; wrapping it here as well would charge every crossing twice
+    # and ADR-0159 §3's never-raises clause would hide it.
+    reconciliation = reconciler if reconciler is not None else build_reconciler(resolved)
     refuse_ineligible_reuse(
         reuse,
         plan.cases,

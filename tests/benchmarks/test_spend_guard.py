@@ -18,11 +18,14 @@ be present and useless:
 
 from __future__ import annotations
 
+import inspect
 import json
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
+from unittest import mock
 
 import pytest
+from benchmarks.memory import run as run_module
 from benchmarks.memory.cases import BenchCase, BenchQuestion, BenchSession, BenchTurn
 from benchmarks.memory.corpora.provenance import LOCOMO
 from benchmarks.memory.records import QuestionRecord, RunManifest, RunMode, read_jsonl
@@ -33,7 +36,7 @@ from benchmarks.memory.spend import (
     SpendGuard,
     is_credit_exhaustion,
 )
-from benchmarks.memory.wiring import build_harness
+from benchmarks.memory.wiring import build_harness, build_reconciler
 from harness_reconcilers import offline_reconciler
 
 from ai_assistant.core.config import EmbedderKind, Settings
@@ -506,6 +509,27 @@ def test_an_injected_observer_is_outside_the_run_budget(tmp_path: Path) -> None:
         harness.close()
 
 
+def _guard_depth(provider: ModelProvider) -> int:
+    """How many guards a seam is wrapped in.
+
+    One is right; two charges every call twice, which at the reconciler's seam is
+    *silent* — ADR-0159 §3 has the reconciler catch the inner wrapper's refusal and
+    report an unlabelled conflict set. So the count is what the assertion is about,
+    rather than "is it guarded at all".
+
+    Args:
+        provider: The seam to inspect.
+
+    Returns:
+        The number of nested ``_GuardedProvider`` wrappers.
+    """
+    depth = 0
+    while getattr(provider, "_guard", None) is not None:
+        depth += 1
+        provider = provider._inner  # type: ignore[attr-defined]
+    return depth
+
+
 def test_a_built_reconciler_spends_the_run_budget(tmp_path: Path) -> None:
     """ADR-0159's seam labels at most one request per proposal, so a LoCoMo case's
     ingestion carries thousands of them (#1293).
@@ -521,8 +545,76 @@ def test_a_built_reconciler_spends_the_run_budget(tmp_path: Path) -> None:
     harness = build_harness(settings, data_dir=tmp_path / "case", guard=guard)
     try:
         assert _guards(harness.reconciliation.model) is guard
+        # Once, not twice: `build_reconciler` deliberately takes no guard, so
+        # `build_harness` is the only layer that wraps this seam.
+        assert _guard_depth(harness.reconciliation.model) == 1
     finally:
         harness.close()
+
+
+def test_the_reconciler_can_be_guarded_at_only_one_boundary(tmp_path: Path) -> None:
+    """Both exported helpers are public, so "wrap it once" has to be unaskable-otherwise.
+
+    A caller holding one guard and calling both — ``build_reconciler(settings,
+    guard=g)`` then ``build_harness(reconciler=that, guard=g)`` — is the natural
+    reading of two functions that each take a guard, and it nests two wrappers: every
+    crossing charged twice, and *invisibly*, since ADR-0159 §3 has the reconciler
+    swallow the inner refusal. Closing it by convention would leave the shape available
+    to the next reader. Closing it by removing the argument leaves nothing to close.
+    """
+    settings = Settings(
+        data_dir=tmp_path, embedder=EmbedderKind.HASHING, default_model="anthropic:claude-x"
+    )
+
+    assert _guard_depth(build_reconciler(settings).model) == 0
+    assert "guard" not in inspect.signature(build_reconciler).parameters
+
+
+async def test_a_run_charges_one_reconciler_call_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exactly one layer wraps the reconciler, on the chain an injection cannot reach.
+
+    ``execute_run`` builds the reconciler and ``build_harness`` guards it, and if both
+    wrapped it every crossing would be charged twice — *silently*, because ADR-0159 §3
+    has the reconciler swallow the inner wrapper's refusal and report an unlabelled set
+    rather than raise. So the two halves are asserted separately, since neither alone
+    would fail on a doubled wrap:
+
+    * ``execute_run`` asks for an **unguarded** reconciler — no ``guard`` reaches
+      ``build_reconciler``, which is why that function takes no such argument.
+    * ``build_harness`` then wraps it exactly once, which the record count shows: the
+      substitute arrives unguarded, this case crosses once, and a ceiling of two buys
+      the crossing and the first question and stops at the second. Two wrappers there
+      would spend both on the crossing and leave no records at all.
+
+    The seam is substituted at ``build_reconciler`` rather than injected through
+    ``execute_run``, because injecting is precisely the path this test must *not* take.
+    The credential is set for the same reason: the run believes it is building the
+    configured route, and ``check_credentials_for`` asks about it before anything else.
+    """
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "present-for-the-route-that-is-not-reached")
+    root = tmp_path / "runs"
+
+    substitute = mock.Mock(return_value=offline_reconciler())
+    with mock.patch.object(run_module, "build_reconciler", substitute):
+        manifest = await execute_run(
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
+            output_root=root,
+            mode=RunMode.SMOKE,
+            corpus_digests={},
+            settings=_settings(tmp_path),
+            model=FakeModelProvider("a dog"),
+            observer=FakeObserver(max_batch_size=BATCH),
+            max_model_calls=2,
+        )
+
+    substitute.assert_called_once()
+    assert substitute.call_args.kwargs == {}, "execute_run must not guard it; build_harness does"
+    assert _guard_depth(substitute.return_value.model) == 0
+    assert manifest.aborted is not None
+    records = read_jsonl(root / manifest.run_id / "records.jsonl", QuestionRecord)
+    assert len(records) == 1
 
 
 def test_an_injected_reconciler_is_inside_the_run_budget(tmp_path: Path) -> None:
