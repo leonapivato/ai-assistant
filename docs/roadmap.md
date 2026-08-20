@@ -89,7 +89,7 @@ Live record: **#1230**.
 gateway, chat, notifications, control surfaces. Milestones are ordered by
 **dependency only**, and each closes on a QA-driven exit ruling: a QA run drives
 the milestone's ruled behaviors end-to-end through a live hub
-(`.claude/skills/qa-leg`), recorded as a `qa` issue, and the owner rules the exit
+(`.claude/skills/qa-milestone`), recorded as a `qa` issue, and the owner rules the exit
 on #1230. An exit test is stated in product terms — a gap closes when a user can
 exercise the capability, not when a test can.
 

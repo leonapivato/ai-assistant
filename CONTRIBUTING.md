@@ -562,7 +562,7 @@ to the track that holds that subsystem, not to both (`docs/roadmap.md` →
   than lazily.
 - `batch` — a dispatch record: the lanes, the ADRs they carry, the run, the
   outcome.
-- `qa` — a QA-run record (`.claude/skills/qa-leg`), the evidence a milestone's
+- `qa` — a QA-run record (`.claude/skills/qa-milestone`), the evidence a milestone's
   exit is ruled on.
 
 Add another label on evidence, not in advance.
