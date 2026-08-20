@@ -584,6 +584,34 @@ def _gh(*args: str, cwd: Path) -> str:
     return completed.stdout.decode("utf-8", "replace").strip()
 
 
+def _refuse_unless_pr_head_is_local_head(root: Path) -> None:
+    """Refuse while the PR's head is not the commit this guard would judge.
+
+    Everything below reads the LOCAL ``HEAD``, so an unpushed commit would make
+    the guard describe a tree GitHub has never seen — and the direction that
+    fails is the permissive one: ratify locally, run the recipe before pushing,
+    and a PR still carrying ``- Status: Proposed`` is marked ready by a guard
+    that just certified a file only this clone holds. That is issue #1044's
+    failure with an extra step, so it is refused rather than warned about.
+    ``ship`` carries the same precondition for the same reason.
+
+    Args:
+        root: The work tree root.
+
+    Raises:
+        ShapeError: If the PR head is not local ``HEAD``.
+    """
+    sha = _git("rev-parse", "HEAD", cwd=root).strip()
+    pr_sha = _gh("pr", "view", "--json", "headRefOid", "--jq", ".headRefOid", cwd=root)
+    if not pr_sha:
+        raise ShapeError("no PR found for this branch — open one first (gh pr create)")
+    if pr_sha != sha:
+        raise ShapeError(
+            f"PR head is {pr_sha[:12]} but HEAD is {sha[:12]} — push first, or this "
+            "guard would judge a commit the PR does not carry"
+        )
+
+
 def pr_adr_paths(root: Path) -> list[str]:
     """Return the numbered ADR documents this PR adds or modifies.
 
@@ -649,6 +677,7 @@ def _check_ready(_args: argparse.Namespace) -> int:
         ShapeError: If any touched ADR still stands ``Proposed``.
     """
     root = repo_root(Path.cwd())
+    _refuse_unless_pr_head_is_local_head(root)
     still = _proposed_adrs(root, pr_adr_paths(root))
     if still:
         listed = "\n       ".join(still)

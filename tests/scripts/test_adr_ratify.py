@@ -492,14 +492,20 @@ def _pr_repo(repo: Path, tmp_path: Path, body: str = _PROPOSED) -> Path:
     return repo
 
 
-def _run_guard(repo: Path, tmp_path: Path) -> subprocess.CompletedProcess[str]:
-    """Run ``check-ready`` with the fake ``gh`` on PATH."""
+def _run_guard(
+    repo: Path, tmp_path: Path, *, pr_sha: str | None = None
+) -> subprocess.CompletedProcess[str]:
+    """Run ``check-ready`` with the fake ``gh`` on PATH.
+
+    ``pr_sha`` is what the PR reports as its head; it defaults to local ``HEAD``,
+    which is the pushed state the recipe is meant to run in.
+    """
     return _run(
         repo,
         "check-ready",
         env={
             "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}",
-            "GH_PR_SHA": _git(repo, "rev-parse", "HEAD"),
+            "GH_PR_SHA": pr_sha or _git(repo, "rev-parse", "HEAD"),
         },
     )
 
@@ -522,6 +528,23 @@ def test_the_ready_guard_passes_once_the_flip_is_made(tmp_path: Path) -> None:
     guard = _run_guard(repo, tmp_path)
 
     assert guard.returncode == 0, guard.stderr
+
+
+def test_the_ready_guard_refuses_a_flip_that_was_never_pushed(tmp_path: Path) -> None:
+    """The guard reads local ``HEAD``, so it must refuse to speak for a PR ahead of it.
+
+    Ratify locally, do not push, and every path below would certify a file only
+    this clone holds while GitHub still shows the ADR standing ``Proposed`` — the
+    permissive direction, and issue #1044's failure with one extra step.
+    """
+    repo = _pr_repo(tmp_path / "repo", tmp_path)
+    unpushed = _git(repo, "rev-parse", "HEAD")
+    assert _run(repo, "ratify").returncode == 0
+
+    guard = _run_guard(repo, tmp_path, pr_sha=unpushed)
+
+    assert guard.returncode == 1
+    assert "push first" in guard.stderr
 
 
 def test_the_ready_guard_still_refuses_a_caveated_proposed_line(tmp_path: Path) -> None:
