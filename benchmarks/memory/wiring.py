@@ -203,6 +203,33 @@ class Reconciliation:
             ),
         )
 
+    def guarded_by(self, guard: SpendGuard) -> Reconciliation:
+        """The same reconciliation, labelling through ``guard``.
+
+        **A caller's own reconciler is covered, which is the one asymmetry worth
+        stating.** ``build_harness`` wraps an injected *answering* seam for the reason
+        its own docstring gives — an injected provider stands in for a call the run
+        would otherwise have made, and a budget nothing can drive is a budget nothing
+        exercises — and an injected reconciler is a ``ModelProvider`` behind a thin
+        value, so unlike an injected ``Observer`` there is something here to wrap.
+        Leaving it unwrapped would let ``--max-model-calls 0`` still spend on every
+        crossing.
+
+        A new value rather than a mutation, because the type is frozen and because the
+        route and the bound must survive: this is the *same* reconciliation, differing
+        only in what it spends through, so the manifest's account of it is unchanged.
+
+        Args:
+            guard: The run's spend guard.
+
+        Returns:
+            The guarded reconciliation. The reconciler object is rebuilt, since the
+            provider is what it holds; nothing else about it moves.
+        """
+        return Reconciliation(
+            model=guard.wrap(self.model), route=self.route, max_conflicts=self.max_conflicts
+        )
+
     @property
     def name(self) -> str:
         """The manifest's account of what actually reconciled.
@@ -597,7 +624,11 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
             one from ``settings`` here. A run builds it once and hands it down, so the
             object the manifest describes is the object each ingestor holds — the
             property #1293 is about; a direct caller that passes ``None`` still gets
-            the configured wiring rather than none.
+            the configured wiring rather than none. An injected one is put behind
+            ``guard`` exactly as an injected ``model`` is
+            (:meth:`Reconciliation.guarded_by`): it is a ``ModelProvider`` behind a
+            thin value, so unlike an injected ``Observer`` there is something to wrap,
+            and a ceiling it escaped would bound less than the run spends.
         guard: The run's spend guard, shared with every other case and with the judge.
             It is applied to the answering seam whether that seam was built here or
             **injected** — the one place the guard covers a caller's own object, because
@@ -636,7 +667,9 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
     # observer below is still built after them — a pre-existing leak on the same shape,
     # left alone here rather than widened into (#1300).
     reconciliation = (
-        reconciler if reconciler is not None else build_reconciler(settings, guard=guard)
+        build_reconciler(settings, guard=guard)
+        if reconciler is None
+        else (reconciler if guard is None else reconciler.guarded_by(guard))
     )
 
     traces = SqliteTraceStore(path=data_dir / "traces.db")
