@@ -299,23 +299,35 @@ def test_only_max_plus_one_is_a_ratification(tmp_path: Path, number: int, why: s
     assert "is not the next number" in checked.stderr
 
 
-def test_refuses_to_ratify_from_a_branch_behind_its_base(tmp_path: Path) -> None:
-    """A number computed off a stale tree collides the moment it merges."""
+@pytest.mark.parametrize("adds_an_adr", [True, False], ids=["adr-landed", "anything-landed"])
+def test_refuses_to_ratify_from_a_branch_behind_its_base(
+    tmp_path: Path, *, adds_an_adr: bool
+) -> None:
+    """Staleness is ancestry, not a comparison of ADR numbers.
+
+    The ADR-landing case is the one that changes the number outright. The other
+    is the one an ADR-number comparison silently accepts: `main` moved, the
+    branch is exactly as stale, and the two number sets are equal — while
+    ADR-0165 §2 puts this commit after the final rebase for the whole tree.
+    """
     repo = _adr_repo(tmp_path / "repo")
-    clone = tmp_path / "other"
-    _git(repo, "worktree", "add", "-q", "-b", "other", str(clone), "main")
-    (clone / "docs" / "adr" / "0101-landed-first.md").write_text(
-        "# 101. Landed first\n\n- Status: Accepted\n- Date: 2026-01-01\n\n## Context\n\nx\n"
-    )
-    _git(clone, "add", "-A")
-    _git(clone, "commit", "-qm", "docs(adr): land first")
-    _git(clone, "push", "-q", "origin", "other:main")
+    other = tmp_path / "other"
+    _git(repo, "worktree", "add", "-q", "-b", "other", str(other), "main")
+    if adds_an_adr:
+        (other / "docs" / "adr" / "0101-landed-first.md").write_text(
+            "# 101. Landed first\n\n- Status: Accepted\n- Date: 2026-01-01\n\n## Context\n\nx\n"
+        )
+    else:
+        (other / "notes.txt").write_text("something that is not an ADR\n")
+    _git(other, "add", "-A")
+    _git(other, "commit", "-qm", "chore: land something on main")
+    _git(other, "push", "-q", "origin", "other:main")
 
     produced = _run(repo, "ratify", "--date", "2026-08-20")
 
     assert produced.returncode == 1
-    assert "ADR-0101" in produced.stderr
-    assert "rebase onto origin/main first" in produced.stderr
+    assert "does not contain it — rebase first" in produced.stderr
+    assert not list((repo / "docs" / "adr").glob("01*-a-decision-worth-recording.md"))
 
 
 def test_a_write_failure_after_the_rename_restores_the_branch(

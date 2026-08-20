@@ -250,6 +250,33 @@ def _git(*args: str, cwd: Path) -> str:
         raise ShapeError("git " + " ".join(args) + ": output is not UTF-8") from exc
 
 
+def _is_ancestor(root: Path, maybe_ancestor: str, rev: str) -> bool:
+    """Return whether ``maybe_ancestor`` is contained in ``rev``'s history.
+
+    Args:
+        root: The work tree root.
+        maybe_ancestor: The commit that may be contained.
+        rev: The commit that may contain it.
+
+    Returns:
+        True if it is an ancestor (or the same commit).
+
+    Raises:
+        ShapeError: If git fails for any reason other than answering "no".
+    """
+    completed = subprocess.run(  # noqa: S603  # fixed argv, no shell
+        ["git", "merge-base", "--is-ancestor", maybe_ancestor, rev],  # noqa: S607
+        cwd=str(root),
+        capture_output=True,
+        check=False,
+    )
+    if completed.returncode not in (0, 1):
+        raise ShapeError(
+            "git merge-base --is-ancestor: " + completed.stderr.decode("utf-8", "replace").strip()
+        )
+    return completed.returncode == 0
+
+
 def repo_root(start: Path) -> Path:
     """Return the work tree root containing ``start``."""
     return Path(_git("rev-parse", "--show-toplevel", cwd=start).strip())
@@ -540,26 +567,27 @@ def _ratify(args: argparse.Namespace) -> int:
 
     # The number is computed from HEAD's tree alone, because that is the tree the
     # recogniser can see. The base is fetched only to prove HEAD is not behind
-    # it: a branch missing a number `main` already carries would compute a number
-    # that collides the moment it merges, and §2 requires this commit to be made
-    # after the final rebase precisely so that cannot happen. Saying so is better
-    # than silently taking the higher of the two, which would then fail the
-    # recogniser's max + 1 test for reasons nobody could read off the commit.
+    # it, and the proof is ANCESTRY, not a comparison of ADR numbers: a base
+    # advance that adds no ADR leaves the two number sets equal while the branch
+    # is just as stale, and §2 puts this commit after the final rebase for the
+    # whole state of the tree, not only for the part that decides the number.
+    # `ship.sh`'s drill refuses on the same test for the same reason (issue
+    # #751): a check computed against a base the branch does not contain answers
+    # a question nobody asked.
     if args.no_fetch:
-        base_numbers = _adr_numbers(root, "origin/" + args.base_branch)
+        base_rev = "origin/" + args.base_branch
     else:
         _git("fetch", "--no-tags", "--quiet", "origin", args.base_branch, cwd=root)
-        base_numbers = _adr_numbers(root, "FETCH_HEAD")
-    taken = _adr_numbers(root, "HEAD")
-    behind = sorted(base_numbers - taken)
-    if behind:
-        missing = ", ".join(f"ADR-{n:04d}" for n in behind)
+        base_rev = "FETCH_HEAD"
+    base_sha = _git("rev-parse", "--verify", base_rev + "^{commit}", cwd=root).strip()
+    if not _is_ancestor(root, base_sha, "HEAD"):
         raise ShapeError(
-            f"'{args.base_branch}' carries {missing} and this branch does not — "
-            f"rebase onto origin/{args.base_branch} first, so the number is max + 1 "
-            f"on the tree that merges"
+            f"'{args.base_branch}' is at {base_sha[:12]} and this branch does not "
+            f"contain it — rebase first, so the number is max + 1 on the tree that "
+            f"actually merges (ADR-0165 §2)"
         )
 
+    taken = _adr_numbers(root, "HEAD")
     expected = max(taken, default=0) + 1
     number: int = args.number if args.number is not None else expected
     if number != expected:

@@ -109,13 +109,15 @@ holding a view across lanes.
 `just adr-ratify` produces the commit. It reads the ADR's *committed* content,
 refuses on a dirty tree, on `main` and on a detached `HEAD`, refuses a document
 that is not in §1's shape, refuses any number that is not the next one, and
-refuses outright on a branch behind its base — a number computed off a stale tree
-collides the moment it merges, which is why §2 puts this commit after the final
-rebase. `--number` states the number the operator expects and is checked against
-the computed one; it does not select. And because a ratify commit that §4's test
-does not recognise is worse than no exemption at all, it verifies its own output
-against that test, restoring the branch — from a failed write as readily as from
-a failed check — if anything does not hold.
+refuses outright on a branch that does not contain its base's tip — staleness
+tested as ancestry, not as a comparison of ADR numbers, because a base advance
+that adds no ADR leaves the numbers equal and the branch just as stale, and §2
+puts this commit after the final rebase for the whole tree rather than for the
+part that decides the number. `--number` states the number the operator expects
+and is checked against the computed one; it does not select. And because a ratify
+commit that §4's test does not recognise is worse than no exemption at all, it
+verifies its own output against that test, restoring the branch — from a failed
+write as readily as from a failed check — if anything does not hold.
 
 > **Normative.** The ratify commit's message is a Conventional Commit naming the
 > number it took, with a matching `Refs:` trailer. The commits that precede it on
