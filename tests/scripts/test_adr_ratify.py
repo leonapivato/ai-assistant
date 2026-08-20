@@ -392,6 +392,53 @@ def test_an_attribute_marked_binary_adr_is_not_a_ratification(tmp_path: Path) ->
     assert _git(repo, "log", "-1", "--pretty=%s") == "mark ADRs binary"
 
 
+def test_a_symlink_entry_is_not_a_ratification(tmp_path: Path) -> None:
+    """A symlink's blob is its target path, which is not an ADR whatever it says."""
+    repo = _adr_repo(tmp_path / "repo")
+    adr = repo / _ADR_PATH
+    adr.unlink()
+    adr.symlink_to("- Status: Proposed")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "docs(adr): make it a link")
+    adr.unlink()
+    adr.symlink_to("- Status: Accepted")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "docs(adr): flip the link")
+
+    checked = _run(repo, "check-shape", "HEAD")
+
+    assert checked.returncode == 1
+    assert "not a regular file" in checked.stderr
+
+
+def test_ratify_will_not_write_through_a_symlinked_adr(tmp_path: Path) -> None:
+    """``Path.write_text`` follows a symlink, and `reset --hard` cannot undo that.
+
+    A tracked ``docs/adr/NNNN-*.md`` whose blob is a *link target* reads as text
+    everywhere upstream of the write: ``git show`` returns the target, and a
+    target crafted to carry a ``- Status: Proposed`` line renders cleanly. The
+    write would then land on a file outside the repository, which was never
+    tracked and so is outside everything the recovery can restore.
+    """
+    repo = _adr_repo(tmp_path / "repo")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not the repository's to touch\n")
+    adr = repo / _ADR_PATH
+    adr.unlink()
+    # A target that is itself a one-line `Proposed` header, so every check
+    # upstream of the write is satisfied and only the mode test stands between
+    # the run and the external file.
+    adr.symlink_to(f"{outside}\n- Status: Proposed")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "docs(adr): make it a link")
+
+    produced = _run(repo, "ratify", "--adr", _ADR_PATH)
+
+    assert produced.returncode == 1
+    assert "not a regular file" in produced.stderr
+    assert outside.read_text() == "not the repository's to touch\n"
+
+
 def test_a_merge_commit_is_not_a_ratification(tmp_path: Path) -> None:
     """Two parents means no single blob to rebuild from, so the shape is undefined."""
     repo = _adr_repo(tmp_path / "repo")
