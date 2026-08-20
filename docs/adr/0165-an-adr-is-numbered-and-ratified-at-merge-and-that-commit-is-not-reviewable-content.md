@@ -13,6 +13,9 @@
 - Directs: `CONTRIBUTING.md`'s ADR-numbering paragraph, its "Finishing an ADR PR"
   sequence and its review-round conditions; `CLAUDE.md`'s golden rule 5; and
   `docs/adr/template.md`'s heading and its displayed placeholders (§§3, 7).
+- Follow-on: this PR is the ADR alone. `scripts/adr_ratify.py`, the exemption in
+  `scripts/ship.sh`, the `just adr-ratify` recipe, the document corrections above
+  and §8's edits are one implementation lane, briefed after this merges (§7).
 - Refs: #1226 §5, the ruling this records; #751, the replica hazard §4's
   implementation is built against.
 
@@ -28,7 +31,7 @@ race the in-flight ledger failed to arbitrate. What it did not remove is the
 *coupling*. A number handed out at dispatch is a claim on `docs/adr/NNNN-…` that
 has to hold until the lane merges — across every reordering, every lane that
 stops, every batch that is re-planned. `CONTRIBUTING.md` carried the fallback for
-when it does not, in the very paragraph this change replaces — the second branch
+when it does not, in the very paragraph §7 replaces — the second branch
 to merge renumbers, a file rename plus its internal references and its trailers —
 and the dispatcher carries the bookkeeping for when it might: a number reserved
 for a lane that never ran is a gap, and a gap is a thing
@@ -116,20 +119,42 @@ which is the only serialisation this repository actually has. It also keeps
 ADR-0015 §2's clone-per-agent model intact — the merger is already the only party
 holding a view across lanes.
 
-`just adr-ratify` produces the commit. It reads the ADR's *committed* content,
-refuses on a dirty tree, on `main` and on a detached `HEAD`, refuses a document
-that is not in §1's shape, refuses any number that is not the next one, offers no
-way to point itself at a different or a stale base — every such escape is an
-escape from the property §4 rests on — and
-refuses outright on a branch that does not contain its base's tip — staleness
-tested as ancestry, not as a comparison of ADR numbers, because a base advance
-that adds no ADR leaves the numbers equal and the branch just as stale, and §2
-puts this commit after the final rebase for the whole tree rather than for the
-part that decides the number. `--number` states the number the operator expects
-and is checked against the computed one; it does not select. And because a ratify
-commit that §4's test does not recognise is worse than no exemption at all, it
-verifies its own output against that test, restoring the branch — from a failed
-write as readily as from a failed check — if anything does not hold.
+**The allocation's safety depends on branch protection being `strict`, and that
+dependency is stated rather than left implied.** Serialising on the merge is not
+by itself enough: two lanes can read one `main` tip, both compute the same
+`max(main) + 1`, and produce ratify commits that are each individually valid,
+because a ratify commit's number is checked against the tree it was made on and
+neither commit can see the other. What closes that window is `strict` — the
+second PR cannot merge until it has been rebased onto the first one's merge, and
+that rebase puts the first ratification into the second ratify commit's **parent
+tree**. §4's recogniser tests the number as the parent tree's maximum plus one,
+so the rebased commit is no longer holding the next number: the exemption is
+withdrawn and the commit refused, at exactly the point the repository's only real
+serialisation happens. The recheck is what makes this mechanical rather than a
+matter of the merger's care, and ADR-0015 §2's single merger means the
+two-merger premise does not arise here in the first place. Neither of those is
+load-bearing on its own; a repository that dropped `strict` while devolving
+merges to several parties would have to re-earn this property some other way.
+
+`just adr-ratify` produces the commit — a recipe this ADR specifies and does not
+deliver. It is built by the follow-on implementation lane (§7), briefed once this
+ADR merges, which is the ordinary ratify-before-build sequence and not a gap: §4's
+exemption fails closed, so until the lane lands a ratify commit made by hand to
+this specification simply costs its review round like any other commit. What the
+recipe must do is fixed here. It reads the ADR's *committed* content, refuses on
+a dirty tree, on `main` and on a detached `HEAD`, refuses a document that is not
+in §1's shape, refuses any number that is not the next one, offers no way to
+point itself at a different or a stale base — every such escape is an escape from
+the property §4 rests on — and refuses outright on a branch that does not contain
+its base's tip — staleness tested as ancestry, not as a comparison of ADR
+numbers, because a base advance that adds no ADR leaves the numbers equal and the
+branch just as stale, and §2 puts this commit after the final rebase for the
+whole tree rather than for the part that decides the number. `--number` states
+the number the operator expects and is checked against the computed one; it does
+not select. And because a ratify commit that §4's test does not recognise is
+worse than no exemption at all, it verifies its own output against that test,
+restoring the branch — from a failed write as readily as from a failed check — if
+anything does not hold.
 
 > **Normative.** The ratify commit's message is a Conventional Commit naming the
 > number it took, with a matching `Refs:` trailer. The commits that precede it on
@@ -197,9 +222,11 @@ about the past; "the parent tree's maximum plus one" is a property the commit
 *has*, checkable from the commit alone, and §2's requirement that the ratify
 commit be made after the final rebase is what makes the two the same number.
 
-`render_ratified` and `check_commit` in `scripts/adr_ratify.py` are that one
-transform and that one test, and `scripts/ship.sh` reaches them by invoking the
-script. It is deliberately not a second spelling of the rule inside `ship.sh`:
+`render_ratified` and `check_commit` in `scripts/adr_ratify.py` are to be that one
+transform and that one test, with `scripts/ship.sh` reaching them by invoking the
+script — the follow-on lane's work (§7), not this change's. What is decided here
+is that they are **one** implementation reached from both ends, and deliberately
+not a second spelling of the rule inside `ship.sh`:
 issue #751 records two distinct ways a hand-built replica of a ship-side rule
 returned a confident clear for a case that was not clear, and the lesson taken
 there — share the code, do not restate the reasoning — is the one taken here.
@@ -250,10 +277,28 @@ and `CONTRIBUTING.md`'s "a commit that changes no reviewed byte does not cost a
 review round"). After the merge the route is gone, and a change to what the ADR
 decided is a new ADR that supersedes it (ADR-0070 §1).
 
-### 7. What `CONTRIBUTING.md` and `CLAUDE.md` say instead
+### 7. The follow-on implementation, and what `CONTRIBUTING.md` and `CLAUDE.md` say instead
+
+> **Normative.** This ADR's PR is the ADR document alone (#1226 §5, and the
+> standing rule that a lane delivers exactly one PR). Everything this section
+> specifies, together with the `scripts/adr_ratify.py` and `scripts/ship.sh` work
+> §§2 and 4 specify, is this ADR's **follow-on implementation**: one lane, briefed
+> once this ADR has merged and taking its number from `main` as §5 requires.
+
+That lane delivers `scripts/adr_ratify.py` and its tests, `scripts/ship.sh`'s §4
+exemption and its disclosure, the `just adr-ratify` recipe, the `CLAUDE.md`,
+`CONTRIBUTING.md` and `docs/adr/template.md` corrections below,
+`scripts/project_status.py`'s footer line, and §8's edits to ADR-0015, ADR-0027
+and ADR-0070 — which ADR-0019 keeps out of this PR in any case, since they may
+not be written while this document stands `Proposed` and it stands `Proposed`
+throughout its review. A worked implementation of all of it exists and was
+reviewed to seven adversarial rounds on this ADR's own branch before the lane was
+split; PR #1242 records the pre-trim head it can be restored from, so the
+follow-on starts from that rather than from nothing.
 
 `CONTRIBUTING.md` is ratified by ADR-0003, so an ADR outranks it and may direct
-its correction (ADR-0070 §5). Three passages are rewritten to state this decision:
+its correction (ADR-0070 §5). Three passages are rewritten by that lane to state
+this decision:
 
 - its **ADR-numbering paragraph** ("ADR numbers are assigned at dispatch"), which
   becomes §2's rule, together with the dispatcher bullet that repeats it;
@@ -363,10 +408,14 @@ the amended text. Nothing of ADR-0020's own becomes false or over-wide.
 
 **This ADR is numbered the old way, and does not exercise its own mechanism.** It
 was dispatched with the number 0165 under ADR-0015 §5, as ADR-0166 was, and the
-two of them are the last numbered that way. §§1–2 bind every ADR
-lane dispatched after this one merges. One consequence is worth stating plainly:
-because this document was authored numbered, it is free to display `ADR-XXXX`
-throughout, which §3 forbids to the documents that come after it.
+two of them are the last numbered that way. §§1–2 bind every ADR lane dispatched
+after §7's follow-on lane has landed the mechanism, rather than from this merge:
+that lane is what makes §2's commit producible and §4's exemption grantable, and
+dispatching against §1 before it lands would leave every merger hand-building the
+ratify commit. The window is safe rather than merely tolerable — §4 fails closed,
+so nothing in it is exempted that should not be. One consequence is worth stating
+plainly: because this document was authored numbered, it is free to display
+`ADR-XXXX` throughout, which §3 forbids to the documents that come after it.
 
 ## Alternatives considered
 
@@ -411,8 +460,8 @@ anyway.
 - **A dispatcher stops allocating numbers, and stops tracking them.** A brief
   names a lane's ADR by slug. There is no reserved number to leak when a lane
   stops, no gap to explain, and no renumbering when two lanes are reordered —
-  `CONTRIBUTING.md`'s renumbering fallback is deleted rather than kept, because
-  the second to merge simply takes the next number.
+  `CONTRIBUTING.md`'s renumbering fallback is to be deleted rather than kept,
+  because the second to merge simply takes the next number.
 - **Every ADR PR saves one Codex round**, and the round it saves is the one that
   had the least to find. What it does not save is any round on the decision
   itself: §1 puts the whole required set on the document that decides.
@@ -443,8 +492,8 @@ anyway.
   checks as everything else, and it is paid once per ADR, by the merger, on a
   diff of one rename.
 - **The merger now writes a commit on the lane's branch.** That is a change to
-  what merging involves, and it is why `just adr-ratify` refuses on `main`, on a
-  dirty tree and on a document out of shape rather than assuming a careful
+  what merging involves, and it is why `just adr-ratify` must refuse on `main`, on
+  a dirty tree and on a document out of shape rather than assume a careful
   operator. Its self-check against `check_commit` closes the one failure that
   would otherwise be silent and expensive: a commit that exists, looks ratified,
   and costs a round because the exemption does not recognise it.
