@@ -1,7 +1,37 @@
 # 165. An ADR is numbered and ratified at merge, and that commit is not reviewable content
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-20
+- **Note (2026-08-20): ratified.** `Proposed` → `Accepted` on the content this ADR
+  merges with, following `CONTRIBUTING.md` → "Finishing an ADR PR", which is where
+  that sequence is argued rather than re-argued here. The required set is
+  **adversarial alone** — this ADR decides the ADR process and touches no contract
+  surface — and it is re-run on the flipped tree, for the coverage ADR-0027 §2
+  makes mechanical rather than for a review *of the flip*. `just ship` posts the
+  terminal verdict and the aggregate to PR
+  [#1242](https://github.com/leonapivato/ai-assistant/pull/1242), so the round
+  count and the churn ratio are taken from that comment rather than restated here.
+
+  **The lens did not return a clean sheet, and this note says so rather than
+  implying one.** Two findings are recorded **waived**, each with its rationale in
+  that PR's description. The `blocker`: that §2's `max(main) + 1` allocation admits
+  a duplicate number behind an `--admin` merge past `strict` protection. Its
+  mechanism is conceded and §2 is the paragraph that records the dependency; it is
+  waived on three grounds. Its Direction would reverse
+  [#1226](https://github.com/leonapivato/ai-assistant/issues/1226) §5, an owner's
+  ruling and not a review round's to refuse. Its premise fails on the record: the
+  dispatch-time allocation it compares against had **no** mechanical check at all —
+  `CONTRIBUTING.md` carried a renumbering fallback because collisions were ordinary
+  — so §2 replaces an unchecked convention with a rechecked one, and is weaker only
+  behind an authorised bypass. And the widening it implies — a new required `gate`
+  check plus a second exception to ADR-0070 §1's append-only rule — is a larger
+  decision than the remedy #1226 §5 ruled. The residual is carried by
+  [#1245](https://github.com/leonapivato/ai-assistant/issues/1245) and
+  [#1246](https://github.com/leonapivato/ai-assistant/issues/1246). The `major`:
+  that `max(main) + 1` has no valid outcome once four digits are exhausted. It is
+  verified true, is pre-existing — ADR-0001's numbering plus `_ADR_FILENAME_RE`,
+  which a dispatcher hits identically — is untouched here, and is filed as
+  [#1244](https://github.com/leonapivato/ai-assistant/issues/1244).
 - Partially supersedes on ratification: ADR-0015 §5's ADR-number-assignment
   clause ("The operator dispatching an agent assigns its ADR number"); §2 below.
   ADR-0015 §5's other clause — a substantive contract ADR ships as its own PR,
