@@ -1474,8 +1474,15 @@ class MemoryWriter(Protocol):
         target is ``EXTERNAL`` (ADR-0045 §5b) — *and* every other conflict in the
         set the policy ruled on whose source is supersedable, in one atomic unit
         with the correction. The two standing refusals are unchanged: nothing folds
-        onto a ``USER_ASSERTED`` target under either ruling, and ``USER_ASSERTED``
-        and ``EXTERNAL`` *siblings* are never swept in.
+        onto a ``USER_ASSERTED`` target under either ruling, and a ``USER_ASSERTED``
+        *sibling* is never swept in. Which sources **are** swept in is the writer's
+        **retirement class**, not this docstring's to enumerate: ADR-0079 §3 states
+        the obligation intensionally — "whose source is supersedable" — so that
+        widening the class widens the contract without editing it, and ADR-0092 §4
+        has since widened it to include ``EXTERNAL``. The class is an allow-list
+        rather than "not ``USER_ASSERTED``" (ADR-0038 §2a), so a source added later
+        is enrolled by decision and never by omission, and the shared conformance
+        suite is what holds every writer to the same set.
 
         **A conflict the writer holds a ``RESTATES`` or ``ADDS`` relation for is
         never retired, by any ruling** (ADR-0159 §5, narrowing the obligation
@@ -2132,16 +2139,20 @@ class Planner(Protocol):
         **``memories`` is what the pipeline assembled for this turn, not one
         relevance cut** (ADR-0074 §5, widened by ADR-0158 §5). It carries **three
         groups, in order**: the conversation's recent turns **first**, in order;
-        then the records retrieved as relevant, best first *within that group*;
-        then the episodic supplement — episodes retrieved by relevance from other
-        conversations, under a budget of their own. Each grouping is meaningful and
-        the sequence is **not globally ranked**: a planner may rely on the grouping
-        and may not rely on a global relevance order. The wording is restated
-        rather than read generously: a conversation tail is usually the most
-        relevant thing the store holds for a continued exchange, but a user who
-        changes the subject mid-conversation is handed prior turns that are not
-        relevant to the new goal at all, so calling the whole sequence "best first"
-        would be a strain.
+        then the records retrieved as relevant; then the episodic supplement —
+        episodes retrieved by relevance from other conversations, under a budget of
+        their own. Each grouping is meaningful and **no run of the sequence is a
+        relevance ranking a planner may read** — not across the groups, and **not
+        within the retrieved group either**, whose internal order is the assembling
+        consumer's rather than this contract's: ADR-0072 §5 gives the retrieved
+        records a precedence and ADR-0113 §6 makes the budget and the assembly order
+        the consumer's, so a more relevant record can sit below a less relevant one
+        by decision. A planner may rely on the grouping and may not rely on a
+        relevance order. The wording is restated rather than read generously: a
+        conversation tail is usually the most relevant thing the store holds for a
+        continued exchange, but a user who changes the subject mid-conversation is
+        handed prior turns that are not relevant to the new goal at all, so calling
+        the sequence "best first" would be a strain at either scope.
 
         **The third group sits last by decision, not by convenience** (ADR-0158
         §4). Position is how this pipeline expresses precedence into a prompt, and a
@@ -2164,9 +2175,9 @@ class Planner(Protocol):
             goal: The objective to plan for.
             context: The situational context assembled for this request.
             memories: The records the pipeline assembled for this turn — the
-                conversation's recent turns in order, then records retrieved as
-                relevant, best first within that group, then the episodic
-                supplement (ADR-0158 §4).
+                conversation's recent turns in order, then the records retrieved
+                as relevant, then the episodic supplement (ADR-0158 §4). No run of
+                it is a relevance ranking; see above.
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.ActionPlan`.
@@ -5854,7 +5865,7 @@ class AssistantEngine(Protocol):
     * the concrete engine keeps both methods and stays substitutable, because a
       Protocol constrains what an implementation must have, not what it may not.
 
-    **One argument convention, applied to all twenty-six methods** (ADR-0085 §2, and
+    **One argument convention, applied to every method below** (ADR-0085 §2, and
     ADR-0102 §2 for the four grant operations): the
     *subject* of a call — the one thing it acts on — is positional, and every other
     argument is keyword-only. A keyword-only modifier can be joined by another
@@ -5903,7 +5914,7 @@ class AssistantEngine(Protocol):
        ADR-0084 §11 makes that the client lane's prerequisite. Tracked in #570.
 
     :class:`~ai_assistant.core.errors.OversizedValueError` is therefore declared by
-    **every** method below and is not repeated in twenty-six ``Raises`` blocks. No
+    **every** method below and is not repeated in each one's ``Raises`` block. No
     method is provably inside the bound: :data:`~ai_assistant.core.types.Identifier`
     carries no maximum length, so even ``forget`` can be handed an oversized
     argument, and every enumerating method's result grows with ``limit``. ADR-0102
@@ -7503,7 +7514,7 @@ class ConnectionProvisioner(Protocol):
 
     **The members are named shorter than the operations they serve, and that is
     deliberate** (ADR-0151 §10). ``AssistantEngine`` needs ``connect_account``
-    because its namespace holds twenty-six unrelated methods and a bare
+    because its namespace holds every other engine operation besides, and a bare
     ``connect`` would sit beside ADR-0084 §2's connect handshake; this Protocol's
     whole subject is connections. Members named identically to the engine's would
     invite a reader to assume one forwards to the other unchanged, which the mint
