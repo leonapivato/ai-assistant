@@ -634,7 +634,7 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
     # naming an uninstalled vendor should fail before this function has opened four
     # SQLite connections it then has no ``Harness`` to hand back for closing. The
     # observer below is still built after them — a pre-existing leak on the same shape,
-    # left alone here rather than widened into (see the issue this PR files).
+    # left alone here rather than widened into (#1300).
     reconciliation = (
         reconciler if reconciler is not None else build_reconciler(settings, guard=guard)
     )
