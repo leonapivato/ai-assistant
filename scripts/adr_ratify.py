@@ -46,9 +46,9 @@ import argparse
 import os
 import re
 import shutil
-import stat
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -563,19 +563,34 @@ def _locate_adr(root: Path) -> str:
     return candidates[0]
 
 
-def _refuse_unless_a_regular_file(root: Path, path: str) -> None:
-    """Refuse early unless ``path`` is a regular file in HEAD's tree.
+def _head_file_mode(root: Path, path: str) -> int:
+    """Return the permission bits HEAD records for ``path``, refusing a non-regular entry.
 
-    This is a **fast failure with a good message**, not the safety boundary —
-    :func:`_write_regular` is that, because any check made here is a statement
-    about a moment that has passed by the time the write runs. It is kept because
-    reading the mode from HEAD's tree is the same authority the recogniser uses,
-    and a run that cannot possibly succeed should say so before it starts
-    changing anything.
+    Two jobs from one ``ls-tree``, because they want the same authority.
+
+    The refusal is a **fast failure with a good message** rather than the safety
+    boundary — :func:`_render_beside` is that, and it holds without this check,
+    because it never writes through ``path`` at all. Saying so up front is still
+    worth the call: a run that cannot succeed should stop before it starts
+    changing anything, and the reason it cannot is worth stating in the ADR's own
+    terms rather than as a stray ``EISDIR``.
+
+    The mode is what the render is given before it replaces the destination.
+    A replace makes a *new* inode, so the permission bits do not survive it on
+    their own and have to be carried across deliberately. **HEAD's tree is the
+    source, and the file on disk is not**, because the file on disk is precisely
+    the object a substitution attack controls — deriving the mode from it would
+    take the one value this function supplies from the attacker. git records only
+    the executable bit, so the render is normalised to ``0644`` or ``0755``; that
+    is a deliberate consequence of preferring the trustworthy source over the
+    more detailed one.
 
     Args:
         root: The work tree root.
         path: The repository-relative path to write.
+
+    Returns:
+        The permission bits to give the render.
 
     Raises:
         ShapeError: If the path is not a regular file in HEAD's tree.
@@ -587,45 +602,95 @@ def _refuse_unless_a_regular_file(root: Path, path: str) -> None:
     if mode not in _REGULAR_MODES:
         raise ShapeError(
             f"{path!r} is a {mode} entry in HEAD's tree, not a regular file — refusing to "
-            "write through it (a symlink's content is a path, and writing follows it)"
+            "render it (a symlink's content is a path, and an ADR is a document)"
         )
+    return 0o755 if mode == "100755" else 0o644
 
 
-def _write_regular(target: Path, text: str) -> None:
-    """Write ``text`` to ``target``, refusing to follow a link or open a device.
+def _render_beside(target: Path, text: str, mode: int) -> Path:
+    """Render ``text`` into a fresh file beside ``target``, and return its path.
 
-    ``Path.write_text`` follows a symlink, so a ``docs/adr/NNNN-*.md`` that is
-    one — tracked as a link, or swapped for one after any check — would have the
-    rendered text written to a file outside the repository, which was never
-    tracked and is therefore outside everything ``git reset --hard`` can restore.
+    Nothing is ever written *through* ``target``. The render is a new inode,
+    created with ``O_CREAT | O_EXCL`` under a name no other process holds, and
+    :func:`_ratify` then moves it onto ``target`` with ``os.replace``.
 
-    A check followed by a plain write cannot close that: it is a statement about
-    a moment that has passed. The descriptor is what closes it, so the decision
-    and the write are made about the **same object**:
+    That indirection is the whole of the safety, and it is there because no check
+    on ``target`` can supply it. ``Path.write_text`` follows a symlink, so a
+    tracked or swapped-in link would carry the write to a file outside the
+    repository that ``git reset --hard`` cannot restore. Opening with
+    ``O_NOFOLLOW`` and ``fstat``-ing the descriptor closes the symlink and the
+    device, but **not a hard link**: a second name for a file outside the
+    repository is a regular file by every test available, so it passes the flags
+    and the ``fstat`` alike, and an ``O_TRUNC`` write then lands on the inode the
+    two names share. There is no flag that excludes it and no check that survives
+    the race, because at every instant the object genuinely *is* a regular file.
+    Writing somewhere else entirely is the only answer that does not depend on
+    winning a race, and it makes the earlier tests unnecessary rather than merely
+    sufficient.
 
-    * ``O_NOFOLLOW`` makes the open itself fail (``ELOOP``) on a symlink, so
-      there is no window between deciding and writing.
-    * ``O_NONBLOCK`` is not about speed: ``O_NOFOLLOW`` does not exclude a FIFO,
-      and opening one for writing blocks until a reader appears — a hang rather
-      than a refusal. On a regular file it does nothing.
-    * ``fstat`` on the open descriptor then refuses anything that is not a
-      regular file, which is the check the two flags cannot make themselves.
+    ``os.replace`` completes it by swapping the **directory entry**, which
+    follows nothing: a symlink at ``target`` is replaced rather than traversed,
+    and a hard link merely loses one of its names while the file it shared keeps
+    every byte. The render is made in ``target``'s own directory so that the
+    replace is a rename within one filesystem — atomic, with no copy to fall back
+    on.
 
     Args:
-        target: The absolute path to write.
+        target: The absolute path this render will be moved onto.
         text: The content.
+        mode: The permission bits to give the render, from
+            :func:`_head_file_mode`. A replace does not carry them across on its
+            own.
+
+    Returns:
+        The render's path, which the caller owns from here (see
+        :func:`_discard_render`).
 
     Raises:
-        ShapeError: If the opened object is not a regular file.
-        OSError: If the path is a symlink, or the write fails.
+        OSError: If the render cannot be created, given its mode, or written.
+            Nothing is left behind in that case: the only path this function
+            creates is removed before the error leaves it.
     """
-    fd = os.open(target, os.O_WRONLY | os.O_TRUNC | os.O_NOFOLLOW | os.O_NONBLOCK)
+    fd, name = tempfile.mkstemp(dir=target.parent, prefix=f".{target.name}.", suffix=".tmp")
+    rendered = Path(name)
     try:
-        if not stat.S_ISREG(os.fstat(fd).st_mode):
-            raise ShapeError(f"{target} is not a regular file — refusing to write it")
-        os.write(fd, text.encode("utf-8"))
-    finally:
-        os.close(fd)
+        try:
+            os.fchmod(fd, mode)
+            os.write(fd, text.encode("utf-8"))
+        finally:
+            os.close(fd)
+    except OSError:
+        rendered.unlink(missing_ok=True)
+        raise
+    return rendered
+
+
+def _discard_render(rendered: Path | None) -> str:
+    """Remove the one untracked path this run creates, and say what became of it.
+
+    The recovery in :func:`_ratify` deletes nothing it did not create, for the
+    reason recorded there. The render is the single exception, and it is one
+    because it is unambiguously this code's: made by :func:`_render_beside`, in a
+    directory nothing else writes to, under a name only that function produces.
+    Leaving it would make the *next* run refuse on a dirty tree over a file whose
+    owner is known — the very outcome the report-and-never-delete rule exists to
+    warn about.
+
+    Args:
+        rendered: The render's path, or ``None`` when there is none to discard —
+            either it was never created, or it has already become the
+            destination.
+
+    Returns:
+        A clause for the recovery's message, empty when there was nothing to do.
+    """
+    if rendered is None:
+        return ""
+    try:
+        rendered.unlink(missing_ok=True)
+    except OSError as exc:
+        return f", and this run's own {rendered.name} could not be removed ({exc})"
+    return f", and this run's own {rendered.name} is discarded"
 
 
 _MESSAGE = """docs(adr): ratify ADR-{number:04d}
@@ -658,7 +723,7 @@ def _ratify(args: argparse.Namespace) -> int:
 
     path: str = args.adr or _locate_adr(root)
     number = adr_number(path)
-    _refuse_unless_a_regular_file(root, path)
+    mode = _head_file_mode(root, path)
     rendered = render_ratified(_git("show", f"HEAD:{path}", cwd=root))
 
     if args.dry_run:
@@ -674,35 +739,45 @@ def _ratify(args: argparse.Namespace) -> int:
     # round *and* reads as a bug in ship — and a half-applied edit left behind by
     # a hook that rejected the commit is worse than either. Restoring is safe
     # precisely because `_refuse_unless_ready` verified the tree clean.
+    target = root / path
+    render: Path | None = None
     try:
-        _write_regular(root / path, rendered)
+        render = _render_beside(target, rendered, mode)
+        render.replace(target)
+        # The render *is* the destination now, so this run no longer holds a path
+        # of its own — and the recovery below must not go looking for one.
+        render = None
         _git("add", "--", path, cwd=root)
         _git("commit", "-m", _MESSAGE.format(number=number), cwd=root)
         check_commit(root, "HEAD")
     except (ShapeError, OSError) as exc:
-        # OSError is in here for the write before the commit: a full disk or an
-        # I/O error there leaves the file edited and no commit, which is exactly
-        # the half-applied state this recovery exists to undo, and it is not a
-        # ShapeError.
+        # OSError is in here for the render and the replace before the commit: a
+        # full disk or an I/O error there leaves the working tree half-applied
+        # with no commit, which is exactly what this recovery exists to undo, and
+        # it is not a ShapeError.
         #
         # `reset --hard` restores tracked files and nothing else, so on its own
         # it leaves behind anything the failed attempt created but never tracked
-        # — typically a file a commit hook wrote on its way to rejecting the
-        # commit. That makes the *next* run refuse on a dirty tree while this
-        # message says "restored". So the residue is REPORTED and never deleted:
-        # the clean-tree precondition is a point-in-time check, so a file that
-        # appeared after it — another process, an editor, a person — would be in
-        # that set, and destroying a user's file to tidy up after a failed commit
-        # is a far worse outcome than the dirty tree it tidies. This run creates
-        # no untracked path of its own, so there is nothing here it may delete.
+        # — a file a commit hook wrote on its way to rejecting the commit, and
+        # this run's own render when the replace never happened. That makes the
+        # *next* run refuse on a dirty tree while this message says "restored".
+        #
+        # So the residue is REPORTED and never deleted, with exactly one
+        # exception: the clean-tree precondition is a point-in-time check, so a
+        # file that appeared after it — another process, an editor, a person —
+        # would be in that set, and destroying a user's file to tidy up after a
+        # failed commit is a far worse outcome than the dirty tree it tidies. The
+        # render is the exception because its provenance is not in doubt; it is
+        # discarded, and said so, before the count below is taken.
+        discarded = _discard_render(render)
         _git("reset", "--hard", before, cwd=root)
         residue = _git("status", "--porcelain", cwd=root).strip()
-        restored = f" — the branch is restored to {before[:12]}"
+        restored = f" — the branch is restored to {before[:12]}{discarded}"
         if residue:
             restored += (
                 f", but {len(residue.splitlines())} path(s) are left in the working "
-                f"tree and none of them is this run's to delete; inspect and clear "
-                f"them before retrying"
+                f"tree; this run deletes only its own render, so inspect and clear "
+                f"the rest before retrying"
             )
         raise ShapeError(f"{exc}{restored}") from exc
 
