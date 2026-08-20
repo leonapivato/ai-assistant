@@ -15,10 +15,12 @@ subsystem (CLAUDE.md golden rule 1).
 from __future__ import annotations
 
 from datetime import datetime, time, timedelta
+from typing import TYPE_CHECKING
 
 import pytest
 from test_engine import AT, Harness, _connection_operations, _grant_operations
 
+from ai_assistant.core.correlation import current_correlation
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.types import (
     ClassReach,
@@ -30,9 +32,15 @@ from ai_assistant.core.types import (
     NotificationPreferences,
     NotificationReach,
     QuietWindow,
+    TraceRef,
 )
 from ai_assistant.orchestration.engine import Engine
 from ai_assistant.testing import FakeNotificationPolicy, FakeNotificationStore
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from ai_assistant.core.protocols import NotificationPolicy
 
 _CLASS = "calendar"
 
@@ -321,6 +329,94 @@ async def test_a_run_with_nothing_due_rules_nothing_and_terminates() -> None:
     await store.admit(_candidate("k1", expires=AT + timedelta(days=1)), policy=policy)
 
     assert await engine.reconsider_notifications() == 0
+
+
+# --- the sweep runs inside an operation, so its ruling is correlated ---------
+
+
+class _WatchingStore(FakeNotificationStore):
+    """A store that records the ambient correlation each re-ruling was made under.
+
+    The real store reads that value and copies it onto the trace it emits, never
+    minting one (ADR-0119 §4) — so the ambient value at the moment of the ruling is
+    exactly what a notification trace would carry, and it is observable here without
+    an emitter and without reaching into ``memory``.
+    """
+
+    def __init__(self, *, now: Callable[[], datetime]) -> None:
+        """Build the fake unchanged, plus somewhere to put the observations.
+
+        Args:
+            now: The clock, as the canonical fake takes it.
+        """
+        super().__init__(now=now)
+        #: One entry per re-ruling, in order, each the ambient value at that call.
+        self.correlations: list[str | None] = []
+
+    async def reconsider(
+        self, notification_id: str, *, policy: NotificationPolicy
+    ) -> NotificationDisposition | None:
+        """Record what the caller's context held, then rule exactly as the fake does.
+
+        Args:
+            notification_id: The record to re-rule.
+            policy: The ruling, asked inside the critical section.
+
+        Returns:
+            Whatever the canonical fake returns.
+        """
+        self.correlations.append(current_correlation())
+        return await super().reconsider(notification_id, policy=policy)
+
+
+async def test_a_reconsideration_sweep_rules_inside_a_bound_correlation() -> None:
+    """ADR-0083 §8: "every scheduler job is a public ``Engine`` call" (#1288).
+
+    The hub's scheduler registers this bound method as a job body, and a job body
+    is therefore not a caller *outside* an operation: :meth:`Engine._tracked` opens
+    ADR-0119 §4's correlation scope before the store is touched, so the ruling the
+    sweep performs is as correlated as one performed during a user's turn. ADR-0119
+    §3 states it directly — a scheduled run and a turn "are all one
+    ``AssistantEngine`` operation, distinguished by the seam label and the outcome".
+
+    **Nothing pinned that, and a test docstring in ``tests/memory`` asserted the
+    opposite for it** — that a sweep reaches the ruling seam with no correlation
+    bound, which is the reading of ADR-0141 §3 that #1054 recorded and PR #1285
+    corrected on the ADR. This is the positive half whose absence let the claim
+    stand.
+
+    It is asserted at two points and they are different facts. The operation trace
+    the façade emits carries the reference, which is what a measure joins on; and
+    the store — the collaborator whose own trace is the one #1288 is about — sees
+    that same value ambient at the instant it rules. ``tests/memory/
+    test_notification_traces.py::test_the_correlation_is_carried_where_there_is_one``
+    holds the remaining step, that a store reading a bound value puts it on its
+    trace, so the three compose into the production claim without this module
+    building a concrete store it is not allowed to import.
+    """
+    harness = Harness()
+    store = _WatchingStore(now=lambda: AT)
+    policy = FakeNotificationPolicy()
+    engine = _wired(harness, store, policy)
+    await store.admit(_candidate("k1", expires=AT + timedelta(days=1)), policy=policy)
+    await store.set_preferences(
+        NotificationPreferences(
+            reaches=(ClassReach(notification_class=_CLASS, reach=NotificationReach.INTERRUPT),)
+        )
+    )
+
+    assert await engine.reconsider_notifications() == 1
+
+    (trace,) = [
+        recorded
+        for recorded in harness.trace_sink.recorded
+        if recorded.seam == "reconsider_notifications"
+    ]
+    correlation = trace.refs[TraceRef.CORRELATION]
+    assert correlation
+    assert store.correlations == [correlation], (
+        "the sweep's ruling saw the operation's own correlation, not None"
+    )
 
 
 # --- the retention sweep counts this store too ------------------------------
