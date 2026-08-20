@@ -585,15 +585,28 @@ def _gh(*args: str, cwd: Path) -> str:
 
 
 def _refuse_unless_pr_head_is_local_head(root: Path) -> None:
-    """Refuse while the PR's head is not the commit this guard would judge.
+    """Refuse while the PR's head is not the commit this guard judges.
 
-    Everything below reads the LOCAL ``HEAD``, so an unpushed commit would make
-    the guard describe a tree GitHub has never seen — and the direction that
-    fails is the permissive one: ratify locally, run the recipe before pushing,
-    and a PR still carrying ``- Status: Proposed`` is marked ready by a guard
-    that just certified a file only this clone holds. That is issue #1044's
+    Everything here reads the LOCAL ``HEAD``, so a commit GitHub has not seen
+    would make the guard describe a tree that is not the PR's — and the direction
+    that fails is the permissive one: ratify locally, run the recipe before
+    pushing, and a PR still carrying ``- Status: Proposed`` is marked ready by a
+    guard that just certified a file only this clone holds. That is issue #1044's
     failure with an extra step, so it is refused rather than warned about.
-    ``ship`` carries the same precondition for the same reason.
+
+    It is called **twice**: once up front, so a stale head fails fast and with a
+    message rather than after a network fetch, and once immediately before the
+    guard returns success, so the window between the evidence and the act is the
+    smallest this shape allows. ``ship`` re-reads ``headRefOid`` before its own
+    external write for exactly this reason.
+
+    **The window is narrowed, not closed, and that is worth saying plainly.** The
+    documented recipe is two commands — this check, then ``gh pr ready`` — so a
+    push landing between the process exiting and GitHub receiving the flag is
+    outside anything this script can observe. Closing it entirely would take a
+    conditional flip GitHub does not offer. What the second read buys is the
+    difference between a window spanning a fetch and a diff and one spanning a
+    process exit.
 
     Args:
         root: The work tree root.
@@ -679,6 +692,9 @@ def _check_ready(_args: argparse.Namespace) -> int:
     root = repo_root(Path.cwd())
     _refuse_unless_pr_head_is_local_head(root)
     still = _proposed_adrs(root, pr_adr_paths(root))
+    # Re-read the PR head last: the evidence above is about the tree as it stood
+    # when the fetch began, and `gh pr ready` acts on the PR as it stands now.
+    _refuse_unless_pr_head_is_local_head(root)
     if still:
         listed = "\n       ".join(still)
         raise ShapeError(
