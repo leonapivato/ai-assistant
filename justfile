@@ -138,6 +138,12 @@ adr-ratify *args:
 # its whole reviewed life, so `just ship` still posts an intermediate round on a
 # genuinely `Proposed` ADR and refuses nothing on that ground.
 #
+# It reads the LOCAL tree, so it first refuses unless the PR's head is local
+# HEAD — otherwise a flip committed but not pushed would certify a file only this
+# clone holds while GitHub still shows the ADR standing `Proposed`, which is the
+# same failure with one more step. `ship` carries that precondition already, and
+# in the documented order it has run by now anyway.
+#
 # Typing `gh pr ready` directly is not stopped by this: that command is GitHub's,
 # not this repository's. ADR-0165 §5 accepts that limit rather than engineering
 # around it, and names a required CI check as its Revisit condition.
