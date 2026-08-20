@@ -29,8 +29,11 @@ testing, dependencies). This file is the short version — when in doubt, defer 
    imported only there. Everyone else uses the `ModelProvider` Protocol.
 5. **A Protocol change is a breaking change.** Flag it in your summary. Its ADR
    is ratified and **merged as its own PR** before anything implements against
-   it (ADR-0015). Your ADR number is assigned when the work is handed to you —
-   don't pick one yourself.
+   it (ADR-0015). You author an ADR **unnumbered** — `docs/adr/<slug>.md`, an
+   `# XXXX. <title>` heading, `ADR-XXXX` self-references, `Status: Proposed` —
+   and it stays that way through the review; the number is `max(main) + 1`,
+   taken at merge by whoever merges, in one mechanical `just adr-ratify` commit
+   (ADR-0165). Never pick a number, and never ratify your own ADR.
 
 These boundaries (rules 1, 2, 4) are enforced mechanically by
 `uv run lint-imports` — a violation fails the gate, it is not just a convention.
@@ -160,8 +163,9 @@ reviews `HEAD` vs the base, i.e. the **committed** diff, so commit a fix before
 re-running or it is invisible. Each run records an artifact under `.review/`, and
 `just ship` refuses to post unless one covers the **content** the PR head
 carries. So amending, squashing, or reverting to a reviewed tree costs no round;
-changing a reviewed byte does. A base move may or may not — it depends on what
-the move touched. **`CONTRIBUTING.md` → "Report the review, then mark it ready"
+changing a reviewed byte does — with one mechanical exception, the ADR ratify
+commit, which is recognised by rebuilding it rather than trusted (ADR-0165 §4).
+A base move may or may not — it depends on what the move touched. **`CONTRIBUTING.md` → "Report the review, then mark it ready"
 carries every condition, including which paths cost a round; do not work them out
 from memory.**
 
