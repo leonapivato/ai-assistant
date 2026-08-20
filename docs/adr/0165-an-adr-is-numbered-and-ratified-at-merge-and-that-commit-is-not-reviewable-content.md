@@ -137,21 +137,32 @@ load-bearing on its own; a repository that dropped `strict` while devolving
 merges to several parties would have to re-earn this property some other way.
 
 **The one route past that is the administrator bypass, and it is named rather
-than left to be discovered.** `--admin` merges past the `strict` check as it
-merges past a red `gate` (`CONTRIBUTING.md` → "Working on GitHub"), so an
-emergency override on a stale ADR branch lands a ratify commit whose number
-`main` has already taken. The two files have different slugs, so nothing
-conflicts and nothing fails: `load_adrs` in `scripts/check_citations.py` keys
-the corpus on the number, so the second file silently shadows the first and a
-citation to that number resolves to whichever sorts last. The remedy is the
-renumbering `CONTRIBUTING.md` used to carry as its collision fallback, applied
-after the fact. This is not a property peculiar to this mechanism — the bypass
-is defined as bypassing *evidence*, and every mechanical guarantee in this
-repository has the same escape — but a rule whose safety rests on a protection
-setting should say which act defeats it. **Revisit if** the bypass is ever used
-on an ADR branch, which would argue for making the duplicate loud: a check that
-no two files under `docs/adr/` share a number costs little and fails on `main`
-rather than shadowing.
+than left to be discovered.** ADR-0010 excludes administrators from the review
+and up-to-date restrictions while requiring the `gate` check of "everyone, with
+no bypass", so what `--admin` overrides is precisely the `strict` check this
+paragraph depends on — CI still runs. An emergency override on a stale ADR branch
+therefore lands a ratify commit whose number `main` has already taken. The two
+files have different slugs, so nothing conflicts and nothing fails: `load_adrs`
+in `scripts/check_citations.py` keys the corpus on the number, so the
+later-sorting file silently shadows the other and a citation to that number
+resolves to one of them.
+
+**That duplicate has no clean repair, and this ADR does not pretend otherwise.**
+Renumbering one of them after the fact — the fallback `CONTRIBUTING.md` used to
+carry for a collision caught *before* merge — is not available once both are
+`Accepted` on `main`: it renames a ratified ADR and rewrites the `ADR-NNNN`
+self-references in its body, and ADR-0070 §1 permits in-place edits to the header
+lines alone and says ratified decision text is never rewritten. §4 amends
+ADR-0070 §1's ratifying-edit clause, which acts on a document still `Proposed`;
+it does not touch the append-only rule, and nothing here authorises a
+post-ratification renumbering. So the answer is prevention rather than recovery:
+the bypass is not used on an ADR branch. This is not a weakness peculiar to this
+mechanism — the bypass is defined as bypassing evidence, and the pre-merge
+renumbering it defeats was equally defeated by it — but a rule whose safety rests
+on a protection setting should say which act defeats it and what the damage then
+is. **Revisit if** the bypass is ever used on an ADR branch, which would argue
+for making the duplicate loud rather than leaving it shadowing: a check that no
+two files under `docs/adr/` share a number costs little and fails on `main`.
 
 `just adr-ratify` produces the commit — a recipe this ADR specifies and does not
 deliver. It is built by the follow-on implementation lane (§7), briefed once this
