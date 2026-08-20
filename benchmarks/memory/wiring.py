@@ -51,7 +51,7 @@ asking a reader to keep them in step.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.app.composition import (
@@ -151,38 +151,71 @@ class Reconciliation:
     contradict it: the claim was read off a setting, and a setting is true whether or
     not anything acted on it.
 
-    A field derived from ``Settings`` can always say that. This one cannot: it is
-    produced by :func:`build_reconciler` in the same expression that constructs the
-    reconciler, it is the value handed to :class:`~ai_assistant.memory.MemoryIngestor`,
-    and there is no way to obtain the description without the object. So a manifest
-    naming a reconciler is a manifest whose ingestor held one.
+    A field derived from ``Settings`` can always say that. This one cannot, and it
+    **builds the reconciler rather than accepting one** so that it cannot: the route
+    and the bound this object reports are the very arguments it passed to
+    :class:`~ai_assistant.memory.ModelBackedReconciler`, in one expression, so no
+    caller — not :func:`build_reconciler`, not a test — can assemble a description
+    that disagrees with the object beside it. Holding a reconciler *and* a separate
+    account of it would leave exactly #1293's failure available one layer up, in a
+    class whose whole purpose is to close it.
+
+    (Deriving them back off the reconciler instead would mean reading ``memory``'s
+    private attributes from a benchmark, which this tree refuses on the ground
+    :data:`BATCH_PROVIDER` states: the harness does not widen a subsystem's surface
+    for its own convenience. Constructing forwards gets the same guarantee with no
+    such reach.)
 
     Attributes:
-        reconciler: The object the ingestor reconciles through.
-        route: The ``"provider:model"`` spec it labels on — the argument it was
-            constructed with, ``Settings.reconciler_model`` resolved against
-            ``default_model`` exactly as ``app.composition._reconciler_spec`` resolves
-            it.
-        max_conflicts: ADR-0159 §3's bound it was constructed with — how many members
-            of a conflict set, in rank order, one request may ask about.
+        model: The seam the reconciler's one request goes through.
+        route: The ``"provider:model"`` spec it labels on — ``Settings.reconciler_model``
+            resolved against ``default_model`` exactly as
+            ``app.composition._reconciler_spec`` resolves it.
+        max_conflicts: ADR-0159 §3's bound — how many members of a conflict set, in
+            rank order, one request may ask about.
+        reconciler: The object the ingestor reconciles through, built here from the
+            three fields above and never passed in.
     """
 
-    reconciler: ModelBackedReconciler
+    model: ModelProvider
     route: str
     max_conflicts: int
+    reconciler: ModelBackedReconciler = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Build the reconciler this object describes.
+
+        ``object.__setattr__`` is how a frozen dataclass fills a derived field, and it
+        is what makes the derivation unavoidable rather than conventional.
+        ``ModelBackedReconciler`` validates ``max_conflicts`` and ``route`` itself, so
+        a bound or a spec this harness got wrong fails here — at the composition root
+        that set it, which is ADR-0022 §4a's placement.
+
+        Raises:
+            TypeError: If ``max_conflicts`` is not an integer, ``bool`` included.
+            ValueError: If ``max_conflicts`` is below 1, or ``route`` is blank.
+        """
+        object.__setattr__(
+            self,
+            "reconciler",
+            ModelBackedReconciler(
+                model=self.model, route=self.route, max_conflicts=self.max_conflicts
+            ),
+        )
 
     @property
     def name(self) -> str:
         """The manifest's account of what actually reconciled.
 
-        The class is read off the constructed object rather than named, so a run
-        wired to something else says so; the two bounds beside it are the arguments
-        that object holds and neither is separately configurable after construction.
+        The class is read off the constructed object rather than named, so a run wired
+        to something else says so; the two figures beside it are the arguments that
+        object was built from in :meth:`__post_init__`, and nothing can change either
+        afterwards.
 
         Returns:
-            One line, in the shape ``ModelGrader``'s :attr:`name` has: what it is and
-            what it was pointed at, fit for a manifest field and for a reader
-            comparing two runs' provenance without opening either's code.
+            One line, in the shape ``ModelGrader.name`` has: what it is and what it was
+            pointed at, fit for a manifest field and for a reader comparing two runs'
+            provenance without opening either's code.
         """
         return (
             f"{type(self.reconciler).__name__}(route={self.route}, "
@@ -465,11 +498,7 @@ def build_reconciler(
         else (model if guard is None else guard.wrap(model))
     )
     return Reconciliation(
-        reconciler=ModelBackedReconciler(
-            model=provider, route=route, max_conflicts=settings.reconciler_max_conflicts
-        ),
-        route=route,
-        max_conflicts=settings.reconciler_max_conflicts,
+        model=provider, route=route, max_conflicts=settings.reconciler_max_conflicts
     )
 
 
@@ -601,6 +630,14 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
         if model is None
         else (model if guard is None else guard.wrap(model))
     )
+    # Above the stores, with the answering seam and for its reason: a reconciler route
+    # naming an uninstalled vendor should fail before this function has opened four
+    # SQLite connections it then has no ``Harness`` to hand back for closing. The
+    # observer below is still built after them — a pre-existing leak on the same shape,
+    # left alone here rather than widened into (see the issue this PR files).
+    reconciliation = (
+        reconciler if reconciler is not None else build_reconciler(settings, guard=guard)
+    )
 
     traces = SqliteTraceStore(path=data_dir / "traces.db")
     # `now` is the benchmark clock; `traces_now` is left at its wall-clock default,
@@ -632,9 +669,6 @@ def build_harness(  # noqa: PLR0913 — the three seam overrides are three disti
     # otherwise. `tests/benchmarks/test_harness_contracts.py` now pins this call's
     # keyword list against the composition root's, so the next argument to appear
     # there cannot go missing here quietly.
-    reconciliation = (
-        reconciler if reconciler is not None else build_reconciler(settings, guard=guard)
-    )
     writes = MemoryWriteStage(
         writer=MemoryIngestor(
             store=store,

@@ -321,6 +321,54 @@ def test_the_harness_resolves_the_reconciler_route_the_composition_root_resolves
     assert reconciler_spec(named) == "openai:gpt-reconciles"
 
 
+def test_a_reconciliation_cannot_describe_a_reconciler_it_does_not_hold() -> None:
+    """The manifest's field is only worth reading if it cannot be assembled to lie.
+
+    ``Reconciliation`` holding a reconciler *and* a separate account of it would leave
+    #1293's failure available one layer up — a description saying ``max_conflicts=9``
+    beside an object built with three — in the class whose whole job is to close it. So
+    the object is built from the fields, in ``__post_init__``, and there is no argument
+    to pass a different one through.
+
+    The three reads below are of ``memory``'s private attributes, which is what a test
+    may do and the harness may not (:data:`~benchmarks.memory.wiring.BATCH_PROVIDER`
+    states the rule); the whole point is that no production code needs them.
+    """
+    built = wiring.Reconciliation(
+        model=FakeModelProvider(), route="fake:reconciler", max_conflicts=4
+    )
+
+    assert built.reconciler._route == built.route
+    assert built.reconciler._max_conflicts == built.max_conflicts
+    assert built.reconciler._model is built.model
+    assert built.name == "ModelBackedReconciler(route=fake:reconciler, max_conflicts=4)"
+    with pytest.raises(TypeError):
+        wiring.Reconciliation(  # type: ignore[call-arg]
+            model=FakeModelProvider(),
+            route="fake:reconciler",
+            max_conflicts=4,
+            reconciler=object(),
+        )
+
+
+@pytest.mark.parametrize(
+    ("route", "max_conflicts", "error"),
+    [
+        pytest.param("fake:reconciler", 0, ValueError, id="a-bound-below-one"),
+        pytest.param("fake:reconciler", True, TypeError, id="a-flag-is-not-a-count"),
+        pytest.param("   ", 3, ValueError, id="a-blank-route"),
+    ],
+)
+def test_a_reconciliation_refuses_what_the_reconciler_refuses(
+    route: str, max_conflicts: int, error: type[Exception]
+) -> None:
+    """Building the reconciler here is also what makes ADR-0159 §3's own refusals land
+    at the composition root that set the value, which is ADR-0022 §4a's placement — a
+    wrapper that merely carried the numbers would defer them to the first ingest."""
+    with pytest.raises(error):
+        wiring.Reconciliation(model=FakeModelProvider(), route=route, max_conflicts=max_conflicts)
+
+
 def test_a_harness_reports_the_reconciler_it_built(tmp_path: Path) -> None:
     """The manifest's field is read off this, so it has to name the object's own facts.
 
