@@ -43,6 +43,61 @@
 - **It discharges no deferral of ADR-0130 and reverses none.** ADR-0130 §2's
   refusal to carry delivery state stands untouched, and §9 below states what that
   costs this instrument rather than routing around it.
+- Amended: 2026-08-20 (§3 — its `TraceRef.CORRELATION` clause carries its
+  conditionality by reference, and this note states that conditionality where the
+  clause is read). §3's normative clause reads "The trace carries
+  `refs[TraceRef.CORRELATION]` on ADR-0119 §4's clause, read from the ambient
+  value as every other emitter reads it. No measure defined here joins on it."
+  Its leading sentence reads unconditionally on its own; the conditionality is
+  carried by the half that follows it — "as every other emitter reads it" — and by
+  the clause it cites. **This note carries what those already say and adds nothing
+  to them.**
+
+  **ADR-0119 §4's clause is conditional in its own words:** "Every trace emitted
+  **while serving one `AssistantEngine` operation** carries that operation's
+  correlation identifier under `TraceRef.CORRELATION`." So the obligation binds
+  exactly when the emission happens inside such an operation. Where it does not,
+  there is no ambient value to read, and **the ref is simply omitted while the
+  trace is still emitted**: ADR-0119 §4 leaves the carrier "ambient to the
+  request" and "the implementing lane's to choose", so an emitter *reads* it and
+  never mints, fabricates or demands one. A ruling emitted outside an
+  `AssistantEngine` operation — a scheduled `NotificationStore.reconsider` sweep
+  is the case this seam actually meets — therefore carries no
+  `TraceRef.CORRELATION` entry, and **that trace is complete rather than
+  defective**: ADR-0119 §4 asks the ref only of a trace emitted inside such an
+  operation, so nothing is missing, and neither §3's fault clause nor ADR-0119
+  §5's lost-trace record has anything to record.
+
+  **Nothing downstream turns on the omission**, which is why the clause could
+  incorporate it by reference without creating a defect. §3 already says "No
+  measure defined here joins on it", so a ruling trace without the ref enters
+  every population this ADR defines; and ADR-0120 §3's uniqueness rule, which §2
+  above takes such care to protect, is a rule about `OPERATION` traces and is
+  untouched either way.
+
+  **This states a reading, it does not settle a question.** An implementing lane
+  that followed "as every other emitter reads it" already writes the omission
+  branch, and as of this note's date the merged emitter in
+  `memory/notification_traces.py` does exactly that — it reads the ambient value
+  and omits the ref when the value is absent, the same shape
+  `memory/traces.py` already carried for `MEMORY_WRITE`. The residual this note
+  answers is legibility, not correctness: a reader had to open ADR-0119 §4 to see
+  that §3's first sentence is conditional.
+
+  **Nothing decided changes and no reader acts differently as to the decision.**
+  §3's clause is unchanged in force, and every other clause of this ADR reads
+  identically before and after. Under ADR-0070 §1 that makes this "a paragraph
+  that only restates the existing decision more clearly", recorded as this
+  appended dated note with the ratified text below **not** rewritten. It
+  reconciles this ADR with its own text and *cites* ADR-0119 rather than being
+  caused by it — no clause of ADR-0119 §4 is amended, narrowed or widened here, so
+  nothing is owed on ADR-0119's `Status` under ADR-0082 §1 — and, being a
+  self-amendment naming no other ADR as its cause, it owes no `Status` edit on
+  this ADR either (ADR-0082 §1). Raised by adversarial review on PR #1035's
+  post-ratification re-run as a `major` and waived there on the ground that the
+  finding's conclusion did not follow from the clause's own text; filed as
+  **#1054**, which verified both references against the merged tree. Refs #1054,
+  #1035, #980.
 
 ## Context
 
