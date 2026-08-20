@@ -4,21 +4,24 @@
 - Date: 2026-08-11
 - Partially superseded: 2026-08-20 by
   [ADR-0166](0166-the-parallel-suite-may-serve-as-the-pytest-step-at-both-anchors.md)
-  — **the parallel recipe `just test-fast` may discharge the `pytest` step at
-  either anchor; everything else this ADR decided stands.** Two clauses are
-  replaced, and only in the scope of which invocation an anchor takes:
+  — **the parallel recipe `just test-fast`, invoked bare, may discharge the
+  `pytest` step at either anchor; everything else this ADR decided stands.** Two
+  clauses are replaced, and only in the scope of which invocation an anchor takes:
   §1's *"the full Definition-of-Done gate — `ruff format`, `ruff check`, `mypy`,
   `lint-imports` and the whole `pytest` suite — is run, and passes, on the tree at
   two anchors"*, as it requires the *whole* suite; and §6's *"Where such a recipe
   exists, running it satisfies neither anchor unless it runs the whole suite —
   §1 requires the suite, not a command name"*. `just test-fast` is
   `uv run pytest -n auto --deselect tests/core/test_protocol_triad.py`, so it does
-  not run the whole suite and §6's conditional resolved against it; ADR-0166 §1
-  admits it at both anchors regardless, and ADR-0166 §3 names the 31 deselected
-  tests — the mechanical Protocol-triad enforcement — as the accepted risk,
-  carried by §4's three nets, of which CI's full serial gate on every push to an
-  open PR (ADR-0010) is the operative one. A reader holding only this ADR would
-  refuse `just test-fast` at an anchor and run the serial suite instead, which is
+  not run the whole suite and §6's conditional resolved against it. ADR-0166 §1
+  admits the argument-free invocation at both anchors regardless, and names the 31
+  deselected tests — the mechanical Protocol-triad enforcement — as the accepted
+  risk, carried by §4's three nets, of which CI's full serial gate on every push
+  to an open PR (ADR-0010) is the operative one. **§6's principle survives the
+  clause**: an invocation carrying a narrowing argument is a scoped selection
+  under §2 and discharges nothing, so what ADR-0166 admits is still a complete run
+  and not a command name. A reader holding only this ADR would refuse
+  `just test-fast` at an anchor and run the serial suite instead, which is
   ADR-0082 §1's test met, so the record is owed.
   **This is a supersession and not an amendment** (ADR-0070 §1): the requirement
   is not reconciled with its own text or with a later fact, it is replaced by a

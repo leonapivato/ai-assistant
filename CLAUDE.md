@@ -118,11 +118,13 @@ the full gate runs and passes at two anchors on a branch — immediately before 
 and neither admitting a docs-only exemption. A rebase that moves your base re-opens
 the obligation.
 
-**The anchor's `pytest` step is the serial suite *or* `just test-fast`** (the suite
-across cores, about a minute — ADR-0166), your call at each anchor, no
-justification owed. It deselects `tests/core/test_protocol_triad.py` and nothing
-else, so prefer the serial run when your diff touches a Protocol or a canonical
-fake; CI catches a triad gap either way.
+**The anchor's `pytest` step is the serial suite *or* a bare `just test-fast`**
+(the suite across cores, about a minute — ADR-0166), your call at each anchor, no
+justification owed. Bare: the recipe forwards arguments to `pytest`, so
+`just test-fast -k …` is a scoped selection and discharges no anchor. It also
+deselects `tests/core/test_protocol_triad.py`, and nothing else, so prefer the
+serial run when your diff touches a Protocol or a canonical fake; CI catches a
+triad gap either way.
 
 **Between the anchors, the four static steps stay mandatory before every commit**
 — they cost about two seconds, and they catch what a *selected* test run would

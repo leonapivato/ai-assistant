@@ -86,9 +86,15 @@ anchors at all.
 `just test-fast` is the recipe for that discretion: the suite distributed across
 cores, about a minute and a half against the serial five to eight. **It also
 satisfies either anchor** (ADR-0166). So an anchor is the four static steps plus
-*either* `uv run pytest` or `just test-fast` — `just check` runs the serial form
-of it — and the choice is yours at each anchor independently, with no
+*either* `uv run pytest` or a bare `just test-fast` — `just check` runs the serial
+form of it — and the choice is yours at each anchor independently, with no
 justification owed and no reviewer entitled to require a particular one.
+
+**Bare means bare.** `just test-fast` forwards its arguments to `pytest`, so
+`just test-fast -k something` is a scoped selection and discharges no anchor,
+whatever the recipe is called — same for `-m`, `-x`, `--lf`, `--deselect`,
+`--ignore` or a path. An argument that narrows nothing (`-n 4`, `-q`) is fine.
+What ADR-0166 bought is a second *complete* run, not a licence to select.
 
 **What you give up by choosing it, and when not to.** `just test-fast` deselects
 `tests/core/test_protocol_triad.py` — 31 tests, and the mechanical enforcement of
