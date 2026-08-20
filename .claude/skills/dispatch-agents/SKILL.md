@@ -115,7 +115,9 @@ An under-specified brief is the largest source of rework. Each one carries:
   instead of reporting as though it were finished; a lane told it holds a floor
   path knows its own merge is the expensive one.
 - **The finishing loop** — full gate, `just review-codex`, triage, `just ship`,
-  `gh pr ready` — and that the agent owns all of it without asking.
+  `just ready` — and that the agent owns all of it without asking. Name `just
+  ready` rather than bare `gh pr ready`: it is the recipe carrying ADR-0165 §5's
+  refusal on an ADR the PR still leaves standing `Proposed` (issue #1044).
 - **Fetch and rebase before gating *and* before reviewing.** A gate against a
   stale tree is not evidence, and Codex reads the working tree for context, so a
   stale branch makes it report other lanes' merged work as regressions.
