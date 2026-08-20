@@ -1536,12 +1536,6 @@ agg_binary_churn="$(agg_field binary_churn)"
         echo "_${summary}_"
         echo
     fi
-    # §4's drift record, when any selected artifact was accepted across a moved
-    # base. Placed after the summary line and before the persona blocks, so the
-    # `<!-- ship:<sha> -->` marker and the header line that must follow it are
-    # untouched and a parser reading those two lines is unaffected (ADR-0027,
-    # Consequences: #153). Deduplicated by base, since two personas commonly
-    # share one.
     # The ratify exemption is disclosed for the same reason §4 discloses a base
     # move: the comment claims a review covers this head, and here it covers the
     # head's PARENT. A reader comparing the posted verdicts against the PR's tip
@@ -1558,6 +1552,12 @@ agg_binary_churn="$(agg_field binary_churn)"
         echo "> reviewable content."
         echo
     fi
+    # §4's drift record, when any selected artifact was accepted across a moved
+    # base. Placed after the summary line and before the persona blocks, so the
+    # `<!-- ship:<sha> -->` marker and the header line that must follow it are
+    # untouched and a parser reading those two lines is unaffected (ADR-0027,
+    # Consequences: #153). Deduplicated by base, since two personas commonly
+    # share one.
     printed_drift=""
     for persona in "${posting_personas[@]}"; do
         drifted="${covering_drift[$persona]:-}"
