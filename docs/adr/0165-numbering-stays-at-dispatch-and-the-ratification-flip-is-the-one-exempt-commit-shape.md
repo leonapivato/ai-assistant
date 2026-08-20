@@ -85,10 +85,11 @@ than afterthoughts: the exemption is worth **less than one round per ADR**, and
 whether it applies is substantially the *author's choice* of whether to write a
 ratification note in the same commit.
 
-The `- Date:` figure is why §2 treats that line the way it does. Amendment 3
-describes the exempt shape as the `Status` flip "plus the date stamp"; on this
-corpus the `- Date:` line records when the ADR was authored and ratification
-almost never restamps it — once, on ADR-0019, in July.
+The `- Date:` figure is why §2 ends up excluding that line. Amendment 3 describes
+the exempt shape as the `Status` flip "plus the date stamp"; on this corpus the
+`- Date:` line records when the ADR was authored and ratification almost never
+restamps it — once, on ADR-0019, in July. §2 records what that second line cost
+when it was tried.
 
 ### The other half: #1044
 
@@ -144,9 +145,8 @@ been, and cites its own number in its own text.
 > not an addition, deletion, rename, copy or binary change; the two blobs are
 > identical except on header lines, meaning lines preceding the file's first line
 > beginning `## `; the differing `Status` line reads exactly `- Status: Proposed`
-> in `P` and exactly `- Status: Accepted` in `C`; and at most one further line
-> differs, which may only be the `- Date:` header line and may only take the
-> value `C`'s **own author date** carries, rendered `YYYY-MM-DD`.
+> in `P` and exactly `- Status: Accepted` in `C`; and **no other line differs at
+> all**, the `- Date:` line included.
 
 Every clause of that predicate is there to remove a way for content no reviewer
 read to ride along. One path, because a second file is unbounded. Modified and
@@ -158,17 +158,29 @@ equality on both `Status` values rather than a prefix match, because a prefix
 match on `Accepted` is precisely the defect PR #1242's round found: it silently
 deleted a qualifier the line carried.
 
-**The `- Date:` clause is admitted because amendment 3 names the date stamp as
-part of the shape, and it is bound to the commit's own author date because
-anything looser is a channel.** A merely date-*shaped* value would let an
-unreviewed commit write `- Date: 1970-01-01`, which is historical metadata a
-reviewer could have rejected — the round-1 finding on this ADR, and correct. Tied
-to the author date the line is not free at all: it is a function of the commit
-being judged, so the recogniser reads it from `C` rather than trusting it, and
-"stamp the ratification date" is the only thing it can express. The author date
-rather than the committer date, because a rebase rewrites the second and
-preserves the first, and a lane that rebases before its final push must not
-thereby lose the exemption.
+**The `- Date:` line is excluded, and this ADR's own review is why.** Amendment 3
+describes the exempt shape as "the two-line flip in one ADR file", the second line
+being the date stamp, and this ADR proposed it that way. Two adversarial rounds
+took it apart, each correctly. A merely date-*shaped* second line lets an
+unreviewed commit write `- Date: 1970-01-01` — historical metadata a reviewer
+could have rejected, which is the one thing the predicate exists to exclude.
+Binding that value to the commit's own author date does not repair it either,
+because the author date is itself caller-supplied: `git commit --date=…` and
+`GIT_AUTHOR_DATE` both set it, so the "trusted" source is the same hand writing
+the line. There is no third source of a ratification date inside the commit, and
+inventing one — a signature, a server-side clock — is machinery out of all
+proportion to what it buys.
+
+**What it buys is measured, and it is one commit.** Of 121 ratification commits on
+`main`, exactly one ever edited the `- Date:` line, in July. So the exclusion
+takes the exemption from a shape whose safety needed an argument down to a shape
+that needs none — one line, one file, two exact strings — and costs the corpus a
+case that has arisen once. **This narrows the shape the ruling authorised rather
+than reversing the ruling**: it exempts strictly less than amendment 3 permits,
+on the strength of amendment 3's own stated principle, which §6 records as
+normative. An author who does need to restamp the date at ratification writes it
+in the flip commit and pays the round, exactly as an author who writes a
+ratification note does.
 
 > **Normative.** One implementation of §2's predicate serves both sides: the
 > recipe that *makes* a ratification flip and the check that *recognises* one are
@@ -279,8 +291,8 @@ filesystem state nor ancestry.
 **What is deliberately not exempted, each for the same reason.** A flip commit
 that also appends a ratification note. A flip commit that also applies the
 amendment records an ADR schedules for its ratification, as ADR-0026 §6 and
-ADR-0027 §7 do and as §9 of this ADR does. A flip that also corrects a typo. A
-flip of two ADRs at once. Each of these is a legitimate, common commit, and each
+ADR-0027 §7 do and as §9 of this ADR does. A flip that also restamps the
+`- Date:` line. A flip that also corrects a typo. A flip of two ADRs at once. Each of these is a legitimate, common commit, and each
 carries text no reviewer has read; each therefore falls outside §2's predicate
 and costs its round exactly as today. This is the fail-closed direction, and it
 is why §2's predicate refuses rather than accommodates.
@@ -390,7 +402,7 @@ and a dated note is added to its header in the position that file already uses
 for its most recent one — leading the existing notes, where the ADR-0138 note
 currently sits above the ADR-0025 and ADR-0027 ones:
 
-`Amended: <ratification date> by ADR-0165 — §3's acceptance rule compares the artifact's recorded tree against HEAD's tree. Where HEAD is a ratification flip as ADR-0165 §2 defines it — one ADR file, Status Proposed to Accepted, at most the Date line besides — the comparison is made against HEAD's parent instead, so the review that covered the Proposed tree covers the Accepted one and the flip costs no round. Nothing else in §3 moves: the anchor is still content and not the commit, the base half is still ADR-0027 §2's, and every commit that is not a ratification flip is still judged against its own tree.`
+`Amended: <ratification date> by ADR-0165 — §3's acceptance rule compares the artifact's recorded tree against HEAD's tree. Where HEAD is a ratification flip as ADR-0165 §2 defines it — one ADR file, one changed line, Status Proposed to Accepted and nothing else — the comparison is made against HEAD's parent instead, so the review that covered the Proposed tree covers the Accepted one and the flip costs no round. Nothing else in §3 moves: the anchor is still content and not the commit, the base half is still ADR-0027 §2's, and every commit that is not a ratification flip is still judged against its own tree.`
 
 **ADR-0027 §2 — amended.** Its acceptance loop is stated in terms of `HEAD`: (a)
 requires the recorded tree to equal "`HEAD`'s tree", and (b) is computed over the
@@ -495,16 +507,19 @@ would refuse it.
 rejected on the merits — it binds harder — but declined as scope here, and named
 as this ADR's Revisit condition (§5).
 
-**Drop the `- Date:` clause from §2's predicate, or leave it merely
-date-shaped.** The first fired once in 121 ratification commits and would make
-the predicate one line shorter; the second is what this ADR proposed at round 1
-and is wrong, because a date-shaped value is still a value an unreviewed commit
-chooses. Neither is taken. Amendment 3 names the date stamp as part of the shape,
-so dropping it narrows the ruling rather than recording it; and tying the value to
-the commit's own author date removes the choice entirely, at the cost of one
-comparison, which is a smaller predicate than a regular expression over a free
-value. If the clause never fires, a later narrowing to one line stays available
-and cheap.
+**Admit the `- Date:` line into the exempt shape, as amendment 3's "two-line
+flip" describes.** Tried, in two forms, and declined in both — the two rounds are
+recorded in §2 because the reasoning is the ADR's own subject matter. A
+date-*shaped* value is a value an unreviewed commit chooses (`- Date:
+1970-01-01`). Binding it to the commit's author date does not fix that, because
+`git commit --date=…` and `GIT_AUTHOR_DATE` set the author date; the repository
+holds no third source for a ratification date that the committing hand does not
+also control. Weighed against one occurrence in 121 ratification commits, the
+exclusion is the trade §6 requires. **This declines latitude the ruling granted;
+it does not reverse the ruling** — the exempt set is a strict subset of the one
+amendment 3 authorised, and the ground for narrowing it is amendment 3's own
+principle. Widening back to two lines is a superseding ADR's business under §6,
+and would need the third source this one could not find.
 
 ## Consequences
 
