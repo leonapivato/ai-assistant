@@ -268,7 +268,12 @@ rebasing onto it does.
 
 Anchoring on content rather than the commit SHA is what makes squashing,
 amending, and reverting free: a commit that changes no reviewed byte does not
-cost a review round.
+cost a review round. Content the review did not read still fails mechanically —
+a scope cut is a real content change, so it genuinely re-reviews. On the
+moved-base path, so does a diverged history, a patch identity with nothing to
+hash (a rename-only or mode-only entry), or a drift record too large to publish
+whole: each makes that path unavailable, leaving the unmoved-base test to judge
+the artifact, which a moved base fails.
 
 **One commit that does change reviewed bytes is exempt, and only one: the ADR
 ratify commit** (ADR-0165 §4). Where a PR's `HEAD` is exactly that commit — the
@@ -282,12 +287,7 @@ unnumbered one with the transform that produced it and compares bytes, so one
 further byte, a second path, a moved slug or a number already taken all fail it,
 as does any condition that stops the test running. `ship` discloses the exemption
 in the comment it posts, naming the parent the reviews actually cover. See
-"Finishing an ADR PR". Content the review did not read still fails mechanically —
-a scope cut is a real content change, so it genuinely re-reviews. On the
-moved-base path, so does a diverged history, a patch identity with nothing to
-hash (a rename-only or mode-only entry), or a drift record too large to publish
-whole: each makes that path unavailable, leaving the unmoved-base test to judge
-the artifact, which a moved base fails.
+"Finishing an ADR PR".
 
 ### Stop when the required reviews are green
 
@@ -445,8 +445,8 @@ is the decision behind it; point at this block rather than re-arguing it.
 **The two ADRs that record the older sequence still record it accurately for
 their own PRs.** ADR-0130 §12 and ADR-0136 §7 each state a status "flipped only
 once both required reviews returned clean on one tree", with the required review
-re-run on the flipped tree — which is what step 3 asked for before ADR-0165
-removed the flip from the lane's PR. They are history, not the current route. An
+re-run on the flipped tree — which is what the older step 3 asked for, before
+ADR-0165 took the flip out of the lane's PR. They are history, not the current route. An
 ADR recording its own ratification owes a line naming the set it ran and the
 outcome it got, plus a pointer here — not a paragraph reasoning the sequencing
 out from first principles.

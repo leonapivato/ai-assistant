@@ -1,9 +1,20 @@
-# NNNN. <short title of the decision>
+# XXXX. <short title of the decision>
 
-- Status: Proposed | Accepted | Withdrawn | Superseded by ADR-XXXX | Partially superseded by ADR-AAAA (<scope>) [and ADR-BBBB (<scope>)]…
+- Status: Proposed | Accepted | Withdrawn | Superseded by ADR-NNNN | Partially superseded by ADR-AAAA (<scope>) [and ADR-BBBB (<scope>)]…
 - Date: YYYY-MM-DD
 
-<!-- Use "Partially superseded by ADR-XXXX (<scope>)" when a later ADR replaces
+<!-- Author this file as docs/adr/<slug>.md, with no number in its name, and
+leave it "Proposed" through the whole review. The heading's XXXX and every
+ADR-XXXX self-reference below are filled in at merge, by `just adr-ratify`,
+which takes max(main) + 1 and flips the status in one mechanical commit
+(ADR-0165). Never pick a number and never ratify your own ADR.
+
+XXXX is RESERVED for this ADR's own number and is substituted wherever it
+appears, so an ADR that needs to *display* the placeholder writes it another
+way — which is why the status line above illustrates the other ADRs with NNNN,
+AAAA and BBBB rather than XXXX. A leftover XXXX fails ratification loudly. -->
+
+<!-- Use "Partially superseded by ADR-NNNN (<scope>)" when a later ADR replaces
 only part of this one: the supersession leads and "Accepted" is dropped (so a
 prefix match on "Accepted" cannot misread the replaced part as live), and the
 parenthesis names exactly what was replaced. The remainder stays accepted. If a

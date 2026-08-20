@@ -11,7 +11,8 @@
   edit carries (§2). The edits are **not** made by this change; §8 records their
   exact form and why they wait (ADR-0019).
 - Directs: `CONTRIBUTING.md`'s ADR-numbering paragraph, its "Finishing an ADR PR"
-  sequence and its review-round conditions, and `CLAUDE.md`'s golden rule 5 (§7).
+  sequence and its review-round conditions; `CLAUDE.md`'s golden rule 5; and
+  `docs/adr/template.md`'s heading and its displayed placeholders (§§3, 7).
 - Refs: #1226 §5, the ruling this records; #751, the replica hazard §4's
   implementation is built against.
 
@@ -23,15 +24,15 @@ arrangement carries.
 
 **The number is allocated at dispatch, and the allocation is a promise about the
 future.** ADR-0015 §5 put number assignment with the dispatcher to remove the
-race the in-flight ledger failed to arbitrate, and that worked: no two lanes have
-collided on a number since. What it did not remove is the *coupling*. A number
-handed out at dispatch is a claim on `docs/adr/NNNN-…` that has to hold until the
-lane merges — across every reordering, every lane that stops, every batch that is
-re-planned. `CONTRIBUTING.md` already carries the fallback for when it does not
-("If two branches still collide on a number, the second to merge renumbers"), and
-the dispatcher carries the bookkeeping for when it might: a number reserved for a
-lane that never ran is a gap, and a gap is a thing `scripts/project_status.py`
-reports and a reader has to be told about. The allocation is only actually needed
+race the in-flight ledger failed to arbitrate. What it did not remove is the
+*coupling*. A number handed out at dispatch is a claim on `docs/adr/NNNN-…` that
+has to hold until the lane merges — across every reordering, every lane that
+stops, every batch that is re-planned. `CONTRIBUTING.md` carried the fallback for
+when it does not, in the very paragraph this change replaces — the second branch
+to merge renumbers, a file rename plus its internal references and its trailers —
+and the dispatcher carries the bookkeeping for when it might: a number reserved
+for a lane that never ran is a gap, and a gap is a thing
+`scripts/project_status.py` reports and a reader has to be told about. The allocation is only actually needed
 at one instant — the moment the file lands on `main` — and it is being made
 hours or days early, by a person, against a counter that only `main` knows.
 
@@ -131,6 +132,20 @@ while still carrying a placeholder nobody will ever resolve. The check makes the
 constraint mechanical rather than advisory, and it costs an author who does need
 to show the form one rephrasing.
 
+**The check catches a leftover `XXXX`, and cannot catch a wrongly-substituted
+one**, which is why the constraint is stated as a rule rather than left to the
+tool. `ADR-XXXX` written to *display* the form is indistinguishable from
+`ADR-XXXX` written as a self-reference, and it is substituted silently. The one
+place that hazard was actually stocked is `docs/adr/template.md`, which an author
+copies: it illustrated the status grammar with `ADR-XXXX`, so a copy carried a
+displayed placeholder into every new ADR.
+
+> **Normative.** `docs/adr/template.md`'s heading becomes `# XXXX. <short title>`,
+> and the placeholders it uses to illustrate *other* ADRs' numbers become `NNNN`,
+> `AAAA` and `BBBB`. ADR-0070 §4's status grammar is unchanged — only the
+> metavariable it is displayed with moves, so that `XXXX` means one thing in an
+> ADR file and only that: this ADR's own number.
+
 ### 4. The ratify commit is exempt from a fresh review round, mechanically
 
 > **Normative.** Where a PR's `HEAD` is exactly a ratify commit, ADR-0027 §2's
@@ -196,8 +211,8 @@ once it has merged its number is a fact on `main` rather than a promise.
 > re-entering the review at §1, and ratifying again afterwards — with the number
 > recomputed, because `main` may have moved.
 
-This is `CONTRIBUTING.md` → "Finishing an ADR PR" step 3's return-to-`Proposed`
-route in its new shape, and it is available for the same reason: every step here
+This is the return-to-`Proposed` route `CONTRIBUTING.md` → "Finishing an ADR PR"
+already carried, in its new shape, and it is available for the same reason: every step here
 runs on the open PR, so an unmerged ratify commit has landed nowhere and binds no
 reader. Removing it is free of review cost by the content anchor — the branch is
 back on a tree a reviewer has already read (ADR-0020 §3, and `CONTRIBUTING.md`'s
@@ -213,10 +228,17 @@ its correction (ADR-0070 §5). Three passages are rewritten to state this decisi
 - its **ADR-numbering paragraph** ("ADR numbers are assigned at dispatch"), which
   becomes §2's rule, together with the dispatcher bullet that repeats it;
 - **"Finishing an ADR PR"**, whose steps 2 and 3 become the ratify commit and its
-  exemption, with step 3's return-to-`Proposed` route kept as §6;
+  exemption, with their return-to-`Proposed` route kept as §6;
 - the **review-round conditions** in "Report the review, then mark it ready",
   which gain the ratify commit alongside the amend/squash/revert cases they
   already list as costing nothing.
+
+`docs/adr/template.md` takes §3's respelling. Three smaller passages are
+corrected to agree with all of it and decide nothing on their own: the dispatcher bullet that repeats the numbering rule, the sentence
+telling an agent its ADR number comes from its brief, and the "Trivial ADR edits"
+paragraph's mention of the ratification flip, which now names where that flip
+lives. `scripts/project_status.py`'s footer line carries the same stale claim in
+generated output and is corrected with them.
 
 `CLAUDE.md`'s **golden rule 5** loses "Your ADR number is assigned when the work
 is handed to you — don't pick one yourself" and gains §1's unnumbered authoring
@@ -322,9 +344,9 @@ throughout, which §3 forbids to the documents that come after it.
 Rejected because the two halves are one mechanism: the exemption's safety comes
 from the ratify commit's diff being *fully determined by its parent*, and a commit
 that only flips a status and a date is a diff so small that recognising it says
-almost nothing (a status line and a date line are also what a lane would edit to
-smuggle something past a reviewer's eye, and the rename is what makes the commit
-structurally unmistakable). Keeping the number at dispatch also keeps the
+almost nothing (the rename is what makes the commit structurally unmistakable,
+where a two-line header edit is a shape an ordinary revision can wear by
+accident). Keeping the number at dispatch also keeps the
 allocation coupled to the plan, which is the cost #1226 §5 names first.
 
 **Relax the tree comparison generally for `docs/adr/**`.** Rejected outright.
@@ -358,8 +380,8 @@ anyway.
 - **A dispatcher stops allocating numbers, and stops tracking them.** A brief
   names a lane's ADR by slug. There is no reserved number to leak when a lane
   stops, no gap to explain, and no renumbering when two lanes are reordered —
-  `CONTRIBUTING.md`'s "the second to merge renumbers" fallback becomes dead
-  letter, because the second to merge simply takes the next number.
+  `CONTRIBUTING.md`'s renumbering fallback is deleted rather than kept, because
+  the second to merge simply takes the next number.
 - **Every ADR PR saves one Codex round**, and the round it saves is the one that
   had the least to find. What it does not save is any round on the decision
   itself: §1 puts the whole required set on the document that decides.
@@ -375,14 +397,20 @@ anyway.
   commits; the ADR file itself carries the real number from the ratify commit
   onward, and `scripts/check_citations.py` reads files, not commit messages.
 - **An unnumbered ADR is outside the Tier 1 citation corpus while it is
-  unnumbered**, because `_ADR_FILENAME_RE` in `scripts/check_citations.py` requires
-  four leading digits and `_ADR_FILE_RE` in `scripts/project_status.py` does the
-  same. Neither errors on the file; both skip it. The check does still run before
+  unnumbered**, because `_ADR_FILENAME_RE` in `scripts/check_citations.py`
+  requires four leading digits in the filename and `_ADR_FILE_RE` in
+  `scripts/project_status.py` requires leading digits at all. Neither errors on
+  the file; both skip it. The check does still run before
   the merge — the ratify commit is pushed to the PR, and CI runs the full gate on
   every push (ADR-0010) — so a broken citation in a new ADR fails on the PR, one
   commit later than it used to. Broadening either script to read the unnumbered
   file is not done here; it would mean teaching them a second filename shape for
   a window that lasts one commit.
+- **The merge grows a CI wait.** The ratify commit is a push to the PR, so the
+  gate runs on it before the merge can happen (ADR-0010, and branch protection's
+  `strict`). That is the cost of putting the numbered file in front of the same
+  checks as everything else, and it is paid once per ADR, by the merger, on a
+  diff of one rename.
 - **The merger now writes a commit on the lane's branch.** That is a change to
   what merging involves, and it is why `just adr-ratify` refuses on `main`, on a
   dirty tree and on a document out of shape rather than assuming a careful
