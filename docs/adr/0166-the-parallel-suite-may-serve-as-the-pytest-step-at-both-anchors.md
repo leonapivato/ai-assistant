@@ -260,10 +260,10 @@ flipped tree.
   has one answer. §1 makes the choice explicitly unjustified and unreviewable to
   keep that from becoming a thing lanes argue about.
 
-**Follow-on.** An issue carries the `tests/core/test_protocol_triad.py` skip-message
-wording, and a second carries `.claude/agents/worker.md`'s copy of the repealed
-"satisfies neither anchor" sentence — dispatch-infrastructure text outside this
-lane's fence. Neither is a condition of this decision.
+**Follow-on.** Issue #1241 carries the `tests/core/test_protocol_triad.py`
+skip-message wording, and issue #1240 carries `.claude/agents/worker.md`'s copy of
+the repealed "satisfies neither anchor" sentence — dispatch-infrastructure text
+outside this lane's fence. Neither is a condition of this decision.
 
 **Revisit if** the triad check is made to run under `-n auto` (the deselection
 goes, §3's whole risk goes with it, and §1 becomes unconditional in fact as well
