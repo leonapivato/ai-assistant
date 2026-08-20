@@ -535,22 +535,23 @@ def _ratify(args: argparse.Namespace) -> int:
         return 0
 
     before = _git("rev-parse", "HEAD", cwd=root).strip()
-    _git("mv", "--", path, new_path, cwd=root)
-    (root / new_path).write_text(rendered, encoding="utf-8")
-    _git("add", "--", new_path, cwd=root)
-    _git("commit", "-m", _MESSAGE.format(number=number, placeholder=PLACEHOLDER), cwd=root)
-
-    # The producer verifies itself against the recogniser, because a ratify
-    # commit the exemption does not recognise is worse than no exemption: it
-    # costs a round *and* reads as a bug in ship. On failure the branch goes back
-    # exactly where it was, which is safe because the tree was verified clean.
+    # Everything that touches the repository is inside one try, and the recovery
+    # is the same for all of it: put the branch back where it was. The producer
+    # verifies itself against the recogniser at the end, because a ratify commit
+    # the exemption does not recognise is worse than no exemption — it costs a
+    # round *and* reads as a bug in ship — and a half-applied rename left behind
+    # by a hook that rejected the commit is worse than either. Restoring is safe
+    # precisely because `_refuse_unless_ready` verified the tree clean.
     try:
+        _git("mv", "--", path, new_path, cwd=root)
+        (root / new_path).write_text(rendered, encoding="utf-8")
+        _git("add", "--", new_path, cwd=root)
+        _git("commit", "-m", _MESSAGE.format(number=number, placeholder=PLACEHOLDER), cwd=root)
         check_commit(root, "HEAD")
     except ShapeError as exc:
         _git("reset", "--hard", before, cwd=root)
-        raise ShapeError(
-            f"produced a commit the shape test refuses ({exc}) — the branch is restored"
-        ) from exc
+        (root / new_path).unlink(missing_ok=True)
+        raise ShapeError(f"{exc} — the branch is restored to {before[:12]}") from exc
 
     print(f"ratified {path} → {new_path} as ADR-{number:04d} ({date})")
     return 0
