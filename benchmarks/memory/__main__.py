@@ -60,6 +60,7 @@ from benchmarks.memory.corpora.provenance import CORPORA, Corpus, corpus_by_key
 from benchmarks.memory.records import RunMode, RunPhase
 from benchmarks.memory.reuse import load_reused_run
 from benchmarks.memory.run import (
+    RunPlan,
     execute_run,
     plan_run,
     refuse_ineligible_scored_run,
@@ -152,6 +153,7 @@ def plan(
     # or already settled — most of them. See `RunPlan.reconciler_calls`.
     table.add_row("reconciler model calls (ceiling)", f"{computed.reconciler_calls:,}")
     table.add_row("[bold]total model calls (at most)", f"[bold]{computed.model_calls:,}")
+    _add_token_rows(table, computed)
     table.add_row("embedder", str(settings.embedder))
     table.add_row("answer route", settings.default_model)
     table.add_row("reconciler route", reconciler_spec(settings))
@@ -289,6 +291,49 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
             "The records written before the stop are complete and readable; the run is not."
         )
         raise typer.Exit(code=1)
+
+
+def _add_token_rows(table: Table, computed: RunPlan) -> None:
+    """Report what a run would cost in tokens, and refuse to report what nobody measured.
+
+    **A call count is not a price, and the gap between the two is what #1292 is about.**
+    Pilot-5 came in at roughly twice its estimate, and reconstructing why meant
+    re-fetching the batch results from the provider — so a plan that reports only calls
+    is a plan an operator cannot decide from. The token figures here are per-question
+    numbers a previous pilot *measured* exactly, off its own batch results, rather than
+    anybody's model of a prompt (:data:`~benchmarks.memory.usage.MEASURED_TOKENS`).
+
+    **Two things are said rather than left to be inferred**, both because the honest
+    reading is not the flattering one:
+
+    * The source run is named, because these figures moved 2-4.5x between pilot-4 and
+      pilot-5 on the same corpora with the same models, entirely on the retrieval budget
+      and the rendering. A reader whose configuration differs needs to know which run
+      this is a measurement of.
+    * Ingestion carries **no** figure, so the total is printed as a floor. Observation
+      and reconciliation are most of what a run spends and nothing has ever measured
+      them; putting a guess in this table would reproduce exactly the arithmetic the
+      pilot-5 overrun came out of.
+
+    A corpus no pilot has run gets a row saying so, and no number.
+
+    Args:
+        table: The plan table, appended to in place.
+        computed: The plan.
+    """
+    measured = computed.measured_tokens
+    if measured is None:
+        table.add_row(
+            "tokens",
+            f"[yellow]no measured figure for {computed.corpus.key}[/yellow] "
+            f"(see benchmarks.memory.usage.MEASURED_TOKENS)",
+        )
+        return
+    table.add_row("answering tokens", f"{computed.answering_tokens or 0:,}")
+    table.add_row("judging tokens (at most)", f"{computed.judging_tokens or 0:,}")
+    table.add_row("ingestion tokens", "[yellow]never measured — see #1292[/yellow]")
+    table.add_row("[bold]total tokens (at least)", f"[bold]{computed.token_floor or 0:,}")
+    table.add_row("token figures measured on", measured.source)
 
 
 def _select(

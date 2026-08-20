@@ -32,6 +32,7 @@ from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.models import ensure_credential_available, ensure_vendor_available
 from benchmarks.memory.answer import ANSWER_SYSTEM_PROMPT, answer_question, retrieve_for
 from benchmarks.memory.batch import (
+    JUDGE_ITEM_SUFFIX,
     BatchSession,
     PollPolicy,
     PreparedQuestion,
@@ -61,6 +62,7 @@ from benchmarks.memory.records import (
 from benchmarks.memory.reuse import describe_reuse, refuse_ineligible_reuse
 from benchmarks.memory.select import CaseSelection
 from benchmarks.memory.spend import RunAbortedError, SpendGuard
+from benchmarks.memory.usage import MEASURED_TOKENS, UsagePhase, UsageTally
 from benchmarks.memory.wiring import (
     DEFAULT_ISSUER,
     build_batch_completer,
@@ -84,6 +86,7 @@ if TYPE_CHECKING:
     from benchmarks.memory.ingest import IngestionSummary
     from benchmarks.memory.records import RetrievalTelemetry
     from benchmarks.memory.reuse import ReusedRun
+    from benchmarks.memory.usage import BatchItemUsage, MeasuredTokens, UsageTotals
     from benchmarks.memory.wiring import Harness, Reconciliation
 
 __all__ = [
@@ -182,6 +185,65 @@ class RunPlan:
     def model_calls(self) -> int:
         """The upper bound on model calls the run would make."""
         return self.observation_calls + self.answer_calls + self.judge_calls + self.reconciler_calls
+
+    @property
+    def measured_tokens(self) -> MeasuredTokens | None:
+        """The per-question token figures a previous pilot measured on this corpus.
+
+        ``None`` where no pilot has run this corpus, which is not a gap to fill in from a
+        sibling corpus — see :data:`~benchmarks.memory.usage.MEASURED_TOKENS`.
+
+        Returns:
+            The figures, or ``None``.
+        """
+        return MEASURED_TOKENS.get(self.corpus.key)
+
+    @property
+    def answering_tokens(self) -> int | None:
+        """Tokens the answering phase would spend, from measured per-question figures.
+
+        Returns:
+            The product, or ``None`` where this corpus has no measured figure.
+        """
+        measured = self.measured_tokens
+        return None if measured is None else measured.answer_tokens * self.answer_calls
+
+    @property
+    def judging_tokens(self) -> int | None:
+        """Tokens the judging phase would spend at most, on the same basis.
+
+        The bound inherits ``judge_calls``'s looseness — an abstention is graded without
+        a call — so this is a ceiling on a phase that is a rounding error beside
+        answering anyway.
+
+        Returns:
+            The product, or ``None`` where this corpus has no measured figure.
+        """
+        measured = self.measured_tokens
+        return None if measured is None else measured.judge_tokens * self.judge_calls
+
+    @property
+    def token_floor(self) -> int | None:
+        """The **least** this run would spend in tokens, and never an estimate of the total.
+
+        **A floor, because ingestion is missing and ingestion dominates.** The two
+        phases below are the ones previous pilots measured; the observation and
+        reconciliation calls — one per twenty captured turns, each carrying a whole
+        window of transcript — have never been measured by anything, which is the gap
+        #1292 exists to close and is why
+        :class:`~benchmarks.memory.usage.MEASURED_TOKENS` states no figure for them.
+
+        Reporting the two known phases as a *total* would repeat the arithmetic that put
+        pilot-5's estimate at half its true cost. So the plan prints this as a floor and
+        says what is not in it.
+
+        Returns:
+            Answering plus judging, or ``None`` where this corpus has no measured figure.
+        """
+        answering, judging = self.answering_tokens, self.judging_tokens
+        if answering is None or judging is None:
+            return None
+        return answering + judging
 
 
 def plan_run(
@@ -307,7 +369,9 @@ def build_grader(
         return ExactGrader()
     if kind == "model":
         spec = route if route is not None else settings.default_model
-        return ModelGrader(build_model_provider(settings, spec, guard=guard), route=spec)
+        return ModelGrader(
+            build_model_provider(settings, spec, phase=UsagePhase.JUDGING, guard=guard), route=spec
+        )
     msg = f"unknown grader {kind!r}; expected 'exact' or 'model'"
     raise ValueError(msg)
 
@@ -750,6 +814,30 @@ async def execute_run(  # noqa: PLR0913, PLR0915 — every parameter is a distin
 
     prepared: list[PreparedQuestion] = []
     aborted: str | None = None
+    # One tally per question, filled by the batched phase from the items it submitted.
+    # Keyed by *answer* item id, so a question's judge usage — whose item carries
+    # `JUDGE_ITEM_SUFFIX` — lands in the same tally as its answer, which is what makes a
+    # row's `usage` the whole of what that question cost.
+    batch_usage: dict[str, UsageTally] = {}
+
+    def file_usage(measured: BatchItemUsage) -> None:
+        """Credit one settled batch item to its question and to the run."""
+        guard.usage.record(
+            phase=measured.phase,
+            route=measured.route,
+            calls=1,
+            prompt=measured.prompt_chars,
+            reply=measured.reply_chars,
+        )
+        answer_id = measured.item_id.removesuffix(JUDGE_ITEM_SUFFIX)
+        batch_usage.setdefault(answer_id, UsageTally()).record(
+            phase=measured.phase,
+            route=measured.route,
+            calls=1,
+            prompt=measured.prompt_chars,
+            reply=measured.reply_chars,
+        )
+
     try:
         async with AsyncExitStack() as stack:
             session: BatchSession | None = None
@@ -771,6 +859,11 @@ async def execute_run(  # noqa: PLR0913, PLR0915 — every parameter is a distin
                     on_batch=file_batch,
                     poll=poll if poll is not None else PollPolicy(),
                     announce=say,
+                    # The route the answer batch actually goes to: `build_batch_completer`
+                    # gives the completer this as its default, and the answer submission
+                    # passes no override. The judge batch names its own.
+                    route=resolved.default_model,
+                    on_usage=file_usage,
                 )
             driver = _CaseDriver(
                 settings=resolved,
@@ -794,7 +887,12 @@ async def execute_run(  # noqa: PLR0913, PLR0915 — every parameter is a distin
                 # §2's un-closed acceptance window: the work that can still fail happens
                 # while nothing is billing.
                 await _answer_and_judge_in_batches(
-                    session, prepared, judge=judge, run_id=run_id, records_path=records_path
+                    session,
+                    prepared,
+                    judge=judge,
+                    run_id=run_id,
+                    records_path=records_path,
+                    usage=batch_usage,
                 )
     except RunAbortedError as stop:
         aborted = stop.reason
@@ -802,13 +900,21 @@ async def execute_run(  # noqa: PLR0913, PLR0915 — every parameter is a distin
         # the deletion sits after the per-case `finally` and is skipped, which is the
         # right direction — the one case that did not finish is the one whose store
         # someone may want to look at.
-    if aborted is not None or submitted:
-        # The manifest's one rewrite, and both things it adds are facts a run only has
-        # once it is over. A batch that must survive an interruption is already in
-        # `batches.jsonl`, appended the moment the provider accepted it — this file is
-        # the record for a reader, not the guard.
-        manifest = manifest.model_copy(update={"aborted": aborted, "batches": tuple(submitted)})
-        (run_dir / "manifest.json").write_text(manifest.model_dump_json(indent=1), encoding="utf-8")
+    # The manifest's one rewrite, and every field it adds is a fact a run only has once
+    # it is over. It happens on every run now rather than only on one that aborted or
+    # batched: the usage ledger is such a fact too, and it is the field a run that
+    # finished cleanly most needs — a run that stopped is one nobody is reading a bill
+    # off. A batch that must survive an interruption is already in `batches.jsonl`,
+    # appended the moment the provider accepted it; this file is the record for a
+    # reader, not the guard.
+    manifest = manifest.model_copy(
+        update={
+            "aborted": aborted,
+            "batches": tuple(submitted),
+            "usage": guard.usage.run.snapshot(),
+        }
+    )
+    (run_dir / "manifest.json").write_text(manifest.model_dump_json(indent=1), encoding="utf-8")
     return manifest
 
 
@@ -915,10 +1021,17 @@ class _CaseDriver:
         prepared: list[PreparedQuestion] = []
         try:
             if self.reuse is None:
-                summary = await ingest_case(
-                    harness, case, batch_size=self.settings.observation_batch_size
-                )
-                ingestion = _ingestion_summary(summary)
+                # The scope covers the ingest and nothing else, which is what makes the
+                # figures it collects an *ingestion* share rather than a case total: the
+                # question loop below runs after it has closed, so no answering or
+                # judging call lands in it. That share is the one thing #1292 exists to
+                # measure and nothing has ever recorded.
+                ingested = UsageTally()
+                with self.guard.usage.attributing_to(ingested):
+                    summary = await ingest_case(
+                        harness, case, batch_size=self.settings.observation_batch_size
+                    )
+                ingestion = _ingestion_summary(summary, usage=ingested)
                 joins = {
                     question.question_id: _evidence_episode_ids(summary, question)
                     for question in case.questions
@@ -937,17 +1050,24 @@ class _CaseDriver:
                     # is what guarantees.
                     harness.clock.set(self.reuse.instant_for(case, question.question_id))
                 if self.session is None:
-                    await _answer_now(
-                        harness,
-                        question,
-                        case=case,
-                        judge=self.judge,
-                        cursor=cursor,
-                        evidence_episode_ids=joins[question.question_id],
-                        ingestion=ingestion,
-                        run_id=self.run_id,
-                        records_path=self.records_path,
-                    )
+                    # One scope per question, opened here rather than inside
+                    # `_answer_now` so it closes around the grading too — a question's
+                    # cost is its answer *and* its judgement, and a reader splitting
+                    # those apart has the phase column to do it with.
+                    asked = UsageTally()
+                    with self.guard.usage.attributing_to(asked):
+                        await _answer_now(
+                            harness,
+                            question,
+                            case=case,
+                            judge=self.judge,
+                            cursor=cursor,
+                            evidence_episode_ids=joins[question.question_id],
+                            ingestion=ingestion,
+                            run_id=self.run_id,
+                            records_path=self.records_path,
+                            usage=asked,
+                        )
                 else:
                     # Retrieval only. The two reads, the separator rule and the
                     # correlation scope are `retrieve_for`'s — the same function
@@ -977,16 +1097,31 @@ class _CaseDriver:
 
 def _ingestion_summary(
     summary: IngestionSummary,
+    *,
+    usage: UsageTally,
 ) -> dict[str, int | float | str | list[str]]:
     """Flatten what ingesting a case reported, for the rows it is denormalised onto.
 
     Args:
         summary: The summary.
+        usage: What this case's ingestion actually spent — the observation and
+            reconciliation calls, and the characters they sent and got back. Flattened
+            in beside the counts because this object is a flat mapping and because the
+            two belong together: ``observation_passes`` says how many calls were made
+            and the usage columns say how large they were, which on a phase carrying a
+            whole window of transcript per call are very different questions.
+
+            **This is the ingestion share #1292 exists to close.** Pilot-5's overrun was
+            reconstructible for answering and judging, from the provider's batch results,
+            and not at all for this phase — it left no record anywhere. It does now, in
+            characters rather than tokens, for the reason
+            :mod:`benchmarks.memory.usage` gives.
 
     Returns:
         The fields every record of that case carries.
     """
     return {
+        **usage.snapshot().flat(),
         "conversation_id": summary.conversation_id,
         "turns_captured": summary.turns_captured,
         "turns_degraded": summary.turns_degraded,
@@ -1084,6 +1219,7 @@ def _question_record(  # noqa: PLR0913 — every parameter is one field of the r
     evidence_episode_ids: tuple[tuple[str, ...], ...],
     telemetry: RetrievalTelemetry,
     ingestion: Mapping[str, int | float | str | list[str]],
+    usage: UsageTotals | None,
     batch_item_id: str | None = None,
 ) -> QuestionRecord:
     """Assemble the one row a question leaves behind, whichever phase produced it.
@@ -1103,6 +1239,12 @@ def _question_record(  # noqa: PLR0913 — every parameter is one field of the r
         evidence_episode_ids: #1074's join for this question.
         telemetry: What the ``RETRIEVAL`` traces said.
         ingestion: The case's summary, denormalised onto every one of its rows.
+        usage: What this question's own calls cost — the answering call and, where one
+            was made, the judging call. Collected differently by the two phases and
+            arriving here as one value, which is the property this function exists for:
+            the synchronous path opens a ledger scope around the question, and the
+            batched path joins each item's measured figures back by ``item_id``.
+            ``None`` where nothing measured it.
         batch_item_id: The id this question's answer was submitted under, or ``None``
             on a synchronous run.
 
@@ -1134,6 +1276,7 @@ def _question_record(  # noqa: PLR0913 — every parameter is one field of the r
         telemetry=telemetry,
         asked_at=attempt.asked_at,
         context_chars=len(attempt.context),
+        usage=usage,
         ingestion=dict(ingestion),
     )
 
@@ -1149,6 +1292,7 @@ async def _answer_now(  # noqa: PLR0913 — the synchronous per-question step, l
     ingestion: Mapping[str, int | float | str | list[str]],
     run_id: str,
     records_path: Path,
+    usage: UsageTally,
 ) -> None:
     """Answer, grade and record one question, in this process, right now.
 
@@ -1177,6 +1321,11 @@ async def _answer_now(  # noqa: PLR0913 — the synchronous per-question step, l
         ingestion: The case's ingestion summary, flattened for the record.
         run_id: The run.
         records_path: Where the row is appended.
+        usage: The ledger scope the caller opened around this question. Snapshotted at
+            the end rather than read progressively, so it covers the grading as well as
+            the answer — and so a question whose answering call failed still records the
+            prompt it paid for, which is the one row a reader hunting an overrun looks
+            for first.
     """
     attempt = await answer_question(harness, question)
     grading = (
@@ -1200,17 +1349,19 @@ async def _answer_now(  # noqa: PLR0913 — the synchronous per-question step, l
             evidence_episode_ids=evidence_episode_ids,
             telemetry=await cursor.collect(attempt.correlation_id),
             ingestion=ingestion,
+            usage=usage.snapshot(),
         ),
     )
 
 
-async def _answer_and_judge_in_batches(
+async def _answer_and_judge_in_batches(  # noqa: PLR0913 — the run's two batches and the four things a row is assembled from; a bundle would only move the list somewhere a reader has to follow
     session: BatchSession,
     prepared: Sequence[PreparedQuestion],
     *,
     judge: Grader,
     run_id: str,
     records_path: Path,
+    usage: Mapping[str, UsageTally],
 ) -> None:
     """Run the two batches, then write every row at once.
 
@@ -1239,6 +1390,17 @@ async def _answer_and_judge_in_batches(
         judge: The grader.
         run_id: The run.
         records_path: Where the rows are appended.
+        usage: Each question's tally, keyed by its **answer** ``item_id`` and filled by
+            the session's own recorder as each batch settles. Read rather than written
+            here: the caller owns it because the recorder is a run-level callback and
+            the run ledger has to be credited whether or not this function is reached.
+
+            **A question can legitimately be missing from it**, and the two ways are
+            worth telling apart. One is a run whose session recorded nothing, which is a
+            caller's choice. The other cannot happen for the answer batch — every
+            prepared question is submitted, and every submitted item is reported whether
+            or not it came back — but *is* the normal case for the judge half, since an
+            abstention is graded without a call and so has no judge item at all.
     """
     answers = await answer_batch(session, prepared)
     gradings: dict[str, Grading] = {}
@@ -1265,6 +1427,7 @@ async def _answer_and_judge_in_batches(
     )
     for one in prepared:
         answer, failure = answers[one.item_id]
+        measured = usage.get(one.item_id)
         write_jsonl_line(
             records_path,
             _question_record(
@@ -1276,6 +1439,7 @@ async def _answer_and_judge_in_batches(
                 evidence_episode_ids=one.evidence_episode_ids,
                 telemetry=one.telemetry,
                 ingestion=one.ingestion,
+                usage=None if measured is None else measured.snapshot(),
                 batch_item_id=one.item_id,
             ),
         )

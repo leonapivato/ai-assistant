@@ -19,6 +19,18 @@ harness *knows*, where tokens would be an estimate over prompts it has not built
 money would be a vendor's price list this tree has no business carrying. It is checked
 before each call, so the bound is never exceeded rather than merely detected afterwards.
 
+*The ledger* is the same seam asked a different question. The guard already sits on the
+one path every model call the run builds goes down, so it is the only place that can say
+what each of them cost — and until #1292 nothing did, which is how pilot-5 came in at
+twice its estimate with artifacts unable to say where the money went. The guard therefore
+carries a :class:`~benchmarks.memory.usage.UsageLedger` and records into it what it
+already had in hand: the call it is charging, the route it is going to, the phase the
+seam was built for, and the characters in and out. **That is not a token count and is not
+converted into one** — the reasoning is
+:mod:`benchmarks.memory.usage`'s, and it is the same reasoning the paragraph above gives
+for the ceiling being in calls. Nothing about the bound changes: the ledger never
+refuses, so a run's behaviour is identical whether or not anyone reads it.
+
 **The unit is one *logical completion*, not one HTTP request, and the difference is a
 choice.** The guard sits outside ``RetryingProvider``, so a call retried twice is charged
 once. Two reasons, and the first is what makes the ceiling usable at all: ``plan_run``
@@ -56,16 +68,18 @@ reason reaches the manifest rather than only a log line.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import ModelError
+from benchmarks.memory.usage import UsageLedger, prompt_chars
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from ai_assistant.core.protocols import ModelProvider
     from ai_assistant.core.types import Message
+    from benchmarks.memory.usage import UsagePhase
 
 __all__ = [
     "CREDIT_EXHAUSTION_SIGNATURES",
@@ -174,6 +188,12 @@ class SpendGuard:
     docstring argues why a retried call is charged once. Tokens would be an estimate over
     prompts not yet built, and money would put a vendor's price list in this tree.
 
+    **The ledger rides along because this is the only seam that can carry it.** ``calls``
+    below is one number for a whole run, which is what a ceiling needs and is exactly
+    what #1292 found insufficient for reading a bill: it cannot say whether the spend was
+    ingestion or answering. :attr:`usage` is the same crossings recorded with the phase
+    and route attached. It bounds nothing and refuses nothing.
+
     Attributes:
         limit: The most model calls this run may make, or ``None`` for no ceiling —
             which is the default, so the behaviour of every existing caller is unchanged
@@ -183,10 +203,21 @@ class SpendGuard:
             outright still spends. A guard that only counted successes would be defeated
             by exactly the failing run it exists to stop, and a bound checked afterwards
             is one the run has already crossed.
+        usage: What each of those calls sent and got back, by phase and route. Created
+            per guard and so per run, never shared, and never consulted by ``charge``:
+            the ceiling's arithmetic is unchanged by anything recorded here.
+
+            **It is not a total of the run's spend and does not claim to be.** It covers
+            exactly what ``calls`` covers — every seam the run *builds* — so an injected
+            ``Observer`` or ``Grader`` is outside it for the reason stated above, and a
+            batch's items are recorded by
+            :func:`~benchmarks.memory.batch.submit_and_settle` rather than here, since a
+            batch does not cross :meth:`wrap`.
     """
 
     limit: int | None = None
     calls: int = 0
+    usage: UsageLedger = field(default_factory=UsageLedger)
 
     def __post_init__(self) -> None:
         """Refuse a bound that is not a count.
@@ -266,17 +297,30 @@ class SpendGuard:
             raise RunAbortedError(msg)
         self.calls += count
 
-    def wrap(self, provider: ModelProvider) -> ModelProvider:
-        """Put ``provider`` behind this guard.
+    def wrap(self, provider: ModelProvider, *, phase: UsagePhase, route: str) -> ModelProvider:
+        """Put ``provider`` behind this guard, labelled with what it is.
+
+        **Both labels are required rather than defaulted, and that is the point of
+        them.** A default would let a newly wrapped seam acquire whatever phase happened
+        to be first in the enum, and a mislabelled ledger row is worse than a missing
+        one: it is a number that looks like a measurement of the wrong thing. The
+        wrapping sites are few and each of them knows exactly which seam it is building.
 
         Args:
             provider: The seam to guard.
+            phase: Which of the run's paid seams this provider *is*. Fixed here, where
+                the seam is built, because nothing downstream can tell an observation
+                call from a reconciliation one — the two routes both fall back to
+                ``default_model``.
+            route: The ``"provider:model"`` spec this seam was built on, for the
+                ledger's "by model" split.
 
         Returns:
-            A provider that charges this guard for every call and converts a
-            credit-exhaustion refusal into a :class:`RunAbortedError`.
+            A provider that charges this guard for every call, records what that call
+            sent and got back, and converts a credit-exhaustion refusal into a
+            :class:`RunAbortedError`.
         """
-        return _GuardedProvider(provider, self)
+        return _GuardedProvider(provider, self, phase, route)
 
 
 @dataclass(slots=True)
@@ -290,17 +334,40 @@ class _GuardedProvider:
     charged once — which is what ``plan_run`` counts and therefore what a ceiling read off
     the plan means. The module docstring holds the argument for that placement and names
     what it gives up.
+
+    **That same placement is what makes the ledger's rows mean anything.** A recorder
+    inside the retry would count attempts, so a flaky hour would look like an expensive
+    one; here a phase's ``calls`` column and ``plan_run``'s figure for that phase are the
+    same currency and can be read against each other.
+
+    Attributes:
+        _inner: The seam being wrapped.
+        _guard: The run's ceiling and ledger.
+        _phase: Which paid seam this is, fixed by whoever built it.
+        _route: The ``"provider:model"`` spec it was built on.
     """
 
     _inner: ModelProvider
     _guard: SpendGuard
+    _phase: UsagePhase
+    _route: str
 
     async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
-        """Charge the guard, then delegate.
+        """Charge the guard, record what is being sent, delegate, record what came back.
+
+        **The two halves are recorded separately, and the split is the same one the
+        charge already makes.** The call and its prompt land before the request, so a
+        call that raises still contributes both — it was made, and it is billed. The
+        reply lands only if there is one, so a phase showing prompts against no replies
+        is a phase whose calls all failed, which is a reading worth having rather than a
+        hole.
 
         Args:
             messages: Conversation history, as the Protocol requires.
-            model: Optional route override, relayed untouched.
+            model: Optional route override, relayed untouched. Recorded as the route
+                where it is given, because it is where the call actually went; the
+                harness's own seams do not pass one, so in practice this is the route
+                :meth:`SpendGuard.wrap` was told about.
 
         Returns:
             The reply.
@@ -313,8 +380,12 @@ class _GuardedProvider:
                 reinterpret.
         """
         self._guard.charge()
+        route = model if model is not None else self._route
+        self._guard.usage.record(
+            phase=self._phase, route=route, calls=1, prompt=prompt_chars(messages)
+        )
         try:
-            return await self._inner.complete(messages, model=model)
+            reply = await self._inner.complete(messages, model=model)
         except ModelError as error:
             if is_credit_exhaustion(error):
                 msg = (
@@ -324,3 +395,5 @@ class _GuardedProvider:
                 )
                 raise RunAbortedError(msg) from error
             raise
+        self._guard.usage.record(phase=self._phase, route=route, reply=len(reply.content))
+        return reply

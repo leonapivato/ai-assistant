@@ -36,6 +36,7 @@ from benchmarks.memory.spend import (
     SpendGuard,
     is_credit_exhaustion,
 )
+from benchmarks.memory.usage import UsagePhase
 from benchmarks.memory.wiring import build_harness, build_reconciler
 from harness_reconcilers import offline_reconciler
 
@@ -64,6 +65,11 @@ BATCH = 2
 #: passed rather than defaulted for the reason `plan_run` requires it: a planner
 #: filling one in reports the cost of a run nobody asked for (#1293).
 PROPOSALS = 3
+
+#: A route to label the wrapped seams in these tests with. `SpendGuard.wrap` requires
+#: one so that a real wrapping site cannot mislabel a ledger row; nothing here reads it
+#: back, and the tests that do read the ledger are in `test_usage_ledger.py`.
+ROUTE = "anthropic:claude-x"
 
 #: The text an exhausted Anthropic account comes back with, as it reaches this seam:
 #: `models.provider._classify` prefixes it and maps the 400 to a bare `ModelError`.
@@ -196,7 +202,7 @@ async def test_the_ceiling_binds_before_the_call_rather_than_after() -> None:
     defeated by the failing run it exists to stop.
     """
     guard = SpendGuard(limit=2)
-    provider = guard.wrap(FakeModelProvider("a dog"))
+    provider = guard.wrap(FakeModelProvider("a dog"), phase=UsagePhase.ANSWERING, route=ROUTE)
     turn = [Message(role=Role.USER, content="hello")]
 
     await provider.complete(turn)
@@ -210,7 +216,7 @@ async def test_the_ceiling_binds_before_the_call_rather_than_after() -> None:
 async def test_no_ceiling_is_a_counter_and_nothing_else() -> None:
     """The default, asserted because every existing caller depends on it."""
     guard = SpendGuard()
-    provider = guard.wrap(FakeModelProvider("a dog"))
+    provider = guard.wrap(FakeModelProvider("a dog"), phase=UsagePhase.ANSWERING, route=ROUTE)
 
     for _ in range(5):
         await provider.complete([Message(role=Role.USER, content="hello")])
@@ -222,7 +228,7 @@ async def test_no_ceiling_is_a_counter_and_nothing_else() -> None:
 async def test_a_zero_ceiling_permits_no_call_at_all() -> None:
     """Meaningful rather than degenerate: it is what "plan only" looks like from inside."""
     guard = SpendGuard(limit=0)
-    provider = guard.wrap(FakeModelProvider("a dog"))
+    provider = guard.wrap(FakeModelProvider("a dog"), phase=UsagePhase.ANSWERING, route=ROUTE)
 
     with pytest.raises(RunAbortedError):
         await provider.complete([Message(role=Role.USER, content="hello")])
@@ -438,7 +444,9 @@ async def test_a_retried_call_is_charged_once() -> None:
                 backoff_base_seconds=0.001,
                 backoff_max_seconds=0.001,
             ),
-        )
+        ),
+        phase=UsagePhase.ANSWERING,
+        route=ROUTE,
     )
 
     with pytest.raises(ModelUnavailableError):
