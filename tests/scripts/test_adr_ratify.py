@@ -267,23 +267,83 @@ def test_a_rename_that_leaves_the_status_proposed_is_not_a_ratification(tmp_path
     assert "some other byte changed" in checked.stderr
 
 
-def test_a_number_already_taken_is_not_a_ratification(tmp_path: Path) -> None:
-    """A duplicate number is invisible in the diff and silent in every consumer."""
+@pytest.mark.parametrize(("number", "why"), [(100, "a duplicate"), (102, "a skipped gap")])
+def test_only_max_plus_one_is_a_ratification(tmp_path: Path, number: int, why: str) -> None:
+    """``--number`` asserts the allocation; it does not choose one.
+
+    Both directions matter and only one of them is a collision. 0100 is already
+    taken, so it would produce a duplicate that is invisible in the diff and
+    silent in every consumer keyed by number. 0102 collides with *nothing* — it
+    is unused, which is exactly why a bare collision test would let it through —
+    and it strands 0101 permanently.
+    """
     repo = _adr_repo(tmp_path / "repo")
 
-    produced = _run(repo, "ratify", "--number", "100", "--date", "2026-08-20")
+    produced = _run(repo, "ratify", "--number", str(number), "--date", "2026-08-20")
+
+    assert produced.returncode == 1, why
+    assert "is not the next number" in produced.stderr
+
+    # And the recogniser refuses one built behind the producer's back, which is
+    # what the ship exemption actually rests on.
+    (repo / "docs" / "adr" / "a-decision-worth-recording.md").unlink()
+    (repo / "docs" / "adr" / f"{number:04d}-a-decision-worth-recording.md").write_text(
+        _MODULE.render_ratified(_PROPOSED, number, "2026-08-20")
+    )
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "docs(adr): take a number that is not the next one")
+
+    checked = _run(repo, "check-shape", "HEAD")
+
+    assert checked.returncode == 1
+    assert "is not the next number" in checked.stderr
+
+
+def test_refuses_to_ratify_from_a_branch_behind_its_base(tmp_path: Path) -> None:
+    """A number computed off a stale tree collides the moment it merges."""
+    repo = _adr_repo(tmp_path / "repo")
+    clone = tmp_path / "other"
+    _git(repo, "worktree", "add", "-q", "-b", "other", str(clone), "main")
+    (clone / "docs" / "adr" / "0101-landed-first.md").write_text(
+        "# 101. Landed first\n\n- Status: Accepted\n- Date: 2026-01-01\n\n## Context\n\nx\n"
+    )
+    _git(clone, "add", "-A")
+    _git(clone, "commit", "-qm", "docs(adr): land first")
+    _git(clone, "push", "-q", "origin", "other:main")
+
+    produced = _run(repo, "ratify", "--date", "2026-08-20")
 
     assert produced.returncode == 1
-    assert "already taken" in produced.stderr
-    # And the recogniser refuses one built behind the producer's back, too.
-    ratified = repo / "docs" / "adr" / "0100-a-decision-worth-recording.md"
-    (repo / "docs" / "adr" / "a-decision-worth-recording.md").unlink()
-    ratified.write_text(_MODULE.render_ratified(_PROPOSED, 100, "2026-08-20"))
-    _git(repo, "add", "-A")
-    _git(repo, "commit", "-qm", "docs(adr): collide")
-    checked = _run(repo, "check-shape", "HEAD")
-    assert checked.returncode == 1
-    assert "already exists" in checked.stderr
+    assert "ADR-0101" in produced.stderr
+    assert "rebase onto origin/main first" in produced.stderr
+
+
+def test_a_write_failure_after_the_rename_restores_the_branch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recovery covers the filesystem, not only the shape self-check.
+
+    Between ``git mv`` and the commit there is one write, and a full disk there
+    would leave the rename staged with no commit — the half-applied state the
+    recovery exists to undo, arriving as an ``OSError`` rather than a
+    ``ShapeError``.
+    """
+    repo = _adr_repo(tmp_path / "repo")
+    before = _git(repo, "rev-parse", "HEAD")
+    monkeypatch.chdir(repo)
+
+    def _no_space(*_args: object, **_kwargs: object) -> str:
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(Path, "write_text", _no_space)
+    args = _MODULE._parser().parse_args(["ratify", "--no-fetch", "--date", "2026-08-20"])
+
+    with pytest.raises(_MODULE.ShapeError, match="branch is restored"):
+        _MODULE._ratify(args)
+
+    assert _git(repo, "rev-parse", "HEAD") == before
+    assert _git(repo, "status", "--porcelain") == ""
+    assert (repo / "docs" / "adr" / "a-decision-worth-recording.md").exists()
 
 
 # --- Production: the refusals that keep a bad commit from existing -----------

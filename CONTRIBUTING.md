@@ -284,10 +284,10 @@ paths still apply in full to that endpoint; nothing about the tree comparison,
 the patch identity, the floor or the drift disclosure is relaxed. The exemption
 is not granted on anyone's word: `ship` rebuilds the numbered file from the
 unnumbered one with the transform that produced it and compares bytes, so one
-further byte, a second path, a moved slug or a number already taken all fail it,
-as does any condition that stops the test running. `ship` discloses the exemption
-in the comment it posts, naming the parent the reviews actually cover. See
-"Finishing an ADR PR".
+further byte, a second path, a moved slug or any number but the next one all
+fail it, as does any condition that stops the test running. `ship` discloses the
+exemption in the comment it posts, naming the parent the reviews actually cover.
+See "Finishing an ADR PR".
 
 ### Stop when the required reviews are green
 
@@ -423,13 +423,14 @@ is the decision behind it; point at this block rather than re-arguing it.
    unnumbered one with the same transform that produced it and comparing bytes,
    then computes ADR-0027 §2's acceptance rule over the commit's **parent**. A
    commit that changed one further byte, touched a second path, moved the slug or
-   took a number already in use is not recognised and costs its round like
-   anything else — and so does a ratify commit under any condition that stops the
-   test running at all, because it fails closed. Ask it before you rely on it:
-   `scripts/adr_ratify.py check-shape HEAD` prints the ratified path, or says why
-   not. **The exemption is from the Codex round, never from the ruling** — the
-   required set is green on the unnumbered tree *before* the ratify commit is
-   made, and nothing here detects a ratification that skipped it.
+   took any number but its parent tree's maximum plus one is not recognised and
+   costs its round like anything else — and so does a ratify commit under any
+   condition that stops the test running at all, because it fails closed. Ask it
+   before you rely on it: `scripts/adr_ratify.py check-shape HEAD` prints the
+   ratified path, or says why not. **The exemption is from the Codex round, never
+   from the ruling** — the required set is green on the unnumbered tree *before*
+   the ratify commit is made, and nothing here detects a ratification that
+   skipped it.
 5. **A finding that arrives once the ratify commit exists** is folded by removing
    that commit, returning the ADR to its unnumbered `Proposed` shape, and
    re-entering at step 1 — then ratifying again, with the number recomputed

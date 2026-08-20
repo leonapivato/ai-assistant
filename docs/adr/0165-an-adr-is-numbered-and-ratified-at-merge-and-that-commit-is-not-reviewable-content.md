@@ -83,7 +83,9 @@ on which four digits the document was going to get.
 
 > **Normative.** The number an ADR takes is `max(main) + 1` — one greater than the
 > highest number `docs/adr/` carries on `main` — computed at the moment the ADR
-> is merged, and never before.
+> is merged, and never before. It is not a number anyone chooses: a number that
+> skips ahead collides with nothing and strands every number it jumped over, so
+> it is refused exactly as a duplicate is.
 
 > **Normative.** It is taken by exactly one commit, whose whole content is: the
 > file renamed from `docs/adr/<slug>.md` to `docs/adr/NNNN-<slug>.md`; the H1's
@@ -106,9 +108,14 @@ holding a view across lanes.
 
 `just adr-ratify` produces the commit. It reads the ADR's *committed* content,
 refuses on a dirty tree, on `main` and on a detached `HEAD`, refuses a document
-that is not in §1's shape, refuses a number already taken, and — because a ratify
-commit that §4's test does not recognise is worse than no exemption at all —
-verifies its own output against that test and restores the branch if it fails.
+that is not in §1's shape, refuses any number that is not the next one, and
+refuses outright on a branch behind its base — a number computed off a stale tree
+collides the moment it merges, which is why §2 puts this commit after the final
+rebase. `--number` states the number the operator expects and is checked against
+the computed one; it does not select. And because a ratify commit that §4's test
+does not recognise is worse than no exemption at all, it verifies its own output
+against that test, restoring the branch — from a failed write as readily as from
+a failed check — if anything does not hold.
 
 > **Normative.** The ratify commit's message is a Conventional Commit naming the
 > number it took, with a matching `Refs:` trailer. The commits that precede it on
@@ -164,9 +171,17 @@ exactly what ADR-0027 says it costs, including when it lands in `docs/adr/**`.
 > pattern-matching the diff: the parent's unnumbered file is put through the same
 > transform that *produces* a ratify commit, and the result is compared byte for
 > byte against the child's numbered file, with the commit's tree diff required to
-> be exactly one delete and one add and the number required not to be taken in the
-> parent tree. A commit that changed one further byte, touched a second path,
-> moved the slug, or took a number already in use is not recognised.
+> be exactly one delete and one add and the number required to be exactly the
+> **parent tree's** maximum plus one. A commit that changed one further byte,
+> touched a second path, moved the slug, or took any number but the next one is
+> not recognised.
+
+**The allocation rule is tested, not assumed, and testing it is why the parent
+tree is the reference.** The recogniser cannot see whatever `main` looked like
+when the commit was made, so "max(main) + 1" would be an unfalsifiable claim
+about the past; "the parent tree's maximum plus one" is a property the commit
+*has*, checkable from the commit alone, and §2's requirement that the ratify
+commit be made after the final rebase is what makes the two the same number.
 
 `render_ratified` and `check_commit` in `scripts/adr_ratify.py` are that one
 transform and that one test, and `scripts/ship.sh` reaches them by invoking the

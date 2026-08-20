@@ -260,6 +260,26 @@ def _blob(root: Path, rev: str, path: str) -> str:
     return _git("show", rev + ":" + path, cwd=root)
 
 
+def _next_number(root: Path, rev: str) -> int:
+    """Return the number an ADR merging onto ``rev`` takes: its maximum plus one.
+
+    One definition, called by the producer and by the recogniser, so "the number
+    is max + 1" is a property a commit *has* rather than a rule the producer was
+    trusted to have followed. Reading it from the ratify commit's own parent is
+    what makes it checkable at all: the recogniser has no access to whatever
+    `main` looked like when the commit was made, and §2 requires the commit to be
+    made on a branch already rebased onto it.
+
+    Args:
+        root: The work tree root.
+        rev: Any revision ``git ls-tree`` accepts.
+
+    Returns:
+        The next number.
+    """
+    return max(_adr_numbers(root, rev), default=0) + 1
+
+
 def _adr_numbers(root: Path, rev: str) -> set[int]:
     """Return every ADR number present under ``docs/adr`` at ``rev``.
 
@@ -418,12 +438,18 @@ def check_commit(root: Path, commit: str) -> str:
     old_path, new_path = _renamed_pair(root, parent, sha)
     number = _ratified_number(old_path, new_path)
 
-    # A number already taken in the parent tree is not a ratification, it is a
-    # collision — and one the exemption must never wave through, because a
-    # duplicate is invisible in the diff and every consumer that keys ADRs by
-    # number silently loses one of the two.
-    if number in _adr_numbers(root, parent):
-        raise ShapeError(f"ADR-{number:04d} already exists at {parent[:12]}")
+    # The number must be exactly the parent tree's maximum plus one, which is
+    # ADR-0165 §2's allocation rule tested rather than assumed. It subsumes the
+    # collision case — a number already in use is at most the maximum, so it can
+    # never be the maximum plus one — and it closes the case a bare
+    # collision test leaves open: a number that skips ahead is *unused*, so it
+    # collides with nothing, and it strands every number it jumped over.
+    expected_number = _next_number(root, parent)
+    if number != expected_number:
+        raise ShapeError(
+            f"ADR-{number:04d} is not the next number at {parent[:12]}: "
+            f"max + 1 there is {expected_number:04d}"
+        )
 
     ratified = _blob(root, sha, new_path)
     expected = render_ratified(_blob(root, parent, old_path), number, _stamped_date(ratified))
@@ -512,16 +538,35 @@ def _ratify(args: argparse.Namespace) -> int:
     slug = slug_of(path)
     original = _blob(root, "HEAD", path)
 
-    taken = _adr_numbers(root, "HEAD")
+    # The number is computed from HEAD's tree alone, because that is the tree the
+    # recogniser can see. The base is fetched only to prove HEAD is not behind
+    # it: a branch missing a number `main` already carries would compute a number
+    # that collides the moment it merges, and §2 requires this commit to be made
+    # after the final rebase precisely so that cannot happen. Saying so is better
+    # than silently taking the higher of the two, which would then fail the
+    # recogniser's max + 1 test for reasons nobody could read off the commit.
     if args.no_fetch:
-        taken |= _adr_numbers(root, "origin/" + args.base_branch)
+        base_numbers = _adr_numbers(root, "origin/" + args.base_branch)
     else:
         _git("fetch", "--no-tags", "--quiet", "origin", args.base_branch, cwd=root)
-        taken |= _adr_numbers(root, "FETCH_HEAD")
+        base_numbers = _adr_numbers(root, "FETCH_HEAD")
+    taken = _adr_numbers(root, "HEAD")
+    behind = sorted(base_numbers - taken)
+    if behind:
+        missing = ", ".join(f"ADR-{n:04d}" for n in behind)
+        raise ShapeError(
+            f"'{args.base_branch}' carries {missing} and this branch does not — "
+            f"rebase onto origin/{args.base_branch} first, so the number is max + 1 "
+            f"on the tree that merges"
+        )
 
-    number: int = args.number if args.number is not None else max(taken, default=0) + 1
-    if number in taken:
-        raise ShapeError(f"ADR-{number:04d} is already taken")
+    expected = max(taken, default=0) + 1
+    number: int = args.number if args.number is not None else expected
+    if number != expected:
+        raise ShapeError(
+            f"ADR-{number:04d} is not the next number: max + 1 is {expected:04d}. "
+            f"--number states the number you expect, it does not choose one"
+        )
 
     date: str = args.date or time.strftime("%Y-%m-%d")
     rendered = render_ratified(original, number, date)
@@ -529,7 +574,7 @@ def _ratify(args: argparse.Namespace) -> int:
 
     if args.dry_run:
         print(f"would ratify {path} → {new_path}")
-        print(f"  number  {number:04d}  (max of {len(taken)} known + 1)")
+        print(f"  number  {number:04d}  (max of the {len(taken)} on this branch, + 1)")
         print("  date    " + date)
         print("  status  Proposed → Accepted")
         return 0
@@ -548,7 +593,11 @@ def _ratify(args: argparse.Namespace) -> int:
         _git("add", "--", new_path, cwd=root)
         _git("commit", "-m", _MESSAGE.format(number=number, placeholder=PLACEHOLDER), cwd=root)
         check_commit(root, "HEAD")
-    except ShapeError as exc:
+    except (ShapeError, OSError) as exc:
+        # OSError is in here for the write between the rename and the commit: a
+        # full disk or an I/O error there leaves the rename staged and no commit,
+        # which is exactly the half-applied state this recovery exists to undo,
+        # and it is not a ShapeError.
         _git("reset", "--hard", before, cwd=root)
         (root / new_path).unlink(missing_ok=True)
         raise ShapeError(f"{exc} — the branch is restored to {before[:12]}") from exc
@@ -572,7 +621,9 @@ def _parser() -> argparse.ArgumentParser:
 
     ratify = sub.add_parser("ratify", help="produce the ratify commit")
     ratify.add_argument("--adr", help="the unnumbered ADR path (default: the branch's one)")
-    ratify.add_argument("--number", type=int, help="the number to take (default: max + 1)")
+    ratify.add_argument(
+        "--number", type=int, help="assert the number: it must be max + 1, or the run refuses"
+    )
     ratify.add_argument("--date", help="the ratification date (default: today)")
     ratify.add_argument("--base-branch", default="main", help="the branch max() is taken over")
     ratify.add_argument(
