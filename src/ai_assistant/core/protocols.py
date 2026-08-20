@@ -1475,9 +1475,13 @@ class MemoryWriter(Protocol):
         set the policy ruled on whose source is supersedable, in one atomic unit
         with the correction. The two standing refusals are unchanged: nothing folds
         onto a ``USER_ASSERTED`` target under either ruling, and a ``USER_ASSERTED``
-        *sibling* is never swept in. Which sources **are** swept in is the writer's
-        **retirement class**, not this docstring's to enumerate: ADR-0079 §3 states
-        the obligation intensionally — "whose source is supersedable" — so that
+        *sibling* is never swept in **by the widening** — topical similarity may not
+        retire a record the user gave us (ADR-0045 §5). The user's own answer may:
+        ADR-0078 §5b narrows that hold-out for a **confirmed** correction, where
+        every confirmed asserted conflict is retired in the same batch and not only
+        the named target. Which sources the widening itself sweeps in is the
+        writer's **retirement class**, not this docstring's to enumerate: ADR-0079
+        §3 states the obligation intensionally — "whose source is supersedable" — so that
         widening the class widens the contract without editing it, and ADR-0092 §4
         has since widened it to include ``EXTERNAL``. The class is an allow-list
         rather than "not ``USER_ASSERTED``" (ADR-0038 §2a), so a source added later
@@ -2141,16 +2145,17 @@ class Planner(Protocol):
         groups, in order**: the conversation's recent turns **first**, in order;
         then the records retrieved as relevant; then the episodic supplement —
         episodes retrieved by relevance from other conversations, under a budget of
-        their own. Each grouping is meaningful and **no run of the sequence is a
-        relevance ranking a planner may read** — not across the groups, and **not
-        within the retrieved group either**, whose internal order is the assembling
-        consumer's rather than this contract's: ADR-0072 §5 gives the retrieved
-        records a precedence and ADR-0113 §6 makes the budget and the assembly order
-        the consumer's, so a more relevant record can sit below a less relevant one
-        by decision. A planner may rely on the grouping and may not rely on a
-        relevance order. The wording is restated rather than read generously: a
-        conversation tail is usually the most relevant thing the store holds for a
-        continued exchange, but a user who changes the subject mid-conversation is
+        their own. Each grouping is meaningful and **the sequence is not one
+        relevance ranking** — not across the groups, and **not across the retrieved
+        group either**, whose internal order is the assembling consumer's rather
+        than this contract's: ADR-0072 §5 gives the retrieved records a precedence
+        and ADR-0113 §6 makes the budget and the assembly order the consumer's, so
+        they arrive precedence first and relevance-ordered only *within* one
+        precedence band, and a more relevant record can sit below a less relevant
+        one by decision. A planner may rely on the grouping and may not read a
+        single relevance order across it. The wording is restated rather than read
+        generously: a conversation tail is usually the most relevant thing the store
+        holds for a continued exchange, but a user who changes the subject mid-conversation is
         handed prior turns that are not relevant to the new goal at all, so calling
         the sequence "best first" would be a strain at either scope.
 
@@ -2176,8 +2181,9 @@ class Planner(Protocol):
             context: The situational context assembled for this request.
             memories: The records the pipeline assembled for this turn — the
                 conversation's recent turns in order, then the records retrieved
-                as relevant, then the episodic supplement (ADR-0158 §4). No run of
-                it is a relevance ranking; see above.
+                as relevant, then the episodic supplement (ADR-0158 §4). The
+                retrieved group is composed under the assembling consumer's
+                precedence rather than as one relevance rank; see above.
 
         Returns:
             A frozen :class:`~ai_assistant.core.types.ActionPlan`.
