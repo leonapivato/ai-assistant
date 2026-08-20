@@ -68,11 +68,14 @@ test *args:
 # each worker accumulates only its own, so the check runs on one worker, sees
 # none of the contract subclasses that passed on the others, and reports every
 # Protocol as missing its triad. It is incompatible with a distributed run, not
-# flaky in one. Deselecting costs no enforcement: `just check`, both ADR-0136
-# anchors and CI all run it serially, so a real triad gap still cannot merge.
+# flaky in one. Since ADR-0166 this recipe may also discharge an ADR-0136 anchor,
+# so the deselection is no longer covered by a serial local run: CI's full serial
+# gate on every push to an open PR is what still catches a real triad gap, and
+# ADR-0166 §2 says to pick `just check` when the diff touches a Protocol or a
+# canonical fake.
 #
 # Last line, because `just --list` shows only that one: what this recipe runs.
-# The suite in parallel — ADR-0136 §2's fast gate, and never one of its anchors
+# The suite in parallel — ADR-0136 §2's fast gate, and either anchor (ADR-0166)
 test-fast *args:
     #!/usr/bin/env bash
     set -euo pipefail

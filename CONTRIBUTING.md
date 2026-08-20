@@ -49,12 +49,14 @@ rewrite. `pre-commit` runs the fast subset on every commit; CI runs the full gat
 on every pull request and push to `main` (`.github/workflows/gate.yml`,
 ADR-0010), and it is the backstop rather than the first line of defence.
 
-### When the full gate is owed, and when it is not (ADR-0136)
+### When the full gate is owed, and when it is not (ADR-0136, ADR-0166)
 
 The five steps are not one price. The four static ones cost about two seconds
-between them; `pytest` costs four to six minutes against ~15,600 tests. ADR-0136
-splits the cadence accordingly and governs it — what follows is operational, and
-where the two read differently the ADR wins.
+between them; `pytest` costs five to eight minutes serially against ~18,100
+tests, or about a minute and a half across cores. ADR-0136 splits the cadence
+accordingly and governs it, and ADR-0166 lets the parallel run stand in for the
+serial one at the anchors — what follows is operational, and where the two read
+differently the ADRs win.
 
 **The full gate runs and passes at two anchors on a branch, and neither is at
 your discretion:** immediately before the **first review invocation** on that
@@ -81,11 +83,25 @@ is owed for the choice, and no reviewer may require a particular one. A diff
 touching no file under `src/` or `tests/` owes no `pytest` run between the
 anchors at all.
 
-`just test-fast` is the recipe for that discretion: the whole suite distributed
-across cores, about a minute against the serial four to six. **It satisfies
-neither anchor** — it deselects one check that cannot run distributed, and the
-anchors require the suite rather than a command name, so an anchor is `just
-check` or the five steps above.
+`just test-fast` is the recipe for that discretion: the suite distributed across
+cores, about a minute and a half against the serial five to eight. **It also
+satisfies either anchor** (ADR-0166). So an anchor is the four static steps plus
+*either* `uv run pytest` or `just test-fast` — `just check` runs the serial form
+of it — and the choice is yours at each anchor independently, with no
+justification owed and no reviewer entitled to require a particular one.
+
+**What you give up by choosing it, and when not to.** `just test-fast` deselects
+`tests/core/test_protocol_triad.py` — 31 tests, and the mechanical enforcement of
+the Protocol triad rule ("Adding a Protocol", below). The check reads pytest's own
+record of what the session ran, and under `-n auto` no worker sees the whole
+session, so the deselection is a property of its design rather than a flake.
+Nothing else is skipped. CI runs the full serial gate on every push to an open PR
+(ADR-0010), so a triad gap is caught there every time — the cost is that you learn
+after the review rather than before it, which is a fix commit and the round it
+buys. **Choose the serial run when your diff adds or changes a Protocol in
+`core/protocols.py` or a canonical fake in `ai_assistant.testing`**, and when the
+change is order-dependent, shares state through a fixture, or is timing-sensitive.
+That is guidance, not a rule: the discretion in the paragraph above is flat.
 
 **A red push between the anchors is acceptable.** The draft PR is opened early so
 that CI gates every push, and a rule that no push may ever be red is in tension
