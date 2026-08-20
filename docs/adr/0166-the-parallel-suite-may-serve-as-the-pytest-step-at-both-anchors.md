@@ -1,6 +1,6 @@
 # 166. The parallel suite may serve as the `pytest` step at both anchors
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-20
 - **What this changes and what it does not.** It relaxes one step of one gate at
   two named moments — which `pytest` invocation discharges ADR-0136 §1's anchors.
