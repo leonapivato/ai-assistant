@@ -28,6 +28,7 @@ Refs #1277, #1273, #1021.
 
 from __future__ import annotations
 
+import os
 import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Final
@@ -50,6 +51,10 @@ _ENV_EXAMPLE: Final = Path(__file__).resolve().parents[2] / ".env.example"
 #: outside what this module can check.
 _ASSIGNMENT: Final = re.compile(r"^#\s*(ASSISTANT_[A-Z0-9_]+)=(.*)$")
 
+#: ``Settings.model_config``'s ``env_prefix``, as it is written in the file and in
+#: ``config.py`` — the case the file uses, not the only case the loader accepts.
+_PREFIX: Final = "ASSISTANT_"
+
 
 def _assignments() -> list[tuple[str, str]]:
     """Every commented ``ASSISTANT_*`` assignment in the file, in file order."""
@@ -62,7 +67,7 @@ def _assignments() -> list[tuple[str, str]]:
 
 def _variables() -> set[str]:
     """The environment variable name of every field on :class:`Settings`."""
-    return {f"ASSISTANT_{name.upper()}" for name in Settings.model_fields}
+    return {f"{_PREFIX}{name.upper()}" for name in Settings.model_fields}
 
 
 def test_the_example_file_offers_settings_to_set() -> None:
@@ -125,10 +130,16 @@ def test_the_example_file_generates_a_loadable_env(
     The environment is cleared first because environment variables outrank
     ``env_file`` in pydantic-settings' source order, so an ambient ``ASSISTANT_*``
     — a developer's own shell, or CI — would otherwise be what the case actually
-    loaded.
+    loaded. It is cleared **case-insensitively**, and by sweeping the environment
+    rather than by deleting the names this module knows about:
+    ``SettingsConfigDict`` leaves ``case_sensitive`` at its ``False`` default, so
+    ``assistant_log_level`` is read exactly as ``ASSISTANT_LOG_LEVEL`` is, and a
+    stray lower-case one holding an invalid value would fail this case at
+    ``baseline`` — before the generated file was tested at all.
     """
-    for variable in _variables():
-        monkeypatch.delenv(variable, raising=False)
+    for variable in list(os.environ):
+        if variable.upper().startswith(_PREFIX):
+            monkeypatch.delenv(variable, raising=False)
     monkeypatch.chdir(tmp_path)
     baseline = Settings()
     assignments = _assignments()
@@ -143,7 +154,7 @@ def test_the_example_file_generates_a_loadable_env(
     # ignores a variable it does not recognise rather than objecting. So the two
     # loads are compared: something moved, and nothing moved that the file does
     # not name.
-    offered = {name.removeprefix("ASSISTANT_").lower() for name, _ in assignments}
+    offered = {name.removeprefix(_PREFIX).lower() for name, _ in assignments}
     moved = {
         field
         for field in Settings.model_fields
