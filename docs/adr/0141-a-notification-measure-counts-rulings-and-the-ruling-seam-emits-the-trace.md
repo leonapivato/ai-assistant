@@ -60,13 +60,23 @@
   there is no ambient value to read, and **the ref is simply omitted while the
   trace is still emitted**: ADR-0119 §4 leaves the carrier "ambient to the
   request" and "the implementing lane's to choose", so an emitter *reads* it and
-  never mints, fabricates or demands one. A ruling emitted outside an
-  `AssistantEngine` operation — a scheduled `NotificationStore.reconsider` sweep
-  is the case this seam actually meets — therefore carries no
-  `TraceRef.CORRELATION` entry, and **that trace is complete rather than
-  defective**: ADR-0119 §4 asks the ref only of a trace emitted inside such an
+  never mints, fabricates or demands one. Such a trace is **complete rather than
+  defective** — ADR-0119 §4 asks the ref only of a trace emitted inside an
   operation, so nothing is missing, and neither §3's fault clause nor ADR-0119
   §5's lost-trace record has anything to record.
+
+  **On this ADR's own seams the antecedent is satisfied, the scheduled
+  reconsideration sweep included, and that is ruled rather than incidental.**
+  ADR-0119 §3 reads ADR-0083 §8 — "every scheduler job is a public `Engine`
+  call" — and concludes that a scheduler-driven run and a user's turn "are all one
+  `AssistantEngine` operation, distinguished by the seam label and the outcome".
+  §3 above places the emitter inside the store's ruling transaction, and both
+  routes into that transaction reach it *through* an engine operation: the writer
+  stage for a first offer, and the engine's maintenance operation for a
+  reconsideration, which §3 above names in as many words. So the omission branch
+  is what a caller driving the store **outside** an engine operation gets, not
+  what the reconsideration path gets, and a lane reading §3's clause should not
+  expect the ref to be absent on either production route.
 
   **Nothing downstream turns on the omission**, which is why the clause could
   incorporate it by reference without creating a defect. §3 already says "No
@@ -79,10 +89,12 @@
   that followed "as every other emitter reads it" already writes the omission
   branch, and as of this note's date the merged emitter in
   `memory/notification_traces.py` does exactly that — it reads the ambient value
-  and omits the ref when the value is absent, the same shape
-  `memory/traces.py` already carried for `MEMORY_WRITE`. The residual this note
-  answers is legibility, not correctness: a reader had to open ADR-0119 §4 to see
-  that §3's first sentence is conditional.
+  and omits the ref when the value is absent, the same shape `memory/traces.py`
+  already carried for `MEMORY_WRITE`. The residual this note answers is
+  legibility, not correctness: a reader had to open ADR-0119 §4 to see that §3's
+  first sentence is conditional, and one who stopped there could take the
+  omission branch for a production case of this seam rather than for the
+  outside-the-engine call it is.
 
   **Nothing decided changes and no reader acts differently as to the decision.**
   §3's clause is unchanged in force, and every other clause of this ADR reads
@@ -96,8 +108,13 @@
   this ADR either (ADR-0082 §1). Raised by adversarial review on PR #1035's
   post-ratification re-run as a `major` and waived there on the ground that the
   finding's conclusion did not follow from the clause's own text; filed as
-  **#1054**, which verified both references against the merged tree. Refs #1054,
-  #1035, #980.
+  **#1054**. That issue's own worked example is the one corrected above: it reads
+  a scheduled `NotificationStore.reconsider` sweep as running with no ambient
+  value, which ADR-0083 §8 and ADR-0119 §3 rule otherwise and the merged
+  `service/scheduler.py` confirms — it schedules `Engine.reconsider_notifications`,
+  a public engine call. Nothing else in #1054 turns on it: the conditionality it
+  reports, and the omission branch it verified in the emitter, are as it states.
+  Refs #1054, #1035, #980.
 
 ## Context
 
