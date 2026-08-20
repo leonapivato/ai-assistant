@@ -31,14 +31,47 @@ actually produced.
 **Its writes are atomic, and that is what makes the pairing safe rather than
 merely workable.** ``singlefile`` writes through ``atomic_write(..., overwrite=
 True)``, which is ``mkstemp`` in the target's own directory followed by
-``os.rename`` — so the configured path always resolves to a *complete* collection,
-never a partial or missing one, and a sync landing mid-read swaps the inode under
-a descriptor this reader already holds rather than corrupting what it is reading.
-§7b's acquisition instant therefore always describes bytes that were whole, and
-the mid-read mutation hazard #649 raises against a *directory* source has no
-counterpart here. Nothing in this module depends on that — the descriptor check
-and the capped read stand on their own — but a deployment note that recommended a
-fetcher writing in place would be recommending something weaker.
+``os.rename`` — so **once a sync has succeeded** the configured path resolves to
+a *complete* collection and never a half-written one, and a sync landing mid-read
+swaps the inode under a descriptor this reader already holds rather than
+corrupting what it is reading. §7b's acquisition instant therefore always
+describes bytes that were whole, and the mid-read mutation hazard #649 raises
+against a *directory* source has no counterpart here. Nothing in this module
+depends on that — the descriptor check and the capped read stand on their own —
+but a deployment note that recommended a fetcher writing in place would be
+recommending something weaker.
+
+**Atomicity has nothing to offer before the first sync, so the order of the
+deployment steps is load-bearing** (#890). Run ``vdirsyncer discover calendar``
+*and* one successful ``vdirsyncer sync calendar`` **before** arming
+``ASSISTANT_CALENDAR_READER_INTERVAL`` or ``ASSISTANT_CALENDAR_UPCOMING_INTERVAL``
+and before granting the source. Until a sync has landed there is nothing whole to
+read, and this reader says so on every tick:
+
+* **Before the local side is created**, the path does not exist, ``os.open``
+  raises ``FileNotFoundError``, and ``read()`` raises ``ReaderError`` reading
+  ``calendar: SourceUnavailableError (FileNotFoundError)``.
+* **After it is created but before a sync has landed**, the path exists and holds
+  **zero bytes** — ``SingleFileStorage.create_collection``, which is what
+  ``vdirsyncer discover`` calls, creates it through ``checkfile(path,
+  create=True)``, and that opens the path ``"wb"`` and closes it. Zero bytes is
+  not an iCalendar document, so ``read()`` raises ``ReaderError`` reading
+  ``calendar: SourceNotParseableError (ValueError)``. **Discovering the
+  collection is therefore not enough**, which is the half of this ordering that
+  surprises: the path an operator checks for is there, and the read still fails.
+
+Once one sync has landed a collection, a calendar that is *genuinely* empty is a
+well-formed ``VCALENDAR`` carrying no ``VEVENT``, and that reads as a **success
+with zero proposals** (§8) rather than as either failure above — so the two states
+are distinguishable and neither is silently read as "no events".
+
+Neither failure needs an operator to intervene. §8 gives a read's failure both its
+postures — advisory on the facet side, and on the ingestion side ADR-0083 §7's
+"logged with its class, retried at the next due instant, never a process exit" —
+so the hub keeps running, nothing is corrupted and nothing is lost, and the first
+successful sync clears it. It is an ordering gotcha rather than a defect, and it
+is written down because the paragraph above is a statement about the *write* and
+reads, on its own, as a promise about the path's whole lifetime.
 
 **Deploying it** (the fetcher is a co-located mature tool and deliberately not a
 dependency of this project, ADR-0095 §Context). Install ``vdirsyncer`` on the hub
@@ -78,8 +111,9 @@ to.
 
 Run ``vdirsyncer discover calendar`` once, then ``vdirsyncer sync calendar`` on a
 timer the fetcher owns (cron or a systemd timer) — the network is the fetcher's
-and never this seam's, which is the whole point of the pattern. Point the hub at
-its output and arm the job::
+and never this seam's, which is the whole point of the pattern. **One sync must
+have succeeded before the settings below are armed**, for the reason given above.
+Point the hub at its output and arm the job::
 
     ASSISTANT_CALENDAR_READER_PATH=/home/you/.calendars/calendar.ics
     ASSISTANT_CALENDAR_READER_INTERVAL=PT15M
