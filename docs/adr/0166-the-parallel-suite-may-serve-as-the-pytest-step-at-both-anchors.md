@@ -103,17 +103,47 @@ ADR-0136 §1's anchors, at the running agent's discretion.**
 > first review invocation on a branch, and immediately before the final push
 > preceding `gh pr ready` — the `pytest` step is discharged by **either** the
 > full serial suite (`uv run pytest`, or `just check`, which runs it) **or** the
-> parallel recipe `just test-fast`. The choice is the running agent's, no
-> justification is owed for it, and no reviewer may require a particular one.
+> bare parallel recipe `just test-fast`, invoked with no arguments. The choice
+> between the two is the running agent's, no justification is owed for it, and no
+> reviewer may require a particular one.
+
+> **Normative.** `just test-fast` forwards any arguments it is given to `pytest`.
+> An invocation carrying an argument that narrows what is collected or run — `-k`,
+> `-m`, `-x`, `--lf`, `--failed-first`, `--deselect`, `--ignore`, `--ignore-glob`,
+> a path or a nodeid — is a scoped selection under ADR-0136 §2 and **discharges no
+> anchor**, whatever the recipe is called. An argument that narrows nothing
+> (`-n 4`, `-q`) leaves the discharge intact.
 
 > **Normative.** ADR-0136 §6's clause "running it satisfies neither anchor unless
-> it runs the whole suite" no longer governs `just test-fast`, whose one
-> deselection is named and accepted in §3 below.
+> it runs the whole suite" no longer governs the bare `just test-fast`, whose one
+> deselection is named and accepted in §3 below. It continues to govern every
+> other invocation of that recipe.
 
 The permission is unconditional because the ruling is. It is stated as "either
 anchor" rather than "both" to leave no reading on which the two anchors take
 different runs: each anchor is discharged independently, and a branch may satisfy
 one with `just test-fast` and the other with the serial suite in either order.
+
+That option list is not invented here: it is the set `tests/conftest.py` already
+records as narrowing a run, in `_FILTERING_OPTIONS`, and the set the triad check
+consults to decide whether an absent binding class proves anything. Naming the
+same set keeps one definition of "narrowed" between the rule and the code.
+
+**The second clause is what keeps ADR-0136 §6's principle intact.** §6 refused to
+let a *command name* stand in for the suite — "§1 requires the suite, not a
+command name" — and this ADR does name a command, so the argument that made §6
+right has to be answered rather than dropped. It is answered by fixing what the
+name denotes: the bare recipe is one determinate run, 31 tests short of the suite
+and short of it in no other way, and the moment an argument narrows it further it
+stops being the thing §1 admits. What ADR-0166 buys is a second *complete* run,
+not a licence to select.
+
+**This is a rule and not a mechanism, exactly as ADR-0136's anchors are.** Nothing
+fires before `gh pr ready` to check that any anchor ran at all — ADR-0136's
+Consequences says so outright — so an argument-validating recipe would harden one
+clause of an obligation that is procedural end to end. That is a real thing to
+want and it is not this decision; §1's job is to say which invocation counts, so
+that a lane and a reviewer read the same answer.
 
 ### 2. The serial run stays available, and is the one to choose when the change warrants it
 
@@ -135,7 +165,7 @@ finish.
 
 ### 3. What the parallel run does not cover, and the risk taken
 
-> **Normative.** An anchor discharged by `just test-fast` leaves
+> **Normative.** An anchor discharged by the bare `just test-fast` leaves
 > `tests/core/test_protocol_triad.py` — 31 tests, including the mechanical
 > Protocol-triad enforcement — unrun locally. This is accepted, on the three nets
 > below, and is not a defect in the agent's conduct.
@@ -232,8 +262,8 @@ flipped tree.
 
 **Easier.**
 
-- **An anchor costs about a minute and a half instead of about eight.** A branch that never
-  rebases pays two anchors; one that rebases twice pays four. The saving is
+- **An anchor costs about a minute and a half instead of about eight.** A branch
+  that never rebases pays two anchors; one that rebases twice pays four. The saving is
   ~7 minutes per anchor, and it lands hardest on exactly the lanes that pay the
   most anchors — the ones merging late in an ordered batch.
 - **The closing anchor stops being the expensive one.** ADR-0136's post-`ready`
