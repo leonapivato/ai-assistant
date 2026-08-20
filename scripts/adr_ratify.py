@@ -372,7 +372,63 @@ def _sole_modified_path(root: Path, parent: str, sha: str) -> tuple[str, str, st
         )
     if src_mode != dst_mode:
         raise ShapeError(f"{sha[:12]} changes the file mode {src_mode} → {dst_mode}")
+    _refuse_a_binary_entry(root, parent, sha, fields[1])
     return fields[1], src_blob, dst_blob
+
+
+def _refuse_a_binary_entry(root: Path, parent: str, sha: str, path: str) -> None:
+    """Refuse when git renders this entry as a binary change (ADR-0165 §2).
+
+    Git calls a change binary for two independent reasons, and both are refused
+    because §2's predicate names the entry kind rather than a heuristic:
+
+    * **content** — a NUL in the first 8000 bytes. :func:`_blob` catches this and
+      more, on the blob alone, independently of every config there is.
+    * **attributes** — a ``.gitattributes`` rule such as ``docs/adr/*.md binary``
+      or ``-diff``. Nothing about the *blob* says so, so the only authority on it
+      is git, and it is asked rather than reimplemented: ``--numstat`` reports a
+      binary entry as ``-`` for both counts.
+
+    Both are asked, because neither subsumes the other: an attribute can force a
+    NUL-carrying file to render as text, and a text file can be marked binary.
+    Asking git makes this the same answer the rest of the toolchain gets, which is
+    the point — the alternative is a second statement of git's own rule.
+
+    Nothing unreviewed could ride in on either case: the reconstruction compares
+    raw objects, which no attribute touches. The clause is honoured anyway
+    because it is normative and because refusing here is the fail-closed
+    direction — a flip refused costs one round, a flip wrongly accepted costs the
+    guarantee.
+
+    Args:
+        root: The work tree root.
+        parent: The parent commit.
+        sha: The commit.
+        path: The one path the entry names.
+
+    Raises:
+        ShapeError: If git renders the entry as binary.
+    """
+    numstat = _git(
+        "-c",
+        "core.quotePath=false",
+        "-c",
+        "diff.renames=false",
+        "diff-tree",
+        "-r",
+        "--no-commit-id",
+        "--numstat",
+        "-z",
+        parent,
+        sha,
+        cwd=root,
+    )
+    if numstat.startswith("-\t-\t"):
+        raise ShapeError(
+            f"git renders {path} as a binary change in {sha[:12]} — a binary change is "
+            "outside the shape (ADR-0165 §2); check .gitattributes for a `binary` or "
+            "`-diff` rule over docs/adr/"
+        )
 
 
 def check_commit(root: Path, commit: str) -> str:

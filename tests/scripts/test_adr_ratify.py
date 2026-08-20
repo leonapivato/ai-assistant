@@ -371,6 +371,27 @@ def test_a_binary_adr_is_not_a_ratification(tmp_path: Path) -> None:
     assert "binary" in checked.stderr
 
 
+def test_an_attribute_marked_binary_adr_is_not_a_ratification(tmp_path: Path) -> None:
+    """Git calls a change binary for two independent reasons; §2 excludes both.
+
+    A ``.gitattributes`` rule says nothing about the blob, so the only authority
+    on it is git — asked here with ``--numstat`` rather than reimplemented.
+    """
+    repo = _adr_repo(tmp_path / "repo")
+    (repo / ".gitattributes").write_text("docs/adr/*.md binary\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "mark ADRs binary")
+
+    produced = _run(repo, "ratify")
+
+    # The producer verifies its own commit against the recogniser, so it refuses
+    # rather than leaving behind a flip the exemption would not honour.
+    assert produced.returncode == 1
+    assert "binary change" in produced.stderr
+    assert "restored" in produced.stderr
+    assert _git(repo, "log", "-1", "--pretty=%s") == "mark ADRs binary"
+
+
 def test_a_merge_commit_is_not_a_ratification(tmp_path: Path) -> None:
     """Two parents means no single blob to rebuild from, so the shape is undefined."""
     repo = _adr_repo(tmp_path / "repo")
