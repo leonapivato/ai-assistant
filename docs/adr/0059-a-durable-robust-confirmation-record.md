@@ -29,6 +29,45 @@
   precisely enough to review and ratify, and precise enough that the triad has no
   open design fork to settle beyond the storage mechanics each ADR already leaves
   to its implementer.
+- Amended: 2026-08-20 (a citation correction — the "single-user local-first
+  (ADR-0002)" scope this ADR restates from #308 is ruled by **ADR-0099 §1**, not
+  by ADR-0002). The Context below records that "#308 places the fix with #287: a
+  durable, safe reference should cover the legacy-upgrade edge and cross-process
+  re-entry together, scoped single-user local-first (ADR-0002) and to the narrow
+  upgrade-instant window". **The attribution is faithful to #308 and wrong at its
+  source**: #308's own text reads "Scope: single-user local-first (ADR-0002), and
+  only a step parked across the exact upgrade instant". **ADR-0002 decides no such
+  thing.** As merged it decides language and tooling, architecture, the model
+  layer, the interface, persistence ("Local-first by default: SQLite with
+  `sqlite-vec` for embedding search") and workflow/CI, and it contains the word
+  "user" zero times; it rules *local-first* and never rules *single-user*.
+
+  **ADR-0099 §1 (2026-08-04) supplies the ruling** the scope leans on: "A hub has
+  exactly one principal: the owner." Read the parenthetical as ADR-0099 §1;
+  ADR-0002 stays correctly cited for local-first persistence and nothing else.
+  The Decision's second use of the same #308 language — a legacy park "left
+  unpresented until the deferred sweep, within the 'transient, narrow window …
+  single-user local-first' #308 scopes as tolerable" — quotes #308 without the
+  parenthetical, so it needs no repointing beyond this note.
+
+  **Nothing decided changes and no reader acts differently as to the decision**,
+  which is ADR-0070 §1's own test applied to this note. The expiry deadline, the
+  resolution-recovery query on `AuditTrail`, the settlement of #308 as a design
+  rather than a fourth contract field, and every refusal the Decision records all
+  stand on the premise they always stood on — now ratified rather than assumed.
+  What changes is which document a reader following the pointer arrives at, which
+  is ADR-0070 §1's enumerated **broken cross-reference**, settled as an amendment
+  rather than a supersession by ADR-0070's own §1 note (2026-07-31). So it is
+  recorded as this appended dated note and the ratified text below is **not**
+  rewritten.
+
+  **No `Status` edit is owed.** The defect is in this ADR's own words — ADR-0082
+  §1's bucket 1, per its 2026-07-31 note, which places "a factual misstatement
+  that predates the ADR" there as a stale phrase — so no other ADR is the cause
+  and ADR-0070 §1's appended dated note is the whole record (ADR-0082 §1).
+  ADR-0099 §6 stated this finding against this ADR and ADR-0058 together, filed it
+  as **#685**, and declined to fix either text from that lane; this note is that
+  fix, and ADR-0058 carries its own. Refs #685, #308, ADR-0099 §1 and §6.
 
 ## Context
 
