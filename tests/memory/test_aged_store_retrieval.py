@@ -1,8 +1,8 @@
 """Leg 7's retrieval exit instrument: latency and service on an aged store (#789).
 
-`docs/roadmap.md`'s leg-7 exit test asks that months of use make retrieval
-better, not slower, "measured in this leg, as retrieval latency and k-shortfall
-against a synthetically aged store". ADR-0112 §7 rules that measurement to be the
+The exit obligation is that months of use make retrieval better, not slower, and
+ADR-0112 §7 names the measurement that discharges it — "retrieval latency and
+k-shortfall against a synthetically aged store" — rules that measurement to be the
 obligation itself, and gates every **headroom** change to retrieval behind it:
 lifting the KNN ``k`` cap or adopting hybrid retrieval are bets on a frequency,
 and this module is where that frequency is read off rather than guessed.

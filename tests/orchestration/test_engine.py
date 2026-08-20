@@ -2378,7 +2378,7 @@ async def test_aclose_sweeps_remaining_closers_when_one_is_cancelled() -> None:
     assert closed == ["a", "b"]  # b released despite a's cancellation
 
 
-# --- learn: the correction leg (ADR-0042 §3; roadmap leg 1) --------------
+# --- learn: the correction leg (ADR-0042 §3) -----------------------------
 
 
 def feedback(

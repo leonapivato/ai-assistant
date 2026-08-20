@@ -5,8 +5,9 @@ tests exercise the wiring without importing any subsystem's internals (CLAUDE.md
 golden rule 1) — which is exactly what the engine under test is required to do.
 
 The one that matters most is :func:`test_a_learned_preference_is_reused_on_a_later_turn`:
-the *closed* part of the loop, and the roadmap's acceptance criterion for the
-first vertical.
+the *closed* part of the loop, and the criterion ADR-0022's Consequences names as
+the one it closes — a preference learned from a correction, and the planner handed
+it on the next turn.
 """
 
 from __future__ import annotations

@@ -1884,7 +1884,7 @@ def _build_configured_embedder(settings: Settings) -> Embedder:
     on-device model (:class:`FastEmbedEmbedder`, ADR-0024), and this is where that
     ratified default is finally honoured by the running app — the composition root
     had wired the non-semantic :class:`HashingEmbedder` unconditionally, leaving
-    production "semantic" recall not actually semantic (roadmap leg 2).
+    production "semantic" recall not actually semantic.
 
     The two realizable modes are the only ones ADR-0024 admits — one vendored model,
     no arbitrary-model path — so this is a mode switch, not a model resolver, and

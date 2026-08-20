@@ -2141,12 +2141,12 @@ class Engine:
         the turn, and nothing runs it on a timer unless a deployment asks. Four
         reasons, in the order they bind (ADR-0077 §8): nothing is waiting on an
         observation while a turn is, and a one-shot process has no "after the
-        answer" to hide the round trip in; the roadmap sequences leg 4's soundness
-        work against volume, and a per-turn trigger *is* volume on the day it
-        merges; the first producer that sends accumulated history to a model should
-        not run without the user knowing; and the hub's scheduler becomes a second
-        caller of this same operation, so cadence becomes configuration rather than
-        a contract change.
+        answer" to hide the round trip in; §8 sequences the epistemic-soundness work
+        ahead of the observer running at volume, and a per-turn trigger *is* volume
+        on the day it merges; the first producer that sends accumulated history to a
+        model should not run without the user knowing; and the hub's scheduler
+        becomes a second caller of this same operation, so cadence becomes
+        configuration rather than a contract change.
 
         That last one has landed, and it changed nothing here: the scheduler's
         observation job ships **disabled** (``Settings.observation_interval`` is
