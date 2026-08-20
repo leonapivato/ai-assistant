@@ -5,10 +5,18 @@ description: Run the post-leg QA pass — drive a finished leg's ruled behaviors
 
 # qa-leg
 
-Runs after a leg's last lane merges and **before the operator rules the exit
-test**, so the ruling is made on composition evidence and not only on per-lane
-green. This is a dev-process tool for building `ai-assistant` itself, not a
-product feature.
+Runs after the last lane of a unit of work merges and **before the operator
+rules the exit test**, so the ruling is made on composition evidence and not only
+on per-lane green. This is a dev-process tool for building `ai-assistant` itself,
+not a product feature.
+
+**"Leg" below means the unit whose exit is being ruled.** The legs this skill was
+written for are retired: work is organised as standing **tracks** whose
+**milestones** close on a QA-driven exit ruling (#1226 §2, `docs/roadmap.md`), and
+that milestone is what a run charters against today. The pass itself is unchanged
+— only the name of the thing it closes — and it is equally the shape for a QA run
+over a surface that is not a live hub. The record issue carries the `qa` label
+(`CONTRIBUTING.md` → "The tracker"); the skill's own rename is issue #1264.
 
 ## 1. What this pass owns, and what it does not
 
