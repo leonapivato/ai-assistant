@@ -635,15 +635,28 @@ def _ratify(args: argparse.Namespace) -> int:
         # leaves behind anything the failed attempt created but never tracked —
         # the renamed file before it was staged, or a file a commit hook wrote on
         # its way to rejecting the commit. Either one makes the *next* run refuse
-        # on a dirty tree, having just been told the branch was restored.
-        # `clean -fd` is exact rather than broad here, and only because of the
-        # precondition: `_refuse_unless_ready` required `git status --porcelain`
-        # to be empty, which counts untracked files, so everything it removes was
-        # created by this attempt. Ignored paths are left alone (no `-x`), which
-        # is what keeps `.review/` where it is.
+        # on a dirty tree, and the old message said "restored" regardless.
+        #
+        # So exactly one untracked path is removed: `new_path`, which this run
+        # chose and which cannot have existed before (its number is max + 1, so
+        # it is not taken, and `git mv` would have refused an occupied
+        # destination). Anything else is REPORTED, never deleted. Cleaning the
+        # untracked set wholesale was the obvious alternative and is wrong: the
+        # clean-tree precondition is a point-in-time check, so a file that
+        # appeared after it — another process, an editor, a person — would be
+        # inside that set, and destroying a user's file to tidy up after a failed
+        # commit is a far worse outcome than the dirty tree it tidies.
         _git("reset", "--hard", before, cwd=root)
-        _git("clean", "-fdq", cwd=root)
-        raise ShapeError(f"{exc} — the branch is restored to {before[:12]}") from exc
+        (root / new_path).unlink(missing_ok=True)
+        residue = _git("status", "--porcelain", cwd=root).strip()
+        restored = f" — the branch is restored to {before[:12]}"
+        if residue:
+            restored += (
+                f", but {len(residue.splitlines())} path(s) are left in the working "
+                f"tree and none of them is this run's to delete; inspect and clear "
+                f"them before retrying"
+            )
+        raise ShapeError(f"{exc}{restored}") from exc
 
     print(f"ratified {path} → {new_path} as ADR-{number:04d} ({date})")
     return 0

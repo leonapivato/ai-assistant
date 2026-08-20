@@ -360,13 +360,17 @@ def test_a_stale_tracking_ref_does_not_let_the_ratification_through(tmp_path: Pa
     assert not any(p.name.startswith("0101-a-decision") for p in (repo / "docs" / "adr").iterdir())
 
 
-def test_a_hook_that_rejects_the_commit_leaves_no_dirt_behind(tmp_path: Path) -> None:
-    """ "Restored" has to mean the next run can start, not just that HEAD moved back.
+def test_a_hook_that_rejects_the_commit_leaves_dirt_reported_not_deleted(
+    tmp_path: Path,
+) -> None:
+    """The recovery removes what it made and *reports* what it did not.
 
-    A commit hook that writes something and then rejects the commit is the case
-    ``git reset --hard`` alone does not cover: the file it wrote is untracked, so
-    the reset preserves it, and the *next* run — this one or `ship` — refuses on
-    a dirty tree having just been told the branch was restored.
+    A commit hook that writes a file and then rejects the commit leaves that file
+    untracked, so ``git reset --hard`` preserves it and the next run refuses on a
+    dirty tree. Saying "restored" and stopping there is misleading. Deleting the
+    untracked set to make it true is worse: the clean-tree precondition is a
+    point-in-time check, so a file that appeared after it — an editor, a person,
+    another process — would be destroyed to tidy up after a failed commit.
     """
     repo = _adr_repo(tmp_path / "repo")
     before = _git(repo, "rev-parse", "HEAD")
@@ -377,11 +381,14 @@ def test_a_hook_that_rejects_the_commit_leaves_no_dirt_behind(tmp_path: Path) ->
     produced = _run(repo, "ratify", "--date", "2026-08-20")
 
     assert produced.returncode == 1
-    assert "the branch is restored" in produced.stderr
     assert _git(repo, "rev-parse", "HEAD") == before
-    assert _git(repo, "status", "--porcelain") == ""
-    assert not (repo / "hook-scratch.txt").exists()
+    # This run's own artifact is gone, and the ADR is back where it was.
+    assert not list((repo / "docs" / "adr").glob("0101-*.md"))
     assert (repo / "docs" / "adr" / "a-decision-worth-recording.md").exists()
+    # The hook's file survives, and the message says so rather than claiming a
+    # clean tree.
+    assert (repo / "hook-scratch.txt").exists()
+    assert "left in the working tree" in produced.stderr
 
 
 def test_the_run_offers_no_way_to_choose_a_different_base() -> None:
