@@ -108,6 +108,46 @@ test-fast *args:
 citations *args:
     uv run python scripts/check_citations.py "$@"
 
+# The one mechanical commit that ends an ADR lane (ADR-0165 §2). Once the
+# required review set is green on one tree, this flips the header's single
+# `- Status: Proposed` line to `- Status: Accepted` in one ADR file and changes
+# nothing else — not the `- Date:` line, not a ratification note, not a second
+# ADR. That one-line shape is the entire reason `just ship` then accepts the head
+# without a fresh round (ADR-0165 §3): `scripts/ship.sh` recognises it by
+# rebuilding the file from its parent's with this same transform, so a flip
+# carrying one further byte simply is not recognised and costs its round, exactly
+# as today. Write the note or restamp the date in the flip commit if you want
+# them — you are choosing to pay the round, which is a correct outcome.
+#
+# It refuses on a dirty tree, on `main`, on a detached HEAD, and on a `Status`
+# line that is not exactly `- Status: Proposed` — a caveat on that line is the
+# text most likely to say "not yet", so it is never rewritten silently.
+# `--dry-run` prints the plan and changes nothing; `--adr <path>` names the ADR
+# when the branch carries more than one standing `Proposed`.
+#
+# Last line, because `just --list` shows only that one: what this recipe writes.
+# Ratify this branch's ADR — the one-line Proposed → Accepted flip (ADR-0165)
+adr-ratify *args:
+    uv run python scripts/adr_ratify.py ratify "$@"
+
+# The documented way out of draft, and the only one that carries ADR-0165 §5's
+# guard: it refuses while any ADR this PR adds or modifies still reads
+# `- Status: Proposed`, naming the file. Issue #1044 is two lanes in two days
+# that shipped ready with the flip never made, caught both times by a human
+# afterwards. The refusal sits HERE and nowhere else — an ADR is `Proposed` for
+# its whole reviewed life, so `just ship` still posts an intermediate round on a
+# genuinely `Proposed` ADR and refuses nothing on that ground.
+#
+# Typing `gh pr ready` directly is not stopped by this: that command is GitHub's,
+# not this repository's. ADR-0165 §5 accepts that limit rather than engineering
+# around it, and names a required CI check as its Revisit condition.
+#
+# Last line, because `just --list` shows only that one: what this recipe does.
+# Flip the PR out of draft — refuses on an unratified ADR (ADR-0165 §5)
+ready:
+    uv run python scripts/adr_ratify.py check-ready
+    gh pr ready
+
 # Advisory dependency vulnerability audit
 audit:
     uv run pip-audit
