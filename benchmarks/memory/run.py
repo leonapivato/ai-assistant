@@ -67,6 +67,8 @@ from benchmarks.memory.wiring import (
     build_embedder,
     build_harness,
     build_model_provider,
+    build_reconciler,
+    reconciler_spec,
     refuse_unbatchable_route,
 )
 
@@ -82,7 +84,7 @@ if TYPE_CHECKING:
     from benchmarks.memory.ingest import IngestionSummary
     from benchmarks.memory.records import RetrievalTelemetry
     from benchmarks.memory.reuse import ReusedRun
-    from benchmarks.memory.wiring import Harness
+    from benchmarks.memory.wiring import Harness, Reconciliation
 
 __all__ = [
     "BATCHES_FILE",
@@ -147,6 +149,23 @@ class RunPlan:
         judge_calls: Model calls grading would make, at most. Abstentions and
             unanswerable questions are graded without a call, so the true number is
             at or below this.
+        reconciler_calls: Model calls ADR-0159's reconciler would make, at most.
+
+            **The loosest of the four bounds, and the only one nothing here can
+            tighten.** A reconciler is consulted at most once per *proposal* — ADR-0159
+            §3 bundles a whole conflict set into one request — and not at all for a
+            proposal whose conflict set is empty or whose members the certain rung
+            already settled, which on the observed corpus is most of them. What a
+            planner knows is the ceiling on proposals: one observation pass returns at
+            most ``observation_max_proposals``. So this is ``observation_calls`` times
+            that bound, and pilot-5's LoCoMo figures put the truth near a fifth of it.
+
+            It is counted anyway, because omitting it is worse. The reconciler is a paid
+            seam the run's :class:`~benchmarks.memory.spend.SpendGuard` covers, and a
+            ceiling read off a plan that left it out would bound a strict subset of what
+            the run spends — the currency mismatch that makes ``--max-model-calls``
+            mean less than it says. An operator who wants the tight figure reads the
+            rows apart, which is why these are four fields and not one total.
     """
 
     corpus: Corpus
@@ -157,14 +176,17 @@ class RunPlan:
     observation_calls: int
     answer_calls: int
     judge_calls: int
+    reconciler_calls: int
 
     @property
     def model_calls(self) -> int:
         """The upper bound on model calls the run would make."""
-        return self.observation_calls + self.answer_calls + self.judge_calls
+        return self.observation_calls + self.answer_calls + self.judge_calls + self.reconciler_calls
 
 
-def plan_run(corpus: Corpus, cases: Sequence[BenchCase], *, batch_size: int) -> RunPlan:
+def plan_run(
+    corpus: Corpus, cases: Sequence[BenchCase], *, batch_size: int, max_proposals: int
+) -> RunPlan:
     """Compute what running these cases would cost, without running anything.
 
     Args:
@@ -176,16 +198,24 @@ def plan_run(corpus: Corpus, cases: Sequence[BenchCase], *, batch_size: int) -> 
             the gate. A bare sequence says nothing about its own provenance, so the
             plan records ``None`` rather than assuming the histories are whole.
         batch_size: The observation batch size the run would use.
+        max_proposals: The observation proposal ceiling the run would use
+            (``Settings.observation_max_proposals``). Required rather than defaulted,
+            for the reason ``batch_size`` beside it is: both are read off the same
+            ``Settings`` by the code that will actually run, and a planner filling one
+            in from a default would report a cost for a run nobody asked for.
 
     Returns:
         The plan.
 
     Raises:
-        ValueError: If ``batch_size`` is not positive, or if two cases share a
-            ``case_key``.
+        ValueError: If ``batch_size`` or ``max_proposals`` is not positive, or if two
+            cases share a ``case_key``.
     """
     if batch_size < 1:
         msg = f"batch_size must be positive, got {batch_size}"
+        raise ValueError(msg)
+    if max_proposals < 1:
+        msg = f"max_proposals must be positive, got {max_proposals}"
         raise ValueError(msg)
     # Two cases under one key is a mistake whatever the directories do — the records
     # they write cannot be told apart afterwards. Refusing it in the planner means both
@@ -224,6 +254,11 @@ def plan_run(corpus: Corpus, cases: Sequence[BenchCase], *, batch_size: int) -> 
         observation_calls=observations,
         answer_calls=questions,
         judge_calls=judged,
+        # One request per proposal at most, and one pass yields at most
+        # `max_proposals` of them. Derived from the observation count rather than
+        # counted in the loop above, because it is a function of that count and
+        # nothing per-case makes it otherwise.
+        reconciler_calls=observations * max_proposals,
     )
 
 
@@ -277,12 +312,13 @@ def build_grader(
     raise ValueError(msg)
 
 
-def check_credentials_for(
+def check_credentials_for(  # noqa: PLR0913 — one flag per seam the run may build, and a bundle would let a new seam default to unchecked, which is the failure #1293 records
     settings: Settings,
     *,
     answering: bool,
     distillation: bool,
     judging: bool,
+    reconciling: bool,
     judge_route: str | None = None,
 ) -> None:
     """Fail now if a route this run will actually build holds no credential.
@@ -304,6 +340,25 @@ def check_credentials_for(
         answering: Whether the answering seam will be built here.
         distillation: Whether the observer will be built here.
         judging: Whether a model judge will be built here.
+        reconciling: Whether ADR-0159's reconciler will be built here **and used** —
+            false where one was injected, and false on a reused run, which ingests
+            nothing and so reconciles nothing.
+
+            Its route has the observer's property and therefore needs the observer's
+            check: ``reconciler_model`` may name a vendor ``default_model`` never
+            touches, and ADR-0159 §3's never-raises clause turns a missing credential
+            into an *unlabelled conflict set* rather than an error — so an
+            uncredentialed reconciler produces exactly the artifacts #1293 found, a run
+            that looks healthy and reconciled nothing.
+
+            **This is stricter than the product, deliberately.**
+            ``app.ensure_model_credentials`` probes the router's preference order and
+            the observer's route, and not the reconciler's — which is right there,
+            because ADR-0159 §6 rules the reconciler's absence safe: the writer falls
+            back to ADR-0121 §1's certain agreements and the user's memory is still
+            correct. It is not right here. A benchmark's output is a *measurement of the
+            mechanism*, so a silently disabled reconciler does not degrade the run, it
+            voids it.
         judge_route: The route the judge will be built on, or ``None`` for
             ``settings.default_model`` — the same fallback :func:`build_grader` applies,
             spelled here rather than assumed, because a judge on a route the answering
@@ -328,6 +383,8 @@ def check_credentials_for(
         needed.add(judge_route if judge_route is not None else settings.default_model)
     if distillation:
         needed.add(observer_route)
+    if reconciling:
+        needed.add(reconciler_spec(settings))
     for spec in sorted(needed):
         # Vendor first, then credential — the order `ensure_credential_available`
         # asks for: an uninstalled package surfaces there as a bare `ImportError`
@@ -336,7 +393,7 @@ def check_credentials_for(
         ensure_credential_available(spec)
 
 
-async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis of the experiment, and bundling them into a config object would hide which ones a caller left at a default
+async def execute_run(  # noqa: PLR0913, PLR0915 — every parameter is a distinct axis of the experiment and a config object would hide which ones a caller left at a default; the statements are one per seam this run builds, gates or records, the shape `build_composition` carries for the same reason
     plan: RunPlan,
     *,
     output_root: Path,
@@ -348,6 +405,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     judge_route: str | None = None,
     model: ModelProvider | None = None,
     observer: Observer | None = None,
+    reconciler: Reconciliation | None = None,
     preregistration_final: bool = False,
     slice_seed: int | None = None,
     max_sessions: int | None = None,
@@ -421,6 +479,14 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
             injected grader, neither of which makes a call.
         model: Override the answering seam. Tests supply one; a live run does not.
         observer: Override the distillation seam, likewise.
+        reconciler: Override ADR-0159's reconciler, likewise. ``None`` builds one from
+            ``settings`` — the case every real run is in, because the product has no
+            configuration that ingests without a reconciler and neither does this.
+            **It is built once for the whole run and shared by every case's harness**,
+            which is what makes the manifest's ``reconciler`` field an account of the
+            object the ingestors actually held rather than of the settings they were
+            built from (#1293). Like the two seams above it, injecting one is refused on
+            a scored run.
         slice_seed: The seed a stratified slice was drawn with, for the manifest.
         max_sessions: **Not what is recorded, and not what the gate reads.** The bound
             comes from ``plan.max_sessions`` — set by the code that actually shortened
@@ -505,6 +571,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
             ("grader", grader),
             ("model", model),
             ("observer", observer),
+            ("reconciler", reconciler),
         )
         if seam is not None
     )
@@ -562,6 +629,10 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         # configured only for the seam it is actually about to build.
         distillation=observer is None and reuse is None,
         judging=grader is None and grader_kind == "model",
+        # The observer's condition exactly, and for both of its halves: a reused run
+        # writes no belief and so crosses no conflict, and an injected reconciler is a
+        # fake that needs no credential.
+        reconciling=reconciler is None and reuse is None,
         judge_route=judge_route,
     )
     # Beside the credential check and for the same reason: a batched run that cannot
@@ -581,6 +652,17 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
     # asked before the manifest exists and has to judge the same embedding space the
     # manifest will record — and because building it twice would load ONNX twice.
     embedder_model_id = build_embedder(resolved).model_id
+    # Built here for the reason the embedder above it is: the manifest is written
+    # before any case runs and has to describe the object the cases will use, not one
+    # built a second time to describe it. Every case's harness is handed *this*
+    # instance, so `manifest.reconciler` and the ingestors' reconciler are the same
+    # object by construction rather than by two readings of one setting agreeing
+    # (#1293). Built even under `reuse`, where it reconciles nothing — the manifest's
+    # field is then inherited from the source run, which is the run that did the
+    # ingesting (`reuse.INHERITED_FIELDS`).
+    reconciliation = (
+        reconciler if reconciler is not None else build_reconciler(resolved, guard=guard)
+    )
     refuse_ineligible_reuse(
         reuse,
         plan.cases,
@@ -626,6 +708,10 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
         # is only recoverable from its manifest if both reads are in it (ADR-0158 §3).
         episodic_limit=EPISODIC_SUPPLEMENT_LIMIT,
         conflict_limit=CONFLICT_LIMIT,
+        # Read off the object every case's ingestor will hold, never off
+        # `resolved.reconciler_model` — a setting is true whether or not anything acted
+        # on it, and for two published pilots nothing did (#1293).
+        reconciler=reconciliation.name,
         observation_batch_size=resolved.observation_batch_size,
         observation_max_proposals=resolved.observation_max_proposals,
         # The same `Settings` field `build_harness` hands the producer, so the manifest
@@ -693,6 +779,7 @@ async def execute_run(  # noqa: PLR0913 — every parameter is a distinct axis o
                 keep_stores=keep_stores,
                 model=model,
                 observer=observer,
+                reconciliation=reconciliation,
                 session=session,
                 reuse=reuse,
             )
@@ -742,6 +829,10 @@ class _CaseDriver:
         keep_stores: Keep every case's databases rather than only its traces.
         model: An injected answering seam, or ``None``.
         observer: An injected distillation seam, or ``None``.
+        reconciliation: The one reconciler the whole run shares — built or injected by
+            :func:`execute_run` and never per case, so the object the manifest names is
+            the object every ingestor holds (#1293). Not optional here, because there
+            is no configuration in which a case ingests without one.
         session: The batch session, or ``None`` under ``--phase sync``. It is what
             decides which of the two paths each question takes, so the phase is read
             off the thing that would do the batching rather than off a flag beside it.
@@ -760,6 +851,7 @@ class _CaseDriver:
     keep_stores: bool
     model: ModelProvider | None
     observer: Observer | None
+    reconciliation: Reconciliation
     session: BatchSession | None
     reuse: ReusedRun | None = None
 
@@ -814,6 +906,7 @@ class _CaseDriver:
             data_dir=case_dir,
             model=self.model,
             observer=self.observer,
+            reconciler=self.reconciliation,
             guard=self.guard,
         )
         prepared: list[PreparedQuestion] = []

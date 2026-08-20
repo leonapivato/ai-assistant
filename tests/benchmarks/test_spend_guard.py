@@ -55,6 +55,12 @@ if TYPE_CHECKING:
 FIRST = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 BATCH = 2
 
+#: The observation proposal ceiling `plan_run` bounds the reconciler's calls by.
+#: Any positive number serves — no test below reads the figure back — but it is
+#: passed rather than defaulted for the reason `plan_run` requires it: a planner
+#: filling one in reports the cost of a run nobody asked for (#1293).
+PROPOSALS = 3
+
 #: The text an exhausted Anthropic account comes back with, as it reaches this seam:
 #: `models.provider._classify` prefixes it and maps the 400 to a bare `ModelError`.
 CREDIT_400 = (
@@ -284,7 +290,7 @@ async def test_a_credit_refusal_stops_the_run_and_leaves_its_records(tmp_path: P
     provider = _FailingProvider(ModelError(CREDIT_400), before=1)
 
     manifest = await execute_run(
-        plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=root,
         mode=RunMode.SMOKE,
         corpus_digests={},
@@ -314,7 +320,7 @@ async def test_a_reached_ceiling_stops_the_run_and_records_the_bound(tmp_path: P
     root = tmp_path / "runs"
 
     manifest = await execute_run(
-        plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=root,
         mode=RunMode.SMOKE,
         corpus_digests={},
@@ -345,7 +351,7 @@ async def test_an_unbounded_run_records_no_abort(tmp_path: Path) -> None:
     root = tmp_path / "runs"
 
     manifest = await execute_run(
-        plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=root,
         mode=RunMode.SMOKE,
         corpus_digests={},
@@ -376,7 +382,7 @@ async def test_an_unrelated_provider_failure_is_still_one_ungraded_question(
     provider = _FailingProvider(ModelUnavailableError("model completion failed: 503"), before=1)
 
     manifest = await execute_run(
-        plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=root,
         mode=RunMode.SMOKE,
         corpus_digests={},

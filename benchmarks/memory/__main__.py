@@ -66,7 +66,7 @@ from benchmarks.memory.run import (
     retention_of,
 )
 from benchmarks.memory.select import first_questions, first_sessions
-from benchmarks.memory.wiring import DEFAULT_ISSUER
+from benchmarks.memory.wiring import DEFAULT_ISSUER, reconciler_spec
 
 if TYPE_CHECKING:
     from benchmarks.memory.cases import BenchCase
@@ -132,7 +132,12 @@ def plan(
     corpus, cases, _ = _select(
         corpus_key, limit=limit, seed=seed, max_sessions=max_sessions, cache=cache
     )
-    computed = plan_run(corpus, cases, batch_size=settings.observation_batch_size)
+    computed = plan_run(
+        corpus,
+        cases,
+        batch_size=settings.observation_batch_size,
+        max_proposals=settings.observation_max_proposals,
+    )
 
     table = Table(title=f"{corpus.title}: what this run would do", show_header=False)
     table.add_row("cases (one store each)", f"{len(computed.cases):,}")
@@ -141,9 +146,15 @@ def plan(
     table.add_row("observation model calls", f"{computed.observation_calls:,}")
     table.add_row("answering model calls", f"{computed.answer_calls:,}")
     table.add_row("judging model calls (at most)", f"{computed.judge_calls:,}")
+    # Labelled "ceiling" rather than "at most" like the row above, because the two
+    # bounds are not equally tight: a judge call is skipped only for an abstention,
+    # while a reconciler call is skipped for every proposal whose conflict set is empty
+    # or already settled — most of them. See `RunPlan.reconciler_calls`.
+    table.add_row("reconciler model calls (ceiling)", f"{computed.reconciler_calls:,}")
     table.add_row("[bold]total model calls (at most)", f"[bold]{computed.model_calls:,}")
     table.add_row("embedder", str(settings.embedder))
     table.add_row("answer route", settings.default_model)
+    table.add_row("reconciler route", reconciler_spec(settings))
     # Named as the default rather than as the judge: `plan` takes no `--judge-model`,
     # because a plan reports what a run would *cost* and the judge's route changes the
     # price per call without changing the call count this table is about.
@@ -221,7 +232,12 @@ def run(  # noqa: PLR0913 — each option is an axis of the experiment and every
     corpus, cases, digests = _select(
         corpus_key, limit=limit, seed=seed, max_sessions=max_sessions, cache=cache
     )
-    computed = plan_run(corpus, cases, batch_size=settings.observation_batch_size)
+    computed = plan_run(
+        corpus,
+        cases,
+        batch_size=settings.observation_batch_size,
+        max_proposals=settings.observation_max_proposals,
+    )
     _warn_about_configuration(settings, computed.cases)
     if reused is not None:
         console.print(

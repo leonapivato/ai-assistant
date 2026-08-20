@@ -75,6 +75,12 @@ pytestmark = pytest.mark.integration
 
 FIRST = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 BATCH = 2
+
+#: The observation proposal ceiling `plan_run` bounds the reconciler's calls by.
+#: Any positive number serves — no test below reads the figure back — but it is
+#: passed rather than defaulted for the reason `plan_run` requires it: a planner
+#: filling one in reports the cost of a run nobody asked for (#1293).
+PROPOSALS = 3
 #: Turns enough that capture writes more episodes than the supplement's budget, which
 #: is what makes the bound observable rather than vacuously satisfied.
 #:
@@ -437,7 +443,7 @@ async def test_a_failed_episodic_read_ends_the_run_rather_than_publishing_belief
         return await real(self, query, limit=limit, kinds=kinds, bands=bands)
 
     root = tmp_path / "runs"
-    plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH)
+    plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS)
     with (
         mock.patch.object(SqliteMemoryStore, "search", _failing),
         pytest.raises(MemoryStoreError),

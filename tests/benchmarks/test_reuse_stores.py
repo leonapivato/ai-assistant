@@ -67,6 +67,12 @@ pytestmark = pytest.mark.integration
 FIRST = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 LAST = FIRST + timedelta(days=35)
 BATCH = 2
+
+#: The observation proposal ceiling `plan_run` bounds the reconciler's calls by.
+#: Any positive number serves — no test below reads the figure back — but it is
+#: passed rather than defaulted for the reason `plan_run` requires it: a planner
+#: filling one in reports the cost of a run nobody asked for (#1293).
+PROPOSALS = 3
 ISSUER = "acct-reuse-tests"
 
 
@@ -195,7 +201,7 @@ async def _ingest(  # noqa: PLR0913 — each argument is one axis a test varies,
     """
     selected = first_sessions(cases if cases is not None else (_case(),), 0)
     manifest = await execute_run(
-        plan_run(LOCOMO, selected, batch_size=BATCH),
+        plan_run(LOCOMO, selected, batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=root,
         mode=RunMode.SMOKE,
         corpus_digests={"locomo10.json": "0" * 64},
@@ -240,7 +246,7 @@ async def _reanswer(  # noqa: PLR0913 — as above: one argument per axis a case
     """
     selected = first_sessions(cases if cases is not None else (_case(),), 0)
     manifest = await execute_run(
-        plan_run(LOCOMO, selected, batch_size=BATCH),
+        plan_run(LOCOMO, selected, batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=root,
         mode=RunMode.SMOKE,
         corpus_digests={"locomo10.json": "0" * 64},

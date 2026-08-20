@@ -483,6 +483,28 @@ class RunManifest(BaseModel):
               came back non-empty. Imported from the composition root like the budget
               above, so it cannot name a bound the product does not use.
         conflict_limit: The ingestor's conflict-probe limit.
+        reconciler: What ADR-0159's conflict reconciler actually was on this run, or
+            ``None`` where the ingestor held none.
+
+            **Read off the constructed object, never off a setting, and #1293 is the
+            whole reason the distinction is written down.** Every pilot script since
+            pilot-4 exported ``ASSISTANT_RECONCILER_MODEL`` while
+            :func:`~benchmarks.memory.wiring.build_harness` passed no ``reconciler`` at
+            all, so two published runs recorded a labelling mechanism that never ran —
+            2,578 crossings of pilot-5's LoCoMo run came back ``reconciler_absent``
+            against a manifest naming a model. A field derived from ``Settings`` is
+            true whether or not anything acted on it; this one is produced by
+            :class:`~benchmarks.memory.wiring.Reconciliation`, in the expression that
+            constructs the reconciler and hands it to the ingestor, so it cannot be
+            written unless there was something to write it about.
+
+            ``None`` therefore has two readings and both are honest: an artifact from
+            before this field existed — which is every run up to and including pilot-5,
+            and none of them reconciled — and a run whose ingestor genuinely held no
+            reconciler. A **reused** run inherits this field from the run whose stores
+            it answers over (:data:`~benchmarks.memory.reuse.INHERITED_FIELDS`), because
+            reconciliation is an ingestion-time fact and a reused run performs no
+            ingest.
         observation_batch_size: Turns per observation pass.
         observation_max_proposals: Beliefs one pass may return.
         observer_timezone: The IANA calendar the observation prompt showed each
@@ -568,6 +590,7 @@ class RunManifest(BaseModel):
     retrieval_limit: int
     episodic_limit: int | None = None
     conflict_limit: int
+    reconciler: str | None = None
     observation_batch_size: int
     observation_max_proposals: int
     observer_timezone: str
