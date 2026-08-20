@@ -439,33 +439,94 @@ def test_ratify_will_not_write_through_a_symlinked_adr(tmp_path: Path) -> None:
     assert outside.read_text() == "not the repository's to touch\n"
 
 
-def test_ratify_will_not_follow_a_symlink_swapped_in_after_the_check(
+def test_ratify_writes_past_a_symlink_swapped_in_after_the_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A check followed by a plain write cannot close this; the descriptor does.
+    """A check followed by a write cannot close this; writing elsewhere does.
 
-    Any mode test is a statement about a moment that has passed by the time the
-    write runs, so the replacement is simulated at exactly that seam: the early
-    check is made to pass and to leave a symlink behind it. ``O_NOFOLLOW`` then
-    fails the open itself, because the decision and the write are made about the
-    same object rather than about the same path.
+    Any test of the destination is a statement about a moment that has passed by
+    the time the write runs, so the replacement is simulated at exactly that
+    seam: the early check is made to pass and to leave a symlink behind it. The
+    render never touches that path — it is made beside it and moved onto it — and
+    ``os.replace`` swaps the *directory entry*, so the link is replaced rather
+    than traversed. The external file keeps every byte, and the flip lands, which
+    is the stronger outcome: the substitution stops being something to detect.
     """
     repo = _adr_repo(tmp_path / "repo")
     outside = tmp_path / "outside.txt"
     outside.write_text("not the repository's to touch\n")
     monkeypatch.chdir(repo)
 
-    def _pass_then_swap(root: Path, path: str) -> None:
+    def _pass_then_swap(root: Path, path: str) -> int:
         (root / path).unlink()
         (root / path).symlink_to(outside)
+        return 0o644
 
-    monkeypatch.setattr(_MODULE, "_refuse_unless_a_regular_file", _pass_then_swap)
+    monkeypatch.setattr(_MODULE, "_head_file_mode", _pass_then_swap)
 
-    with pytest.raises(_MODULE.ShapeError, match="branch is restored"):
-        _MODULE._ratify(_MODULE._parser().parse_args(["ratify"]))
+    assert _MODULE._ratify(_MODULE._parser().parse_args(["ratify"])) == 0
 
     assert outside.read_text() == "not the repository's to touch\n"
-    assert _git(repo, "log", "-1", "--pretty=%s") == "docs(adr): draft the decision"
+    assert not (repo / _ADR_PATH).is_symlink()
+    assert "- Status: Accepted" in (repo / _ADR_PATH).read_text()
+
+
+def test_ratify_writes_past_a_hard_link_swapped_in_after_the_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A hard link is a regular file, so no check and no open flag excludes it.
+
+    ``O_NOFOLLOW`` and an ``fstat`` on the opened descriptor exclude a symlink
+    and a device. They cannot exclude a second *name* for a file outside the
+    repository: it is a regular file at every instant, so it passes both, and an
+    ``O_TRUNC`` write then lands on the inode the two names share — a file that
+    was never tracked and is outside everything ``git reset --hard`` can restore.
+
+    Nothing detects that. What closes it is not writing through the destination
+    at all: the render is a new inode and ``os.replace`` swaps the directory
+    entry, so the shared file keeps its bytes and merely loses one of its names.
+    """
+    repo = _adr_repo(tmp_path / "repo")
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not the repository's to touch\n")
+    monkeypatch.chdir(repo)
+
+    def _pass_then_link(root: Path, path: str) -> int:
+        (root / path).unlink()
+        os.link(outside, root / path)
+        return 0o644
+
+    monkeypatch.setattr(_MODULE, "_head_file_mode", _pass_then_link)
+    assert outside.stat().st_nlink == 1
+
+    assert _MODULE._ratify(_MODULE._parser().parse_args(["ratify"])) == 0
+
+    assert outside.read_text() == "not the repository's to touch\n"
+    # The link is gone rather than followed: the ADR is its own inode again.
+    assert outside.stat().st_nlink == 1
+    assert (repo / _ADR_PATH).stat().st_ino != outside.stat().st_ino
+    assert "- Status: Accepted" in (repo / _ADR_PATH).read_text()
+
+
+def test_the_render_carries_the_mode_head_records(tmp_path: Path) -> None:
+    """A replace makes a new inode, so the permission bits have to be carried.
+
+    They are read from HEAD's tree rather than from the file on disk, because the
+    file on disk is the object a substitution controls. git records only the
+    executable bit, which is therefore the whole of what can be preserved — and
+    losing it would not merely change a mode: ``check-shape`` requires the two
+    entries to have the same mode, so the flip would stop being recognisable.
+    """
+    repo = _adr_repo(tmp_path / "repo")
+    (repo / _ADR_PATH).chmod(0o755)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "chore: mark it executable")
+
+    produced = _run(repo, "ratify")
+
+    assert produced.returncode == 0, produced.stderr
+    assert (repo / _ADR_PATH).stat().st_mode & 0o777 == 0o755
+    assert _git(repo, "ls-tree", "HEAD", "--", _ADR_PATH).split()[0] == "100755"
 
 
 def test_a_merge_commit_is_not_a_ratification(tmp_path: Path) -> None:
@@ -578,7 +639,7 @@ def test_a_write_failure_before_the_commit_restores_the_branch(
 ) -> None:
     """The recovery covers the filesystem, not only the shape self-check.
 
-    A full disk on the one write would leave the file edited with no commit — the
+    A full disk on the render leaves the working tree short of a commit — the
     half-applied state the recovery exists to undo, arriving as an ``OSError``
     rather than a ``ShapeError``.
     """
@@ -589,7 +650,7 @@ def test_a_write_failure_before_the_commit_restores_the_branch(
     def _no_space(*_args: object, **_kwargs: object) -> None:
         raise OSError(28, "No space left on device")
 
-    monkeypatch.setattr(_MODULE, "_write_regular", _no_space)
+    monkeypatch.setattr(_MODULE, "_render_beside", _no_space)
     args = _MODULE._parser().parse_args(["ratify"])
 
     with pytest.raises(_MODULE.ShapeError, match="branch is restored"):
@@ -597,6 +658,71 @@ def test_a_write_failure_before_the_commit_restores_the_branch(
 
     assert _git(repo, "rev-parse", "HEAD") == before
     assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_a_render_that_cannot_be_finished_removes_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The render is created before it can fail, so it cleans up after itself.
+
+    A failure between the render's creation and its completion is the one moment
+    ``_ratify`` cannot see the path — it has not been handed back yet — so the
+    removal belongs where the creation is. Without it the run would leave an
+    untracked file under ``docs/adr/`` and the next run would refuse on a dirty
+    tree.
+    """
+    repo = _adr_repo(tmp_path / "repo")
+    before = _git(repo, "rev-parse", "HEAD")
+    monkeypatch.chdir(repo)
+
+    def _io_error(*_args: object, **_kwargs: object) -> None:
+        raise OSError(5, "Input/output error")
+
+    # Narrow on purpose: `os.fchmod` runs on the render's own descriptor and
+    # nothing else in the run calls it.
+    monkeypatch.setattr(_MODULE.os, "fchmod", _io_error)
+
+    with pytest.raises(_MODULE.ShapeError, match="branch is restored"):
+        _MODULE._ratify(_MODULE._parser().parse_args(["ratify"]))
+
+    assert _git(repo, "rev-parse", "HEAD") == before
+    assert _git(repo, "status", "--porcelain") == ""
+
+
+def test_a_failed_replace_discards_this_runs_own_render(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The recovery owns the render, and owns *only* the render.
+
+    Rendering beside the destination creates one untracked path. Between its
+    creation and the replace it is the run's own, and a failure there would leave
+    it under ``docs/adr/`` — making the *next* run refuse on a dirty tree over a
+    file whose owner is not in doubt, which is precisely what the
+    report-and-never-delete rule exists to warn about rather than to cause. So
+    this one path is discarded, and the message says which; everything the run
+    did not create is still only reported (see the hook test above).
+    """
+    repo = _adr_repo(tmp_path / "repo")
+    before = _git(repo, "rev-parse", "HEAD")
+    monkeypatch.chdir(repo)
+
+    def _io_error(*_args: object, **_kwargs: object) -> None:
+        raise OSError(5, "Input/output error")
+
+    monkeypatch.setattr(_MODULE.os, "replace", _io_error)
+
+    with pytest.raises(_MODULE.ShapeError, match="is discarded"):
+        _MODULE._ratify(_MODULE._parser().parse_args(["ratify"]))
+
+    assert _git(repo, "rev-parse", "HEAD") == before
+    assert "- Status: Proposed" in (repo / _ADR_PATH).read_text()
+    # Nothing of this run's is left: no untracked render, and so no dirty tree
+    # for the next run to refuse on.
+    assert _git(repo, "status", "--porcelain") == ""
+    assert sorted(entry.name for entry in (repo / "docs" / "adr").iterdir()) == [
+        "0100-already-here.md",
+        Path(_ADR_PATH).name,
+    ]
 
 
 # --- The ready guard (ADR-0165 §5, issue #1044) ------------------------------
