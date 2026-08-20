@@ -88,15 +88,43 @@ _UPCOMING: Final = f"{_PREFIX}CALENDAR_UPCOMING_INTERVAL"
 #: (``_DurationSetting``) from the two the note's own examples name.
 #:
 #: ``calendar_upcoming_interval`` is deliberately absent: it cannot be varied alone,
-#: because ADR-0132 §4 ties it to the lead. It has its own cases at the foot of this
-#: module, and :func:`test_the_roster_is_every_calendar_duration_setting` is what
-#: keeps the two halves adding up to the whole.
+#: because ADR-0132 §4 ties it to the lead. It runs over the same two tables in its
+#: own pair of cases below, and
+#: :func:`test_the_roster_is_every_calendar_duration_setting` is what keeps the two
+#: halves adding up to the whole.
 _VARIED: Final = [
     pytest.param(f"{_PREFIX}CALENDAR_READER_INTERVAL", "calendar_reader_interval", id="interval"),
     pytest.param(f"{_PREFIX}CALENDAR_UPCOMING_LEAD", "calendar_upcoming_lead", id="lead"),
     pytest.param(f"{_PREFIX}CALENDAR_WINDOW_PAST", "calendar_window_past", id="window-past"),
     pytest.param(f"{_PREFIX}CALENDAR_WINDOW_FUTURE", "calendar_window_future", id="window-future"),
     pytest.param(f"{_PREFIX}CALENDAR_READ_TIMEOUT", "calendar_read_timeout", id="read-timeout"),
+]
+
+#: The spellings the note says are accepted, and what each one means. Every value
+#: is inside every bound on every duration field on this chain, so a case over this
+#: table observes the *parse* and never a range refusal.
+_ACCEPTED: Final = [
+    pytest.param("PT5M", timedelta(minutes=5), id="iso-five-minutes"),
+    pytest.param("00:05:00", timedelta(minutes=5), id="clock-five-minutes"),
+    pytest.param("PT15M", timedelta(minutes=15), id="iso-fifteen-minutes"),
+    pytest.param("00:15:00", timedelta(minutes=15), id="clock-fifteen-minutes"),
+    pytest.param("PT30S", timedelta(seconds=30), id="iso-thirty-seconds"),
+    # The one the note calls out. Kept in the same table as its
+    # indistinguishable-looking neighbour above, because the pair *is* the claim:
+    # two strings four characters apart, sixty times apart in effect.
+    pytest.param("15:00", timedelta(hours=15), id="clock-fifteen-hours"),
+]
+
+#: The spellings the note says are refused, each at the parse.
+_REFUSED: Final = [
+    # Two components with no hour field. The note says this is refused outright,
+    # which is what makes `15:00` the dangerous one: the near-miss that fails is
+    # not the near-miss that loads.
+    pytest.param("5:00", id="two-component-clock"),
+    # A bare number of seconds, which is the form an operator reaches for first
+    # and the one the note warns about by name (#981).
+    pytest.param("15", id="bare-fifteen"),
+    pytest.param("300", id="bare-three-hundred"),
 ]
 
 
@@ -144,20 +172,7 @@ def _refusals(exc: ValidationError) -> list[str]:
 # --- what the note says a spelling means (readers/calendar.py) ---------------
 
 
-@pytest.mark.parametrize(
-    ("spelling", "duration"),
-    [
-        pytest.param("PT5M", timedelta(minutes=5), id="iso-five-minutes"),
-        pytest.param("00:05:00", timedelta(minutes=5), id="clock-five-minutes"),
-        pytest.param("PT15M", timedelta(minutes=15), id="iso-fifteen-minutes"),
-        pytest.param("00:15:00", timedelta(minutes=15), id="clock-fifteen-minutes"),
-        pytest.param("PT30S", timedelta(seconds=30), id="iso-thirty-seconds"),
-        # The one the note calls out. Kept in the same table as its
-        # indistinguishable-looking neighbour above, because the pair *is* the
-        # claim: two strings four characters apart, sixty times apart in effect.
-        pytest.param("15:00", timedelta(hours=15), id="clock-fifteen-hours"),
-    ],
-)
+@pytest.mark.parametrize(("spelling", "duration"), _ACCEPTED)
 @pytest.mark.parametrize(("variable", "field"), _VARIED)
 def test_each_documented_spelling_loads_to_the_duration_the_note_states(
     monkeypatch: pytest.MonkeyPatch,
@@ -213,19 +228,7 @@ def test_a_fifteen_hour_interval_is_hours_and_is_not_fifteen_minutes(
 # --- what it refuses, and how the refusal is classified ----------------------
 
 
-@pytest.mark.parametrize(
-    "spelling",
-    [
-        # Two components with no hour field. The note says this is refused
-        # outright, which is what makes `15:00` the dangerous one: the near-miss
-        # that fails is not the near-miss that loads.
-        pytest.param("5:00", id="two-component-clock"),
-        # A bare number of seconds, which is the form an operator reaches for
-        # first and the one the note warns about by name (#981).
-        pytest.param("15", id="bare-fifteen"),
-        pytest.param("300", id="bare-three-hundred"),
-    ],
-)
+@pytest.mark.parametrize("spelling", _REFUSED)
 @pytest.mark.parametrize(("variable", "field"), _VARIED)
 def test_a_spelling_the_note_calls_refused_is_refused_at_load(
     monkeypatch: pytest.MonkeyPatch, spelling: str, variable: str, field: str
@@ -284,6 +287,56 @@ def test_a_parse_refusal_reaches_an_operator_as_a_configuration_error(
 
     with pytest.raises(ConfigurationError, match="invalid configuration"):
         load_settings()
+
+
+# --- the producer's interval, which needs a companion to load at all ---------
+
+
+@pytest.mark.parametrize(("spelling", "duration"), _ACCEPTED)
+def test_the_producer_interval_takes_the_same_spellings_under_a_coherent_lead(
+    monkeypatch: pytest.MonkeyPatch, spelling: str, duration: timedelta
+) -> None:
+    """The sixth duration setting, held to the same table as the other five.
+
+    It is absent from :data:`_VARIED` because it cannot be varied alone — ADR-0132
+    §4 requires a strictly greater lead, so an accepted spelling only *loads* beside
+    a companion — and that exclusion is exactly how a field goes quietly uncovered.
+    The lead is therefore computed from the case's own value and written in the one
+    spelling no case here disputes, which keeps the observation on the interval.
+
+    Without this, the producer's coverage would be ``PT5M`` and a ``15:00`` that
+    never loads: ``ASSISTANT_CALENDAR_UPCOMING_INTERVAL=00:05:00`` could start
+    failing while every other case in this module stayed green, and the note
+    promises the clock spelling for this setting in the same breath as for the
+    reader's.
+    """
+    lead = f"PT{int(duration.total_seconds()) * 2}S"
+    _armed(monkeypatch, **{_UPCOMING: spelling, f"{_PREFIX}CALENDAR_UPCOMING_LEAD": lead})
+
+    settings = Settings()
+
+    assert settings.calendar_upcoming_interval == duration
+    assert settings.calendar_upcoming_lead == duration * 2
+
+
+@pytest.mark.parametrize("spelling", _REFUSED)
+def test_the_producer_interval_refuses_the_same_spellings(
+    monkeypatch: pytest.MonkeyPatch, spelling: str
+) -> None:
+    """And it refuses them at the parse, with no companion needed.
+
+    A value that never became a duration cannot reach ADR-0132 §4's rule at all —
+    the model validators run after the fields, so the lead is irrelevant here and
+    supplying one would only hide which clause did the refusing. That is the
+    distinction the case asserts: one error, ``time_delta_parsing``, on this field.
+    """
+    _armed(monkeypatch, **{_UPCOMING: spelling})
+
+    with pytest.raises(ValidationError) as refusal:
+        Settings()
+
+    assert _refusals(refusal.value) == ["time_delta_parsing"]
+    assert refusal.value.errors()[0]["loc"] == ("calendar_upcoming_interval",)
 
 
 # --- the coherence rule, which is a different code path (ADR-0132 §4) --------
@@ -366,9 +419,10 @@ def test_the_roster_is_every_calendar_duration_setting() -> None:
 
     ``calendar_upcoming_interval`` is on the right of the comparison rather than in
     the roster because it cannot be varied alone: ADR-0132 §4 requires a strictly
-    greater lead, so a spelling case on it is a case about two settings. Its
-    spellings are pinned by the coherence cases above, which is why it is named here
-    rather than excluded by a predicate that would also have swallowed a seventh.
+    greater lead, so a spelling case on it is a case about two settings. It is
+    covered by :func:`test_the_producer_interval_takes_the_same_spellings_under_a_
+    coherent_lead` and its refusal case, over the same two tables — named here
+    rather than excluded by a predicate, which would also have swallowed a seventh.
     """
     durations = {
         name
