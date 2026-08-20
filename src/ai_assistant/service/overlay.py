@@ -13,7 +13,7 @@ the syscall, because ``SO_PEERCRED`` "has no analogue across a network":
 agent is not imported by, embedded in, linked into or launched by
 ``ai_assistant``. The hub binds an address the agent provides and the client dials
 one; neither speaks to the agent's operator." So this module speaks a few bytes of
-HTTP/1.1 to a Unix socket the agent already listens on, and adds no dependency —
+HTTP/1.0 to a Unix socket the agent already listens on, and adds no dependency —
 the request is a fixed ``GET``, and refusing to grow a client library for it is
 also what keeps the "not linked into" clause mechanically true.
 
@@ -85,8 +85,39 @@ _LOCAL_API_HOST: Final = "local-tailscaled.sock"
 _QUERY_TIMEOUT_SECONDS: Final = 5.0
 
 #: How many space-separated parts a status line must have before its code can be
-#: read: ``HTTP/1.1`` and the code itself.
+#: read: the version and the code itself.
 _STATUS_LINE_PARTS: Final = 2
+
+#: The version this hub asks in, and it is load-bearing rather than incidental
+#: (#1309). Go's ``net/http`` — which ``tailscaled`` embeds — frames an HTTP/1.1
+#: response it has not measured as ``Transfer-Encoding: chunked`` *whatever*
+#: ``Connection: close`` says, so an HTTP/1.1 request gets a body carrying chunk
+#: framing and every query fails as "not JSON". HTTP/1.0 has no chunked encoding at
+#: all, so the daemon must measure the body or end it at close, and both are
+#: readable by the plain read-to-EOF below. Asking in the older version is what lets
+#: the transport stay the fixed ``GET`` ADR-0124 §3's "not linked into" clause wants,
+#: rather than growing a chunk parser.
+_HTTP_VERSION: Final = "HTTP/1.0"
+
+#: The one response framing this transport reads: none. A ``Transfer-Encoding`` on
+#: an HTTP/1.0 response is a daemon answering in a frame nobody asked for, and the
+#: bytes underneath it are not the body — so the answer is refused by name rather
+#: than handed to :func:`json.loads`, which would report the same failure as an
+#: agent talking nonsense and send an operator looking in the wrong place.
+_UNFRAMED: Final = b"identity"
+
+#: Which member carries a node's stable identifier, per endpoint — and the two
+#: endpoints do not agree (#1309). ``status`` answers with Go's
+#: ``ipnstate.PeerStatus``, whose stable identifier is ``ID``; ``whois`` answers with
+#: a ``tailcfg.Node``, whose is ``StableID``. The values are the same identity — the
+#: live daemon returns one string for both — but a reader that looked for ``StableID``
+#: in a ``PeerStatus`` finds nothing at all, which is why the hub's own startup query
+#: could never have worked against a real daemon. Named per endpoint rather than
+#: tried in turn: a fallback would read a member the type it is reading does not
+#: define, which is guessing at exactly the seam :func:`_stable_id` refuses to guess
+#: at.
+_STATUS_SELF_IDENTITY: Final = "ID"
+_WHOIS_NODE_IDENTITY: Final = "StableID"
 
 #: What one response may occupy. The local API's ``status`` grows with the number
 #: of overlay members, so the bound is generous; it exists so that a daemon
@@ -194,7 +225,7 @@ class TailscaleAgent:
         if not isinstance(this, dict):
             msg = "the overlay agent's status names no node for this machine"
             raise OverlayIdentityUnavailableError(msg)
-        identity = _stable_id(this)
+        identity = _stable_id(this, _STATUS_SELF_IDENTITY)
         addresses = this.get("TailscaleIPs")
         if not isinstance(addresses, list) or not all(isinstance(one, str) for one in addresses):
             msg = "the overlay agent reported no usable addresses for this machine"
@@ -222,7 +253,7 @@ class TailscaleAgent:
         if not isinstance(node, dict):
             msg = f"the overlay agent knows no node at the address a peer connected from ({port})"
             raise OverlayIdentityUnavailableError(msg)
-        return _stable_id(node)
+        return _stable_id(node, _WHOIS_NODE_IDENTITY)
 
     async def _get(self, path: str) -> dict[str, Any]:
         """Perform one local ``GET`` and decode its JSON body.
@@ -259,13 +290,20 @@ class TailscaleAgent:
         return decoded
 
     async def _request(self, path: str) -> bytes:
-        """Write one HTTP/1.1 request and read the whole response body.
+        """Write one HTTP/1.0 request and read the whole response body.
 
         Hand-written rather than delegated, for ADR-0124 §3's reason: the agent is
         "not imported by, embedded in, linked into or launched by ``ai_assistant``",
         and a fixed ``GET`` against a local socket is a smaller thing than the
-        dependency that would perform it. ``Connection: close`` is what makes the
-        body's end unambiguous without reading a chunked encoding.
+        dependency that would perform it.
+
+        **The version is what keeps that true** (:data:`_HTTP_VERSION`, #1309). This
+        asked in HTTP/1.1 and read the body to EOF on the strength of
+        ``Connection: close``, which is not what that header means: Go's ``net/http``
+        chunks an unmeasured 1.1 response regardless, so every answer arrived wrapped
+        in chunk framing and every query failed. HTTP/1.0 has no chunked encoding, so
+        the daemon measures the body or ends it at close — either of which the
+        read-to-EOF below gets whole, with no parser to grow.
 
         Args:
             path: The local API path, query string included.
@@ -276,8 +314,9 @@ class TailscaleAgent:
         Raises:
             OSError: If the socket cannot be opened or the daemon goes away.
             OverlayIdentityUnavailableError: If the peer answering on the socket is
-                neither root nor this process (ADR-0131 §7), or if the status line is
-                not a success.
+                neither root nor this process (ADR-0131 §7), if the status line is
+                not a success, or if the answer is framed in an encoding this
+                transport does not read.
         """
         reader, writer = await asyncio.open_unix_connection(self.socket_path)
         try:
@@ -288,7 +327,7 @@ class TailscaleAgent:
             # class of the same name would escape that handler entirely.
             check_agent_peer(writer, self.socket_path, refusal=OverlayIdentityUnavailableError)
             request = (
-                f"GET {path} HTTP/1.1\r\n"
+                f"GET {path} {_HTTP_VERSION}\r\n"
                 f"Host: {_LOCAL_API_HOST}\r\n"
                 f"Accept: application/json\r\n"
                 f"Connection: close\r\n\r\n"
@@ -301,6 +340,7 @@ class TailscaleAgent:
                 rendered = head.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
                 msg = f"the overlay agent refused a local query: {rendered}"
                 raise OverlayIdentityUnavailableError(msg)
+            _check_framing(head)
             return await _read_body(reader)
         except (asyncio.IncompleteReadError, asyncio.LimitOverrunError) as exc:
             msg = "the overlay agent closed the connection before answering, or ran on"
@@ -311,8 +351,40 @@ class TailscaleAgent:
                 await writer.wait_closed()
 
 
+def _check_framing(head: bytes) -> None:
+    """Refuse an answer wrapped in a transfer encoding, by name (#1309).
+
+    The request was HTTP/1.0 precisely so there would be no framing to read
+    (:data:`_HTTP_VERSION`), and a daemon that frames one anyway is answering
+    something this transport cannot turn back into a body. Left undetected that is
+    not a legible fault: the chunk-size lines reach :func:`json.loads`, which reports
+    an agent "answering with something that is not JSON" — the diagnosis #1309 cost a
+    deployment, pointing at the daemon's content when the problem is its envelope.
+
+    Args:
+        head: The response's status line and headers, terminated by a blank line.
+
+    Raises:
+        OverlayIdentityUnavailableError: If the response declares any transfer
+            encoding other than ``identity``.
+    """
+    for line in head.split(b"\r\n")[1:]:
+        name, sep, value = line.partition(b":")
+        if not sep or name.strip().lower() != b"transfer-encoding":
+            continue
+        framing = value.strip().lower()
+        if framing == _UNFRAMED:
+            continue
+        rendered = framing.decode("ascii", errors="replace")
+        msg = (
+            f"the overlay agent framed its answer as {rendered!r}, which this hub does "
+            f"not read; the query is HTTP/1.0 so that the body needs no framing at all"
+        )
+        raise OverlayIdentityUnavailableError(msg)
+
+
 async def _read_body(reader: asyncio.StreamReader) -> bytes:
-    """Read a ``Connection: close`` response body to its end, under a ceiling.
+    """Read an unframed response body to its end, under a ceiling.
 
     ``StreamReader.read(n)`` returns as soon as *any* bytes are available, so a
     single call is not "the body" — it is whatever one packet happened to carry,
@@ -320,6 +392,12 @@ async def _read_body(reader: asyncio.StreamReader) -> bytes:
     fails to parse as JSON. Reading to EOF is what makes the answer whole, and the
     ceiling is what stops a daemon answering without end from being a memory fault
     in a resident process.
+
+    EOF is the end whether or not the daemon measured the body: an HTTP/1.0 answer
+    to a ``Connection: close`` request is closed after its last byte either way, so
+    a ``Content-Length`` here is corroboration rather than the delimiter. What EOF
+    would *not* survive is a transfer encoding, which is why one is refused before
+    this is called (:func:`_check_framing`).
 
     Args:
         reader: The connection to the agent.
@@ -339,11 +417,15 @@ async def _read_body(reader: asyncio.StreamReader) -> bytes:
     return bytes(body)
 
 
-def _stable_id(node: dict[str, Any]) -> str:
+def _stable_id(node: dict[str, Any], member: str) -> str:
     """Read one node's stable overlay identity, or refuse to guess.
 
     Args:
         node: The agent's record of a node.
+        member: Which member of *that record* holds the stable identifier —
+            :data:`_STATUS_SELF_IDENTITY` or :data:`_WHOIS_NODE_IDENTITY`, because
+            the two endpoints answer with two different Go types and name it
+            differently. Passed in rather than searched for: see those constants.
 
     Returns:
         Its stable identifier.
@@ -355,7 +437,7 @@ def _stable_id(node: dict[str, Any]) -> str:
             one recorded against an address would follow a reassignment — both of
             which admit a device the owner never enrolled.
     """
-    identity = node.get("StableID")
+    identity = node.get(member)
     if not isinstance(identity, str) or not identity:
         msg = (
             "the overlay agent reported a node with no stable identity; an enrolment "
