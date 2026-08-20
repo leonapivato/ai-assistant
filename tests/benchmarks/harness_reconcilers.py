@@ -33,7 +33,6 @@ from typing import Final
 
 from benchmarks.memory.wiring import Reconciliation
 
-from ai_assistant.memory import ModelBackedReconciler
 from ai_assistant.testing import FakeModelProvider
 
 __all__ = ["OFFLINE_ROUTE", "offline_reconciler"]
@@ -58,11 +57,7 @@ def offline_reconciler(*, max_conflicts: int = 3) -> Reconciliation:
         reads and the same object the ingestor holds.
     """
     return Reconciliation(
-        reconciler=ModelBackedReconciler(
-            model=FakeModelProvider("no envelope here"),
-            route=OFFLINE_ROUTE,
-            max_conflicts=max_conflicts,
-        ),
+        model=FakeModelProvider("no envelope here"),
         route=OFFLINE_ROUTE,
         max_conflicts=max_conflicts,
     )
