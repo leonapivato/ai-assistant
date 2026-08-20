@@ -1,7 +1,33 @@
 # 165. Numbering stays at dispatch, and the ratification flip is the one exempt commit shape
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-20
+- **Note (2026-08-20): ratified.** `Proposed` → `Accepted` on the content this ADR
+  merges with, after the required set — **adversarial alone**, this ADR deciding
+  the ADR process and touching no contract surface — returned `APPROVE` with no
+  findings on one tree (`a2c10251`). That sequence is `CONTRIBUTING.md` →
+  "Finishing an ADR PR", pointed at rather than re-argued; `just ship` posts the
+  terminal verdict and the aggregate to PR
+  [#1247](https://github.com/leonapivato/ai-assistant/pull/1247), so the round
+  count and the churn ratio are read from that comment. **No finding was waived**
+  and no issue was deferred: both findings raised were in-diff and were fixed.
+
+  **What changed while it stood `Proposed` was the decision, not the wording.** §2
+  proposed the two-line shape amendment 3 describes — the `Status` flip plus the
+  date stamp — and two rounds took the second line apart. A date-*shaped* second
+  line lets an unreviewed commit write a false `- Date:`; binding it to the
+  commit's own author date does not repair that, because `git commit --date=…`
+  and `GIT_AUTHOR_DATE` set the author date, so the source is the same hand
+  writing the line. With no third source of a ratification date inside the commit,
+  and one occurrence in 121 ratification commits at stake, the line is excluded and
+  the exempt shape is now **one changed line**. §2, §6's not-exempted list and
+  Alternatives all carry the reasoning; the narrowing exempts strictly less than
+  the ruling authorised, on the ruling's own principle.
+
+  **ADR-0165's own §§2–3 exemption is not applied to itself.** It is not law until
+  this merges, so `CONTRIBUTING.md` → "Finishing an ADR PR" step 3's re-run was run
+  in full — and this ratification commit carries §9's two records besides, which
+  puts it outside the exempt shape in any case.
 - **What this changes and what it does not.** It retains ADR-0015 §5's
   dispatch-time numbering unchanged, and it relaxes exactly one thing: which
   commit's content the review-coverage rule is evaluated against, in one

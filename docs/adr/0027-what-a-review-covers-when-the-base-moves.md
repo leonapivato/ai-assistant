@@ -1,6 +1,6 @@
 # 27. What a review covers when the base moves
 
-- Status: Accepted
+- Status: Accepted, §2's acceptance loop amended by ADR-0165
 - Date: 2026-07-21
 - Amends on ratification: ADR-0020 §3, the content anchor — the section
   ADR-0025 §4 already amended once. The edit is **not** made by this change; §7
@@ -11,6 +11,16 @@
   review covers — #124 how it is *tested*, #149 how it is *named*.
 - Refs: #153 (`scripts/review_history.py`, in flight) — unaffected, see
   Consequences.
+- Amended: 2026-08-20 by
+  [ADR-0165](0165-numbering-stays-at-dispatch-and-the-ratification-flip-is-the-one-exempt-commit-shape.md)
+  — §2's two acceptance paths are evaluated against `HEAD`'s tree and `HEAD`'s
+  patch identity. Where `HEAD` is a **ratification flip** as ADR-0165 §2 defines
+  it, both are taken from `HEAD`'s parent and (a) and (b) then run exactly as
+  written; the re-anchoring is not recursive and adds no third path. §2's two
+  properties, the `git patch-id --verbatim` choice, the proper-ancestor
+  requirement and the rules making (b) unavailable are untouched, as are §§1 and
+  3–7 — in particular §3's floor and §4's disclosure, which govern a base move and
+  not a commit the PR itself carries.
 
 ## Context
 
