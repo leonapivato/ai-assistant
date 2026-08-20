@@ -103,39 +103,61 @@ ADR-0136 §1's anchors, at the running agent's discretion.**
 > first review invocation on a branch, and immediately before the final push
 > preceding `gh pr ready` — the `pytest` step is discharged by **either** the
 > full serial suite (`uv run pytest`, or `just check`, which runs it) **or** the
-> bare parallel recipe `just test-fast`, invoked with no arguments. The choice
-> between the two is the running agent's, no justification is owed for it, and no
-> reviewer may require a particular one.
+> parallel recipe `just test-fast`, subject to the collection clause below. The
+> choice between the two is the running agent's, no justification is owed for it,
+> and no reviewer may require a particular one.
 
-> **Normative.** `just test-fast` forwards any arguments it is given to `pytest`.
-> An invocation carrying an argument that narrows what is collected or run — `-k`,
-> `-m`, `-x`, `--lf`, `--failed-first`, `--deselect`, `--ignore`, `--ignore-glob`,
-> a path or a nodeid — is a scoped selection under ADR-0136 §2 and **discharges no
-> anchor**, whatever the recipe is called. An argument that narrows nothing
-> (`-n 4`, `-q`) leaves the discharge intact.
+> **Normative.** An anchor is discharged only by a run that **collected the whole
+> suite** — every test the tree declares, less the one file `just test-fast`
+> deselects. A run narrowed by a filtering option discharges nothing and is a
+> scoped selection under ADR-0136 §2, **whatever the source of the option**: an
+> argument to the recipe (`test-fast *args` forwards them to `pytest`),
+> `PYTEST_ADDOPTS`, a local `addopts`, or a disabled plugin. The filtering options
+> are the set `tests/conftest.py` records as `_FILTERING_OPTIONS` — `-k`, `-m`,
+> `-x`, `--lf`, `--ff`, `--deselect`, `--ignore`, `--ignore-glob` — plus a path or
+> a nodeid argument. An option that narrows nothing (`-n 4`, `-q`) leaves the
+> discharge intact.
 
 > **Normative.** ADR-0136 §6's clause "running it satisfies neither anchor unless
-> it runs the whole suite" no longer governs the bare `just test-fast`, whose one
-> deselection is named and accepted in §3 below. It continues to govern every
-> other invocation of that recipe.
+> it runs the whole suite" no longer governs `just test-fast` where nothing
+> narrowed what it collected, whose one deselection is named and accepted in §3
+> below. It continues to govern every narrowed invocation of that recipe.
 
 The permission is unconditional because the ruling is. It is stated as "either
 anchor" rather than "both" to leave no reading on which the two anchors take
 different runs: each anchor is discharged independently, and a branch may satisfy
 one with `just test-fast` and the other with the serial suite in either order.
 
-That option list is not invented here: it is the set `tests/conftest.py` already
-records as narrowing a run, in `_FILTERING_OPTIONS`, and the set the triad check
-consults to decide whether an absent binding class proves anything. Naming the
-same set keeps one definition of "narrowed" between the rule and the code.
+**The clause is a property of the run, not of the command line, because the
+command line is not the only way to narrow one.** `PYTEST_ADDOPTS='-k something'`
+reaches pytest through the environment and no inspection of the argv would see
+it. Written against the argv the rule would have been exactly as wide as the ways
+an author happens to know about, which is the shape of rule this ADR is trying not
+to write.
+
+Two things bound what that clause is carrying. First, **the exposure is neither
+new nor this ADR's**: the same variable narrows `uv run pytest` and `just check`
+identically, so ADR-0136's serial anchor has always had it and ADR-0166 neither
+widens nor closes it. Second, **the run states what it collected** — pytest's
+summary line prints the counts, which on this tree are 18,088 passed / 33 skipped
+serially and 18,057 / 33 across cores — so an agent that read its own summary has
+already checked this clause. The tooling side — whether a recipe should clear or
+refuse a filtering `PYTEST_ADDOPTS` — is issue #1243 rather than a decision here:
+it touches both anchors' recipes equally and it is not what this ADR is about.
+
+The option list is not invented here either: it is the set `tests/conftest.py`
+records as `_FILTERING_OPTIONS`, and the set the triad check consults to decide
+whether an absent binding class proves anything. Naming the same set keeps one
+definition of "narrowed" between the rule and the code.
 
 **The second clause is what keeps ADR-0136 §6's principle intact.** §6 refused to
 let a *command name* stand in for the suite — "§1 requires the suite, not a
 command name" — and this ADR does name a command, so the argument that made §6
-right has to be answered rather than dropped. It is answered by fixing what the
-name denotes: the bare recipe is one determinate run, 31 tests short of the suite
-and short of it in no other way, and the moment an argument narrows it further it
-stops being the thing §1 admits. What ADR-0166 buys is a second *complete* run,
+right has to be answered rather than dropped. It is answered by not letting the
+name do the work: what §1 admits is a *run that collected the whole suite*, and
+`just test-fast` is named only as the way to produce one 31 tests short of it. The
+moment anything narrows the collection further, from any source, it stops being
+the thing §1 admits. What ADR-0166 buys is a second *complete* run,
 not a licence to select.
 
 **This is a rule and not a mechanism, exactly as ADR-0136's anchors are.** Nothing
@@ -165,7 +187,7 @@ finish.
 
 ### 3. What the parallel run does not cover, and the risk taken
 
-> **Normative.** An anchor discharged by the bare `just test-fast` leaves
+> **Normative.** An anchor discharged by `just test-fast` leaves
 > `tests/core/test_protocol_triad.py` — 31 tests, including the mechanical
 > Protocol-triad enforcement — unrun locally. This is accepted, on the three nets
 > below, and is not a defect in the agent's conduct.
@@ -290,7 +312,11 @@ flipped tree.
   has one answer. §1 makes the choice explicitly unjustified and unreviewable to
   keep that from becoming a thing lanes argue about.
 
-**Follow-on.** Issue #1241 carries the `tests/core/test_protocol_triad.py`
+**Follow-on.** Issue #1243 carries the tooling side of §1's collection clause:
+neither `just check` nor `just test-fast` clears or refuses a filtering
+`PYTEST_ADDOPTS`, so both anchors rest on the agent reading their own summary
+line. That is a pre-existing property of ADR-0136's anchors rather than something
+this decision introduces. Issue #1241 carries the `tests/core/test_protocol_triad.py`
 skip-message wording, and issue #1240 carries `.claude/agents/worker.md`'s copy of
 the repealed "satisfies neither anchor" sentence — dispatch-infrastructure text
 outside this lane's fence. Neither is a condition of this decision.

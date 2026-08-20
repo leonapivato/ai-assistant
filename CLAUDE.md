@@ -120,11 +120,13 @@ the obligation.
 
 **The anchor's `pytest` step is the serial suite *or* a bare `just test-fast`**
 (the suite across cores, about a minute — ADR-0166), your call at each anchor, no
-justification owed. Bare: the recipe forwards arguments to `pytest`, so
-`just test-fast -k …` is a scoped selection and discharges no anchor. It also
-deselects `tests/core/test_protocol_triad.py`, and nothing else, so prefer the
-serial run when your diff touches a Protocol or a canonical fake; CI catches a
-triad gap either way.
+justification owed. What discharges an anchor is a run that **collected the whole
+suite**, so a filtering option from any source — a recipe argument, a
+`PYTEST_ADDOPTS` in your environment — makes it a scoped selection instead; read
+the summary line. `just test-fast` also deselects
+`tests/core/test_protocol_triad.py`, and nothing else, so prefer the serial run
+when your diff touches a Protocol or a canonical fake; CI catches a triad gap
+either way.
 
 **Between the anchors, the four static steps stay mandatory before every commit**
 — they cost about two seconds, and they catch what a *selected* test run would
