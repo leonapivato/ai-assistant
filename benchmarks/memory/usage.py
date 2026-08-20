@@ -404,15 +404,39 @@ class UsageLedger:
         Args:
             tally: Where to also record.
 
+        **Closed by identity, walking from the innermost end, and never by equality.**
+        :class:`UsageTally` is a plain dataclass, so two of them holding the same
+        crossings compare equal — and two *empty* ones always do. ``list.remove`` finds
+        the first equal element, so closing an inner scope over a pair of fresh tallies
+        removed the **outer** one: the crossings between the inner scope's exit and the
+        outer's were then credited to the tally that had already closed, and the outer
+        scope's own exit raised ``ValueError`` because by then nothing equal was left.
+        Identity is the only correct test here, because what a scope names is *this*
+        accumulator and not a value equal to it.
+
+        Args:
+            tally: Where to also record.
+
         Yields:
             The same tally, so a caller can open a scope and keep the accumulator in one
             expression.
+
+        Raises:
+            RuntimeError: If this scope is no longer open, which means somebody closed
+                it out of order. Loud rather than silent: the alternative is a ledger
+                that keeps collecting into a scope a reader believes is finished.
         """
         self.open_scopes.append(tally)
         try:
             yield tally
         finally:
-            self.open_scopes.remove(tally)
+            for index in reversed(range(len(self.open_scopes))):
+                if self.open_scopes[index] is tally:
+                    del self.open_scopes[index]
+                    break
+            else:
+                msg = "this usage scope is no longer open; scopes must close in order"
+                raise RuntimeError(msg)
 
 
 @dataclass(frozen=True, slots=True)
@@ -426,12 +450,25 @@ class BatchItemUsage:
     item, and the caller keys them back to questions by ``item_id`` exactly as ADR-0143
     §4 has it key outcomes.
 
+    **Reported twice per item, and the split is the same one the synchronous seam
+    makes.** The call and its prompt are reported the moment the provider accepts the
+    submission; the reply is reported after the batch settles and its outcomes are read.
+    A batch that is accepted and then never settles — the provider's window closes, or
+    the run stops waiting — is therefore in the ledger as prompts that bought nothing,
+    which is exactly the run an operator is reading a ledger to explain. Reporting only
+    after ``fetch`` left those items out of the manifest entirely.
+
+    Every field defaults to zero for that reason: each report carries the half it is
+    about and says nothing about the other.
+
     Attributes:
         item_id: The id the item was submitted under, byte-for-byte. A judge item still
             carries :data:`~benchmarks.memory.batch.JUDGE_ITEM_SUFFIX`; stripping it is
             the caller's, which is the same join it already does for the grading.
         phase: ``ANSWERING`` or ``JUDGING`` — which of the run's two batches this was.
         route: The ``"provider:model"`` spec the batch was submitted to.
+        calls: ``1`` on the submission report, ``0`` on the reply report — so a caller
+            adding both to one tally counts the item once.
         prompt_chars: Characters submitted for this item.
         reply_chars: Characters the outcome carried, and ``0`` for an item that expired,
             was cancelled or failed — which is the same reading a failed synchronous call
@@ -442,8 +479,9 @@ class BatchItemUsage:
     item_id: str
     phase: UsagePhase
     route: str
-    prompt_chars: int
-    reply_chars: int
+    calls: int = 0
+    prompt_chars: int = 0
+    reply_chars: int = 0
 
 
 class MeasuredTokens(BaseModel):
