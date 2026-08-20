@@ -625,16 +625,16 @@ content, and a linear history where each commit keeps its `Refs:` trailer.
   the backstop, not the substitute, and a red check on the *final* push is the
   one the closing anchor exists to prevent.
 - **`gate` is the only required check; no approving review is required.** Branch
-  protection asks for zero approvals, because there is no second author to ask —
-  so the Codex review reported by `just ship` (see "Review") is the entire
-  independent judgement on the change, and the dispatcher's verification is the
-  entire human one. Note in the PR description any `blocker`/`major` finding you
-  waived, with its rationale, and link the issues you filed for findings you
-  deferred. **A merge therefore needs no `--admin`:** reach for the bypass only
-  for a *stale* gate — a branch `strict` is holding because it is behind `main`
-  — and say why in the PR. A **red** gate is never a case for it: ADR-0010 rules
-  that nothing crosses the gate red, whatever the flag mechanically reaches (see
-  the divergence note below).
+  protection asks for zero approvals (ADR-0167 §4), because there is no second
+  author to ask — so the Codex review reported by `just ship` (see "Review") is
+  the entire independent judgement on the change, and the dispatcher's
+  verification is the entire human one. Note in the PR description any
+  `blocker`/`major` finding you waived, with its rationale, and link the issues
+  you filed for findings you deferred. **A merge therefore needs no `--admin`:**
+  reach for the bypass only for a *stale* gate — a branch `strict` is holding
+  because it is behind `main` — and say why in the PR. A **red** gate is never a
+  case for it: ADR-0167 §2 rules that nothing crosses the gate red, whatever the
+  flag mechanically reaches (see the bypass note below).
 - **Rebase and merge.** Rebase your branch onto `main` and merge via GitHub's
   *Rebase and merge* so linear history holds and each commit keeps its
   `Refs: ADR-NNNN` trailer. Delete the branch after merge.
@@ -646,21 +646,19 @@ content, and a linear history where each commit keeps its `Refs:` trailer.
   reason to trust the merge, so the bypass is for a genuine emergency and the
   reason goes in the PR.
 
-  **ADR-0010's ratified text reads differently, and the gap is open, not
-  settled.** Its Decision requires `gate` "for **everyone, with no bypass**"
-  while excluding administrators from the review and up-to-date restrictions —
-  a split GitHub's classic protection cannot express, because the switch that
-  exempts administrators is one all-or-nothing toggle. What the two sentences
-  above describe is the toggle as it actually stands, which is the honest thing
-  for a document read at the moment someone reaches for the bypass. Reconciling
-  the two — tighten the settings and lose the emergency hatch, or record the
-  deviation under ADR-0010's own Revisit clause — is a decision and not a
-  wording fix, and it is **issue #1246**. Until it is ruled, **ADR-0010's rule
-  binds conduct even where the toggle does not enforce it**: nothing crosses the
-  gate red, and a bypass that mechanically *can* reach the gate is not licence to
-  use it for that. The two sentences above describe the blast radius of the flag,
-  so that whoever reaches for it knows what they are actually overriding; they
-  authorise nothing.
+  **That bypass is deliberate, and ADR-0167 is where it is decided.**
+  `enforce_admins` is off, which exempts administrators from every protection on
+  `main` — the required `gate` included — because the only person the lock would
+  restrain is the sole administrator and merger. ADR-0010 asked instead for a
+  split (gate binding everyone, administrators exempt from the review and
+  up-to-date restrictions only) that classic branch protection cannot express,
+  the switch being one all-or-nothing toggle; ADR-0167 partially supersedes that
+  clause and ratifies the configuration, closing issue #1246. **The rule binds
+  conduct where the toggle does not enforce it** (ADR-0167 §2): nothing crosses
+  the gate red, and a bypass that mechanically *can* reach the gate is not
+  licence to use it for that. The two sentences above describe the blast radius
+  of the flag, so that whoever reaches for it knows what they are actually
+  overriding; they authorise nothing.
 
 ### Coordinating parallel work
 
