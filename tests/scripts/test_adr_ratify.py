@@ -330,6 +330,44 @@ def test_refuses_to_ratify_from_a_branch_behind_its_base(
     assert not list((repo / "docs" / "adr").glob("01*-a-decision-worth-recording.md"))
 
 
+def test_a_stale_tracking_ref_does_not_let_the_ratification_through(tmp_path: Path) -> None:
+    """The base is fetched live, and it is `main`, with no way to say otherwise.
+
+    A stale `origin/main` passes the ancestry test while `main` itself has moved,
+    and the number computed under it is then wrong in a way ``check_commit``
+    cannot see — it reads the commit's parent, which is the same stale tree. So
+    the run has no ``--no-fetch`` and no ``--base-branch`` to reach for, and this
+    pins that: `main` moves on the remote only, the tracking ref is left behind,
+    and the run still refuses.
+    """
+    repo = _adr_repo(tmp_path / "repo")
+    stale = _git(repo, "rev-parse", "origin/main")
+    other = tmp_path / "other"
+    _git(repo, "worktree", "add", "-q", "-b", "other", str(other), "main")
+    (other / "docs" / "adr" / "0101-landed-first.md").write_text(
+        "# 101. Landed first\n\n- Status: Accepted\n- Date: 2026-01-01\n\n## Context\n\nx\n"
+    )
+    _git(other, "add", "-A")
+    _git(other, "commit", "-qm", "docs(adr): land first")
+    _git(other, "push", "-q", "origin", "other:main")
+    # The remote has moved; this clone's tracking ref has not been updated.
+    _git(repo, "update-ref", "refs/remotes/origin/main", stale)
+
+    produced = _run(repo, "ratify", "--date", "2026-08-20")
+
+    assert produced.returncode == 1
+    assert "does not contain it — rebase first" in produced.stderr
+    assert not any(p.name.startswith("0101-a-decision") for p in (repo / "docs" / "adr").iterdir())
+
+
+def test_the_run_offers_no_way_to_choose_a_different_base() -> None:
+    """Every escape here is an escape from the property the exemption rests on."""
+    help_text = _run(Path(__file__).parents[2], "ratify", "--help").stdout
+
+    assert "--no-fetch" not in help_text
+    assert "--base-branch" not in help_text
+
+
 def test_a_write_failure_after_the_rename_restores_the_branch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -348,7 +386,7 @@ def test_a_write_failure_after_the_rename_restores_the_branch(
         raise OSError(28, "No space left on device")
 
     monkeypatch.setattr(Path, "write_text", _no_space)
-    args = _MODULE._parser().parse_args(["ratify", "--no-fetch", "--date", "2026-08-20"])
+    args = _MODULE._parser().parse_args(["ratify", "--date", "2026-08-20"])
 
     with pytest.raises(_MODULE.ShapeError, match="branch is restored"):
         _MODULE._ratify(args)

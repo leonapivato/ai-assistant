@@ -108,7 +108,9 @@ holding a view across lanes.
 
 `just adr-ratify` produces the commit. It reads the ADR's *committed* content,
 refuses on a dirty tree, on `main` and on a detached `HEAD`, refuses a document
-that is not in §1's shape, refuses any number that is not the next one, and
+that is not in §1's shape, refuses any number that is not the next one, offers no
+way to point itself at a different or a stale base — every such escape is an
+escape from the property §4 rests on — and
 refuses outright on a branch that does not contain its base's tip — staleness
 tested as ancestry, not as a comparison of ADR numbers, because a base advance
 that adds no ADR leaves the numbers equal and the branch just as stale, and §2
@@ -350,8 +352,8 @@ A reader following ADR-0020 §3 is sent to ADR-0027 for the live rule and lands 
 the amended text. Nothing of ADR-0020's own becomes false or over-wide.
 
 **This ADR is numbered the old way, and does not exercise its own mechanism.** It
-was dispatched with the number 0165 under ADR-0015 §5, as was the ADR of #1226's
-act 7, and the two of them are the last numbered that way. §§1–2 bind every ADR
+was dispatched with the number 0165 under ADR-0015 §5, as ADR-0166 was, and the
+two of them are the last numbered that way. §§1–2 bind every ADR
 lane dispatched after this one merges. One consequence is worth stating plainly:
 because this document was authored numbered, it is free to display `ADR-XXXX`
 throughout, which §3 forbids to the documents that come after it.

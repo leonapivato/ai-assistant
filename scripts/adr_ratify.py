@@ -566,25 +566,29 @@ def _ratify(args: argparse.Namespace) -> int:
     original = _blob(root, "HEAD", path)
 
     # The number is computed from HEAD's tree alone, because that is the tree the
-    # recogniser can see. The base is fetched only to prove HEAD is not behind
-    # it, and the proof is ANCESTRY, not a comparison of ADR numbers: a base
-    # advance that adds no ADR leaves the two number sets equal while the branch
-    # is just as stale, and §2 puts this commit after the final rebase for the
-    # whole state of the tree, not only for the part that decides the number.
+    # recogniser can see. `main` is fetched only to prove HEAD is not behind it,
+    # and the proof is ANCESTRY, not a comparison of ADR numbers: a base advance
+    # that adds no ADR leaves the two number sets equal while the branch is just
+    # as stale, and §2 puts this commit after the final rebase for the whole
+    # state of the tree, not only for the part that decides the number.
     # `ship.sh`'s drill refuses on the same test for the same reason (issue
     # #751): a check computed against a base the branch does not contain answers
     # a question nobody asked.
-    if args.no_fetch:
-        base_rev = "origin/" + args.base_branch
-    else:
-        _git("fetch", "--no-tags", "--quiet", "origin", args.base_branch, cwd=root)
-        base_rev = "FETCH_HEAD"
-    base_sha = _git("rev-parse", "--verify", base_rev + "^{commit}", cwd=root).strip()
+    #
+    # BOTH HALVES OF THAT ARE FIXED — a live fetch, and `main` — and neither is
+    # an option, deliberately. A stale `origin/main` and an older `--base-branch`
+    # each pass the ancestry test while `main` itself has moved, and the number
+    # computed under either is then wrong in a way `check_commit` cannot see: it
+    # reads the commit's parent, which is exactly the stale tree. Every escape
+    # this run could offer is an escape from the one property the ship exemption
+    # rests on, so it offers none.
+    _git("fetch", "--no-tags", "--quiet", "origin", "main", cwd=root)
+    base_sha = _git("rev-parse", "--verify", "FETCH_HEAD^{commit}", cwd=root).strip()
     if not _is_ancestor(root, base_sha, "HEAD"):
         raise ShapeError(
-            f"'{args.base_branch}' is at {base_sha[:12]} and this branch does not "
-            f"contain it — rebase first, so the number is max + 1 on the tree that "
-            f"actually merges (ADR-0165 §2)"
+            f"'main' is at {base_sha[:12]} and this branch does not contain it — "
+            f"rebase first, so the number is max + 1 on the tree that actually "
+            f"merges (ADR-0165 §2)"
         )
 
     taken = _adr_numbers(root, "HEAD")
@@ -653,10 +657,6 @@ def _parser() -> argparse.ArgumentParser:
         "--number", type=int, help="assert the number: it must be max + 1, or the run refuses"
     )
     ratify.add_argument("--date", help="the ratification date (default: today)")
-    ratify.add_argument("--base-branch", default="main", help="the branch max() is taken over")
-    ratify.add_argument(
-        "--no-fetch", action="store_true", help="read origin/<base-branch> without fetching"
-    )
     ratify.add_argument("--dry-run", action="store_true", help="print the plan, change nothing")
 
     check = sub.add_parser("check-shape", help="is this commit exactly a ratify commit?")
