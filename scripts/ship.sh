@@ -283,7 +283,46 @@ fi
 # A recorded base that is NOT an ancestor of the merge base is not drift; it is a
 # different history, and fails closed.
 expected_base="$(git merge-base FETCH_HEAD "$sha")"
-head_tree="$(git rev-parse "${sha}^{tree}")"
+
+# --- The ADR ratify commit carries no reviewable content (ADR-0165 §4) -------
+#
+# Under ADR-0165 an ADR lane's PR is the ADR alone, reviewed as *Proposed,
+# unnumbered*, and one mechanical commit at merge takes `max(main) + 1`, renames
+# the file onto it, substitutes the `ADR-XXXX` self-references, flips `Status` to
+# `Accepted` and stamps the date. Nothing in that commit is content a reviewer
+# could read differently — the number is an allocation, not a decision — so it
+# does not cost a round, and the whole acceptance rule below is computed over its
+# PARENT instead.
+#
+# Two properties keep this from being a hole:
+#
+#   It is a NORMALISATION, not a third acceptance path. ADR-0027 §2's (a) and (b)
+#   run afterwards exactly as written, over `content_sha`; nothing about the tree
+#   comparison, the patch identity, §3's floor or §4's disclosure is relaxed.
+#   Only the endpoint they read moves, and only by one commit.
+#
+#   The recognition is a RECONSTRUCTION. `scripts/adr_ratify.py check-shape`
+#   rebuilds the child file from the parent's with the same transform that
+#   *produced* it and compares bytes, so a commit that changed one further byte,
+#   or touched any second path, is not recognised. That script is the one
+#   implementation of the shape — shelling out to it is deliberate, because a
+#   replica of a ship-side rule is what issue #751 records the cost of.
+#
+# Everything here fails CLOSED: no python, a missing script, a non-zero exit, a
+# root commit — any of them leaves `content_sha` at `$sha`, and the ratify commit
+# simply costs its round, which is the behaviour that predates this block.
+ratify_adr=""
+_ratify_python="$(command -v python3 || command -v python || true)"
+if [[ -n "$_ratify_python" && -f "${repo_root}/scripts/adr_ratify.py" ]]; then
+    ratify_adr="$("$_ratify_python" "${repo_root}/scripts/adr_ratify.py" \
+        check-shape "$sha" 2>/dev/null || true)"
+fi
+content_sha="$sha"
+if [[ -n "$ratify_adr" ]]; then
+    content_sha="$(git rev-parse "${sha}^")"
+fi
+
+head_tree="$(git rev-parse "${content_sha}^{tree}")"
 
 # --- The reviewed range's rendering, and its identity (ADR-0027 §2) ----------
 #
@@ -416,7 +455,7 @@ patch_identity() {
 }
 # <<< shared-patch-identity
 
-head_patch_id="$(patch_identity "$expected_base" "$sha")"
+head_patch_id="$(patch_identity "$expected_base" "$content_sha")"
 
 # --- The §3 floor ------------------------------------------------------------
 #
@@ -733,7 +772,12 @@ _drill_report() {
     echo "ship: drill — ADR-0027 §2 coverage, computed but not posted" >&2
     {
         echo "  HEAD                  ${sha}"
-        echo "  HEAD tree             ${head_tree}"
+        if [[ -n "$ratify_adr" ]]; then
+            echo "  ADR ratification      HEAD is the mechanical ratify commit for"
+            echo "                        ${ratify_adr}; coverage below is computed over"
+            echo "                        its parent ${content_sha:0:12} (ADR-0165 §4)"
+        fi
+        echo "  content tree          ${head_tree}"
         echo "  PR base branch        ${base_ref}"
         echo "  fetched base tip      $(git rev-parse FETCH_HEAD)"
         echo "  PR merge base         ${expected_base}"
@@ -1325,7 +1369,7 @@ fi
 # review of *this* content.
 if [[ -z "${covering[adversarial]:-}" ]]; then
     die "no adversarial review covering this PR's content
-     (HEAD tree ${head_tree:0:12}, base ${expected_base:0:12})${why}
+     (content tree ${head_tree:0:12}, base ${expected_base:0:12})${why}
      run: just review-codex adversarial"
 fi
 
@@ -1498,6 +1542,22 @@ agg_binary_churn="$(agg_field binary_churn)"
     # untouched and a parser reading those two lines is unaffected (ADR-0027,
     # Consequences: #153). Deduplicated by base, since two personas commonly
     # share one.
+    # The ratify exemption is disclosed for the same reason §4 discloses a base
+    # move: the comment claims a review covers this head, and here it covers the
+    # head's PARENT. A reader comparing the posted verdicts against the PR's tip
+    # commit must be told that, not left to infer it from a SHA that matches
+    # nothing.
+    if [[ -n "$ratify_adr" ]]; then
+        echo "> **ADR ratification — exempt from a fresh round (ADR-0165 §4).** The tip"
+        echo "> commit \`${sha:0:12}\` is the mechanical ratify commit for \`${ratify_adr}\`:"
+        echo "> the file renamed onto its number, the \`ADR-XXXX\` self-references"
+        echo "> substituted, \`Status\` flipped to \`Accepted\` and the date stamped, and"
+        echo "> nothing else — verified by rebuilding it from its parent"
+        echo "> (\`scripts/adr_ratify.py check-shape\`). The review(s) below cover that"
+        echo "> parent, \`${content_sha:0:12}\`, which is the whole of this PR's"
+        echo "> reviewable content."
+        echo
+    fi
     printed_drift=""
     for persona in "${posting_personas[@]}"; do
         drifted="${covering_drift[$persona]:-}"
