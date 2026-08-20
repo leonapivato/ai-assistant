@@ -821,22 +821,16 @@ async def execute_run(  # noqa: PLR0913, PLR0915 — every parameter is a distin
     batch_usage: dict[str, UsageTally] = {}
 
     def file_usage(measured: BatchItemUsage) -> None:
-        """Credit one settled batch item to its question and to the run."""
-        guard.usage.record(
-            phase=measured.phase,
-            route=measured.route,
-            calls=1,
-            prompt=measured.prompt_chars,
-            reply=measured.reply_chars,
-        )
+        """Credit one batch item's report to its question and to the run.
+
+        Called **twice per item** — once when the provider accepted the submission, once
+        when its outcome was read — and the counts are relayed exactly as reported rather
+        than assumed here. That is what leaves an accepted batch which never settled in
+        the ledger as prompts that bought nothing, instead of leaving it out.
+        """
         answer_id = measured.item_id.removesuffix(JUDGE_ITEM_SUFFIX)
-        batch_usage.setdefault(answer_id, UsageTally()).record(
-            phase=measured.phase,
-            route=measured.route,
-            calls=1,
-            prompt=measured.prompt_chars,
-            reply=measured.reply_chars,
-        )
+        _credit(guard.usage.run, measured)
+        _credit(batch_usage.setdefault(answer_id, UsageTally()), measured)
 
     try:
         async with AsyncExitStack() as stack:
@@ -1093,6 +1087,29 @@ class _CaseDriver:
             for name in ("memory.db", "conversations.db", "deferrals.db"):
                 (case_dir / name).unlink(missing_ok=True)
         return prepared
+
+
+def _credit(tally: UsageTally, measured: BatchItemUsage) -> None:
+    """Add one batch item's report to one tally.
+
+    A function rather than a loop over the two tallies, because the two are reached
+    differently — one is the run's, one is minted per question on first sight — and
+    because ``execute_run`` is already at the complexity ceiling its own ``noqa`` line
+    argues about.
+
+    Args:
+        tally: Where to record.
+        measured: What the item reported. Its counts are relayed unchanged: a submission
+            report carries the call and the prompt, a settled report carries the reply,
+            and assuming either here would double-count one of them.
+    """
+    tally.record(
+        phase=measured.phase,
+        route=measured.route,
+        calls=measured.calls,
+        prompt=measured.prompt_chars,
+        reply=measured.reply_chars,
+    )
 
 
 def _ingestion_summary(

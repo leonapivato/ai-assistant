@@ -474,6 +474,12 @@ async def submit_and_settle(
     # Before the first poll, and before the announcement: if this process dies in the
     # next instant, the file is what says a paid job exists.
     session.on_batch(BatchRef.of(handle, kind=kind, item_count=len(items)))
+    # Here, rather than after the fetch, for the reason the file above is written here:
+    # what has happened by this line is that a provider accepted a billable job. A run
+    # whose batch then times out or whose fetch fails still stops cleanly and still
+    # rewrites its manifest, and a ledger that had recorded nothing would leave that
+    # manifest describing a run whose largest single act is missing from it.
+    _report_submitted(session, kind=kind, items=items, model=model)
     session.announce(
         f"submitted {kind} batch {handle.batch_id} ({len(items)} items) under "
         f"issuer {handle.issuer}"
@@ -481,11 +487,59 @@ async def submit_and_settle(
     await _wait_for(session, handle, kind=kind)
     outcomes = await session.completer.fetch(handle)
     settled = {outcome.item_id: outcome for outcome in outcomes}
-    _report_usage(session, kind=kind, items=items, outcomes=settled, model=model)
+    _report_replies(session, kind=kind, items=items, outcomes=settled, model=model)
     return settled
 
 
-def _report_usage(
+def _usage_route(session: BatchSession, model: str | None) -> str:
+    """Where this batch actually went.
+
+    Args:
+        session: The run's session, holding the answering route the completer defaults to.
+        model: The per-batch override, or ``None``.
+
+    Returns:
+        The ``"provider:model"`` spec to record against.
+    """
+    return model if model is not None else session.route
+
+
+def _report_submitted(
+    session: BatchSession,
+    *,
+    kind: str,
+    items: Sequence[BatchRequest],
+    model: str | None,
+) -> None:
+    """Report each item's call and prompt, as soon as the provider has accepted them.
+
+    The near half of the same split :class:`~benchmarks.memory.spend.SpendGuard`'s
+    wrapper makes on the synchronous seam: what was sent is recorded before there is any
+    answer to record, so nothing about a batch that does not come back is lost.
+
+    Args:
+        session: The run's session, for its recorder and its default route.
+        kind: :data:`ANSWER_BATCH` or :data:`JUDGE_BATCH`.
+        items: What was submitted.
+        model: The per-batch route override, or ``None`` for the completer's default.
+    """
+    if session.on_usage is None:
+        return
+    phase = PHASE_BY_BATCH[kind]
+    route = _usage_route(session, model)
+    for item in items:
+        session.on_usage(
+            BatchItemUsage(
+                item_id=item.item_id,
+                phase=phase,
+                route=route,
+                calls=1,
+                prompt_chars=prompt_chars(item.messages),
+            )
+        )
+
+
+def _report_replies(
     session: BatchSession,
     *,
     kind: str,
@@ -493,14 +547,22 @@ def _report_usage(
     outcomes: Mapping[str, BatchItemOutcome],
     model: str | None,
 ) -> None:
-    """Report what each submitted item sent and got back.
+    """Report what each submitted item got back, once the batch has settled.
 
     **Driven off ``items`` rather than off ``outcomes``, and the direction matters.**
     ADR-0143 §4 promises one outcome per submitted item, but an item whose outcome is
     missing, expired, cancelled or failed is exactly the item an operator reading a bill
-    most needs to see: it was submitted, so it was charged, and it bought nothing. Walking
-    the outcomes instead would drop those rows and make a partly-failed batch look cheaper
-    than it was.
+    most needs to see. Walking the outcomes instead would drop those rows and make a
+    partly-failed batch look cheaper than it was — and every such item is already in the
+    ledger with its prompt, so this half has to visit the same set to leave them at zero.
+
+    **The message's raw content is measured, not the stripped answer.**
+    :func:`_reply_of` strips, because a trailing newline is not part of an answer and
+    must not be part of a grading; but it *is* part of what the provider generated and
+    billed for. The synchronous seam records ``len(reply.content)`` unstripped, so
+    measuring the stripped text here would make the same run's two phases report
+    different sizes for the same reply — and phase parity is the property this harness
+    is most careful about.
 
     Args:
         session: The run's session, for its recorder and its default route.
@@ -512,16 +574,16 @@ def _report_usage(
     if session.on_usage is None:
         return
     phase = PHASE_BY_BATCH[kind]
-    route = model if model is not None else session.route
+    route = _usage_route(session, model)
     for item in items:
-        reply, _failure = _reply_of(outcomes.get(item.item_id))
+        outcome = outcomes.get(item.item_id)
+        message = outcome.message if outcome is not None else None
         session.on_usage(
             BatchItemUsage(
                 item_id=item.item_id,
                 phase=phase,
                 route=route,
-                prompt_chars=prompt_chars(item.messages),
-                reply_chars=len(reply),
+                reply_chars=0 if message is None else len(message.content),
             )
         )
 

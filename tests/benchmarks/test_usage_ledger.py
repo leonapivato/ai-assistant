@@ -171,11 +171,13 @@ class _SettlingCompleter:
 
     The canonical fake does everything that matters — the refusals, the snapshot, the
     deliberately jumbled result order — and this adds only the thing a test cannot wait
-    for: a provider that finishes.
+    for: a provider that finishes. ``settle=False`` withholds that, which is how a run
+    reaches its own poll deadline against a batch the provider has genuinely accepted.
     """
 
-    def __init__(self, inner: FakeBatchCompleter) -> None:
+    def __init__(self, inner: FakeBatchCompleter, *, settle: bool = True) -> None:
         self._inner = inner
+        self._settle = settle
 
     @property
     def issuer(self) -> str:
@@ -189,7 +191,8 @@ class _SettlingCompleter:
         self, batch_key: str, items: Sequence[BatchRequest], *, model: str | None = None
     ) -> BatchHandle:
         handle = await self._inner.submit(batch_key, items, model=model)
-        self._inner.provider.settle(handle.batch_id)
+        if self._settle:
+            self._inner.provider.settle(handle.batch_id)
         return handle
 
     async def poll(self, handle: BatchHandle) -> BatchStatus:
@@ -199,13 +202,14 @@ class _SettlingCompleter:
         return await self._inner.fetch(handle)
 
 
-async def _run(
+async def _run(  # noqa: PLR0913 — each argument is one axis a test varies, and a bundle would hide which ones a case left alone
     tmp_path: Path,
     *,
     phase: RunPhase = RunPhase.SYNC,
     case: BenchCase | None = None,
     completer: _SettlingCompleter | None = None,
     judge: Grader | None = None,
+    poll: PollPolicy | None = None,
 ) -> tuple[RunManifest, Path]:
     """Execute one run over a fixture case, with every model seam faked.
 
@@ -220,6 +224,7 @@ async def _run(
         completer: The batch seam, required under ``BATCH``.
         judge: The grader, or ``None`` for the exact one — which makes no model call and
             so submits no judge batch.
+        poll: The wait policy, or ``None`` for one that settles immediately.
 
     Returns:
         The manifest and its run directory.
@@ -239,7 +244,7 @@ async def _run(
         phase=phase,
         batch_completer=completer,
         issuer=ISSUER,
-        poll=PollPolicy(interval=0.0, timeout=30.0),
+        poll=poll if poll is not None else PollPolicy(interval=0.0, timeout=30.0),
     )
     return manifest, root / manifest.run_id
 
@@ -352,6 +357,26 @@ class TestAScopeCollectsExactlyWhatWasMadeInsideIt:
         assert ledger.open_scopes == []
         ledger.record(phase=UsagePhase.ANSWERING, route="a:b", calls=1)
         assert scope.snapshot().calls == 0
+
+    def test_closing_an_inner_scope_leaves_the_outer_one_receiving(self) -> None:
+        """Scopes close by identity, and two empty tallies are indistinguishable by value.
+
+        ``UsageTally`` is a plain dataclass, so two fresh ones compare equal — and
+        ``list.remove`` finds the first *equal* element. Closing the inner scope
+        therefore removed the outer one: every crossing between the inner exit and the
+        outer exit was credited to a scope the caller believed had finished, and the
+        outer exit then raised ``ValueError`` because nothing equal was left to remove.
+        """
+        ledger = UsageLedger()
+        outer, inner = UsageTally(), UsageTally()
+        with ledger.attributing_to(outer):
+            with ledger.attributing_to(inner):
+                pass
+            ledger.record(phase=UsagePhase.ANSWERING, route="a:b", calls=1, prompt=5)
+
+        assert outer.snapshot().calls == 1
+        assert inner.snapshot().calls == 0, "the crossing landed in a closed scope"
+        assert ledger.open_scopes == []
 
     def test_nested_scopes_are_both_credited(self) -> None:
         """Containment, stated because the other reading loses figures silently.
@@ -699,6 +724,63 @@ class TestARunRecordsWhatEachScopeCost:
         assert entry.calls == 1
         assert entry.prompt_chars > 0
         assert entry.reply_chars == 0, "an expired item bought nothing and must say so"
+
+    async def test_an_accepted_batch_that_never_settles_is_still_in_the_ledger(
+        self, tmp_path: Path
+    ) -> None:
+        """Accepted is billed, whether or not the run ever reads the answers.
+
+        A batch that does not settle within the run's timeout stops the run cleanly, and
+        the manifest is rewritten to say so — carrying the ledger. Recording only after
+        ``fetch`` left the run's single largest act out of the artifact that exists to
+        explain what it cost, in exactly the case somebody opens that artifact.
+        """
+        case = _case()
+        completer = _SettlingCompleter(FakeBatchCompleter(issuer=ISSUER), settle=False)
+
+        manifest, _ = await _run(
+            tmp_path,
+            phase=RunPhase.BATCH,
+            case=case,
+            completer=completer,
+            poll=PollPolicy(interval=0.0, timeout=0.0),
+        )
+
+        assert manifest.aborted is not None, "the batch settled, so this proves nothing"
+        assert manifest.usage is not None
+        answering = _entry(manifest.usage, UsagePhase.ANSWERING)
+        assert answering is not None
+        assert answering.calls == len(case.questions)
+        assert answering.prompt_chars > 0
+        assert answering.reply_chars == 0
+
+    async def test_a_batched_reply_is_measured_before_it_is_stripped(self, tmp_path: Path) -> None:
+        """What the provider generated, not what grading reads.
+
+        ``_reply_of`` strips, because a trailing newline is not part of an answer and
+        must not reach a judge. It *is* part of what was generated and billed for, and
+        the synchronous seam records the reply unstripped — so measuring the stripped
+        text here would make one run's two phases report different sizes for the same
+        reply, on a harness whose parity claim is load-bearing.
+        """
+        case = _case()
+        padded = f"  {ANSWER}  \n"
+        completer = _SettlingCompleter(FakeBatchCompleter(issuer=ISSUER))
+        for question in case.questions:
+            completer.provider.program(
+                item_id_for(case.case_key, question.question_id),
+                ProgrammedOutcome(content=padded),
+            )
+
+        _, run_dir = await _run(tmp_path, phase=RunPhase.BATCH, case=case, completer=completer)
+
+        row = read_jsonl(run_dir / "records.jsonl", QuestionRecord)[0]
+        assert row.usage is not None
+        answering = _entry(row.usage, UsagePhase.ANSWERING)
+        assert answering is not None
+        assert answering.reply_chars == len(padded)
+        assert answering.reply_chars > len(ANSWER), "the padding is what this is about"
+        assert row.answer == ANSWER, "the recorded answer must still be the stripped one"
 
     async def test_a_judge_item_lands_on_the_question_its_answer_did(self, tmp_path: Path) -> None:
         """A judge id is an answer id plus a suffix, and one row wants both halves.
