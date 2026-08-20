@@ -189,19 +189,20 @@ rather than a reason; it stays deliberately undesigned, named so its absence is
 a known debt of the plan rather than an oversight. A **commitment ledger** and a
 **portable context graph** sit beside it, unscheduled.
 
-## Closed arcs
+## Arc records
 
 The arc concept is retired (#1226 §2): tracks are peers, and there is no
-arc-level closure. Nothing about the three arcs that ran under it is re-derived
-here — each line below is a pointer at the record that holds the rulings, which
-is where their exits were ruled and where any later reading of them belongs.
+arc-level closure to rule. Three arcs ran before that ruling, and each is left
+here as a pointer at the issue that holds its rulings — restating any of them
+is what this section exists to avoid.
 
-- **The first vertical** — seven core artifacts and one closed learning loop.
-  No ruling issue: the ADR ledger and this file's git history are its record.
-- **Accumulation (legs 1–8)** — the exit ruling is on **#878**, the QA run it
+- **The first vertical** — the seven core artifacts and the explicit learning
+  loop. No ruling issue: the ADR ledger and this file's git history are its
+  record.
+- **Accumulation (legs 1–8)** — the exit ruling is on **#878**; the QA run it
   was ruled on is **#862**.
 - **Inhabitation (legs 9–12)** — direction, the measures gate and the box
-  migration are ruled on **#879**, which also carries each leg's mechanism-exit
+  migration are ruled on **#879**, which also holds each leg's mechanism-exit
   record and the QA runs behind them (#919, #978, #1081, #1159).
 
 #879 is also where the inhabitation arc's **owner-side half** sits — deferred,
