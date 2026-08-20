@@ -68,6 +68,12 @@ pytestmark = pytest.mark.integration
 FIRST = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 BATCH = 2
 
+#: The observation proposal ceiling `plan_run` bounds the reconciler's calls by.
+#: Any positive number serves — no test below reads the figure back — but it is
+#: passed rather than defaulted for the reason `plan_run` requires it: a planner
+#: filling one in reports the cost of a run nobody asked for (#1293).
+PROPOSALS = 3
+
 #: What both phases' answering seam says, so a parity comparison is about the harness
 #: rather than about two different replies.
 ANSWER = "she adopted a dog"
@@ -233,7 +239,9 @@ async def _run(  # noqa: PLR0913 — each argument is one axis a test varies, an
     """Execute one run over a fixture case, with every model seam faked."""
     subject = case if case is not None else _case()
     resolved = settings if settings is not None else _settings(tmp_path)
-    plan = plan_run(LOCOMO, first_sessions((subject,), 0), batch_size=BATCH)
+    plan = plan_run(
+        LOCOMO, first_sessions((subject,), 0), batch_size=BATCH, max_proposals=PROPOSALS
+    )
     root = tmp_path / "runs"
     manifest = await execute_run(
         plan,

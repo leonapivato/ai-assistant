@@ -99,5 +99,6 @@ def test_the_credential_check_follows_the_judge_route(tmp_path: Path) -> None:
             answering=False,
             distillation=False,
             judging=True,
+            reconciling=False,
             judge_route="nosuchvendor:model-z",
         )

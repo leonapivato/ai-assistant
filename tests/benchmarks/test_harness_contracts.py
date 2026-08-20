@@ -481,7 +481,9 @@ def test_a_configured_but_unreached_fallback_needs_no_credential(
         fallback_models=("openai:gpt-4o",),
     )
 
-    check_credentials_for(settings, answering=True, distillation=True, judging=True)
+    check_credentials_for(
+        settings, answering=True, distillation=True, judging=True, reconciling=True
+    )
 
 
 def test_the_observer_route_is_checked_even_when_it_repeats_the_default(
@@ -497,7 +499,9 @@ def test_the_observer_route_is_checked_even_when_it_repeats_the_default(
     )
 
     with pytest.raises(ConfigurationError):
-        check_credentials_for(settings, answering=False, distillation=True, judging=False)
+        check_credentials_for(
+            settings, answering=False, distillation=True, judging=False, reconciling=False
+        )
 
 
 def test_no_route_is_checked_when_every_seam_is_injected(
@@ -508,4 +512,6 @@ def test_no_route_is_checked_when_every_seam_is_injected(
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     settings = Settings(data_dir=tmp_path, embedder=EmbedderKind.HASHING)
 
-    check_credentials_for(settings, answering=False, distillation=False, judging=False)
+    check_credentials_for(
+        settings, answering=False, distillation=False, judging=False, reconciling=False
+    )

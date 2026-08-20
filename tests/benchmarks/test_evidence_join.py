@@ -44,6 +44,12 @@ FIRST = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 #: retrieval budget of five over a store holding one record returns it.
 BATCH = 1
 
+#: The observation proposal ceiling `plan_run` bounds the reconciler's calls by.
+#: Any positive number serves — no test below reads the figure back — but it is
+#: passed rather than defaulted for the reason `plan_run` requires it: a planner
+#: filling one in reports the cost of a run nobody asked for (#1293).
+PROPOSALS = 3
+
 #: A pointer no turn in the case carries — the corpus citing a turn this run never
 #: ingested, which is what ``--max-sessions`` produces at scale.
 UNINGESTED = "D9:9"
@@ -125,7 +131,7 @@ async def _records(tmp_path: Path) -> tuple[tuple[QuestionRecord, ...], Path]:
     """
     root = tmp_path / "runs"
     manifest = await execute_run(
-        plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=root,
         mode=RunMode.SMOKE,
         corpus_digests={},

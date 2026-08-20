@@ -54,6 +54,12 @@ pytestmark = pytest.mark.integration
 FIRST = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 BATCH = 1
 
+#: The observation proposal ceiling `plan_run` bounds the reconciler's calls by.
+#: Any positive number serves — no test below reads the figure back — but it is
+#: passed rather than defaulted for the reason `plan_run` requires it: a planner
+#: filling one in reports the cost of a run nobody asked for (#1293).
+PROPOSALS = 3
+
 
 class _SecretObserver:
     """An ``Observer`` proposing one secret-tier belief per batch.
@@ -239,7 +245,7 @@ async def test_every_record_reports_the_ask_rate_beside_the_run(tmp_path: Path) 
     an answer was right."""
     root = tmp_path / "runs"
     manifest = await execute_run(
-        plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=root,
         mode=RunMode.SMOKE,
         corpus_digests={},

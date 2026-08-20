@@ -16,8 +16,16 @@ composition root uses, minus the turn-answering half it must not use. Everything
 decides what lands in memory is the production object: the same
 ``SqliteMemoryStore``, the same embedder the settings select, the same
 ``ConversationLifecycle`` capture, the same ``ModelBackedObserver``, the same
-``DefaultMemoryPolicy``, the same ``MemoryIngestor``, the same
-``SqliteTraceStore``.
+``DefaultMemoryPolicy``, the same ``MemoryIngestor`` holding the same
+``ModelBackedReconciler``, the same ``SqliteTraceStore``.
+
+**That list is checked rather than asserted, and #1293 is why.** For two published
+pilots the reconciler was on it and not in the code: ``MemoryIngestor`` was
+constructed here without one while ``app/composition.py`` wired it, so ADR-0159's
+mechanism never ran in a scored run and the manifest — reading a setting rather than
+an object — said it had. ``tests/benchmarks/test_harness_contracts.py`` now pins the
+ingestor's keyword list against the composition root's, so the next argument to
+appear there fails a test instead of a pilot.
 
 **The three cardinality controls are imported, not copied.** ``RETRIEVAL_LIMIT``,
 ``EPISODIC_SUPPLEMENT_LIMIT`` and ``CONFLICT_LIMIT`` come from
@@ -58,6 +66,7 @@ from ai_assistant.learning import ModelBackedObserver
 from ai_assistant.memory import (
     DefaultMemoryPolicy,
     MemoryIngestor,
+    ModelBackedReconciler,
     SqliteDeferralStore,
     SqliteMemoryStore,
 )
@@ -92,10 +101,13 @@ __all__ = [
     "BATCH_PROVIDER",
     "DEFAULT_ISSUER",
     "Harness",
+    "Reconciliation",
     "build_batch_completer",
     "build_embedder",
     "build_harness",
     "build_model_provider",
+    "build_reconciler",
+    "reconciler_spec",
     "refuse_unbatchable_route",
 ]
 
@@ -127,6 +139,58 @@ DEFAULT_ISSUER: Final = "unnamed-account"
 
 
 @dataclass(frozen=True, slots=True)
+class Reconciliation:
+    """ADR-0159's reconciler as this run wired it, beside the manifest's word for it.
+
+    **The object and its description are one value because #1293 was the other
+    arrangement.** Every pilot script since pilot-4 exported
+    ``ASSISTANT_RECONCILER_MODEL``, and the run notes recorded it as if a reconciler
+    were labelling conflicts — while ``build_harness`` constructed ``MemoryIngestor``
+    with no ``reconciler`` at all. Two published runs therefore carry a provenance
+    claim about a mechanism that never ran, and nothing in the artifacts could
+    contradict it: the claim was read off a setting, and a setting is true whether or
+    not anything acted on it.
+
+    A field derived from ``Settings`` can always say that. This one cannot: it is
+    produced by :func:`build_reconciler` in the same expression that constructs the
+    reconciler, it is the value handed to :class:`~ai_assistant.memory.MemoryIngestor`,
+    and there is no way to obtain the description without the object. So a manifest
+    naming a reconciler is a manifest whose ingestor held one.
+
+    Attributes:
+        reconciler: The object the ingestor reconciles through.
+        route: The ``"provider:model"`` spec it labels on — the argument it was
+            constructed with, ``Settings.reconciler_model`` resolved against
+            ``default_model`` exactly as ``app.composition._reconciler_spec`` resolves
+            it.
+        max_conflicts: ADR-0159 §3's bound it was constructed with — how many members
+            of a conflict set, in rank order, one request may ask about.
+    """
+
+    reconciler: ModelBackedReconciler
+    route: str
+    max_conflicts: int
+
+    @property
+    def name(self) -> str:
+        """The manifest's account of what actually reconciled.
+
+        The class is read off the constructed object rather than named, so a run
+        wired to something else says so; the two bounds beside it are the arguments
+        that object holds and neither is separately configurable after construction.
+
+        Returns:
+            One line, in the shape ``ModelGrader``'s :attr:`name` has: what it is and
+            what it was pointed at, fit for a manifest field and for a reader
+            comparing two runs' provenance without opening either's code.
+        """
+        return (
+            f"{type(self.reconciler).__name__}(route={self.route}, "
+            f"max_conflicts={self.max_conflicts})"
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class Harness:
     """One case's worth of wired pipeline, over one data directory.
 
@@ -146,6 +210,10 @@ class Harness:
         embedder_model_id: The embedding space this run's vectors live in — recorded
             in the manifest, because a score computed under one embedder says nothing
             about another.
+        reconciliation: ADR-0159's reconciler this case's ingestor actually holds,
+            beside the manifest's word for it. Held on the harness rather than left
+            inside ``MemoryIngestor`` — which exposes nothing — so a caller can record
+            what reconciled without asking a setting what it thinks reconciled (#1293).
         model_route: The ``"provider:model"`` spec answers came from.
         observer_route: The spec episodes were distilled through. Reported separately
             because ``Settings.observer_model`` can differ from ``default_model``, and
@@ -168,6 +236,7 @@ class Harness:
     model: ModelProvider
     clock: BenchmarkClock
     embedder_model_id: str
+    reconciliation: Reconciliation
     model_route: str
     observer_route: str
     retrieval_limit: int
@@ -306,6 +375,104 @@ def build_model_provider(
     return built if guard is None else guard.wrap(built)
 
 
+def reconciler_spec(settings: Settings) -> str:
+    """The one ``"provider:model"`` spec the reconciler labels through (ADR-0159 §3).
+
+    Mirrors ``ai_assistant.app.composition._reconciler_spec``, which is private and so
+    cannot be called: ``reconciler_model`` where the operator named one, otherwise
+    ``default_model``. Spelled here rather than assumed, for the reason
+    :func:`~benchmarks.memory.run.check_credentials_for` spells the judge's fallback —
+    a reconciler on a route the answering seam never touches is exactly the
+    configuration a startup check exists to refuse, and it cannot refuse a route it
+    computed differently from the one that will be built.
+
+    Args:
+        settings: Loaded application settings.
+
+    Returns:
+        The spec, never empty: ``default_model`` stands behind it.
+    """
+    return (
+        settings.reconciler_model
+        if settings.reconciler_model is not None
+        else settings.default_model
+    )
+
+
+def build_reconciler(
+    settings: Settings, *, model: ModelProvider | None = None, guard: SpendGuard | None = None
+) -> Reconciliation:
+    """Construct ADR-0159's reconciler as the composition root constructs it.
+
+    ``app/composition.py`` wires ``ModelBackedReconciler`` unconditionally — the route
+    falls back to ``default_model``, so there is no configuration under which the
+    product ingests without one — and this is the same wiring over the harness's own
+    one-route seam. **It is unconditional here for the same reason**: a
+    ``reconciler_model`` that is set and a ``reconciler_model`` that is unset are two
+    routes, not a switch, and a harness that treated the unset case as "no reconciler"
+    would measure a pipeline the product cannot be configured into.
+
+    The provider is built by :func:`build_model_provider` rather than by copying
+    ``_build_reconciler_provider``, and the two agree by construction: both are
+    ``RetryingProvider`` over one ``PydanticAIProvider``, with no routing, which is
+    what ADR-0159 §3 requires of this seam and is already why this module's answering
+    and observation seams have that shape.
+
+    **The guard reaches this seam, and it has to.** A reconciler labels at most one
+    request per proposal, so a LoCoMo case's ingestion carries thousands of them —
+    a paid seam the run's ceiling did not cover would make ``--max-model-calls`` a
+    bound on a strict subset of what the run spends. :func:`~benchmarks.memory.run.
+    plan_run` counts them for the same reason, so the ceiling stays readable off the
+    plan in the currency the plan is written in.
+
+    **What the guard cannot do here is stop the run at this seam**, and that is
+    ADR-0159 §3's never-raises clause rather than a gap in the wrap: the reconciler
+    catches ``Exception`` around its own request, so a ``RunAbortedError`` raised by
+    the guard is converted into an unlabelled conflict set exactly as a model error
+    is. The bound still holds — ``charge`` refuses before the call, so nothing is
+    spent past it — and the run still stops, at the next answering or observation
+    call, which is guarded by something that lets the abort out. What a reader must
+    not conclude from a run's ``reconciler_failed`` count alone is that the model
+    misbehaved; a run that also aborted may have been reporting its own ceiling.
+
+    Args:
+        settings: Loaded application settings — the route, the bound, and the
+            resilience knobs :func:`build_model_provider` reads.
+        model: Override the labelling seam. Supplied by tests, which must make no live
+            model call; ``None`` builds the configured route. An injected reconciler
+            reaches ``refuse_ineligible_scored_run`` clause 5 through
+            :func:`~benchmarks.memory.run.execute_run`, so a *scored* run cannot carry
+            one.
+        guard: The run's spend guard, or ``None`` for an unguarded seam. Applied to a
+            provider built here **and** to an injected one, for the reason
+            :func:`build_harness` applies it to an injected answering seam: an
+            injected provider stands in for a call the run would otherwise have made.
+
+    Returns:
+        The reconciler and the manifest's account of it, as one value.
+
+    Raises:
+        ConfigurationError: If the reconciler's route names a vendor unknown to
+            pydantic-ai or whose optional package is not installed — raised at the
+            build rather than at the first ingest that would have reconciled, which is
+            the reason ``_build_reconciler_provider`` gives for checking it even when
+            the route repeats ``default_model``.
+    """
+    route = reconciler_spec(settings)
+    provider = (
+        build_model_provider(settings, route, guard=guard)
+        if model is None
+        else (model if guard is None else guard.wrap(model))
+    )
+    return Reconciliation(
+        reconciler=ModelBackedReconciler(
+            model=provider, route=route, max_conflicts=settings.reconciler_max_conflicts
+        ),
+        route=route,
+        max_conflicts=settings.reconciler_max_conflicts,
+    )
+
+
 def refuse_unbatchable_route(spec: str) -> None:
     """Fail now if ``spec``'s vendor has no batch endpoint this harness can reach.
 
@@ -376,12 +543,13 @@ def build_batch_completer(
     )
 
 
-def build_harness(
+def build_harness(  # noqa: PLR0913 — the three seam overrides are three distinct injection points and a bundle would hide which of them a caller left to the settings
     settings: Settings,
     *,
     data_dir: Path,
     model: ModelProvider | None = None,
     observer: Observer | None = None,
+    reconciler: Reconciliation | None = None,
     guard: SpendGuard | None = None,
 ) -> Harness:
     """Wire one case's pipeline over ``data_dir``.
@@ -396,6 +564,11 @@ def build_harness(
         model: Override the answering and grading seam. Supplied by tests, which must
             make no live model call; ``None`` builds the configured route.
         observer: Override the distillation seam, for the same reason.
+        reconciler: The reconciler every case in a run shares, or ``None`` to build
+            one from ``settings`` here. A run builds it once and hands it down, so the
+            object the manifest describes is the object each ingestor holds — the
+            property #1293 is about; a direct caller that passes ``None`` still gets
+            the configured wiring rather than none.
         guard: The run's spend guard, shared with every other case and with the judge.
             It is applied to the answering seam whether that seam was built here or
             **injected** — the one place the guard covers a caller's own object, because
@@ -451,12 +624,24 @@ def build_harness(
     # `conflict_limit` is passed for the reason the composition root passes it: the
     # figure a trace records should be one this layer chose rather than one a default
     # filled in. The value is imported, so it is the product's figure either way.
+    #
+    # **`reconciler` is passed for a blunter reason: for two published pilots it was
+    # not** (#1293). ADR-0159's mechanism defaulted to `None` here while the
+    # composition root wired it, so every crossing of every scored run came back
+    # `reconciler_absent` — 2,578 of 2,578 on pilot-5 — and the manifest said
+    # otherwise. `tests/benchmarks/test_harness_contracts.py` now pins this call's
+    # keyword list against the composition root's, so the next argument to appear
+    # there cannot go missing here quietly.
+    reconciliation = (
+        reconciler if reconciler is not None else build_reconciler(settings, guard=guard)
+    )
     writes = MemoryWriteStage(
         writer=MemoryIngestor(
             store=store,
             policy=DefaultMemoryPolicy(),
             traces_sink=traces,
             conflict_limit=CONFLICT_LIMIT,
+            reconciler=reconciliation.reconciler,
             now=clock,
         ),
         deferrals=deferrals,
@@ -496,6 +681,7 @@ def build_harness(
         model=answering,
         clock=clock,
         embedder_model_id=embedder.model_id,
+        reconciliation=reconciliation,
         model_route=model_route,
         observer_route=observer_route,
         retrieval_limit=RETRIEVAL_LIMIT,

@@ -46,6 +46,12 @@ pytestmark = pytest.mark.integration
 FIRST = datetime(2023, 5, 8, 13, 56, tzinfo=UTC)
 BATCH = 2
 
+#: The observation proposal ceiling `plan_run` bounds the reconciler's calls by.
+#: Any positive number serves — no test below reads the figure back — but it is
+#: passed rather than defaulted for the reason `plan_run` requires it: a planner
+#: filling one in reports the cost of a run nobody asked for (#1293).
+PROPOSALS = 3
+
 
 def _case(key: str = "conv-test") -> BenchCase:
     """A two-session case with two questions, one of them unanswerable.
@@ -173,7 +179,7 @@ async def _run(
         The manifest and the run's output directory.
     """
     settings = _settings(tmp_path, timezone=timezone)
-    plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH)
+    plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS)
     root = tmp_path / "runs"
     manifest = await execute_run(
         plan,
@@ -191,7 +197,7 @@ def test_plan_counts_exchanges_and_passes_without_touching_anything() -> None:
     """Six utterances fold into three exchanges — session 1's four turns pair into
     two, session 2's two into one — and three exchanges at a batch of two is one full
     pass plus a closing partial one."""
-    plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH)
+    plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS)
 
     assert plan.turn_count == 3
     assert plan.observation_calls == 2
@@ -202,7 +208,7 @@ def test_plan_counts_exchanges_and_passes_without_touching_anything() -> None:
 
 def test_plan_refuses_a_non_positive_batch() -> None:
     with pytest.raises(ValueError, match="must be positive"):
-        plan_run(LOCOMO, (_case(),), batch_size=0)
+        plan_run(LOCOMO, (_case(),), batch_size=0, max_proposals=PROPOSALS)
 
 
 async def test_a_run_writes_a_manifest_naming_its_mode(tmp_path: Path) -> None:
@@ -385,7 +391,7 @@ async def test_the_answer_reads_only_retrieved_context(tmp_path: Path) -> None:
     shows on the bullet's continuation line."""
     settings = _settings(tmp_path)
     model = FakeModelProvider("a dog")
-    plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH)
+    plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS)
 
     await execute_run(
         plan,
@@ -441,7 +447,7 @@ async def test_the_traces_survive_the_run_and_the_stores_do_not(tmp_path: Path) 
 
 async def test_keeping_the_stores_is_available(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
-    plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH)
+    plan = plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS)
     root = tmp_path / "runs"
 
     manifest = await execute_run(
@@ -472,13 +478,15 @@ def test_a_plan_refuses_two_cases_under_one_key() -> None:
     """No naming scheme separates a key from itself, so the refusal is the only
     place this can be caught — and it is caught before anything is spent."""
     with pytest.raises(ValueError, match="distinct case_key"):
-        plan_run(LOCOMO, (_case(), _case()), batch_size=BATCH)
+        plan_run(LOCOMO, (_case(), _case()), batch_size=BATCH, max_proposals=PROPOSALS)
 
 
 async def test_colliding_keys_get_their_own_stores(tmp_path: Path) -> None:
     """Two cases whose keys sanitise alike each keep their own memory: sharing one
     directory would let the dog case's beliefs answer the cat case's questions."""
-    plan = plan_run(LOCOMO, (_case(key="a/b"), _cat_case()), batch_size=BATCH)
+    plan = plan_run(
+        LOCOMO, (_case(key="a/b"), _cat_case()), batch_size=BATCH, max_proposals=PROPOSALS
+    )
     root = tmp_path / "runs"
 
     manifest = await execute_run(
@@ -599,7 +607,7 @@ async def test_an_answering_failure_does_not_end_the_run(tmp_path: Path) -> None
     every later case, which is far worse than one row a reader can exclude."""
     model = _FailsOnceProvider(fail_on=1)
     manifest = await execute_run(
-        plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=tmp_path / "runs",
         mode=RunMode.SMOKE,
         corpus_digests={},
@@ -625,7 +633,7 @@ async def test_a_failed_answer_keeps_the_retrieval_it_actually_made(
     permanently. Handling the failure inside the correlation scope is what keeps them
     attributable."""
     manifest = await execute_run(
-        plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=tmp_path / "runs",
         mode=RunMode.SMOKE,
         corpus_digests={},
@@ -648,7 +656,7 @@ async def test_the_manifest_records_a_session_bound(tmp_path: Path) -> None:
     the one case where the caller's declaration is all anyone has, and reachable only
     by a smoke run because the gate refuses a scored one planned that way."""
     manifest = await execute_run(
-        plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+        plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=tmp_path / "runs",
         mode=RunMode.SMOKE,
         corpus_digests={},
@@ -677,7 +685,9 @@ async def test_a_scored_run_cannot_truncate_in_selection_and_declare_nothing(
     memory. The bound now comes from the plan, so the declaration cannot be the thing
     that is checked."""
     settings = _settings(tmp_path).model_copy(update={"embedder": EmbedderKind.ON_DEVICE})
-    plan = plan_run(LOCOMO, first_sessions((_case(),), 1), batch_size=BATCH)
+    plan = plan_run(
+        LOCOMO, first_sessions((_case(),), 1), batch_size=BATCH, max_proposals=PROPOSALS
+    )
 
     with pytest.raises(ValueError, match="different memory"):
         await execute_run(
@@ -705,7 +715,7 @@ async def test_a_scored_run_sees_a_bound_a_question_limit_passed_through(
 
     with pytest.raises(ValueError, match="different memory"):
         await execute_run(
-            plan_run(LOCOMO, cases, batch_size=BATCH),
+            plan_run(LOCOMO, cases, batch_size=BATCH, max_proposals=PROPOSALS),
             output_root=tmp_path / "runs",
             mode=RunMode.SCORED,
             corpus_digests={},
@@ -726,7 +736,7 @@ async def test_a_scored_run_is_refused_when_the_plan_records_no_selection(
 
     with pytest.raises(ValueError, match="no record of how"):
         await execute_run(
-            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
             output_root=tmp_path / "runs",
             mode=RunMode.SCORED,
             corpus_digests={},
@@ -741,7 +751,7 @@ async def test_the_manifest_records_a_bound_no_caller_declared(tmp_path: Path) -
     with no declaration made anywhere — which is the whole of #1052: the record and the
     data can no longer be two separate inputs that disagree."""
     manifest = await execute_run(
-        plan_run(LOCOMO, first_sessions((_case(),), 1), batch_size=BATCH),
+        plan_run(LOCOMO, first_sessions((_case(),), 1), batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=tmp_path / "runs",
         mode=RunMode.SMOKE,
         corpus_digests={},
@@ -762,7 +772,9 @@ async def test_a_declaration_that_disagrees_with_the_plan_is_refused(
     correcting that on the smoke run leaves the belief in place for the scored one."""
     with pytest.raises(ValueError, match="declares max_sessions=0"):
         await execute_run(
-            plan_run(LOCOMO, first_sessions((_case(),), 1), batch_size=BATCH),
+            plan_run(
+                LOCOMO, first_sessions((_case(),), 1), batch_size=BATCH, max_proposals=PROPOSALS
+            ),
             output_root=tmp_path / "runs",
             mode=RunMode.SMOKE,
             corpus_digests={},
@@ -782,7 +794,7 @@ async def test_a_bound_the_selection_never_reached_is_no_contradiction(
     are whole, the manifest says `0`, and the declaration is not treated as a
     disagreement. Refusing it would fail a run that is entirely legitimate."""
     manifest = await execute_run(
-        plan_run(LOCOMO, first_sessions((_case(),), 99), batch_size=BATCH),
+        plan_run(LOCOMO, first_sessions((_case(),), 99), batch_size=BATCH, max_proposals=PROPOSALS),
         output_root=tmp_path / "runs",
         mode=RunMode.SMOKE,
         corpus_digests={},
@@ -801,7 +813,7 @@ async def test_execute_run_refuses_an_ineligible_scored_run_itself(tmp_path: Pat
     label an ineligible run `scored`."""
     with pytest.raises(PermissionError):
         await execute_run(
-            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
             output_root=tmp_path / "runs",
             mode=RunMode.SCORED,
             corpus_digests={},
@@ -821,7 +833,9 @@ async def test_execute_run_refuses_a_scored_run_on_the_hashing_embedder(
     to the gate now: the bound comes from the plan's own selection."""
     with pytest.raises(ValueError, match="non-semantic"):
         await execute_run(
-            plan_run(LOCOMO, first_sessions((_case(),), 0), batch_size=BATCH),
+            plan_run(
+                LOCOMO, first_sessions((_case(),), 0), batch_size=BATCH, max_proposals=PROPOSALS
+            ),
             output_root=tmp_path / "runs",
             mode=RunMode.SCORED,
             corpus_digests={},
@@ -842,7 +856,9 @@ async def test_execute_run_refuses_a_scored_run_judged_by_the_exact_grader(
 
     with pytest.raises(ValueError, match="LLM judge"):
         await execute_run(
-            plan_run(LOCOMO, first_sessions((_case(),), 0), batch_size=BATCH),
+            plan_run(
+                LOCOMO, first_sessions((_case(),), 0), batch_size=BATCH, max_proposals=PROPOSALS
+            ),
             output_root=tmp_path / "runs",
             mode=RunMode.SCORED,
             corpus_digests={},
@@ -864,7 +880,9 @@ async def test_execute_run_refuses_a_scored_run_with_an_injected_seam(
 
     with pytest.raises(ValueError, match="injected seam"):
         await execute_run(
-            plan_run(LOCOMO, first_sessions((_case(),), 0), batch_size=BATCH),
+            plan_run(
+                LOCOMO, first_sessions((_case(),), 0), batch_size=BATCH, max_proposals=PROPOSALS
+            ),
             output_root=tmp_path / "runs",
             mode=RunMode.SCORED,
             corpus_digests={},
@@ -884,7 +902,9 @@ async def test_execute_run_names_every_injected_seam_in_its_refusal(
 
     with pytest.raises(ValueError, match="injected seam") as caught:
         await execute_run(
-            plan_run(LOCOMO, first_sessions((_case(),), 0), batch_size=BATCH),
+            plan_run(
+                LOCOMO, first_sessions((_case(),), 0), batch_size=BATCH, max_proposals=PROPOSALS
+            ),
             output_root=tmp_path / "runs",
             mode=RunMode.SCORED,
             corpus_digests={},
@@ -905,7 +925,7 @@ async def test_the_gate_is_not_bypassed_by_the_mode_s_bare_string(tmp_path: Path
     value it exists to catch, while the manifest coerced the same string happily."""
     with pytest.raises(PermissionError):
         await execute_run(
-            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
             output_root=tmp_path / "runs",
             mode="scored",  # type: ignore[arg-type]  # the point of the test: a caller outside mypy's reach
             corpus_digests={},
@@ -921,7 +941,7 @@ async def test_an_unknown_mode_is_refused_rather_than_written(tmp_path: Path) ->
     """Normalising through the enum rejects a mode nobody defined, as a bonus."""
     with pytest.raises(ValueError, match="not a valid RunMode"):
         await execute_run(
-            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
             output_root=tmp_path / "runs",
             mode="provisional",  # type: ignore[arg-type]  # as above
             corpus_digests={},
@@ -943,7 +963,7 @@ async def test_a_real_judge_beside_fake_seams_still_checks_credentials(
 
     with pytest.raises(ConfigurationError):
         await execute_run(
-            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
             output_root=tmp_path / "runs",
             mode=RunMode.SMOKE,
             corpus_digests={},
@@ -970,7 +990,7 @@ async def test_a_non_boolean_confirmation_does_not_admit_a_scored_run(
     parameters are what a shell wrapper or a config file produces."""
     with pytest.raises(PermissionError):
         await execute_run(
-            plan_run(LOCOMO, (_case(),), batch_size=BATCH),
+            plan_run(LOCOMO, (_case(),), batch_size=BATCH, max_proposals=PROPOSALS),
             output_root=tmp_path / "runs",
             mode=RunMode.SCORED,
             corpus_digests={},

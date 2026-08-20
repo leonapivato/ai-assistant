@@ -100,17 +100,25 @@ __all__ = [
 #:
 #: Every one of them describes *ingestion*, which a reused run did not do: the route
 #: that distilled the beliefs, the window and proposal ceiling it distilled under, the
-#: calendar ADR-0156 §2 has it resolve relative expressions against, and the ingestor's
-#: conflict probe. None of them is read by an answering pass, so none can be
-#: "overridden" here in any meaningful sense — the stores are already written. Copying
-#: them is the only truthful option; leaving this process's own settings in those
-#: fields would produce a manifest describing a distillation that never happened.
+#: calendar ADR-0156 §2 has it resolve relative expressions against, the ingestor's
+#: conflict probe, and ADR-0159's reconciler that ruled on the crossings. None of them
+#: is read by an answering pass, so none can be "overridden" here in any meaningful
+#: sense — the stores are already written. Copying them is the only truthful option;
+#: leaving this process's own settings in those fields would produce a manifest
+#: describing a distillation that never happened.
+#:
+#: ``reconciler`` is the newest of them and the one whose omission would be least
+#: visible (#1293): this run builds a reconciler because every run does, and reporting
+#: *that* object would have a manifest claim ADR-0159 labelled conflicts in a pass that
+#: wrote no beliefs at all. Inherited, a reuse over a pilot-5 store reports ``None``,
+#: which is what those stores were actually built with.
 INHERITED_FIELDS: Final = (
     "conflict_limit",
     "observation_batch_size",
     "observation_max_proposals",
     "observer_route",
     "observer_timezone",
+    "reconciler",
 )
 
 #: The manifest fields whose difference from the source run is the point of the reuse.
