@@ -834,25 +834,3 @@ half must not land without its suite.
   enforceable and ADR-0072 §7 already ruled it owed; and leg 1's exit test is that
   the user can *read and kill* what the system believes, which is worth having
   before the system starts believing things nobody dictated — not after.
-
-## Note (2026-08-20): read §5's and §10's `#248` as `#435`
-
-**A citation correction under ADR-0070 §1, appended rather than edited in; no
-decision changes and a reader acts identically before and after.**
-
-§5's third reason for declining a conditional delete, its closing "Revisit"
-sentence, and §10's fourth deferral each attribute the compare-and-swap question
-to **#248**. That issue is closed, and its subject is a different one: an
-unsynchronised read-modify-write in `MemoryIngestor.ingest`, not whether a
-`MemoryStore` write ever becomes conditional on a revision.
-
-**The question this ADR defers is tracked by #435** — "The show-then-confirm
-deletion window: does a MemoryStore write ever become conditional on a revision?"
-— which was filed from this ADR's §5 and §10 and carries the same ADR-0046 §5
-deferral, the same trigger (a second concurrent writer, which the hub makes real)
-and the same two sub-questions: whether any `MemoryStore` write becomes
-conditional on a revision, and whether `delete` grows an `expected_revision`
-alongside it. Read the three `#248` references as `#435`.
-
-What §5 decided — show-then-confirm, the window accepted and bounded, the render
-taken as late as it can be — is untouched. (#693)
