@@ -72,12 +72,14 @@ test *args:
 # so the deselection is no longer covered by a serial local run: CI's full serial
 # gate on every push to an open PR is what still catches a real triad gap, and
 # ADR-0166 §2 says to pick `just check` when the diff touches a Protocol or a
-# canonical fake. Only the ARGUMENT-FREE invocation discharges an anchor: the
-# `*args` below reach pytest, so `just test-fast -k …` is a scoped selection
-# under ADR-0136 §2 however this recipe is spelled (ADR-0166 §1).
+# canonical fake. And only a run that COLLECTED THE WHOLE SUITE discharges an
+# anchor: the `*args` below reach pytest, as does a `PYTEST_ADDOPTS` in the
+# environment (issue #1243), and either one narrowing the collection makes this
+# a scoped selection under ADR-0136 §2 however the recipe is spelled
+# (ADR-0166 §1).
 #
 # Last line, because `just --list` shows only that one: what this recipe runs.
-# The suite in parallel — ADR-0136 §2's fast gate, and, bare, either anchor
+# The suite in parallel — ADR-0136 §2's fast gate, and, unnarrowed, an anchor
 test-fast *args:
     #!/usr/bin/env bash
     set -euo pipefail
