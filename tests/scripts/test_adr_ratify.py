@@ -493,21 +493,23 @@ def _pr_repo(repo: Path, tmp_path: Path, body: str = _PROPOSED) -> Path:
 
 
 def _run_guard(
-    repo: Path, tmp_path: Path, *, pr_sha: str | None = None
+    repo: Path, tmp_path: Path, *, pr_sha: str | None = None, pr_sha_after: str | None = None
 ) -> subprocess.CompletedProcess[str]:
     """Run ``check-ready`` with the fake ``gh`` on PATH.
 
     ``pr_sha`` is what the PR reports as its head; it defaults to local ``HEAD``,
-    which is the pushed state the recipe is meant to run in.
+    which is the pushed state the recipe is meant to run in. ``pr_sha_after`` is
+    what it reports from the *second* ``headRefOid`` query onward — a head that
+    moves while the guard is gathering its evidence.
     """
-    return _run(
-        repo,
-        "check-ready",
-        env={
-            "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}",
-            "GH_PR_SHA": pr_sha or _git(repo, "rev-parse", "HEAD"),
-        },
-    )
+    env = {
+        "PATH": f"{tmp_path / 'bin'}{os.pathsep}{os.environ['PATH']}",
+        "GH_PR_SHA": pr_sha or _git(repo, "rev-parse", "HEAD"),
+        "GH_CALL_MARK": str(tmp_path / "gh-called"),
+    }
+    if pr_sha_after is not None:
+        env["GH_PR_SHA_2"] = pr_sha_after
+    return _run(repo, "check-ready", env=env)
 
 
 def test_the_ready_guard_refuses_and_names_the_unratified_adr(tmp_path: Path) -> None:
@@ -542,6 +544,24 @@ def test_the_ready_guard_refuses_a_flip_that_was_never_pushed(tmp_path: Path) ->
     assert _run(repo, "ratify").returncode == 0
 
     guard = _run_guard(repo, tmp_path, pr_sha=unpushed)
+
+    assert guard.returncode == 1
+    assert "push first" in guard.stderr
+
+
+def test_the_ready_guard_refuses_a_head_that_moves_while_it_looks(tmp_path: Path) -> None:
+    """The evidence is about the tree the fetch began on; the act is about now.
+
+    So the head is read again immediately before the guard returns success, the
+    way ``ship`` re-reads it before its own external write. The window is
+    narrowed rather than closed — the recipe is two commands and nothing here can
+    observe a push landing after this process exits — which is exactly why the
+    read that *can* happen does.
+    """
+    repo = _pr_repo(tmp_path / "repo", tmp_path)
+    assert _run(repo, "ratify").returncode == 0
+
+    guard = _run_guard(repo, tmp_path, pr_sha_after="0" * 40)
 
     assert guard.returncode == 1
     assert "push first" in guard.stderr
