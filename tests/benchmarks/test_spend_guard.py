@@ -314,10 +314,17 @@ async def test_a_credit_refusal_stops_the_run_and_leaves_its_records(tmp_path: P
 async def test_a_reached_ceiling_stops_the_run_and_records_the_bound(tmp_path: Path) -> None:
     """The ceiling end to end, and the field a reader pairs the abort with.
 
-    The observer is injected and the grader makes no call, so every charge here is an
-    answer: a bound of one buys the first question and stops at the second. That is the
-    shape a real run stops in — some records kept, the manifest saying why there are no
-    more — and it is asserted below rather than left to the abort message.
+    The observer is injected and the grader makes no call, so the charges here are one
+    reconciler request during ingestion — this case's proposals cross exactly once, and
+    since #1293 that seam is inside the budget like every other the run wires — and then
+    one per answer. A bound of two therefore buys the crossing and the first question
+    and stops at the second, which is the shape a real run stops in: some records kept,
+    the manifest saying why there are no more. Both halves are asserted below rather
+    than left to the abort message.
+
+    **The reconciler's charge is the point of the bound being two rather than one.** A
+    seam outside the ceiling would leave this test passing at one and the run spending
+    thousands of unbudgeted requests on a real corpus.
     """
     root = tmp_path / "runs"
 
@@ -329,15 +336,15 @@ async def test_a_reached_ceiling_stops_the_run_and_records_the_bound(tmp_path: P
         settings=_settings(tmp_path),
         model=FakeModelProvider("a dog"),
         observer=FakeObserver(max_batch_size=BATCH),
-        max_model_calls=1,
+        max_model_calls=2,
         reconciler=offline_reconciler(),
     )
 
-    assert manifest.model_call_ceiling == 1
+    assert manifest.model_call_ceiling == 2
     assert manifest.aborted is not None
-    assert "ceiling of 1 model calls" in manifest.aborted
+    assert "ceiling of 2 model calls" in manifest.aborted
     written = json.loads((root / manifest.run_id / "manifest.json").read_text("utf-8"))
-    assert written["model_call_ceiling"] == 1
+    assert written["model_call_ceiling"] == 2
     assert written["aborted"] == manifest.aborted
     records = read_jsonl(root / manifest.run_id / "records.jsonl", QuestionRecord)
     assert len(records) == 1
@@ -495,5 +502,91 @@ def test_an_injected_observer_is_outside_the_run_budget(tmp_path: Path) -> None:
         # The answering seam is the one injected object the guard *does* cover, so the
         # exemption above is specific to the observer rather than a blanket one.
         assert _guards(harness.model) is guard
+    finally:
+        harness.close()
+
+
+def test_a_built_reconciler_spends_the_run_budget(tmp_path: Path) -> None:
+    """ADR-0159's seam labels at most one request per proposal, so a LoCoMo case's
+    ingestion carries thousands of them (#1293).
+
+    A paid seam outside the ceiling would make ``--max-model-calls`` a bound on a
+    strict subset of what the run spends, which is why ``plan_run`` counts these calls
+    too — the bound and the plan have to be in one currency.
+    """
+    settings = Settings(
+        data_dir=tmp_path, embedder=EmbedderKind.HASHING, default_model="anthropic:claude-x"
+    )
+    guard = SpendGuard(limit=7)
+    harness = build_harness(settings, data_dir=tmp_path / "case", guard=guard)
+    try:
+        assert _guards(harness.reconciliation.model) is guard
+    finally:
+        harness.close()
+
+
+def test_an_injected_reconciler_is_inside_the_run_budget(tmp_path: Path) -> None:
+    """The injected answering seam's rule, not the injected observer's exemption.
+
+    The exemption above turns on there being nothing to wrap: an ``Observer`` holds its
+    provider behind a surface with no accessor. A ``Reconciliation`` is the opposite —
+    it *is* a provider, a route and a bound — so the run's guard reaches it, and a
+    version that did not would let ``--max-model-calls 0`` spend a real request on
+    every crossing while reporting a ceiling of zero.
+
+    The route and the bound survive the wrapping, because they are what the manifest
+    reports and a guarded run must not describe itself differently from an unguarded one.
+    """
+    settings = Settings(
+        data_dir=tmp_path, embedder=EmbedderKind.HASHING, default_model="anthropic:claude-x"
+    )
+    guard = SpendGuard(limit=7)
+    injected = offline_reconciler(max_conflicts=5)
+    harness = build_harness(
+        settings,
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider("a dog"),
+        observer=FakeObserver(max_batch_size=BATCH),
+        guard=guard,
+        reconciler=injected,
+    )
+    try:
+        assert _guards(harness.reconciliation.model) is guard
+        assert _guards(injected.model) is None, "the caller's own object was mutated"
+        assert harness.reconciliation.route == injected.route
+        assert harness.reconciliation.max_conflicts == 5
+        assert harness.reconciliation.name == injected.name
+    finally:
+        harness.close()
+
+
+async def test_a_reconciler_call_is_charged_once_against_the_ceiling(tmp_path: Path) -> None:
+    """Behavioural, because the field read above only proves the wrapper is *there*.
+
+    The ceiling is zero, so the first request the reconciler's seam makes must be
+    refused before it is sent. Driven through the provider the reconciler holds rather
+    than through ``reconcile``, because ADR-0159 §3's never-raises clause would swallow
+    the abort and report an unlabelled set — which is the same reason
+    :func:`~benchmarks.memory.wiring.build_reconciler` says a run's
+    ``reconciler_failed`` count must be read beside its abort.
+    """
+    settings = Settings(
+        data_dir=tmp_path, embedder=EmbedderKind.HASHING, default_model="anthropic:claude-x"
+    )
+    guard = SpendGuard(limit=0)
+    harness = build_harness(
+        settings,
+        data_dir=tmp_path / "case",
+        model=FakeModelProvider("a dog"),
+        observer=FakeObserver(max_batch_size=BATCH),
+        guard=guard,
+        reconciler=offline_reconciler(),
+    )
+    try:
+        with pytest.raises(RunAbortedError, match="ceiling of 0"):
+            await harness.reconciliation.model.complete(
+                [Message(role=Role.USER, content="which of these restates the other?")]
+            )
+        assert guard.calls == 0
     finally:
         harness.close()
