@@ -178,22 +178,34 @@ is.
 > **Normative.** That check fails on `main`, and a required check red on `main`
 > is red on every branch rebased onto it, so the repair is stated here rather
 > than left to be improvised under a stopped repository. Where two ADRs on `main`
-> share a number, the **later-merged** of the two is renumbered to `max(main) + 1`
-> by a commit of exactly the ratify commit's shape — the rename, the H1, the
-> `ADR-NNNN` self-references, and **nothing else** — with a dated header note
-> recording the correction. Citations elsewhere in the corpus need no repointing:
-> they were written against the number the *first* document holds, and it keeps
-> it.
+> share a number, the **later-merged** of the two is renumbered, by a commit
+> whose whole content is: the file renamed from `docs/adr/NNNN-<slug>.md` to
+> `docs/adr/MMMM-<slug>.md`, where `MMMM` is `max(main) + 1` computed as above;
+> the H1's number replaced by `MMMM`, unpadded; every `ADR-NNNN` self-reference
+> replaced by `ADR-MMMM`, zero-padded; and one appended dated header note
+> recording the renumbering and naming the document it collided with.
+> **Nothing else.** The `Status` and `Date` lines are not touched — the document
+> is already `Accepted` and its ratification date is a fact about when it landed.
 
-This is the one case in which ADR-0070 §1's append-only rule yields, and it
+This is a **third transform**, distinct from the ratify commit's and from the
+ordinary amendment, and it is deliberately not folded into either. §4 does not
+recognise it and no exemption attaches: the repair commit is reviewed like any
+other commit, which is the right price for the one act in this ADR that edits a
+ratified document. Citations elsewhere in the corpus need no repointing — they
+were written against the number the *first* document holds, and it keeps it.
+
+This is also the one case in which ADR-0070 §1's append-only rule yields, and it
 yields on §1's own test rather than against it. The second document never validly
 took that number — §2 refuses a number that is not the next one, and the only
-reason this commit exists is that the bypass skipped the check which would have
+reason the commit exists is that the bypass skipped the check which would have
 caught it — so the correction reconciles the file with what the rule always said,
-which is exactly the "correcting a … line to match what actually landed" case §1
-already permits. No decision changes: the Context, Decision and Consequences stay
-byte for byte as ratified, and a reader acts identically before and after. §8
-records the amendment.
+which is the "correcting a … line to match what actually landed" case §1 already
+permits, applied to the number rather than to the `Status`. What the substitution
+touches inside the Context, Decision and Consequences is the ADR's own number and
+nothing else: four digits that *name* the document rather than say anything in
+it. No sentence changes meaning, no reader acts differently, and the note is
+appended rather than written over anything. §8 records the amendment and its
+bounds.
 
 Whether the bypass itself should stop being available on this path is ADR-0010's
 to decide and not this ADR's: its own Revisit clause is "an incident shows the
@@ -455,7 +467,8 @@ There the edited text *is* ratified: the later-merged of two ADRs sharing a
 number is renamed and its self-references substituted after it stands `Accepted`,
 which §1's "ratified decision text … is never rewritten" plainly does not
 contemplate. It is still an amendment and not a supersession, on §1's own test —
-the Context, Decision and Consequences are byte-identical afterwards, no reader
+what the substitution reaches inside the Context, Decision and Consequences is
+the ADR's own number and nothing else, no sentence changes meaning, no reader
 acts differently, and the number being corrected is one §2 refuses to issue, so
 the file is being reconciled with the rule rather than the rule with the file.
 But a reader holding only ADR-0070 would say no such edit is available at all,
@@ -467,7 +480,8 @@ superseded by ADR-0127 …` token, and ADR-0082 §2 is explicit that on such a l
 **no amendment qualifier is written**: the record is the appended dated note and
 that is the whole of it. So ADR-0070's `Status` line is **not** edited. The note
 states both clauses and, for the second, its bounds — the one anomaly it repairs,
-the commit shape it is confined to, and that nothing else may ride it.
+the commit shape it is confined to, that nothing else may ride it, and that it
+carries no review exemption.
 
 **ADR-0082 — no record, and this is a ruling, not an omission.** #1226 §5 names
 ADR-0082 alongside ADR-0070 as carrying a numbering line to be amended. It does
