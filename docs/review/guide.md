@@ -33,6 +33,24 @@ about ripple effects beyond the diff. Fetch the diff yourself if you have shell
 access (`git diff <base>...HEAD`). **Read-only: never modify files or git
 state.**
 
+**Your evidence base is the tree and the diff, and nothing else.** GitHub state
+is outside it — issue and PR numbers, open/closed status, labels, and above all
+*how many* issues a query would return. Never assert one: a finding that turns on
+tracker state is phrased **conditionally** ("if that query ever returns more than
+one page…") and grounded in the mechanism, which surfaces the concern without
+inventing the fact. An invented count is not a lesser error than an invented line
+of code; it reads exactly like grounding, and it costs the author a round to
+disprove (issue #1254).
+
+*Operator note, not a rule for the reviewer: the read-only sandbox has one
+switch. `CODEX_REVIEW_NO_SANDBOX=1` — and `GITHUB_ACTIONS` exactly `true`, which
+`scripts/codex-review.sh` treats the same way — runs Codex under
+`--dangerously-bypass-approvals-and-sandbox`: no sandbox at all, so the whole
+filesystem and the network are reachable, no session is kept, and the read-only
+proof of ADR-0025 §4 is skipped. It is there for CI-like environments where
+bubblewrap cannot set up its network namespace; do not set it for an ordinary
+local review.*
+
 ## Output contract
 
 Produce a **ranked list, most severe first**. For each finding:
