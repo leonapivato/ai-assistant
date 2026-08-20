@@ -283,7 +283,57 @@ fi
 # A recorded base that is NOT an ancestor of the merge base is not drift; it is a
 # different history, and fails closed.
 expected_base="$(git merge-base FETCH_HEAD "$sha")"
-head_tree="$(git rev-parse "${sha}^{tree}")"
+
+# --- The ratification flip carries no reviewable content (ADR-0165 §3) -------
+#
+# One commit shape is exempt from a fresh round, and it is one line: an ADR PR
+# whose HEAD modifies exactly one `docs/adr/NNNN-*.md`, changing the header's
+# single `- Status: Proposed` to `- Status: Accepted` and NOTHING ELSE — not the
+# `- Date:` line, not a ratification note, not a second file. The decision text
+# that commit ratifies is byte for byte the text the reviewer already returned
+# green on, so the round it costs today is one no reviewer could have used.
+#
+# Where HEAD is that shape, the acceptance loop below reads HEAD's PARENT for the
+# two content inputs it compares — the tree and the patch identity — and ADR-0027
+# §2's (a) and (b) then run exactly as written. Three properties keep this from
+# being a hole, and each is ADR-0165's, not this script's:
+#
+#   It is a RE-ANCHORING, not a third acceptance path. Nothing in §2 is relaxed:
+#   (a) still refuses on any changed byte anywhere in the tree it compares, (b)
+#   still needs a proper-ancestor base, a hashable and unchanged patch identity,
+#   a clear floor and a published drift record. One input moves, by one commit.
+#
+#   It is NOT RECURSIVE. `content_sha` is HEAD's parent at most; a flip whose
+#   parent is itself a flip earns the exemption for the head alone, and the
+#   parent is then judged on its own content.
+#
+#   The recognition is a RECONSTRUCTION. `scripts/adr_ratify.py check-shape`
+#   rebuilds the child's blob from the parent's with the same transform that
+#   PRODUCED it and compares bytes, so one further byte anywhere, or any second
+#   path, is simply not recognised. That script is the one implementation of the
+#   shape, and shelling out to it is deliberate: a second statement of a rule in
+#   a second place is what issue #751 records the cost of.
+#
+# ADR-0027 §3's floor and §4's disclosure are untouched here. They govern a BASE
+# MOVE — a change to the history the PR is measured against — and a ratification
+# flip is a commit the PR itself carries; a base move touching `docs/adr/**`
+# still breaches the floor whether or not HEAD is a flip.
+#
+# Everything below fails CLOSED: no python, a missing script, a non-zero exit,
+# a root commit — any of them leaves `content_sha` at `$sha`, and the flip costs
+# its round, which is exactly the behaviour that predates this block.
+ratify_adr=""
+_ratify_python="$(command -v python3 || command -v python || true)"
+if [[ -n "$_ratify_python" && -f "${repo_root}/scripts/adr_ratify.py" ]]; then
+    ratify_adr="$("$_ratify_python" "${repo_root}/scripts/adr_ratify.py" \
+        check-shape "$sha" 2>/dev/null || true)"
+fi
+content_sha="$sha"
+if [[ -n "$ratify_adr" ]]; then
+    content_sha="$(git rev-parse "${sha}^")"
+fi
+
+head_tree="$(git rev-parse "${content_sha}^{tree}")"
 
 # --- The reviewed range's rendering, and its identity (ADR-0027 §2) ----------
 #
@@ -416,7 +466,7 @@ patch_identity() {
 }
 # <<< shared-patch-identity
 
-head_patch_id="$(patch_identity "$expected_base" "$sha")"
+head_patch_id="$(patch_identity "$expected_base" "$content_sha")"
 
 # --- The §3 floor ------------------------------------------------------------
 #
@@ -733,7 +783,13 @@ _drill_report() {
     echo "ship: drill — ADR-0027 §2 coverage, computed but not posted" >&2
     {
         echo "  HEAD                  ${sha}"
-        echo "  HEAD tree             ${head_tree}"
+        if [[ -n "$ratify_adr" ]]; then
+            echo "  ADR ratification      HEAD is the one-line ratification flip of"
+            echo "                        ${ratify_adr}; the coverage below is"
+            echo "                        computed over its parent ${content_sha:0:12}"
+            echo "                        (ADR-0165 §3)"
+        fi
+        echo "  content tree          ${head_tree}"
         echo "  PR base branch        ${base_ref}"
         echo "  fetched base tip      $(git rev-parse FETCH_HEAD)"
         echo "  PR merge base         ${expected_base}"
@@ -1325,7 +1381,7 @@ fi
 # review of *this* content.
 if [[ -z "${covering[adversarial]:-}" ]]; then
     die "no adversarial review covering this PR's content
-     (HEAD tree ${head_tree:0:12}, base ${expected_base:0:12})${why}
+     (content tree ${head_tree:0:12}, base ${expected_base:0:12})${why}
      run: just review-codex adversarial"
 fi
 
@@ -1490,6 +1546,24 @@ agg_binary_churn="$(agg_field binary_churn)"
             summary="${summary} · supersedes ${pretty}"
         fi
         echo "_${summary}_"
+        echo
+    fi
+    # ADR-0165 §4: an exemption that is used is disclosed, never silent. The
+    # comment otherwise claims a review covering this head, and here it covers
+    # the head's PARENT — the merge reviewer is the only reader positioned to
+    # notice that a flip commit was not what it claimed, and they can only notice
+    # if the claim is on the page. Same reasoning as §4's drift record below, with
+    # more force: this assertion is the repository's own code speaking about the
+    # repository's own commit.
+    if [[ -n "$ratify_adr" ]]; then
+        echo "> **ADR ratification — exempt from a fresh round (ADR-0165 §3).** The tip"
+        echo "> commit \`${sha:0:12}\` is the one-line ratification flip of"
+        echo "> \`${ratify_adr}\`: the header's \`- Status: Proposed\` line became"
+        echo "> \`- Status: Accepted\`, and no other byte changed — verified by rebuilding"
+        echo "> the file from its parent's (\`scripts/adr_ratify.py check-shape\`), not by"
+        echo "> matching a pattern. The review(s) below were judged against that parent,"
+        echo "> \`${content_sha:0:12}\`, which carries the whole of this PR's reviewable"
+        echo "> content."
         echo
     fi
     # §4's drift record, when any selected artifact was accepted across a moved
