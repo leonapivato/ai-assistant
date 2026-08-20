@@ -1,6 +1,6 @@
 # 167. The gate binds the merge path, the admin bypass is deliberate, and no approval is required
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-20
 
 ## Context
