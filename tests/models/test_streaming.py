@@ -34,7 +34,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import Message, Role
 from ai_assistant.models import PydanticAIStreamingCompleter
 from ai_assistant.models.streaming import (
-    _Cancellations,  # pyright: ignore[reportPrivateUsage]
+    _cancellations,  # pyright: ignore[reportPrivateUsage]
 )
 from ai_assistant.testing import StreamAttempt
 
@@ -396,61 +396,83 @@ class TestCancellationOnTheCleanupPath:
         assert caught.value.retryable is False
         assert caught.value.routable is False
 
-    async def test_the_cleanup_tells_our_cancellation_from_the_run_s(self) -> None:
-        # The predicate the cleanup branches on, asserted in every state rather
+    async def test_the_count_read_before_and_after_is_what_separates_them(self) -> None:
+        # The reading the cleanup branches on, asserted in every state rather
         # than only in the one an integration case happens to reach. Reading it
         # wrong is silent either way: one direction absorbs a real cancellation,
         # the other invents one on an ordinary close.
-        assert not _Cancellations.now().rose_since()
+        assert _cancellations() == 0
 
-        async def cancelled_after_the_reading() -> bool:
-            opened = _Cancellations.now()
-            task = asyncio.current_task()
-            assert task is not None
-            task.cancel()
-            try:
-                await asyncio.sleep(_A_MOMENT)
-            except asyncio.CancelledError:
-                return opened.rose_since()
-            return False  # pragma: no cover - the sleep is always cancelled
-
-        async def cancelled_before_the_reading() -> bool:
-            # The regression: a caller that handled an earlier cancellation and
-            # did not `uncancel()` keeps a standing count, so a live-flag reading
-            # would report every later close of every later stream as cancelled.
+        async def rises_when_cancelled() -> tuple[int, int]:
+            before = _cancellations()
             task = asyncio.current_task()
             assert task is not None
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await asyncio.sleep(_A_MOMENT)
-            opened = _Cancellations.now()
-            return opened.rose_since()
+            return before, _cancellations()
 
-        assert await asyncio.ensure_future(cancelled_after_the_reading())
-        assert not await asyncio.ensure_future(cancelled_before_the_reading())
+        async def stands_still_afterwards() -> tuple[int, int]:
+            # The regression: a caller that handled an earlier cancellation and
+            # did not `uncancel()` keeps a standing count, so a flag reading would
+            # report every later close of every later stream as cancelled.
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await asyncio.sleep(_A_MOMENT)
+            before = _cancellations()
+            await asyncio.sleep(0)
+            return before, _cancellations()
 
-    async def test_a_caller_that_swallowed_an_earlier_cancellation_still_closes(self) -> None:
-        """The same regression, end to end, on the seam rather than the predicate.
+        rising_before, rising_after = await asyncio.ensure_future(rises_when_cancelled())
+        still_before, still_after = await asyncio.ensure_future(stands_still_afterwards())
 
-        A stream read and closed inside a task carrying a standing cancellation
-        count must close like any other. Otherwise every stream that task ever
-        opens afterwards reports a cancellation nobody delivered — ADR-0060's
-        provenance rule broken in the inventing direction rather than the
-        absorbing one.
+        assert rising_after > rising_before
+        assert still_after == still_before
+        assert still_before > 0, "the case must leave a standing count, or it proves nothing"
+
+    @pytest.mark.parametrize("cross_task", [False, True], ids=["same-task", "cross-task"])
+    async def test_a_closer_carrying_a_standing_cancellation_still_closes(
+        self, cross_task: bool
+    ) -> None:
+        """The regression end to end, from the reader's task and from another's.
+
+        A stream closed by a task that already handled a cancellation of its own
+        must close like any other. Otherwise every stream that task ever closes
+        afterwards reports a cancellation nobody delivered — ADR-0060's provenance
+        rule broken in the inventing direction rather than the absorbing one. The
+        cross-task case is the sharper one: an async generator may be closed from
+        a task other than the one that read it, so a baseline taken in the reader
+        would be netted against a closer's unrelated history.
         """
         world = _world(StreamAttempt(deltas=("one", "two", "three")))
+        stream = world.completer.stream(_a_question())
         seen: list[str] = []
 
-        async def swallow_then_stream() -> None:
+        async def swallow_a_cancellation() -> None:
             task = asyncio.current_task()
             assert task is not None
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await asyncio.sleep(_A_MOMENT)
-            async with closing(world.completer.stream(_a_question())) as stream:
-                seen.append(await anext(stream))
 
-        await asyncio.ensure_future(swallow_then_stream())
+        async def close_it() -> None:
+            await swallow_a_cancellation()
+            async with closing(stream):
+                pass
+
+        if cross_task:
+            seen.append(await anext(stream))
+            await asyncio.ensure_future(close_it())
+        else:
+
+            async def read_and_close() -> None:
+                await swallow_a_cancellation()
+                async with closing(stream):
+                    seen.append(await anext(stream))
+
+            await asyncio.ensure_future(read_and_close())
 
         assert seen == ["one"]
         assert world.released == 1
