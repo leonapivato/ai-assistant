@@ -321,6 +321,7 @@ class Harness:
         self,
         *,
         planner: object | None = None,
+        composing: ComposingStage | None = None,
         tools: tuple[ToolDefinition, ...] = (),
         policy: FakeActionPolicy | None = None,
         memory: FakeMemoryStore | None = None,
@@ -456,8 +457,12 @@ class Harness:
         # case assert a reach the engine does not have.
         self.trace_sink = trace_sink if trace_sink is not None else FakeTraceSink()
         self.trace_retention = trace_retention
+        # The terminal composing stage (ADR-0170 §2), overridable so a case can
+        # script what the composer does — refuse, come back blank, or contradict
+        # the step account — without a second harness.
+        self.composing = composing if composing is not None else _composing()
         self.engine = Engine(
-            composing=_composing(),
+            composing=self.composing,
             grant_operations=_grant_operations(),
             connection_operations=_connection_operations(),
             loop=loop,
