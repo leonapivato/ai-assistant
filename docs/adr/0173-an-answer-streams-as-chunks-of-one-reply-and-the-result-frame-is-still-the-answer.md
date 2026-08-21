@@ -14,8 +14,13 @@
   `AssistantEngine`, and one **new sibling Protocol** with the triad
   `CONTRIBUTING.md` → "Adding a Protocol" requires. Every implementation is a
   separate lane against this ADR once it is merged (golden rule 5, ADR-0015 §5).
-- **It partially supersedes ADR-0170, in two named clauses, and its `Status` line
-  and dated note ride this change** (ADR-0070 §1, ADR-0083 §15). §6 replaces §4's
+- **It partially supersedes two ADRs, in four named clauses, and each one's
+  `Status` line and dated note ride this change** (ADR-0070 §1, ADR-0083 §15).
+  **ADR-0085** is superseded twice, in §11 below: §8a's envelope table enumerates
+  the five frame kinds "and no others", and §2 adds a sixth; §8c obliges every
+  implementation to enforce the payload limit "on results before return", and §4's
+  streaming method has no single result to enforce it on. **ADR-0170** is
+  superseded twice, in §§6 and 7. §6 replaces §4's
   clause that `reply_degraded` is "never `True` beside a non-`None` `reply`",
   because streaming creates a shape ADR-0170 could not have: an answer that
   **began and did not finish**. §7 replaces §8's clause naming
@@ -658,6 +663,35 @@ That is stated because ADR-0170 §7 said the opposite for its own change — "be
 changes" — and a lane reading the two ADRs in order would otherwise carry that
 relief forward into a change where it is false.
 
+**Two clauses of ADR-0085 are partially superseded here, and both are about the
+envelope rather than about the surface.**
+
+> **Normative.** ADR-0085 §8a's envelope table admits `chunk` as a sixth value of
+> `kind`, alongside the five it lists. Every other row stands: a chunk frame
+> carries `id` and `payload` like every frame, carries no `method` like every
+> non-request frame, and adds no member to the envelope.
+
+> **Normative.** ADR-0085 §8b's 512-byte envelope reserve is **unchanged and is
+> not recomputed.** `chunk` is five bytes against `connect_ack`'s eleven, so it
+> does not touch the worst case §8b's arithmetic is built on, and §8b's headroom
+> for a later member is untouched.
+
+> **Normative.** ADR-0085 §8c's limit binds every frame this ADR adds, and its
+> enforcement clause is restated for a method that returns an iterator: the limit
+> is enforced **on each value before the frame carrying it is written** — on every
+> `ReplyChunk` and on the terminal `TurnOutcome` alike — in place of "on results
+> before return", which a streaming method has no single point to satisfy. The
+> limit itself, the reserve it is computed from, and its enforcement on arguments
+> and on errors are unchanged.
+
+**Restating §8c rather than exempting streaming from it is the whole point.** The
+clause exists so that both halves refuse the same byte string at the same
+boundary, and an iterator does not weaken that — it only moves *when* the check
+runs, from once before returning to once before each write. §3's ceiling clause is
+the same rule read forward: because the terminal `TurnOutcome` is measured before
+its frame is written, and because no chunk is written whose text that frame cannot
+repeat, a stream cannot publish text the limit would have refused.
+
 > **Normative.** ADR-0131's delivery rules bind unchanged and need no amendment. A
 > streaming turn is not a delivery connection; a poll on a connection that carried
 > one is already refused, and a streaming request on a delivery connection is
@@ -808,6 +842,28 @@ fourth shape and §10's boundary clause were each written to make.
 ADR-0082 §1's test is whether "a reader holding only the earlier ADR [would] now
 act differently, or read one of its clauses more widely than it now holds."
 Applied clause by clause:
+
+**A record is owed on ADR-0085, and this change writes it** — its `Status` line
+and an appended dated note, in the two scopes §11 names. §8a's table states the
+envelope's members "and no others" and enumerates `kind` as "one of `connect`,
+`connect_ack`, `request`, `result`, `error`"; a reader implementing §8a alone
+refuses a `chunk` frame, and §2 makes one valid. That is not a stale roster but a
+live decodability rule — `decode_envelope` refuses an unknown `kind` and
+ADR-0084 §3 closes the connection for it — so the reader acts differently, which
+is ADR-0070 §1's test. §8c's "on results before return" is acted on just as
+directly by an implementer, and §4's method cannot satisfy it as written.
+
+**This is where ADR-0170 §3's argument about ADR-0085 §4 does *not* transfer, and
+the difference is worth stating because the two look alike.** ADR-0170 §3 declined
+to record a supersession for adding a field to a promoted type, on the ground that
+"ADR-0085 §4's decision is *which types promote and in what shape at that
+moment*", with `Disposition`'s two later members as the settled precedent. That
+reasoning holds for a *roster* of types whose authority over later additions was
+never claimed. §8a is not a roster: it is the envelope schema that §8b's reserve is
+computed from and that a decoder implements, and a frame it does not admit is one
+a conforming peer closes the connection over. §8c is an enforcement obligation on
+every implementation. Both are acted on directly, so both are recorded rather than
+disclosed.
 
 **A record is owed on ADR-0170, and this change writes it** — its `Status` line
 and an appended dated note, in the two scopes §6 and §7 name. §4's sentence

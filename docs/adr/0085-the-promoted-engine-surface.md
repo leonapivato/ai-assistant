@@ -1,7 +1,26 @@
 # 85. The promoted engine surface: fifteen methods, twenty-four types, one closed graph
 
-- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`)
+- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator)
 - Date: 2026-07-31
+- Partially superseded: 2026-08-21 by
+  [ADR-0173](0173-an-answer-streams-as-chunks-of-one-reply-and-the-result-frame-is-still-the-answer.md),
+  in the scope the `Status` line names — **two envelope clauses, and nothing about
+  the surface's types or the limit itself.** ADR-0173 §2 adds `chunk` as a sixth
+  `kind`, so §8a's table admits six values where it enumerated five; every other
+  row of that table stands, and a chunk frame carries `id` and `payload` and no
+  `method` exactly as the table already requires of a non-request frame. §8b's
+  **512-byte reserve is unchanged and is not recomputed**: `chunk` is five bytes
+  against `connect_ack`'s eleven, so the worst case §8b's arithmetic is built on
+  does not move, and its headroom for a later envelope member is untouched.
+  Separately, §8c's obligation to enforce the payload limit "on results before
+  return" has no single point to run at on a method returning an async iterator,
+  so ADR-0173 §11 restates it for that case as enforcement **on each value before
+  the frame carrying it is written** — every chunk and the terminal outcome alike.
+  The limit itself, the reserve it is computed from, its whole-payload rather than
+  per-value measurement, and its enforcement on arguments and on errors are all
+  unchanged. Nothing in §§1–7, §9 or §10 is touched. ADR-0173 §§2, 4 and 11 are
+  the operative text; this note records the supersession and does not restate its
+  terms.
 - Partially superseded: 2026-08-05 by ADR-0107 — **two field lists are no longer
   complete and one absolute is no longer true; everything §4a decided about *why*
   the two types differ is untouched.** ADR-0086 §1 bounded `Provenance.evidence`
