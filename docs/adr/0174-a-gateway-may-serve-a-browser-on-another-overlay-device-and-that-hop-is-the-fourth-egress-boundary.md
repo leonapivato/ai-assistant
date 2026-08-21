@@ -21,10 +21,19 @@
 - **It partially supersedes two ADRs, and both records land in this change**
   (ADR-0070 §1, ADR-0082 §1, ADR-0083 §15): **ADR-0124 §1's rule as an
   enumeration**, which authorises three boundaries and calls every other egress a
-  bug, and **ADR-0168 §2's loopback-only bind clause and its one-gateway-one-device
-  clause**, each only as it reaches a separately configured remote browser
-  listener. §12 applies ADR-0070 §1's test clause by clause to every other ADR a
-  reader might expect this to falsify and finds no further record owed.
+  bug, and **four clauses of ADR-0168** — §2's loopback-only bind clause, §2's
+  one-gateway-one-device clause, §4's sole-admitter clause and §6's exclusive
+  record enumeration — each only as it reaches a separately configured remote
+  browser listener. §12 applies ADR-0070 §1's test clause by clause to every other
+  ADR a reader might expect this to falsify and finds no further record owed.
+- **Two of those four were classified as no-record-owed in an earlier draft, and
+  architecture review was right to refuse the classification.** That draft called
+  §4's second admission fact and §6's added record field "additions rather than
+  relaxations". An exclusive enumeration that gains a member is **false**, not
+  widened, and a reader building session-only admission out of §4 now builds the
+  wrong door — ADR-0070 §1's first limb, twice. ADR-0017 §5 refuses "a narrowing
+  of a ratified clause presented as a clarification"; the earlier draft was doing
+  that in the other direction, and §12 now carries the record instead.
 - **Its required review set is adversarial *and* architecture.** It fixes an
   egress boundary and an admission rule, which is the pair ADR-0124 took both
   lenses for, and `CONTRIBUTING.md` makes a change contract-surface when it is
@@ -341,14 +350,24 @@ outcome, the refusal condition and a count, and a loopback peer has no identity
 worth naming. Here there is one, it is attested rather than asserted, and an
 owner reading a refusal learns *which of their devices* was refused.
 
-**Widening ADR-0168 §6's enumeration is an addition to it and not a relaxation of
-it, and the difference is what keeps §6 safe.** §6's enumeration is exclusive —
-"No such record carries anything outside that enumeration" — and it is exclusive
-because an earlier draft's exclusion list would have admitted the utterance out of
-a refused `ask`. Adding one named Tier 2 fact, decidable before the request is
-parsed and about a device rather than about a person's content, leaves that
-property exactly where it was: the record still names what may appear rather than
-what may not, and everything §6 forbids stays forbidden.
+**Adding a field to ADR-0168 §6's enumeration supersedes it, and calling that an
+"addition" was an error an earlier draft of this section made.** §6's enumeration
+is **exclusive** — "No such record carries anything outside that enumeration" —
+and it is exclusive because an earlier draft of *that* ADR used an exclusion list
+which would have admitted the utterance out of a refused `ask`. A sentence saying
+a record carries nothing outside a list does not survive the list gaining a
+member: it becomes false, and a reader holding only §6 rejects a record this ADR
+requires. Architecture review found the misclassification on its first round, and
+§12 carries the record rather than the excuse.
+
+**What the supersession is careful to keep is the enumeration's *form*, which is
+the whole of why §6 is safe.** The record still names what may appear rather than
+what may not, so a later lane adding a request shape nobody has thought of yet
+inherits a closed list. The one new member is a Tier 2 fact about a *device*,
+decidable before the request is parsed, and everything §6 excludes — session
+halves, verifiers, bootstrap values, bodies, paths, query strings, headers,
+cookies, and anything the hub or a model returned — stays excluded, on the remote
+listener exactly as on the loopback one.
 
 **The client-side half of ADR-0124 §4 has no analogue here, and saying so is
 better than manufacturing one.** ADR-0124 §4 requires the *client* to confirm the
@@ -486,11 +505,13 @@ TCP port**, and its §8 argued the figures from the absence of a `0600` bit on
 one. A reader inheriting those clauses on a listener that is not loopback needs
 to know which arguments moved with them. This section runs them.
 
-> **Normative.** Every clause of ADR-0168 §4, §5, §6 and §9 binds the remote
-> browser listener exactly as it binds the loopback one, except as §6, §7 and §8
-> below state otherwise. This ADR restates none of them and modifies none of
-> them, and where a reader finds this ADR and ADR-0168 addressing the same
-> subject on a clause this ADR does not name, **ADR-0168 governs**.
+> **Normative.** Every clause of ADR-0168 §3, §4, §5, §6 and §9 binds the remote
+> browser listener exactly as it binds the loopback one, **except the four §12
+> records as superseded** — §2's two, §4's sole-admitter clause and §6's record
+> enumeration — and except as §6, §7 and §8 below state otherwise. This ADR
+> restates no clause it does not supersede and modifies none, and where a reader
+> finds this ADR and ADR-0168 addressing the same subject on a clause this ADR
+> does not name, **ADR-0168 governs**.
 
 **The two-value session carries over, and the mechanism it defends against is
 unchanged.** ADR-0168 §6 made a session two values "because a cookie is scoped to
@@ -725,11 +746,18 @@ is the ground `gateway_max_hub_connections` already stands on.
 > about a listener, so a configuration that carries one while the listener is off
 > is one no reading makes true, and neither is ignored silently.
 
-> **Normative.** Every element of `gateway_remote_browser_devices` is refused at
-> settings load unless it satisfies the invariant this system already holds an
-> overlay identity to: non-blank, encodable as UTF-8, and at most
-> `MAX_OVERLAY_IDENTITY_BYTES` bytes encoded. The bound is that constant rather
-> than a figure of this ADR's own, so the two cannot drift apart.
+> **Normative.** Every element of `gateway_remote_browser_devices` is held to the
+> invariant this system already holds an overlay identity to — non-blank,
+> encodable as UTF-8, and at most `MAX_OVERLAY_IDENTITY_BYTES` bytes encoded —
+> and the check is **split across two places, because golden rule 2 puts the
+> bound outside `core`**. `Settings` refuses at load what it can decide without
+> importing anything: an element that is blank or has no UTF-8 form. The
+> **gateway refuses at start**, before it binds or discloses a bootstrap value, an
+> element over the byte bound, reading the constant the wire seam owns.
+
+> **Normative.** No component of `core` may import that constant, and no lane may
+> restate its value in `core` to move the check there. The bound has exactly one
+> definition per package that owns one today, and this ADR adds no further copy.
 
 > **Normative.** The list is read as a **set** of identities, compared for
 > equality against the identity §3 obtained. A repeated element changes nothing
@@ -783,18 +811,33 @@ settings file. Adversarial review found the asymmetry on the second round: the
 device list already refused this state and the name list did not, and making them
 alike was the smaller of the two repairs available.
 
-**Validating each identity at load rather than at the door is the same ruling one
-level down, and it reuses a constant rather than restating a number.**
+**Validating each identity before the door rather than at it is the same ruling
+one level down, and it reuses a constant rather than restating a number.**
 `ai_assistant.wire.overlay`'s `_stable_id` already refuses a blank identity, one
 with no UTF-8 form and one over `MAX_OVERLAY_IDENTITY_BYTES` — "an identity that
 cannot be encoded cannot be recorded, compared or reported" — and
 `service/enrolment.py` and `service/admin.py` each apply the same bound where an
 identity is *supplied* rather than obtained. A configured identity failing that
-invariant is one the agent can never report, so without a load-time check the
+invariant is one the agent can never report, so without an up-front check the
 owner's named device is refused at every exchange with nothing saying why: the
 configuration would be silently unsatisfiable, which is the failure the clause
 above exists to prevent, arriving through the element instead of the list.
 Adversarial review found it on the third round.
+
+**Splitting that check across `Settings` and the gateway is not a compromise; it
+is what golden rule 2 requires, and the corpus already splits the neighbouring
+one exactly here.** `MAX_OVERLAY_IDENTITY_BYTES` is defined in
+`ai_assistant.wire.overlay` and in `ai_assistant.service.overlay`, and in neither
+case in `core` — so a `Settings` validator enforcing it would be `core` importing
+a subsystem, which golden rule 2 forbids and `lint-imports` fails on, while a
+`Settings` validator restating `128` would be the second copy the clause above
+refuses. Architecture review found that on its first round, and the resolution is
+ADR-0124 §2's own shape: `core/config.py` refuses the parts of
+`hub_remote_address` that `ipaddress` can decide, and `ai_assistant.service.remote`
+refuses at bind what only the overlay agent knows. One check, two places, each
+where the fact it needs already lives. A gateway that will not start on a
+malformed identity is also ADR-0168 §5's established shape — "a gateway that
+cannot disclose its bootstrap value does not start, and reports why".
 
 **A length figure is declined in the same breath, and the reason is which
 direction the value comes from.** ADR-0168 §8's figures bound what a *caller* can
@@ -1020,25 +1063,47 @@ No record is owed on any other ADR.**
   the `tools/` seam and nothing else; §1 above states that no lane may cite this
   ADR toward them. §4's argument survives and is what licenses this widening, in
   its own words.
-- **ADR-0168 §3, §4, §5, §6 and §9 — used as given, and §5 above makes them
-  binding on the remote listener unchanged.** Nothing is added to any of them and
-  nothing is read more widely, with three exceptions each recorded at the clause
-  that makes it. §3's two pre-session exceptions are unchanged in extent — still
-  exactly those two request classes and nothing else — and gain prior conditions
-  in §4 above, different ones for each: the assets on an attested overlay
-  membership, the bootstrap exchange on a device the owner listed. Both narrow
-  §3's population and neither widens it, so a reader holding only §3 still serves
-  no third thing without a session.
-  §6's admission record gains one permitted Tier 2 fact for records about a
-  connection on the remote listener (§3 above), which adds to an enumeration
-  §6 states as exclusive rather than relaxing what it forbids — every value §6
-  keeps out stays out. §6's content-security-policy clause is applied with the
-  origin §6 above admits rather than a loopback one, which is the clause working
-  rather than changing. §7's `Host` and `Origin` checks are restated for a
-  listener whose bound authority is not loopback (§6 above); the check, its
-  ordering and its reason are §7's, and a record is not owed because §7's own
-  text scopes the `Host` rule to "the loopback names it bound" — on a listener
-  that bound others, a reader following §7 compares against what *it* bound.
+- **ADR-0168 §4's sole-admitter clause — partially superseded (§4), on the same
+  scope.** "A **web session** … is the only thing that admits a browser request."
+  §4 above makes admission on the remote listener turn on **two** facts, so a
+  reader holding only §4 builds a door that admits a browser the gateway's own
+  agent cannot place, and admits a bootstrap exchange from a device the owner
+  never named. That is ADR-0070 §1's first limb. An earlier draft called this an
+  addition rather than a replacement, on the reading that "the only thing that
+  admits" is a claim about **sufficiency** and a second *necessary* fact leaves it
+  true. The reading is defensible and it is not the test: ADR-0070 §1 asks whether
+  the reader acts differently, and this one does. Architecture review found it.
+  **What survives is the rest of §4 entire** — what a session is, its entropy and
+  constant-time comparison, the verifier-only retention, the process-memory table,
+  death with the process, continuous expiry, and refusing rather than evicting at
+  the ceiling all bind the remote listener unchanged (§5 above), and §9 above
+  declines to touch the ceiling's inertness.
+- **ADR-0168 §6's exclusive record enumeration — partially superseded (§3), on
+  the same scope.** "No such record carries anything outside that enumeration."
+  §3 above requires the attested overlay identity on records about a connection on
+  the remote listener, so the sentence becomes false there and a reader holding
+  only §6 rejects a record this ADR requires. **What survives is the whole of §6
+  besides**: the enumeration's exclusive *form*, every value it excludes, the
+  trigger clause naming which decisions are recorded, the rate bound and its
+  collapse key, the retention-free emission, the two-value session, the distinct
+  replaced-cookie fault, the text-not-markup clause and the content-security
+  policy — the last applied with the origin §6 above admits rather than a loopback
+  one, which is the clause working rather than changing.
+- **ADR-0168 §3, §5 and §9 — used as given, and §5 above makes them binding on
+  the remote listener unchanged.** §3's two pre-session exceptions are unchanged
+  in extent — still exactly those two request classes and nothing else — and gain
+  prior conditions in §4 above, different ones for each: the assets on an attested
+  overlay membership, the bootstrap exchange on a device the owner listed. Both
+  **narrow** §3's population and neither widens it, so a reader holding only §3
+  still serves no third thing without a session and is not wrong about anything
+  §3 says. §5 is untouched and §9 above declines to relax it. §9 of that ADR binds
+  the new listener word for word.
+- **ADR-0168 §7 — used as given, and no record is owed.** Its `Host` and `Origin`
+  checks are restated for a listener whose bound authority is not loopback (§6
+  above); the check, its ordering and its reason are §7's. A record is not owed
+  because §7's own text scopes the rule to "the loopback names it **bound**" — on
+  a listener that bound others, a reader following §7 compares against what *it*
+  bound, and acts identically before and after.
 - **ADR-0172 — examined at length, and no record is owed.** Its Revisit clause
   names this decision by name and therefore **fires**; examining a revisit
   condition is not itself an amendment (the ADR-0083 §15 pattern, which ADR-0124
@@ -1144,6 +1209,12 @@ No record is owed on any other ADR.**
   be**, and only in that way: a second listener, off by default, on an overlay
   address the settings validator refuses to let be anything else. The loopback
   listener and every clause governing it are unchanged (§2).
+- **Four clauses of ADR-0168 are partially superseded, each scoped to that second
+  listener** (§12): §2's two, §4's sole-admitter clause and §6's exclusive record
+  enumeration. A reader of ADR-0168 building the loopback gateway is right about
+  every one of them; a reader building the remote one has a second document to
+  read, which is the cost of a boundary the first ADR deferred rather than
+  designed.
 - **The corpus gains a fourth admission rule, and one principle still covers all
   four.** Loopback at the hub refuses a credential, the hub's remote listener
   requires one, the gateway's loopback listener requires a session, and the

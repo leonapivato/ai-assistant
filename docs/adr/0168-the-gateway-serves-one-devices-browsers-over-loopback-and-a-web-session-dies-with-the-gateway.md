@@ -1,12 +1,14 @@
 # 168. The gateway serves one device's browsers over loopback, and a web session is minted at the gateway and dies with it
 
-- Status: Partially superseded by ADR-0174 (§2's loopback-only bind clause and its one-gateway-one-device clause, each only as it reaches a separately configured remote browser listener)
+- Status: Partially superseded by ADR-0174 (§2's loopback-only bind clause, §2's one-gateway-one-device clause, §4's sole-admitter clause, and §6's exclusive record enumeration, each only as it reaches a separately configured remote browser listener)
 - Date: 2026-08-21
-- Partially superseded: 2026-08-21 by ADR-0174 — **two clauses of §2, one
-  listener, and the deferral §2 wrote for exactly this is discharged rather than
-  replaced.** ADR-0174 is the fourth-boundary decision this ADR's §2 deferred by
-  name, taken for `track:web-client` milestone 14 (#1230), whose exit test puts a
-  browser on a phone — a device that cannot host a gateway.
+- Partially superseded: 2026-08-21 by ADR-0174 — **four clauses, one listener,
+  and the deferral §2 wrote for exactly this is discharged rather than replaced.**
+  ADR-0174 is the fourth-boundary decision this ADR's §2 deferred by name, taken
+  for `track:web-client` milestone 14 (#1230), whose exit test puts a browser on a
+  phone — a device that cannot host a gateway. Every replacement below is scoped
+  to a **separately configured remote browser listener**; nothing about the
+  loopback listener this ADR was written for changes.
 
   **Replaced — §2's first clause, only as it reaches a separately configured
   remote browser listener.** "The gateway's browser-facing listener binds a
@@ -47,24 +49,53 @@
   That sentence stays true and now has an answer, which is ADR-0083 §15's stacked
   addition on its own test — the deferral is discharged by the decision it named.
 
-  **Not replaced — §§1, 3–13, none of them.** §3's two pre-session exceptions keep
-  their extent — still exactly those two request classes and nothing else — and
-  gain prior conditions on the remote listener, a different one for each: the
-  assets on an attested overlay membership, the bootstrap exchange on a device the
-  owner listed at the gateway, because §5 has that exchange return "the two
+  **Replaced — §4's sole-admitter clause, on that same scope.** "A **web session**
+  is the gateway's own admission record for one browser … and it is the only thing
+  that admits a browser request." ADR-0174 §4 makes admission on the remote
+  listener turn on **two** facts — an overlay identity the gateway's own agent
+  attests, and the session — and admits the bootstrap exchange only from a device
+  the owner listed at the gateway. A reader holding only §4 builds a door that
+  admits a browser the agent cannot place, and mints a session for whoever holds a
+  phished bootstrap value. ADR-0174 records that an earlier draft of it called
+  this an addition rather than a replacement, reading "the only thing that admits"
+  as a claim about sufficiency that a second *necessary* fact leaves standing; the
+  reading is defensible and ADR-0070 §1's test is whether a reader acts
+  differently, and this one does.
+
+  **Replaced — §6's exclusive record enumeration, on that same scope.** "No such
+  record carries anything outside that enumeration." ADR-0174 §3 requires the
+  attested overlay identity — a Tier 2 fact about a device — on records about a
+  connection on the remote listener, so a reader holding only §6 rejects a record
+  that ADR requires.
+
+  **Not replaced — the whole of §4 and §6 besides, and the form of §6's
+  enumeration most of all.** What a session is, its entropy and constant-time
+  comparison, the verifier-only retention, the process-memory table, death with
+  the process, continuous expiry and refusing rather than evicting at the ceiling
+  all bind the new listener unchanged. §6's enumeration stays a closed list of
+  what may appear rather than a list of what may not, and everything it excludes —
+  session halves, verifiers, bootstrap values, bodies, paths, query strings,
+  headers, cookies, and anything the hub or a model returned — stays excluded on
+  both listeners; so do its trigger clause, its rate bound and collapse key, its
+  retention-free emission, the two-value session, the distinct replaced-cookie
+  fault, the text-not-markup clause and the content-security policy.
+
+  **Not replaced — §§1, 3, 5, 7–13, none of them.** §3's two pre-session
+  exceptions keep their extent — still exactly those two request classes and
+  nothing else — and gain prior conditions on the remote listener, a different one
+  for each: the assets on an attested overlay membership, the bootstrap exchange
+  on a device the owner listed, because §5 has that exchange return "the two
   session values §6 requires" while the assets hand back nothing of the kind. Both
-  narrow §3's population and neither widens it. §4's session, §5's single
-  bootstrap value and one mint per process, and §9's hub-down legibility bind the
-  new listener unchanged, and ADR-0174 §9 declines to relax §5 and leaves #1320
-  and #1329 open; §6's clauses bind it unchanged, its admission record gaining one
-  permitted Tier 2 fact — the attested overlay identity — which adds to an
-  exclusive enumeration rather than relaxing what it forbids; §7's `Host` and
-  `Origin` checks are restated for a listener whose bound authority is not
-  loopback, on §7's own scoping to "the loopback names it bound"; §8's ten figures
-  are the gateway's totals across both listeners rather than each listener's, and
-  its rule that none of those ten is nullable is untouched by three new fields
-  outside its table; §10's in-repo bundle is what ADR-0174 §1 names as the second
-  half of the new boundary; §11, §12 and §13 stand exactly as written.
+  narrow §3's population and neither widens it. §5's single bootstrap value and
+  one mint per process are untouched — ADR-0174 §9 declines to relax them and
+  leaves #1320 and #1329 open — as is §9's hub-down legibility, which binds the
+  new listener word for word. §7's `Host` and `Origin` checks are restated for a
+  listener whose bound authority is not loopback, on §7's own scoping to "the
+  loopback names it bound". §8's ten figures are the gateway's totals across both
+  listeners rather than each listener's, and its rule that none of those ten is
+  nullable is untouched by three new fields outside its table. §10's in-repo
+  bundle is what ADR-0174 §1 names as the second half of the new boundary; §11,
+  §12 and §13 stand exactly as written.
 
 - **This is `track:web-client` milestone 13's decision** (#1230). It takes the
   wire seat ADR-0084 §3 and ADR-0094 §2 hold open — a spoke process that reaches
