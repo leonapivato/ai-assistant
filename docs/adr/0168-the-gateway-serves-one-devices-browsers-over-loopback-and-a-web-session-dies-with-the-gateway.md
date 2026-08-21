@@ -446,10 +446,16 @@ honour a budget it cannot meet rather than silently shortening one.
 > bootstrap exchange and an assistant request; the outcome; and for a refusal,
 > which of §3's, §6's and §7's conditions it failed.
 
-> **Normative.** Failure records are bounded: within one `gateway_record_interval`
-> (§8) each distinct condition is written once, carrying how many times it
-> occurred in that interval, so that a caller able to drive a refusal cannot drive
-> an unbounded number of records.
+> **Normative.** Failure records are rate-bounded: within one
+> `gateway_record_interval` (§8) each distinct condition is emitted once, carrying
+> how many times it occurred in that interval, so that a caller able to drive a
+> refusal cannot drive a record per attempt.
+
+> **Normative.** The record is emitted through the logging this system already
+> configures, and the gateway **retains none of it**. What the gateway holds for
+> the clause above is one count per refusal condition for the current interval and
+> nothing else — a fixed set of integers, reset each interval — and it keeps no
+> history of what it emitted.
 
 > **Normative.** No such record carries anything outside that enumeration — no
 > session half, bootstrap value or verifier; no request body; no path, query
@@ -467,6 +473,22 @@ also more edge state than ADR-0094 §9's permission contemplates, since an
 unbounded log is bounded in neither size nor age. Recording the *decision* rather
 than the request removes the amplification on the admitted path, and the interval
 removes it on the refused one. Architecture review found it on the third round.
+
+**The gateway keeps no log, and that is what makes the state question small
+rather than a retention policy.** `configure_logging` (`src/ai_assistant/core/logging.py`)
+calls `logging.basicConfig` with no file and no handler of its own, so every
+record this system emits goes to standard error and this system retains none of
+it; where it then lands and how long it is kept is the operator's, exactly as it
+already is for the hub and the CLI. So the admission record adds no store, no
+file and no growing artifact. The only state the clauses above create is the
+interval's counters — one integer per refusal condition, reset each interval,
+which is a fixed set fixed in advance. An earlier draft claimed the record was
+bounded "in count and in age" like the session table, which was false of a
+rate limit and is the wrong frame besides; architecture review was right that a
+rate bound is not a size bound, and the answer is that there is nothing retained
+for a size bound to apply to. Whether *this system's logging in general* should
+carry a retention policy is a project-wide question, not a gateway one, and no
+clause here decides it.
 
 **The narrowing is also the closer analogue of what ADR-0124 §7 already does.**
 That section has the hub record "each admission and each refusal with the device
@@ -912,11 +934,16 @@ lane. No record is owed on any of the rest.**
   applied to **both** things this ADR lets the gateway hold. The session table is
   bounded in count and in age (§8), destroyed continuously rather than at a
   checkpoint (§4), and never authoritative — nothing the hub does depends on it,
-  and the hub is not told it exists (§3). The admission record is bounded in the
-  same two dimensions by §6's decision scope and its interval, and it is never
-  authoritative either: no clause of this ADR gives it an effect on whether
-  anything is admitted. An earlier draft left it unbounded, which §9 does not
-  permit and which architecture review named.
+  and the hub is not told it exists (§3). §6's admission record adds no second
+  body of edge state to test against §9, because the gateway **retains none of
+  it**: the record is emitted to the logging this system already configures, which
+  writes to standard error and keeps no file. What §9 does reach there is the
+  interval's counters — one integer per refusal condition, reset each interval —
+  which are bounded in size by a fixed set, bounded in age by the interval, and
+  never authoritative, since no clause here gives them an effect on whether
+  anything is admitted. Two earlier drafts were wrong about this in opposite
+  directions, and architecture review named both: the first obliged a record per
+  request, and the second called a rate limit a bound in size.
 - **ADR-0094 §10a's producer clause.** Examined and found not to reach this. Its
   subject is the deferral it marks — the sensor-spectrum amendment, whose content
   §10 states as "the ephemeral buffer, consent-per-capture, and graduated trigger
