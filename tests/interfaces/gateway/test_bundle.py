@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Final
 
 import pytest
 
@@ -421,14 +422,54 @@ def test_the_page_reads_a_conversation_before_it_forgets_one() -> None:
     assert "window.confirm(" in script
 
 
+#: Every top-level function that calls ``fetch``, and the entry point each is reached
+#: from. A `fetch` rejects where the gateway process has stopped, and the entry point
+#: is where that is caught — `ask` guards the two turn entries it chooses between, and
+#: `relay` is reached from both conversation entries — so the guard is asserted there
+#: rather than at the call.
+_FETCH_SITES: Final = {
+    "startSession": "startSession",
+    "askWhole": "ask",
+    "askStreaming": "ask",
+    "watchDeliveries": "watchDeliveries",
+    "relay": "listConversations",
+}
+
+
+def _functions(script: str) -> dict[str, str]:
+    """Every top-level function in the script, by name, each to the next declaration.
+
+    They are all declared at column zero and nothing else in this file is, so the
+    next declaration is where one ends — enough to ask what a *particular* function
+    does, which counting occurrences across the whole file cannot.
+    """
+    opened = list(re.finditer(r"^(?:async )?function\*? (\w+)\(", script, re.MULTILINE))
+    return {
+        one.group(1): script[
+            one.start() : (opened[index + 1].start() if index + 1 < len(opened) else len(script))
+        ]
+        for index, one in enumerate(opened)
+    }
+
+
 def test_every_fetch_the_page_makes_is_guarded() -> None:
     """A rejected ``fetch`` is the gateway having stopped, which is its own condition
     (ADR-0168 §9) and not silence.
 
-    The milestone-13 bootstrap site is issue #1332's; the sites this decision adds are
-    guarded here, and the count is what keeps a later one from being added unguarded.
+    The bootstrap site is issue #1332's, and the count that used to stand here did not
+    pin it: six mentions of ``GATEWAY_GONE`` falling to five still satisfied
+    ``>= 5``, so deleting that guard outright left this test green. The enumeration
+    is what makes the claim now — a `fetch` in a function not named below fails the
+    first assertion, and an entry point that stopped catching fails the second.
     """
     script = _code("app.js")
+    functions = _functions(script)
 
     assert script.count("await fetch(") == script.count("fetch(")
-    assert script.count("GATEWAY_GONE") >= 5
+    assert {name for name, body in functions.items() if "fetch(" in body} == set(_FETCH_SITES)
+    for called, entry in _FETCH_SITES.items():
+        guard = functions[entry]
+        assert "} catch (" in guard, called
+        assert "fault(GATEWAY_GONE)" in guard, called
+    # `forgetConversation` reaches `relay` too, and is its own entry point.
+    assert "fault(GATEWAY_GONE)" in functions["forgetConversation"]
