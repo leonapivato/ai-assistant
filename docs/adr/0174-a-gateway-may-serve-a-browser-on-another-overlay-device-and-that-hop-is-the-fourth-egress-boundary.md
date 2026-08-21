@@ -15,7 +15,7 @@
   it." This is that decision.
 - **No implementation lands with it.** No `src/`, no `tests/`.
 - **It decides no `core/protocols.py` and no `core/types.py` surface** (§11), so
-  golden rule 5 is not triggered. It adds `Settings` fields (§2, §6), which are
+  golden rule 5 is not triggered. It adds three `Settings` fields (§8), which are
   contract surface in ADR-0054's sense — the position ADR-0084 §3 was in for its
   four transport figures and ADR-0168 §8 for its ten.
 - **It partially supersedes two ADRs, and both records land in this change**
@@ -209,10 +209,10 @@ that existed." Three was a count as well.
 - **Named.** Both halves are artifacts of this repository in one package —
   `src/ai_assistant/interfaces/gateway/` and the bundle it serves (ADR-0168 §10)
   — and no new package is created.
-- **Few.** The recipients are the browsers on devices of the owner's own overlay
-  that hold a session the gateway minted from a value disclosed once on its own
-  standard output. No model, plan, tool or configuration value can add to that
-  set.
+- **Few.** The recipients are the browsers on devices the owner **named at the
+  gateway**, holding a session the gateway minted from a value disclosed once on
+  its own standard output (§4). No model, plan, tool or hub response can add to
+  that set, and no request on any listener can.
 - **Answerable for what it sends.** The gateway sends the front end's own assets
   and the rendering of the calls the promoted engine surface answered for the
   request that browser just made (ADR-0168 §1's biconditional, unchanged), and
@@ -362,29 +362,62 @@ to the device that holds that address or it is speaking to nothing. That is
 weaker than ADR-0124 §4's client clause — it authenticates a *node*, not a
 *value the owner enrolled* — and the residual is that an owner who types the
 wrong overlay address reaches the wrong device of their own overlay and is told
-nothing about it. §6's `Host` rule is what bounds it: the wrong device does not
-serve this listener, and if it serves some other listener the origin's session
-storage is empty, so the exchange fails rather than succeeding somewhere
-unexpected.
+nothing about it.
 
-### 4. Admission is two facts, and membership alone reaches only ADR-0168 §3's two exceptions
+**What that residual reaches is the bootstrap value, and it is §4's device clause
+rather than §6's `Host` rule that stops it becoming a session.** An earlier draft
+of this section said the `Host` rule bounded it — "the wrong device does not serve
+this listener, so the exchange fails" — and that is false about the attack that
+matters. A `Host` rule is a rule *this* gateway applies to requests *it* receives;
+it says nothing about what a **different** overlay member serves. A hostile member
+occupying the address the owner mistyped serves its own look-alike page at its own
+authority, the browser is satisfied, and the owner types the bootstrap value into
+it. Adversarial review found it on the first round, and ADR-0124 §4 had already
+ruled that this class of omission "is the whole of the attack" for the CLI rather
+than a residual to accept.
+
+**Two clauses stop the phished value short of a session, and they close the two
+routes it can take.** Relayed from the hostile member's **own** device, the
+exchange is refused because §4 admits it only from an overlay identity the owner
+named at the gateway, and the attacker's is not one. Relayed through the owner's
+**own** browser — a `fetch` the attacker's page issues to the real gateway — it is
+refused by §6, because that request carries the attacker's `Origin` and not the
+gateway's. What is left is a value an attacker holds and cannot spend, an
+unexchanged value still live at the real gateway, and an owner who believes they
+have used their assistant and has not. That is a phishing residual on a human
+check — read the address the gateway printed — and it is stated rather than
+claimed closed.
+
+### 4. Admission is two facts, and only the assets are served on membership alone
 
 > **Normative.** On the remote browser listener a request is admitted only when
-> both hold: the overlay identity §3 obtained names a device of the overlay the
-> gateway's own agent serves, and the request carries a live web session under
-> ADR-0168 §4 and §6. Neither fact admits a request on its own.
+> both hold: the overlay identity §3 obtained names a device the owner listed in
+> `gateway_remote_browser_devices`, and the request carries a live web session
+> under ADR-0168 §4 and §6. Neither fact admits a request on its own.
 
-> **Normative.** ADR-0168 §3's two pre-session exceptions — the front end's own
-> static assets and the single bootstrap exchange — are served on the first fact
-> alone, and they remain the whole of the exception. Nothing else is served
-> without a live session, and a request arriving without one is refused with a
-> refusal carrying no assistant content, no fact about the hub's state and no
-> fact about whether the hub is reachable, exactly as ADR-0168 §3 requires.
+> **Normative.** ADR-0168 §3's two pre-session exceptions keep their extent and
+> are separated on this listener, because they are not alike in what they hand
+> back. The front end's own **static assets** are served to any device of the
+> overlay the gateway's agent serves. The **bootstrap exchange** is served only to
+> a device the owner listed, and a bootstrap exchange arriving from any other
+> overlay identity is refused without the value being read, compared or consumed.
+> Nothing else is served without a live session, and a request arriving without
+> one is refused with a refusal carrying no assistant content, no fact about the
+> hub's state and no fact about whether the hub is reachable, exactly as ADR-0168
+> §3 requires.
 
-> **Normative.** This ADR creates no enrolment, no grant and no principal. A
-> browsing device is not enrolled under ADR-0124 §6, is not a device in ADR-0124
-> §5's sense of the unit of admission to the hub, is not an ADR-0097 grant, and
-> carries no principal of its own (ADR-0099 §1). The hub's admission stays
+> **Normative.** Listing a device is an act the owner performs **at the gateway**,
+> in that gateway's configuration. No request on any listener may add to the list,
+> extend it or modify it, and no model, plan, tool or hub response may.
+
+> **Normative.** This ADR creates no enrolment, no grant and no principal, and
+> **listing a device is none of the three**. A listed device is not enrolled under
+> ADR-0124 §6 — nothing is minted, nothing durable is recorded and nothing is
+> revoked — is not a device in ADR-0124 §5's sense of the unit of admission to the
+> hub, is not an ADR-0097 grant, and carries no principal of its own (ADR-0099
+> §1). No lane may present the list as an enrolment record, key any rule on it
+> beyond §4's admission, or cite this ADR toward a device-scoped permission,
+> capability or ceiling. The hub's admission stays
 > exactly ADR-0124 §7's two facts about the **gateway's** device, and ADR-0168
 > §3's prohibition on anything about a browser reaching the hub is untouched: no
 > browser identity, session value or per-browser identifier crosses the wire in
@@ -399,9 +432,9 @@ one that transfers.** That section refused to admit the hub's callers on overlay
 membership alone because "networks acquire members: an ACL edit, a shared node, a
 device the owner adds for an unrelated reason. Admitting on membership alone
 would mean the hub admits on a decision the owner never made *at the hub*." The
-same sentence holds one hop out with one word changed: the decision the owner
-makes *at the gateway* is reading the bootstrap value off its standard output and
-exchanging it, and that is what the session records.
+same sentence holds one hop out with one word changed, and the decision the owner
+makes *at the gateway* is now two acts rather than one: listing the device, and
+disclosing the bootstrap value to it.
 
 **So the two facts here are structurally ADR-0124 §7's, with a different second
 fact, and the substitution is what §5 exists to check.** The hub's second fact is
@@ -410,28 +443,41 @@ gateway's is a session minted by an act at the gateway and held in a browser,
 under the ADR-0004 §3, §6 and §7 exemptions ADR-0172 ruled for exactly this class
 of value. This ADR does not reopen any of them.
 
-**Serving the two exceptions on membership alone is the one place this boundary
-admits on one fact, and it is stated rather than hidden.** ADR-0168 §3 makes both
-decidable from the request alone and guarantees that neither "carries assistant
-content, a fact about the hub's state, or a fact about whether the hub is
-reachable" — the assets are the bundle this repository ships to anyone who
-installs it, and the exchange returns only a refusal or the session values a
-correct bootstrap value earns. So what a member of the overlay who never had the
-bootstrap value can obtain from this listener is: our front end, which they could
-have got from the distribution, and the knowledge that a gateway is running. The
-second is the same disclosure ADR-0168 §9 requires the gateway to make on purpose
-— "a browser reaching a running gateway learns that the hub is down rather than
-that nothing is there" — and it is made to a population §2 bounds to the owner's
-own overlay.
+**Splitting the two exceptions is a correction rather than a refinement, and the
+draft it corrects is worth recording because its reasoning is the tempting one.**
+That draft served both on membership alone, on the ground that ADR-0168 §3
+guarantees neither "carries assistant content, a fact about the hub's state, or a
+fact about whether the hub is reachable" — so both were treated as responses that
+carry nothing. **That is true of the assets and false of the exchange.** ADR-0168
+§5 has a successful exchange "return nothing but the two session values §6
+requires", and a session is the whole of what admits a browser to the device's
+authority. Reading the two as alike is what let a hostile overlay member phish a
+bootstrap value from a mistyped address and spend it from its own device (§3), and
+adversarial review found it on the first round. The exception's *extent* is
+unchanged — still exactly two request classes, still nothing else — and what
+changed is that the one which hands back a credential is admitted on a fact the
+owner supplied rather than on one the network did.
 
-**A per-device allow-list at the gateway was considered and is not adopted**,
-which is the shape a reader expecting ADR-0124 §6's enrolment will look for. It
-would add a second owner decision — this device may fetch assets — on top of a
-decision the owner already made by handing that device the bootstrap value, to
-protect two responses that carry nothing. That is ceremony consuming a decision
-nobody asked for, which is ADR-0126 §11's finding and ADR-0172 §3's restatement
-of it. What it would genuinely buy is a bound on the population that can *reach*
-the port at all, and §2 already supplies one.
+**What a listed device is, and what it deliberately is not.** It is the smallest
+form of ADR-0124 §6's insight and nothing more: enrolment there exists because
+"admitting on membership alone would mean the hub admits on a decision the owner
+never made at the hub", and a list of overlay identities is that decision made at
+the gateway. It mints nothing, records nothing durable, and revokes nothing — a
+device leaves the list by being removed from configuration, and any session it
+already holds dies with the gateway process (ADR-0168 §4) rather than being
+revoked. The clause above states in terms that this is not an enrolment, and no
+lane may build one out of it.
+
+**What the assets stay on membership alone for, since the split could have taken
+them too.** They are the bundle this repository ships to anyone who installs it,
+so an overlay member obtains from them nothing they could not obtain from the
+distribution, plus the knowledge that a gateway is running — which is the
+disclosure ADR-0168 §9 requires the gateway to make on purpose, "so that a browser
+reaching a running gateway learns that the hub is down rather than that nothing is
+there". Listing a device before it may fetch a stylesheet would be ceremony
+consuming a decision nobody asked for, which is ADR-0126 §11's finding and
+ADR-0172 §3's restatement of it. The line is drawn at the response that hands back
+a credential, because that is where the two differ.
 
 ### 5. What carries over of ADR-0168 §6's argument, clause by clause
 
@@ -653,6 +699,7 @@ is the ground `gateway_max_hub_connections` already stands on.
 | `Settings` field | Type | Default |
 | --- | --- | --- |
 | `gateway_remote_address` | `str \| None` | unset |
+| `gateway_remote_browser_devices` | `tuple[str, ...]` | empty |
 | `gateway_remote_host_names` | `tuple[str, ...]` | empty |
 
 > **Normative.** `gateway_remote_address` is refused at settings load unless it
@@ -661,6 +708,15 @@ is the ground `gateway_max_hub_connections` already stands on.
 > the five refusals `hub_remote_address` already carries, in the same shape and
 > for the same reasons (ADR-0124 §2). Unset means the remote browser listener is
 > off.
+
+> **Normative.** `gateway_remote_browser_devices` holds the overlay identities
+> §4 admits a bootstrap exchange from, in the stable form the overlay agent
+> reports and this system already compares device identities in (ADR-0124 §4).
+> Empty is the default and means **no device may exchange**, so a gateway
+> configured on serves its assets and mints no remote session until the owner
+> names a device. A configuration setting it non-empty while
+> `gateway_remote_address` is unset is refused at load, because it would express a
+> permission on a listener that is off.
 
 > **Normative.** The remote browser listener binds `gateway_port`, on the address
 > above. No second port figure is added: the two listeners differ in address, so
@@ -685,9 +741,10 @@ is the ground `gateway_max_hub_connections` already stands on.
 
 **Naming the figures rather than leaving them is ADR-0168 §8's ground, taken from
 ADR-0084 §3 and ADR-0083 §7: "a 'bounded default' with no figure is two
-conforming stores handing the same continuation different history".** Two fields
-is the whole of what this boundary adds, and both are switches rather than
-budgets, because §8 above spends no new budget — it shares the ones that exist.
+conforming stores handing the same continuation different history".** Three
+fields are the whole of what this boundary adds, and none of them is a budget:
+two are switches and one is the owner's list of devices, because §8 above spends
+no new budget — it shares the ones that exist.
 
 ### 9. One bootstrap value still, one session still — and this is not ADR-0168 §5's revisit
 
@@ -827,10 +884,15 @@ notification is not networking."
   and #1320 and #1329 hold until that decision.
 - **A device as a permission input, a context facet, or the audit trail's
   "approved from where"** (#920). A browsing device's overlay identity is now a
-  fact the gateway holds, which makes the question more askable and answers no
-  part of it: §4 states in terms that a browsing device is not a principal and
-  carries no grant, and #920's three surfaces are each contract-shaped and owe
-  their own ADRs.
+  fact the gateway holds, and §4 makes one admission turn on a list of them —
+  which makes #920's questions more askable and answers no part of them. §4 states
+  in terms that a listed device is not a principal, not a grant and not an
+  enrolment, and forbids keying any rule on the list beyond that one admission;
+  #920's three surfaces are each contract-shaped and owe their own ADRs. In
+  particular the list is a **gateway-side door policy**, not a permission input:
+  it decides who may exchange a bootstrap value, never what the assistant may do
+  for them, and every browser it admits reaches exactly what the gateway's own
+  device reaches and no more.
 - **Whether the client may accept a name for the hub's destination** (#912).
   Untouched. §6 admits a configured name as a `Host` value only, and states why
   that is a different question.
@@ -904,8 +966,12 @@ No record is owed on any other ADR.**
 - **ADR-0168 §3, §4, §5, §6 and §9 — used as given, and §5 above makes them
   binding on the remote listener unchanged.** Nothing is added to any of them and
   nothing is read more widely, with three exceptions each recorded at the clause
-  that makes it. §3's two pre-session exceptions are unchanged in extent and gain
-  a prior condition in §4 above (§3's population is narrowed, never widened).
+  that makes it. §3's two pre-session exceptions are unchanged in extent — still
+  exactly those two request classes and nothing else — and gain prior conditions
+  in §4 above, different ones for each: the assets on an attested overlay
+  membership, the bootstrap exchange on a device the owner listed. Both narrow
+  §3's population and neither widens it, so a reader holding only §3 still serves
+  no third thing without a session.
   §6's admission record gains one permitted Tier 2 fact for records about a
   connection on the remote listener (§3 above), which adds to an enumeration
   §6 states as exclusive rather than relaxing what it forbids — every value §6
@@ -1028,9 +1094,15 @@ No record is owed on any other ADR.**
   session — because admission never asserts a check that did not happen, and each
   door's answer is decided by what its transport already guarantees.
 - **A browsing device becomes a fact the gateway holds**, attested by its own
-  overlay agent and recorded on its admission decisions. That is a strict
-  improvement on the loopback listener, which had no such fact, and it makes
-  #920's questions more askable while answering none of them (§4, §11).
+  overlay agent, recorded on its admission decisions, and — for the one response
+  that hands back a credential — checked against a list the owner wrote. That is
+  a strict improvement on the loopback listener, which had no such fact, and it
+  makes #920's questions more askable while answering none of them (§4, §11).
+- **The owner acquires one configuration act they did not have**: naming the
+  devices whose browsers may exchange a bootstrap value. It is deliberately the
+  smallest form of ADR-0124 §6's insight — no mint, no durable record, no
+  revocation act — and §4 forbids reading it as an enrolment, a grant or a
+  permission input.
 - **Milestone 14's exit test is reachable, and one thing about it is not settled
   by this decision.** A conversation and an in-page pushed notification on a
   phone need no secure context and are supported. An operating-system notification
@@ -1090,12 +1162,21 @@ No record is owed on any other ADR.**
   decision the owner never made at the gateway. It would also re-export the
   device credential's whole authority to every device on the overlay, which is
   ADR-0168 §3's amplifier argument with a larger amplifier.
-- **Enrol the browsing device at the gateway**, a per-device allow-list standing
-  in for ADR-0124 §6's enrolment. *Rejected in §4.* It would add an owner
-  decision on top of one the owner already made by handing that device the
-  bootstrap value, to protect two responses ADR-0168 §3 guarantees carry nothing
-  — ceremony consuming a decision nobody asked for, which is ADR-0126 §11's
-  finding and ADR-0172 §3's restatement of it.
+- **Serve the bootstrap exchange on overlay membership alone**, on the ground
+  that ADR-0168 §3 guarantees its two pre-session exceptions carry nothing. The
+  position an earlier draft took. *Rejected in §4 after adversarial review.* It is
+  true of the assets and false of the exchange, which ADR-0168 §5 has return "the
+  two session values §6 requires" — so a hostile overlay member at a mistyped
+  address could phish a bootstrap value and spend it from its own device. §4 now
+  admits the exchange only from a device the owner listed, which is the smallest
+  form of the insight ADR-0124 §6 built enrolment out of.
+- **Enrol the browsing device at the gateway**, minting a credential and holding a
+  durable record, so the parallel with ADR-0124 §6 is complete. *Rejected in §4*,
+  and it is the opposite error from the one above: a mint is a second Tier 0
+  secret this milestone declined (ADR-0168 §5), a durable record is edge state
+  ADR-0094 §9 permits only bounded and continuously destroyed, and a revocation
+  act is machinery for a list the owner edits in a file. Naming an identity buys
+  the whole of what §4 needs and none of that.
 - **Require the gateway to read the hub's enrolment record before admitting a
   browsing device**, so the two-fact rule is the hub's own. *Not available, and
   self-defeating besides.* It needs a wire surface that does not exist, ADR-0124
