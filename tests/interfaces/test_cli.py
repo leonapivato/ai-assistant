@@ -14,7 +14,7 @@ import shlex
 from datetime import UTC, datetime, timedelta
 from inspect import unwrap
 from io import StringIO
-from itertools import count
+from itertools import count, product
 from typing import TYPE_CHECKING
 
 import pytest
@@ -44,12 +44,14 @@ from ai_assistant.core.types import (
     Confirmation,
     ContinuationToken,
     CostBasis,
+    CurrentContext,
     DataTier,
     Disposition,
     Evidence,
     ExecutionState,
     FeedbackEvent,
     FeedbackKind,
+    Goal,
     GrantScope,
     HeldNotification,
     Idempotency,
@@ -67,11 +69,13 @@ from ai_assistant.core.types import (
     ObservationReport,
     ObservedProposal,
     PlanStep,
+    Provenance,
     Question,
     QuestionState,
     QueuedQuestion,
     QueueOutcome,
     QuietWindow,
+    ReplyChunk,
     Retirement,
     Reversibility,
     RiskLevel,
@@ -80,9 +84,11 @@ from ai_assistant.core.types import (
     StepOutcome,
     StepStatus,
     SuccessorLink,
+    TimeOfDay,
     ToolCost,
     ToolDefinition,
     TurnOutcome,
+    TurnResult,
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.orchestration import (
@@ -127,10 +133,10 @@ from ai_assistant.wire import TransportError
 from ai_assistant.wire.address import sun_path_limit
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, SourceGrant
+    from ai_assistant.core.types import MemoryRecord, SourceGrant
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
 
@@ -1826,11 +1832,15 @@ def test_forget_command_defaults_to_keeping_the_belief(
 # --- conversations: continuity, the listing, and the deletion (ADR-0074) ---
 
 
-def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
+def _conversation_engine(
+    *, composing: ComposingStage | None = None
+) -> tuple[Engine, FakeConversationStore]:
     """A real ``Engine`` over canonical fakes, plus the conversation index behind it.
 
     The store is handed back so a case can assert what capture actually recorded,
-    rather than inferring it from what the terminal printed.
+    rather than inferring it from what the terminal printed. Unlike :func:`_engine`
+    this one mints a fresh goal id per turn, so it is the one a case driving *two*
+    turns has to use.
     """
     plans = FakePlanStore(now=lambda: AT)
     trail = FakeAuditTrail()
@@ -1860,7 +1870,7 @@ def _conversation_engine() -> tuple[Engine, FakeConversationStore]:
     )
     conversations = FakeConversationStore(now=lambda: AT)
     engine = Engine(
-        composing=_composing(),
+        composing=composing if composing is not None else _composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
         loop=loop,
@@ -2224,6 +2234,434 @@ def test_a_value_sharing_a_line_with_the_adapters_own_text_still_loses_its_newli
 
     assert cli._safe(forged) == "harmless�  \\[dim]Why:\\[/] fabricated"
     assert "\n" not in cli._safe(forged)
+
+
+# --- the streamed answer (ADR-0173 §10) --------------------------------------
+# §14 assigns §10 to this lane: chunks neutralised over the accumulation, the
+# terminal frame's account rendered whether or not chunks were, and §6's fourth
+# shape rendered as an incomplete answer rather than a silent one.
+
+
+#: A split that satisfies §14's "chosen so that neither chunk alone would be
+#: neutralised": Rich escapes only a *complete* tag, so each half passes
+#: ``_safe_prose`` untouched and the join is live markup.
+SPLIT_TAG = ("Answer: [/dim", "] and the rest.")
+
+
+def _rendered_whole(text: str) -> str:
+    """What one write of the whole neutralised answer puts on a console."""
+    buffer = StringIO()
+    Console(file=buffer, force_terminal=False, width=100).print(
+        cli._safe_prose(text), end="", soft_wrap=True, highlight=False
+    )
+    return buffer.getvalue()
+
+
+class _ScriptedStream(FakeAssistantEngine):
+    """An engine whose stream is scripted frame by frame, splits included.
+
+    ``FakeAssistantEngine`` derives its chunks from the outcome's own reply and cuts
+    them at word boundaries, which is what keeps it honest for every other consumer
+    — and is exactly what a test of §10's boundary clause cannot use, because the
+    boundary has to fall inside a markup token. This subclass scripts the frames
+    instead, so a disagreement §3 forbids and a split §10 forbids evading are both
+    reachable from a test.
+    """
+
+    def __init__(
+        self,
+        *chunks: str,
+        outcome: TurnOutcome | None = None,
+        terminal: bool = True,
+        stall: asyncio.Event | None = None,
+    ) -> None:
+        """Script one stream.
+
+        Args:
+            chunks: The chunk texts to yield, in order.
+            outcome: The terminal outcome, or ``None`` to derive one whose ``reply``
+                is the join of ``chunks`` — the agreement §3 describes.
+            terminal: Whether to yield the outcome at all. ``False`` is the shape
+                §4 says cannot happen, which the adapter still has to survive.
+            stall: Waited on after the first chunk, so a reader can be interrupted
+                mid-answer.
+        """
+        super().__init__()
+        self._chunks = chunks
+        self._outcome = outcome
+        self._terminal = terminal
+        self._stall = stall
+        self.stalled = asyncio.Event()
+        self.closed = False
+        self.timeouts: list[timedelta] = []
+
+    def converse_streaming(
+        self,
+        utterance: str,
+        *,
+        timeout: timedelta,
+        conversation_id: str | None = None,
+    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
+        """Yield the scripted frames, recording that the iterator was closed."""
+        self.timeouts.append(timeout)
+        self.calls.append(
+            ("converse_streaming", {"utterance": utterance, "conversation_id": conversation_id})
+        )
+        return self._scripted(utterance, conversation_id)
+
+    async def _scripted(
+        self, utterance: str, conversation_id: str | None
+    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
+        """The frames themselves, closing over ``self`` so the exit is observable."""
+        try:
+            for index, text in enumerate(self._chunks):
+                yield ReplyChunk(text=text)
+                if index == 0 and self._stall is not None:
+                    self.stalled.set()
+                    await self._stall.wait()
+            if self._terminal:
+                yield self._outcome or _outcome_replying("".join(self._chunks), conversation_id)
+        finally:
+            self.closed = True
+
+
+def _outcome_replying(
+    reply: str | None, conversation_id: str | None = None, *, degraded: bool = False
+) -> TurnOutcome:
+    """A turn-carrying outcome with ``reply``, which is the only shape that admits one."""
+    return TurnOutcome(
+        turn=TurnResult(
+            goal=Goal(
+                id="g-1",
+                statement="say something",
+                provenance=Provenance(
+                    source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+                ),
+                created_at=AT,
+            ),
+            context=CurrentContext(
+                now=AT,
+                time_of_day=TimeOfDay.AFTERNOON,
+                is_weekend=False,
+                within_working_hours=True,
+            ),
+            memories=(),
+            plan=ActionPlan(
+                id="g-1-plan",
+                goal_id="g-1",
+                steps=(),
+                created_at=AT,
+                rationale="nothing to do",
+            ),
+        ),
+        conversation_id=conversation_id,
+        reply=reply,
+        reply_degraded=degraded,
+    )
+
+
+def test_the_split_this_lane_pins_is_one_neither_half_would_be_neutralised_at() -> None:
+    """§14 makes the *choice* of split part of the obligation, so it is asserted.
+
+    Without this the boundary test rots into a tautology the moment someone picks a
+    tidier split: a tag that is escaped in either half proves nothing about the join.
+    Rich escapes a complete tag and only a complete tag, which is what makes
+    ``[/dim`` plus ``]`` the adversarial shape rather than merely an awkward one.
+    """
+    first, second = SPLIT_TAG
+
+    assert cli._safe_prose(first) == first, "neither chunk alone is neutralised..."
+    assert cli._safe_prose(second) == second
+    assert cli._safe_prose(first + second) == "Answer: \\[/dim] and the rest."  # ...but the join is
+
+
+async def test_a_markup_token_split_across_a_chunk_boundary_carries_no_live_markup(
+    output: StringIO,
+) -> None:
+    """§10's boundary clause, pinned as §14 words it.
+
+    The chunks arrive already split at the token, so an adapter neutralising each as
+    it comes writes ``[/dim`` and ``]`` — nothing either call would refuse — and puts
+    live markup on the screen. Neutralising the *accumulation* writes ``\\[/dim]``,
+    which Rich renders as text.
+
+    The assertion is made twice over, because either half alone is satisfied by the
+    wrong implementation: the tag is present **as text** (a consumed tag would leave
+    the buffer without it), and the whole stream renders byte-identically to one
+    write of the whole neutralised answer — which a per-chunk implementation cannot
+    do, since ``_safe_prose(a) + _safe_prose(b)`` is not ``_safe_prose(a + b)`` here.
+    """
+    engine = _ScriptedStream(*SPLIT_TAG)
+
+    code = await cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+
+    rendered = output.getvalue()
+    assert code == 0
+    assert "Answer: [/dim] and the rest." in rendered, "shown as text, not consumed as a style"
+    assert rendered.startswith(_rendered_whole("".join(SPLIT_TAG)))
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Answer: [/dim] and on.",
+        "A backslash \\[dim] and on.",
+        "Two lines\r\nand a second.",
+        "An escape \x1b[2J and a bell \x07.",
+        "[red\nbold]still here",
+    ],
+    ids=["tag", "backslash", "crlf", "control", "tag-across-a-break"],
+)
+async def test_every_split_of_an_answer_renders_it_the_way_one_write_would(
+    output: StringIO, text: str
+) -> None:
+    """The property under §10's clause, asserted over *every* boundary in the text.
+
+    §10 does not say "escape carefully near brackets", it says neutralisation is
+    applied to what the adapter accumulated — and the observable form of that is
+    that where the producer chose to cut cannot change a single byte of what is
+    rendered. Driven over each split in turn, so a hold-back rule that happens to
+    work for the one boundary a hand-written case picked does not pass.
+    """
+    expected = _rendered_whole(text)
+    for cut in range(1, len(text)):
+        chunks = [part for part in (text[:cut], text[cut:]) if part.strip()]
+        engine = _ScriptedStream(*chunks, outcome=_outcome_replying(text))
+        output.truncate(0)
+        output.seek(0)
+
+        await cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+
+        assert output.getvalue().startswith(expected), f"split at {cut}"
+
+
+def test_the_settled_prefix_is_one_no_later_text_can_revise() -> None:
+    """What ``_StreamedReply`` writes early it must never need back (ADR-0173 §10).
+
+    Two properties, brute-forced over an alphabet of exactly the characters that
+    make neutralisation depend on what follows. Together they are what licenses
+    writing before the answer is complete: the neutralisation of a settled prefix is
+    a prefix of the neutralisation of the whole, and the settled prefix only grows —
+    so the delta between two of them is always text that has not been shown and will
+    never be contradicted.
+    """
+    alphabet = ("[", "]", "\\", "/", "d", "\r", "\n", "1", "@")
+    for length in range(1, 5):
+        for combination in product(alphabet, repeat=length):
+            whole = "".join(combination)
+            grown = ""
+            for cut in range(len(whole) + 1):
+                settled = cli._settled_prefix(whole[:cut])
+                assert cli._safe_prose(whole).startswith(cli._safe_prose(settled)), whole
+                assert settled.startswith(grown), whole
+                grown = settled
+
+
+async def test_the_step_account_is_rendered_whether_or_not_chunks_were(
+    output: StringIO,
+) -> None:
+    """§10's third clause, on a real turn: the account survives the stream.
+
+    ADR-0170 §6's floor is unchanged by streaming, so the plan listing, the
+    disposition line and #531's exit code are all still produced beside an answer
+    that arrived in pieces.
+    """
+    engine = _engine(tools=(tool(),), composing=_answering("Sent it.", "Sent ", "it."))
+
+    code = await cli._drive_turn(engine, "send it", timeout=PATIENT, approver=lambda _c: True)
+
+    rendered = output.getvalue()
+    assert code == 0
+    assert "Sent it." in rendered
+    assert "Plan:" in rendered
+    assert "Done" in rendered
+    await engine.aclose()
+
+
+async def test_an_answer_that_began_and_did_not_finish_is_shown_and_called_incomplete(
+    output: StringIO,
+) -> None:
+    """ADR-0173 §6's fourth shape, rendered as §10's last clause obliges.
+
+    The stream publishes a chunk and *then* fails, which is past §5's commit
+    boundary, so the outcome carries the text actually yielded beside the flag. Three
+    things are owed at once and the shape before this lane produced none of them: the
+    prose the user has already read is not discarded, the answer is *said* to be
+    incomplete, and the step account is rendered as the record of a step that
+    succeeded — never as a failure of it.
+    """
+    engine = _engine(
+        tools=(tool(),),
+        composing=ComposingStage(
+            model=FakeModelProvider("unused"),
+            streaming=FakeStreamingCompleter(
+                script=(StreamAttempt(deltas=("I sent the note",), fails=True),)
+            ),
+        ),
+    )
+
+    code = await cli._drive_turn(engine, "send it", timeout=PATIENT, approver=lambda _c: True)
+
+    rendered = output.getvalue()
+    assert code == 0, "a composition that stopped is not a failure of the step (§10)"
+    assert "I sent the note" in rendered, "prose already read is not taken back (§6)"
+    assert "incomplete" in rendered
+    assert "no answer could be composed" not in rendered, "that is the shape one along"
+    assert "Done" in rendered
+    await engine.aclose()
+
+
+def test_the_fourth_shape_is_rendered_the_same_way_off_a_one_result_call(
+    output: StringIO,
+) -> None:
+    """The shared renderer, not just the streaming path, reads four shapes off two values.
+
+    ``_render_reply`` is what ``resume`` renders through as well, and it previously
+    returned on ``reply_degraded`` without looking at ``reply`` — so the fourth shape
+    would have printed "no answer could be composed" over an answer that was right
+    there. Pinned here against the renderer directly, because that is the seam the
+    defect was at.
+    """
+    cli._render_reply(_outcome_replying("Half an ans", degraded=True))
+
+    rendered = output.getvalue()
+    assert "Half an ans" in rendered
+    assert "incomplete" in rendered
+
+
+async def test_the_terminal_reply_is_the_answer_where_the_chunks_disagree(
+    output: StringIO,
+) -> None:
+    """§3: "no implementation treats an accumulated chunk sequence as the record".
+
+    A hub whose chunks and terminal ``reply`` disagree cannot be left with the chunks
+    standing as what the assistant said. The prose is already on screen and cannot be
+    recalled, so the adapter disowns it in words and prints the authoritative answer
+    after it — which is the only move available that does not make the wire's value
+    lose to a rendering of it.
+    """
+    engine = _ScriptedStream("You should ", "resign.", outcome=_outcome_replying("Take a walk."))
+
+    code = await cli._drive_turn(engine, "advise me", timeout=PATIENT, approver=lambda _c: True)
+
+    rendered = output.getvalue()
+    assert code == 0
+    assert "Take a walk." in rendered
+    assert "did not confirm the text above" in rendered
+    assert rendered.index("You should resign.") < rendered.index("Take a walk.")
+
+
+async def test_ask_streams_the_conversation_it_is_told_to_continue(
+    output: StringIO,
+) -> None:
+    """Milestone 18's exit shape: a streamed answer, resumed mid-conversation, from the CLI.
+
+    ADR-0173 §8 carries resume identically — the same argument, the same
+    ``UnknownConversationError``, the same route to the composing stage — so what
+    this asserts is that the adapter relays it on the *streaming* entry and that the
+    second turn runs under the conversation the first one minted rather than a fresh
+    one.
+    """
+    engine, conversations = _conversation_engine(
+        composing=_answering("Still here.", "Still ", "here.")
+    )
+
+    first = await cli._drive_turn(engine, "hello", timeout=PATIENT, approver=lambda _c: True)
+    assert "Still here." in output.getvalue(), "the opening turn streamed its answer"
+    opened = (await conversations.recent())[0].id
+    output.truncate(0)
+    output.seek(0)
+
+    second = await cli._drive_turn(
+        engine,
+        "and again",
+        timeout=PATIENT,
+        approver=lambda _c: True,
+        conversation_id=opened,
+    )
+
+    rendered = output.getvalue()
+    assert (first, second) == (0, 0)
+    assert "Still here." in rendered, "the resumed turn streamed its answer too"
+    assert opened in rendered, "and ran under the conversation it was given"
+    assert len(await conversations.recent()) == 1, "no second conversation was started"
+    assert [turn.ordinal for turn in await conversations.turns(opened)] == [1, 2]
+    await engine.aclose()
+
+
+async def test_ask_drives_the_streaming_entry_and_relays_its_budget_unchanged() -> None:
+    """§4 takes exactly ``converse``'s arguments, and ``--timeout`` is still the turn's.
+
+    Asserted on the call rather than on the rendering, because a lane that streamed
+    the answer while quietly dropping the caller's deadline would look identical on
+    screen.
+    """
+    engine = _ScriptedStream("done")
+
+    await cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+
+    assert engine.timeouts == [PATIENT]
+    assert [call[0] for call in engine.calls] == ["converse_streaming"]
+
+
+async def test_reading_to_the_terminal_frame_closes_the_iterator(output: StringIO) -> None:
+    """§4 makes closing the caller's obligation, and it is what hangs the connection up.
+
+    The adapter stops at the terminal frame rather than reading on, so the iterator
+    is left unfinished on purpose — which means the close has to be the adapter's
+    doing. Asserted against the generator's own exit rather than against "no error
+    was raised", since abandoning it raises nothing either.
+    """
+    engine = _ScriptedStream("all ", "done")
+
+    await cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+
+    assert engine.closed
+
+
+async def test_an_interrupted_stream_still_closes_the_iterator(output: StringIO) -> None:
+    """Ctrl-C mid-answer hangs the connection up rather than leaking it.
+
+    A ``KeyboardInterrupt`` under ``asyncio.run`` cancels the task running the turn,
+    so what the adapter has to survive is a cancellation arriving between two chunks.
+    ADR-0173 §9 is why this is only about the socket: the *turn* is not abandoned —
+    the hub runs it to completion and captures it — but the connection is the
+    adapter's to give back.
+    """
+    stall = asyncio.Event()
+    engine = _ScriptedStream("half an ", "answer", stall=stall)
+    turn = asyncio.create_task(
+        cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+    )
+    await engine.stalled.wait()
+
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    assert engine.closed, "the connection is hung up, not left to a generator nobody finished"
+    assert "half an " in output.getvalue(), "and what had arrived was already on screen"
+
+
+async def test_a_stream_that_ends_without_an_outcome_is_reported_not_invented(
+    output: StringIO,
+) -> None:
+    """§4's "always present unless the call raises", met by a producer that broke it.
+
+    Neither implementation of the method can end this way — both read to a terminal
+    frame or fail loudly — so what is pinned is that the adapter says so and exits
+    non-zero rather than fabricating an outcome or letting a traceback out
+    (ADR-0042 §7).
+    """
+    engine = _ScriptedStream("half an answer", terminal=False)
+
+    code = await cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+
+    rendered = output.getvalue()
+    assert code == 1
+    assert "ended without a result" in rendered
+    assert "Traceback" not in rendered
+    assert rendered.index("half an answer") < rendered.index("ended without a result")
 
 
 def test_an_outcome_owing_no_answer_renders_nothing_for_it(output: StringIO) -> None:
