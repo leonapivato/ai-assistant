@@ -1,0 +1,114 @@
+/*
+ * The front end's only stylesheet, served from the gateway's own origin because
+ * ADR-0168 §10 forbids the page loading "any asset, font, style, script or datum
+ * from any origin but the gateway's own". No web font, no CDN, no import.
+ */
+
+:root {
+  color-scheme: light dark;
+  --ink: #16181d;
+  --paper: #fbfbfd;
+  --muted: #5b6270;
+  --line: #d6d9e0;
+  --alarm: #a4232b;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ink: #e8eaf0;
+    --paper: #16181d;
+    --muted: #9aa2b1;
+    --line: #333845;
+    --alarm: #f08a90;
+  }
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.shell {
+  max-width: 44rem;
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
+}
+
+h1 {
+  font-size: 1.35rem;
+  letter-spacing: 0.01em;
+}
+
+h2 {
+  font-size: 1rem;
+  margin: 0 0 0.6rem;
+}
+
+.panel {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 1.1rem 1.2rem;
+  margin: 1.2rem 0;
+}
+
+label {
+  display: block;
+  font-size: 0.85rem;
+  color: var(--muted);
+  margin-bottom: 0.35rem;
+}
+
+input,
+textarea {
+  width: 100%;
+  box-sizing: border-box;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0.5rem 0.6rem;
+}
+
+button {
+  margin-top: 0.7rem;
+  font: inherit;
+  color: var(--paper);
+  background: var(--ink);
+  border: 0;
+  border-radius: 7px;
+  padding: 0.45rem 1.1rem;
+  cursor: pointer;
+}
+
+button[disabled] {
+  opacity: 0.5;
+  cursor: progress;
+}
+
+.hint {
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.rationale {
+  font-weight: 600;
+}
+
+.notice {
+  color: var(--muted);
+  font-size: 0.9rem;
+}
+
+.failed {
+  color: var(--alarm);
+}
+
+.fault {
+  border: 1px solid var(--alarm);
+  border-radius: 10px;
+  padding: 0.8rem 1rem;
+  color: var(--alarm);
+}

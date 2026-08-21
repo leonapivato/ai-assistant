@@ -149,6 +149,7 @@ from ai_assistant import __version__
 from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import (
     AssistantError,
+    ConfigurationError,
     DisplacedProvisioningError,
     IncompleteProvisioningError,
     OversizedValueError,
@@ -183,6 +184,7 @@ from ai_assistant.core.types import (
     encodable_text,
     secret_value,
 )
+from ai_assistant.interfaces.gateway import run_gateway
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.wire import (
     HubClient,
@@ -626,6 +628,26 @@ def main() -> None:
 def version() -> None:
     """Print the installed version."""
     console.print(f"ai-assistant [bold cyan]{__version__}[/]")
+
+
+@app.command()
+def gateway() -> None:
+    """Serve this device's browsers, and print the value one browser starts with.
+
+    A **subcommand** rather than a console script of its own, and that inverts the
+    standing instinct on purpose (ADR-0168 §1). ADR-0084 §6 gave the hub its own
+    script because a subcommand would put it in ``interfaces``, "which would then
+    have to import ``service``" — a rule about where code must live, and one that
+    does not reach a gateway: an interface adapter belongs in ``interfaces``
+    already, and this is the first time that rule has been examined and found not
+    to fire.
+
+    The gateway binds a loopback port on **this** machine and serves the browsers
+    on it. It starts whether or not the hub is reachable, so that a browser
+    reaching it learns the hub is down rather than that nothing is there
+    (ADR-0168 §9), and every session ends when this process does (ADR-0168 §4).
+    """
+    raise typer.Exit(asyncio.run(_serve_gateway()))
 
 
 def _positive_finite_seconds(value: float) -> float:
@@ -2179,6 +2201,75 @@ def _enrolment_secrets(settings: Settings) -> KeyringSecretStore:
         by building it (ADR-0125 §7).
     """
     return KeyringSecretStore(scope=SecretScope.ENROLMENT, installation=str(settings.data_dir))
+
+
+async def _serve_gateway() -> int:
+    """Compose the gateway process and serve until it is stopped (ADR-0168 §1, §9).
+
+    **Nothing is probed.** :func:`_open_engine` probes because a one-shot command
+    that cannot reach the hub should say so before rendering anything; a gateway
+    must do the opposite — "a gateway that refused to start without a hub would
+    present the two failures identically", so it binds regardless and reports the
+    hub's absence to whichever browser asks (ADR-0168 §9).
+
+    The client is built by :func:`_client_for`, the same selection the CLI's own
+    commands use, because the gateway "obtains the hub only through the promoted
+    ``AssistantEngine`` Protocol, by the same client the CLI uses and by the same
+    selection between the loopback and remote transports" (ADR-0168 §1).
+
+    Returns:
+        The process exit code. Stopping the gateway is an ordinary end rather than
+        a failure, so an interrupt exits zero.
+    """
+    try:
+        settings = load_settings()
+        configure_logging(settings)
+        engine = _client_for(settings)
+        await run_gateway(settings=settings, engine=engine, disclose=_disclose_bootstrap)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    except KeyboardInterrupt, asyncio.CancelledError:
+        console.print("[dim]Gateway stopped. Every session ended with it.[/]")
+    return _EXIT_OK
+
+
+def _disclose_bootstrap(value: str, origin: str) -> None:
+    """Print the bootstrap value once, on standard output, and nowhere else (ADR-0168 §5).
+
+    **Written straight to the stream rather than through Rich or the logger, and
+    both halves of that are deliberate.** §5 forbids the value appearing "in a log
+    record, not in an error, not in a response body, and not in any URL a browser
+    transmits to a server", and this system's structured records go to standard
+    output too — so a logged value would be inside the stream anything parsing
+    those records reads. And a console renderer wraps at the terminal's width,
+    which would break a value the owner has to paste back whole.
+
+    §5 also requires that "a gateway that cannot disclose its bootstrap value does
+    not start, and reports why", which is what the refusal below is: a process
+    whose standard output cannot be written to cannot hand the owner the one value
+    that admits a browser, so it does not go on to bind a port nobody can use.
+
+    Args:
+        value: The bootstrap value, disclosed exactly once.
+        origin: Where to open a browser.
+
+    Raises:
+        ConfigurationError: If standard output cannot be written.
+    """
+    try:
+        sys.stdout.write(
+            f"Assistant gateway listening on {origin}\n"
+            f"Bootstrap value (good once, and only for this gateway process):\n"
+            f"{value}\n"
+        )
+        sys.stdout.flush()
+    except OSError as exc:
+        msg = (
+            "the gateway's bootstrap value could not be written to standard output, "
+            "so no browser could be admitted; run it where its output is readable"
+        )
+        raise ConfigurationError(msg) from exc
 
 
 async def _ask(
