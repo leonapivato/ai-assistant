@@ -484,6 +484,15 @@ browser a reconnect — which is free, because a session outlives its connection
 > stream was open when a poll returned, it acknowledges nothing and the entry
 > returns to the outbox when its lease expires (ADR-0131 §3).
 
+> **Normative.** Where there is **no next poll** — because the last delivery stream
+> ended after the write and the delivery connection closed with it (§4, and the
+> clause below) — the delivery is left **unacknowledged**, its lease expires, and
+> the hub offers the entry again (ADR-0131 §3). The gateway opens no poll and holds
+> no connection for the sole purpose of acknowledging, and it carries no
+> `delivery_id` across a period in which no delivery stream was open. So the
+> gateway holds nothing at all whenever no stream is open, and every
+> acknowledgement it owes rides a poll §4 already obliges.
+
 > **Normative.** A `delivery_id` never reaches a browser. It is placed in no value
 > the gateway writes on a stream, in no response body, in no document and in no
 > URL, and no browser request carries one. No browser acknowledges, retires,
@@ -526,6 +535,29 @@ alternative is for the gateway to hold it — which is the store §4 refuses. Cl
 the delivery connection when the last stream ends is what shrinks that window to
 the race itself: ADR-0131 §2a cancels a poll whose connection goes away before the
 selection step and "takes no entry".
+
+**The write-then-disconnect arm is where the acknowledgement rule would otherwise
+have no conforming outcome, and its cost is a duplicate rather than a loss.**
+Architecture review found it: §4 permits a poll only while a stream is open and the
+close clause above ends the delivery connection with the last one, so a delivery
+written to a stream that then goes away has no next poll to be acknowledged on. The
+outcome is now ruled rather than derived — the lease expires and the entry comes
+back — so what the owner may see is one notification twice, which is ADR-0131 §3's
+guarantee behaving exactly as built: "on expiry it returns to the outbox and may be
+delivered again."
+
+**The alternative is available, and declining it is a choice rather than an
+oversight.** ADR-0131 §4 makes an acknowledgement naming anything but an entry's
+"current outstanding delivery" one that "is accepted and does nothing", expressly so
+that a client may "reconnect after any failure and acknowledge blindly" — so a
+gateway that kept the token and spent it on the poll some later browser provokes
+would be safe, and inside `hub_notification_lease` would even suppress the
+duplicate. What it would cost is a value held for a period bounded by nothing the
+gateway controls, because a browser may never come back: edge state that is not
+"bounded in size and in age and destroyed continuously" (ADR-0094 §9), kept to avoid
+a duplicate the corpus already accepts one hop in. Past the lease it buys nothing at
+all, since the token is no longer the entry's current outstanding delivery and the
+acknowledgement does nothing.
 
 ### 6. What a browser reaches is a closed enumeration of five operations
 
@@ -1038,7 +1070,10 @@ differently, or read one of its clauses more widely than it now holds?
   past that, the guarantee is that the notification was written to at least one open
   stream. A browser whose connection dies between the write and the paint loses it
   (§5). Closing that would mean handing a browser the `delivery_id` capability, which
-  ADR-0172 §1 closes its class against.
+  ADR-0172 §1 closes its class against. In the other direction the owner may see one
+  notification **twice**: a delivery written just before the last stream closed is
+  never acknowledged, so its lease expires and the hub offers it again — at-least-once
+  doing what it says, and the gateway holding nothing to prevent it (§5).
 - **The surface a browser reaches is now a list rather than an accident**, and
   adding to it costs a ratified decision (§6). That is what keeps ADR-0174's
   permission to run a gateway on the hub's own machine from quietly handing a browser
