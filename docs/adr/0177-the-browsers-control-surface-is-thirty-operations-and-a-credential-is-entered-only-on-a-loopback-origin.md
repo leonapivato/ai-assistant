@@ -1,6 +1,6 @@
 # 177. The browser's control surface is thirty operations, and a credential is entered only on a loopback origin
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-22
 
 - **This is `track:web-client` milestone 15's control-surface decision** (#1230,
