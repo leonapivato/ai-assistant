@@ -725,6 +725,23 @@ is the ground `gateway_max_hub_connections` already stands on.
 > about a listener, so a configuration that carries one while the listener is off
 > is one no reading makes true, and neither is ignored silently.
 
+> **Normative.** Every element of `gateway_remote_browser_devices` is refused at
+> settings load unless it satisfies the invariant this system already holds an
+> overlay identity to: non-blank, encodable as UTF-8, and at most
+> `MAX_OVERLAY_IDENTITY_BYTES` bytes encoded. The bound is that constant rather
+> than a figure of this ADR's own, so the two cannot drift apart.
+
+> **Normative.** The list is read as a **set** of identities, compared for
+> equality against the identity §3 obtained. A repeated element changes nothing
+> and is not refused; order carries no meaning; and no element is matched by
+> prefix, suffix, pattern or any form of partial comparison.
+
+> **Normative.** No figure bounds the list's length, and none is owed. It is
+> configuration the owner writes, it is not supplied by any peer, and §4 consults
+> it on one request class that ADR-0168 §5 already limits to one exchange per
+> gateway process — so there is no caller who can grow it and no path a large one
+> could be spent on. A lane that measures a real cost may buy a figure then.
+
 > **Normative.** The remote browser listener binds `gateway_port`, on the address
 > above. No second port figure is added: the two listeners differ in address, so
 > one port cannot collide with the other, and a second figure would buy an owner
@@ -765,6 +782,26 @@ process does not do, which is ADR-0083's ruling 4 failure arriving through the
 settings file. Adversarial review found the asymmetry on the second round: the
 device list already refused this state and the name list did not, and making them
 alike was the smaller of the two repairs available.
+
+**Validating each identity at load rather than at the door is the same ruling one
+level down, and it reuses a constant rather than restating a number.**
+`ai_assistant.wire.overlay`'s `_stable_id` already refuses a blank identity, one
+with no UTF-8 form and one over `MAX_OVERLAY_IDENTITY_BYTES` — "an identity that
+cannot be encoded cannot be recorded, compared or reported" — and
+`service/enrolment.py` and `service/admin.py` each apply the same bound where an
+identity is *supplied* rather than obtained. A configured identity failing that
+invariant is one the agent can never report, so without a load-time check the
+owner's named device is refused at every exchange with nothing saying why: the
+configuration would be silently unsatisfiable, which is the failure the clause
+above exists to prevent, arriving through the element instead of the list.
+Adversarial review found it on the third round.
+
+**A length figure is declined in the same breath, and the reason is which
+direction the value comes from.** ADR-0168 §8's figures bound what a *caller* can
+make the gateway hold; this list is what the *owner* wrote, on one request class
+ADR-0168 §5 caps at one exchange per process. Naming a figure for it would be an
+eleventh number defending nothing, which is the move ADR-0168 §8 itself refused
+when it declined "an eighth figure for a queue nothing yet needs".
 
 ### 9. One bootstrap value still, one session still — and this is not ADR-0168 §5's revisit
 
