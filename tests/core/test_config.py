@@ -901,6 +901,23 @@ def test_every_integer_setting_is_discovered() -> None:
         # failure would arrive as a connection refused, which is exactly what a
         # hub that is down looks like.
         "remote_hub_port",
+        # ADR-0168 §8's six integer figures, acknowledged here for the reason
+        # ADR-0084 §3's are — each is refused at load unless strictly positive, and
+        # joining this tuple is what subjects them to the guards below. The ``bool``
+        # one is load-bearing on every one of them, and §8 says why with more force
+        # than the hub's block can: the gateway's port carries no ``0600`` bit, so
+        # ``gateway_max_browser_connections=True`` is a gateway serving one browser
+        # connection at a time while reporting health — "a gateway indistinguishable
+        # from one that is down, which is ADR-0083's ruling 4 failure arriving by the
+        # resource path". ``gateway_port=True`` is ``hub_remote_port``'s case exactly,
+        # one door over, and the lower bound refuses it a second time because port 1
+        # is privileged.
+        "gateway_port",
+        "gateway_max_sessions",
+        "gateway_max_hub_connections",
+        "gateway_max_request_bytes",
+        "gateway_max_browser_connections",
+        "gateway_max_pending_connections",
         # ADR-0093 §7a's four counting caps. Acknowledged here for the reason the
         # transport figures are: each is refused at load outside its range, and
         # joining this tuple is what subjects it to the guards below. The ``bool``
@@ -1212,6 +1229,17 @@ def test_every_duration_setting_is_discovered() -> None:
         "email_reader_interval",
         "email_window_past",
         "email_read_timeout",
+        # ADR-0168 §8's four durations, none of them nullable for the reason
+        # ``hub_read_timeout`` is not: "a gateway with no session expiry, no session
+        # ceiling and no request bound is a resident process that a single local
+        # caller can exhaust". The ``bool`` guard is the difference between a
+        # twelve-hour session and a one-second one, and between an interval that
+        # rate-bounds refusal records and one that emits a record per second — which
+        # is the amplification §6's interval exists to remove.
+        "gateway_session_ttl",
+        "gateway_session_idle_timeout",
+        "gateway_record_interval",
+        "gateway_read_timeout",
     }
 
 

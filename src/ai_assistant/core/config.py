@@ -609,6 +609,21 @@ _MAX_CALENDAR_WINDOW: Final = timedelta(days=3650)
 #: reader's copy, exactly as the calendar's is pinned.
 _MAX_EMAIL_WINDOW: Final = timedelta(days=3650)
 
+#: ADR-0168 §8's named default for :attr:`Settings.gateway_max_request_bytes` — one
+#: mebibyte, bounding a browser request *whole*. Its own constant rather than a
+#: reuse of any frame figure: it "is the gateway's own bound and does not replace
+#: the hub's", so one of them moving is not the other moving.
+_DEFAULT_GATEWAY_REQUEST_BYTES: Final = 1024 * 1024
+
+#: The lowest port ADR-0168 §8 admits for :attr:`Settings.gateway_port`, which is
+#: refused "unless it is a valid non-privileged TCP port". Below 1024 a listener
+#: needs privilege the gateway has no business holding, and a browser reaching one
+#: would be reaching a process that started as root.
+_LOWEST_UNPRIVILEGED_PORT: Final = 1024
+
+#: The highest port TCP can express, and the other half of §8's validity clause.
+_HIGHEST_PORT: Final = 65535
+
 
 class Settings(BaseSettings):
     """Typed application settings.
@@ -1363,6 +1378,157 @@ class Settings(BaseSettings):
             "root or by this client's uid. Ignored when remote_hub_address is unset."
         ),
     )
+
+    # --- The browser gateway (ADR-0168 §8) -------------------------------
+    # The ten figures ADR-0168 §8 names rather than leaving to the implementation,
+    # on the ground it took from ADR-0084 §3, which took it from ADR-0083 §7 and
+    # ADR-0093 §5: "a 'bounded default' with no figure is two conforming stores
+    # handing the same continuation different history", and it "binds with more
+    # force on a limit whose whole job is to refuse".
+    #
+    # **None of them is nullable, and none takes a value meaning "off"** — ADR-0084
+    # §3's reason restated by §8 for a second resident process: "A gateway with no
+    # session expiry, no session ceiling and no request bound is a resident process
+    # that a single local caller can exhaust", and "a one-shot CLI could shrug this
+    # off; a process that runs for weeks cannot."
+    #
+    # **The gateway owes the resource figures with more force than the hub does.**
+    # ADR-0084 §3's own ceilings are "robustness, not secrecy", because "the `0600`
+    # bit already scopes a peer to the owning user". A TCP loopback port carries no
+    # such bit (ADR-0168 §2, §3), so the peer these bound is not hypothetical.
+    #
+    # These are the *spoke's* settings, which is why they sit beside the client's
+    # own and not beside the `hub_*` block: everything named `hub_*` in this file is
+    # a fact about this machine acting as a hub, and a gateway never is one.
+    gateway_port: _IntegerSetting = Field(
+        default=8422,
+        ge=_LOWEST_UNPRIVILEGED_PORT,
+        le=_HIGHEST_PORT,
+        description=(
+            "The loopback TCP port the gateway serves browsers on (ADR-0168 §2, §8). "
+            "A valid non-privileged port; the address is loopback and is not "
+            "configurable, since no Settings value may widen it (ADR-0168 §2)."
+        ),
+    )
+    gateway_session_ttl: _DurationSetting = Field(
+        default=timedelta(hours=12),
+        gt=timedelta(0),
+        description=(
+            "How long a web session admits anything after it was minted, whatever it "
+            "is used for (ADR-0168 §4, §8). Positive. A session ends at the earlier "
+            "of this and gateway_session_idle_timeout, and in any case when the "
+            "gateway process ends."
+        ),
+    )
+    gateway_session_idle_timeout: _DurationSetting = Field(
+        default=timedelta(hours=1),
+        gt=timedelta(0),
+        description=(
+            "How long a web session survives without admitting a request (ADR-0168 "
+            "§4, §8). Positive, and never above gateway_session_ttl."
+        ),
+    )
+    gateway_max_sessions: _IntegerSetting = Field(
+        default=8,
+        gt=0,
+        description=(
+            "How many live web sessions the gateway holds; a mint beyond it is "
+            "refused rather than evicting an existing session (ADR-0168 §4, §8)."
+        ),
+    )
+    gateway_max_hub_connections: _IntegerSetting = Field(
+        default=8,
+        gt=0,
+        description=(
+            "How many connections to the hub the gateway holds at once (ADR-0168 §8). "
+            "A browser request needing one beyond it is refused, naming the limit — "
+            "never queued, and never served by opening a further connection."
+        ),
+    )
+    gateway_max_request_bytes: _IntegerSetting = Field(
+        default=_DEFAULT_GATEWAY_REQUEST_BYTES,
+        gt=0,
+        description=(
+            "The largest browser request the gateway will read — request line, "
+            "headers and body together, not the body alone (ADR-0168 §8). Enforced "
+            "incrementally, before the bytes past it are buffered."
+        ),
+    )
+    gateway_record_interval: _DurationSetting = Field(
+        default=timedelta(minutes=1),
+        gt=timedelta(0),
+        description=(
+            "The interval within which each distinct pair of request class and "
+            "refusal condition is recorded at most once (ADR-0168 §6, §8). Positive. "
+            "What stops a caller able to drive a refusal from driving a record per "
+            "attempt."
+        ),
+    )
+    gateway_read_timeout: _DurationSetting = Field(
+        default=timedelta(seconds=30),
+        gt=timedelta(0),
+        description=(
+            "How long a browser connection may go without completing a request "
+            "before the gateway closes it (ADR-0168 §8). Positive. An unadmitted "
+            "connection is closed this long after it was accepted whatever arrives; "
+            "an admitted one, this long after its last complete request."
+        ),
+    )
+    gateway_max_browser_connections: _IntegerSetting = Field(
+        default=64,
+        gt=0,
+        description=(
+            "How many browser connections the gateway holds at once, admitted and "
+            "unadmitted together; beyond it the listener refuses rather than "
+            "queueing (ADR-0168 §8)."
+        ),
+    )
+    gateway_max_pending_connections: _IntegerSetting = Field(
+        default=8,
+        gt=0,
+        description=(
+            "How many *unadmitted* browser connections the gateway holds at once — "
+            "those carrying no request a live session admitted (ADR-0168 §8). Never "
+            "above gateway_max_browser_connections. The tighter budget keys on "
+            "admission rather than on activity, because admission is the property a "
+            "peer cannot fake."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_gateway_bounds_can_bind(self) -> Settings:
+        """Refuse a gateway bound that can never bind (ADR-0168 §8).
+
+        Two orderings, one reason, which §8 states once and applies twice: an idle
+        timeout above the absolute lifetime "is a limit that can never bind", and so
+        is a pending ceiling above the total connection ceiling. A limit that cannot
+        bind is not a weaker limit but an absent one, and an operator who set it
+        believes they hold a defence they do not — the same argument
+        :meth:`_the_pending_ceiling_can_bind` makes for the hub's own pair.
+
+        Returns:
+            ``self``, once both pairs are ordered.
+
+        Raises:
+            ValueError: If the idle timeout exceeds the session lifetime, or the
+                pending ceiling exceeds the browser-connection ceiling.
+        """
+        if self.gateway_session_idle_timeout > self.gateway_session_ttl:
+            msg = (
+                f"gateway_session_idle_timeout={self.gateway_session_idle_timeout} exceeds "
+                f"gateway_session_ttl={self.gateway_session_ttl}, so the idle bound can "
+                f"never bind; lower it to at most the session lifetime"
+            )
+            raise ValueError(msg)
+        if self.gateway_max_pending_connections > self.gateway_max_browser_connections:
+            msg = (
+                f"gateway_max_pending_connections={self.gateway_max_pending_connections} "
+                f"exceeds gateway_max_browser_connections="
+                f"{self.gateway_max_browser_connections}, so the pending ceiling can never "
+                f"bind; lower it to at most the browser-connection ceiling"
+            )
+            raise ValueError(msg)
+        return self
 
     # --- Model layer -----------------------------------------------------
     # The assistant is model-agnostic; this names the default model the
