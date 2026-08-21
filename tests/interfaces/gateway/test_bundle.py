@@ -104,6 +104,45 @@ def test_the_front_end_never_turns_a_value_into_markup_or_code(sink: str) -> Non
     assert sink not in _code("app.js")
 
 
+def test_the_page_renders_the_answer_beside_the_step_account() -> None:
+    """ADR-0170 §6: the composed answer is rendered "**in addition to** the step
+    account it renders today, never instead of it", and the account "is rendered on
+    a degraded turn too".
+
+    Read off the shipped script for this file's own reason: the gateway carrying
+    ``reply`` is the half of #1337 a Python test can see, and a page that received
+    the answer and rendered nothing would leave the browser exactly where the QA run
+    found it.
+
+    The account's own renderers are asserted to still be reached on the same pass,
+    because "instead of" is the failure the clause names and it would pass a check
+    that only looked for the answer.
+    """
+    script = _code("app.js")
+
+    assert "renderReply(body, outcome);" in script
+    assert "line(body, outcome.reply, " in script
+    assert "outcome.reply_degraded" in script
+    assert "No answer could be composed for this turn" in script
+    assert "line(body, outcome.rationale, " in script
+    assert "renderStep(body, outcome.step);" in script
+
+
+def test_the_answer_keeps_the_line_breaks_it_was_composed_with() -> None:
+    """The stylesheet's half of rendering model prose as text.
+
+    A composed answer is one value inserted with ``textContent`` — the clause above —
+    and a paragraph collapses the newlines in it, so an answer written as two
+    paragraphs or as a list arrives intact and is shown as one run-on line. Shaping
+    it any other way would mean turning the value into markup, which is the one
+    thing this front end never does.
+    """
+    stylesheet = _asset("app.css")
+
+    assert ".reply {" in stylesheet
+    assert "white-space: pre-wrap;" in stylesheet
+
+
 def test_the_header_half_is_held_in_origin_scoped_storage_shared_across_tabs() -> None:
     """§6: "held in browser storage scoped to **scheme, host and port** and shared
     across that origin's tabs".
