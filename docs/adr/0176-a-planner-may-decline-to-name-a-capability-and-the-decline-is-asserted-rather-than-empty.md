@@ -1,6 +1,6 @@
 # 176. A planner may decline to name a capability, and the decline is asserted rather than empty
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-21
 - **Partially supersedes:**
   [ADR-0047](0047-the-model-backed-planner.md) — §4 step 2's requirement that the
