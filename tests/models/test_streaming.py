@@ -36,6 +36,10 @@ from ai_assistant.core.types import Message, Role
 from ai_assistant.models import PydanticAIStreamingCompleter
 from ai_assistant.models.streaming import (
     _cancellations,  # pyright: ignore[reportPrivateUsage]
+    _Delta,  # pyright: ignore[reportPrivateUsage]
+    _Ended,  # pyright: ignore[reportPrivateUsage]
+    _next,  # pyright: ignore[reportPrivateUsage]
+    _Streamed,  # pyright: ignore[reportPrivateUsage]
 )
 from ai_assistant.testing import StreamAttempt
 
@@ -58,6 +62,11 @@ _A_MOMENT: Final = 5.0
 
 #: How many deltas the throttling case reads before it stops.
 _A_FEW: Final = 3
+
+#: More loop turns than the run needs to reach its end, so a case can hand the
+#: event loop back until the run has finished without pinning how many steps that
+#: takes. Bounded rather than `while True` so the failure is a failed case.
+_PLENTY_OF_TURNS: Final = 100
 
 
 def _a_question() -> list[Message]:
@@ -316,6 +325,89 @@ class TestTheStreamingSeamItself:
         completer = PydanticAIStreamingCompleter(default_model="anthropic:not-a-real-model")
 
         assert isinstance(completer, PydanticAIStreamingCompleter)
+
+
+class TestTheLastDeltaOfARunThatFinished:
+    """A delta already queued when the run ends is still the caller's.
+
+    The run is driven beside the iterator, so "the run finished" and "the queue is
+    empty" are two facts and not one, and the reader learns them from two
+    different places. Preferring the queue is what makes the Protocol's
+    concatenation clause hold at the end of a stream rather than merely in the
+    middle of one — the deltas join into the answer, so a dropped tail is a
+    truncated reply that raises nothing anywhere.
+    """
+
+    async def test_a_queued_delta_is_taken_before_a_finished_run_is_believed(self) -> None:
+        """The invariant, held even when the queue's getter loses the race outright.
+
+        **This is the case that goes red without the poll.** The substituted queue
+        holds its getter on an event this case never sets, so the getter cannot
+        win: :func:`asyncio.wait` returns on the already-finished run, and a
+        ``_next`` that read the terminal off the run whenever its getter had not
+        finished reported ``_Ended`` with ``"tail"`` still sitting in the queue.
+
+        Held rather than merely slowed, because "slowed" is not a property a case
+        can state: a getter that suspends once is still ahead of the run's
+        done-callback in the loop's ready queue, so a plausible ``await
+        asyncio.sleep(0)`` substitute passes against the defect and proves
+        nothing. What this stands in for is any scheduling under which the run's
+        completion is serviced before the queue's getter — which CPython's
+        ``call_soon`` ordering avoids and nothing documents.
+        """
+        never = asyncio.Event()
+
+        class HeldGetter(asyncio.Queue[_Delta]):
+            """An ``asyncio.Queue`` whose getter waits on ``never`` before delivering."""
+
+            async def get(self) -> _Delta:
+                await never.wait()
+                return await super().get()  # pragma: no cover - `never` is never set
+
+        deltas: asyncio.Queue[_Delta] = HeldGetter(maxsize=1)
+        deltas.put_nowait(_Delta("tail"))
+
+        async def already_finished() -> _Streamed:
+            return _Ended()
+
+        run = asyncio.ensure_future(already_finished())
+        await run
+
+        assert await _next(deltas, run) == _Delta("tail")
+        # And only then the terminal, so the poll defers the ending rather than
+        # discarding it: a reader still learns the run is over.
+        assert await _next(deltas, run) == _Ended()
+
+    async def test_a_reader_that_pauses_still_receives_the_queued_tail(self) -> None:
+        """The same property end to end, through the real seam.
+
+        **It passes before the fix as well, and is a pin rather than a
+        reproduction.** The precondition it sets up is the one the finding names —
+        the run finished with its last delta still queued, asserted on
+        :attr:`_ProviderWorld.released` so the case cannot pass vacuously by
+        draining a run that never got there — but CPython's scheduling delivers
+        the tail either way, which is why the case above substitutes the queue to
+        get a red. Kept because this is the shape a consumer lane actually depends
+        on, and because it fails on any future rework that drops the tail for a
+        reason other than the scheduling one.
+        """
+        world = _world(StreamAttempt(deltas=("one", "two")))
+        stream = world.completer.stream(_a_question())
+        seen = [await anext(stream)]
+
+        for _ in range(_PLENTY_OF_TURNS):
+            if world.released:
+                break
+            await asyncio.sleep(0)
+
+        # The transport's generator is exhausted, so the run is past every `put`
+        # and "two" is in the queue rather than in a blocked producer.
+        assert world.released == 1, "the run never finished, so the case proves nothing"
+        assert seen == ["one"]
+
+        seen.extend(await _drain(stream))
+
+        assert seen == ["one", "two"]
 
 
 class TestCancellationOnTheCleanupPath:
