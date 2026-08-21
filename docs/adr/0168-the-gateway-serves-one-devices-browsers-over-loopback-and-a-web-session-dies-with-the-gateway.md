@@ -217,10 +217,26 @@ implementation time.
 
 ### 3. A browser session carries the device's whole authority, so it is admitted with that much care
 
-> **Normative.** The gateway serves no browser request it has not admitted under
-> §4. A request arriving without a live session is refused, and the refusal
-> carries no assistant content, no fact about the hub's state, and no fact about
-> whether the hub is reachable.
+> **Normative.** Exactly two kinds of request are served without a live session,
+> and they are the whole of the exception: the front end's own static assets
+> (§10), and the single bootstrap exchange of §5. Neither carries assistant
+> content, a fact about the hub's state, or a fact about whether the hub is
+> reachable.
+
+> **Normative.** Every other browser request is served only when the gateway has
+> admitted it under §4, and a request arriving without a live session is refused
+> — with a refusal that likewise carries no assistant content, no fact about the
+> hub's state, and no fact about whether the hub is reachable.
+
+**The exception is stated as a rule because a bare "serve nothing unadmitted"
+cannot be obeyed.** A browser with no session cannot fetch the page from which
+it would exchange the bootstrap value, and the exchange itself is by definition a
+request no session admits; a rule forbidding both makes §5 unreachable, which is
+the shape ADR-0084 §3 rejected in its own terms — "a rule whose own response
+violates the adjacent rule is not a rule". Adversarial review found it on the
+first round. Enumerating the two rather than carving out "whatever bootstrapping
+needs" is what keeps the exception from growing: both are decidable from the
+request alone, and neither can carry anything the session exists to protect.
 
 > **Normative.** Nothing about a browser session crosses the wire to the hub. The
 > gateway sends no session identity, no session token, and no per-browser
@@ -254,15 +270,15 @@ check, and the session is what checks.
 > grant (ADR-0097), not a principal (ADR-0099 §1), and no surface may present it
 > as any of the three.
 
-> **Normative.** A session token is at least 128 bits drawn from the operating
-> system's cryptographic random source, disclosed to the browser once, and
-> compared in constant time against a verifier from which the token cannot be
-> recovered. The gateway retains the verifier and never the token.
+> **Normative.** Each half of a session (§6) is at least 128 bits drawn from the
+> operating system's cryptographic random source, disclosed to the browser once,
+> and compared in constant time against a verifier from which it cannot be
+> recovered. The gateway retains the verifiers and never the values themselves.
 
-> **Normative.** The session table is process memory alone. No session, token or
-> verifier is written to any database this system opens, to any file, to any log
-> record, to any audit record, or into any error message or diagnostic the
-> gateway emits.
+> **Normative.** The session table is process memory alone. No session, session
+> value or verifier is written to any database this system opens, to any file, to
+> any log record, to any audit record, or into any error message or diagnostic
+> the gateway emits.
 
 > **Normative.** Every session ends when the gateway process ends. A session does
 > not survive a gateway restart, and the gateway reconstructs no session from
@@ -313,6 +329,13 @@ to the milestone that actually asks for them.
 > exchange consumes it, and after it the gateway mints no further session until
 > its process is restarted.
 
+> **Normative.** The bootstrap exchange is the only request by which a session is
+> minted, and it is the only request other than a static asset the gateway serves
+> without one (§3). It carries the bootstrap value and nothing else, it returns
+> nothing but the two session values §6 requires, and a failed exchange discloses
+> only that it failed — never whether the value was well-formed, whether one is
+> still outstanding, or whether a session already exists.
+
 > **Normative.** A gateway that cannot disclose its bootstrap value does not
 > start, and reports why.
 
@@ -334,12 +357,26 @@ the shape ADR-0124 §6 argued against on the credential it *did* mint. It become
 the right conversation when the roadmap asks for it, which it does by name at
 milestone 16 ("session persistence"), and §12 defers it there.
 
-### 6. Where the token lives in the browser, and what the bundle may never do
+### 6. A session is two values, because a cookie is not scoped to a port
 
-> **Normative.** The session token reaches the browser only as a cookie marked
-> `HttpOnly` and `SameSite=Strict`, scoped to the gateway's own origin. It is
-> never placed in a response body, never in `localStorage`, `sessionStorage` or
-> IndexedDB, and never in a URL.
+> **Normative.** A session is admitted only on **two** values presented together
+> — a **cookie half** the gateway set, and a **header half** the front end sends
+> — and each is minted with the entropy §4 requires. Neither admits a request
+> alone, and a request carrying one and not the other is refused exactly as one
+> carrying neither is.
+
+> **Normative.** The cookie half is marked `HttpOnly` and `SameSite=Strict`, is
+> not readable by any script, and carries no persistent expiry, so that closing
+> the browser ends it.
+
+> **Normative.** The header half is held in browser storage scoped to **scheme,
+> host and port** and shared across that origin's tabs, and it is sent only as a
+> request header the front end sets. It is never placed in a cookie, in a URL, or
+> in storage that outlives the origin's own scope.
+
+> **Normative.** Neither half is placed in any response body except the bootstrap
+> exchange's own reply (§5), and neither is placed in a URL, in a log record, or
+> in any error the gateway emits.
 
 > **Normative.** The front end inserts every value the hub returned into the page
 > as **text** and never as markup, and executes nothing derived from one.
@@ -348,17 +385,41 @@ milestone 16 ("session persistence"), and §12 defers it there.
 > that permits scripts, styles, fonts, images, media and connections from its own
 > origin alone, and permits no inline script.
 
-**`HttpOnly` is chosen over a token the front end holds, and the trade is stated
-rather than assumed.** A bearer token in a header is immune to cross-site request
-forgery and must then be stored somewhere script can read it; a cookie is
-readable by no script and must then be defended against forgery, which §7 does.
-The asymmetry that decides it is what the page renders: an assistant's answer is
-**model output**, and a model is not a trusted source of markup. A front end that
-one day renders an answer carelessly turns a script-readable token into an
-exfiltrated one, and that token is the device's whole authority (§3). The second
-and third clauses are the same defence from the other end, and all three are
-cheap enough that taking only one of them would be a choice to explain rather
-than a saving.
+**Two halves, because a cookie is scoped to a host and not to a port, and one
+half alone leaks the device's whole authority to any local process.** This is a
+property of the cookie mechanism rather than of an implementation choice: a
+cookie set by `http://127.0.0.1:8422` is presented to `http://127.0.0.1:9000` as
+well, because the two differ only in a component cookie scope does not have. So
+another local user who binds any other port on the same host and gets the owner's
+browser to make one request to it receives the session — and §7's checks cannot
+help, because that request never reaches the gateway at all. A single-cookie
+design would therefore have shipped the exact bypass §3's session exists to
+prevent, reachable by a process that never had to guess anything. Adversarial
+review found it on the first round.
+
+**The header half closes it because web storage *is* origin-scoped where a
+cookie is not**, so the value at `127.0.0.1:8422` is unreadable from
+`127.0.0.1:9000`, and a request carrying it is set by the front end rather than
+attached by the browser. A page on another local port that dials the gateway
+with credentials still fails twice over: §7 refuses its `Origin`, and it has no
+header half to send.
+
+**The cookie half is kept rather than dropped, and what it buys is the
+exfiltration half of the trade.** A token the front end holds is immune to
+cross-site forgery and must live somewhere script can read; a cookie is readable
+by no script and must be defended against forgery, which §7 does. The asymmetry
+that decides it is what the page renders: an assistant's answer is **model
+output**, and a model is not a trusted source of markup. So a value stolen out of
+storage — by a front end that one day renders an answer carelessly — is not on
+its own a session, because the half that admits alongside it is one no script can
+read.
+
+**The residual is stated rather than argued away: script running on the gateway's
+own origin defeats both halves**, because it need not read either — it can simply
+issue requests the browser will authenticate. That is true of every
+browser-resident credential and is not closable by choosing a different one. What
+bounds it here is the last two clauses, the session's ceiling and expiry (§8),
+and the fact that it dies with the gateway process (§4).
 
 ### 7. Origin and host are checked before the session is consulted
 
@@ -372,12 +433,17 @@ than a saving.
 > response and honours no cross-origin preflight.
 
 **The host check is what closes DNS rebinding, which is the specific attack a
-loopback listener attracts.** A page the owner visits can resolve a name it
-controls to `127.0.0.1` and then speak to the gateway with the owner's browser as
-the confused deputy — and because the request is then same-origin from the
-browser's point of view, `SameSite` does not see it and the cookie rides along.
-Refusing a `Host` the gateway did not bind is what makes that request fail, and
-it costs one comparison.
+loopback listener attracts, and being exact about what it does and does not do is
+worth more than the shorter sentence.** A page the owner visits from a name the
+attacker controls can have that name re-resolve to `127.0.0.1`; the browser then
+treats `http://that-name:8422/…` as **same-origin with the attacking page**, so
+the page may read the responses. What it does *not* get is a session: the cookie
+half is scoped to the host the gateway was reached at and the header half to that
+origin's storage, and neither belongs to the attacker's name — so §3 refuses it
+already. The `Host` check is what refuses it one step earlier, on a fact decidable
+from the request alone rather than on the session logic being right, and it is
+what keeps §3's two pre-session exceptions from being readable by a page that is
+not the gateway's own. It costs one comparison.
 
 **Running both checks before the session read is not fussiness.** A refusal that
 depends on whether a session exists is a refusal that discloses whether one
@@ -669,11 +735,13 @@ differently, or read one of its clauses more widely than it now holds?
 - **ADR-0017 §1.** Already replaced by ADR-0124 §1, which is what §2 above reads;
   §§2–9 are not engaged by a loopback listener and no clause of them is read
   either way.
-- **ADR-0004 §1 and §3.** A session token and a bootstrap value are Tier 0, and
-  §3's clauses stay true of them word for word: neither is stored "in the memory
-  database", neither reaches "a committed file", and neither is read through a
+- **ADR-0004 §1 and §3.** Both halves of a session and the bootstrap value are
+  Tier 0, and §3's clauses stay true of them word for word: none is stored "in the
+  memory database", none reaches "a committed file", and none is read through a
   path §3's `SecretStore` sentence governs, since the gateway holds no Tier 0
-  value at rest at all (§4). The device credential the gateway *does* read stays
+  value at rest at all (§4). What the *browser* holds is held by software this
+  system neither writes nor chooses the storage of, and §6 bounds it to what the
+  browser's own origin scope and session lifetime already destroy. The device credential the gateway *does* read stays
   exactly where ADR-0124 §6 put it, through the Protocol ADR-0124 §6 requires.
   ADR-0004 §7's gating clause is not engaged: no exemption beyond ADR-0124 §6's
   narrow one is taken, claimed or needed.
@@ -700,6 +768,11 @@ differently, or read one of its clauses more widely than it now holds?
   the gateway requires a session — because admission never asserts a check that
   did not happen, and each door's answer is decided by what its transport already
   guarantees.
+- **A session is two values rather than one**, because a cookie is scoped to a
+  host and not to a port and would therefore be presented to any other local
+  service on `127.0.0.1`. That is a property of the browser's own mechanism, so
+  it constrains every later browser-facing surface this track builds and not just
+  this one (§6).
 - **A browser session is exactly as powerful as the device it sits behind**, and
   the hub cannot tell two of them apart. That is stated as a rule rather than
   left as a property, so that no later lane builds on an isolation that does not
@@ -770,12 +843,17 @@ differently, or read one of its clauses more widely than it now holds?
   which is the shape ADR-0124 §6 spent a clause arguing against, and durable
   sessions then owe §13's `VISION.md` argument on harder ground. Deferred to
   milestone 16 rather than refused outright.
-- **A bearer token the front end holds in `localStorage`.** Immune to
-  cross-site request forgery, so §7's checks would matter less. *Rejected in §6*:
-  it is script-readable, the page renders model output, and the token is the
-  device's authority. The cookie's forgery exposure is closable by two header
-  checks; the bearer token's exfiltration exposure is closable only by the front
-  end never making a rendering mistake.
+- **One value, in a cookie alone.** The obvious design and the one an earlier
+  draft of §6 carried. *Rejected in §6, on a fact rather than a preference*: a
+  cookie is scoped to a host and not to a port, so any other local user who binds
+  another port on `127.0.0.1` and draws the owner's browser to it is handed the
+  session — and §7 cannot intervene, because that request never reaches the
+  gateway. It would have shipped the bypass §3 exists to prevent.
+- **One value, in an origin-scoped header alone.** Closes the port leak, and
+  needs no cookie. *Rejected in §6*: it must live where script can read it, the
+  page renders model output, and that value would then be the device's whole
+  authority in one exfiltrable place. Keeping a cookie half that no script can
+  read costs one `Set-Cookie` and means a stolen storage value is not a session.
 - **Evict the oldest session when the ceiling is reached.** Friendlier. *Rejected
   in §4* on ADR-0131 §2's reasoning: it hands any local caller a silent lever to
   log the owner out, and the eviction is indistinguishable from an ordinary
