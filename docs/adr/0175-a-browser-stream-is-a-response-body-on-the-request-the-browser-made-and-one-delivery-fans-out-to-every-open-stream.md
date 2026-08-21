@@ -43,9 +43,18 @@
 
 ### What milestone 14 asks for, and what is already ruled
 
-#1230's milestone 14 reads: "conversation and notifications — streaming chat;
-conversation list / resume / forget; the delivery connection (`next_notification`,
-ADR-0131) held open — the first push consumer."
+Milestone 14 reads, in `docs/roadmap.md` and on #1230: "**14 — conversation and
+notifications.** Streaming chat; conversation list, resume and forget; the delivery
+connection held open (`next_notification`, ADR-0131) — the first push consumer."
+
+**"Resume" there is a conversation and not a turn**, and the two are different
+methods this ADR treats differently, so the distinction is drawn before §6 and §10
+appear to disagree. Resuming a *conversation* is reading it (`conversation`) and
+continuing it (`converse` or `converse_streaming` carrying a `conversation_id`),
+which the shipped gateway's one engine call already does, and §6 enumerates all
+three of those. `AssistantEngine.resume` is a different method: it
+resumes a **parked turn** awaiting a confirmation, it travels with
+`pending_confirmations` and the CONFIRM prompt, and §10 defers it with them.
 
 Almost every mechanism that sentence names is ratified and most of it is built.
 
@@ -527,14 +536,16 @@ selection step and "takes no entry".
 > which no browser argument reaches, and which only §4's poll originates.
 
 > **Normative.** Every other operation the promoted surface carries is unreached
-> from a browser, and no lane may add one without its own ratified decision. In
-> particular ADR-0168 §12's inheritance to milestone 15 is untouched and is not
-> read as lifted by ADR-0174's deployment permission: the five connection
-> operations, `resume` and `pending_confirmations`, the grant surface, the belief
-> and question surfaces, and the notification review surface — `notifications`,
-> `dismiss_notification`, `forget_notification`, `notification_preferences` and
-> `set_notification_preferences` — are milestone 15's, and a gateway dialling its
-> hub over loopback reaches none of them from a browser (ADR-0174 §11).
+> from a browser, and no lane may add one without its own ratified decision.
+> ADR-0168 §12's inheritance to milestone 15 is **the five connection operations**,
+> which is the one it names, and that inheritance is untouched and is not read as
+> lifted by ADR-0174's deployment permission. The rest of milestone 15's surface is
+> unreached on this clause's own terms rather than on §12's: `resume` and
+> `pending_confirmations` with the CONFIRM prompt they serve, the grant surface, the
+> belief and question surfaces, and the notification review surface —
+> `notifications`, `dismiss_notification`, `forget_notification`,
+> `notification_preferences` and `set_notification_preferences`. A gateway dialling
+> its hub over loopback reaches none of them from a browser (ADR-0174 §11).
 
 > **Normative.** This ADR creates no principal, no grant and no per-browser scope,
 > and no operation above is conditioned on which browser asked. ADR-0099 §1's
@@ -546,9 +557,9 @@ selection step and "takes no entry".
 own reason.** That section made its record "an enumeration rather than an
 exclusion list, because an exclusion list was wrong here", and "naming what may
 appear is the only form that stays right when a later lane adds a request shape
-nobody has thought of yet." The promoted surface has thirty-one operations today
-and gains one with ADR-0173; a browser surface defined by what it excludes gains
-every one of them silently.
+nobody has thought of yet." The promoted surface is large and still growing —
+ADR-0173's lane added an operation to it inside this milestone — and a browser
+surface defined by what it excludes gains every one of them silently.
 
 **A closed enumeration is what ADR-0168 §1's biconditional ranges over, not a
 contradiction of it, and the distinction is worth stating because the two clauses
@@ -820,9 +831,14 @@ what this decision supports."
   (ADR-0130), which is a different act from the delivery acknowledgement §5 keeps
   inside the gateway, and conflating them is the mistake this deferral exists to
   prevent.
-- **`resume`, `pending_confirmations` and the CONFIRM prompt.** Milestone 15 names
-  them. A browser turn that parks is rendered as a park and the owner resumes it at a
-  terminal, which is what the shipped front end already tells them.
+- **`resume`, `pending_confirmations` and the CONFIRM prompt.** Milestone 15 owns
+  the prompt and these two are what serve it. This is the `resume` that resumes a
+  **parked turn**, and not the "resume" milestone 14's own line names, which is
+  resuming a conversation and is already §6's (Context). A browser turn that parks
+  is rendered as a park and the owner resumes it at a terminal, which is what the
+  shipped front end already tells them — in terms: "The assistant parked this step
+  for confirmation. The gateway authors no permission ruling, so answer it with
+  'assistant resume' at a terminal."
 - **Multiplexing.** The other half of ADR-0084 §3's reserved second job stays
   reserved and unspent at both edges; §1 keeps one exchange per stream.
 - **Resuming an interrupted stream.** ADR-0173 §13 declines it and names its
