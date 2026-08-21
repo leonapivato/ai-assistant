@@ -440,6 +440,20 @@ general over the surface.
 > coalesce. A stream that yields no non-blank text at all is the blank-completion
 > case ADR-0170 §8 classifies, and degrades identically.
 
+> **Normative.** Coalescing **preserves the answer's text**. A delta that is empty
+> or wholly whitespace is joined to the text adjacent to it, never discarded, so
+> the concatenation of the yielded `ReplyChunk` texts equals the concatenation of
+> the deltas — but for whitespace leading or trailing the whole answer, which the
+> stage strips as `ComposingStage` strips it today.
+
+**That clause exists because the obvious reading of "coalesce" loses words.** A
+provider yielding `"hello"`, `" "`, `"world"` must not emit the middle delta as a
+`ReplyChunk` of its own, since `NonBlankEncodableText` refuses it — and an
+implementation that therefore *drops* it produces `"helloworld"`. The blank delta
+is not noise to be filtered; it is a separator the model emitted, and it belongs
+to the chunk on either side of it. §14 pins the case, because every fake that
+yields tidy word-sized deltas hides it.
+
 **ADR-0143 §1 already ruled this exact fork, and its three grounds transfer.** It
 introduced `BatchCompleter` as "a **new Protocol** … No member is added to
 `ModelProvider`", on the module docstring's own guideline ("prefer adding a new
@@ -883,6 +897,13 @@ takes the triad first, because the rest is written against it.
 > UTF-8 encoding is refused at the seam rather than surfacing later as a validation
 > error from `ReplyChunk` construction.
 
+> **Normative.** The wire lane pins §5's coalescing clause on an **interleaved**
+> stream, not only on a blank one: a provider yielding `"hello"`, `" "`, `"world"`
+> produces chunks whose join and a terminal `reply` that are both `"hello world"`.
+> An implementation that drops the blank delta yields `"helloworld"` and fails
+> this test, which is the whole reason it is named rather than left to a fake that
+> emits tidy word-sized deltas.
+
 > **Normative.** The wire lane lands §1's frame sequence with tests pinning: that
 > every frame of one answer carries the request's correlation id; that a chunk
 > frame names no method; that the terminal frame is the last; that a client
@@ -960,6 +981,28 @@ live decodability rule — `decode_envelope` refuses an unknown `kind` and
 ADR-0084 §3 closes the connection for it — so the reader acts differently, which
 is ADR-0070 §1's test. §8c's "on results before return" is acted on just as
 directly by an implementer, and §4's method cannot satisfy it as written.
+
+**No record is owed on ADR-0085 §1 or §3 for §4's added method, and the corpus
+has settled that four times.** §1 says `AssistantEngine` carries "the fifteen
+request methods below and nothing else" and §3 lists those fifteen signatures, so
+a sixteenth looks like it contradicts them. Four ADRs have already added twelve —
+ADR-0130 §9 five, ADR-0131 §4 `next_notification` as "the twenty-fifth method",
+ADR-0139 §2 `standing_grants` as the twenty-sixth, and ADR-0151 §1 five connection
+operations — taking the tree to thirty-one, and **not one of them recorded a
+supersession against ADR-0085**, whose `Status` line named only ADR-0107 before
+this change. The mechanism the corpus uses instead is the one ADR-0124 §9 names:
+"any change to the promoted surface's method set" bumps `PROTOCOL_VERSION`, and
+"adding a method bumps, and that is the honest consequence rather than an
+oversight." The running note in `wire/envelope.py` is where each addition is
+recorded, against the ADR that decided it. §11 above does exactly that, and this
+ADR opens no fifth way of doing it.
+
+**The consequence is disclosed rather than hidden**, as ADR-0170 §3 disclosed the
+same shape: ADR-0085 §1's count and §3's listing already read short against the
+tree by sixteen methods, and after this ADR by seventeen. That divergence is not
+this ADR's to repair — it predates it by four decisions — and #1226's merge-time
+numbering practice, not a supersession chain, is what keeps the surface's true
+membership discoverable from `wire/surface.py`'s reflective `METHODS`.
 
 **This is where ADR-0170 §3's argument about ADR-0085 §4 does *not* transfer, and
 the difference is worth stating because the two look alike.** ADR-0170 §3 declined
