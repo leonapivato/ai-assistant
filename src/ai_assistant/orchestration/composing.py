@@ -734,17 +734,38 @@ def _render_plan(
     the stage the plan in terms. They are quoted all the same: a span this system
     authored can still carry a newline, and §2's non-forgeability is a property of
     the assembler rather than a judgement about the span's author.
+
+    **The rationale is rendered on a decline too, and there it is the whole of the
+    plan's content** (#1355). On a plan with steps the rationale supplements: each
+    step carries its own ``intent`` and ``capability``, so the steps themselves say
+    what was decided. A decline has no steps, so ADR-0176 §3 makes ``rationale``
+    the only thing the persisted plan says — the sole record of *why* no capability
+    was named — and requires it non-blank for exactly that reason. Dropping it here
+    would hand the stage "none was needed" with the reason removed, which is the
+    one thing ADR-0170 §5 exists to stop: a stage left to infer what it was not
+    told. ADR-0176 §6 endorses the *engine*'s empty-plan branch and the truth of
+    this branch's wording; it rules nothing about which of the plan's fields this
+    function renders, and the defect predates it.
+
+    The rationale line is built once for both paths, so the two cannot drift apart
+    in wording or in provenance marking. Its placement differs by design: on a
+    decline it follows the "Nothing" line, because there it is the reason for that
+    line rather than a preamble to steps that follow.
     """
+    rationale = (
+        []
+        if plan.rationale is None
+        else [f"  the planner's stated rationale: {_quoted_span(plan.rationale)}"]
+    )
     if not plan.steps:
         return [
             "What the assistant decided to do:",
             "  Nothing: the planner produced no steps for this turn, so no action was "
             "taken and none was needed.",
+            *rationale,
         ]
     never_driven = {one.id for one in undriven}
-    lines = ["What the assistant decided to do:"]
-    if plan.rationale is not None:
-        lines.append(f"  the planner's stated rationale: {_quoted_span(plan.rationale)}")
+    lines = ["What the assistant decided to do:", *rationale]
     for index, planned in enumerate(plan.steps, start=1):
         if planned.id in never_driven:
             mark = "NOT DRIVEN AT ALL — nothing was attempted for this step"
