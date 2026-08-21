@@ -34,6 +34,13 @@ def timers() -> Timers:
 #: interval it covers; the request's class; the outcome; and, for a refusal, the
 #: condition it was refused on and the number of times that class and that
 #: condition occurred together in that interval."
+#:
+#: **``device`` is the one member ADR-0174 §3 adds**, and only for a record about a
+#: connection on the remote browser listener. It is in this set rather than exempted
+#: from it, because §3's permission is an addition to an enumeration that stays
+#: exclusive: everything §6 excludes — session halves, verifiers, bootstrap values,
+#: bodies, paths, query strings, headers, cookies, and anything the hub or a model
+#: returned — is excluded on both listeners still, which is what this set checks.
 _PERMITTED = frozenset(
     {
         "event",
@@ -45,8 +52,14 @@ _PERMITTED = frozenset(
         "outcome",
         "condition",
         "count",
+        "device",
     }
 )
+
+#: Two identities of the shape an overlay agent reports, so a case can tell "the
+#: right device" from "a device".
+_PHONE = "nPHONE01CNTRL"
+_LAPTOP = "nLAPTOP1CNTRL"
 
 
 def _recorder(clock: Clock, timers: Timers) -> AdmissionRecorder:
@@ -216,13 +229,20 @@ def test_every_recorded_member_is_one_adr_0168_section_6_permits(
         assert set(record) <= _PERMITTED, record
 
 
-def test_the_four_request_classes_and_six_conditions_are_the_whole_enumeration() -> None:
+def test_the_four_request_classes_and_seven_conditions_are_the_whole_enumeration() -> None:
     """Both enumerations are "fixed in advance" and total (ADR-0168 §6).
 
-    The classes are §1's four kinds of request; the conditions are the ones §6
-    names — §3's, §4's, §5's, §6's and §7's — and §8's are deliberately not among
-    them, since "nothing [is recorded] for a refusal on any other ground, §8's
-    size bound included".
+    The classes are §1's four kinds of request and stay four — ADR-0175 §12 declined
+    a fifth for a delivery stream, and ADR-0174 adds none either, because a second
+    listener changes which door a request may arrive at rather than what kind of
+    request it is.
+
+    The conditions are the ones ADR-0168 §6 names — §3's, §4's, §5's, §6's and §7's
+    — plus ADR-0174 §4's, which is the first one a *listener* rather than a session
+    decides. §8's are deliberately absent still, since "nothing [is recorded] for a
+    refusal on any other ground, §8's size bound included"; so is ADR-0174 §3's
+    unobtainable identity, which "reaches no clause of ADR-0168 §3, §4, §5 or §6 at
+    all" and so has no condition to be recorded under.
     """
     assert {member.value for member in RequestClass} == {
         "asset",
@@ -237,6 +257,7 @@ def test_the_four_request_classes_and_six_conditions_are_the_whole_enumeration()
         "cookie-half-mismatch",
         "session-ceiling",
         "bootstrap-exchange-failed",
+        "device-not-listed",
     }
 
 
@@ -254,3 +275,100 @@ def test_a_record_names_a_class_and_an_outcome_always(clock: Clock, timers: Time
         assert record["outcome"]
     refusals = [one for one in records if one["outcome"] == "refused"]
     assert all(one["condition"] for one in refusals)
+
+
+# --- ADR-0174 §3: the one field a remote connection adds ---------------------
+
+
+def test_a_loopback_record_carries_no_device_member_at_all(clock: Clock, timers: Timers) -> None:
+    """§3's permission is scoped: "an addition… for records written about a
+    connection on this listener, **and to no other record**".
+
+    Omitted rather than emitted as ``None``, so a loopback record carries ADR-0168
+    §6's enumeration unchanged rather than §6's enumeration plus an empty member —
+    which is what keeps a reader of §6 right about every record the loopback gateway
+    they built writes.
+    """
+    recorder = _recorder(clock, timers)
+
+    with structlog.testing.capture_logs() as records:
+        recorder.session_minted()
+        recorder.refused(RequestClass.ASSET, RefusalCondition.HOST_NOT_BOUND)
+        recorder.flush()
+
+    assert records
+    assert all("device" not in record for record in records)
+
+
+def test_a_remote_mint_names_the_device_it_was_exchanged_from(clock: Clock, timers: Timers) -> None:
+    """ADR-0124 §7 records "each admission… with the device it named", and this is
+    the first door of the gateway's that has one to name."""
+    recorder = _recorder(clock, timers)
+
+    with structlog.testing.capture_logs() as records:
+        recorder.session_minted(device=_PHONE)
+
+    assert records[0]["device"] == _PHONE
+    assert records[0]["outcome"] == "session-minted"
+
+
+def test_a_remote_refusal_names_which_of_the_owners_devices_was_refused(
+    clock: Clock, timers: Timers
+) -> None:
+    """§3: "an owner reading a refusal learns *which of their devices* was refused".
+
+    Two devices meeting the same condition are two records rather than one count of
+    two, because a single collapsed record could not tell the owner that — which is
+    the whole reason §3 records the identity at all.
+    """
+    recorder = _recorder(clock, timers)
+
+    with structlog.testing.capture_logs() as records:
+        recorder.refused(RequestClass.BOOTSTRAP, RefusalCondition.DEVICE_NOT_LISTED, device=_PHONE)
+        recorder.refused(RequestClass.BOOTSTRAP, RefusalCondition.DEVICE_NOT_LISTED, device=_LAPTOP)
+        recorder.flush()
+
+    assert {record["device"] for record in records} == {_PHONE, _LAPTOP}
+    assert [record["count"] for record in records] == [1, 1]
+
+
+def test_one_device_meeting_one_condition_repeatedly_is_still_one_record(
+    clock: Clock, timers: Timers
+) -> None:
+    """The rate bound ADR-0174 §12 keeps whole, in the direction that matters.
+
+    What ADR-0168 §6's bound bounds is what a *caller* can drive: "what stops a
+    caller able to drive a refusal from driving a record per attempt". One device
+    driving one condition a hundred times is one record carrying a hundred, exactly
+    as it was before the key gained a device.
+    """
+    recorder = _recorder(clock, timers)
+
+    with structlog.testing.capture_logs() as records:
+        for _ in range(100):
+            recorder.refused(
+                RequestClass.ASSISTANT, RefusalCondition.NO_LIVE_SESSION, device=_PHONE
+            )
+        recorder.flush()
+
+    assert len(records) == 1
+    assert records[0]["count"] == 100
+    assert records[0]["device"] == _PHONE
+
+
+def test_the_same_pair_on_both_listeners_is_two_records(clock: Clock, timers: Timers) -> None:
+    """A loopback refusal and a remote one are not one another's count.
+
+    They are decided at different doors on different populations — every local
+    process on one, the owner's overlay devices on the other — so a gateway that
+    added them together would report a number about neither.
+    """
+    recorder = _recorder(clock, timers)
+
+    with structlog.testing.capture_logs() as records:
+        recorder.refused(RequestClass.OTHER, RefusalCondition.HOST_NOT_BOUND)
+        recorder.refused(RequestClass.OTHER, RefusalCondition.HOST_NOT_BOUND, device=_PHONE)
+        recorder.flush()
+
+    assert len(records) == 2
+    assert {record.get("device") for record in records} == {None, _PHONE}

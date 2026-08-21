@@ -20,11 +20,30 @@ _respond` is where that holds: a static asset, the bootstrap exchange, an
 unadmitted request and a refused one each return before :meth:`Gateway._ask`, the
 only method on this class that touches the engine.
 
-**The listener is loopback and nothing else** (ADR-0168 §2). The address is
-:data:`_LOOPBACK`, a constant of this module rather than a setting, so there is no
-configuration that could have it bind a wildcard, an interface or an overlay
+**The loopback listener is loopback and nothing else** (ADR-0168 §2). The address
+is :data:`_LOOPBACK`, a constant of this module rather than a setting, so there is
+no configuration that could have it bind a wildcard, an interface or an overlay
 address — which is the stronger form of §2's "a configuration that would have it
 bind anything else is refused at load rather than bound".
+
+**A second listener may serve browsers on the owner's other devices, and it is off
+unless it is configured on** (ADR-0174). It is the fourth egress boundary §1 of
+that ADR authorises: the gateway's remote browser transport, bound to an overlay
+address the owner configured and reachable only over an overlay satisfying
+ADR-0124 §2. :data:`_LOOPBACK` stays a constant through all of it, because §2 of
+ADR-0174 supersedes ADR-0168 §2 only "as it reaches a **separately configured**
+remote browser listener" — the loopback listener is bound whether or not this one
+is, on the same address, under every clause of ADR-0168 §2 that survives. A
+gateway with no ``gateway_remote_address`` behaves byte for byte as it did.
+
+**What the second listener adds is a fact the first one never had.** Before serving
+anything on it — a static asset and the bootstrap exchange included — the gateway
+asks the overlay agent on its **own** machine who holds the connecting address, and
+takes that identity from nothing the peer asserts (ADR-0174 §3). Admission is then
+two facts rather than one (§4): the device is one the owner listed in
+``gateway_remote_browser_devices``, *and* the request carries a live web session.
+The assets alone are served on overlay membership, because they are the bundle this
+repository ships to anyone who installs it.
 
 **A browser reaches a closed enumeration of five operations** (ADR-0175 §6):
 ``converse``, ``converse_streaming``, ``recent_conversations``, ``conversation``
@@ -60,7 +79,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import structlog
 
-from ai_assistant.core.errors import AssistantError
+from ai_assistant.core.errors import AssistantError, ConfigurationError
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
@@ -99,17 +118,29 @@ from ai_assistant.interfaces.gateway.sessions import (
     mint_value,
     verifier,
 )
-from ai_assistant.wire.errors import TransportError
+from ai_assistant.wire.errors import OverlayIdentityUnavailableError, TransportError
+from ai_assistant.wire.overlay import (
+    CLIENT_AGENT_SOCKET,
+    MAX_OVERLAY_IDENTITY_BYTES,
+    local_agent,
+)
 
 if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
     from collections.abc import Awaitable, Callable, Mapping
 
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import AssistantEngine
+    from ai_assistant.wire.overlay import OverlayAgent
 
 _log = structlog.get_logger(__name__)
 
-#: The only address this gateway binds (ADR-0168 §2). Not a setting, deliberately.
+#: The address the **loopback** listener binds (ADR-0168 §2). Not a setting, and
+#: still not one after ADR-0174: §2 of that ADR supersedes ADR-0168 §2's bind clause
+#: only as it reaches "a separately configured remote browser listener", and keeps
+#: the loopback listener bound "whether or not this one is, under every clause of
+#: ADR-0168 §2 that this ADR does not supersede". So no configuration moves *this*
+#: address, and the remote address is a second field rather than a widening of the
+#: first — which is what makes ADR-0168 §2's reader right about the door they built.
 _LOOPBACK: Final = "127.0.0.1"
 
 #: The paths the browser-facing surface uses. ADR-0168 §12 leaves the surface to
@@ -207,7 +238,17 @@ _REFUSAL_STATUS: Final[Mapping[RefusalCondition, tuple[int, str]]] = {
     RefusalCondition.COOKIE_HALF_MISMATCH: (409, "Conflict"),
     RefusalCondition.SESSION_CEILING: (429, "Too Many Requests"),
     RefusalCondition.BOOTSTRAP_EXCHANGE_FAILED: (400, "Bad Request"),
+    # ADR-0174 §4. `403` rather than `401`, and the distinction is the one the two
+    # status codes exist for: the caller is authenticated — the gateway's own agent
+    # attested which device this is — and that device is not one the owner listed.
+    # A `401` would invite a browser to present something, and there is nothing it
+    # could present that would change the answer.
+    RefusalCondition.DEVICE_NOT_LISTED: (403, "Forbidden"),
 }
+
+#: How many parts a peer address must have before its host and port can be read.
+#: An IPv6 ``peername`` is a four-tuple, so this is a floor rather than a length.
+_ADDRESS_PARTS: Final = 2
 
 #: The bundle's paths and media types (ADR-0168 §10). The gateway "serves only
 #: assets that shipped in the installed distribution", so the map is fixed here
@@ -218,6 +259,70 @@ _BUNDLE: Final[Mapping[str, tuple[str, str]]] = {
     "/app.css": ("app.css", "text/css; charset=utf-8"),
     "/app.js": ("app.js", "text/javascript; charset=utf-8"),
 }
+
+
+def _authority(host: str, port: int) -> str:
+    """One ``host:port`` authority, in the form a browser writes it in a `Host`.
+
+    Bracketed for IPv6, because that is what a browser sends and what ADR-0174 §6
+    compares literally — an unbracketed ``fd7a::1:8422`` is not an authority any
+    browser produces, and a set holding one would refuse every real request.
+
+    Args:
+        host: The address or name.
+        port: The port.
+
+    Returns:
+        The authority.
+    """
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def _check_the_remote_listener_can_serve(settings: Settings, *, agent: OverlayAgent | None) -> None:
+    """Refuse a remote browser listener that could never admit anything (ADR-0174 §8).
+
+    Two conditions, both stay-down and both cheaper here than at the door:
+
+    - **An identity over the byte bound.** ``Settings`` refuses a blank element and
+      one with no UTF-8 form; this is §8's other half, "reading the constant the wire
+      seam owns" rather than restating it in ``core`` — which golden rule 2 forbids,
+      because ``MAX_OVERLAY_IDENTITY_BYTES`` lives in ``ai_assistant.wire.overlay``
+      and ``core`` may import nothing. An identity failing the invariant is one the
+      agent can never report, so the owner's named device would be refused at every
+      exchange with nothing saying why.
+    - **No agent.** §3 makes the agent the sole source of a browsing device's
+      identity and refuses every connection whose identity cannot be obtained, so a
+      gateway configured on with no agent binds a door that answers nobody.
+
+    Args:
+        settings: The loaded configuration.
+        agent: The overlay agent, or ``None``.
+
+    Raises:
+        ConfigurationError: On either condition.
+    """
+    if settings.gateway_remote_address is None:
+        return
+    if agent is None:
+        msg = (
+            "gateway_remote_address is set, so the gateway serves browsers on the "
+            "overlay and must take each one's device identity from the overlay agent "
+            "on this machine (ADR-0174 §3) — but no agent was supplied. Compose the "
+            "gateway with one, or unset ASSISTANT_GATEWAY_REMOTE_ADDRESS"
+        )
+        raise ConfigurationError(msg)
+    for position, identity in enumerate(settings.gateway_remote_browser_devices):
+        size = len(identity.encode("utf-8"))
+        if size > MAX_OVERLAY_IDENTITY_BYTES:
+            msg = (
+                f"gateway_remote_browser_devices[{position}] encodes to {size} bytes, over "
+                f"the {MAX_OVERLAY_IDENTITY_BYTES} an overlay identity may occupy — no "
+                f"overlay this system accepts produces one, so it could never equal an "
+                f"identity the agent reports and the device it names could never exchange "
+                f"a bootstrap value (ADR-0174 §8). Use the stable identity your overlay "
+                f"agent reports for that device"
+            )
+            raise ConfigurationError(msg)
 
 
 def packaged_bundle() -> Mapping[str, tuple[bytes, str]]:
@@ -239,17 +344,35 @@ def packaged_bundle() -> Mapping[str, tuple[bytes, str]]:
 
 @dataclass(eq=False)
 class _Connection:
-    """One browser connection, and the only fact §8's ceilings turn on.
+    """One browser connection: which door it arrived at, and who holds the far end.
 
     Compared by identity — ``eq=False`` — because the population §8 bounds is a
     set of *connections* and two of them in the same state are not one connection.
+    ADR-0174 §8 makes that population the gateway's rather than each listener's, so
+    both listeners put their connections in the same set and the ceilings are
+    totals: "a connection on either listener counts against the same figure".
 
     "A browser connection is **admitted** from the moment it carries a request the
     gateway admitted under §4, and **unadmitted** before that… no rule of this ADR
-    returns an admitted connection to the unadmitted population" (ADR-0168 §8).
+    returns an admitted connection to the unadmitted population" (ADR-0168 §8) —
+    read with ADR-0174 §4 on the remote listener, where admitting a request takes
+    two facts rather than one.
+
+    Attributes:
+        admitted: Whether it has carried an admitted request.
+        remote: Whether it arrived on the remote browser listener. The whole of what
+            selects ADR-0174's rules, and ``False`` reproduces ADR-0168's gateway
+            exactly.
+        device: The overlay identity ADR-0174 §3 obtained for it, attested by the
+            gateway's own agent and taken from nothing the peer asserts. ``None`` on
+            a loopback connection, which has no such fact — and a remote connection
+            never reaches a request with it still ``None``, because §3 refuses and
+            closes one whose identity could not be obtained.
     """
 
     admitted: bool = False
+    remote: bool = False
+    device: str | None = None
 
 
 @dataclass
@@ -364,7 +487,7 @@ class _Streamed:
 class Gateway:
     """Serves one device's browsers, and reaches the hub as any spoke does."""
 
-    def __init__(  # noqa: PLR0913 — one keyword per injected seam: config, hub, clock, timer, bundle, entropy
+    def __init__(  # noqa: PLR0913 — one keyword per injected seam: config, hub, clock, timer, bundle, agent, entropy
         self,
         *,
         settings: Settings,
@@ -372,20 +495,45 @@ class Gateway:
         now: Callable[[], datetime],
         defer: Defer,
         bundle: Mapping[str, tuple[bytes, str]],
+        agent: OverlayAgent | None = None,
         mint_value: Callable[[], str] = mint_value,
     ) -> None:
         """Build a gateway that has minted nothing and bound nothing.
 
+        **This is "start" for ADR-0174 §8's second refusal**, and it is before the
+        two things §8 names: nothing has been bound and no bootstrap value has been
+        minted, let alone disclosed. §8 splits the identity invariant across two
+        places "because golden rule 2 puts the bound outside ``core``" — ``Settings``
+        refuses a blank element and one with no UTF-8 form, both decidable without
+        importing anything, and the gateway refuses an element over
+        ``MAX_OVERLAY_IDENTITY_BYTES`` by reading the constant the wire seam owns.
+        Refusing in the constructor rather than in :func:`run_gateway` is what makes
+        it unskippable: every composition of a gateway runs it, not just the one this
+        module ships.
+
         Args:
-            settings: The loaded configuration, read for ADR-0168 §8's ten figures
-                and for nothing else.
+            settings: The loaded configuration, read for ADR-0168 §8's ten figures,
+                ADR-0175 §8's eleventh, ADR-0174 §8's three fields, and nothing else.
             engine: The hub, as the promoted ``AssistantEngine`` (ADR-0168 §1).
             now: The clock, injected.
             defer: How a session's death and a record interval's close are
                 scheduled, injected for the same reason.
             bundle: The front end's assets, already read.
+            agent: The overlay agent on **this** machine, which ADR-0174 §3 makes the
+                sole source of a browsing device's identity. Required when
+                ``gateway_remote_address`` is set and unused when it is not —
+                :func:`run_gateway` builds the real one, and a test supplies a fake.
             mint_value: The entropy source for the bootstrap value and both
                 session halves.
+
+        Raises:
+            ConfigurationError: If the remote browser listener is configured on with
+                no agent to satisfy ADR-0174 §3, or if a listed device's identity is
+                over the byte bound the wire seam holds every overlay identity to.
+                Both are stay-down deployment faults (ADR-0083 §5): a gateway that
+                bound the door anyway would refuse every connection on it, or refuse
+                the owner's own named device at every exchange with nothing saying
+                why.
         """
         self._settings = settings
         self._engine = engine
@@ -415,8 +563,25 @@ class Gateway:
             release=self._give_hub_slot,
         )
         self._bootstrap: _Bootstrap | None = None
-        self._authority = f"{_LOOPBACK}:{settings.gateway_port}"
+        self._authority = _authority(_LOOPBACK, settings.gateway_port)
         self._origin = f"http://{self._authority}"
+        self._agent = agent
+        self._remote_address = settings.gateway_remote_address
+        #: Read as a set, "compared for equality against the identity §3 obtained. A
+        #: repeated element changes nothing and is not refused; order carries no
+        #: meaning; and no element is matched by prefix, suffix, pattern or any form
+        #: of partial comparison" (ADR-0174 §8).
+        self._listed_devices = frozenset(settings.gateway_remote_browser_devices)
+        #: What a `Host` may name on the remote listener (ADR-0174 §6): "the overlay
+        #: address it bound, with the port it bound; or a name the owner configured
+        #: in ``gateway_remote_host_names``, with that port". Compared literally, and
+        #: nothing here is ever resolved or dialled.
+        self._remote_authorities = frozenset(
+            _authority(name, settings.gateway_port)
+            for name in (self._remote_address, *settings.gateway_remote_host_names)
+            if name is not None
+        )
+        _check_the_remote_listener_can_serve(settings, agent=agent)
         #: The four shapes answered whole, by path. A table rather than a chain of
         #: comparisons, so ADR-0175 §6's enumeration is one thing to read against the
         #: ADR — and so a path :data:`_ASSISTANT_PATHS` admits but nothing here
@@ -431,8 +596,24 @@ class Gateway:
 
     @property
     def origin(self) -> str:
-        """The one origin this gateway serves, and the one it admits."""
+        """The loopback origin this gateway serves, and the one it admits there."""
         return self._origin
+
+    @property
+    def origins(self) -> tuple[str, ...]:
+        """Every origin a browser can reach this gateway at, loopback first.
+
+        More than one only where ADR-0174's remote browser listener is configured on,
+        and then one per authority §6 of that ADR admits — the overlay address it
+        binds, and each name the owner configured. The owner needs all of them: the
+        exit test milestone 14 names is a phone, and the address to type into it is
+        not the loopback one this gateway has always printed.
+
+        Returns:
+            The origins, in the order a disclosure should list them.
+        """
+        remote = sorted(self._remote_authorities)
+        return (self._origin, *(f"http://{one}" for one in remote))
 
     def mint_bootstrap(self) -> str:
         """Mint the one bootstrap value of this process's life (ADR-0168 §5).
@@ -470,19 +651,108 @@ class Gateway:
             The bound server, whose lifetime the caller owns.
         """
         server = await asyncio.start_server(
-            self._handle, host=_LOOPBACK, port=self._settings.gateway_port
+            partial(self._handle, remote=False), host=_LOOPBACK, port=self._settings.gateway_port
         )
         _log.info("gateway.listening", origin=self._origin, served_paths=sorted(self._bundle))
         return server
 
-    async def serve(self) -> None:
-        """Bind and serve until cancelled, ending every session on the way out."""
-        server = await self.start()
+    async def start_remote(self) -> asyncio.Server | None:
+        """Bind the remote browser listener, if the owner configured one (ADR-0174 §2).
+
+        > The remote browser listener is **off unless it is configured on**. A
+        > gateway with no remote-browser-listener configuration binds only ADR-0168
+        > §2's loopback listener.
+
+        **The address is confirmed with the overlay agent before it is bound**, which
+        is the half of §2's bind rule no string can decide. ``Settings`` refuses a
+        wildcard, a name, a loopback, a multicast and a link-local address and a
+        globally routable one; nothing in ``192.168.1.5`` says whether it is an
+        overlay address or an ``eth0`` one, and §2 forbids binding "an address of a
+        physical interface". So the gateway asks the agent whose device holds the
+        address it is about to bind — §2's own words are that "the gateway binds an
+        address the agent provides" — and stays down when the agent places no node
+        there. That is ADR-0124 §2's split at this door, and
+        :mod:`ai_assistant.service.remote` does the same thing for the hub's.
+
+        **It is also the earliest moment the agent's absence can be reported.** Every
+        connection on this listener needs §3's identity, and a connection whose
+        identity cannot be obtained is refused and closed — so a gateway that bound
+        this door with no reachable agent would present an open port that refuses
+        everything, which is exactly the pair of failures ADR-0168 §9 refuses to
+        present identically.
+
+        Returns:
+            The bound server, or ``None`` where the listener is off.
+
+        Raises:
+            ConfigurationError: If the overlay agent does not place a node at the
+                configured address, or cannot be asked. A stay-down deployment fault
+                (ADR-0083 §5): restarting unchanged never succeeds, and what has to
+                change is the configuration or the overlay.
+        """
+        address = self._remote_address
+        if address is None:
+            return None
+        await self._confirm_the_bound_address(address)
+        server = await asyncio.start_server(
+            partial(self._handle, remote=True), host=address, port=self._settings.gateway_port
+        )
+        _log.info(
+            "gateway.remote_listening",
+            authorities=sorted(self._remote_authorities),
+            listed_devices=len(self._listed_devices),
+        )
+        return server
+
+    async def _confirm_the_bound_address(self, address: str) -> None:
+        """Ask this machine's agent to place the address on the overlay (ADR-0174 §2).
+
+        Args:
+            address: The address about to be bound.
+
+        Raises:
+            ConfigurationError: If the agent will not place a node there.
+        """
+        agent = self._agent
+        if agent is None:  # pragma: no cover — the constructor refuses this pairing
+            msg = "the remote browser listener is configured on with no overlay agent"
+            raise ConfigurationError(msg)
         try:
-            async with server:
-                await server.serve_forever()
-        finally:
-            self.close()
+            await agent.identify(address, self._settings.gateway_port)
+        except OverlayIdentityUnavailableError as exc:
+            msg = (
+                f"the remote browser listener is configured to bind {address}, and the "
+                f"overlay agent on this machine does not place a node there ({exc}). "
+                f"ADR-0174 §2 binds only an address that exists on the overlay and "
+                f"forbids an address of a physical interface, so the gateway will not "
+                f"bind one it cannot confirm; start the overlay agent and use the address "
+                f"it reports for this machine, or unset ASSISTANT_GATEWAY_REMOTE_ADDRESS "
+                f"to serve browsers over the loopback listener alone"
+            )
+            raise ConfigurationError(msg) from exc
+
+    async def serve(self) -> None:
+        """Bind every configured listener and serve until cancelled.
+
+        The loopback listener is bound whether or not the remote one is (ADR-0174
+        §2), and both are torn down together — with every session ended on the way
+        out, whichever listener minted it (ADR-0168 §4).
+
+        **The stack is what makes a failed second bind clean.** A gateway whose
+        remote listener will not start must not leave a loopback listener answering
+        behind it: the owner asked for a gateway serving two doors, and one serving
+        one of them silently is a deployment that does something its configuration
+        does not say.
+        """
+        async with contextlib.AsyncExitStack() as stack:
+            # Registered first so it runs *last* — after both sockets are closed —
+            # and so it runs at all when the remote bind is what fails.
+            stack.callback(self.close)
+            bound = [await stack.enter_async_context(await self.start())]
+            remote = await self.start_remote()
+            if remote is not None:
+                bound.append(await stack.enter_async_context(remote))
+            await asyncio.gather(*(one.serve_forever() for one in bound))
 
     def close(self) -> None:
         """End every session and flush the interval in progress (ADR-0168 §4, §6).
@@ -537,17 +807,91 @@ class Gateway:
         """Give one back."""
         self._hub_in_flight -= 1
 
-    async def _handle(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        """Serve one connection under ADR-0168 §8's two ceilings and one deadline."""
-        connection = _Connection()
+    async def _handle(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter, *, remote: bool
+    ) -> None:
+        """Serve one connection under ADR-0168 §8's two ceilings and one deadline.
+
+        **On the remote listener the identity comes first, and before the ceilings it
+        does not.** ADR-0174 §3 orders the identity check "before ADR-0168 §7's
+        ``Host`` and ``Origin`` checks and before any session is read", which is where
+        it sits; §8's ceilings are ahead of it because a ceiling refusal *serves*
+        nothing — "it refuses to accept a further connection rather than queueing it"
+        — and asking the agent about a connection the gateway is closing unread would
+        put a local query on the one path a flood can drive.
+
+        Args:
+            reader: The connection's reader.
+            writer: The connection's writer.
+            remote: Whether this is the remote browser listener's door.
+        """
+        connection = _Connection(remote=remote)
         if not self._admit_connection(connection):
             await _close(writer)
             return
         try:
+            if remote and not await self._identify(writer, connection):
+                return
             await self._serve_connection(reader, writer, connection)
         finally:
             self._connections.discard(connection)
             await _close(writer)
+
+    async def _identify(self, writer: asyncio.StreamWriter, connection: _Connection) -> bool:
+        """Take the connecting device's overlay identity from this machine's agent.
+
+        > Before serving anything on the remote browser listener — a static asset and
+        > the bootstrap exchange included — the gateway obtains the connecting
+        > device's overlay identity from the overlay agent running on the gateway's
+        > **own** machine, over a local interface. It may not take that identity from
+        > anything the peer asserts — a header, a cookie, a query parameter, a request
+        > body — and it may not obtain it by a call that leaves the machine. A
+        > connection whose overlay identity cannot be obtained is refused and closed.
+        > (ADR-0174 §3)
+
+        **Nothing is recorded for a refusal here**, and §3 is explicit about why: a
+        connection refused on it "reaches no clause of ADR-0168 §3, §4, §5 or §6 at
+        all", so it is outside §6's recorded set exactly as §8's ceilings are. The
+        warning below is a fault the owner may need to act on — their agent is not
+        answering — and carries no fact about the request, which has not been read.
+
+        **Nothing is written back either.** The peer is refused by the connection
+        closing, because the gateway has not yet read a request and so has nothing to
+        answer; a status line here would be a response to a request that does not
+        exist.
+
+        Args:
+            writer: The accepted connection, for its peer address.
+            connection: The connection to record the identity on.
+
+        Returns:
+            Whether an identity was obtained.
+        """
+        agent = self._agent
+        peer = writer.get_extra_info("peername")
+        if agent is None or not isinstance(peer, tuple) or len(peer) < _ADDRESS_PARTS:
+            _log.warning(
+                "gateway.remote_peer_unaddressed",
+                detail=(
+                    "a connection on the remote browser listener carried no peer address "
+                    "to ask the overlay agent about, so it is refused (ADR-0174 §3)"
+                ),
+            )
+            return False
+        try:
+            connection.device = await agent.identify(str(peer[0]), int(peer[1]))
+        except OverlayIdentityUnavailableError as exc:
+            _log.warning(
+                "gateway.remote_identity_unavailable",
+                reason=str(exc),
+                detail=(
+                    "the gateway takes a browsing device's identity from its own overlay "
+                    "agent and never from the peer, so a peer it cannot name is refused "
+                    "(ADR-0174 §3)"
+                ),
+            )
+            return False
+        return True
 
     def _admit_connection(self, connection: _Connection) -> bool:
         """Take a connection, or refuse it at either ceiling (ADR-0168 §8).
@@ -705,22 +1049,40 @@ class Gateway:
         return await self._respond(request, connection)
 
     async def _respond(self, request: Request, connection: _Connection) -> Response | _Streamed:
-        """Decide one request (ADR-0168 §3, §7, §1's biconditional).
+        """Decide one request (ADR-0168 §3, §7, §1's biconditional; ADR-0174 §4).
 
         The order is §7's: "Both checks run before the session is read, and a
         request failing either is refused without the session being consulted at
         all." Classification is not a check — it decides which of §6's four classes
         a record would name — so it happens first and refuses nothing.
+
+        **The device check sits between the assets and everything else, and that
+        position is ADR-0174 §4's whole content.** §4 admits a request on the remote
+        listener only when the device is listed *and* a live session is presented,
+        and separates §3's two pre-session exceptions because "they are not alike in
+        what they hand back": the assets are "the bundle this repository ships to
+        anyone who installs it", so an overlay member obtains nothing from them they
+        could not obtain from the distribution; the bootstrap exchange hands back a
+        session, "and a session is the whole of what admits a browser to the device's
+        authority". So the assets are answered above this line and every other class
+        below it — the exchange included, which is what stops a hostile overlay
+        member phishing a value from a mistyped address and spending it from its own
+        device.
+
+        The check is ahead of the session read for §3's reason one level in: an
+        unlisted device is refused without the gateway consulting a session at all.
         """
         request_class = self._classify(request)
-        condition = self._check_door(request)
+        condition = self._check_door(request, connection)
         if condition is not None:
-            return self._refuse(request_class, condition)
+            return self._refuse(request_class, condition, connection)
         if request_class is RequestClass.ASSET:
             body, media_type = self._bundle[request.path]
             return Response(200, "OK", body=body, content_type=media_type, close=False)
+        if connection.remote and connection.device not in self._listed_devices:
+            return self._refuse(request_class, RefusalCondition.DEVICE_NOT_LISTED, connection)
         if request_class is RequestClass.BOOTSTRAP:
-            return self._exchange(request)
+            return self._exchange(request, connection)
         return await self._session_bound(request, connection, request_class)
 
     def _classify(self, request: Request) -> RequestClass:
@@ -741,7 +1103,7 @@ class Gateway:
             return RequestClass.ASSISTANT
         return RequestClass.OTHER
 
-    def _check_door(self, request: Request) -> RefusalCondition | None:
+    def _check_door(self, request: Request, connection: _Connection) -> RefusalCondition | None:
         """Run ADR-0168 §7's two checks, both decidable from the request alone.
 
         The `Host` check is what closes DNS rebinding — "a page the owner visits
@@ -752,20 +1114,41 @@ class Gateway:
         (:meth:`Request.header`) and is refused, because a door that picked the
         first of two would let the peer choose which one it is judged on.
 
+        **The job is unchanged on the remote listener and the set is larger**
+        (ADR-0174 §6): the gateway refuses any `Host` that is not "the overlay
+        address it bound, with the port it bound; or a name the owner configured in
+        ``gateway_remote_host_names``, with that port. The comparison is literal
+        against the configured set. **The gateway resolves nothing**". §7's reason
+        survives whole — "rebinding is a property of the attacker's own name rather
+        than of the target", so an attacker's name is refused on either listener
+        because it is not in the owner's set. Admitting a configured name is not
+        #912's posture reversed: a `Host` header is a string the browser reports
+        about the URL the owner typed, never a destination anything is sent to.
+
+        **The `Origin` is compared against the authority this request's own `Host`
+        named**, which is §6's rule and, on the loopback listener, the one origin
+        this gateway has always admitted — a `Host` there is admitted only when it
+        equals :attr:`_authority`, so the comparison is byte for byte the one
+        ADR-0168 §7 made.
+
         Args:
             request: The request as parsed.
+            connection: The connection it arrived on, which decides which set of
+                authorities its `Host` is judged against.
 
         Returns:
             The condition it fails, or ``None`` where it passes both.
         """
-        if request.header("host") != self._authority:
+        admitted = self._remote_authorities if connection.remote else frozenset({self._authority})
+        host = request.header("host")
+        if host is None or host not in admitted:
             return RefusalCondition.HOST_NOT_BOUND
         origin = request.header("origin")
-        if origin is not None and origin != self._origin:
+        if origin is not None and origin != f"http://{host}":
             return RefusalCondition.ORIGIN_NOT_OWN
         return None
 
-    def _exchange(self, request: Request) -> Response:
+    def _exchange(self, request: Request, connection: _Connection) -> Response:
         """The one exchange that mints a session (ADR-0168 §5).
 
         "A failed exchange discloses only that it failed — never whether the value
@@ -785,12 +1168,16 @@ class Gateway:
             or held.spent
             or not hmac.compare_digest(verifier(presented), held.verifier)
         ):
-            return self._refuse(RequestClass.BOOTSTRAP, RefusalCondition.BOOTSTRAP_EXCHANGE_FAILED)
+            return self._refuse(
+                RequestClass.BOOTSTRAP, RefusalCondition.BOOTSTRAP_EXCHANGE_FAILED, connection
+            )
         values = self._sessions.mint()
         if values is None:
-            return self._refuse(RequestClass.BOOTSTRAP, RefusalCondition.SESSION_CEILING)
+            return self._refuse(
+                RequestClass.BOOTSTRAP, RefusalCondition.SESSION_CEILING, connection
+            )
         held.spent = True
-        self._records.session_minted()
+        self._records.session_minted(device=connection.device)
         return Response(
             200,
             "OK",
@@ -814,18 +1201,20 @@ class Gateway:
             header_half=header_half, cookie_halves=request.cookies(_COOKIE_NAME)
         )
         if outcome is Admission.NO_LIVE_SESSION:
-            return self._refuse(request_class, RefusalCondition.NO_LIVE_SESSION)
+            return self._refuse(request_class, RefusalCondition.NO_LIVE_SESSION, connection)
         if outcome is Admission.COOKIE_HALF_MISMATCH:
-            return self._refuse(request_class, RefusalCondition.COOKIE_HALF_MISMATCH)
+            return self._refuse(request_class, RefusalCondition.COOKIE_HALF_MISMATCH, connection)
         connection.admitted = True
         if request_class is RequestClass.ASSISTANT:
-            return await self._assistant(request, header_half)
+            return await self._assistant(request, header_half, connection)
         # Admitted, and asking the assistant for nothing: answered, and the engine
         # is not reached (ADR-0168 §1's biconditional). Not a refusal on any of
         # §3 to §7's conditions, so nothing is recorded and the connection survives.
         return _fault(404, "Not Found", "no-such-path", close=False)
 
-    async def _assistant(self, request: Request, header_half: str | None) -> Response | _Streamed:
+    async def _assistant(
+        self, request: Request, header_half: str | None, connection: _Connection
+    ) -> Response | _Streamed:
         """Resolve one admitted assistant request onto ADR-0175 §6's five operations.
 
         **The enumeration is here and it is closed.** Every other operation the
@@ -840,6 +1229,7 @@ class Gateway:
             header_half: The value it was admitted on. The two streamed shapes need
                 the session's own handle, because ADR-0175 §7 ends every stream a
                 session held at the moment that session ends.
+            connection: The connection it arrived on, for the record a refusal writes.
 
         Returns:
             The response, or the stream to write.
@@ -849,7 +1239,9 @@ class Gateway:
             return await self._unary[request.path](request)
         handle = None if header_half is None else self._sessions.handle(header_half)
         if handle is None:  # pragma: no cover — admitted means a session verified it
-            return self._refuse(RequestClass.ASSISTANT, RefusalCondition.NO_LIVE_SESSION)
+            return self._refuse(
+                RequestClass.ASSISTANT, RefusalCondition.NO_LIVE_SESSION, connection
+            )
         if shape == ("POST", _ASK_STREAM_PATH):
             return self._ask_streaming(request, handle)
         return self._delivery_stream(handle)
@@ -1032,16 +1424,35 @@ class Gateway:
             self._give_hub_slot()
         return _rendered({"destroyed": destroyed})
 
-    def _refuse(self, request_class: RequestClass, condition: RefusalCondition) -> Response:
-        """Record one refusal and answer it (ADR-0168 §3, §6, §8).
+    def _refuse(
+        self, request_class: RequestClass, condition: RefusalCondition, connection: _Connection
+    ) -> Response:
+        """Record one refusal and answer it (ADR-0168 §3, §6, §8; ADR-0174 §3).
 
         The body carries the condition and nothing else: no assistant content, no
         fact about the hub's state, and no fact about whether the hub is
         reachable, which is what ADR-0168 §3 requires of every refusal. The
         connection is closed, because §8 requires it of a refusal on any of §3's,
         §4's, §5's, §6's, §7's and §8's conditions alike.
+
+        The record carries the connection's attested overlay identity where there is
+        one, which is ADR-0174 §3's addition to §6's enumeration and the reason it is
+        worth having: ADR-0124 §7 has the hub record "each admission and each refusal
+        with the device it named", and here for the first time "an owner reading a
+        refusal learns *which of their devices* was refused". It never reaches the
+        response — the device already knows who it is, and the enumeration governs
+        the record rather than what is written back.
+
+        Args:
+            request_class: Which of ADR-0168 §6's four kinds the request was.
+            condition: The single condition it was refused on.
+            connection: The connection it arrived on, for the identity the record
+                carries.
+
+        Returns:
+            The refusal to write.
         """
-        self._records.refused(request_class, condition)
+        self._records.refused(request_class, condition, device=connection.device)
         status, reason = _REFUSAL_STATUS[condition]
         return _fault(status, reason, condition.value)
 
@@ -1357,16 +1768,33 @@ async def run_gateway(
     gateway that bound first and then failed to print would be answering a port
     with a value nobody can present.
 
+    **Every origin is disclosed, not just the loopback one** (ADR-0174). The owner
+    reads the value off this terminal and carries it to another device, and the
+    address to type there is the overlay one — a disclosure naming only
+    ``127.0.0.1`` would hand them a value and no door to spend it at. On a gateway
+    with no remote listener this is the single origin it has always printed.
+
+    **The agent is built only where a remote listener needs one**, from
+    ``client_overlay_agent_socket`` — the field ADR-0174 §8 widens rather than
+    duplicating: "a gateway may dial its hub over loopback and still serve browsers
+    over the overlay, so the condition widens to cover a set
+    ``gateway_remote_address``. No eleventh agent-socket field is owed, and the
+    custody conditions ``wire/overlay.py`` enforces on that socket are applied
+    unchanged." Those conditions are enforced by :func:`local_agent` itself, which
+    refuses a configured path an untrusted user could answer on.
+
     Args:
         settings: The loaded configuration.
         engine: The hub, as the promoted ``AssistantEngine``. Built by whoever
             composes this process — the gateway builds no engine (ADR-0168 §1).
-        disclose: How the bootstrap value and the origin reach the owner. Raising
+        disclose: How the bootstrap value and the origins reach the owner. Raising
             from it is what stops the gateway starting.
         now: The clock.
 
     Raises:
-        AssistantError: If the bootstrap value cannot be disclosed.
+        AssistantError: If the bootstrap value cannot be disclosed, if the overlay
+            agent's configured socket fails its custody conditions, or if the remote
+            browser listener is configured in a way that could never serve.
     """
     gateway = Gateway(
         settings=settings,
@@ -1374,6 +1802,28 @@ async def run_gateway(
         now=now,
         defer=default_defer(),
         bundle=packaged_bundle(),
+        agent=_agent_for(settings),
     )
-    disclose(gateway.mint_bootstrap(), gateway.origin)
+    disclose(gateway.mint_bootstrap(), ", ".join(gateway.origins))
     await gateway.serve()
+
+
+def _agent_for(settings: Settings) -> OverlayAgent | None:
+    """This machine's overlay agent, where a remote browser listener needs one.
+
+    Args:
+        settings: The loaded configuration.
+
+    Returns:
+        The agent, or ``None`` where no remote listener is configured and none is
+        read. Building one eagerly would put a configured socket's custody check on
+        the path of every gateway, including the loopback-only one ADR-0168 §2 rules
+        and which never asks the agent anything.
+
+    Raises:
+        ConfigurationError: If a configured socket path fails the custody conditions
+            ``wire/overlay.py`` holds both ends of ADR-0124 §4's hop to.
+    """
+    if settings.gateway_remote_address is None:
+        return None
+    return local_agent(settings.client_overlay_agent_socket, terms=CLIENT_AGENT_SOCKET)
