@@ -1,6 +1,6 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete) and ADR-0155 (§2's residency clause)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete) ADR-0155 (§2's residency clause) and ADR-0172 (§3's keyring clause and §7's gating clause, each only as it reaches a browser-held web-session credential)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
@@ -192,6 +192,85 @@
   destination.
   **#95 is answered**; #57, #74, #83, #89 and the residues ADR-0154 §6 carries stay
   open on their own terms. The enforcement gap ADR-0155 §4 names is **#1154**.
+- Partially superseded: 2026-08-21 by ADR-0172 — **two clauses, one narrow class,
+  and the class exists because a browser has no keyring and no way to reach the
+  hub's gate.** ADR-0168 ruled `track:web-client` milestone 13's browser gateway
+  (#1230): a spoke binding a loopback TCP listener, admitting a browser on a **web
+  session** it mints, holds in process memory and destroys when its process ends.
+  ADR-0168 §6 classified that session's two halves and its single-use bootstrap
+  value as Tier 0 under §1, found §3 and §7 engaged by them, and made one narrowly
+  scoped supersession covering both a **prerequisite of the implementing lane**.
+  ADR-0172 is that supersession.
+
+  **Replaced — §3's keyring clause, only for the web-session credential class.**
+  "Tier 0 secrets are stored in the **OS keyring** via the `keyring` library." A
+  browser has no keyring, no `SecretStore` and no path to `select_backend`, whose
+  five-prefix allow-list correctly admits only the operating systems' own
+  keyrings — so there is nothing to wire, and ADR-0172 §2 records that **no
+  browser session design escapes the clause**: whatever admits a returning
+  browser is a value the browser holds, and a cookie is no more the OS keyring
+  than web storage is. In its place ADR-0172 §2 puts four replacements, an
+  implementation omitting any of which does not have the exemption: the values are
+  read on the admission path and for no other purpose; on this system's side they
+  never leave process memory and are held as verifiers rather than as values, so
+  the class is **nowhere at rest** rather than in a weaker place; on the browser's
+  side custody is the browser profile's own file permissions, which is the
+  operating system's own access control this clause itself chose; and every value
+  is minted by this system, bounded by ADR-0168 §8's expiry, and dies with the
+  gateway process. **The rest of the same bullet is applied rather than
+  superseded** — no value in the class is written to the memory database or any
+  other database, none is ever committed, and the `.env` sentence authorises
+  nothing. ADR-0172 §2 also states that a **durable** browser-held credential is
+  not authorised: the bound is a condition of the exemption, so a design removing
+  it loses the exemption instead of inheriting it.
+
+  **Replaced — §7's gating clause, only for a gateway's reads and verifications
+  of that class on the admission path.** "Access to Tier 0/1 data and every
+  side-effecting tool call is gated by the `permissions/` layer and recorded in an
+  **audit trail**." Both halves are the hub's — `permissions/` runs inside it and
+  the audit trail is `<data_dir>/audit.db`, a Tier 1 store ADR-0083 gives it
+  exclusively — and the access is the one by which a browser becomes able to reach
+  the hub at all, so the gate is circular in ADR-0124 §6's exact sense. It is also
+  self-defeating here in a way ADR-0124's case was not: ADR-0168 §9 requires the
+  gateway to serve its listener whether or not the hub is reachable, so a
+  hub-gated admission could never deliver the message that the hub is down.
+  ADR-0172 §3 puts three replacements in its place: one purpose and one path;
+  operating-system custody at both ends, where `permissions/` cannot run; and the
+  **session's admission** made auditable under ADR-0168 §6's record clause — the
+  mint that created it and every refusal, a failed verification included.
+
+  **The third replacement is auditable *admission* and not auditable *use*, and
+  ADR-0172 §4 rules the question ADR-0168 §6 left open by name.** No record is
+  written for a Tier 0 read a live session admits. The ground is not cost: a rider
+  on a live session issues its requests through the owner's own browser, over the
+  owner's own connection, carrying the owner's own two halves, so a per-request
+  record increments identically for the owner and the rider and cannot
+  distinguish the case it would exist to reveal. The shortfall is stated rather
+  than closed — an auditor sees the mint and every failed attempt, not the
+  successful verifications — and the ruling is scoped to a session that dies with
+  its gateway process, so milestone 16's durable session reopens it and may not
+  inherit it.
+
+  **Not replaced — everything else, which is nearly all of both sections.** §3's
+  second bullet, the reader clause as ADR-0125 §8 replaced it, is untouched and
+  read neither more widely nor more narrowly: no value in the class travels
+  through `Secrets` or `SecretStore`, so neither Protocol gains a consumer and
+  ADR-0125 §7's refusal of a backend without the operating system's own access
+  control is applied rather than narrowed. §7's minimisation clause and §7's gate
+  over every other Tier 0 and Tier 1 access stand, in the hub, in the offline
+  tools, on every device and elsewhere in a gateway. §1's tiers are used as
+  given — the class is Tier 0 *because* of §1, and ADR-0172 refuses
+  reclassification as the way to avoid this record. §2, §4 and §5 are untouched,
+  §5 being what shapes ADR-0168 §6's record into an enumeration of permitted Tier
+  2 facts. **§6 is examined and no record is owed**: there is nothing at rest for
+  a purge to miss, since a session lives only while its gateway process runs and
+  the browser's copy verifies against nothing afterwards. ADR-0172 §1 closes the
+  class at three kinds of value, puts the gateway's own device credential
+  expressly outside it, and forbids any lane citing the ADR to place another Tier
+  0 value outside the keyring or to widen the class by resemblance. It neither
+  cites nor widens ADR-0124 §6's exemption or ADR-0126 §11's, and **#74 stays open
+  on its own subject**. That §7 now carries three narrow exemptions, and whether
+  the clause should be restated rather than exempted a fourth time, is **#1321**.
 - Note (2026-07-20): **§2's egress clause is superseded by ADR-0017.** That
   clause named `models/` the only component permitted to send user data
   off-device; ADR-0017 §1 replaces it with `models/` plus a designated
