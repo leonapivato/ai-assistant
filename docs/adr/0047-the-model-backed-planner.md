@@ -1,6 +1,6 @@
 # 47. The model-backed planner: prompt, output envelope, and text→`ActionPlan` extraction
 
-- Status: Partially superseded by ADR-0071 (§4 step 1's extraction mechanism)
+- Status: Partially superseded by ADR-0071 (§4 step 1's extraction mechanism) and ADR-0176 (§4 step 2's non-empty `steps` requirement and the paragraph stating it)
 - Date: 2026-07-23
 - Note (2026-07-26): **§4 step 1's extraction *mechanism* is superseded by
   ADR-0071.** The "first `{` to last `}`" slice this ADR specified failed step 1's
@@ -11,6 +11,33 @@
   never-a-corrupt-plan property, and §6's bounded repair all stand. §4's body is
   left as ratified (append-only, ADR-0001); ADR-0071 states the replacement and its
   extent.
+- Partially superseded: 2026-08-21 by ADR-0176 — **§4 step 2 no longer requires the
+  envelope's `steps` to be a non-empty list, and a zero-step reply is no longer
+  treated as "no plan could be produced" in every case.** §4's goal, step 1 as
+  ADR-0071 replaced it, step 2's `rationale` clause and its "other envelope keys are
+  ignored" rule, steps 3 and 4, the never-a-corrupt-plan property, §5's open
+  capability vocabulary and §6's bounded repair all stand. Step 2 requires "a `steps`
+  key whose value is a **non-empty list**", and §4 gives the reason: "a production
+  planner returning zero steps for a goal is indistinguishable from a failure to
+  decompose it, so an empty plan is treated as 'no plan could be produced', not as a
+  valid answer". That reasoning holds against an *absence*, and this ADR states it
+  correctly; what it does not reach is a zero-step reply that says so **positively**.
+  [ADR-0176](0176-a-planner-may-decline-to-name-a-capability-and-the-decline-is-asserted-rather-than-empty.md)
+  §1 admits a second envelope shape — an empty `steps` list **together with** a
+  `no_capability_needed` key whose value is the JSON boolean `true`, and a non-blank
+  `rationale` — as a **decline**, distinguishable from a failure to decompose because
+  the model asserted it rather than omitted it. A failure still enters §6's bounded
+  repair and still ends in `PlanningError`, unchanged. A reader holding only ADR-0047
+  would build a planner that refuses the decline, so ADR-0070 §1 makes this a
+  supersession however small the edit; ADR-0176 §10 states its extent. The defect it
+  answers is #1315: while the non-empty rule is in force the planner must invent a
+  capability for a goal that needs none, which is what QA run #1334 observed live.
+
+  **The 2026-07-26 note above is narrowed by this one**, in the one respect that its
+  "its steps 2–4 (shape, per-step validation, construction) … all stand" no longer
+  covers the whole of step 2. Step 2's shape check now admits the decline envelope;
+  everything else that note lists is unaffected, and ADR-0071's own Decision text is
+  partially superseded in the matching scope by the same ADR.
 
 ## Context
 
