@@ -561,9 +561,9 @@ text-not-markup clause is untouched in every word.
 > resolves nothing**: it never asks a resolver what a name means, and a name in
 > that set is admitted as a `Host` value and never used as a destination.
 
-> **Normative.** `gateway_remote_host_names` is empty by default, so a gateway
-> configured on serves the address it bound and nothing else until the owner
-> says otherwise.
+> **Normative.** `gateway_remote_host_names` is §8's field and §8 is the single
+> statement of what it holds, what its default is and when it is refused. This
+> section states only what the gateway does with it, and adds no condition on it.
 
 > **Normative.** The gateway refuses any request carrying an `Origin` that is not
 > the origin of the authority its own `Host` header named, and sends no
@@ -714,9 +714,16 @@ is the ground `gateway_max_hub_connections` already stands on.
 > reports and this system already compares device identities in (ADR-0124 §4).
 > Empty is the default and means **no device may exchange**, so a gateway
 > configured on serves its assets and mints no remote session until the owner
-> names a device. A configuration setting it non-empty while
-> `gateway_remote_address` is unset is refused at load, because it would express a
-> permission on a listener that is off.
+> names a device.
+
+> **Normative.** `gateway_remote_host_names` holds the additional authorities §6
+> admits a `Host` header to name. Empty is the default, so a gateway configured on
+> serves the address it bound and nothing else.
+
+> **Normative.** Either list being non-empty while `gateway_remote_address` is
+> unset is **refused at settings load**. Both are permissions the owner wrote
+> about a listener, so a configuration that carries one while the listener is off
+> is one no reading makes true, and neither is ignored silently.
 
 > **Normative.** The remote browser listener binds `gateway_port`, on the address
 > above. No second port figure is added: the two listeners differ in address, so
@@ -742,9 +749,22 @@ is the ground `gateway_max_hub_connections` already stands on.
 **Naming the figures rather than leaving them is ADR-0168 §8's ground, taken from
 ADR-0084 §3 and ADR-0083 §7: "a 'bounded default' with no figure is two
 conforming stores handing the same continuation different history".** Three
-fields are the whole of what this boundary adds, and none of them is a budget:
-two are switches and one is the owner's list of devices, because §8 above spends
-no new budget — it shares the ones that exist.
+fields are the whole of what this boundary adds and none of them is a budget:
+one is the switch and two are lists the owner writes, because §8 above spends no
+new budget — it shares the ones that exist.
+
+**Refusing a stranded list rather than ignoring it is the one place these fields
+depart from the corpus's usual companion-setting shape, and the reason is what
+kind of value they are.** `hub_remote_port` and `client_overlay_agent_socket` are
+documented as "ignored when" their switch is unset, and that is right for them: a
+port number and a socket path are neutral facts, and a neutral fact going unread
+costs the owner nothing. A list of devices that may exchange a credential, and a
+list of authorities the door will answer to, are **permissions** — an owner who
+wrote one and got silence has a configuration that says something the running
+process does not do, which is ADR-0083's ruling 4 failure arriving through the
+settings file. Adversarial review found the asymmetry on the second round: the
+device list already refused this state and the name list did not, and making them
+alike was the smaller of the two repairs available.
 
 ### 9. One bootstrap value still, one session still — and this is not ADR-0168 §5's revisit
 
