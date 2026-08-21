@@ -25,6 +25,9 @@ that wants the fallback calls ``ModelProvider.complete``.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from pydantic_ai import Agent
@@ -65,6 +68,32 @@ def _encodable(delta: str) -> EncodableText:
     except ValueError as exc:
         msg = f"the model streamed a delta that cannot be encoded: {exc}"
         raise ModelResponseError(msg) from exc
+
+
+@dataclass(frozen=True)
+class _Delta:
+    """One text delta the run produced."""
+
+    text: str
+
+
+@dataclass(frozen=True)
+class _Failed:
+    """The run ended by raising, carrying the failure unclassified."""
+
+    error: Exception
+
+
+@dataclass(frozen=True)
+class _Ended:
+    """The run ended normally, with no further deltas."""
+
+
+#: What crosses the queue between the run and the consumer yielding from it.
+#: Three cases and no fourth: a stream either produces a delta, fails, or ends,
+#: and making the terminal states values rather than a sentinel is what lets the
+#: consumer's ``match`` be exhaustive for mypy.
+type _Streamed = _Delta | _Failed | _Ended
 
 
 class PydanticAIStreamingCompleter:
@@ -151,7 +180,27 @@ class PydanticAIStreamingCompleter:
     async def _stream(
         self, history: list[ModelMessage], *, model: str | None
     ) -> AsyncIterator[EncodableText]:
-        """Drive one pydantic-ai streamed run over an already-rendered history.
+        """Yield the run's deltas, driving the run itself in a task beside them.
+
+        **The run is not held open across a ``yield``, and that indirection is the
+        whole of this method.** The obvious shape — ``async with
+        agent.run_stream(...)`` wrapped directly around ``yield`` — is broken
+        under early termination and fails ADR-0060's resource clause. pydantic-ai
+        drives a streamed run inside anyio cancel scopes, and unwinding those from
+        inside an async generator that is being *closed* means awaiting during
+        ``GeneratorExit``: ``aclose()`` on a partially consumed stream raises
+        ``RuntimeError: coroutine ignored GeneratorExit`` and the run's teardown
+        does not complete. A consumer that stops reading — a client that
+        disconnected, a composing stage that hit ADR-0173 §3's ceiling — is the
+        ordinary case here, not the exotic one.
+
+        Running the exchange in its own task fixes it at the root: the task
+        unwinds under an ordinary ``CancelledError``, which is exactly what
+        anyio's scopes are built to take, and the generator's own cleanup only has
+        to cancel it and watch it finish. That is ADR-0060's clause read
+        literally — at the moment ``CancelledError`` leaves this method the run is
+        "still held exclusively by work the method started and can observe
+        finishing", and then it is released.
 
         ``debounce_by=None`` rather than pydantic-ai's default of 0.1 seconds.
         The default groups deltas arriving inside a window and emits them
@@ -161,16 +210,49 @@ class PydanticAIStreamingCompleter:
         unpromised and coalescing the composing stage's, which has the chunk
         ceiling and the text-preservation rule that a transport-level debounce
         knows nothing about.
+        """
+        # Depth one, so the run stays at most one delta ahead of the consumer.
+        # Unbounded would buffer a whole answer for a caller that stalled, and
+        # this seam has no ceiling of its own to bound that by (ADR-0173 §3 puts
+        # the ceiling above it, on the engine).
+        deltas: asyncio.Queue[_Streamed] = asyncio.Queue(maxsize=1)
+        run = asyncio.create_task(self._pump(history, model=model, deltas=deltas))
+        try:
+            while True:
+                match await deltas.get():
+                    case _Delta(text=text):
+                        yield _encodable(text)
+                    case _Failed(error=error):
+                        raise _classify(error) from error
+                    case _Ended():
+                        return
+        finally:
+            run.cancel()
+            # Suppressed because this cancellation is one we asked for, and a
+            # `finally` re-raises whatever it was unwinding — so a cancellation
+            # delivered from outside is still delivered onward (ADR-0060), it is
+            # merely not delivered *twice*.
+            with contextlib.suppress(asyncio.CancelledError):
+                await run
 
-        The whole run is inside one ``try``, deliberately: ADR-0173 §5 admits a
-        ``ModelError`` "from the call or from the iteration", and pydantic-ai
-        raises from both — resolving the model on entry, and reading chunks
-        thereafter. Classification is
-        :func:`~ai_assistant.models.provider._classify`'s, unchanged, so a
-        streamed failure and a completed one land on the same taxonomy.
-        ``CancelledError`` is a ``BaseException`` and is not caught here: it is
-        delivered onward as ADR-0060 obliges, and leaving the ``async with`` is
-        what releases the provider connection.
+    async def _pump(
+        self,
+        history: list[ModelMessage],
+        *,
+        model: str | None,
+        deltas: asyncio.Queue[_Streamed],
+    ) -> None:
+        """Drive one streamed run, posting each delta and then how it ended.
+
+        The failure is posted **unclassified**. Classification belongs to the
+        consumer so that a narrowed subclass raised there — ``_encodable``'s
+        refusal — cannot be flattened by passing back through ``_classify``, and
+        so that the traceback the caller sees is chained from the exception rather
+        than from a queue.
+
+        ``CancelledError`` is re-raised rather than posted: it is not this run's
+        answer, it is the consumer having gone away, and posting it would block on
+        a queue nobody is reading.
         """
         try:
             async with self._agent.run_stream(
@@ -179,11 +261,12 @@ class PydanticAIStreamingCompleter:
                 model=model,
             ) as result:
                 async for delta in result.stream_text(delta=True, debounce_by=None):
-                    yield _encodable(delta)
-        except ModelError:
-            # Already ours: `_encodable`'s refusal, or a re-raise on a second pass
-            # through this handler. Classifying it again would flatten a narrowed
-            # subclass back to whatever `_classify` makes of a `ModelError`.
+                    await deltas.put(_Delta(delta))
+        except asyncio.CancelledError:
             raise
         except Exception as exc:
-            raise _classify(exc) from exc
+            # Broad on purpose: `_classify` is the taxonomy, and its default for an
+            # unrecognised failure is the conservative bare `ModelError` (ADR-0063).
+            await deltas.put(_Failed(exc))
+        else:
+            await deltas.put(_Ended())
