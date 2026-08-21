@@ -77,10 +77,12 @@ an act silently not taken — that this system's whole step-account machinery
 exists to make visible.
 
 **Prior art on the same dead end.** ADR-0053 added a selection-time capability
-alias layer, mitigating the invented-capability problem *downstream* by mapping a
-name onto a registered tool. That approach cannot reach this case, because there
-is no tool to map onto: the right answer is that no tool is wanted. The decision
-belongs at the planner, and there is an architectural reason it does — the
+alias layer, mitigating the invented-capability problem *downstream* by resolving
+an emitted capability onto one the registry advertises. That approach cannot
+reach this case, because there is no advertised capability to resolve onto: the
+right answer is that no capability is wanted at all, and every branch of
+`resolve_capability` returns a name. The decision belongs at the planner, and
+there is an architectural reason it does — the
 retrieved memories and the assembled context are **passed into** `plan` and
 rendered into the planner's own prompt (ADR-0047 §3, `Planner.plan`). The planner
 is the first and only stage that can see, at once, both the goal and the material
@@ -357,9 +359,10 @@ default plan to record a call, and whether a canonical fake should be able to
 script a *marked* decline is a `testing/` question the implementing lane may raise
 on its own account.
 
-**ADR-0053's alias layer is untouched.** It maps a named capability onto a
-registered tool at selection time and keeps doing so; this decision is about the
-case where no capability should be named at all.
+**ADR-0053's alias layer is untouched.** It resolves an emitted capability onto
+an advertised one at selection time and keeps doing so; this decision is about
+the case where no capability should be named at all, which its four branches —
+exact, surface variant, curated synonym, unknown — have no way to express.
 
 **No claim is made about how often either direction is taken.** The QA evidence on
 #1334 is one observation of the current failure, not a measured rate. Whether the
