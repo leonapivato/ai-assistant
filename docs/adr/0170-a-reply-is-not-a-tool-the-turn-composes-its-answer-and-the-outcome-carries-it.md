@@ -568,9 +568,21 @@ response type" reads like a protocol change with a matching edit somewhere in
 > stage failing for a reason of its own. All three degrade identically, and none
 > becomes a `reply`.
 
-> **Normative.** The stage makes **one** composition attempt per turn. It does not
-> retry, re-route, or re-plan on failure — a second attempt is the caller asking
-> again, which is a new turn under the caller's own budget.
+> **Normative.** The stage originates **one** `ModelProvider.complete()` call per
+> turn. It does not loop, does not call again on a failure that call returns, and
+> does not re-plan — a second attempt is the caller asking again, which is a new
+> turn under the caller's own budget. What the injected provider does *below* that
+> seam is not this ADR's to constrain.
+
+**The clause binds the composer, not the provider stack.** Retry and fallback
+routing are cross-cutting behaviour composed by wrapping — ADR-0011 §2 makes a
+substitutable `ModelProvider` that holds another one the way resilience is added,
+and ADR-0013 §3 wires `RoutingProvider(RetryingProvider(...))` deliberately, so a
+single `complete()` may already make several vendor calls before it returns. A
+stage forbidden to "re-route" would either contradict a conforming provider or
+have to inspect what it was injected, which is the coupling ADR-0011 §2 exists to
+avoid. What §8 rules out is the *stage* looping: no second `complete()` of its
+own, no re-planning, no second bite at a turn the caller can simply ask again.
 
 > **Normative.** The two turn calls never surface a pydantic `ValidationError` from
 > `TurnOutcome` construction to a caller.
