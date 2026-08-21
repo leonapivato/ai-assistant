@@ -13,14 +13,23 @@
 - **It decides no `core/protocols.py` and no `core/types.py` surface**, so golden
   rule 5 is not triggered. It adds no `Settings` field either — ADR-0168 §8
   already names the ten this milestone owes, and this ADR adds no eleventh.
-- **It partially supersedes ADR-0004, twice and narrowly** — §3's keyring clause
-  and §7's gating clause, each only as it reaches the web-session credential class
-  §1 defines. The record lands on ADR-0004 in this same change (ADR-0070 §1,
-  ADR-0082 §1, ADR-0083 §15). §7 below applies ADR-0070 §1's test clause by
-  clause to every other ADR a reader might expect this to reach, and finds no
-  further record owed.
+- **It partially supersedes ADR-0004 three times, each narrowly** — §3's keyring
+  clause (§2), §6's Tier 0 purge clause (§4) and §7's gating clause (§3), each
+  only as it reaches the web-session credential class §1 defines. One record
+  carrying all three lands on ADR-0004 in this same change (ADR-0070 §1,
+  ADR-0082 §1, ADR-0083 §15). §8 below applies ADR-0070 §1's test clause by clause
+  to every other ADR a reader might expect this to reach, and finds no further
+  record owed.
+- **ADR-0168 §6 named two of those clauses and not the third.** §6 is engaged
+  because §2 authorises a Tier 0 credential that lives outside the keyring and
+  outlives no gateway — so a delete at the hub cannot reach it, exactly as
+  ADR-0124 §8 and ADR-0126 §6 each found for a different unreachable holder. The
+  engagement is created by this ADR's own ruling, and ADR-0070 §1 is categorical
+  that creating it is what obliges the record; leaving it engaged and unmet is the
+  instrument ADR-0124 §6 refused. §4 carries the argument and names why ADR-0126's
+  supersession of the same sentence does not extend to this class.
 - **It rules the one question ADR-0168 §6 left to this lane by name**: whether a
-  successful Tier 0 read on the admission path is recorded. **It is not** (§4),
+  successful Tier 0 read on the admission path is recorded. **It is not** (§5),
   and the reason is not that the record costs too much — it is that the record
   cannot distinguish the case it would exist to reveal.
 
@@ -50,6 +59,12 @@ declares two of ADR-0004's clauses engaged:
 - **§7**, because the gateway reads and verifies them on the admission path,
   which `permissions/` cannot gate and the hub's audit trail does not record.
 
+**A third clause is engaged that ADR-0168 did not name, and it is engaged by this
+ADR rather than by that one.** Once §2 below authorises a Tier 0 credential
+outside the keyring, §6's purge clause has a holder no delete act at the hub can
+reach — the same discovery ADR-0124 §8 and ADR-0126 §6 each made about a different
+custodian. §4 carries it.
+
 ADR-0168 wrote neither supersession. It could not: nothing implements there, so
 nothing ran unmet in the interval, and the corpus's ordinary shape for a
 dependent ratified decision is a separate change merged first. What it did
@@ -65,7 +80,7 @@ that lane one open question with both halves of it visible. This ADR takes both.
 > developer convenience only and is git-ignored.
 
 §3's second bullet — the `SecretStore` reader clause — was already replaced by
-ADR-0125 §8 and is untouched here (this ADR's §7 classifies it).
+ADR-0125 §8 and is untouched here (this ADR's §8 classifies it).
 
 §7's first bullet:
 
@@ -183,15 +198,16 @@ successful verifications behind it.
 
 ADR-0168 §6 states both and closes neither: "Which of the two costs more is a
 real question, and it belongs to the lane that writes the supersession — with
-both halves of it visible here rather than one." §4 below is the ruling.
+both halves of it visible here rather than one." §5 below is the ruling.
 
 ## Decision
 
-We will supersede ADR-0004 §3's keyring clause and §7's gating clause **for the
-web-session credential class and for nothing else**, put four replacements in
-their place, make the exemption conditional on ADR-0168's own storage and record
-clauses being obeyed, and rule that a successful read on the admission path is
-**not** recorded — stating the shortfall that leaves rather than closing it.
+We will supersede ADR-0004 §3's keyring clause, §6's Tier 0 purge clause and
+§7's gating clause **for the web-session credential class and for nothing else**,
+put named replacements in the place of each, make every exemption conditional on
+ADR-0168's own storage and record clauses being obeyed, and rule that a
+successful read on the admission path is **not** recorded — stating the shortfall
+that leaves rather than closing it.
 
 ### 1. The class, and its edges
 
@@ -259,11 +275,13 @@ once, neither of which permits it.
 > gateway reads one, none is passed to the promoted engine surface, and none
 > appears in any frame the gateway sends the hub.
 >
-> **(b) Nothing at rest on our side.** On the gateway's side the values never
-> leave process memory, and the gateway retains verifiers rather than the values
-> themselves (ADR-0168 §4). Where §3 requires a Tier 0 secret to be *somewhere*,
-> this class is nowhere: it is a stronger posture than the clause it replaces, not
-> a weaker one.
+> **(b) Nothing at rest on this system's side.** On the gateway's side the values
+> never leave process memory, and the gateway retains verifiers rather than the
+> values themselves (ADR-0168 §4). Where ADR-0004 §3 requires a Tier 0 secret to
+> be in a place this system chose, this class is in none: nothing this system
+> writes holds it. That is a stronger posture than the clause it replaces on the
+> side this system controls, and it says nothing about the browser's side, which
+> replacement (c) governs and §4 takes as the reason §6 is engaged.
 >
 > **(c) Custody by the operating system, where a keyring does not exist.** On the
 > browser's side custody is the browser profile's own file permissions, which is
@@ -358,7 +376,7 @@ makes this narrow instead of a hole.
 > **Normative.** The third replacement reaches an **admission and not a use**. No
 > implementation and no later lane may state, present or rely on it as the latter:
 > it makes no successful Tier 0 read on the admission path reviewable, and this
-> ADR's §4 rules that none is recorded.
+> ADR's §5 rules that none is recorded.
 
 > **Normative.** The third replacement reaches the record's **emission and not its
 > retention**. ADR-0168 §6 has the gateway retain none of what it emits, so where
@@ -422,7 +440,7 @@ is stated rather than smoothed over.**
   *this* access — ADR-0124 §6's own statement of its own shortfall, and it
   transfers whole.
 - **Admission, not use.** A record of a session's admission is not a record of
-  the reads that session then makes, which is this ADR's §4 subject.
+  the reads that session then makes, which is this ADR's §5 subject.
 
 **The first of the three was an over-claim in an earlier draft, and it is the
 same defect ADR-0168 §6 warned this lane about one level down.** That draft said
@@ -436,7 +454,76 @@ and the instruction turns out to bite twice, on the *use* half and on the
 *auditable* half alike. The clauses above now name what the replacement actually
 delivers, which is a recorded decision, and name the two things it does not.
 
-### 4. A successful read is not recorded, and the shortfall is stated rather than closed
+### 4. ADR-0004 §6's Tier 0 purge clause is superseded for that class, and the act that removes it is stopping the gateway
+
+> **Normative.** ADR-0004 §6's clause that "deleting the user's data purges Tier 0
+> (keyring entries) and Tier 1 (database rows) together" is superseded **only** as
+> it reaches the web-session credential class §1 defines, and for nothing else.
+> Everything else §6 grants — view, export, delete, retention rules, and the purge
+> of every Tier 1 artifact and every keyring-held Tier 0 artifact a delete act does
+> reach — is untouched.
+
+> **Normative.** Two replacements stand in this exemption's place, and an
+> implementation that omits either does not have it. **The act that removes the
+> class is stopping the gateway process**, performed at the machine that runs it
+> and needing no hub, after which every session has ended (ADR-0168 §4) and what a
+> browser still holds verifies against nothing. And a delete act that cannot
+> perform it **names the class as not purged** and names that act; it may not
+> describe Tier 0 as purged.
+
+> **Normative.** Nothing in this ADR obliges a delete act to reach a gateway, to
+> stop one, or to enumerate one. ADR-0168 §3 forbids anything about a browser
+> reaching the hub's machinery, a gateway ordinarily runs on a different machine
+> from the hub (ADR-0168 §2), and ADR-0126 §2 requires the offline delete act to
+> run with the hub stopped — so an act that could reach a gateway is a mechanism
+> no ADR provisions, and this one does not provision it either.
+
+**A record is owed here, and ADR-0126's supersession of the same sentence does
+not cover it.** ADR-0126 §6 took this clause too, and its scope reaches "a Tier 0
+credential held **on the hub's own machine** outside the OS keyring", naming its
+subject as "exactly one thing: the model provider credential". Two things keep
+that from reaching a web session. ADR-0168 §2's ordinary arrangement puts the
+gateway on the *browsing* device, so the class is typically not on the hub's own
+machine at all. And ADR-0126's replacement is written for its own subject — its
+report clause describes "a credential the operator holds in their environment or a
+shell profile" — so even where a gateway does run on the hub's machine, that
+report does not describe this class. ADR-0126 also forbids any lane citing it "to
+hold a new credential outside" the keyring, which is what this ADR's §2 does on
+its own argument. So this is a **third scope on §6's sentence**, not a widening of
+ADR-0126's.
+
+**Two ADRs have already superseded that sentence for two different unreachable
+places, and neither recorded anything on the other.** ADR-0124 §8 took it for an
+enrolled device's keyring entry, because a delete at the hub cannot reach another
+machine. ADR-0126 §6 took it for a credential in the operator's own environment —
+another custodian, one machine closer. Both wrote their record on ADR-0004 alone.
+A third subject is that same operation a third time, which is why §8 writes
+nothing on either of them.
+
+**An earlier draft found no record owed here, and the argument it used is the one
+ADR-0126 had already refused.** It said there is "nothing at rest for a purge to
+miss", and that a session surviving the delete admits nothing useful because the
+hub is gone. Both halves are wrong. The half a browser holds *is* at rest, in a
+browser profile no delete act reaches, and while its gateway runs it still admits
+— ADR-0168 §9 has the gateway serve its listener whether or not the hub is
+reachable, so what the browser gets is a served request carrying a legible
+hub-down answer, not the silence of a dead credential. And "not useful" is
+precisely the reasoning ADR-0126 §6 rejected on its own credential: ADR-0004 §1
+defines Tier 0 by what a value *is* rather than by where it sits or what it can
+still open, and an act that leaves one exactly where it found it has not purged
+it. Adversarial review found it on the second round.
+
+**What this supersession costs is small, and that is a fact about the class rather
+than a mitigation of the record.** The act that ends the class is one the owner can
+perform locally, without the hub, and it ends *every* session at once; after it the
+residue is inert. That is a better position than either precedent — an enrolled
+device's keyring entry needs an act at that device, an environment credential an
+act at the place the operator set it, and neither becomes inert on its own. What
+all three share is the only thing the record is about: the delete act cannot
+perform the act that removes the value, so it says so instead of claiming a purge
+it did not do.
+
+### 5. A successful read is not recorded, and the shortfall is stated rather than closed
 
 > **Normative.** No record is written for a Tier 0 read or verification that a
 > live web session admits. The record ADR-0168 §6 requires — a mint, and every
@@ -522,7 +609,7 @@ rider can ride; the ceiling and death with the process (ADR-0168 §4) bound how
 many sessions exist and the whole exposure to one gateway's lifetime. Those are the defences. The
 record was never one of them.
 
-### 5. The exemption is conditional on ADR-0168's own clauses
+### 6. The exemption is conditional on ADR-0168's own clauses
 
 > **Normative.** An implementation has neither exemption above unless it satisfies
 > ADR-0168 §4's storage clauses — the session table is process memory alone, no
@@ -550,7 +637,7 @@ ADR-0089 §2 records finding *in the section defining the prevention*. ADR-0168 
 ratified and its text is settled; pointing at it costs a citation and cannot
 diverge from it.
 
-### 6. What this decides no part of
+### 7. What this decides no part of
 
 > **Normative.** This ADR decides no `core/protocols.py` and no `core/types.py`
 > surface, adds no `Settings` field, and changes no wire member. A lane
@@ -588,7 +675,7 @@ diverge from it.
   and no value in this ADR's §1 class is covered content or reaches an egress
   span.
 
-### 7. Classification under ADR-0070 §1 and ADR-0082 §1
+### 8. Classification under ADR-0070 §1 and ADR-0082 §1
 
 ADR-0082 §1 requires the judgement to be made in this text, naming the clause and
 applying ADR-0070 §1's test: would a reader holding only the earlier text now act
@@ -625,25 +712,33 @@ owed on any of the rest.**
   "logs are Tier 2 only" is what makes ADR-0168 §6's record an enumeration of
   permitted Tier 2 facts, and §2's replacement (b) keeps every value in the class
   out of every log.
-- **ADR-0004 §6 — examined, and no record is owed.** §6's purge clause
-  ("deleting the user's data purges Tier 0 … and Tier 1 … together") is the one a
-  reader might expect to gain a second unreachable custodian, as it did from
-  ADR-0124 §8 and ADR-0126 §6. It does not, and the reason is §2's replacement
-  (b): **there is nothing at rest for a purge to miss.** A web session exists only
-  while a gateway process runs, holds nothing under the data directory, and dies
-  with that process; the browser's copy then verifies against nothing, because
-  ADR-0168 §4 forbids the gateway reconstructing a session from anything a browser
-  presents after a restart. Nor does a live session survive the offline delete act
-  in any useful sense: that act destroys the resolved `data_dir` with the hub
-  stopped, the enrolment record goes with it, and a gateway still holding a
-  session is a gateway that can reach no hub — ADR-0168 §9's legible fault, not a
-  residual credential. Every sentence of §6 stays true.
-- **ADR-0126 §6 and §11 — examined, and no record is owed.** §6's replacement is
-  self-limiting and says it "authorises no new credential to be held outside" the
-  keyring. That sentence stays exactly true: ADR-0126 authorises none, and this
-  ADR is what authorises this one, on its own argument. §6's obligation on the
-  delete act — name the credential it cannot purge — gains no second subject, for
-  the reason in the bullet above. §11's exemption is neither cited nor widened.
+- **ADR-0004 §6's Tier 0 purge clause — superseded, narrowly (§4).** A reader
+  holding only §6 believes deleting their data purges Tier 0 with Tier 1, and
+  after §2 that is wrong of a class whose holder is a browser profile and a live
+  gateway process that no delete act reaches. It is the third unreachable holder
+  that sentence has acquired, after ADR-0124 §8's enrolled device and ADR-0126
+  §6's operator environment, and it takes the same instrument both took. **This is
+  a clause ADR-0168 §6 did not name**, and this ADR writes the record because its
+  own §2 is what creates the engagement — ADR-0070 §1 is categorical that creating
+  it obliges the record, and ADR-0124 §6 already ruled that filing it as a gap is
+  the wrong instrument. §6's other grants — view, export, delete, retention rules,
+  and the purge of every Tier 1 artifact and every keyring-held Tier 0 artifact a
+  delete act reaches — are untouched.
+- **ADR-0126 §6 and §11 — examined, and no record is owed.** Every sentence
+  stays true. Its self-limiting clause says it "authorises no new credential to be
+  held outside" the keyring, and that holds exactly: ADR-0126 authorises none, and
+  this ADR's §2 is what authorises this one, on its own argument rather than by
+  citing that one. Its supersession scope reaches a credential "on the hub's own
+  machine", which §4 shows this class ordinarily is not, and its report clause
+  describes the operator's environment credential, which this class is not either
+  — so §4 is a **third scope on ADR-0004 §6's sentence** rather than a widening of
+  ADR-0126's, and it takes nothing from it. The one sentence overtaken is the
+  population observation "today that is exactly one thing", a state claim about
+  ADR-0126's own moment rather than a decision, so nothing is rewritten. **The
+  precedent for writing no record is exact**: ADR-0124 §8 and ADR-0126 §6
+  superseded that same ADR-0004 sentence for two different unreachable holders,
+  and neither wrote anything on the other. §11's §7 exemption is neither cited nor
+  widened.
 - **ADR-0124 §6 — examined, and no record is owed.** Its exemption "covers that
   read and expressly nothing else", and §1 above puts the device credential
   outside this class in terms, so a reader holding only ADR-0124 still confines
@@ -661,7 +756,7 @@ owed on any of the rest.**
 - **ADR-0168 §4, §5, §6 and §9 — used as given, and §5 above makes two of them —
   §4's storage clauses and §6's record clause — conditions of this exemption.**
   Nothing is added to any of them and nothing is read more widely. In particular §6's record clause is relied on exactly as
-  written: this ADR's §4 rules the same way it does — nothing recorded for a
+  written: this ADR's §5 rules the same way it does — nothing recorded for a
   request a live session admits — so it imposes no obligation §6 does not already
   carry, and no record is owed on ADR-0168. §6's fourth replacement bullet
   instructs the writing lane to state the third replacement as auditable
@@ -693,13 +788,21 @@ owed on any of the rest.**
 ## Consequences
 
 - **ADR-0168 §6's prerequisite is discharged**, so the milestone-13 gateway
-  implementation lane is unblocked. That lane may now implement §6 — and it
-  inherits §5 above, so an implementation that persists a session table or drops
-  ADR-0168 §6's record does not have this ADR's exemption and is in breach of
-  ADR-0004 §3 and §7 as written.
+  implementation lane is unblocked. That lane may now implement ADR-0168 §6 — and
+  it inherits this ADR's §6, so an implementation that persists a session table or
+  drops ADR-0168 §6's record does not have any exemption here and is in breach of
+  ADR-0004 §3, §6 and §7 as written.
 - **ADR-0004 gains a sixth partial supersession**, and its `Status` line a sixth
-  pair naming both scopes. The record and its dated note land in this change, per
-  ADR-0070 §1, ADR-0082 §1 and ADR-0083 §15.
+  pair — carrying **three** scopes, since ADR-0168 §6 required one supersession
+  covering §3 and §7 and this ADR's own §2 then engaged §6 as well. The record and
+  its dated note land in this change, per ADR-0070 §1, ADR-0082 §1 and ADR-0083
+  §15.
+- **ADR-0004 §6's purge clause now has three unreachable holders** — an enrolled
+  device's keyring entry (ADR-0124 §8), the operator's environment credential
+  (ADR-0126 §6), and a live web session (§4) — each recorded separately on that
+  sentence and each answered with the same instrument: name what was not purged,
+  and name the act that removes it. The third is the mildest of them, because its
+  act is local, needs no hub, and leaves inert bytes behind.
 - **A Tier 0 value now exists in this system's world that is not in the OS
   keyring**, deliberately and for the first time. That is the honest cost: a
   reader of ADR-0004 §3 can no longer act on it alone, and every later lane
@@ -716,7 +819,7 @@ owed on any of the rest.**
   **#1321**.
 - **The corpus now has an answer to "is a successful read recorded" for an
   admission credential**, and it is the same answer at all three doors: the audit
-  unit is the admission. That is stated with its shortfall (§4) rather than as a
+  unit is the admission. That is stated with its shortfall (§5) rather than as a
   clean property, so a later lane inherits both halves.
 - **What becomes harder:** a rider on a live web session leaves no trace in any
   record. Nothing this milestone ships detects it, and the defences are
@@ -784,11 +887,25 @@ owed on any of the rest.**
   partial supersession first-class precisely so a clause's live remainder is not
   collateral, and the remainder here is the part with the teeth: every other Tier 0
   secret in the keyring, every other Tier 0 and Tier 1 access gated and recorded.
-- **Two ADRs, one per superseded clause.** *Rejected.* ADR-0168 §6 requires "one
-  narrowly scoped supersession covering both", and the two engagements share one
-  subject, one class and one set of replacements — §2's replacement (a) serves both
-  exemptions. Splitting them would put half the argument in each document and
-  neither would be readable alone.
+- **Find no record owed on ADR-0004 §6**, on the ground that a session is never at
+  rest and that one surviving a delete admits nothing useful. The position an
+  earlier draft took. *Rejected in §4* on both halves: the browser's half **is** at
+  rest in a profile no delete act reaches, and while its gateway runs it still
+  admits — ADR-0168 §9 has that gateway answer rather than fall silent. "Not
+  useful" is also the argument ADR-0126 §6 refused on its own credential, since
+  ADR-0004 §1 defines Tier 0 by what a value is and not by what it can still open.
+- **Read ADR-0126 §6's supersession as already covering the class**, so no third
+  scope is owed. *Rejected in §4*: ADR-0126's scope reaches a credential "on the
+  hub's own machine", which the ordinary gateway arrangement is not, its report
+  clause describes the operator's environment credential specifically, and it
+  forbids any lane citing it to hold a new credential outside the keyring — which
+  is what this ADR does.
+- **One ADR per superseded clause.** *Rejected.* ADR-0168 §6 requires "one
+  narrowly scoped supersession covering both" of the clauses it named, and all
+  three engagements share one subject, one class and one argument — §2's
+  replacement (a) serves the §3 and §7 exemptions alike, and §4's replacements
+  rest on §2's bound. Splitting them would put a third of the argument in each
+  document and none would be readable alone.
 - **Defer the question §4 answers to the implementing lane.** *Rejected.* It is a
   ruling about what the §7 exemption's third replacement *is*, so an implementation
   cannot be judged against the exemption without it, and ADR-0168 §6 assigned it

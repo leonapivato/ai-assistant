@@ -1,6 +1,6 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause) and ADR-0172 (§3's keyring clause and §7's gating clause, each only as it reaches a browser-held web-session credential)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause) and ADR-0172 (§3's keyring clause, §6's Tier 0 purge clause and §7's gating clause, each only as it reaches a browser-held web-session credential)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
@@ -200,7 +200,9 @@
   ADR-0168 §6 classified that session's two halves and its single-use bootstrap
   value as Tier 0 under §1, found §3 and §7 engaged by them, and made one narrowly
   scoped supersession covering both a **prerequisite of the implementing lane**.
-  ADR-0172 is that supersession.
+  ADR-0172 is that supersession, and it engages a **third** clause ADR-0168 did
+  not name — §6 — because authorising a Tier 0 credential outside the keyring
+  gives that clause a holder no delete act at the hub can reach.
 
   **Replaced — §3's keyring clause, only for the web-session credential class.**
   "Tier 0 secrets are stored in the **OS keyring** via the `keyring` library." A
@@ -213,7 +215,9 @@
   implementation omitting any of which does not have the exemption: the values are
   read on the admission path and for no other purpose; on this system's side they
   never leave process memory and are held as verifiers rather than as values, so
-  the class is **nowhere at rest** rather than in a weaker place; on the browser's
+  nothing this system writes holds the class at all — a stronger posture than the
+  clause it replaces on the side this system controls, and silent about the
+  browser's side, which is why §6 is engaged; on the browser's
   side custody is the browser profile's own file permissions, which is the
   operating system's own access control this clause itself chose; and every value
   is minted by this system and **ceases to admit anything** at the earlier of
@@ -228,6 +232,28 @@
   nothing. ADR-0172 §2 also states that a **durable** browser-held credential is
   not authorised: the bound is a condition of the exemption, so a design removing
   it loses the exemption instead of inheriting it.
+
+  **Replaced — §6's Tier 0 purge clause, only as it reaches that same class.**
+  "Deleting the user's data purges Tier 0 (keyring entries) and Tier 1 (database
+  rows) together." A live web session is held in a browser profile and in a
+  running gateway process, and a delete act reaches neither: the gateway
+  ordinarily runs on the browsing device rather than the hub's machine (ADR-0168
+  §2), and ADR-0126 §2 requires the offline delete act to run with the hub
+  stopped. ADR-0172 §4 puts two replacements in the clause's place: **the act that
+  removes the class is stopping the gateway process**, performed at the machine
+  that runs it and needing no hub, after which every session has ended (ADR-0168
+  §4) and what a browser still holds verifies against nothing; and a delete act
+  that cannot perform it **names the class as not purged** and names that act,
+  never describing Tier 0 as purged. No clause obliges a delete act to reach,
+  stop or enumerate a gateway. This is the **third** unreachable holder this
+  sentence has acquired — after ADR-0124 §8's enrolled device and ADR-0126 §6's
+  operator environment — and it takes the instrument both took. ADR-0172 §4
+  records why ADR-0126's supersession does not extend to it: that scope reaches a
+  credential "on the hub's own machine", its report clause describes the
+  operator's environment credential, and it forbids any lane citing it to hold a
+  new credential outside the keyring. Everything else §6 grants — view, export,
+  delete, retention rules, and the purge of every Tier 1 artifact and every
+  keyring-held Tier 0 artifact a delete act does reach — is untouched.
 
   **Replaced — §7's gating clause, only for a gateway's reads and verifications
   of that class on the admission path.** "Access to Tier 0/1 data and every
@@ -272,9 +298,7 @@
   given — the class is Tier 0 *because* of §1, and ADR-0172 refuses
   reclassification as the way to avoid this record. §2, §4 and §5 are untouched,
   §5 being what shapes ADR-0168 §6's record into an enumeration of permitted Tier
-  2 facts. **§6 is examined and no record is owed**: there is nothing at rest for
-  a purge to miss, since a session lives only while its gateway process runs and
-  the browser's copy verifies against nothing afterwards. ADR-0172 §1 closes the
+  2 facts. ADR-0172 §1 closes the
   class at three kinds of value, puts the gateway's own device credential
   expressly outside it, and forbids any lane citing the ADR to place another Tier
   0 value outside the keyring or to widen the class by resemblance. It neither
