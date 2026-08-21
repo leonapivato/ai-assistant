@@ -117,6 +117,7 @@ from ai_assistant.testing import (
     FakeObserver,
     FakePlanStore,
     FakeSourceGrantStore,
+    FakeStreamingCompleter,
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
@@ -141,7 +142,7 @@ def _composing() -> ComposingStage:
     pinned in ``tests/orchestration/test_composing.py`` and
     ``tests/orchestration/test_engine_composing.py``.
     """
-    return ComposingStage(model=FakeModelProvider())
+    return ComposingStage(model=FakeModelProvider(), streaming=FakeStreamingCompleter())
 
 
 def _grant_ids() -> Callable[[], str]:
@@ -1962,7 +1963,7 @@ async def test_ask_reports_an_unknown_conversation_rather_than_starting_one(
 
 def _answering(reply: str) -> ComposingStage:
     """A composing stage whose provider always returns ``reply``."""
-    return ComposingStage(model=FakeModelProvider(reply))
+    return ComposingStage(model=FakeModelProvider(reply), streaming=FakeStreamingCompleter())
 
 
 async def test_ask_prints_the_composed_answer(output: StringIO) -> None:
@@ -2053,7 +2054,12 @@ async def test_a_degraded_composition_is_stated_and_the_account_still_rendered(
         msg = "the route is exhausted"
         raise ModelUnavailableError(msg)
 
-    engine = _engine(tools=(tool(),), composing=ComposingStage(model=FakeModelProvider(refuse)))
+    engine = _engine(
+        tools=(tool(),),
+        composing=ComposingStage(
+            model=FakeModelProvider(refuse), streaming=FakeStreamingCompleter()
+        ),
+    )
 
     code = await cli._drive_turn(engine, "send it", timeout=PATIENT, approver=lambda _c: True)
 

@@ -372,14 +372,56 @@ class TestTurnOutcomeReply:
         with pytest.raises(ValidationError, match="outcome with no turn must carry no reply"):
             TurnOutcome(turn=None, reply="You prefer hiking.")
 
-    def test_the_flag_is_never_true_beside_an_answer(self) -> None:
-        """§4: "never ``True`` beside a non-``None`` ``reply``".
+    def test_the_flag_beside_an_answer_is_admitted_as_the_fourth_shape(self) -> None:
+        """ADR-0173 §6's widening of ADR-0170 §4's "never ``True`` beside a reply".
 
-        That is what lets a client tell "no answer was owed" from "an answer was
-        owed and could not be composed" from the value alone.
+        Streaming creates a shape ADR-0170 could not have — an answer that **began
+        and did not finish** — so the outcome carries the text actually yielded
+        *with* the flag. Discarding it was the alternative and is the dishonest one:
+        the wire's authoritative value would contradict prose already on the user's
+        screen, leaving every client to invent its own reconciliation.
         """
-        with pytest.raises(ValidationError, match="there is no reply to carry"):
-            TurnOutcome(turn=_turn(), reply="You prefer hiking.", reply_degraded=True)
+        outcome = TurnOutcome(turn=_turn(), reply="You prefer hi", reply_degraded=True)
+        assert outcome.reply == "You prefer hi"
+        assert outcome.reply_degraded is True
+
+    def test_the_four_shapes_are_each_distinct_from_the_two_values(self) -> None:
+        """§4's purpose survives the widening, which is ADR-0070 §1's own test.
+
+        ADR-0173 §6: a client now "reads four states from two values and every one
+        of them is distinct". §4's stated reason for the flag — telling these apart
+        "from the value alone" — is therefore strictly better served, not eroded.
+        """
+        read = {
+            "no answer owed": TurnOutcome(turn=_turn(), step=_parked()),
+            "owed, none produced": TurnOutcome(turn=_turn(), reply_degraded=True),
+            "owed, part produced": TurnOutcome(
+                turn=_turn(), reply="You prefer hi", reply_degraded=True
+            ),
+            "owed, whole produced": TurnOutcome(turn=_turn(), reply="You prefer hiking."),
+        }
+        states = {
+            name: (outcome.reply is None, outcome.reply_degraded) for name, outcome in read.items()
+        }
+        assert states == {
+            "no answer owed": (True, False),
+            "owed, none produced": (True, True),
+            "owed, part produced": (False, True),
+            "owed, whole produced": (False, False),
+        }
+        assert len(set(states.values())) == len(states)
+
+    def test_the_widening_reaches_that_shape_and_no_other(self) -> None:
+        """A park and a turn-less outcome stay closed in **both** directions.
+
+        ADR-0173 §6 admits a reply beside the flag on the fourth shape "and no
+        other", so the two shapes that owe no answer at all are exactly as refused
+        as they were — adding prose does not buy either of them the flag.
+        """
+        with pytest.raises(ValidationError, match="parked outcome must carry no reply"):
+            TurnOutcome(turn=_turn(), step=_parked(), reply="You prefer hi", reply_degraded=True)
+        with pytest.raises(ValidationError, match="outcome with no turn must carry no reply"):
+            TurnOutcome(turn=None, reply="You prefer hi", reply_degraded=True)
 
 
 class TestWhatIsDeliberatelyNotConstrained:

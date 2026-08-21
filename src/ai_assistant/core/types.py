@@ -8285,6 +8285,46 @@ class TurnResult(BaseModel):
     )
 
 
+class ReplyChunk(BaseModel):
+    """One instalment of a streamed answer (ADR-0173 §2).
+
+    The payload of a ``chunk`` frame, and the value
+    ``AssistantEngine.converse_streaming`` yields before its terminal
+    :class:`TurnOutcome`. A chunk is a *rendering of the answer in flight*, never
+    the answer itself: ADR-0173 §3 keeps :attr:`TurnOutcome.reply` authoritative,
+    and where a chunk sequence and the terminal ``reply`` disagree the terminal
+    ``reply`` is the answer.
+
+    **One member, and the two that were refused are refused on ADR-0084 §3's own
+    argument** (ADR-0173 §2). That section declined a length member inside the
+    envelope because "the frame's length is the prefix below … so a second length
+    inside the envelope would be a value that can disagree with the one already
+    read". A stream's order is already fixed by the byte order of a
+    length-prefixed sequence on one connection, so a **sequence number** would be a
+    second claim about the same fact and a chunk whose index disagreed with its
+    position would have no defensible interpretation. The same reasoning retires a
+    **final-frame flag**: ``FrameKind`` is the discriminator, and a frame that is a
+    chunk by kind and final by flag is two answers to one question.
+
+    Attributes:
+        text: This instalment's text. :data:`NonBlankEncodableText` rather than
+            :data:`EncodableText`, for ADR-0170 §3's reason applied one level down:
+            a blank chunk is a frame that costs a round of framing and says
+            nothing, and admitting one would oblige every client to decide whether
+            an empty chunk means "nothing yet" or "something ended". A provider
+            that yields an empty delta is coalesced by the composing stage
+            (ADR-0173 §5), which is where that knowledge belongs — and coalesced
+            **without discarding**, since a blank delta is a separator the model
+            emitted and belongs to the text on either side of it.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    text: NonBlankEncodableText = Field(
+        description="This instalment of the streamed answer (ADR-0173 §2)."
+    )
+
+
 class TurnOutcome(BaseModel):
     """One unit of what a turn call produced (ADR-0042 §3).
 
@@ -8317,17 +8357,23 @@ class TurnOutcome(BaseModel):
             must answer is :attr:`StepOutcome.confirmation`; a pass whose
             :attr:`turn` is ``None``, a resume driven from a *recovered* park, where
             context and memories were never persisted and there is nothing to
-            compose from; and a pass on which composition failed, which is the one
-            of the three that sets :attr:`reply_degraded`. Non-``None`` on every
-            other outcome the two turn calls return.
+            compose from; and a pass on which composition failed **before anything
+            was published**, which is the one of the three that sets
+            :attr:`reply_degraded`. Non-``None`` on every other outcome the two turn
+            calls return.
+
+            **On a streamed turn it is also the join of the chunks**, in the order
+            they were written (ADR-0173 §3), and where a chunk sequence and this
+            value disagree *this value is the answer* — no client, adapter, setting
+            or later ADR resolves that disagreement in the chunks' favour.
 
             :data:`NonBlankEncodableText` rather than :data:`EncodableText` because
             ``None`` has the precise meaning above and a blank string would be a
             third state meaning the same thing less legibly — the reasoning
             :attr:`NotificationCandidate.summary` already applies to the one line a
             user is told.
-        reply_degraded: Whether composing that answer **failed** on a turn that
-            otherwise ran (ADR-0170 §3, §8). The third of a set:
+        reply_degraded: Whether composing that answer **did not complete** on a turn
+            that otherwise ran (ADR-0170 §3, §8; ADR-0173 §6). The third of a set:
             :attr:`TurnResult.memory_degraded` says retrieval failed and
             :attr:`capture_degraded` says the record could not be written, and each
             says the same kind of thing — a late stage failed, the turn is still
@@ -8342,6 +8388,19 @@ class TurnOutcome(BaseModel):
             (ADR-0170 §8), because a stage that could be wholly broken while every
             turn reported the same classified-looking degradation is the state
             hardest to notice.
+
+            **ADR-0173 §6 adds a fourth shape and widens this flag to reach it**,
+            partially superseding ADR-0170 §4's clause that it is "never ``True``
+            beside a non-``None`` ``reply``". Streaming creates a shape ADR-0170
+            could not have — an answer that **began and did not finish** — and the
+            outcome then carries :attr:`reply` set to the text actually yielded with
+            this flag ``True``. So it means *composing this answer did not complete*,
+            whether because it failed or because it ran out of room, and a client
+            reads four states off two values: no answer was owed, one was owed and
+            none was produced, one was owed and part of it was produced, one was
+            owed and the whole of it was. Carrying the truncated text is what keeps
+            the authoritative value from contradicting prose already on the user's
+            screen (ADR-0173 §6).
 
     Note:
         ADR-0085 §4's Group A table lists this type's four fields as promoted; the
@@ -8375,7 +8434,7 @@ class TurnOutcome(BaseModel):
 
     @model_validator(mode="after")
     def _reply_matches_the_shape_of_the_pass(self) -> TurnOutcome:
-        """State ADR-0170 §4's two invariants, in both directions.
+        """State ADR-0170 §4's invariants, as ADR-0173 §6 widened them, both ways.
 
         **Both directions, for** :meth:`StepOutcome._confirmation_matches_disposition`
         **'s own reason.** A silent ``None`` on a turn that ran is an answer the user
@@ -8384,11 +8443,20 @@ class TurnOutcome(BaseModel):
         user must answer, and the prose is what they will read.
 
         The three ``None`` shapes are a park, a recovered resume, and a composition
-        failure — and only the third sets :attr:`reply_degraded`, which is what lets
-        a client tell "no answer was owed" from "an answer was owed and could not be
-        composed" from the value alone. So the flag is refused beside a non-``None``
-        :attr:`reply`, on a park, and where :attr:`turn` is ``None``; and where all
-        three of those are absent, an answer is owed and a bare ``None`` is refused.
+        failure that published nothing — and only the third sets
+        :attr:`reply_degraded`, which is what lets a client tell "no answer was
+        owed" from "an answer was owed and could not be composed" from the value
+        alone. So the flag is refused on a park and where :attr:`turn` is ``None``;
+        and where both of those are absent and the flag is clear, an answer is owed
+        and a bare ``None`` is refused.
+
+        **What it is no longer refused beside is a non-``None`` reply**, and that is
+        ADR-0173 §6's fourth shape rather than a relaxation: a streamed answer that
+        began and did not finish carries the text actually yielded *and* the flag,
+        because discarding prose the user has already read would make the wire's
+        authoritative value contradict their screen. The widening is exact — the
+        flag is admitted beside a reply on **that** shape and no other, so a park
+        and a turn-less outcome are refused in both directions exactly as before.
 
         **The first two shapes are refused in the ``reply`` direction as well as the
         flag direction**, which is what "in both directions" costs on each of them
@@ -8414,9 +8482,6 @@ class TurnOutcome(BaseModel):
             )
             raise ValueError(msg)
         if self.reply_degraded:
-            if self.reply is not None:
-                msg = "reply_degraded says composition failed, so there is no reply to carry"
-                raise ValueError(msg)
             if parked:
                 msg = "a parked outcome owes no answer, so composing one cannot have degraded"
                 raise ValueError(msg)

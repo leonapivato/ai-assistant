@@ -34,7 +34,7 @@ from ai_assistant.core.types import (
     StepStatus,
 )
 from ai_assistant.orchestration.composing import ComposingStage
-from ai_assistant.testing import FakeModelProvider
+from ai_assistant.testing import FakeModelProvider, FakeStreamingCompleter
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -53,7 +53,8 @@ def _refusing(_messages: Sequence[Message]) -> str:
 
 def _wired(model: ModelProvider, **knobs: object) -> Harness:
     """A harness whose composing stage runs over ``model``."""
-    return Harness(composing=ComposingStage(model=model), **knobs)  # type: ignore[arg-type]  # heterogeneous harness knobs
+    stage = ComposingStage(model=model, streaming=FakeStreamingCompleter())
+    return Harness(composing=stage, **knobs)  # type: ignore[arg-type]  # heterogeneous harness knobs
 
 
 class _GatedProvider:

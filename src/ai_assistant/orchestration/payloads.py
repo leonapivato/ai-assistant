@@ -259,6 +259,37 @@ def canonical_payload(value: object) -> bytes:
     return _encode(project(value))
 
 
+#: What a JSON string costs before any of its characters do — the two quotes
+#: :func:`encoded_text_bytes` counts. Named so that a caller accumulating a value's
+#: cost can add *bodies* rather than whole encodings, which is what makes that
+#: arithmetic additive over concatenation (ADR-0173 §3).
+JSON_STRING_QUOTE_BYTES: Final[int] = 2
+
+
+def encoded_text_bytes(text: str) -> int:
+    """How many bytes ``text`` occupies as a JSON string in the canonical encoding.
+
+    The quotes included, so it is exactly what one string member's *value*
+    contributes to :func:`canonical_payload`'s output at whatever position it sits.
+
+    **It is additive over concatenation, and that is what it is for** (ADR-0173 §3).
+    ADR-0087 §2's recipe escapes a JSON string character by character and
+    ``ensure_ascii=False`` leaves every other code point as its own UTF-8 bytes, so
+    the escaped body of ``a + b`` is the escaped body of ``a`` followed by that of
+    ``b``. A caller bounding a value it is accumulating can therefore keep a running
+    total instead of re-encoding the whole of it on every step, which is the
+    difference between the composing stage's ceiling costing linear work and
+    quadratic.
+
+    Args:
+        text: The string to measure.
+
+    Returns:
+        The byte length of its canonical JSON form, ``2`` for the empty string.
+    """
+    return len(_encode(text))
+
+
 def _largest_member(projection: Any) -> str | None:
     """Name the top-level member that contributed most to the payload's size.
 
