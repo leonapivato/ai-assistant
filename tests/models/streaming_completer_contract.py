@@ -21,6 +21,7 @@ Named ``*_contract`` (not ``test_*``) so pytest collects it only via a
 
 from __future__ import annotations
 
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Protocol
 
 import pytest
@@ -98,6 +99,17 @@ class StreamingWorld(Protocol):
         """The conversation each attempt was handed, oldest attempt first."""
         ...
 
+    @property
+    def released(self) -> int:
+        """How many started attempts have finished — completed, failed, or closed.
+
+        The observable form of ADR-0060's resource clause at this seam. It lets a
+        case assert that an exchange really was let go rather than merely that
+        nothing raised on the way out, which is the assertion an implementation
+        that leaks the run still passes.
+        """
+        ...
+
 
 def _history(roles: Sequence[Role]) -> list[Message]:
     """Build a conversation of ``roles``, one message per role, in order."""
@@ -127,6 +139,25 @@ def _conversation() -> list[Message]:
 def _fingerprint(messages: Sequence[Message]) -> tuple[Turn, ...]:
     """The full identity of every turn in ``messages`` — role, content, and name."""
     return tuple((m.role, m.content, m.name) for m in messages)
+
+
+@asynccontextmanager
+async def closing(stream: AsyncIterator[str]) -> AsyncIterator[AsyncIterator[str]]:
+    """:func:`contextlib.aclosing` for a value the Protocol types as an iterator.
+
+    The return annotation ADR-0173 §5 fixes is ``AsyncIterator``, which declares
+    no ``aclose``, while the Protocol's own text obliges an implementation to
+    return one that has it — otherwise a caller has no way to release the
+    exchange and this module's cancellation clause could not be discharged at
+    this seam at all. This is where the suite holds an implementation to that,
+    which is why the ``assert`` is here rather than a silent ``getattr`` default.
+    """
+    try:
+        yield stream
+    finally:
+        aclose = getattr(stream, "aclose", None)
+        assert aclose is not None, "a StreamingCompleter returns a closeable iterator"
+        await aclose()
 
 
 async def _drain(stream: AsyncIterator[str]) -> list[str]:
@@ -300,41 +331,58 @@ class StreamingCompleterContract:
 
     # --- stopping early (ADR-0060, via this module's cancellation clause) ----
 
-    async def test_abandoning_a_stream_part_way_releases_it_without_raising(self) -> None:
-        """Stopping early is ordinary here, and must cost the caller nothing.
+    async def test_closing_a_stream_part_way_releases_the_exchange(self) -> None:
+        """Stopping early is ordinary here, and closing must both work and release.
 
         A composing stage that hits ADR-0173 §3's ceiling stops reading, and so
-        does any caller whose own client went away — so an implementation holding
-        the provider exchange open across its ``yield`` has to be able to unwind
-        that from a *close*, not only from exhaustion. It is easy to get wrong in
-        a way nothing else notices: the run is left mid-flight and the failure
-        surfaces as an unrelated error out of the close.
+        does any caller whose own client went away — so an implementation must be
+        able to unwind its exchange from a *close*, not only from exhaustion. It
+        is easy to get wrong in a way that looks fine: an implementation holding a
+        provider context manager open across its own ``yield`` cannot unwind it
+        from a ``GeneratorExit`` at all, and the failure surfaces as an unrelated
+        error out of the close.
 
-        ``aclose`` is called through :func:`getattr` because the Protocol's return
-        type is ``AsyncIterator``, which does not declare it. An implementation
-        that returns an async generator (both of ours do) gets the deterministic
-        assertion; one returning a bare iterator is asserted on the ``break`` path
-        below, which every shape has.
+        Asserted on :attr:`StreamingWorld.released` and not merely on "nothing
+        raised", because an implementation that leaks the exchange passes the
+        weaker assertion. Closed through :func:`contextlib.aclosing`, which is
+        also the shape the Protocol tells a caller to use.
         """
-        world = self.world(StreamAttempt(deltas=("one", "two", "three")))
-        stream = world.completer.stream(_a_question())
-
-        first = await anext(stream)
-        aclose = getattr(stream, "aclose", None)
-        if aclose is not None:
-            await aclose()
-
-        assert first == "one"
-
-    async def test_breaking_out_of_the_iteration_does_not_raise(self) -> None:
         world = self.world(StreamAttempt(deltas=("one", "two", "three")))
         seen: list[str] = []
 
-        async for delta in world.completer.stream(_a_question()):
-            seen.append(delta)
-            break
+        async with closing(world.completer.stream(_a_question())) as stream:
+            seen.append(await anext(stream))
 
         assert seen == ["one"]
+        assert world.attempts == 1
+        assert world.released == 1
+
+    async def test_a_retained_iterator_holds_the_exchange_until_it_is_closed(self) -> None:
+        """The caller's obligation, pinned in both directions.
+
+        The Protocol says an abandoned iterator is still open until it is closed,
+        because Python closes an async iterator at finalisation and not at the
+        ``break``. Both halves are asserted: unclosed is genuinely still held, and
+        closing it genuinely lets it go. A consumer lane reads this case to learn
+        that ``break`` is not enough — which is exactly the mistake the clause
+        exists to prevent, and one no amount of care inside the implementation can
+        prevent for it.
+        """
+        world = self.world(StreamAttempt(deltas=("one", "two", "three")))
+        stream = world.completer.stream(_a_question())
+        seen: list[str] = []
+
+        async for delta in stream:
+            seen.append(delta)
+            break
+        held = world.released
+
+        async with closing(stream):
+            pass
+
+        assert seen == ["one"]
+        assert held == 0, "an abandoned but unclosed iterator is still holding its exchange"
+        assert world.released == 1, "closing it is what lets the exchange go"
 
     # --- the blank stream (ADR-0173 §5, ADR-0170 §8, #1324) ------------------
 

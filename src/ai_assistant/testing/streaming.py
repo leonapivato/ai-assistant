@@ -124,10 +124,16 @@ class FakeStreamingCompleter:
         script: The attempts, in order. Defaults to one successful attempt
             yielding :data:`DEFAULT_STREAM_DELTAS`.
         calls: One :class:`StreamCall` per attempt actually started.
+        released: How many started attempts have finished — by completing, by
+            failing, or by the caller closing the stream part-way. It stands in
+            for a provider exchange being let go, so a consumer can assert that
+            its early-stop handling really releases rather than merely not
+            raising (ADR-0060).
     """
 
     script: tuple[StreamAttempt, ...] = (StreamAttempt(deltas=DEFAULT_STREAM_DELTAS),)
     calls: list[StreamCall] = field(default_factory=list)
+    released: int = 0
 
     @classmethod
     def yielding(cls, *deltas: str) -> FakeStreamingCompleter:
@@ -208,14 +214,25 @@ class FakeStreamingCompleter:
     async def _stream(
         self, messages: tuple[Message, ...], *, model: str | None
     ) -> AsyncIterator[EncodableText]:
-        """Walk the script, substituting only while nothing non-blank has been sent."""
+        """Walk the script, substituting only while nothing non-blank has been sent.
+
+        The ``try``/``finally`` around each attempt is what makes :attr:`released`
+        true of a *closed* stream as well as a finished one: a caller that stops
+        reading and closes the iterator raises ``GeneratorExit`` at the ``yield``,
+        and the attempt is let go there — which is the fake standing in for a
+        provider exchange being released, so a consumer's early-stop handling can
+        be tested against something that behaves like the real seam.
+        """
         committed = False
         failure: ModelError | None = None
         for attempt in self.script:
             self.calls.append(StreamCall(messages=messages, model=model))
-            for delta in attempt.deltas:
-                yield _encodable(delta)
-                committed = committed or not _is_blank(delta)
+            try:
+                for delta in attempt.deltas:
+                    yield _encodable(delta)
+                    committed = committed or not _is_blank(delta)
+            finally:
+                self.released += 1
             if not attempt.fails:
                 return
             failure = ModelUnavailableError("the fake's scripted route failed")
