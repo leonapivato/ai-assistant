@@ -127,6 +127,24 @@ and that reason is a ratified decision rather than a missing mechanism.
 > `True` equals `1` and `1.0`, and every other clause of this decision would still
 > pass while `{"steps": [], "no_capability_needed": 1}` executed as a decline.
 
+> **Normative.** The same lane ships a deterministic test of the marker's
+> **inertness**: a plan envelope whose `steps` is non-empty and which also carries
+> `no_capability_needed` — at the JSON boolean `true` and at a non-boolean value —
+> asserting in both cases that the plan's steps are returned and that no repair
+> round is taken.
+
+That second test guards the opposite mistake from the first, and the two are
+easy to conflate into one. A lane that reads the strictness clause as "validate
+the marker" rather than "validate the marker *where it decides something*" will
+type-check it before looking at `steps`, and then
+`{"steps": [<a valid step>], "no_capability_needed": "yes"}` becomes an
+extraction failure — a good plan sent to bounded repair over a key that decides
+nothing on that shape. The strictness test cannot see it, because every case in
+it has an empty `steps` list. ADR-0047 §4 step 2's "other envelope keys are
+ignored" rule is what makes ignoring it the right outcome, and §10 leans on that
+rule to admit the marker without further ceremony; this clause is what keeps the
+implementation honest to it.
+
 **Both halves are positive assertions, and that is the whole answer to ADR-0047
 §4.** §4's objection is that zero steps is indistinguishable from a failure to
 decompose — that absence cannot be told from breakage. It is a good objection
