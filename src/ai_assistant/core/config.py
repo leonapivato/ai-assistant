@@ -522,6 +522,138 @@ _OptionalDuration = Annotated[
 ]
 
 
+def _split_configured_list(value: object) -> object:
+    """Parse a comma-separated list out of a single environment string.
+
+    pydantic-settings treats a tuple-typed field as *complex* and parses its
+    environment value as **JSON**, which would make an owner write
+    ``ASSISTANT_GATEWAY_REMOTE_BROWSER_DEVICES='["nPHONE1CNTRL"]'`` — quoting,
+    brackets, and a parse error naming JSON rather than the mistake. ``NoDecode``
+    on the field turns that decoding off so the raw string arrives here, which is
+    pydantic-settings' own documented hook: source precedence is untouched and
+    only the *decoding* changes. :func:`_split_model_specs` takes the same shape
+    for the same reason.
+
+    **What it does not borrow from that function is the ordered-input guard**, and
+    the difference is what the order means. ADR-0062 §1 makes the written order of
+    ``fallback_models`` the operator's statement of preference, so an input whose
+    order is not a statement had to be refused; ADR-0174 §8 rules the opposite for
+    these two lists — "The list is read as a **set** of identities… order carries
+    no meaning" — so there is nothing an unordered input could misrepresent, and a
+    refusal keyed on ordering would be ceremony rather than a defence.
+
+    Whitespace around an element is stripped and empty segments are dropped, so a
+    trailing comma is not an element. An empty or all-whitespace value therefore
+    means "no elements", the same as omitting the variable.
+
+    Args:
+        value: The raw configured value.
+
+    Returns:
+        A tuple of elements if ``value`` was an exact ``str``; anything else
+        unchanged, for the field's own validation to judge.
+    """
+    if type(value) is str:
+        return tuple(part.strip() for part in value.split(_SPEC_SEPARATOR) if part.strip())
+    return value
+
+
+#: A list an owner writes as one comma-separated environment variable. Empty is a
+#: real value on both fields that use it, and it is their default.
+_ConfiguredList = Annotated[tuple[str, ...], NoDecode, BeforeValidator(_split_configured_list)]
+
+
+def _refuse_a_non_overlay_address(
+    value: str | None, *, setting: str, loopback_is: str, unset_means: str
+) -> str | None:
+    """Refuse at load what ADR-0124 §2 forbids a listener to bind.
+
+    > The remote listener binds only to an address that exists on that overlay. It
+    > may not bind a wildcard address, an address of a physical interface, or any
+    > address reachable from the public internet, and a configuration that would
+    > have it do so is refused at load time rather than bound.
+
+    **What is decidable from the string alone is decided here, and the rest is
+    decided before the bind rather than by it.** A wildcard, a name, a loopback or
+    link-local address and a globally-routable one are properties of the value;
+    *which* private address belongs to the overlay is a fact only the overlay agent
+    holds, so the process that binds refuses an address the agent does not place on
+    the overlay. Neither half is sufficient alone — this one would pass a LAN
+    address on ``eth0``, and the agent check alone would let a wildcard reach a
+    process that has already opened its stores — and together they are "refused…
+    rather than bound".
+
+    **A name is refused rather than resolved.** Resolving one is a lookup whose
+    answer another party supplies, and the address a listener binds would then be a
+    fact about a resolver rather than about this deployment; ADR-0124 §1's rule that
+    a destination never comes "from a discovery mechanism" is the same principle on
+    the other end of the hop.
+
+    **Shared by two settings rather than restated for the second**, which is
+    ADR-0174 §8's own instruction: ``gateway_remote_address`` carries "the five
+    refusals ``hub_remote_address`` already carries, **in the same shape** and for
+    the same reasons (ADR-0124 §2)". Two copies of five conditions is the drift
+    ADR-0089 §2 records finding in the section defining its own prevention, so what
+    is per-caller here is only the wording a refusal uses — the setting to correct,
+    what its loopback sibling is, and what unsetting it leaves running.
+
+    Args:
+        value: The configured address, or ``None`` when the listener is off.
+        setting: The field being validated, so a refusal names the one to edit.
+        loopback_is: What this listener's loopback sibling is, as a clause
+            completing "a loopback address, which is not on the overlay; …".
+        unset_means: What unsetting the field leaves bound, as a noun phrase
+            completing "or unset it to …".
+
+    Returns:
+        The address, stripped of surrounding space, or ``None``.
+
+    Raises:
+        ValueError: If the value is not an IP address, or is one ADR-0124 §2
+            forbids. Reported as a ``ConfigurationError`` by ``load_settings``,
+            which is a stay-down deployment fault (ADR-0083 §5).
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    try:
+        address = ipaddress.ip_address(text)
+    except ValueError as exc:
+        msg = (
+            f"{setting}={value!r} is not an IP address. The remote listener "
+            f"binds a literal address that exists on the overlay (ADR-0124 §2); a name "
+            f"would make the bound address a fact about a resolver. Run your overlay "
+            f"agent's status command and use the address it reports for this machine"
+        )
+        raise ValueError(msg) from exc
+    # A sequence of pairs rather than a mapping keyed on the predicate: there
+    # are only two booleans, so a dictionary would collapse five conditions
+    # into two entries and silently report the wrong reason.
+    forbidden = (
+        (
+            address.is_unspecified,
+            "a wildcard address, which would put the listener on every interface this "
+            "machine has, including any reachable from the public internet",
+        ),
+        (address.is_loopback, f"a loopback address, which is not on the overlay; {loopback_is}"),
+        (address.is_multicast, "a multicast address, which no listener may hold"),
+        (address.is_link_local, "a link-local address, which is not on the overlay"),
+        (
+            address.is_global,
+            "reachable from the public internet, where the population that can attempt "
+            "the credential is everyone — which is the door ADR-0124 §2 refuses to open",
+        ),
+    )
+    for holds, reason in forbidden:
+        if holds:
+            msg = (
+                f"{setting}={value!r} is {reason}. Configure the address your "
+                f"overlay agent reports for this machine, or unset it to {unset_means}"
+            )
+            raise ValueError(msg)
+    return text
+
+
 class EmbedderKind(StrEnum):
     """Which :class:`~ai_assistant.core.protocols.Embedder` the app wires (ADR-0006 §2).
 
@@ -1213,84 +1345,36 @@ class Settings(BaseSettings):
     @field_validator("hub_remote_address")
     @classmethod
     def _the_remote_listener_binds_only_an_overlay_address(cls, value: str | None) -> str | None:
-        """Refuse at load what ADR-0124 §2 forbids the listener to bind.
+        """Refuse at load what ADR-0124 §2 forbids the hub's listener to bind.
 
-        > The remote listener binds only to an address that exists on that overlay.
-        > It may not bind a wildcard address, an address of a physical interface,
-        > or any address reachable from the public internet, and a configuration
-        > that would have it do so is refused at load time rather than bound.
-
-        **What is decidable from the string alone is decided here, and the rest is
-        decided before the bind rather than by it.** A wildcard, a name, a loopback
-        or link-local address and a globally-routable one are properties of the
-        value; *which* private address belongs to the overlay is a fact only the
-        overlay agent holds, so :mod:`ai_assistant.service.remote` refuses to bind
-        an address the agent does not report as the hub's own. Neither half is
-        sufficient alone — this one would pass a LAN address on ``eth0``, and the
-        agent check alone would let a wildcard reach a process that has already
-        opened its stores — and together they are "refused… rather than bound".
-
-        **A name is refused rather than resolved.** Resolving one is a lookup whose
-        answer another party supplies, and the address a listener binds would then
-        be a fact about a resolver rather than about this deployment; §1's rule
-        that a destination never comes "from a discovery mechanism" is the same
-        principle on the other end of the hop.
+        The five refusals and the reasoning behind them live in
+        :func:`_refuse_a_non_overlay_address`, which ADR-0174 §8 obliged this field
+        to share with ``gateway_remote_address`` — "the five refusals
+        ``hub_remote_address`` already carries, in the same shape and for the same
+        reasons". The half that cannot be decided from the string is
+        :mod:`ai_assistant.service.remote`'s, which refuses to bind an address the
+        overlay agent does not report as the hub's own.
 
         Args:
             value: The configured address, or ``None`` when the listener is off.
 
         Returns:
-            The address, unchanged.
+            The address, stripped of surrounding space, or ``None``.
 
         Raises:
             ValueError: If the value is not an IP address, or is one ADR-0124 §2
                 forbids. Reported as a ``ConfigurationError`` by ``load_settings``,
                 which is a stay-down deployment fault (ADR-0083 §5).
         """
-        if value is None:
-            return None
-        text = value.strip()
-        try:
-            address = ipaddress.ip_address(text)
-        except ValueError as exc:
-            msg = (
-                f"hub_remote_address={value!r} is not an IP address. The remote listener "
-                f"binds a literal address that exists on the overlay (ADR-0124 §2); a name "
-                f"would make the bound address a fact about a resolver. Run your overlay "
-                f"agent's status command and use the address it reports for this machine"
-            )
-            raise ValueError(msg) from exc
-        # A sequence of pairs rather than a mapping keyed on the predicate: there
-        # are only two booleans, so a dictionary would collapse five conditions
-        # into two entries and silently report the wrong reason.
-        forbidden = (
-            (
-                address.is_unspecified,
-                "a wildcard address, which would put the hub on every interface this "
-                "machine has, including any reachable from the public internet",
+        return _refuse_a_non_overlay_address(
+            value,
+            setting="hub_remote_address",
+            loopback_is=(
+                "the loopback transport is ADR-0084 §1's Unix socket and is bound "
+                "whether or not this listener is"
             ),
-            (
-                address.is_loopback,
-                "a loopback address, which is not on the overlay; the loopback transport "
-                "is ADR-0084 §1's Unix socket and is bound whether or not this listener is",
-            ),
-            (address.is_multicast, "a multicast address, which no listener may hold"),
-            (address.is_link_local, "a link-local address, which is not on the overlay"),
-            (
-                address.is_global,
-                "reachable from the public internet, where the population that can attempt "
-                "the credential is everyone — which is the door ADR-0124 §2 refuses to open",
-            ),
+            unset_means="bind only the loopback socket",
         )
-        for holds, reason in forbidden:
-            if holds:
-                msg = (
-                    f"hub_remote_address={value!r} is {reason}. Configure the address your "
-                    f"overlay agent reports for this machine, or unset it to bind only the "
-                    f"loopback socket"
-                )
-                raise ValueError(msg)
-        return text
 
     # --- Reaching a hub on another machine (ADR-0124 §1) -----------------
     # **The client's half of the hop, and it is two settings holding one fact.**
@@ -1368,14 +1452,24 @@ class Settings(BaseSettings):
     # run could drive one side of §4 from configuration and had to reach the other
     # from outside the application. ADR-0125 §2's bar for an additive `Settings`
     # field is "a deployment asking for it", and that run is one asking.
+    # **Its "ignored when" widened, and ADR-0174 §8 is the clause that widened it.**
+    # This field used to be documented as ignored when ``remote_hub_address`` is
+    # unset, which stopped being true when the gateway acquired a remote browser
+    # listener: "a gateway may dial its hub over loopback and still serve browsers
+    # over the overlay, so the condition widens to cover a set
+    # ``gateway_remote_address``. No eleventh agent-socket field is owed, and the
+    # custody conditions ``wire/overlay.py`` enforces on that socket are applied
+    # unchanged."
     client_overlay_agent_socket: str | None = Field(
         default=None,
         description=(
             "The Unix socket of the overlay agent this machine runs, used to identify "
-            "the hub before dialling it, or unset to look at the two paths the daemon "
-            "is packaged to use (ADR-0124 §4). A configured path is held to the same "
-            "custody conditions as the data directory, and the socket must be owned by "
-            "root or by this client's uid. Ignored when remote_hub_address is unset."
+            "the hub before dialling it and to identify a browsing device at the "
+            "gateway's remote listener, or unset to look at the two paths the daemon "
+            "is packaged to use (ADR-0124 §4, ADR-0174 §3, §8). A configured path is "
+            "held to the same custody conditions as the data directory, and the socket "
+            "must be owned by root or by this process's uid. Ignored when both "
+            "remote_hub_address and gateway_remote_address are unset."
         ),
     )
 
@@ -1523,6 +1617,207 @@ class Settings(BaseSettings):
             "setting; a budget the hub declines is reported as a declined request."
         ),
     )
+
+    # --- The gateway's remote browser listener (ADR-0174 §8) --------------
+    # **Three fields, and none of them is a budget.** ADR-0174 §8 adds one switch
+    # and two lists to the block above and spends no new figure — §8 makes ADR-0168
+    # §8's ceilings *totals* across both listeners instead, "because a second
+    # listener is the natural place to double a budget by accident" (ADR-0124 §7).
+    #
+    # **The address is the switch, and it is nullable for that reason alone.**
+    # ADR-0168 §8's rule that "none of them is nullable, and none takes a value
+    # meaning 'off'" is stated over the ten fields in that ADR's own table and is
+    # untouched; ADR-0174 §8: "``gateway_remote_address`` is nullable *because it is
+    # the switch*, which is ADR-0124 §2's shape for the hub's own remote listener…
+    # A boundary that is off unless configured on needs a value meaning off."
+    #
+    # **No second port figure.** §8: "the two listeners differ in address, so one
+    # port cannot collide with the other, and a second figure would buy an owner
+    # nothing they cannot get by changing the one."
+    gateway_remote_address: str | None = Field(
+        default=None,
+        description=(
+            "The overlay address the gateway's remote browser listener binds, on "
+            "gateway_port, or unset to serve browsers over the loopback listener "
+            "alone (ADR-0174 §2, §8). A literal IP address on the overlay — never a "
+            "name, a wildcard, a loopback address, or a public one."
+        ),
+    )
+    # **A permission the owner wrote, which is why an empty default means "nobody"
+    # and a stranded one is refused rather than ignored.** §8: "Empty is the default
+    # and means **no device may exchange**, so a gateway configured on serves its
+    # assets and mints no remote session until the owner names a device."
+    gateway_remote_browser_devices: _ConfiguredList = Field(
+        default=(),
+        description=(
+            "The overlay identities of the devices whose browsers may exchange a "
+            "bootstrap value at this gateway, comma-separated (ADR-0174 §4, §8). "
+            "Read as a set: order carries no meaning, a repeat changes nothing, and "
+            "no element is matched by prefix, suffix or pattern. Empty — the default "
+            "— means no device may exchange. Listing a device is not an enrolment, "
+            "not a grant and not a principal."
+        ),
+    )
+    gateway_remote_host_names: _ConfiguredList = Field(
+        default=(),
+        description=(
+            "Additional authorities the remote browser listener admits a Host header "
+            "to name, comma-separated and compared literally with gateway_port "
+            "appended (ADR-0174 §6, §8). The gateway resolves nothing: a name here is "
+            "admitted as a Host value and never used as a destination. Empty — the "
+            "default — means the bound address is the only authority."
+        ),
+    )
+
+    @field_validator("gateway_remote_address")
+    @classmethod
+    def _the_browser_listener_binds_only_an_overlay_address(cls, value: str | None) -> str | None:
+        """Refuse at load what ADR-0174 §2 forbids the browser listener to bind.
+
+        > The remote browser listener binds only an address that exists on that
+        > overlay. It may not bind a wildcard address, an address of a physical
+        > interface, a loopback address, or any address reachable from the public
+        > internet, and a configuration that would have it do so is refused at load
+        > rather than bound.
+
+        The five conditions and their reasoning are
+        :func:`_refuse_a_non_overlay_address`'s, shared with ``hub_remote_address``
+        because ADR-0174 §8 says to share them: "the five refusals
+        ``hub_remote_address`` already carries, **in the same shape** and for the
+        same reasons (ADR-0124 §2)". The physical-interface limb is not decidable
+        from the string — nothing in ``192.168.1.5`` says whether it is an overlay
+        address or an ``eth0`` one — so ADR-0124 §2's own split applies and
+        :class:`~ai_assistant.interfaces.gateway.server.Gateway` refuses at start
+        what only the overlay agent knows.
+
+        Args:
+            value: The configured address, or ``None`` when the listener is off.
+
+        Returns:
+            The address, stripped of surrounding space, or ``None``.
+
+        Raises:
+            ValueError: If the value is not an IP address, or is one ADR-0174 §2
+                forbids.
+        """
+        return _refuse_a_non_overlay_address(
+            value,
+            setting="gateway_remote_address",
+            loopback_is=(
+                "the loopback listener is ADR-0168 §2's own, binds 127.0.0.1 by "
+                "construction, and is bound whether or not this one is"
+            ),
+            unset_means="serve browsers over the loopback listener alone",
+        )
+
+    @model_validator(mode="after")
+    def _no_remote_browser_permission_is_stranded(self) -> Settings:
+        """Refuse a list written about a listener that is off (ADR-0174 §8).
+
+        > Either list being non-empty while ``gateway_remote_address`` is unset is
+        > **refused at settings load**. Both are permissions the owner wrote about a
+        > listener, so a configuration that carries one while the listener is off is
+        > one no reading makes true, and neither is ignored silently.
+
+        **This is the one place these fields depart from the corpus's usual
+        companion-setting shape, and §8 gives the reason:** ``hub_remote_port`` and
+        ``client_overlay_agent_socket`` are documented as "ignored when" their switch
+        is unset, and "a port number and a socket path are neutral facts, and a
+        neutral fact going unread costs the owner nothing. A list of devices that may
+        exchange a credential, and a list of authorities the door will answer to, are
+        **permissions** — an owner who wrote one and got silence has a configuration
+        that says something the running process does not do."
+
+        Returns:
+            ``self``, once neither list is stranded.
+
+        Raises:
+            ValueError: If either list is non-empty while the address is unset.
+        """
+        if self.gateway_remote_address is not None:
+            return self
+        stranded = {
+            "gateway_remote_browser_devices": self.gateway_remote_browser_devices,
+            "gateway_remote_host_names": self.gateway_remote_host_names,
+        }
+        for name, written in stranded.items():
+            if written:
+                msg = (
+                    f"{name}={list(written)!r} is set while gateway_remote_address is "
+                    f"unset, so the remote browser listener it grants a permission on is "
+                    f"off and nothing would ever read it (ADR-0174 §8). Set "
+                    f"gateway_remote_address to the overlay address the gateway should "
+                    f"serve browsers on, or unset {name}"
+                )
+                raise ValueError(msg)
+        return self
+
+    @field_validator("gateway_remote_browser_devices")
+    @classmethod
+    def _every_listed_device_is_an_identity_an_agent_could_report(
+        cls, value: tuple[str, ...]
+    ) -> tuple[str, ...]:
+        """Refuse an element no overlay agent could ever report (ADR-0174 §8).
+
+        > Every element of ``gateway_remote_browser_devices`` is held to the
+        > invariant this system already holds an overlay identity to — non-blank,
+        > encodable as UTF-8, and at most ``MAX_OVERLAY_IDENTITY_BYTES`` bytes
+        > encoded — and the check is **split across two places, because golden rule 2
+        > puts the bound outside ``core``**. ``Settings`` refuses at load what it can
+        > decide without importing anything: an element that is blank or has no UTF-8
+        > form. The **gateway refuses at start**, before it binds or discloses a
+        > bootstrap value, an element over the byte bound, reading the constant the
+        > wire seam owns.
+
+        **The split is golden rule 2, not a compromise**, and §8 says so:
+        ``MAX_OVERLAY_IDENTITY_BYTES`` is defined in ``ai_assistant.wire.overlay``
+        and in ``ai_assistant.service.overlay`` and in neither case in ``core``, "so
+        a ``Settings`` validator enforcing it would be ``core`` importing a
+        subsystem, which golden rule 2 forbids and ``lint-imports`` fails on, while a
+        ``Settings`` validator restating ``128`` would be the second copy the clause
+        above refuses."
+
+        **Why an up-front check at all:** an identity failing the invariant is one
+        the agent can never report, so without it "the owner's named device is
+        refused at every exchange with nothing saying why: the configuration would be
+        silently unsatisfiable".
+
+        Args:
+            value: The configured identities.
+
+        Returns:
+            The identities, each stripped of surrounding space.
+
+        Raises:
+            ValueError: If an element is blank or has no UTF-8 form.
+        """
+        listed: list[str] = []
+        for position, element in enumerate(value):
+            identity = element.strip()
+            if not identity:
+                msg = (
+                    f"gateway_remote_browser_devices[{position}] is blank. An overlay "
+                    f"agent never reports a blank identity, so a blank element could "
+                    f"never name a device and the configuration would be silently "
+                    f"unsatisfiable (ADR-0174 §8); remove it, or name the device's "
+                    f"stable overlay identity"
+                )
+                raise ValueError(msg)
+            try:
+                identity.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                # A lone surrogate is a ``str`` Python holds and UTF-8 cannot
+                # express, so it can never equal an identity the agent reported —
+                # the same condition ``wire.overlay._stable_id`` refuses on the
+                # producing side, arriving here from the configuration instead.
+                msg = (
+                    f"gateway_remote_browser_devices[{position}] has no UTF-8 form, so "
+                    f"it can never equal an identity the overlay agent reports and the "
+                    f"device it names could never be admitted (ADR-0174 §8)"
+                )
+                raise ValueError(msg) from exc
+            listed.append(identity)
+        return tuple(listed)
 
     @model_validator(mode="after")
     def _the_gateway_bounds_can_bind(self) -> Settings:
