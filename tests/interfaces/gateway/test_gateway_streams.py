@@ -943,8 +943,49 @@ class _GoneWriter:
         self.closed = True
 
 
-async def _fail_the_head(one: Harness, method: str, path: str, payload: dict[str, Any]) -> bool:
-    """Decide one streamed request, then lose the peer before its head lands."""
+class _ExpiringWriter:
+    """A connection whose head write outlives the session that admitted the request.
+
+    The window round 2 of this PR's review found: a ``drain`` may yield — a paused
+    transport is enough — and a session's death is a scheduled callback, so between
+    the head and the body the session can end. Firing the timers from inside the
+    drain is that ordering made deterministic.
+    """
+
+    def __init__(self, one: Harness) -> None:
+        """Start open, over a harness whose clock and timers a test drives."""
+        self.one = one
+        self.written = b""
+        self.closed = False
+        self.drains = 0
+
+    def write(self, payload: bytes) -> None:
+        """Take the bytes."""
+        self.written += payload
+
+    async def drain(self) -> None:
+        """Let the admitting session die while the head is still going out.
+
+        The death is scheduled on the loop rather than run inline, because that is
+        where it comes from in a running gateway: ``gateway_session_idle_timeout``
+        arrives as a ``call_later`` callback, outside any task. Running it inline
+        would be a task ending its own stream, which is a shape the gateway does not
+        produce and whose guard would make this case pass for the wrong reason.
+        """
+        self.drains += 1
+        if self.drains == 1:
+            self.one.clock.advance(timedelta(minutes=6))
+            asyncio.get_running_loop().call_soon(self.one.timers.fire_all)
+            await asyncio.sleep(0)
+            await asyncio.sleep(0)
+
+    def close(self) -> None:
+        """Record the close."""
+        self.closed = True
+
+
+def _decide(one: Harness, method: str, path: str, payload: dict[str, Any]) -> Any:
+    """Decide one streamed request, as the router would, and hand back the stream."""
     request = Request(
         method=method,
         path=path,
@@ -959,9 +1000,14 @@ async def _fail_the_head(one: Harness, method: str, path: str, payload: dict[str
         else one.gateway._delivery_stream(handle)
     )
     assert not isinstance(decided, Response)
+    return decided
+
+
+async def _fail_the_head(one: Harness, method: str, path: str, payload: dict[str, Any]) -> bool:
+    """Decide one streamed request, then lose the peer before its head lands."""
     return await one.gateway._write_stream(
         _GoneWriter(),  # type: ignore[arg-type] # a writer is what it writes
-        decided,
+        _decide(one, method, path, payload),
         closing=False,
     )
 
@@ -1024,3 +1070,38 @@ async def test_a_session_ending_closes_an_answer_stream_still_waiting_to_compose
 
         await asyncio.wait_for(engine.closed.wait(), timeout=5)
         assert await _read_all(reader) == []
+
+
+async def test_a_session_that_dies_while_the_head_is_written_still_ends_the_stream() -> None:
+    """§7: "A stream ends no later than the session that admitted it."
+
+    The ordering that makes the clause reachable: the stream is registered before the
+    first awaited write, so it cannot miss its own session's death. Registered one
+    line later — after the head has drained — a drain that yields lets the session's
+    scheduled death run first, find no stream against that handle, and leave the one
+    that follows with nothing that will ever end it.
+
+    Driven in its own task because ending a stream cancels the task driving it. The
+    engine is never reached at all here — the death lands during the *head*, before
+    the body starts — which is what makes the claim about registration rather than
+    about the turn: the stream was found and ended on a handle it had already been
+    associated with.
+    """
+    engine = _Stalling()
+    async with _harness(engine, gateway_session_idle_timeout=timedelta(minutes=5)) as one:
+        decided = _decide(one, "POST", "/ask/stream", {"utterance": "what is on"})
+        writer = _ExpiringWriter(one)
+
+        driving = asyncio.ensure_future(
+            one.gateway._write_stream(
+                writer,  # type: ignore[arg-type] # a writer is what it writes
+                decided,
+                closing=False,
+            )
+        )
+        with contextlib.suppress(asyncio.CancelledError):
+            await asyncio.wait_for(driving, timeout=5)
+
+        assert driving.cancelled()
+        assert writer.closed
+        assert engine.calls == []

@@ -328,23 +328,37 @@ class _Streamed:
     a stream's head is written only once the gateway has committed to answering on
     one, and every fault after that travels as the stream's terminal value.
 
+    **Deciding to stream takes resources, and one place gives them back.** Both
+    shapes take a hub connection before this is built — the answer stream directly,
+    the delivery stream through the poll its first reader opens — and both are
+    registered against the session that admitted them. :meth:`Gateway._write_stream`
+    owns the whole of that: it registers before the first awaited write and releases
+    in a ``finally``, so a peer that went away before the head landed, a session that
+    ended mid-stream and an ordinary completion all take the same path out. Splitting
+    it between the decision and the body is what round 2 of this PR's review found a
+    window in.
+
     Attributes:
+        handle: The session that admitted the request. ADR-0175 §7 ends every stream
+            a session held at the moment that session ends, and a held-open stream
+            sends no further request — so the association is what makes that clause
+            reachable at all.
         head: The head to write before the first piece.
-        body: Writes the pieces. It owns everything it registered and releases it on
-            every exit, early ones included.
-        abandon: Releases what *deciding* to stream took, for the one path on which
-            ``body`` never runs — a peer that went away before the head could be
-            written. The two are mutually exclusive: the head either reaches the
-            browser and ``body`` owns the release, or it does not and this does.
-            Without it a browser that hangs up at exactly the wrong moment leaks the
-            hub slot ADR-0175 §7 counts, and on a delivery stream leaves a poll
-            running for a stream nobody is reading — which is the "while and only
-            while" of §4 quietly broken by an error path.
+        body: Writes the pieces.
+        delivery: The delivery stream this answers on, or ``None`` for an answer
+            stream. Ending a delivery stream abandons it as well as closing the
+            connection, so its writer stops waiting on a browser rather than on a
+            socket that is about to go.
+        release: Gives back what deciding to stream took — the hub slot, or the
+            fan-out's registration and the poll that goes with the last reader.
+            Called exactly once, on every exit.
     """
 
+    handle: SessionHandle
     head: StreamHead
     body: Callable[[asyncio.StreamWriter], Awaitable[None]]
-    abandon: Callable[[], None]
+    release: Callable[[], None]
+    delivery: DeliveryStream | None = None
 
 
 class Gateway:
@@ -622,15 +636,24 @@ class Gateway:
             answer: What to stream.
             closing: Whether the connection is closed once this completes.
 
-        **The head is written in its own attempt**, because a peer that went away
-        before it landed is the one path on which ``body`` never runs — and ``body``
-        is what releases the hub slot and unregisters the delivery stream that
-        *deciding* to answer already took. Losing that release is not a slow leak: a
-        browser hanging up at that instant would hold one of
-        ``gateway_max_hub_connections`` for the process's whole life (ADR-0175 §7),
-        and on a delivery stream would leave a poll running for a reader that never
-        existed, which is §4's "while and only while at least one delivery stream is
-        open" broken by an error path rather than by a rule.
+        **The stream is registered before the first awaited write, and that ordering
+        is the whole of ADR-0175 §7's reachability.** Nothing between
+        :meth:`SessionTable.admit` and this line yields to the event loop — the
+        decision is a chain of coroutine calls with no suspension point in it — so a
+        stream registered here cannot have missed its own session's death. Registered
+        one line later, after the head has drained, it could: a drain that yields
+        (a paused transport is enough) lets the session's scheduled death run first,
+        find no stream against that handle, and leave the one that follows with
+        nothing that will ever end it. That is the window round 2 of this PR's review
+        found, and it is closed by ordering rather than by a second check.
+
+        **The release is a ``finally`` for the same reason it is not the body's.** A
+        peer that went away before the head landed never reaches ``body`` at all, and
+        a session ending mid-stream cancels the task driving it — so the two paths a
+        body-owned release would miss are exactly the two that leak: a hub slot held
+        for the process's whole life (ADR-0175 §7), and a poll left running for a
+        reader that never existed, which is §4's "while and only while at least one
+        delivery stream is open" broken by an error path rather than by a rule.
 
         Args:
             writer: The connection's writer.
@@ -641,18 +664,19 @@ class Gateway:
             Whether the connection survived. ``False`` where the peer went away,
             which is an ordinary end for a stream and not a fault to report.
         """
+        held = _OpenStream(writer=writer, delivery=answer.delivery, driver=asyncio.current_task())
+        self._register(answer.handle, held)
         try:
             writer.write(render_stream_head(replace(answer.head, close=closing), policy=_POLICY))
             await writer.drain()
-        except ConnectionError, OSError:
-            answer.abandon()
-            return False
-        try:
             await answer.body(writer)
             writer.write(render_stream_end())
             await writer.drain()
         except ConnectionError, OSError:
             return False
+        finally:
+            self._unregister(answer.handle, held)
+            answer.release()
         return True
 
     async def _next(
@@ -883,34 +907,11 @@ class Gateway:
         if not self._take_hub_slot():
             return _ceiling()
         return _Streamed(
+            handle=handle,
             head=StreamHead(content_type=streams.MEDIA_TYPE),
-            body=partial(
-                self._answer_body, handle=handle, utterance=utterance, conversation=conversation
-            ),
-            abandon=self._give_hub_slot,
+            body=partial(self._pump_answer, utterance=utterance, conversation=conversation),
+            release=self._give_hub_slot,
         )
-
-    async def _answer_body(
-        self,
-        writer: asyncio.StreamWriter,
-        *,
-        handle: SessionHandle,
-        utterance: str,
-        conversation: str | None,
-    ) -> None:
-        """Write one streamed turn, releasing everything it took on every exit.
-
-        The driver is this connection's own task, recorded so that ending the session
-        that admitted the stream can cancel an iteration that is still waiting on its
-        first value (ADR-0175 §7, :meth:`_OpenStream.end`).
-        """
-        held = _OpenStream(writer=writer, driver=asyncio.current_task())
-        self._register(handle, held)
-        try:
-            await self._pump_answer(writer, utterance=utterance, conversation=conversation)
-        finally:
-            self._unregister(handle, held)
-            self._give_hub_slot()
 
     async def _pump_answer(
         self, writer: asyncio.StreamWriter, *, utterance: str, conversation: str | None
@@ -956,22 +957,12 @@ class Gateway:
         if opened is None:
             return _ceiling()
         return _Streamed(
+            handle=handle,
             head=StreamHead(content_type=streams.MEDIA_TYPE),
-            body=partial(self._delivery_body, handle=handle, stream=opened),
-            abandon=partial(self._deliveries.close, opened),
+            body=partial(write_stream, stream=opened, frame=_frame),
+            release=partial(self._deliveries.close, opened),
+            delivery=opened,
         )
-
-    async def _delivery_body(
-        self, writer: asyncio.StreamWriter, *, handle: SessionHandle, stream: DeliveryStream
-    ) -> None:
-        """Write one delivery stream, closing the poll with the last one (§4, §5)."""
-        held = _OpenStream(writer=writer, delivery=stream, driver=asyncio.current_task())
-        self._register(handle, held)
-        try:
-            await write_stream(writer, stream, frame=_frame)
-        finally:
-            self._unregister(handle, held)
-            self._deliveries.close(stream)
 
     async def _recent_conversations(self, request: Request) -> Response:
         """List conversations, most recently active first (ADR-0074 §2, ADR-0175 §6)."""
