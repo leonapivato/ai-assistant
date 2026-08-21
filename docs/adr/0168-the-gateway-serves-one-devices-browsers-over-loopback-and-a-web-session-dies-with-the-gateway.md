@@ -800,9 +800,12 @@ and it binds with more force on a limit whose whole job is to refuse.
 > that is **refused**, and the refusal names the limit. The gateway does not
 > queue such a request and does not open a further connection.
 
-> **Normative.** The gateway refuses a browser request whose body exceeds
-> `gateway_max_request_bytes` locally, before any part of it is forwarded, and
-> the refusal names the limit.
+> **Normative.** `gateway_max_request_bytes` bounds a browser request **whole** —
+> its request line, its headers and its body together, not its body alone. The
+> gateway enforces it incrementally and locally, refusing as soon as the bytes it
+> has read on a connection exceed the limit and before it buffers past it, rather
+> than on a complete request it has already held. The refusal names the limit and
+> is applied before any part of the request is forwarded.
 
 **None is nullable for ADR-0084 §3's reason, restated because it is the same
 one.** There, "a hub with no frame cap or no read deadline has exactly the
@@ -910,6 +913,19 @@ hub's.** ADR-0084 §3 makes the hub's `hub_max_frame_bytes` authoritative and ha
 "the client enforces the number it was told"; that stays exactly as it is, and
 this bound sits in front of it so that an oversized browser request fails at the
 gateway with a legible message instead of being buffered and then refused.
+
+**It bounds the request whole, and an earlier draft that bounded only the body
+left the framing open.** A peer inside its 30-second deadline can send an
+enormous request line or header — well-formed or unterminated, it makes no
+difference — and a bound naming the body has nothing to say while the parser
+buffers it. §7's checks cannot intervene either, since they read a `Host` and an
+`Origin` out of headers the gateway has not finished parsing, so the pending
+ceiling would be eight slots each holding as much memory as the peer cares to
+send. That is ADR-0084 §3's shape taken properly: `hub_max_frame_bytes` bounds
+the whole frame, envelope included, and its reader "never allocates the declared
+length up front" but "reads incrementally against the cap". One cap over the
+whole request is the same rule at this door, and it is why a second figure for
+headers is not owed. Adversarial review found it on the thirteenth round.
 
 ### 9. Hub-down is a legible fault, and the gateway never stands in for the hub
 
