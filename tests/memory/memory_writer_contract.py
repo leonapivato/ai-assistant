@@ -61,8 +61,14 @@ mechanism half is rewritten by ADR-0045 §5):
   §3 it retires **the whole ruled-on set**, not the named target alone: that
   target — ``EXTERNAL`` included, where a policy names one explicitly — plus every
   other conflict whose source is in the retirement class, which since ADR-0092 §4
-  is ``{OBSERVED, INFERRED, EXTERNAL}``, with only ``USER_ASSERTED`` *siblings*
-  left live. Each retirement **clamps** rather than
+  is ``{OBSERVED, INFERRED, EXTERNAL}``, with ``USER_ASSERTED`` *siblings* left live
+  save by ADR-0078 §5b's confirmed batch. **Two relation-side narrowings cut that
+  set down**, and neither touches the class: a member the writer holds ``RESTATES``
+  or ``ADDS`` for is never in it (ADR-0159 §5), and — where the crossing produced a
+  labelled contradiction at all — a member the writer holds **no** relation for is
+  left live too (ADR-0171 §2). Where the crossing produced none, which is every
+  ingest ADR-0159 §2 excludes from reconciliation, the obligation binds exactly as
+  ADR-0079 §3 states it. Each retirement **clamps** rather than
   extends: the window closes at the earlier of the writer's close instant and the
   record's own ``valid_until``, ``valid_from`` untouched (ADR-0080 §1).
   ``record_id`` is the **live record's** id, neither the target's nor any
@@ -321,6 +327,12 @@ _CITED = "cited-episode"
 #: they plant, so the boundary those cases exercise is the *retirement* rule and
 #: not ADR-0079 §1's refusal. Nothing is asserted about the value (ADR-0079 §4).
 _ROOMY_CEILING = 10
+
+#: The ceiling the #1302 conv-50 case needs: above the **thirteen** members that
+#: crossing offered, so what it exercises is ADR-0171 §2's narrowing and not
+#: ADR-0079 §1's refusal. Held apart from :data:`_ROOMY_CEILING` rather than raising
+#: it, so every other multi-conflict case keeps the set size it was written for.
+_AUDIT_CEILING = 20
 
 #: The **belief** ADR-0081 §1's cases cite: a ``PreferenceMemory`` carrying
 #: :data:`_CONTENT`, unlike :data:`_CITED`, so it is both a resolvable citation and
@@ -2522,6 +2534,196 @@ class MemoryWriterContract:
         assert result.record_id == "corrected"
         retained = {record.id: record for record in await store.export()}
         assert retained["existing"].validity.valid_until is not None
+
+    # --- ADR-0171 §2: a supersession sweeps in only a labelled contradiction --
+    #
+    # Three arms reach the widening, they behave differently, and each of these
+    # cases fails on a writer that implements only the others. The discriminator is
+    # the **crossing** — did this ingest produce a labelled contradiction at all —
+    # and not the member, because a writer cannot tell a member left unlabelled
+    # beyond ADR-0159 §3's bound from one no reconciler ever judged (ADR-0164 §6 and
+    # §9 decline the consulted set that would; #1225 records it).
+
+    async def test_a_labelled_contradiction_leaves_an_unlabelled_sibling_live(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0171 §2, first clause — the reconciled arm, and where the narrowing bites.
+
+        Where the writer holds ``CONTRADICTS`` for at least one member of the ruled-on
+        set, the supersession retires the named target and, beyond it, **only** the
+        other members it holds that relation for. A member it holds *no* relation for
+        is left live, whatever its source.
+
+        This is the record #1302's audit says is being destroyed. The unlabelled
+        member is not spared because anything judged it harmless — it is spared
+        because nothing judged it at all, and ADR-0050 §1's premise that every member
+        of a similarity-surfaced set "is a same-kind, at-or-above-threshold
+        contradiction of the proposal" is what #1188 and #1302 between them measured
+        false. Before this clause the lookup returned nothing, nothing was not in the
+        unretirable set, and the member was swept in on that double negative.
+
+        The sibling's source is in the retirement class, so a writer that narrowed on
+        the *source* rather than on the relation passes nothing here.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(_preference("target", source=MemorySource.INFERRED))
+        await store.add(_preference("unjudged", source=MemorySource.INFERRED))
+        writer = make_writer(
+            store,
+            _SupersedeNamingPolicy("target"),
+            id_factory=_scripted("corrected"),
+            conflict_limit=_ROOMY_CEILING,
+            reconciler=_LabellingReconciler({"target": ConflictRelation.CONTRADICTS}),
+        )
+
+        result = await writer.ingest(_proposal(_correcting("new", evidence=(_CITED,))))
+
+        assert result.record_id == "corrected"
+        retained = {record.id: record for record in await store.export()}
+        assert retained["target"].validity.valid_until is not None, "the named target is retired"
+        assert retained["unjudged"].validity.valid_until is None, (
+            "a member the writer holds no relation for was swept into the retirement "
+            "set of a crossing that produced a labelled contradiction (ADR-0171 §2)"
+        )
+        assert await store.get("unjudged") is not None
+
+    async def test_a_crossing_with_no_relations_still_retires_the_whole_set(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0171 §2, third clause — the asserted arm, unchanged and #313/#314's.
+
+        **This is the case a narrowing phrased as "retire only labelled
+        contradictions" would have destroyed**, which is why §2 is stated over the
+        crossing. A ``USER_ASSERTED`` proposal never reaches a reconciler — ADR-0159
+        §2's invocation condition excludes it, and excludes any crossing holding an
+        asserted member — so the writer holds no relations, no member is labelled
+        ``CONTRADICTS``, and ADR-0079 §3's obligation binds exactly as it stands. A
+        user correcting a belief still retires every stale sibling it is shown
+        (ADR-0079 §1), across all three sources of the retirement class.
+
+        A reconciler that *would* have labelled one member and narrowed the set to
+        two is injected anyway, so the case pins that the exclusion is the invocation
+        condition's and not an accident of nothing being injected. A writer that
+        consulted it here would retire two records instead of four.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await store.add(_preference("target", source=MemorySource.OBSERVED))
+        await store.add(_preference("stale-observed", source=MemorySource.OBSERVED))
+        await store.add(_preference("stale-inferred", source=MemorySource.INFERRED))
+        await store.add(_preference("stale-external", source=MemorySource.EXTERNAL))
+        writer = make_writer(
+            store,
+            _SupersedeNamingPolicy("target"),
+            id_factory=_scripted("corrected"),
+            conflict_limit=_ROOMY_CEILING,
+            reconciler=_LabellingReconciler({"target": ConflictRelation.CONTRADICTS}),
+        )
+
+        result = await writer.ingest(
+            _proposal(_preference("new", source=MemorySource.USER_ASSERTED))
+        )
+
+        assert result.record_id == "corrected"
+        retained = {record.id: record for record in await store.export()}
+        for retired_id in ("target", "stale-observed", "stale-inferred", "stale-external"):
+            assert retained[retired_id].validity.valid_until is not None, (
+                f"{retired_id} survived a user's own correction: ADR-0171 §2's third "
+                "clause hands an unreconciled crossing to ADR-0079 §3 unchanged"
+            )
+
+    async def test_a_crossing_holding_only_restates_labels_retires_the_unlabelled(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """ADR-0171 §2, third clause — the degraded arm, and ADR-0159 §6's floor unmoved.
+
+        With no reconciler injected the writer holds at most the certain rung's
+        ``RESTATES`` labels, computed with no model from ADR-0121 §1's predicate. That
+        rung can **never** produce ``CONTRADICTS``, so the third clause governs and an
+        unlabelled supersedable sibling is retired exactly as it is today.
+
+        Sparing on the strength of a test that was never run would be the wrong
+        direction — it would leave a stale belief live beside its correction because
+        no provider was configured — and ADR-0171 §2 does not. The ``RESTATES``
+        member is still spared, by ADR-0159 §5 and not by anything here, which is what
+        keeps the two narrowings distinguishable in this case rather than collapsed.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(_preference("target", source=MemorySource.INFERRED))
+        await store.add(_preference("restated", _DISAGREEING, source=MemorySource.INFERRED))
+        await store.add(_preference("unjudged", source=MemorySource.INFERRED))
+        writer = make_writer(
+            store,
+            _SupersedeNamingPolicy("target"),
+            id_factory=_scripted("corrected"),
+            conflict_limit=_ROOMY_CEILING,
+        )
+
+        result = await writer.ingest(_proposal(_correcting("new", evidence=(_CITED,))))
+
+        assert result.record_id == "corrected"
+        retained = {record.id: record for record in await store.export()}
+        assert retained["target"].validity.valid_until is not None
+        assert retained["unjudged"].validity.valid_until is not None, (
+            "the degraded arm holds no CONTRADICTS, so ADR-0079 §3 binds unchanged"
+        )
+        assert retained["restated"].validity.valid_until is None, "ADR-0159 §5 still spares it"
+
+    async def test_the_audits_worst_crossing_retires_two_and_leaves_eleven_live(
+        self, make_writer: WriterFactory
+    ) -> None:
+        """#1302's conv-50 shape, by its measured values (ADR-0171 §5).
+
+        The verified worst case of #1294's supersede audit: a crossing offering **13**
+        members, of which the model was asked about three and labelled one ``ADDS``
+        and two ``CONTRADICTS``. Today twelve records are retired and ten of them were
+        never labelled at all — among them 'performed on stage 2 Aug' and 'met artists
+        in Boston 3 Oct', which no reading calls contradicted.
+
+        Under ADR-0171 §2 the ruling names one of the two contradictions, the
+        retirement set adds the other, ADR-0159 §5 spares the ``ADDS`` member as it
+        already does, and the ten unlabelled members are left live: **two retired
+        instead of twelve.**
+
+        The shape is pinned rather than the anatomy — the numbers here are the audit's
+        own, and the case is what stops a later reader restoring the widening on the
+        argument that a similarity-surfaced set is all one belief.
+        """
+        store = FakeMemoryStore(now=_after_close)
+        await _cite(store)
+        await store.add(_preference("target", source=MemorySource.INFERRED))
+        await store.add(_preference("other-contradiction", source=MemorySource.INFERRED))
+        await store.add(_preference("distinct", source=MemorySource.INFERRED))
+        unjudged = tuple(f"unjudged-{index}" for index in range(10))
+        for record_id in unjudged:
+            await store.add(_preference(record_id, source=MemorySource.INFERRED))
+        writer = make_writer(
+            store,
+            _SupersedeNamingPolicy("target"),
+            id_factory=_scripted("corrected"),
+            conflict_limit=_AUDIT_CEILING,
+            reconciler=_LabellingReconciler(
+                {
+                    "target": ConflictRelation.CONTRADICTS,
+                    "other-contradiction": ConflictRelation.CONTRADICTS,
+                    "distinct": ConflictRelation.ADDS,
+                }
+            ),
+        )
+
+        result = await writer.ingest(_proposal(_correcting("new", evidence=(_CITED,))))
+
+        assert result.record_id == "corrected"
+        retained = {record.id: record for record in await store.export()}
+        retired = {
+            record_id
+            for record_id, record in retained.items()
+            if record_id != _CITED and record.validity.valid_until is not None
+        }
+        assert retired == {"target", "other-contradiction"}
+        for spared_id in ("distinct", *unjudged):
+            assert await store.get(spared_id) is not None
 
     # --- the retirement clamp (ADR-0080 §7) ---------------------------------
 
