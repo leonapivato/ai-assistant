@@ -60,9 +60,12 @@ Almost every mechanism that sentence names is ratified and most of it is built.
 - **A phone can reach it.** ADR-0174 authorises the fourth egress boundary — the
   gateway's remote browser listener and the front end it serves — off unless
   configured on, admitted on an attested overlay identity *and* the session.
-- **The hub streams.** ADR-0173 gives `FrameKind.CHUNK`, the `ReplyChunk` type
-  and `converse_streaming`, and rules that the terminal result frame is still the
-  answer.
+- **The hub streams, and it does so in the tree.** ADR-0173 gives
+  `FrameKind.CHUNK`, the `ReplyChunk` type and `converse_streaming`, and rules that
+  the terminal result frame is still the answer; its engine-and-wire lane merged
+  before this decision was reviewed, taking `PROTOCOL_VERSION` with it and adding
+  `ai_assistant.core.streams` for the closing obligation an async iterator places on
+  whoever consumes one.
 - **The hub delivers.** ADR-0131 gives `next_notification`, the durable outbox,
   the per-device delivery slot and the `delivery_id` capability. It is
   **fully built and entirely unconsumed**: nothing in `src/` calls it outside the
@@ -125,8 +128,8 @@ Run the three candidate carriers against that.
   back in the response. So a socket is admitted on one half or on a credential in
   a URL, and §6 refuses both.
 - **`EventSource`.** Same defect and less room to argue about it: the constructor
-  takes a URL and one boolean, and there is no interface for a request header at
-  all.
+  takes a URL and an options object whose one member is a boolean, and there is no
+  interface for a request header at all.
 - **An ordinary request whose response body streams.** `fetch` sets whatever
   headers the front end gives it and exposes the response body as a readable
   stream, so both halves travel exactly as §6 requires and the surface differs
@@ -211,9 +214,11 @@ of five promoted operations to the browser.
 
 > **Normative.** The gateway serves no WebSocket, offers no protocol upgrade and
 > honours no `Upgrade` header, and serves nothing a browser reaches with
-> `EventSource`. ADR-0168 §7's refusal of a connection upgrade carrying a foreign
-> `Origin` is applied and is not read as authorising one carrying the gateway's
-> own.
+> `EventSource`.
+
+> **Normative.** ADR-0168 §7's refusal of a connection upgrade carrying a foreign
+> `Origin` is applied unchanged, and no lane reads it as authorising an upgrade
+> carrying the gateway's own.
 
 > **Normative.** The gateway opens no connection to a browser. ADR-0174 §10's
 > direction rule binds unchanged and is what this section implements at the
@@ -316,12 +321,43 @@ type would be this ADR reaching past its own subject.
 > disagree, the front end renders the terminal `reply`; and no front end treats an
 > accumulated chunk sequence as the record of what the assistant said.
 
+> **Normative.** The terminal value carries the `TurnOutcome` whole, so all four
+> of ADR-0173 §6's shapes are readable at the browser from the two members alone —
+> no answer owed, owed and none produced, owed and **partly** produced, owed and
+> produced whole. The front end renders the third of those as ADR-0173 §10 requires,
+> as the step account the outcome carries plus a statement that the answer is
+> incomplete, and never as a whole answer and never as a silent turn.
+
 > **Normative.** Both turn entries reach the browser and the gateway never
-> substitutes one for the other. A streamed turn that composed no answer is
-> rendered as ADR-0173 §10 requires — the step account it carries, plus a statement
-> that the answer is incomplete — and is not re-asked as `converse` by the gateway;
-> a turn the browser asked for whole is answered by `converse` and never from a
-> stream.
+> substitutes one for the other. A streamed turn is not re-asked as `converse` by
+> the gateway, whatever it produced, and a turn the browser asked for whole is
+> answered by `converse` and never from a stream.
+
+> **Normative.** The gateway closes every engine stream it opened, on every exit
+> and early ones included, through the closing seam `core.streams` carries for the
+> contract that hands it back. A browser that goes away, an abandoned delivery
+> stream (§4) and a write that failed are each an early exit, and none of them
+> leaves an iteration open.
+
+**The fourth shape is the one a browser surface loses by accident, which is why it
+is a clause rather than an inheritance.** ADR-0173 §6 added an outcome carrying a
+`reply` *and* `reply_degraded` `True` — an answer that began and did not finish —
+and the natural browser rendering of a stream is to show the chunks and then stop,
+which displays that outcome identically to a complete one. The gateway already
+carries both members in the view it renders a `TurnOutcome` into, so nothing new is
+needed on the wire; what is needed is that the front end read them, and ADR-0173
+§10's own clause — never "a silent turn, and never as a failure of a step the
+account records as succeeded" — is what it owes.
+
+**Closing the engine stream is named because this surface is the first consumer
+that will routinely abandon one.** `core.streams` exists because "Python does not
+close an abandoned async iterator at the point of abandonment", and its module
+docstring names a hub whose peer sent a second request as one of the consumers that
+breaks out early. A gateway breaks out early in three ordinary ways — the browser
+navigated away, its stream was abandoned under §4, or a write failed — where the
+CLI drives every stream to exhaustion. A lane that consumes `converse_streaming`
+with a bare `async for` and a `break` is leaking a turn's resources on the most
+common path this surface has.
 
 **Keeping the non-streaming entry on this surface is a decision and not inertia,
 and ADR-0173 §5 is why it matters.** That section rules that a configured route
@@ -374,12 +410,14 @@ gateway behaving as though it had answered once when it answered twice.
 > again only when a browser establishes a delivery stream afresh, and retries no
 > poll of its own motion.
 
-> **Normative.** The gateway holds at most one value pending per stream and
-> queues nothing behind one. On a delivery stream a write that has not completed
-> when the next value is due on it is abandoned and that stream is ended, so a
-> browser that stops reading cannot delay another's delivery. An answer stream has
-> one reader and nothing to protect from it, and the turn's own budget bounds the
-> exchange.
+> **Normative.** The gateway holds at most one value pending per stream and queues
+> nothing behind one.
+
+> **Normative.** On a **delivery** stream a write that has not completed when the
+> next value is due on that stream is abandoned and the stream is ended, so a
+> browser that stops reading cannot delay another browser's delivery. An answer
+> stream has one reader and nothing to protect from it, and this clause does not
+> reach one.
 
 **Polling only while somebody is listening is the clause the rest of the section
 falls out of.** A poll that returns a delivery to a gateway with nowhere to put it
@@ -432,10 +470,10 @@ browser a reconnect — which is free, because a session outlives its connection
 
 ### 5. The acknowledgement never leaves the gateway
 
-> **Normative.** The gateway acknowledges a delivery on its next poll, and it
-> acknowledges a delivery it wrote to at least one open delivery stream and no
-> other. Where no stream was open when the poll returned, it acknowledges nothing,
-> and the entry returns to the outbox when its lease expires (ADR-0131 §3).
+> **Normative.** The gateway acknowledges, on its next poll, a delivery it wrote
+> to at least one open delivery stream, and it acknowledges no other. Where no
+> stream was open when a poll returned, it acknowledges nothing and the entry
+> returns to the outbox when its lease expires (ADR-0131 §3).
 
 > **Normative.** A `delivery_id` never reaches a browser. It is placed in no value
 > the gateway writes on a stream, in no response body, in no document and in no
@@ -512,6 +550,21 @@ nobody has thought of yet." The promoted surface has thirty-one operations today
 and gains one with ADR-0173; a browser surface defined by what it excludes gains
 every one of them silently.
 
+**A closed enumeration is what ADR-0168 §1's biconditional ranges over, not a
+contradiction of it, and the distinction is worth stating because the two clauses
+read as though they collide.** §1 says a browser request reaches the promoted
+surface "if and only if the gateway has admitted it under §4 *and* it asks the
+assistant for something", which sounds like an admitted request naming a belief
+operation must reach it. It does not, and it does not today either: what a browser
+can *ask* is fixed by the shapes the gateway serves, decided from the request alone
+before any check runs, and everything else is ADR-0168 §6's residual fourth class
+— served, on the shipped gateway, as a plain "no such path" to an admitted session
+and reaching nothing. §1's biconditional is a rule about which of the shapes the
+gateway serves reach the engine; this section is the statement of what those shapes
+are. A request for something outside it is not an admitted assistant request the
+gateway declines to forward — it is a request the surface has no shape for, which
+is the same thing a request for `/nonsense` is.
+
 **Milestone 15's inheritance is restated because ADR-0174 made it newly easy to
 lose.** ADR-0168 §12 recorded that the connection operations are refused on the
 hub's remote listener and refused client-side, and handed the question to
@@ -524,7 +577,7 @@ methods that happened to be guarded.
 **`forget_conversation` widens what a script on the gateway's own origin can
 spend, and the honest accounting is that it widens it by less than what is already
 there.** ADR-0168 §6 states the residual plainly — "script running on the
-gateway's own origin defeats both halves, because it need not read either; it can
+gateway's own origin defeats both halves, because it need not read either — it can
 simply issue requests the browser will authenticate" — and that residual has
 covered `converse` since milestone 13. A turn can approve a tool, execute it and
 durably commit a non-idempotent effect (ADR-0173 §9's own reasoning turns on it),
@@ -550,9 +603,15 @@ available to it.
 
 > **Normative.** Every other clause of ADR-0168 §8 binds unchanged and binds on
 > both listeners as ADR-0174 §8 requires — the admitted-versus-unadmitted
-> partition, the close on a refusal, the one-request bound on an unadmitted
-> connection, `gateway_max_browser_connections`, `gateway_max_pending_connections`
-> and `gateway_max_request_bytes`, which bounds a request and not a response.
+> partition, the close on a refusal, `gateway_max_browser_connections`,
+> `gateway_max_pending_connections` and `gateway_max_request_bytes`, which bounds a
+> request and not a response.
+
+> **Normative.** An unadmitted connection is untouched by the clause above and
+> keeps both of §8's bounds on it whole: it carries at most one request, and it is
+> closed `gateway_read_timeout` after it was **accepted** whatever it has or has not
+> sent by then. No stream is served on one, because no stream is served without the
+> session that admits it.
 
 > **Normative.** A stream ends no later than the session that admitted it, and the
 > gateway ends every stream a session held at the moment that session ends.
@@ -563,10 +622,12 @@ available to it.
 > gateway writes on one, and not by a delivery poll.
 
 > **Normative.** The gateway's delivery connection counts against
-> `gateway_max_hub_connections` exactly as any hub connection does, and a browser
-> request that would need one beyond that ceiling is refused naming the limit, as
-> ADR-0168 §8 already requires. No lane gives delivery its own connection budget at
-> the gateway, which is ADR-0131 §5's rule applied at this door.
+> `gateway_max_hub_connections` exactly as any hub connection does, and a request
+> that would need one beyond that ceiling is refused naming the limit, as ADR-0168
+> §8 already requires.
+
+> **Normative.** No lane gives delivery its own connection budget at the gateway,
+> which is ADR-0131 §5's rule applied at this door.
 
 **The first clause is a supersession and §12 carries the record, because a reader
 holding only ADR-0168 §8 builds a gateway on which no stream can exist.** §8 says
@@ -587,6 +648,22 @@ enumeration ADR-0168 §1's biconditional and §6's collapse key were each rewrit
 to remove. "A response the gateway has not finished writing" is a property every
 connection is on one side of at every moment, so no request shape can be added
 later that the rule has no opinion about.
+
+**What it does not do is leave a connection unbounded, which is the objection this
+supersession has to answer rather than assume.** ADR-0168 §8 spends its deadline on
+"the cheapest state for a misbehaving peer to accumulate", and a rule that stops
+closing connections looks like it hands that state away. It does not, for three
+reasons that are each already ratified. A stream is served only on an **admitted**
+request, so holding one requires a live session, which requires the bootstrap value
+the gateway disclosed once on its own standard output (ADR-0168 §5) — the peer
+these ceilings were written against, a local process that has guessed nothing,
+cannot reach the clause at all and stays under the unadmitted bounds above. A
+stream is bounded above by the session that admits it, and the clause below is what
+keeps that bound live: absolutely at `gateway_session_ttl` and, because a stream is
+not use, at `gateway_session_idle_timeout` — an hour by default rather than never.
+And `gateway_max_browser_connections` bounds how many exist at once, unchanged. The
+deadline that goes is the one that was reclaiming a connection doing exactly what
+the surface asked it to do.
 
 **Not refreshing the idle timeout is the clause that keeps ADR-0168 §4's bound
 from going the way of `gateway_max_sessions`.** #1320 records a figure that is
@@ -631,10 +708,12 @@ conforming stores handing the same continuation different history."
 > browser observes is the completion of the poll the budget bounds.
 
 > **Normative.** No load-time check relates it to `hub_max_notification_budget`,
-> which is another process's setting and may be another machine's. A budget the hub
-> declines is a request the hub received and declined, reported under ADR-0168 §9
-> as distinguishable from a transport failure, and the gateway does not retry it
-> (§4).
+> which is another process's setting and may be another machine's, and no lane adds
+> one.
+
+> **Normative.** A budget the hub declines is a request the hub received and
+> declined, reported under ADR-0168 §9 as distinguishable from a transport failure,
+> and the gateway does not retry it (§4).
 
 **Twenty seconds, and where the number comes from.** It is not a latency budget —
 `next_notification` returns the moment the hub has something, so the figure decides
@@ -667,11 +746,12 @@ applied to a clock.
 
 > **Normative.** The front end inserts every value the hub returned into the page
 > as text through the document's own text node, never as markup and never through
-> any interface that parses markup (ADR-0168 §6). A renderer that does so satisfies
-> ADR-0173 §10's boundary clause by construction, because a text node interprets
-> nothing; a front end that ever renders a value by markup owes §10's rule that
-> neutralisation is applied to accumulated text and never independently to each
-> chunk.
+> any interface that parses markup (ADR-0168 §6).
+
+> **Normative.** A front end that ever renders such a value by markup owes
+> ADR-0173 §10's boundary clause whole — neutralisation applied to text it has
+> accumulated, on boundaries its own renderer controls, and never independently to
+> each chunk as it arrives.
 
 > **Normative.** A notification is rendered inside the open page and by no other
 > means. This ADR authorises no Notification API, no Push API, no service worker,
@@ -713,7 +793,8 @@ what this decision supports."
 > **Normative.** It changes no member of the connect exchange, no frame's encoding,
 > and no method's arguments or results, so no lane implementing it changes
 > `PROTOCOL_VERSION` for it (ADR-0124 §9). Every wire-visible change milestone 14
-> needs is ADR-0173's, and the bump it obliges is that ADR's lane's.
+> needs is ADR-0173's, and the bump it obliges was made by that ADR's own lane
+> before this decision was reviewed.
 
 > **Normative.** It adds no clause to ADR-0131, ADR-0172 or ADR-0174, reopens no
 > ruling of any of them, and decides nothing ADR-0168 defers that is not named in
@@ -826,7 +907,11 @@ differently, or read one of its clauses more widely than it now holds?
   that surface rather than to a call of its own. The clause's stated purpose — that
   golden rule 3 be "checkable rather than aspirational", so that a gateway which
   authored anything is in breach detectably — survives whole, which is the test
-  ADR-0070 §1 sets and which ADR-0173 §6 applied in the same form. **The alternative
+  ADR-0070 §1 sets and which ADR-0173 §6 applied in the same form. §6's closed
+  enumeration is likewise not a narrowing of §1: it fixes which request shapes the
+  surface has, which is the population §1's biconditional quantifies over, and a
+  request outside it falls in §6's residual fourth class exactly as it does on the
+  shipped gateway today. **The alternative
   reading is named rather than hidden**: a reader taking "resolves to calls" as
   "originates a call" would build one poll per stream, and would be closed by
   ADR-0131 §2 on the second — so the reading that is wrong is the one the corpus
