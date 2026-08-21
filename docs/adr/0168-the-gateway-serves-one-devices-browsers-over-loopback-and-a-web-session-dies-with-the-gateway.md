@@ -774,16 +774,21 @@ and it binds with more force on a limit whose whole job is to refuse.
 > is no greater than `gateway_max_browser_connections`, for that same reason.
 
 > **Normative.** A browser connection is **admitted** from the moment it carries
-> a request the gateway admitted under §4, and **unadmitted** before that. A
-> request the gateway refuses returns its connection to unadmitted. Serving one
-> of §3's two pre-session exceptions changes neither.
+> a request the gateway admitted under §4, and **unadmitted** before that.
+> Serving one of §3's two pre-session exceptions does not admit it, and no rule
+> of this ADR returns an admitted connection to the unadmitted population.
 
-> **Normative.** An unadmitted connection carries at most one request. The
+> **Normative.** The gateway **closes** a connection once it has sent a refusal
+> on it — on any of §3's, §4's, §5's, §6's, §7's and §8's conditions alike, and
+> whether the connection was admitted or not. §9's report that the hub is
+> unreachable is not a refusal and closes nothing.
+
+> **Normative.** An unadmitted connection carries at most one request: the
 > gateway closes it once that request's response is complete, and in any case
 > `gateway_read_timeout` after it was accepted, whether or not a complete request
-> has arrived by then. At most `gateway_max_pending_connections` unadmitted
-> connections exist at once, and the gateway refuses a further connection rather
-> than queueing it.
+> has arrived by then. The gateway holds at most
+> `gateway_max_pending_connections` unadmitted connections, and while that many
+> exist it refuses to accept a further connection rather than queueing it.
 
 > **Normative.** An admitted connection may carry further requests. The gateway
 > closes it `gateway_read_timeout` after the last complete request it carried,
@@ -830,11 +835,23 @@ well-formed, session-less request is refused under §3 and costs nothing, and th
 connection then sat under the total ceiling alone, renewing its deadline every 29
 seconds and holding a slot indefinitely. The bound has to be the thing the peer
 cannot fake rather than the thing it can, so it is admission under §4 — which
-needs a session, which needs the bootstrap value — and a refused request returns a
-connection to the unadmitted side rather than leaving it where its last success
-put it. That is §1's biconditional applied to a resource: name the property, and
-every state falls on one side of it, instead of enumerating the states someone
-happened to think of and being shown the next one.
+needs a session, which needs the bootstrap value. That is §1's biconditional
+applied to a resource: name the property, and every state falls on one side of
+it, instead of enumerating the states someone happened to think of and being
+shown the next one.
+
+**A refusal closes the connection rather than demoting it, and the difference is
+not stylistic.** The draft between these two rounds had a refused request return
+its connection to the unadmitted population, which reads as the symmetrical rule
+and is not one: an admitted connection failing §7 would be added to a population
+already at its ceiling, so the count and the ceiling could not both hold, and
+nothing in the text said which gave way. Architecture review found it on the
+round after. Closing has neither problem — the ceiling stays an invariant instead
+of a check performed at one moment, because acceptance is then the only thing
+that can raise the count, and a peer that spends a slot on a refusal has bought
+one request rather than a foothold. It also costs the owner nothing, for the
+reason the idle-connection paragraph below gives: a session outlives its
+connections, so a closed connection is a reconnect and not a re-admission.
 
 **What it leaves is a denial the owner can see, and that is stated rather than
 argued away.** A local peer can still cycle unadmitted connections — one request
