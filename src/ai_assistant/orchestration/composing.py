@@ -131,11 +131,28 @@ _STANCE: Final[dict[BeliefBand, str]] = {
     BeliefBand.DERIVED: "this system worked this out",
 }
 
-_SYSTEM_PROMPT: Final = """\
+#: The heading this conversation's own earlier turns are printed under (#1374).
+#:
+#: Spelled once and named, because :data:`_SYSTEM_PROMPT` quotes it back to the
+#: model: the instruction not to disclaim the conversation is about *this* block,
+#: and a heading the prompt named by a near-miss would point at nothing.
+_TAIL_HEADING: Final = "Earlier turns of this same conversation, oldest first:"
+
+#: The heading the relevance-retrieved group is printed under. Unchanged wording
+#: from before the split, because the group it heads is unchanged: what the tail
+#: took out of it was never a memory the assistant retrieved.
+_RETRIEVED_HEADING: Final = "What the assistant remembers that may bear on this:"
+
+#: Built with :data:`_TAIL_HEADING` interpolated rather than spelled a second time.
+#: The instruction below is about *that* block, and a prompt quoting a heading the
+#: renderer does not write would point the model at nothing — the near-miss this
+#: interpolation makes unrepresentable.
+_SYSTEM_PROMPT: Final = f"""\
 You are the answering stage of an AI assistant, speaking to its own user in the \
 assistant's voice. You are shown what the user just said, the situational context \
-assembled for this turn, what the assistant remembers, what it decided to do, and \
-what became of the step it drove. Write the reply the user reads.
+assembled for this turn, the earlier turns of this same conversation, what the \
+assistant remembers, what it decided to do, and what became of the step it drove. \
+Write the reply the user reads.
 
 Answer in plain prose, addressed to the user. No JSON, no headings, no bullet \
 lists unless the answer is genuinely a list. Be brief: a question that wants one \
@@ -144,6 +161,14 @@ sentence gets one.
 Draw on the remembered material where it bears on the question, and say plainly \
 when you do not know something. Never invent a memory, and never claim to know \
 something about the user that is not in the material below.
+
+The block below headed "{_TAIL_HEADING}" is this conversation so far. You have been \
+shown it, so never tell the user you have no access to what was said earlier in \
+this conversation. It is a bounded window and not a guaranteed-whole transcript: it \
+can be short, it can have a gap where a turn was deleted, and it is absent entirely \
+on a conversation's first turn or where reading it failed. Where it is absent, or \
+does not reach back far enough to answer, say that plainly rather than guessing at \
+what was said.
 
 TELL THE TRUTH ABOUT WHAT WAS DONE. The step account below is the record, and it \
 is shown to the user beside your reply:
@@ -529,10 +554,16 @@ def _render_request(
     """Render the whole of what the stage was given into the user-turn prompt.
 
     Five blocks, in the order a reader needs them: what the user said, the context
-    assembled for the turn, what the assistant remembers, what it decided to do, and
-    what became of the step it drove. Each block is headed, and every span this
-    system did not author is quoted by :func:`_quoted_span` — so a heading is
+    assembled for the turn, what the pipeline assembled from memory, what it decided
+    to do, and what became of the step it drove. Each block is headed, and every span
+    this system did not author is quoted by :func:`_quoted_span` — so a heading is
     something only this function can write.
+
+    The memory block carries **two** headings rather than one, because ADR-0074 §5
+    hands it two groups: this conversation's own earlier turns, and then the records
+    retrieved as relevant (:func:`_render_memories`). One heading over both is what
+    #1374 records — the model drew on the conversation and disclaimed having it in
+    the same reply.
 
     The blocks are separated rather than merged because ADR-0098 §2 requires this
     system's own instruction, the user's own words and external content to be
@@ -649,17 +680,40 @@ def _render_facet_stamp(facet: ContextFacet) -> list[str]:
 
 
 def _render_memories(memories: Sequence[MemoryRecord], *, degraded: bool) -> list[str]:
-    """Render what the turn retrieved, and say plainly where it retrieved nothing.
+    """Render the conversation's own turns, then what the turn retrieved.
+
+    **Two headings, because ``memories`` carries two things and one heading told the
+    model they were the same thing** (#1374). ADR-0074 §5 hands this stage the
+    conversation's recent turns as the leading group of ``TurnResult.memories``, and
+    ADR-0173 §8 confirms that is the whole of how a resumed conversation reaches
+    here. Rendered under one heading saying what the assistant *remembers*, an
+    earlier turn of this very exchange is indistinguishable from a belief distilled
+    weeks ago — so the model answered "what's the last thing I said" correctly from
+    the material and then truthfully added that it had been shown no conversation.
+    Naming the group is the whole fix: nothing new is read, nothing new is passed,
+    and the records rendered are the ones already in hand.
+
+    The split is :func:`_split_conversation_tail`, and where the tail is empty no
+    heading is written at all — a first turn is told nothing about a conversation it
+    does not have.
 
     ``memory_degraded`` is told to the model rather than swallowed (ADR-0170 §5):
     an answer composed with no personal memory must not claim knowledge of the user
     this turn did not retrieve, and the model cannot honour that without being told
     which state it is in. An empty read and a *failed* read are different sentences
     for the same reason ``TurnResult.memory_degraded`` exists as a separate field.
+    The note covers both groups, because the flag does: ``TurnResult.memory_degraded``
+    folds a failed history read into the same boolean as a failed retrieval.
     """
-    lines = ["What the assistant remembers that may bear on this:"]
-    if memories:
-        lines += [_render_record(record) for record in memories]
+    turns, retrieved = _split_conversation_tail(memories)
+    lines: list[str] = []
+    if turns:
+        lines.append(_TAIL_HEADING)
+        lines += [_render_record(record) for record in turns]
+        lines.append("")
+    lines.append(_RETRIEVED_HEADING)
+    if retrieved:
+        lines += [_render_record(record) for record in retrieved]
     else:
         lines.append("  (nothing was retrieved for this turn)")
     if degraded:
@@ -670,6 +724,49 @@ def _render_memories(memories: Sequence[MemoryRecord], *, degraded: bool) -> lis
             "and say that personal memory was unavailable if the question needed it."
         )
     return lines
+
+
+def _split_conversation_tail(
+    memories: Sequence[MemoryRecord],
+) -> tuple[Sequence[MemoryRecord], Sequence[MemoryRecord]]:
+    """Split ``memories`` into this conversation's own turns and everything else.
+
+    The tail is the **leading run** of episodic records, not every episodic record.
+    ADR-0074 §5 puts the conversation's recent turns first and the
+    relevance-retrieved records after, so a prefix split is the only reading of that
+    order which cannot reorder the sequence; a partition by kind could. ADR-0158 §5
+    appends an episodic *supplement* after the beliefs, and it stays in the trailing
+    group, which is the group it belongs to — the belief composition excludes
+    ``EPISODIC`` (ADR-0074 §6), so any belief between the two is the separator that
+    keeps them apart.
+
+    **The one case where that separator is absent is decided upstream, not guessed
+    at here** (ADR-0158 §4). Where nothing before the supplement is non-``EPISODIC``
+    the tail and the supplement would form one unbroken run and this split would
+    render a conversation weeks old as this one's recent turns — so
+    ``orchestration.loop`` drops the supplement instead, for exactly that reason.
+    Nothing is owed here and nothing here could tell the two apart.
+
+    **Written out rather than imported from ``planning``**, which applies the same
+    rule to the same sequence for its own prompt: golden rule 1 keeps
+    ``orchestration`` off another subsystem's internals, and the rule being shared is
+    ADR-0074 §5 — the contract — rather than that module's code. The kind test is
+    ``isinstance`` against the union member, which is what :func:`_render_record`
+    already asks of the same records one function below.
+
+    Args:
+        memories: The records the pipeline assembled for this turn, in the order
+            ``TurnResult.memories`` documents.
+
+    Returns:
+        The leading episodic run, then everything after it. Either may be empty.
+    """
+    boundary = 0
+    for record in memories:
+        if not isinstance(record, EpisodicMemory):
+            break
+        boundary += 1
+    return memories[:boundary], memories[boundary:]
 
 
 def _render_record(record: MemoryRecord) -> str:

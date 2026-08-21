@@ -12,6 +12,7 @@ it on the next turn.
 
 from __future__ import annotations
 
+import itertools
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -1447,6 +1448,36 @@ async def test_the_supplement_follows_the_belief_records() -> None:
     result = await _supplementing_loop(memory).respond("dana works on billing", history=(tail,))
 
     assert [record.id for record in result.memories] == ["tail-1", "belief-1", "episode-1"]
+
+
+async def test_the_leading_episodic_run_is_exactly_the_conversations_own_turns() -> None:
+    """The invariant two prompt assemblers read this sequence with (#1374).
+
+    Neither ``planning.planner`` nor ``orchestration.composing`` is handed a boundary
+    — ADR-0074 §5 declines a ``history`` parameter and ADR-0170 §2 gives the composing
+    stage the ``TurnResult`` and nothing else — so both recover the conversation's own
+    turns as the **leading run** of ``EPISODIC`` records. This asserts what that
+    recovery rests on from *this* side: the history goes first, whole and in order,
+    and the first non-episodic record ends it.
+
+    Stated as its own test rather than left implied by the supplement's ordering
+    cases, because the two prompts now *name* the group to the model — a turn that
+    stopped leading with the history would not degrade the prompt, it would put a
+    belief retrieved by relevance under a heading claiming the user just said it.
+    """
+    memory = FakeMemoryStore(now=_clock)
+    await memory.add(_belief("belief-1", "dana works on billing"))
+    await memory.add(_episode("episode-1", "dana works on billing"))
+    tail = (_episode("tail-1", "dana works on billing"), _episode("tail-2", "and on payments"))
+
+    result = await _supplementing_loop(memory).respond("dana works on billing", history=tail)
+
+    leading = list(
+        itertools.takewhile(
+            lambda record: MemoryKind(record.kind) is MemoryKind.EPISODIC, result.memories
+        )
+    )
+    assert [record.id for record in leading] == ["tail-1", "tail-2"]
 
 
 async def test_an_episode_already_in_the_tail_is_not_repeated_by_the_supplement() -> None:
