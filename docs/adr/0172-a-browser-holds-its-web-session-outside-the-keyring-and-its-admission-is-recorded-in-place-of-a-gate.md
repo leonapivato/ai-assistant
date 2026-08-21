@@ -1,6 +1,6 @@
 # 172. A browser holds its web session outside the keyring, and its admission is recorded in place of a gate
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-21
 
 - **This is the prerequisite ADR-0168 §6 names**, for `track:web-client`
