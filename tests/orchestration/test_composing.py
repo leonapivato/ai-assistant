@@ -670,6 +670,148 @@ async def test_an_episode_is_rendered_whole_with_its_instant_and_outcome() -> No
     assert "how it turned out" in prompt
 
 
+# --- #1374: the conversation's own turns are named as such -------------------
+#
+# ADR-0074 §5 hands this stage the conversation's recent turns as the leading group
+# of ``TurnResult.memories``, and ADR-0173 §8 confirms that route is the whole of
+# how a resumed conversation reaches the composing stage. What #1374 records is that
+# the stage rendered both groups under one heading, so the model drew on the
+# conversation and disclaimed having it in the same reply.
+
+
+def _episode(
+    record_id: str, content: str, *, ago: timedelta = timedelta(minutes=1)
+) -> EpisodicMemory:
+    """One captured turn, as ADR-0074 §3 writes it: an episode in the derived band."""
+    return EpisodicMemory(
+        id=record_id,
+        content=content,
+        occurred_at=AT - ago,
+        provenance=_provenance(MemorySource.OBSERVED),
+    )
+
+
+async def test_this_conversations_own_turns_are_headed_apart_from_what_was_retrieved() -> None:
+    """#1374: the leading episodic run is named as this conversation, the rest is not.
+
+    The assertion is on **which heading each record fell under**, not merely that a
+    heading exists: the fault was that both groups rendered under one, so a test
+    that only looked for the new sentence would pass against the bug.
+    """
+    model = FakeModelProvider("answer")
+    memories = (
+        _episode("turn-1", "the user asked about the weekend"),
+        _episode("turn-2", "the user asked what time it was"),
+        _belief("the user prefers hiking", record_id="rec-1"),
+        _episode("supplement-1", "the user mentioned a trip", ago=timedelta(days=30)),
+    )
+
+    await ComposingStage(model=model, streaming=FakeStreamingCompleter()).compose(
+        turn=_turn(memories=memories), step=None, undriven=()
+    )
+
+    grouped = _grouped(_prompt(model))
+    assert grouped[composing._TAIL_HEADING] == [
+        "the user asked about the weekend",
+        "the user asked what time it was",
+    ]
+    assert grouped[composing._RETRIEVED_HEADING] == [
+        "the user prefers hiking",
+        "the user mentioned a trip",
+    ]
+
+
+async def test_a_turn_with_no_conversation_behind_it_claims_none() -> None:
+    """The other direction: a first turn is told nothing about a conversation.
+
+    The heading is a claim about continuity, so writing it over an empty group —
+    or over a group that is only relevance-retrieved beliefs — would be the
+    fabrication ADR-0158 §4 refuses in the reader, restored in the renderer.
+    """
+    model = FakeModelProvider("answer")
+
+    await ComposingStage(model=model, streaming=FakeStreamingCompleter()).compose(
+        turn=_turn(memories=(_belief("the user prefers hiking"),)), step=None, undriven=()
+    )
+
+    prompt = _prompt(model)
+    assert composing._TAIL_HEADING not in prompt
+    assert composing._RETRIEVED_HEADING in prompt
+
+
+async def test_an_episode_retrieved_by_relevance_is_never_called_this_conversation() -> None:
+    """ADR-0158 §5's supplement sits behind a belief, and the prefix split keeps it there.
+
+    A partition by *kind* would pull it forward into the tail and tell the model a
+    conversation a month old was said moments ago. The split is a prefix for exactly
+    that reason (ADR-0074 §5), and this pins the direction that costs a user a
+    fabricated continuity claim rather than a missing one.
+    """
+    model = FakeModelProvider("answer")
+    memories = (
+        _belief("the user prefers hiking"),
+        _episode("supplement-1", "the user mentioned a trip", ago=timedelta(days=30)),
+    )
+
+    await ComposingStage(model=model, streaming=FakeStreamingCompleter()).compose(
+        turn=_turn(memories=memories), step=None, undriven=()
+    )
+
+    prompt = _prompt(model)
+    assert composing._TAIL_HEADING not in prompt
+    assert _grouped(prompt)[composing._RETRIEVED_HEADING] == [
+        "the user prefers hiking",
+        "the user mentioned a trip",
+    ]
+
+
+def test_the_system_prompt_names_the_block_and_forbids_disclaiming_it() -> None:
+    """#1374's second half: the instruction must point at the heading that exists.
+
+    A near-miss between the two — the prompt quoting a heading the renderer does not
+    write — is the failure this asserts against, which is why the heading is a named
+    constant rather than a literal in two places.
+    """
+    prompt = composing._SYSTEM_PROMPT
+    assert composing._TAIL_HEADING in prompt
+    assert "never tell the user you have no access to what was said earlier" in prompt
+
+
+def test_the_prompts_claim_about_the_conversation_stays_within_what_it_can_promise() -> None:
+    """The "TELL THE TRUTH" posture survives: the window is stated as bounded.
+
+    ADR-0074 §5 bounds the tail by a configured count of recent turns and skips an
+    id that no longer resolves, so a prompt asserting the model holds *the*
+    transcript would be this stage telling the model something untrue about its own
+    material — the thing every other clause here exists to prevent.
+    """
+    prompt = composing._SYSTEM_PROMPT
+    assert "TELL THE TRUTH ABOUT WHAT WAS DONE." in prompt
+    assert "bounded window and not a guaranteed-whole transcript" in prompt
+    assert "does not reach back far enough to answer, say that plainly" in prompt
+
+
+def _grouped(prompt: str) -> dict[str, list[str]]:
+    """The record contents the prompt printed, keyed by the heading they fell under.
+
+    Reads the assembled prompt the way the model does — a heading, then the bullets
+    below it — so an assertion can say *which* group a record landed in rather than
+    only that its text appears somewhere.
+    """
+    headings = (composing._TAIL_HEADING, composing._RETRIEVED_HEADING)
+    grouped: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in prompt.splitlines():
+        if line in headings:
+            current = line
+            grouped[current] = []
+        elif current is not None and line.startswith("  - ["):
+            grouped[current].append(json.loads(line[line.index('"') :]))
+        elif current is not None and not line.startswith(("  ", "    ")):
+            current = None
+    return grouped
+
+
 def test_the_error_the_degradation_set_names_is_the_ratified_one() -> None:
     """A pin on the classification rather than on the class: §8 names ``ModelError``."""
     assert issubclass(ModelUnavailableError, ModelError)
