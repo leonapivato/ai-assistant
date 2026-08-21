@@ -1,7 +1,52 @@
 # 79. A correction resolves every conflict it is shown, or it does not land
 
-- Status: Partially superseded by ADR-0159 (§3's promoted full-set retirement obligation, as it reaches a conflict labelled a restatement or an addition)
+- Status: Partially superseded by ADR-0159 (§3's promoted full-set retirement obligation, as it reaches a conflict labelled a restatement or an addition) and ADR-0171 (that same obligation, as it reaches a conflict the writer holds no relation for on a crossing carrying a labelled contradiction)
 - Date: 2026-07-28
+- Partially superseded: 2026-08-21 by ADR-0171 — **§3's promoted `MemoryWriter`
+  obligation is narrowed a second time, on a ground its sentence again has no term
+  for; §1's ruling and everything §3 argues for promoting the obligation stand.**
+  ADR-0159 §5 excluded from the retirement set any conflict the writer holds a
+  `RESTATES` or `ADDS` relation for. #1294's supersede audit (#1302) measures what
+  that left: the reconciler labels at most `reconciler_max_conflicts` members, and the
+  writer sweeps in every *unlabelled* sibling because absence is not one of the
+  excluded relations. Across the replay, 56 supersede rulings retired 146 records —
+  2.6 apiece — and the verified worst case offered 13 members, labelled 3, and retired
+  12, ten of which no reading calls contradicted.
+  [ADR-0171](0171-a-supersession-sweeps-in-only-a-labelled-contradiction-and-the-labelling-bound-rises-to-fifteen.md)
+  §2 therefore rules that where a writer holds a `CONTRADICTS` relation for any member
+  of the ruled-on set, the `SUPERSEDE` retires the named `target` plus **only** the
+  other `CONTRADICTS` members. A reader holding only ADR-0079 §3 would build a writer
+  that retires records ADR-0171 forbids retiring, so the sentence no longer holds as
+  written.
+
+  **The intensional statement is exposed for the second time, and for the same
+  reason.** ADR-0050's 2026-08-02 note ruled that §3 needed no record of ADR-0092's
+  widening because §3 names "whose source is supersedable" rather than a list, so
+  widening the class leaves its sentence true verbatim. ADR-0159's record explains why
+  that reasoning does not reach an exclusion, and it does not reach this one either:
+  ADR-0171 §2 changes no member of the retirement class. It withholds retirement from
+  a member whose source **is** supersedable, on a relation-side ground §3's sentence
+  cannot express.
+
+  **What stands, and the half of §3 this ADR is most likely to be misread as
+  weakening.** §3's obligation still binds **in full** wherever the writer holds no
+  `CONTRADICTS` relation for any member — which is every crossing on the asserted arm,
+  since a `USER_ASSERTED` proposal never reaches a reconciler and neither does a
+  crossing holding a `USER_ASSERTED` member, and every crossing on ADR-0159 §6's
+  degraded floor, where the certain rung can only ever say `RESTATES`. So **a user
+  correcting a belief still retires every stale sibling it is shown**, which is
+  #313/#314 exactly as §1 ruled it, and ADR-0171 §2's third clause says so in terms.
+  §1's ruling — "a correction resolves every conflict it is shown, or it does not
+  land" — stays true on the reading ADR-0159 §11 gave it: what moves is the extension
+  of "conflict shown", and ADR-0171 §1's raise of the labelling bound to 15 is what
+  keeps that extension close to the truth. §1's completeness refusal and its ceiling,
+  §2's deferral precedence, §3's silent-divergence argument — which is why ADR-0171 §2
+  carries the narrowing into the canonical fake and the shared suite as ADR-0159 §5
+  did — §4's contract surface and §5's partial supersession of ADR-0050 all stand,
+  as does ADR-0159's earlier pair, which keeps its place on the line (ADR-0070 §4's
+  accumulation rule). ADR-0171 §6 applies ADR-0082 §1's test and records this ruling;
+  ADR-0171 lands in the same change, so this line never names an ADR that does not
+  exist. Refs #1302, #1294.
 - Partially superseded: 2026-08-16 by ADR-0159 — **§3's promoted `MemoryWriter`
   obligation is narrowed by one exclusion; everything §3 argues for promoting it
   stands.** §3 makes the full-set retirement "an obligation of the `MemoryWriter`

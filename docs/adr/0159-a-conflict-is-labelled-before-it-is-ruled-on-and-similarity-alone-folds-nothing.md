@@ -1,7 +1,57 @@
 # 159. A conflict is labelled before it is ruled on, and similarity alone folds nothing
 
-- Status: Partially superseded by ADR-0161 (of §4, §4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`; of §6, the members its degraded floor may name as a target, for every non-asserted proposal)
+- Status: Partially superseded by ADR-0161 (of §4, §4(a) whole — its target class, its target selection and the reach of its `CONTRADICTS` purity condition — and the paragraph excluding `EXTERNAL` from both target classes, each only as it reaches a proposal whose own `provenance.source` is `EXTERNAL`; of §6, the members its degraded floor may name as a target, for every non-asserted proposal) and ADR-0171 (§3's default value for `reconciler_max_conflicts`; §5's second clause, in the respect that ADR-0079 §3's retirement obligation is narrowed a second time)
 - Date: 2026-08-16
+- Partially superseded: 2026-08-21 by ADR-0171 — **§3's default is no longer three,
+  and §5's second clause no longer leaves ADR-0079 §3's obligation "otherwise
+  unchanged"; the bound itself, its rank order, its response half, and the whole of
+  §5's `RESTATES`/`ADDS` exclusion stand.** §3 states that "`Settings` gains
+  `reconciler_max_conflicts: int`, positive, defaulting to **3**", and argues the
+  number from a measured distribution: "three is where the measured distribution puts
+  the records a proposal could plausibly restate or contradict, and a fourth is nearly
+  always a topical neighbour". #1294's supersede audit (#1302) measures that
+  distribution again on a denser corpus and refutes it — 657 of 1,753 crossings offer
+  more than three members, and the bound accounts for **100%** of the replay's 2,522
+  unlabelled relations.
+  [ADR-0171](0171-a-supersession-sweeps-in-only-a-labelled-contradiction-and-the-labelling-bound-rises-to-fifteen.md)
+  §1 sets the default to **15**, the value #1302's A/B measured on the identical
+  proposal stream. A reader holding only ADR-0159 would configure three, so ADR-0070
+  §1 makes it a supersession however small the edit.
+
+  **§5's second clause moves for a different reason, and it is the load-bearing
+  half.** That clause reads: ADR-0079 §3's obligation "is narrowed by the clause above
+  and is otherwise unchanged. Where the writer holds no relations, the obligation
+  binds exactly as ADR-0079 §3 states it." ADR-0171 §2 narrows it a second time — on a
+  crossing for which the writer holds a `CONTRADICTS` relation, a `SUPERSEDE` retires
+  the named `target` plus only the other `CONTRADICTS` members, and a member the
+  writer holds **no** relation for is left live. So "otherwise unchanged" no longer
+  holds, and a reader building a writer from §5 alone would retire records ADR-0171
+  forbids retiring.
+
+  **What this ADR got right is what made the defect findable.** §5's own argument —
+  that the retirement set "is where this rule would have destroyed most", and that the
+  exclusion "is not a refinement of ADR-0050 §1; it is the condition on which the arm
+  in §4(b) may exist at all" — is the reasoning ADR-0171 §2 extends. What §5 could not
+  see is that its protection is computed only over members the reconciler *labelled*,
+  while §3's bound decides how many of those there are: a cost control was silently
+  governing a destructive rule. ADR-0171 §2 states the protection as a rule rather
+  than leaving it a statistic, and §1 is what keeps the statistic close to the rule.
+
+  **What stands.** §3's bound in every other respect — positive, applied over the
+  conflict set in rank order, members beyond it left unlabelled, a volunteered label
+  for one of them discarded, `reconciler_model`'s validated route, the temporal
+  clause, the one-request clause and the never-raises clause with its cancellation
+  exception. §5's first, third, fourth and fifth clauses, whole: a `RESTATES` or
+  `ADDS` member is never retired, a `SUPERSEDE` naming one is refused, the exclusion
+  is enforced at the writer from the writer's own relations and is carried into the
+  canonical fake and the shared suite, and `_refuse_unsafe_fold`'s clause 1 gains no
+  exception. §1, §2, §4, §6, §7, §8, §9, §10 and §11 are untouched, as is ADR-0161's
+  earlier partial supersession, whose pair keeps its place on the line (ADR-0070 §4's
+  accumulation rule). §12's bullet leaving "the right value of
+  `reconciler_max_conflicts`" to a measurement is *answered* rather than falsified,
+  which ADR-0083 §15 rules a stacked addition owing nothing. ADR-0171 §6 applies
+  ADR-0082 §1's test and records this ruling; ADR-0171 lands in the same change, so
+  this line never names an ADR that does not exist. Refs #1302, #1294.
 - **Partially superseded: 2026-08-16 by
   [ADR-0161](0161-an-attested-re-read-restates-its-own-import-and-folds-at-an-id-that-is-ours.md),
   in the scope the `Status` line names — an `EXTERNAL` proposal that **agrees**
