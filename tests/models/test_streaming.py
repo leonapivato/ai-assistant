@@ -8,6 +8,7 @@ these tests are deterministic and never touch the network — the shape
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
@@ -26,6 +27,9 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import Message, Role
 from ai_assistant.models import PydanticAIStreamingCompleter
+from ai_assistant.models.streaming import (
+    _cancelled_from_outside,  # pyright: ignore[reportPrivateUsage]
+)
 from ai_assistant.testing import StreamAttempt
 
 if TYPE_CHECKING:
@@ -40,6 +44,10 @@ if TYPE_CHECKING:
 #: ``_classify_status`` narrows to a retryable, routable ``ModelUnavailableError``
 #: — the disposition the shared suite's boundary cases are written against.
 _UNAVAILABLE: Final = 503
+
+#: Long enough that a scheduling hiccup does not fail a case, short enough that a
+#: genuine hang is a failure rather than a stalled run.
+_A_MOMENT: Final = 5.0
 
 
 def _a_question() -> list[Message]:
@@ -67,6 +75,7 @@ class _ScriptedTransport:
     script: tuple[StreamAttempt, ...]
     status: int = _UNAVAILABLE
     observed: list[tuple[Turn, ...]] = field(default_factory=list)
+    released: int = 0
 
     async def stream_function(
         self, messages: list[ModelMessage], _info: AgentInfo
@@ -74,8 +83,14 @@ class _ScriptedTransport:
         """Play the next scripted attempt, recording what it observed."""
         attempt = self.script[min(len(self.observed), len(self.script) - 1)]
         self.observed.append(rendered_turns(messages))
-        for delta in attempt.deltas:
-            yield delta
+        try:
+            for delta in attempt.deltas:
+                yield delta
+        finally:
+            # Reached on exhaustion and on close alike, which is what makes it
+            # the observable form of "the provider exchange was released": the
+            # library closes this generator when the run it drives is torn down.
+            self.released += 1
         if attempt.fails:
             raise ModelHTTPError(status_code=self.status, model_name="scripted", body=None)
 
@@ -98,6 +113,10 @@ class _ProviderWorld:
     @property
     def observed(self) -> tuple[tuple[Turn, ...], ...]:
         return tuple(self.transport.observed)
+
+    @property
+    def released(self) -> int:
+        return self.transport.released
 
 
 def _world(*attempts: StreamAttempt, status: int = _UNAVAILABLE) -> _ProviderWorld:
@@ -254,3 +273,62 @@ class TestTheStreamingSeamItself:
         completer = PydanticAIStreamingCompleter(default_model="anthropic:not-a-real-model")
 
         assert isinstance(completer, PydanticAIStreamingCompleter)
+
+
+class TestCancellationOnTheCleanupPath:
+    """ADR-0060's propagation clause, on the path where it is easiest to lose.
+
+    Releasing the run means catching ``CancelledError`` in the generator's
+    cleanup — to tell the pump acknowledging the cancellation we asked for from
+    one delivered to us — and a blanket suppression there eats the second kind
+    silently, reporting a clean close for a call that really was cancelled.
+    """
+
+    async def test_a_cancelled_reader_is_given_its_cancellation(self) -> None:
+        held = asyncio.Event()
+
+        async def slow(_messages: list[ModelMessage], _info: AgentInfo) -> AsyncIterator[str]:
+            yield "one"
+            await held.wait()  # pragma: no cover - the case never releases it
+            yield "two"
+
+        completer = PydanticAIStreamingCompleter(default_model=FunctionModel(stream_function=slow))
+        stream = completer.stream(_a_question())
+        seen: list[str] = []
+        reading = asyncio.Event()
+
+        async def read() -> None:
+            async for delta in stream:
+                seen.append(delta)
+                reading.set()
+
+        reader = asyncio.ensure_future(read())
+        await asyncio.wait_for(reading.wait(), _A_MOMENT)
+        # The reader is now suspended waiting for a delta the run will not send,
+        # so its cancellation lands *inside* the generator's own await — the
+        # window whose cleanup this class is about.
+        await asyncio.sleep(0)
+        reader.cancel()
+
+        with pytest.raises(asyncio.CancelledError):
+            await reader
+        assert seen == ["one"]
+
+    async def test_the_cleanup_tells_our_cancellation_from_the_pump_s(self) -> None:
+        # The predicate the cleanup branches on, asserted in both states rather
+        # than only in the one an integration test happens to reach. `cancelling()`
+        # is what distinguishes them, and reading it wrong in either direction is
+        # a silent bug: one way absorbs a real cancellation, the other invents one.
+        assert not _cancelled_from_outside()
+
+        async def cancels_itself() -> bool:
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+            try:
+                await asyncio.sleep(_A_MOMENT)
+            except asyncio.CancelledError:
+                return _cancelled_from_outside()
+            return False  # pragma: no cover - the sleep is always cancelled
+
+        assert await asyncio.ensure_future(cancels_itself())

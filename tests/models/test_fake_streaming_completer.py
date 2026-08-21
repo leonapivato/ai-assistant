@@ -58,6 +58,10 @@ class _FakeWorld:
             for call in self.subject.calls
         )
 
+    @property
+    def released(self) -> int:
+        return self.subject.released
+
 
 class TestFakeStreamingCompleterContract(StreamingCompleterContract):
     """``FakeStreamingCompleter`` passes the shared ``StreamingCompleter`` contract."""

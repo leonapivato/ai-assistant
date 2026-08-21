@@ -26,7 +26,6 @@ that wants the fallback calls ``ModelProvider.complete``.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -68,6 +67,21 @@ def _encodable(delta: str) -> EncodableText:
     except ValueError as exc:
         msg = f"the model streamed a delta that cannot be encoded: {exc}"
         raise ModelResponseError(msg) from exc
+
+
+def _cancelled_from_outside() -> bool:
+    """Whether something has cancelled the task running this code.
+
+    ``Task.cancelling()`` counts the cancellations requested of a task and not
+    yet balanced by ``uncancel()``, so a non-zero count is the one durable
+    signal that a ``CancelledError`` caught during cleanup belongs to *us*
+    rather than to a task we cancelled ourselves. Outside a task — a bare
+    ``coroutine`` driven by hand, or an async generator finalised by the loop's
+    shutdown hook — there is nothing to have been cancelled and the answer is
+    ``False``.
+    """
+    current = asyncio.current_task()
+    return current is not None and current.cancelling() > 0
 
 
 @dataclass(frozen=True)
@@ -228,12 +242,21 @@ class PydanticAIStreamingCompleter:
                         return
         finally:
             run.cancel()
-            # Suppressed because this cancellation is one we asked for, and a
-            # `finally` re-raises whatever it was unwinding — so a cancellation
-            # delivered from outside is still delivered onward (ADR-0060), it is
-            # merely not delivered *twice*.
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await run
+            except asyncio.CancelledError:
+                # Two different facts arrive here as one exception type, and
+                # ADR-0060 rules them opposite ways. The pump acknowledging the
+                # cancellation we just asked for is *ours*, and re-raising it
+                # would invent a cancellation nobody delivered. A cancellation
+                # delivered to **this** coroutine from outside must be delivered
+                # onward and never absorbed — and a bare `suppress` here eats
+                # exactly that one, silently, on the cleanup path.
+                #
+                # `cancelling()` is what separates them: it is non-zero exactly
+                # when something cancelled the task running this cleanup.
+                if _cancelled_from_outside():
+                    raise
 
     async def _pump(
         self,
