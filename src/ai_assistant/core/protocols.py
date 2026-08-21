@@ -107,7 +107,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from ai_assistant.core.types import DEFAULT_PAGE_SIZE
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import AsyncIterator, Mapping, Sequence
     from datetime import datetime, timedelta
 
     from ai_assistant.core.types import (
@@ -526,6 +526,146 @@ class BatchCompleter(Protocol):
                 if the exchange with the provider fails. The first two are caller
                 errors and carry ADR-0066 §3's disposition; a provider failure is
                 narrowed to the most specific subclass.
+        """
+        ...
+
+
+@runtime_checkable
+class StreamingCompleter(Protocol):
+    """Streaming inference: the assistant's reply as ordered text deltas.
+
+    A **sibling** of :class:`ModelProvider`, not a widening of it (ADR-0173 §5),
+    on the ground ADR-0143 §1 already established for :class:`BatchCompleter`:
+    this module's own guideline prefers a new Protocol to a wider one, ADR-0021 §3
+    makes a separate Protocol the presumptive shape because it takes nothing away
+    from anyone, and ``Protocol`` is *structural* — a new member on
+    ``ModelProvider`` would silently unsatisfy every existing implementation at
+    once (``PydanticAIProvider``, ``RetryingProvider``, ``RoutingProvider``, the
+    canonical ``FakeModelProvider``, and every test double) and, since
+    ``ModelProvider`` is ``@runtime_checkable``, change what ``isinstance``
+    answers about all of them. Nothing here is added to ``ModelProvider``, this
+    Protocol does not inherit from it, and an object may implement both without
+    anything requiring that it does.
+
+    **The fourth ground is stronger here than it was for a batch, and it is what
+    :meth:`stream`'s commit clause exists to state.** A completion is atomic:
+    nobody has seen anything until it returns, so ``RetryingProvider`` may
+    re-issue it and ``RoutingProvider`` may send it down another route, and a
+    second attempt is invisible. A stream is not atomic. Once a delta carrying
+    real text has been handed upward, a retry produces a *second* answer to a
+    question already half-answered and a fallback route produces a different one,
+    and no clause anywhere could say which of the two the user was reading. A
+    member on ``ModelProvider`` would therefore have obliged both wrappers to
+    forward an operation whose safe behaviour past that point contradicts the one
+    thing each of them exists to do.
+
+    **A streamed turn is genuinely less resilient than the same turn unstreamed,
+    and that is a trade rather than an implementation detail** (ADR-0173
+    Consequences). The resilience every other model call gets is available on this
+    seam *before* the first non-blank delta and gone after it. A caller that would
+    rather have the fallback calls :meth:`ModelProvider.complete`, which is
+    exactly why ADR-0173 §4 keeps it.
+
+    **What this seam does not promise.** Tool use — it inherits
+    :meth:`ModelProvider.complete`'s position that nothing at the model seam
+    promises tool support, and :meth:`stream` refuses a history containing a
+    ``Role.TOOL`` turn rather than representing one. Nor a delta size, a delta
+    count, a token boundary, any relation between a delta and a word, or a
+    non-empty stream: a stream that yields no text at all is admissible, and
+    classifying it is the caller's (ADR-0170 §8, ADR-0173 §5).
+
+    How :meth:`stream` observes the conversation it is handed is governed by this
+    module's input-observation clause (ADR-0065), which has bite here for the same
+    reason it has bite on ``BatchCompleter.submit``: the argument is a
+    caller-owned ``Sequence`` and the call suspends, repeatedly, between reading
+    it and finishing. Cancellation is governed by this module's cancellation
+    clause (ADR-0060), and the resource an implementation must not orphan is the
+    provider connection the stream is being read from — a consumer that stops
+    iterating early releases it, which is what makes an ``async with`` or an
+    ``aclose`` on the iterator the implementation's business rather than the
+    caller's.
+    """
+
+    def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+    ) -> AsyncIterator[EncodableText]:
+        """Stream the assistant's next message as text deltas, oldest first.
+
+        The same arguments :meth:`ModelProvider.complete` takes, in the same
+        shape, and subject to the same precondition (ADR-0066 §1): ``messages``
+        must be non-empty and must not end on a ``Role.ASSISTANT`` turn, read as
+        that docstring states it — a **necessary condition, not a sufficient
+        one**, admitting nothing by omission. A history containing a ``Role.TOOL``
+        turn is refused although the clause does not name it. This seam widens the
+        model seam's admissible history by nothing.
+
+        **Each yielded value is** :data:`~ai_assistant.core.types.EncodableText`
+        **rather than a bare** ``str``, so ADR-0085 §4c's rule that every string
+        this system carries has a UTF-8 encoding binds *at this seam* — as it
+        already binds at ``complete``'s, whose returned ``Message.content`` is
+        that type. A delta with no encoding is refused **here**, before it can
+        reach the construction of whatever the caller renders it into, rather than
+        surfacing later as a validation error from a value the caller built
+        (ADR-0173 §5, §14).
+
+        **The concatenation of the deltas is the reply**, in the order they were
+        yielded, and nothing else about their shape is promised. A delta
+        conveying no text is admissible and is the caller's to coalesce — and to
+        coalesce **without discarding**, because a blank delta is a separator the
+        model emitted and belongs to the text on either side of it: a provider
+        yielding ``"hello"``, ``" "``, ``"world"`` means ``"hello world"``, and an
+        implementation of the *caller* that filters the middle delta produces
+        ``"helloworld"`` (ADR-0173 §5). A stream that yields no non-blank text at
+        all is the blank-completion case ADR-0170 §8 classifies; it is **not** a
+        failure at this seam, which returns it exactly as it returns any other
+        stream, and no postcondition of ``ModelProvider`` changes (#1324).
+
+        **The commit boundary, which is the clause that makes this a sibling
+        rather than a copy of** ``complete``. An implementation may retry,
+        re-issue or substitute a route **freely until it yields its first delta
+        containing a non-whitespace character, and never after it**. A delta that
+        is empty or wholly whitespace publishes nothing, so it commits nothing —
+        which is why the boundary is drawn at the first *non-blank* delta and not
+        at the first delta, and why an implementation that commits at any delta at
+        all is giving away resilience for nothing. Past that boundary it does not
+        restart, does not fall back, and does not re-issue; a failure there is
+        raised from the iteration rather than repaired beneath it.
+
+        **A failure raised past the boundary keeps its class, and the caller stops
+        acting on it.** ADR-0011 §1's taxonomy binds — a ``ModelError`` may be
+        raised from the call or from the iteration — but its ``retryable`` and
+        ``routable`` dispositions are actionable **only before** the first
+        non-blank delta. After it, no caller and no wrapper acts on them. The
+        error is not downgraded to say so: a mid-stream ``ModelRateLimitError`` is
+        still that error, and what changes is that the answer it interrupted has
+        already been published and cannot be composed twice.
+
+        Args:
+            messages: Conversation history, oldest first. Non-empty, and not
+                ending on a ``Role.ASSISTANT`` turn.
+            model: Optional ``"provider:model"`` override; falls back to the
+                configured default when ``None``.
+
+        Returns:
+            An async iterator over the reply's text deltas, in order. Iterating it
+            is what starts the exchange; an implementation is free to raise the
+            precondition failures below from the call instead, and a caller
+            therefore drives the iterator rather than inspecting the return.
+
+        Raises:
+            ModelError: If ``messages`` is empty, ends on a ``Role.ASSISTANT``
+                turn, or contains a ``Role.TOOL`` turn — from the call or from the
+                first iteration step, the implementation's choice, and in either
+                case before any model is contacted. What binds every
+                implementation is the *disposition*, not the class identity:
+                neither ``retryable`` nor ``routable``, because a malformed
+                argument reproduces identically on every attempt from every route
+                (ADR-0066 §3). Also raised, from the iteration, if a delta has no
+                UTF-8 encoding or the exchange with the provider fails, narrowed
+                to the most specific subclass.
         """
         ...
 
