@@ -212,10 +212,28 @@ or a truncation, whereas an empty `steps` list *accompanied by an affirmative
 boolean marker* is a thing a reply contains only if something wrote it
 deliberately.
 
-**Two genuine envelopes still cannot be told apart locally and the earlier still
-wins**, which is ADR-0071's ruling and is unchanged. The one new instance of it —
-a decline envelope ahead of a plan envelope, or the reverse — resolves the same
-way, and §7 is why that is acceptable rather than merely bounded.
+> **Normative.** Where a reply contains two genuine envelopes, the earlier one in
+> the scan wins, whatever their shapes: a decline envelope ahead of a plan envelope
+> yields the decline, and a plan envelope ahead of a decline envelope yields the
+> plan.
+
+> **Normative.** The implementing lane ships that ordering test as a **pair** —
+> decline before plan, and plan before decline — asserting in each case that the
+> returned `ActionPlan` comes from the first envelope in the reply.
+
+**This is ADR-0071's earlier-wins rule and it is unchanged in substance, but it
+is a clause here rather than prose because the pair it now ranges over is new.**
+ADR-0071 had exactly one envelope shape, so "two genuine envelopes" meant two
+plans; the cross-shape pair exists only because §1 created a second shape, and
+under ADR-0089 §3 a rule stated only in the prose beside a mark binds nothing.
+The implementation it excludes is a plausible one: keep the first envelope as a
+fall-back and carry on scanning for a *plan* specifically — preferring to act —
+which passes the standalone decline test, the decoy-before-decline test and every
+ADR-0071 test while silently overriding a decline the model asserted. Reversing
+the two objects exposes the mirror failure, which is why the obligation is a pair
+rather than a case. §7 is why the earlier-wins answer is acceptable rather than
+merely bounded: whichever way it lands, ADR-0170 §6's account reports what was
+actually done.
 
 ### 3. A decline states why, because the rationale is the whole of its content
 
@@ -372,10 +390,11 @@ propagates unwrapped.
 
 > **Normative.** The implementing lane ships a case at the engine seam on a
 > declined plan, asserting that the goal and the plan are persisted, that the turn
-> is composed and captured, and that no execution is started. It is a case on a
-> branch that already exists rather than a change to it; a lane that finds itself
-> editing `orchestration/` to make it pass has found something this decision did
-> not rule and stops.
+> is composed and captured, that no execution is started, and that the goal and
+> plan are persisted even where composition fails. It is a case on a branch that
+> already exists rather than a change to it; a lane that finds itself editing
+> `orchestration/` to make it pass has found something this decision did not rule
+> and stops.
 
 > **Normative.** A decline is persisted whether or not the composed answer
 > succeeds. It is a decision the system made about the user's request, and ADR-0014
@@ -459,6 +478,14 @@ text this planner writes into a prompt and parses back out of a reply; ADR-0047
 §4 defined it and ADR-0071 has already changed it once without touching `core`.
 The durable artefact is unchanged in type and in every invariant it carries — a
 frozen plan, unique step ids, a `goal_id`, a clock-stamped `created_at`.
+
+**That the marker cannot leak into the durable artefact needs no test, and this
+is why rather than an omission.** `_build_plan` constructs the `ActionPlan`
+payload from an explicit five-key mapping — `id`, `goal_id`, `steps`,
+`created_at`, `rationale` — never by spreading the decoded envelope, so there is
+no path by which an envelope key reaches `model_validate` at all. The property is
+structural rather than asserted, and a lane that changed `_build_plan` to spread
+the envelope would be making a `core`-facing change this section forbids.
 
 The implementing lane is therefore `planning/` alone: the system prompt,
 `_extract_object`, `_require_steps`, the rationale condition, `_repair_prompt`,
