@@ -224,7 +224,7 @@ disagrees with its position has no defensible interpretation either. The same
 reasoning retires a final-frame flag: `FrameKind` is the discriminator, and a
 frame that is a chunk by kind and final by flag is two answers to one question.
 
-**`NonBlankEncodableText` rather than `EncodableText`**, for §3's reason applied
+**`NonBlankEncodableText` rather than `EncodableText`**, for ADR-0170 §3's reason applied
 one level down: a blank chunk is a frame that costs a round of framing and says
 nothing, and admitting one would oblige every client to decide whether an empty
 chunk means "nothing yet" or "something ended". A provider that yields an empty
@@ -285,11 +285,31 @@ before a byte moves; streaming is what makes it reachable after bytes have moved
 > discover.
 
 > **Normative.** Where the accumulating answer would breach that ceiling, the
-> engine **stops streaming before the breach** and terminates with §6's fourth
-> shape: `reply` the text actually yielded, `reply_degraded` `True`. It does not
-> yield a chunk it cannot repeat, does not refuse a turn whose prose has already
-> been published, and does not produce a terminal `reply` that disagrees with the
-> chunks.
+> engine **stops streaming before the breach** and terminates under §6's ordinary
+> partition, decided by whether anything was published: having yielded at least one
+> `ReplyChunk` it terminates with §6's fourth shape, `reply` the text actually
+> yielded and `reply_degraded` `True`; having yielded none — because the room left
+> could not hold even the first chunk — it terminates with §6's pre-commit shape,
+> `reply` `None` and `reply_degraded` `True`. It does not yield a chunk it cannot
+> repeat, does not refuse a turn whose prose has already been published, and does
+> not produce a terminal `reply` that disagrees with the chunks.
+
+> **Normative.** Where the outcome's **non-reply** content alone breaches the
+> ceiling, so that no `reply` at all would fit, that is ADR-0085 §8c's oversized
+> result and raises `OversizedValueError` exactly as it does on `converse` today.
+> This ADR neither creates that case nor changes it, and no lane cites this ADR
+> toward softening it.
+
+**Those three outcomes are one rule read at three inputs, not three rules**, and
+the partition is worth spelling out because the middle one is easy to collapse
+into either neighbour. What decides between them is only ever §6's question —
+was anything published? Nothing was published when the room could not hold a first
+chunk, so that case is the ordinary pre-commit degradation and *not* a truncation;
+`reply` is `None` there because `NonBlankEncodableText` has no way to say "the
+empty answer", which is exactly why ADR-0170 §3 chose that type. And the case
+where even an answerless outcome will not fit was never about the reply at all: it
+is a turn whose plan and retrieved memories overflow the frame on their own, which
+`converse` refuses today and which streaming leaves precisely as it found.
 
 **This is a disclosed truncation, and that is exactly the distinction ADR-0170 §8
 draws.** §8 forbids "a silent truncation" and makes an over-ceiling answer "that
@@ -448,8 +468,8 @@ conformance suite can pin it, which is the difference between a rule and a hope.
 > rule 1 forbids.
 
 > **Normative.** Where the configured route cannot stream, that is a `ModelError`
-> from the call — before any delta — and the pass degrades under §6's first
-> clause. It is not a startup refusal, not a capability flag on the surface, and
+> from the call — before any delta — and the pass degrades into §6's pre-commit
+> shape. It is not a startup refusal, not a capability flag on the surface, and
 > not a reason for the streaming method to be absent from the promoted surface.
 
 Making it a runtime failure rather than a wiring question is what keeps the
@@ -475,14 +495,16 @@ sentence of it.
 > what it yielded, never from what the transport achieved, so an in-process caller
 > and a caller across the wire observe the same outcome for the same turn.
 
-> **Normative.** A composition failure **before the first `ReplyChunk` is yielded**
-> degrades exactly as ADR-0170 §8 rules and changes nothing: the outcome carries
-> `reply` `None` and `reply_degraded` `True`, the turn is returned rather than
-> raised, and ADR-0170 §4's shapes are untouched. This is so whether the failure
-> preceded the first delta or followed it.
+> **Normative.** A composition failure **before the first `ReplyChunk` is
+> yielded** — and equally a §3 ceiling stop that yielded none — degrades exactly as
+> ADR-0170 §8 rules and changes nothing: the outcome carries `reply` `None` and
+> `reply_degraded` `True`, the turn is returned rather than raised, and ADR-0170
+> §4's shapes are untouched. This is so whether the failure preceded the first
+> delta or followed it.
 
 > **Normative.** A composition failure **after the first `ReplyChunk` is yielded**,
-> or a stop at §3's result-payload ceiling, produces a fourth shape which ADR-0170
+> or a §3 ceiling stop with at least one already yielded, produces a fourth shape
+> which ADR-0170
 > §4 does not admit and this clause adds: the outcome carries `reply` set to the
 > text actually yielded and `reply_degraded` `True`. `reply_degraded` therefore
 > means *composing this answer did not complete* — whether because it failed or
@@ -871,6 +893,12 @@ takes the triad first, because the rest is written against it.
 > Both assert that **no chunk was yielded whose text the terminal `reply` does not
 > repeat**, which is the property a chunk-reading and a chunk-ignoring client must
 > agree on.
+
+> **Normative.** The same lane pins §3's other two ceiling inputs, which the
+> boundary test above does not reach: a turn whose remaining room cannot hold even
+> the first chunk terminates with `reply` `None` and `reply_degraded` `True`,
+> having yielded nothing; and a turn whose non-reply content alone breaches the
+> ceiling raises `OversizedValueError`, as it does on `converse`.
 
 > **Normative.** The same lane pins §9: a connection dropped mid-stream leaves the
 > turn completed and captured, with its conversation turn and episode present, and
