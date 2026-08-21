@@ -759,15 +759,30 @@ and it binds with more force on a limit whose whole job is to refuse.
 | `gateway_max_hub_connections` | `int` | 8 |
 | `gateway_max_request_bytes` | `int` | 1 MiB |
 | `gateway_record_interval` | `timedelta` | 1 min |
+| `gateway_read_timeout` | `timedelta` | 30 s |
+| `gateway_max_browser_connections` | `int` | 64 |
+| `gateway_max_pending_connections` | `int` | 8 |
 
 > **Normative.** Every field above is refused at settings load unless it is
 > strictly positive, in the `gt=0` / `gt=timedelta(0)` form ADR-0083 §7 adopted.
 > None of them is nullable, and none takes a value meaning "off".
 
 > **Normative.** `gateway_port` is additionally refused unless it is a valid
-> non-privileged TCP port, and `gateway_session_idle_timeout` unless it is no
+> non-privileged TCP port; `gateway_session_idle_timeout` unless it is no
 > greater than `gateway_session_ttl` — an idle bound above the absolute lifetime
-> is a limit that can never bind.
+> is a limit that can never bind; and `gateway_max_pending_connections` unless it
+> is no greater than `gateway_max_browser_connections`, for that same reason.
+
+> **Normative.** A browser connection that has not delivered a complete request
+> within `gateway_read_timeout` is closed, and the same deadline runs while a
+> connection the gateway is holding open waits for its next request — so a peer
+> that connects and then sends nothing, or sends a request a byte at a time,
+> cannot hold a slot indefinitely.
+
+> **Normative.** The gateway accepts at most `gateway_max_browser_connections`
+> browser connections at once, and at most `gateway_max_pending_connections` of
+> those may be connections that have not yet delivered a complete request.
+> Beyond either ceiling it refuses rather than queueing without bound.
 
 > **Normative.** The gateway holds at most `gateway_max_hub_connections`
 > connections to the hub at once. A browser request that would need one beyond
@@ -786,6 +801,38 @@ expiry, no session ceiling and no request bound is a resident process that a
 single local caller can exhaust, and ADR-0084 §3's closing argument transfers
 verbatim: "A one-shot CLI could shrug this off; a process that runs for weeks
 cannot."
+
+**The deadline and the two connection ceilings are ADR-0084 §3's, taken whole,
+because the state they bound is reachable here before any rule of this ADR
+runs.** A local process can open loopback connections and send an incomplete
+request header, or a valid body one byte at a time under
+`gateway_max_request_bytes`; none of those has been admitted under §4, none has
+asked for a hub connection, and none is refused by §7 — so every limit stated
+above it leaves them untouched while they hold descriptors and reader tasks. That
+is the exact pair ADR-0084 §3 separates: "a per-frame deadline bounds each
+connection but says nothing about how many there may be", and "a connection that
+has not completed the handshake has cost the hub a descriptor and a task while
+telling it nothing, which is the cheapest state for a misbehaving peer to
+accumulate". A connection that has delivered no complete request is this door's
+version of that state, and it gets the tighter budget for the same reason.
+Adversarial review found the gap on the tenth round.
+
+**The gateway owes those three figures with more force than the hub does, not
+less.** ADR-0084 §3 was explicit that its own ceilings are "robustness, not
+secrecy", because "the `0600` bit already scopes a peer to the owning user".
+That bit is precisely what §2 and §3 establish the gateway does not have: its
+port is reachable by every local process and every local user, which is the whole
+reason a session exists at all. So the peer these ceilings bound is not
+hypothetical here, and the cost of omitting them is a browser that cannot
+connect — a gateway indistinguishable from one that is down, which is ADR-0083's
+ruling 4 failure arriving by the resource path.
+
+**Closing an idle connection costs the browser nothing, which is what makes the
+deadline a resource rule rather than a behaviour change.** ADR-0084 §3 grounds
+the same clause on the client being stateless, and the browser's position is
+better still: a session is held by the gateway and presented on §6's two values,
+so it survives the connection being closed and outlives any number of them.
+Reconnecting is a reconnect, not a re-admission.
 
 **`gateway_max_hub_connections` exists because the hub's budget is shared and the
 gateway is not its only claimant.** The client opens one connection per call and
@@ -1109,7 +1156,7 @@ lane. No record is owed on any of the rest.**
 - **The system gains a second interface adapter**, in `interfaces/`, reached by a
   subcommand of the existing `assistant` script — the first time ADR-0084 §6's
   own-console-script rule has been examined and found not to fire (§1).
-- **`core` gains seven `Settings` fields** (§8), each strictly positive at load,
+- **`core` gains ten `Settings` fields** (§8), each strictly positive at load,
   none nullable. They are contract surface in ADR-0054's sense, which several
   earlier ADRs already were; they are not `core` Protocol or type surface, so
   golden rule 5 is not triggered and no triad is owed.
