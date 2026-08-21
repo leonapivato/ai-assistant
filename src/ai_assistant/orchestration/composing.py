@@ -65,26 +65,29 @@ while every turn reported the same classified-looking degradation.
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
 import structlog
 
 from ai_assistant.core.errors import ModelError
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     BeliefBand,
     Disposition,
     EpisodicMemory,
     Message,
+    ReplyChunk,
     Role,
     band_of,
     rests_on_recorded_external_content,
 )
+from ai_assistant.orchestration.payloads import JSON_STRING_QUOTE_BYTES, encoded_text_bytes
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
-    from ai_assistant.core.protocols import ModelProvider
+    from ai_assistant.core.protocols import ModelProvider, StreamingCompleter
     from ai_assistant.core.types import (
         ActionPlan,
         CalendarFacet,
@@ -99,6 +102,9 @@ if TYPE_CHECKING:
     )
 
 __all__ = ["ComposedReply", "ComposingStage"]
+
+#: Spelled locally so the ceiling arithmetic below reads as arithmetic.
+_QUOTES: Final[int] = JSON_STRING_QUOTE_BYTES
 
 _log = structlog.get_logger(__name__)
 
@@ -150,14 +156,108 @@ class ComposedReply:
     :class:`~ai_assistant.core.types.TurnOutcome` fields §3 adds.
 
     Attributes:
-        text: The answer, or ``None`` where composing it failed.
-        degraded: Whether composing failed. ``True`` only beside a ``None``
-            :attr:`text`, and only for a **classified** failure — a ``ModelError``,
-            or a completion unusable as an answer (ADR-0170 §8's closed set).
+        text: The answer, or ``None`` where composing it produced none at all.
+        degraded: Whether composing **did not complete**. Only ever for a
+            **classified** failure — a ``ModelError``, or a completion unusable as
+            an answer (ADR-0170 §8's closed set) — or, on the streaming path, a
+            ceiling stop (ADR-0173 §3).
+
+            ``True`` beside a non-``None`` :attr:`text` on exactly one shape and no
+            other: ADR-0173 §6's fourth outcome, an answer that **began and did not
+            finish**, which only :meth:`ComposingStage.compose_streaming` can
+            produce. :meth:`ComposingStage.compose` is atomic and still reports the
+            flag only beside a ``None`` text.
     """
 
     text: str | None
     degraded: bool
+
+
+@dataclass(slots=True)
+class _Coalescing:
+    """The answer being assembled from a stream's deltas, and the room it has left.
+
+    ADR-0173 §5's coalescing rule and §3's ceiling, in one object, because the two
+    are one decision per delta: whether this delta completes a chunk, and whether
+    that chunk still fits.
+
+    **A blank delta is held, never dropped.** It is a separator the model emitted
+    and belongs to the text on either side of it, so it is carried forward and
+    joined to whatever follows — which is what makes ``"hello"``, ``" "``,
+    ``"world"`` mean ``"hello world"`` rather than ``"helloworld"``.
+
+    **Trailing whitespace is held too, for a second reason**: it may turn out to be
+    the whole answer's tail, which is stripped exactly as
+    :meth:`ComposingStage.compose` strips it. So a chunk is emitted only once its
+    last character is non-blank.
+
+    Attributes:
+        room: The escaped bytes the terminal outcome has for the whole reply.
+        published: The chunks emitted so far, in order. Their join is the answer.
+        used: Their escaped byte cost.
+        held: Whitespace taken in and not yet emitted, always between two chunks or
+            after the last one — never before the first, since leading whitespace is
+            stripped rather than held.
+        held_cost: Its escaped byte cost, counted against :attr:`room` exactly as
+            emitted text is (ADR-0173 §3), which is what bounds a provider that
+            yields nothing but whitespace forever.
+        breached: Whether the last :meth:`take` found that the room had run out. The
+            caller stops on it; nothing is emitted after it.
+    """
+
+    room: int
+    published: list[str] = field(default_factory=list)
+    used: int = 0
+    held: str = ""
+    held_cost: int = 0
+    breached: bool = False
+
+    @property
+    def text(self) -> str:
+        """The answer as it stands — the join of what has been emitted (§3)."""
+        return "".join(self.published)
+
+    @property
+    def _left(self) -> int:
+        """The escaped bytes still available for text, emitted or held."""
+        return self.room - self.used
+
+    def take(self, delta: str) -> str | None:
+        """Fold one delta in, and return the chunk it completed, if any.
+
+        Args:
+            delta: The seam's next text delta, verbatim — blank ones included.
+
+        Returns:
+            The chunk's text where this delta ended on a non-blank character and it
+            fits, and ``None`` otherwise. ``None`` with :attr:`breached` set is the
+            ceiling stop; ``None`` without it is text still being held.
+        """
+        body = delta.rstrip()
+        if not self.published:
+            # Leading whitespace is stripped from the whole answer, so while nothing
+            # has been published there is nothing to hold: a wholly blank delta here
+            # contributes no held bytes at all.
+            body = body.lstrip()
+        if not body:
+            if self.published:
+                self.held += delta
+                self.held_cost += encoded_text_bytes(delta) - _QUOTES
+                self.breached = self.held_cost > self._left
+            return None
+        text = self.held + body
+        cost = self.held_cost + encoded_text_bytes(body) - _QUOTES
+        if cost > self._left:
+            # Refused **before** the caller can yield it, so no chunk is ever
+            # published whose text the terminal ``reply`` cannot repeat — the
+            # property a chunk-reading and a chunk-ignoring client must agree on.
+            self.breached = True
+            return None
+        self.used += cost
+        self.published.append(text)
+        self.held = delta[len(delta.rstrip()) :]
+        self.held_cost = encoded_text_bytes(self.held) - _QUOTES
+        return text
 
 
 class ComposingStage:
@@ -170,8 +270,23 @@ class ComposingStage:
     what keeps ``reply_degraded`` ``False`` there.
     """
 
-    def __init__(self, *, model: ModelProvider) -> None:
-        """Wire the stage to the model seam it composes through.
+    def __init__(self, *, model: ModelProvider, streaming: StreamingCompleter) -> None:
+        """Wire the stage to the two model seams it composes through.
+
+        **Two parameters and one budget** (ADR-0173 §7). A pass that owes an answer
+        originates **exactly one** model call, spent at whichever seam that pass
+        uses: :meth:`compose` spends it on ``ModelProvider.complete()`` and
+        :meth:`compose_streaming` spends it on ``StreamingCompleter.stream()`` and
+        originates no ``complete()`` call at all. The stage never falls back from
+        one to the other — before the first chunk that would be a second call the
+        budget forbids, and after it, it would produce a complete answer that does
+        not begin with the text the user already read.
+
+        **Two seams rather than a widened one**, because ADR-0173 §5 puts streaming
+        on a sibling Protocol: a stream cannot be retried or re-routed once it has
+        begun, so the resilience ``RetryingProvider`` and ``RoutingProvider`` give
+        every other model call contradicts what this seam needs past its first
+        non-blank delta. The composition root supplies both explicitly (ADR-0028 §4).
 
         **One parameter, and no route of its own.** ADR-0170 §9 leaves "which model
         answers" undecided and §2 gives the stage no setting, so the seam it is
@@ -191,8 +306,17 @@ class ComposingStage:
                 obligation that creates no new contract: ``Engine.__init__``
                 receives no ``ModelProvider`` of its own, and reaching a concrete
                 subsystem's internals to find one is what golden rule 1 forbids.
+            streaming: The injected
+                :class:`~ai_assistant.core.protocols.StreamingCompleter`
+                :meth:`compose_streaming` reaches the model through (ADR-0173 §5).
+                Required rather than optional: the promoted surface's method set is
+                a fixed property of a build (``wire.surface.METHODS`` is reflective
+                and ADR-0084 §3's handshake makes it a promise), so a route that
+                cannot stream is a ``ModelError`` at the call and never an absent
+                method — which is what an optional seam here would have made it.
         """
         self._model = model
+        self._streaming = streaming
 
     async def compose(
         self,
@@ -267,6 +391,114 @@ class ComposingStage:
         # value copies nothing — it is the stage's own product. Stripping makes the
         # blankness test above and the value carried agree byte for byte.
         return ComposedReply(text=text, degraded=False)
+
+    async def compose_streaming(
+        self,
+        *,
+        turn: TurnResult,
+        step: StepOutcome | None,
+        undriven: Sequence[PlanStep],
+        room: int,
+    ) -> AsyncIterator[ReplyChunk | ComposedReply]:
+        """Compose the answer as it arrives, yielding chunks then one report.
+
+        The streaming twin of :meth:`compose`, over ADR-0173 §5's sibling seam. It
+        yields zero or more :class:`~ai_assistant.core.types.ReplyChunk` values and
+        then **exactly one** :class:`ComposedReply`, which is always the last value
+        and is always present unless this raises. The report is *yielded* rather
+        than returned because an async generator has no return value a caller can
+        read, and splitting the terminal into a second call would let a caller
+        obtain chunks without ever obtaining the answer §3 makes authoritative.
+
+        **Originates exactly one** ``StreamingCompleter.stream()`` **call and no**
+        ``complete()`` **call at all** (ADR-0173 §7). It does not loop, does not
+        re-issue, and does not fall back to the completing seam when a stream fails.
+
+        **Coalescing preserves the answer's text** (ADR-0173 §5). A delta that is
+        empty or wholly whitespace is *joined to the text adjacent to it, never
+        discarded*: a provider yielding ``"hello"``, ``" "``, ``"world"`` means
+        ``"hello world"``, and a stage that filtered the middle delta — which
+        ``NonBlankEncodableText`` will not carry as a chunk of its own — would emit
+        ``"helloworld"``. So a blank run is *held* and joined to whatever follows,
+        and the concatenation of the chunks equals the concatenation of the deltas
+        but for whitespace leading or trailing the whole answer, which this strips
+        exactly as :meth:`compose` strips it today.
+
+        **Whitespace held is whitespace that has to be bounded, and ``room`` is
+        what bounds it** (ADR-0173 §3). Text coalesced but not yet emitted counts
+        against the room left exactly as emitted text does, so a provider that
+        yields ``"ok"`` and then an unbounded run of whitespace terminates rather
+        than accumulating, and needs no second limit to do it.
+
+        **The ceiling is spent in escaped bytes, and the arithmetic is additive.**
+        ADR-0087 §2's encoding escapes a JSON string character by character, so the
+        cost of a chunk is the cost of its own characters wherever it lands in the
+        answer (:func:`~ai_assistant.orchestration.payloads.encoded_text_bytes`).
+        A running total is therefore exact, and re-encoding the accumulated answer
+        on every delta — which would make a long answer quadratic — is unnecessary.
+
+        Args:
+            turn: What the turn produced, as :meth:`compose` takes it.
+            step: What became of the step the turn drove, as :meth:`compose`.
+            undriven: The plan's steps that were not driven at all, as
+                :meth:`compose`.
+            room: How many **escaped** bytes the terminal ``TurnOutcome`` has left
+                for its ``reply``, computed by the caller from the outcome it will
+                build (ADR-0173 §3: "the implementing lane measures it rather than
+                guessing at a fraction of the frame size"). Zero or negative means
+                no chunk can be yielded at all, which is the pre-commit degradation
+                rather than a truncation.
+
+        Yields:
+            Each :class:`~ai_assistant.core.types.ReplyChunk` as it is composed, and
+            then the :class:`ComposedReply` naming the whole answer and whether
+            composing it completed.
+
+        Raises:
+            Exception: Anything the stage's own rendering raises, as
+                :meth:`compose`. ADR-0170 §8's degradation set stays closed, so a
+                defect here propagates rather than arriving as a classified
+                "no answer was available".
+        """
+        conversation = (
+            Message(role=Role.SYSTEM, content=_SYSTEM_PROMPT),
+            Message(role=Role.USER, content=_render_request(turn, step, undriven)),
+        )
+        answer = _Coalescing(room=room)
+        stopped = False
+        try:
+            # **Closed, not merely abandoned** (ADR-0173 §5's seam clause). Python
+            # does not close an async iterator at the point of abandonment, so a
+            # stage that breaks out of the loop below on the ceiling would leave the
+            # provider exchange open and still being paid for. Every exit from this
+            # block runs the seam's own release.
+            async with closing_stream(self._streaming.stream(conversation)) as deltas:
+                async for delta in deltas:
+                    completed = answer.take(delta)
+                    if completed is not None:
+                        yield ReplyChunk(text=completed)
+                    if answer.breached:
+                        stopped = True
+                        break
+        except ModelError:
+            # ADR-0011 §1's taxonomy, whole, and its dispositions are not acted on:
+            # past the first non-blank delta the seam does not re-issue and neither
+            # does this stage (ADR-0173 §5, §7).
+            _log.warning("reply_composition_failed", reason="model_error", exc_info=True)
+            stopped = True
+        if not answer.published:
+            # Nothing was published: either the stream carried no non-blank text at
+            # all — ADR-0170 §8's blank-completion case, classified here exactly as
+            # :meth:`compose` classifies it — or it failed, or the room could not
+            # hold even a first chunk. All three are §6's pre-commit shape, and none
+            # of them is a truncation.
+            if not stopped:
+                _log.warning("reply_composition_failed", reason="blank_completion")
+            yield ComposedReply(text=None, degraded=True)
+            return
+        if stopped:
+            _log.warning("reply_composition_truncated", chunks=len(answer.published))
+        yield ComposedReply(text=answer.text, degraded=stopped)
 
 
 def _render_request(

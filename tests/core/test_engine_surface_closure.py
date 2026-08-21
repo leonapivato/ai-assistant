@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import inspect
 import typing
-from collections.abc import Sequence
+from collections.abc import AsyncIterator, Sequence
 from types import UnionType
 from typing import Final, get_args, get_origin, get_type_hints
 
@@ -50,8 +50,13 @@ from ai_assistant.core.protocols import AssistantEngine
 
 #: ``core/protocols.py`` imports the promoted types under ``TYPE_CHECKING``, so the
 #: names in its annotations are not in its module globals at runtime. Resolving them
-#: needs ``core.types``' namespace handed in explicitly.
-_NAMESPACE: Final = {**vars(core_types), **vars(protocols_module)}
+#: needs ``core.types``' namespace handed in explicitly — and, since ADR-0173 §4 put
+#: a method returning an async iterator on the surface, that name too.
+_NAMESPACE: Final = {
+    **vars(core_types),
+    **vars(protocols_module),
+    "AsyncIterator": AsyncIterator,
+}
 
 #: The thirty-four the corpus has promoted. Twenty-four are ADR-0085 §5's own walk:
 #: thirteen from ``engine.py`` (of which ``BeliefSummary`` is new, §4a), six from
@@ -90,6 +95,15 @@ _NAMESPACE: Final = {**vars(core_types), **vars(protocols_module)}
 #: reached only as an *argument* and never as a field of any promoted model, and
 #: ADR-0087's canonical projection is deliberately not extended to it. No response
 #: on this surface carries a credential value or any value derived from one.
+#:
+#: The thirty-eighth is ADR-0173 §2's ``ReplyChunk``, which ``converse_streaming``
+#: yields before its terminal ``TurnOutcome``. §2 declares it member by member — one
+#: member, ``text``, and a stated refusal of the two a reader expects, a sequence
+#: number and a final-frame flag — so the walk terminates in ``core`` immediately.
+#: It is reached through the *union inside* an ``AsyncIterator``, which is the first
+#: annotation on this surface the walk has had to go through two parameterised forms
+#: to reach; that it arrives is what makes ADR-0173 §4's return type checkable here
+#: rather than asserted.
 #:
 #: ``SourceGrant`` and ``GrantScope`` are **not** here and that is not an omission:
 #: they predate this block (ADR-0097 §2) and are ``core`` leaves the walk terminates
@@ -133,6 +147,7 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ProvisioningState",
         "ConnectedAccount",
         "ConnectionAct",
+        "ReplyChunk",
     }
 )
 
@@ -308,13 +323,48 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     re-provisioning one, disconnecting one, and the two listings ADR-0139 §1 keeps
     apart because neither derives the other.
 
+    ADR-0173 §4's ``converse_streaming`` takes it to thirty-two, and it is the first
+    addition that is a *second entry on an existing call* rather than a new
+    capability: "``converse`` is unchanged — same name, same signature, same clauses,
+    same one result frame", and the streaming twin "composes with rather than
+    replaces" it (ADR-0042 §5). ``resume`` deliberately gains none, so the count
+    moves by one and not two.
+
     **This assertion is now also #1125's answer.** ``core/types.py`` and
     ``wire/surface.py`` each carried a prose count of this surface that had gone
     stale by seven; both now name this check instead of restating a number, which
     is `CONTRIBUTING.md` -> "No state claims in living documents" applied to a
     comment in ``src/``.
     """
-    assert len(_method_names()) == 31
+    assert len(_method_names()) == 32
+
+
+def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
+    """The convention ``wire.surface`` derives its two adapters from (ADR-0173 §4).
+
+    §4 maps the yielded union onto the frames one-to-one — "a ``ReplyChunk`` is a
+    chunk frame, the ``TurnOutcome`` is the terminal result frame" — and
+    ``wire.surface`` reads which is which off the annotation's own order rather than
+    naming either type. That makes the mapping total by construction, and it makes
+    the *order* load-bearing: a second streaming method declared
+    ``TurnOutcome | ReplyChunk`` would send chunk payloads in result frames, with
+    nothing but a client's validation failure to say so.
+
+    So it is pinned here, beside the Protocol, rather than left to be discovered.
+    The set is read off the surface, so a second streaming method is covered the day
+    it lands.
+    """
+    from ai_assistant.wire.surface import STREAMING_METHODS  # noqa: PLC0415 — asserted about
+
+    assert {"converse_streaming"} == STREAMING_METHODS
+    for name in sorted(STREAMING_METHODS):
+        annotation = get_type_hints(getattr(AssistantEngine, name), globalns=_NAMESPACE)["return"]
+        assert get_origin(annotation) is AsyncIterator
+        members = get_args(get_args(annotation)[0])
+        assert len(members) == 2, f"{name}() yields {len(members)} types; §4's union has two"
+        chunk, terminal = members
+        assert chunk is core_types.ReplyChunk
+        assert terminal is core_types.TurnOutcome
 
 
 def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None:
@@ -343,6 +393,14 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``reply`` fails with ``extra_forbidden`` on that member. The method set does not
     move for it and the version goes to 8.
 
+    **ADR-0173 §11 is the first bump under both limbs at once**, and it moves both
+    numbers: ``converse_streaming`` takes the method set to thirty-two (first limb),
+    and ``FrameKind.CHUNK`` is a frame an old peer cannot decode at all — an unknown
+    ``kind`` closes the connection with no response (ADR-0084 §3) — which is the
+    second limb reached at the framing layer rather than inside a payload. So the
+    version goes to 9, and a lane that moved only one of these two numbers would
+    still be made to read ADR-0124 §9 by this pin.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -351,7 +409,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (31, 8), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (32, 9), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

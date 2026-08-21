@@ -81,6 +81,7 @@ from ai_assistant.testing import (
     FakeObserver,
     FakePlanStore,
     FakeSourceGrantStore,
+    FakeStreamingCompleter,
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
@@ -117,7 +118,7 @@ def _composing() -> ComposingStage:
     pinned in ``tests/orchestration/test_composing.py`` and
     ``tests/orchestration/test_engine_composing.py``.
     """
-    return ComposingStage(model=FakeModelProvider())
+    return ComposingStage(model=FakeModelProvider(), streaming=FakeStreamingCompleter())
 
 
 def _confirmable() -> ToolDefinition:

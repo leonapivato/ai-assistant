@@ -136,7 +136,30 @@ from ai_assistant.wire.errors import (
 #: the shape of the method's own declared return annotation (ADR-0085 §10), so the
 #: field crosses without a second declaration and nothing transcribes it into a
 #: wire-side schema.
-PROTOCOL_VERSION: Final[int] = 8
+#:
+#: **9 since ADR-0173 §11**, which adds ``converse_streaming`` to the promoted
+#: surface *and* :attr:`FrameKind.CHUNK` to the envelope. ADR-0124 §9 is reached
+#: **twice over, and each limb bites independently** — the first time a bump has
+#: had two grounds rather than one. The first limb is the familiar one: "any change
+#: to the promoted surface's method set", and "adding a method bumps, and that is
+#: the honest consequence rather than an oversight". The second is sharper than any
+#: type widening before it, because a chunk frame is a frame an older peer cannot
+#: decode *at all*: :func:`decode_envelope` refuses a ``kind`` naming no known
+#: :class:`FrameKind`, and an undecodable frame closes the connection with **no
+#: response** (ADR-0084 §3) — so a version 8 client asked to read a stream would see
+#: its socket hang up rather than §3's message naming both versions. That is
+#: precisely the "would be refused by a conforming peer at the old version" limb,
+#: reached at the framing layer instead of inside a payload.
+#:
+#: Unlike ADR-0170 §7's bump, this one does **not** leave the rest of ``wire/``
+#: alone, and ADR-0173 §11 says so rather than letting a lane discover it: the
+#: frame-kind enum, the server's one-envelope dispatch, the client's one-reply read
+#: and the surface reflection that builds a single result adapter all move with it.
+#: What does not move is ADR-0084 §3's permanent freeze — the 4-byte big-endian
+#: length prefix, the UTF-8 JSON codec and the connect frame's version member keep
+#: their representation, the connect exchange gains no member, and a chunk frame is
+#: framed and decoded by the existing rules.
+PROTOCOL_VERSION: Final[int] = 9
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
@@ -228,13 +251,32 @@ HANDSHAKE_REFUSALS: Final[frozenset[str]] = frozenset(
 
 
 class FrameKind(StrEnum):
-    """What a frame is (ADR-0085 §8a)."""
+    """What a frame is (ADR-0085 §8a, ADR-0173 §2).
+
+    **Six members, not the five ADR-0085 §8a enumerated "and no others".**
+    ADR-0173 §11 partially supersedes that clause to admit :attr:`CHUNK` as a sixth
+    value of ``kind``, and every other row of §8a's table stands: a chunk frame
+    carries ``id`` and ``payload`` like every frame, carries no ``method`` like
+    every non-request frame, and adds no member to the envelope. §8b's 512-byte
+    reserve is **unchanged and is not recomputed** — ``chunk`` is five bytes
+    against ``connect_ack``'s eleven, so it does not touch the worst case that
+    arithmetic is built on.
+    """
 
     CONNECT = "connect"
     CONNECT_ACK = "connect_ack"
     REQUEST = "request"
     RESULT = "result"
     ERROR = "error"
+    CHUNK = "chunk"
+    """One instalment of a streamed answer (ADR-0173 §2).
+
+    **Solicited, and that is what keeps ADR-0131 §1 intact.** A chunk answers the
+    request whose correlation id it carries, so it is not the hub writing to a
+    device unsolicited — it is the most solicited byte on the wire. It also spends
+    exactly half of the second job ADR-0084 §3 reserved the correlation id for, "a
+    progress stream", leaving multiplexing unspent and the connection serial.
+    """
 
 
 @dataclass(frozen=True, slots=True)

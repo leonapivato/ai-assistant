@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Any, Final, Protocol
 import structlog
 
 from ai_assistant.core.errors import AssistantError
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.codec import ENVELOPE_RESERVE_BYTES
 from ai_assistant.wire.errors import (
@@ -44,10 +45,16 @@ from ai_assistant.wire.errors import (
     error_payload,
 )
 from ai_assistant.wire.framing import read_frame, write_frame
-from ai_assistant.wire.surface import METHODS, argument_adapter, parameters
+from ai_assistant.wire.surface import (
+    METHODS,
+    STREAMING_METHODS,
+    argument_adapter,
+    chunk_type,
+    parameters,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
     from datetime import timedelta
 
     from ai_assistant.core.protocols import AssistantEngine
@@ -61,6 +68,17 @@ _log = structlog.get_logger(__name__)
 #: the moment the watcher settles. Zero is the case the tests pin, so a change that
 #: removed the yielding would fail rather than become intermittent.
 _SETTLE_TURNS: Final[int] = 3
+
+#: What ADR-0084 §3's serial rule says when a peer breaks it. A constant because
+#: three call sites now raise it — an ordinary dispatch, a streamed one that has
+#: finished, and a streamed one caught mid-flight — and a rule stated three ways
+#: reads as three rules.
+_OVERLAPPED: Final[str] = (
+    "a peer wrote a second frame while a request was outstanding; this connection is "
+    "serial, and a correlated error would carry an id the client must itself reject, "
+    "so the connection is closed instead — with no reply to either, since a peer that "
+    "has broken the rule is not one to write more framed bytes at"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -617,48 +635,31 @@ async def _serve_requests(  # noqa: PLR0913 — the engine, the two stream halve
 
         _check_live(admission)
         polling = frame.method == DELIVERY_METHOD
-        if polling and carried_other:
-            msg = (
-                "a next_notification arrived on a connection that has already carried "
-                "another request; ADR-0131 §2 gives a delivery connection to that alone, "
-                "because a poll outstanding for a minute makes the owner's next request a "
-                "violation of the serial rule — so this claims nothing and closes"
-            )
-            raise ProtocolError(msg)
-        if is_delivery and not polling:
-            msg = (
-                f"a {frame.method!r} arrived on a delivery connection; ADR-0131 §2 gives "
-                f"that connection to next_notification for its lifetime, and a client "
-                f"wanting an ordinary session while polling opens a second connection"
-            )
-            raise ProtocolError(msg)
+        _refuse_a_misplaced_frame(
+            frame,
+            polling=polling,
+            carried_other=carried_other,
+            is_delivery=is_delivery,
+            admission=admission,
+        )
         if polling and not is_delivery:
             _claim_delivery(delivery, admission, claimed)
             is_delivery = True
-        if admission is not None and frame.method in CONNECTION_METHODS:
-            # **ADR-0151 §13, held on the hub's side.** A client that simply lacks
-            # the method is not a check — ``wire/client.py`` puts these five on the
-            # loopback client for that reason, and this is the half that binds a
-            # peer which does not use it. ``admission`` is exactly the
-            # discriminator: it is the remote listener's two-fact rule and is
-            # ``None`` on the loopback listener (:func:`serve_connection`).
-            #
-            # **Closed rather than answered with an error frame**, for
-            # :func:`_dispatch`'s own reason: ADR-0085 §10a fixes the wire's error
-            # vocabulary as "exactly the ``AssistantError`` subtree", so there is
-            # no ratified code for "not on this transport" and inventing one would
-            # be this lane authoring contract surface it may not author. It is the
-            # same answer a peer gets for a method this build does not declare,
-            # which is what a method not carried on this listener *is*.
-            msg = (
-                f"a {frame.method!r} arrived on the remote listener; ADR-0151 §13 keeps "
-                f"the connection operations on ADR-0084 §1's loopback socket until a "
-                f"ratified decision rules the credential's hop from an enrolled device, "
-                f"so this connection carries no such method and closes"
-            )
-            raise ProtocolError(msg)
 
         watcher = asyncio.ensure_future(_read_request(reader, limits=limits, idle=None))
+        if frame.method in STREAMING_METHODS:
+            # A streamed exchange writes its own frames, terminal one included, so
+            # it does not come back with a reply to write here (ADR-0173 §1).
+            try:
+                await _dispatch_stream(
+                    engine, frame, writer, watcher, limits=limits, admission=admission
+                )
+            finally:
+                overlapped = await _settle(watcher)
+            if overlapped:
+                raise ProtocolError(_OVERLAPPED)
+            carried_other = True
+            continue
         if polling:
             reply = await _dispatch_poll(engine, frame, watcher, limit=limits.payload_limit)
             if reply is None:
@@ -669,18 +670,71 @@ async def _serve_requests(  # noqa: PLR0913 — the engine, the two stream halve
             finally:
                 overlapped = await _settle(watcher)
             if overlapped:
-                msg = (
-                    "a peer wrote a second frame while a request was outstanding; this "
-                    "connection is serial, and a correlated error would carry an id the "
-                    "client must itself reject, so the connection is closed instead — with "
-                    "no reply to either, since a peer that has broken the rule is not one "
-                    "to write more framed bytes at"
-                )
-                raise ProtocolError(msg)
+                raise ProtocolError(_OVERLAPPED)
             carried_other = True
         body = env.encode_envelope(reply)
         _check_live(admission)
         await write_frame(writer, body, max_frame_bytes=limits.max_frame_bytes)
+
+
+def _refuse_a_misplaced_frame(
+    frame: env.Envelope,
+    *,
+    polling: bool,
+    carried_other: bool,
+    is_delivery: bool,
+    admission: Admission | None,
+) -> None:
+    """Close on a frame this connection's own rules do not admit.
+
+    The three connection-level refusals, gathered so :func:`_serve_requests` reads
+    as the frame loop it is. Each is a **close** rather than a typed error, for the
+    reason ADR-0084 §3 gives: a decoded frame gets a typed error "provided it is not
+    itself a violation of the connection's own rules", and each of these is one.
+
+    Raises:
+        ProtocolError: If a poll arrives on a connection that has carried anything
+            else, if anything else arrives on a delivery connection (ADR-0131 §2),
+            or if a connection operation arrives on the remote listener (ADR-0151
+            §13).
+    """
+    if polling and carried_other:
+        msg = (
+            "a next_notification arrived on a connection that has already carried "
+            "another request; ADR-0131 §2 gives a delivery connection to that alone, "
+            "because a poll outstanding for a minute makes the owner's next request a "
+            "violation of the serial rule — so this claims nothing and closes"
+        )
+        raise ProtocolError(msg)
+    if is_delivery and not polling:
+        msg = (
+            f"a {frame.method!r} arrived on a delivery connection; ADR-0131 §2 gives "
+            f"that connection to next_notification for its lifetime, and a client "
+            f"wanting an ordinary session while polling opens a second connection"
+        )
+        raise ProtocolError(msg)
+    if admission is not None and frame.method in CONNECTION_METHODS:
+        # **ADR-0151 §13, held on the hub's side.** A client that simply lacks the
+        # method is not a check — ``wire/client.py`` puts these five on the loopback
+        # client for that reason, and this is the half that binds a peer which does
+        # not use it. ``admission`` is exactly the discriminator: it is the remote
+        # listener's two-fact rule and is ``None`` on the loopback listener
+        # (:func:`serve_connection`).
+        #
+        # **Closed rather than answered with an error frame**, for
+        # :func:`_dispatch`'s own reason: ADR-0085 §10a fixes the wire's error
+        # vocabulary as "exactly the ``AssistantError`` subtree", so there is no
+        # ratified code for "not on this transport" and inventing one would be this
+        # lane authoring contract surface it may not author. It is the same answer a
+        # peer gets for a method this build does not declare, which is what a method
+        # not carried on this listener *is*.
+        msg = (
+            f"a {frame.method!r} arrived on the remote listener; ADR-0151 §13 keeps "
+            f"the connection operations on ADR-0084 §1's loopback socket until a "
+            f"ratified decision rules the credential's hop from an enrolled device, "
+            f"so this connection carries no such method and closes"
+        )
+        raise ProtocolError(msg)
 
 
 def _claim_delivery(
@@ -868,14 +922,34 @@ async def _settle(watcher: asyncio.Future[env.Envelope]) -> bool:
     Returns:
         Whether anything arrived while a request was outstanding.
     """
+    overlapped = await _peek(watcher)
+    if not watcher.done():
+        watcher.cancel()
+        with contextlib.suppress(asyncio.CancelledError, Exception):
+            await watcher
+    return overlapped
+
+
+async def _peek(watcher: asyncio.Future[env.Envelope]) -> bool:
+    """Say whether the peer has written anything, **without** stopping the watch.
+
+    :func:`_settle`'s observation, extracted because a stream asks the same question
+    repeatedly and must not answer it by cancelling: ADR-0173 §1 obliges the hub to
+    notice an overlapping request *while the stream is running* and stop writing, so
+    the watcher has to survive being consulted between chunks.
+
+    The loop of bare yields and the clean-close exemption are :func:`_settle`'s own,
+    and its docstring carries the reasoning for both.
+
+    Returns:
+        Whether a frame — decodable or not — arrived while a request was
+        outstanding. A clean close is not one.
+    """
     for _ in range(_SETTLE_TURNS):
         if watcher.done():
             break
         await asyncio.sleep(0)
     if not watcher.done():
-        watcher.cancel()
-        with contextlib.suppress(asyncio.CancelledError, Exception):
-            await watcher
         return False
     if watcher.cancelled():  # pragma: no cover — nothing else cancels this future
         return False
@@ -934,6 +1008,85 @@ async def _dispatch(engine: AssistantEngine, frame: env.Envelope, *, limit: int)
             payload=error_payload(exc, max_bytes=limit),
         )
     return env.Envelope(kind=env.FrameKind.RESULT, id=frame.id, payload=result)
+
+
+async def _dispatch_stream(  # noqa: PLR0913 — the engine, the request, the write half, the overlap watcher, and one keyword per policy the connection carries
+    engine: AssistantEngine,
+    frame: env.Envelope,
+    writer: asyncio.StreamWriter,
+    watcher: asyncio.Future[env.Envelope],
+    *,
+    limits: ConnectionLimits,
+    admission: Admission | None,
+) -> None:
+    """Run one streaming request, writing its frames as the engine yields them.
+
+    **Zero or more chunk frames, then exactly one terminal frame** — a result or an
+    error — every one of them carrying the request's own correlation id (ADR-0173
+    §1). The kind is the discriminator and the only one: a chunk names no method, as
+    no non-request frame does, and the union the engine yields is resolved here by
+    what it *is* rather than by inspecting a payload.
+
+    **The overlap check runs between frames, and that is this function's whole
+    reason for taking the watcher** (ADR-0173 §1). The hub "notices that violation
+    while the stream is running and stops writing: it does not finish the stream and
+    close afterwards". A stream is the second long-running dispatch this transport
+    has, and ADR-0131 §2a already records what the blind spot costs on the first —
+    with nothing reading the socket, nothing observes what arrives on it. So the
+    watcher is consulted before every write, and a peer that wrote gets no further
+    chunk frames and no correlated error.
+
+    **ADR-0124 §8's write-side liveness check binds every frame, not just the
+    last.** Its ground is that "a request dispatched a moment before a revocation
+    may be awaiting a model provider for seconds; if the rule stopped at dispatch,
+    the hub would finish that work and write the answer to a device the owner has
+    expelled" — which reaches harder here, because a stream writes many times over
+    exactly that span.
+
+    **Closing the engine's iterator is this function's obligation**
+    (``AssistantEngine.converse_streaming``). Every early exit — an expelled device,
+    an overlapping request, a peer that hung up mid-write — leaves the turn running
+    to its own completion (ADR-0173 §9) but must not leave the iterator unfinished.
+
+    Raises:
+        ProtocolError: If the peer wrote a frame while the stream was outstanding,
+            or if the device was expelled part-way through it.
+        UndecodableFrameError: As :func:`_dispatch`, for a request whose arguments
+            the surface does not declare.
+    """
+    method = frame.method
+    if method is None:  # pragma: no cover — `_read_request` admits only requests
+        msg = "a streamed dispatch reached a frame that names no method"
+        raise UndecodableFrameError(msg)
+    arguments = _decode_arguments(method, frame.payload)
+    chunk = chunk_type(method)
+
+    async def emit(kind: env.FrameKind, payload: Any) -> None:
+        # **Before the write, not after it**, which is what makes ADR-0173 §1's
+        # clause bite: "no further chunk frames written after the violating request
+        # was readable". A check afterwards would be satisfied by a hub that
+        # streamed to completion and closed, which is the behaviour §1 refuses.
+        if await _peek(watcher):
+            raise ProtocolError(_OVERLAPPED)
+        _check_live(admission)
+        await write_frame(
+            writer,
+            env.encode_envelope(env.Envelope(kind=kind, id=frame.id, payload=payload)),
+            max_frame_bytes=limits.max_frame_bytes,
+        )
+
+    started: AsyncIterator[Any] = getattr(engine, method)(**arguments)
+    async with closing_stream(started) as values:
+        try:
+            async for value in values:
+                # Which type is a chunk is the Protocol's answer, read off the
+                # annotation by `wire.surface` rather than named here (ADR-0173 §4).
+                await emit(
+                    env.FrameKind.CHUNK if isinstance(value, chunk) else env.FrameKind.RESULT,
+                    value,
+                )
+        except AssistantError as exc:
+            await emit(env.FrameKind.ERROR, error_payload(exc, max_bytes=limits.payload_limit))
 
 
 def _decode_arguments(method: str, payload: object) -> dict[str, Any]:

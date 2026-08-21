@@ -31,9 +31,10 @@ argument, so a test changes one thing without restating the rest.
 
 from __future__ import annotations
 
+import re
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from ai_assistant.core.errors import (
     GrantError,
@@ -70,6 +71,7 @@ from ai_assistant.core.types import (
     Provenance,
     Question,
     QuestionState,
+    ReplyChunk,
     SkipReason,
     SourceGrant,
     StepExecution,
@@ -100,7 +102,7 @@ from ai_assistant.testing.notifications import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
 
     from ai_assistant.core.types import (
         ConnectedAccount,
@@ -122,6 +124,11 @@ _AT = datetime(2026, 1, 1, 12, 0, 0, tzinfo=UTC)
 #: real one: it keeps the ordering deterministic and keeps the fake free of a wall
 #: clock.
 _TICK = timedelta(seconds=1)
+
+#: Where :func:`_pieces_of` cuts a composed answer: immediately before each word
+#: that follows whitespace. Zero-width, so the pieces concatenate back to the answer
+#: byte for byte — which is the property ADR-0173 §3 makes load-bearing.
+_BEFORE_A_WORD: Final = re.compile(r"(?<=\s)(?=\S)")
 
 #: The confidence a stored belief is held at here. Below 1.0 so a
 #: ``DERIVED``-banded record would still validate, and unadjusted because nothing
@@ -287,6 +294,56 @@ class FakeAssistantEngine:
             reply=f"This fake engine composed no real answer to {utterance.strip()!r}.",
         )
         return self._checked(outcome, "converse")
+
+    def converse_streaming(
+        self,
+        utterance: EncodableText,
+        *,
+        timeout: timedelta,  # the caller's budget, as the Protocol declares it
+        conversation_id: Identifier | None = None,
+    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
+        """Run one turn, publishing its answer as chunks first (ADR-0173 §4).
+
+        **The chunks are derived from the outcome rather than scripted beside it**,
+        which is what keeps the fake honest about the one property ADR-0173 §3 makes
+        load-bearing: ``reply`` is the join of what was yielded, so a client tested
+        against this double can never pass over a disagreement the real engine
+        cannot produce. Script :attr:`turn_outcome` and the split follows.
+
+        The local refusals are raised **from the call**, as the concrete engine
+        raises them and as ``StreamingCompleter.stream`` raises its own, so a caller
+        that never iterates still sees them. Everything else — an unknown
+        conversation included — arrives from the iteration.
+        """
+        selected = (
+            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
+        )
+        check_arguments(
+            "converse_streaming",
+            max_bytes=self._max_payload_bytes,
+            utterance=utterance,
+            timeout=timeout,
+            conversation_id=selected,
+        )
+        return self._streamed(utterance, conversation_id=selected)
+
+    async def _streamed(
+        self, utterance: EncodableText, *, conversation_id: str | None
+    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
+        """Yield the outcome's own reply in pieces, then the outcome."""
+        self.calls.append(
+            ("converse_streaming", {"utterance": utterance, "conversation_id": conversation_id})
+        )
+        held = self._resolve(conversation_id)
+        outcome = self.turn_outcome or TurnOutcome(
+            turn=_turn(utterance),
+            conversation_id=held,
+            reply=f"This fake engine composed no real answer to {utterance.strip()!r}.",
+        )
+        checked = self._checked(outcome, "converse_streaming")
+        for piece in _pieces_of(checked.reply):
+            yield self._checked(ReplyChunk(text=piece), "converse_streaming")
+        yield checked
 
     async def resume(
         self,
@@ -1124,6 +1181,38 @@ def _summary_of(belief: Belief) -> BeliefSummary:
         valid_until=belief.valid_until,
         evidence_elided=belief.evidence_elided,
     )
+
+
+def _pieces_of(reply: str | None) -> tuple[str, ...]:
+    """Split one composed answer into the chunks a stream of it would carry.
+
+    **The join is the whole point** (ADR-0173 §3): the pieces concatenate back to
+    ``reply`` exactly, so a chunk-reading client and a chunk-ignoring one hold the
+    same answer. The split is *before* each word that follows whitespace, so every
+    piece carries the separator that preceded it — which is also the shape ADR-0173
+    §5's coalescing rule produces, rather than the tidy word-sized deltas §14 warns
+    a fake will otherwise hide the interesting cases behind.
+
+    An answer that owes no chunks — a park, a recovered resume, a composition that
+    failed before publishing — yields none at all, which is the zero-chunk exchange
+    ADR-0173 §4 admits.
+
+    Args:
+        reply: The composed answer, or ``None`` where the pass produced none.
+
+    Returns:
+        The pieces, in order, each carrying a non-whitespace character.
+    """
+    if reply is None:
+        return ()
+    pieces = _BEFORE_A_WORD.split(reply)
+    # A leading run of whitespace is a piece with nothing in it, which
+    # ``NonBlankEncodableText`` will not carry — so it is joined to the word after
+    # it rather than dropped, which is ADR-0173 §5's own rule about a blank delta.
+    while len(pieces) > 1 and not pieces[0].strip():
+        pieces[1] = pieces[0] + pieces[1]
+        del pieces[0]
+    return () if not pieces[0].strip() else tuple(pieces)
 
 
 def _turn(utterance: str) -> TurnResult:

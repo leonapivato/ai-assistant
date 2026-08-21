@@ -80,6 +80,7 @@ composition root's, a separate package (ADR-0042 §2).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -97,6 +98,7 @@ from ai_assistant.core.errors import (
     TraceStoreError,
     UnknownContinuationError,
 )
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     Belief,
@@ -115,6 +117,7 @@ from ai_assistant.core.types import (
     ParkedBinding,
     QueuedQuestion,
     QueueOutcome,
+    ReplyChunk,
     StepOutcome,
     StepStatus,
     TraceOutcome,
@@ -125,9 +128,12 @@ from ai_assistant.core.types import (
 from ai_assistant.orchestration.notifications import hand_off
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
+    JSON_STRING_QUOTE_BYTES,
+    canonical_payload,
     check_arguments,
     check_payload,
     check_provisioning_call,
+    encoded_text_bytes,
     grant_scope,
     identifier,
     non_blank_text,
@@ -138,7 +144,7 @@ from ai_assistant.orchestration.questions import question_state
 from ai_assistant.orchestration.traces import Observation, OperationTraces
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     from ai_assistant.core.clock import Clock
     from ai_assistant.core.protocols import (
@@ -197,6 +203,30 @@ if TYPE_CHECKING:
     from ai_assistant.orchestration.writes import WriteOutcome
 
 _log = structlog.get_logger(__name__)
+
+#: The one-character reply :meth:`Engine._reply_room` measures a probe outcome with.
+#: Its own encoding is subtracted straight back out, so the character is arbitrary
+#: — what it has to be is *something*, since
+#: :data:`~ai_assistant.core.types.NonBlankEncodableText` has no spelling for the
+#: empty answer and a ``None`` reply would encode as ``null`` rather than a string.
+_ROOM_PROBE: Final[str] = "x"
+
+
+def _note_failure(turn: asyncio.Task[TurnOutcome]) -> None:
+    """Observe a finished streaming turn's failure, whether or not anyone read it.
+
+    A turn abandoned by its client (ADR-0173 §9) runs on and may still fail, and its
+    exception would otherwise reach asyncio's unretrieved-exception reporter at some
+    later collection with no context. Retrieving it here logs it once, at the moment
+    it happened, and leaves ``result()`` free to re-raise it for a caller that *is*
+    still reading.
+    """
+    if turn.cancelled():
+        return
+    failure = turn.exception()
+    if failure is not None:
+        _log.warning("streamed_turn_failed", exc_info=failure)
+
 
 _T = TypeVar("_T")
 
@@ -2062,6 +2092,127 @@ class Engine:
             "converse",
             checked=True,
         )
+
+    def converse_streaming(
+        self,
+        utterance: EncodableText,
+        *,
+        timeout: timedelta,
+        conversation_id: Identifier | None = None,
+    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
+        """Run one turn as :meth:`converse` does, streaming the answer (ADR-0173 §4).
+
+        Every clause :meth:`converse` declares binds here: the same arguments in the
+        same shape, the same conversation resolution, the same refusals and the same
+        failures. What differs is that the composed answer is yielded as it arrives,
+        as zero or more :class:`~ai_assistant.core.types.ReplyChunk` values followed
+        by exactly one :class:`~ai_assistant.core.types.TurnOutcome`.
+
+        **The local refusals are raised from the call, not from the iteration**, as
+        they are on :meth:`converse` and as ``StreamingCompleter.stream`` raises its
+        own: a caller that never iterates still learns that its utterance had no
+        encoding or its conversation id was blank, and ADR-0085 §9's "refused
+        locally, before any I/O" stays true of a method whose I/O has not started.
+
+        **A client that goes away does not abandon the turn** (ADR-0173 §9). The
+        turn runs inside a tracked task of its own, so abandoning or closing this
+        iterator leaves it running to its ordinary completion — including its
+        capture — and the undelivered chunks and outcome are simply discarded. A
+        turn may already have approved and executed a non-idempotent tool before a
+        single word was composed; abandoning it would leave that effect committed
+        and the exchange uncaptured, whose natural retry can perform it twice.
+
+        Args:
+            utterance: What the user said, passed through untouched.
+            timeout: The per-attempt budget, as :meth:`converse`.
+            conversation_id: The conversation to continue, or ``None``.
+
+        Returns:
+            An async iterator over the answer's chunks and then the turn's outcome.
+            Close it if you stop reading part-way (:func:`contextlib.aclosing`).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ValueError: If ``conversation_id`` is blank or the utterance has no
+                UTF-8 encoding.
+            OversizedValueError: If the arguments exceed the contract limit.
+        """
+        self._reject_if_closing()
+        selected = (
+            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
+        )
+        check_arguments(
+            "converse_streaming",
+            max_bytes=self._max_payload_bytes,
+            utterance=utterance,
+            timeout=timeout,
+            conversation_id=selected,
+        )
+        return self._streamed(utterance, timeout=timeout, conversation_id=selected)
+
+    async def _streamed(
+        self,
+        utterance: str,
+        *,
+        timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
+        conversation_id: str | None,
+    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
+        """Drive the turn in a tracked task and relay what it publishes.
+
+        **The turn runs beside this generator rather than inside it**, and that
+        split is what ADR-0173 §9 costs. An async generator's cleanup runs while it
+        is being *closed*, so a turn driven inside one would have to finish its
+        capture during ``GeneratorExit`` — which cannot await — or be abandoned
+        mid-flight, which §9 forbids. Running it as an ordinary task lets a client
+        walk away while the turn completes, and puts it in ``_inflight`` so
+        :meth:`aclose` still drains it (ADR-0042 §2).
+
+        **The queue is unbounded, and it is bounded all the same.** ADR-0173 §3
+        caps the published answer at the room the terminal frame has, and nothing
+        else is ever put here — so the queue holds at most one more copy of a
+        payload the outcome already carries. A bounded queue would be the wrong
+        trade: a client that stopped reading would block the producer forever, and
+        the turn §9 promises to finish would never finish.
+        """
+        chunks: asyncio.Queue[ReplyChunk] = asyncio.Queue()
+        turn = self._track(
+            self._checked_result(
+                self._converse_streaming(
+                    utterance, timeout=timeout, conversation_id=conversation_id, chunks=chunks
+                ),
+                "converse_streaming",
+            ),
+            "converse_streaming",
+        )
+        # A turn nobody reads still fails legibly rather than as asyncio's
+        # "Task exception was never retrieved" on the next collection: §9 makes an
+        # abandoned stream ordinary, so its failure has to be *observed* somewhere
+        # even when no caller is left to be told.
+        turn.add_done_callback(_note_failure)
+        waiting: asyncio.Task[ReplyChunk] | None = None
+        try:
+            while not turn.done() or not chunks.empty():
+                if not chunks.empty():
+                    yield chunks.get_nowait()
+                    continue
+                if waiting is None:
+                    waiting = asyncio.ensure_future(chunks.get())
+                await asyncio.wait({waiting, turn}, return_when=asyncio.FIRST_COMPLETED)
+                if waiting.done():
+                    yield waiting.result()
+                    waiting = None
+        finally:
+            # Cancelling a parked ``Queue.get`` cannot lose an item: ``put_nowait``
+            # appends before it wakes a getter, so anything already queued is still
+            # there for the drain above. The turn itself is deliberately **not**
+            # cancelled — §9 again.
+            if waiting is not None and not waiting.done():
+                waiting.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await waiting
+        # ``result()`` re-raises whatever the turn raised, which is the terminal
+        # error frame's value one layer down (ADR-0173 §1).
+        yield turn.result()
 
     async def resume(
         self,
@@ -3941,17 +4092,47 @@ class Engine:
             Whatever ``coro`` returned.
         """
         work = self._checked_result(coro, seam) if checked else coro
-        task: asyncio.Task[_T] = asyncio.ensure_future(
-            self._operation_traces.observing(seam, work, observe) if traced else work
-        )
-        self._inflight.add(task)
-        task.add_done_callback(self._inflight.discard)
+        task = self._track(work, seam, observe, traced=traced)
         if not shielded:
             # Awaiting the task directly propagates this caller's cancellation into
             # it, which is the point; it stays in `_inflight` either way, so the
             # drain still waits for whatever it orphans.
             return await task
         return await asyncio.shield(task)
+
+    def _track(
+        self,
+        work: Awaitable[_T],
+        seam: str,
+        observe: Callable[[_T], Observation] | None = None,
+        *,
+        traced: bool = True,
+    ) -> asyncio.Task[_T]:
+        """Register one operation's work as a task shutdown will drain.
+
+        The half of :meth:`_tracked` that does not await, extracted because
+        :meth:`_streamed` needs the task itself: a streaming turn runs *beside* the
+        iterator relaying it, so that abandoning the iterator leaves the turn
+        running to completion (ADR-0173 §9) and still inside the drain ADR-0042 §2
+        obliges.
+
+        Args:
+            work: The operation's own work, already wrapped in whatever measurement
+                its caller owes.
+            seam: Its name, for the trace.
+            observe: How to read the result onto its trace, or ``None``.
+            traced: Whether an ADR-0119 §8 operation trace is emitted.
+
+        Returns:
+            The registered task. It is *not* awaited here, and it is not shielded —
+            a caller that wants either does it itself.
+        """
+        task: asyncio.Task[_T] = asyncio.ensure_future(
+            self._operation_traces.observing(seam, work, observe) if traced else work
+        )
+        self._inflight.add(task)
+        task.add_done_callback(self._inflight.discard)
+        return task
 
     async def _uninterruptibly(self, coro: Awaitable[_T]) -> _T:
         """Run one step to completion even if this caller is cancelled, still tracked.
@@ -4087,7 +4268,86 @@ class Engine:
         timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
         conversation_id: str | None,
     ) -> TurnOutcome:
-        """Resolve the conversation, plan the turn, drive its step, record it."""
+        """Run one whole turn, composing its answer atomically (ADR-0170 §1)."""
+        return await self._run_turn(
+            utterance,
+            timeout=timeout,
+            conversation_id=conversation_id,
+            compose=self._composed_whole,
+        )
+
+    async def _converse_streaming(
+        self,
+        utterance: str,
+        *,
+        timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
+        conversation_id: str | None,
+        chunks: asyncio.Queue[ReplyChunk],
+    ) -> TurnOutcome:
+        """Run one whole turn, publishing its answer as it composes (ADR-0173 §4).
+
+        **The same turn, and deliberately the same code.** Everything before the
+        composing stage — resolving the conversation, reading its tail, planning,
+        the confirmation ceiling, driving the step, and the capture afterwards — is
+        :meth:`_run_turn`'s, unchanged. ADR-0173 adds a stage to nothing and moves
+        no other stage; what it changes is which seam the composing stage spends the
+        turn's one model call at (§7) and where the answer goes on its way to the
+        outcome.
+
+        Args:
+            utterance: What the user said.
+            timeout: The per-attempt budget.
+            conversation_id: The conversation to continue, or ``None``.
+            chunks: Where each composed :class:`~ai_assistant.core.types.ReplyChunk`
+                is put as it is produced. The relaying iterator owns reading it, and
+                a reader that has gone away does not stop this turn (ADR-0173 §9).
+
+        Returns:
+            The turn's outcome, whose ``reply`` is the join of whatever was put on
+            ``chunks`` (ADR-0173 §3).
+        """
+
+        async def compose(
+            turn: TurnResult | None, step: StepOutcome | None, conversation: str
+        ) -> ComposedReply | None:
+            return await self._compose_streaming(turn, step, conversation, chunks)
+
+        return await self._run_turn(
+            utterance, timeout=timeout, conversation_id=conversation_id, compose=compose
+        )
+
+    async def _composed_whole(
+        self, turn: TurnResult | None, step: StepOutcome | None, conversation: str
+    ) -> ComposedReply | None:
+        """Compose atomically, ignoring the conversation the streaming twin needs.
+
+        ``conversation`` is what :meth:`_compose_streaming` measures its ceiling
+        against; the whole-answer path has no ceiling of its own — ADR-0170 §8 makes
+        an over-ceiling answer a refusal, because nothing has been published — so it
+        is accepted and dropped rather than making :meth:`_run_turn` carry two
+        composer shapes.
+        """
+        del conversation
+        return await self._compose(turn, step)
+
+    async def _run_turn(
+        self,
+        utterance: str,
+        *,
+        timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
+        conversation_id: str | None,
+        compose: Callable[
+            [TurnResult | None, StepOutcome | None, str], Awaitable[ComposedReply | None]
+        ],
+    ) -> TurnOutcome:
+        """Resolve the conversation, plan the turn, drive its step, record it.
+
+        ``compose`` is how this pass's answer is produced — atomically for
+        :meth:`converse`, as a stream for :meth:`converse_streaming`. It is a
+        parameter rather than a flag because the two differ in nothing else: a
+        second copy of this method would be two places for the confirmation ceiling,
+        the reservation's release and the capture point to drift apart.
+        """
         # Before the turn's work (ADR-0074 §2), so the id exists whatever the turn
         # does and a continuation marks the conversation active before a reclaim
         # could judge it idle.
@@ -4103,7 +4363,7 @@ class Engine:
             # persisted as an auditable record (ADR-0014 §2).
             await self._plans.save_goal(turn.goal)
             await self._plans.save_plan(turn.plan)
-            composed = await self._compose(turn, None)
+            composed = await compose(turn, None, conversation.id)
             return await self._capture(
                 conversation.id, turn=turn, step=None, resumed=False, composed=composed
             )
@@ -4142,7 +4402,7 @@ class Engine:
         # (#1314) — so composing first is chosen for the reason that the capture
         # point is the single place a ``TurnOutcome`` is built, and folding one more
         # already-computed value into it beats threading a second construction site.
-        composed = await self._compose(turn, step)
+        composed = await compose(turn, step, conversation.id)
         return await self._capture(
             conversation.id, turn=turn, step=step, resumed=False, parked=parked, composed=composed
         )
@@ -4185,6 +4445,116 @@ class Engine:
             () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
         )
         return await self._composing.compose(turn=turn, step=step, undriven=undriven)
+
+    async def _compose_streaming(
+        self,
+        turn: TurnResult | None,
+        step: StepOutcome | None,
+        conversation_id: str,
+        chunks: asyncio.Queue[ReplyChunk],
+    ) -> ComposedReply | None:
+        """Stream this pass's answer onto ``chunks``, and report what it composed.
+
+        The streaming twin of :meth:`_compose`, and it declines on **exactly** the
+        same two shapes for exactly the same reasons — a park, and a pass with no
+        turn — so a streaming call and a whole one owe an answer on precisely the
+        same passes and a client cannot tell the two apart by which shapes fall
+        silent. Zero chunks then, and the terminal outcome alone (ADR-0173 §4).
+
+        **Every chunk is measured before it is published** (ADR-0173 §11's restating
+        of ADR-0085 §8c): the limit is enforced on each value before the frame
+        carrying it is written, in place of "on results before return", which a
+        method returning an iterator has no single point to satisfy.
+
+        **The stage's iterator is closed rather than merely exhausted.** The ceiling
+        makes stopping part-way ordinary rather than exotic — the stage breaks out
+        of its own read the moment the next chunk would breach — and
+        :func:`contextlib.aclosing` is what releases the provider exchange
+        underneath it (ADR-0060, ``StreamingCompleter``'s own clause).
+
+        Returns:
+            What the stage composed, or ``None`` where no answer was owed.
+
+        Raises:
+            RuntimeError: If the stage ended without reporting, which is a defect in
+                it rather than a composition failure — and ADR-0170 §8's closed
+                degradation set is why it is raised rather than reported as one.
+        """
+        if turn is None or (step is not None and step.confirmation is not None):
+            return None
+        undriven = (
+            () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
+        )
+        composed: ComposedReply | None = None
+        stream = self._composing.compose_streaming(
+            turn=turn,
+            step=step,
+            undriven=undriven,
+            room=self._reply_room(turn=turn, step=step, conversation_id=conversation_id),
+        )
+        async with closing_stream(stream) as composing:
+            async for produced in composing:
+                if isinstance(produced, ReplyChunk):
+                    check_payload(
+                        produced,
+                        max_bytes=self._max_payload_bytes,
+                        subject="a chunk of the reply to converse_streaming()",
+                    )
+                    chunks.put_nowait(produced)
+                else:
+                    composed = produced
+        if composed is None:  # pragma: no cover — the stage always reports last
+            msg = "the composing stage ended without reporting what it composed"
+            raise RuntimeError(msg)
+        return composed
+
+    def _reply_room(
+        self, *, turn: TurnResult, step: StepOutcome | None, conversation_id: str
+    ) -> int:
+        """How many escaped bytes the terminal outcome has left for its reply (§3).
+
+        **The reserve is computable, which is what makes ADR-0173 §3's clause an
+        obligation rather than a wish.** A ``TurnOutcome``'s non-reply content is
+        fixed before composition begins — its ``turn``, ``step``, ``plan`` and
+        ``memories`` are all settled by the time this stage is reached (ADR-0170 §2)
+        — and the two members capture supplies are an ``Identifier`` this method is
+        handed and a ``bool``. So the room is measured here rather than guessed at
+        as a fraction of the frame size.
+
+        **Measured by encoding the outcome that will be built, less the probe reply
+        it stands in for.** What is left is everything but the reply's own
+        characters, so a reply whose escaped body fits in the difference produces a
+        payload inside the limit — exactly, because ADR-0087 §2's encoding escapes a
+        string character by character and is therefore additive over concatenation.
+
+        **Both booleans are probed at their longer spelling**, ``false`` being five
+        bytes against ``true``'s four. Capture has not run yet and the answer has not
+        finished, so neither is known; taking the longer one can only under-state the
+        room, which stops a stream a byte or two early and can never publish text the
+        terminal frame would then refuse.
+
+        Args:
+            turn: The turn the outcome will carry.
+            step: The step it will carry, or ``None``.
+            conversation_id: The conversation it will name — the one
+                ``ConversationLifecycle.capture`` reports back for this turn.
+
+        Returns:
+            The escaped byte budget for the reply. Zero or negative means no chunk
+            fits at all, which the stage reports as the pre-commit degradation and
+            which leaves an answerless outcome to be measured on its own way out
+            (ADR-0173 §3's third case, ``OversizedValueError`` as on ``converse``).
+        """
+        probe = TurnOutcome(
+            turn=turn,
+            step=step,
+            conversation_id=conversation_id,
+            capture_degraded=False,
+            reply=_ROOM_PROBE,
+            reply_degraded=False,
+        )
+        fixed = len(canonical_payload(probe)) - encoded_text_bytes(_ROOM_PROBE)
+        return self._max_payload_bytes - fixed - JSON_STRING_QUOTE_BYTES
 
     def _check_plan_is_for_goal(self, turn: TurnResult) -> None:
         """Refuse a plan that was not built for this turn's goal (ADR-0037 §2 in spirit).

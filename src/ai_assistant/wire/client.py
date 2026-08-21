@@ -71,11 +71,11 @@ from ai_assistant.wire.errors import (
 )
 from ai_assistant.wire.framing import read_frame, write_frame
 from ai_assistant.wire.peer import check_peer_is_self
-from ai_assistant.wire.surface import return_adapter
+from ai_assistant.wire.surface import chunk_adapter, return_adapter, terminal_adapter
 
 if TYPE_CHECKING:
     import socket
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
     from datetime import timedelta
     from pathlib import Path
 
@@ -103,6 +103,7 @@ if TYPE_CHECKING:
         NotificationPreferences,
         ObservationReport,
         Question,
+        ReplyChunk,
         SecretValue,
         SourceGrant,
         TurnOutcome,
@@ -243,6 +244,110 @@ class HubClient:
         return await self._call(  # type: ignore[no-any-return]
             "converse", utterance=utterance, timeout=timeout, conversation_id=selected
         )
+
+    def converse_streaming(
+        self,
+        utterance: EncodableText,
+        *,
+        timeout: timedelta,  # the caller's budget, relayed to the hub (ADR-0029 §4)
+        conversation_id: Identifier | None = None,
+    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
+        """Run one turn on the hub, reading its answer as it is composed (ADR-0173 §4).
+
+        **This is where the client stops being a one-frame-per-request transport.**
+        :meth:`_call` writes one frame and reads exactly one; this reads until the
+        terminal frame, which ADR-0173 §11 names as the honest cost of spending the
+        correlation id's reserved second job.
+
+        Args:
+            utterance: What the user said.
+            timeout: The budget for the whole turn.
+            conversation_id: The conversation to continue, or ``None``.
+
+        Returns:
+            An async iterator over the answer's chunks and then the turn's outcome.
+            Close it if you stop reading part-way (:func:`contextlib.aclosing`) —
+            the connection is hung up by its own cleanup, which a generator nobody
+            closes does not run.
+
+        Raises:
+            ValueError: If ``conversation_id`` is blank, or a value has no wire
+                form — refused here, before any I/O, exactly as :meth:`_call`
+                refuses it (ADR-0085 §9).
+        """
+        selected = (
+            None if conversation_id is None else identifier(conversation_id, name="conversation_id")
+        )
+        payload = arguments_object(utterance=utterance, timeout=timeout, conversation_id=selected)
+        # Projected **before** the generator is even built, for :meth:`_call`'s own
+        # reason: a value with no wire form must be refused the same way whether or
+        # not a hub happens to be up, and a refusal raised from the first iteration
+        # step instead would be one a caller that never iterates never sees.
+        project(payload)
+        return self._stream_call("converse_streaming", payload)
+
+    async def _stream_call(self, method: str, payload: dict[str, object]) -> AsyncIterator[Any]:
+        """Read one streamed exchange: chunk frames, then one terminal frame.
+
+        The order is :meth:`_call`'s, with the last step turned into a loop:
+        connect and handshake, measure the arguments against the limit the hub
+        published, send, then read frames until one of them is terminal.
+
+        **Every frame's correlation id is checked, not just the first.** ADR-0084
+        §3's mismatch rule is a rule about *frames*, and a stream is the first
+        exchange on this transport where a desynchronisation could hide behind a
+        frame that is not the last — so it is checked on each, and a mismatch is
+        still the unrepairable state §3 makes it.
+
+        **The union is resolved by frame kind and never by inspecting a payload**
+        (ADR-0173 §4), so the kind stays the single discriminator §2 makes it.
+
+        **The result is measured on this side too**, chunk and terminal alike:
+        ADR-0173 §11 restates ADR-0085 §8c for a method with no single result, and
+        the clause binds both halves so a client is never silently less capable than
+        the engine it stands in for.
+        """
+        reader, writer, limit = await self._connect()
+        try:
+            check_payload(payload, max_bytes=limit, subject=f"the arguments to {method}()")
+            correlation = str(uuid.uuid4())
+            await write_frame(
+                writer,
+                env.encode_envelope(
+                    env.Envelope(
+                        kind=env.FrameKind.REQUEST,
+                        id=correlation,
+                        payload=payload,
+                        method=method,
+                    )
+                ),
+                max_frame_bytes=limit + ENVELOPE_RESERVE_BYTES,
+            )
+            while True:
+                reply = await self._read(reader, limit=limit, idle=None, expecting=method)
+                if reply.id != correlation:
+                    msg = (
+                        f"the hub answered with correlation id {reply.id!r} while "
+                        f"{correlation!r} was outstanding; a desynchronised stream cannot be "
+                        f"repaired by guessing"
+                    )
+                    raise ProtocolError(msg)
+                if reply.kind is env.FrameKind.ERROR:
+                    _raise_reply_error(reply.payload)
+                if reply.kind is env.FrameKind.CHUNK:
+                    chunk = chunk_adapter(method).validate_python(reply.payload)
+                    check_payload(chunk, max_bytes=limit, subject=f"a chunk from {method}()")
+                    yield chunk
+                    continue
+                if reply.kind is not env.FrameKind.RESULT:
+                    msg = f"the hub answered a request with a {reply.kind.value} frame"
+                    raise ProtocolError(msg)
+                result = terminal_adapter(method).validate_python(reply.payload)
+                check_payload(result, max_bytes=limit, subject=f"the result of {method}()")
+                yield result
+                return
+        finally:
+            await hang_up(writer)
 
     async def resume(
         self,

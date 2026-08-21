@@ -51,6 +51,7 @@ from ai_assistant.models import (
     BoundedEmbedder,
     HashingEmbedder,
     PydanticAIProvider,
+    PydanticAIStreamingCompleter,
     RetryingProvider,
     Route,
     RoutingProvider,
@@ -1011,7 +1012,22 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             # injection §2 obliges — `Engine` receives no `ModelProvider` of its
             # own, so a stage that reached for one would have to go through a
             # concrete subsystem's internals, which golden rule 1 forbids.
-            composing=ComposingStage(model=model),
+            composing=ComposingStage(
+                model=model,
+                # The streaming seam, built here and **not** wrapped (ADR-0173 §5).
+                # No `RetryingProvider` and no `RoutingProvider`: a stream is not
+                # atomic, so past its first non-blank delta a retry answers a
+                # question already half-answered and a fallback route answers it
+                # differently — which is why streaming is a sibling Protocol neither
+                # wrapper implements rather than a member on `ModelProvider`. The
+                # route is `default_model`, the same primary the router prefers, so
+                # a streamed answer comes from the model the deployment configured
+                # for conversation; a route that cannot stream is a `ModelError`
+                # from the call and degrades the pass, never a startup refusal
+                # (§5) — and its vendor is already checked above, since
+                # `_model_specs` puts `default_model` first.
+                streaming=PydanticAIStreamingCompleter(settings.default_model),
+            ),
             # The observation stage (ADR-0077 §8), over the *same* memory store and
             # the *same* writer the learn leg uses, so an observed belief is
             # retrievable, inspectable and forgettable through the surfaces the user
