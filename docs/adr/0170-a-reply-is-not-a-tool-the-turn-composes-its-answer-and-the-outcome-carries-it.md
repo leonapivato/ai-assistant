@@ -393,6 +393,44 @@ says.
 > and refuses a history containing one (ADR-0066), and this ADR does not widen that
 > seam.
 
+### 5a. The composing stage is a prompt assembler, and ADR-0098 §2 binds it
+
+This section exists because ADR-0098 §9 asked for it in terms. Its list of what
+the implementing lanes owe says of a later prompt-rendering addition that "the
+lane that adds it inherits §2 and should be told so in its ADR". This ADR creates
+a **new prompt assembler** — a stage that renders retrieved memories, assembled
+context and a step account into a model call — so this is that telling, and
+leaving it out would have shipped the first assembler in the product path that
+nobody told.
+
+> **Normative.** The composing stage is a prompt assembler under ADR-0098 §2 and
+> inherits that section whole. Every span of external content reaching it — a
+> retrieved `MemoryRecord` whose `Provenance.source` marks it external, any facet
+> text of external origin, and any externally-derived text in the step account such
+> as a tool id or a `StepFailure.message` — is presented to the model as
+> third-party data, distinguishable from this system's own instruction and from the
+> user's own words.
+
+> **Normative.** That distinction is **not forgeable from inside the span**. It is
+> derived from data the assembler holds — `Provenance.source`, an `Attestation`, a
+> facet's source — and never from inspecting the text, so no sequence of characters
+> inside a retrieved record may change which span the prompt attributes to whom.
+
+> **Normative.** The implementing lane ships ADR-0098 §9's marked test **for this
+> assembler**: a record whose `content` contains the assembler's own container
+> syntax — its bullet, label, header and newline structure — asserting that the
+> assembled prompt's attribution of every span is unchanged by it. A test asserting
+> only that a label is present does not satisfy that clause and does not satisfy
+> this one.
+
+ADR-0098 §3 — instructions inside external content are data, and external content
+is never the authority for an action — is satisfied structurally here rather than
+by a further clause, and §2 above is why: the composing stage takes no action, sets
+no execution status and transitions no step, so there is no authority for a steered
+span to borrow. What it can still do is put words in the assistant's mouth, which
+is what §2's non-forgeability and §6's deterministic account are between it and the
+user.
+
 ### 6. The answer is rendered beside the step account, never in place of it
 
 > **Normative.** An adapter renders the composed answer **in addition to** the step
@@ -474,13 +512,30 @@ reach it; and §3's `NonBlankEncodableText` cannot hold it, so constructing the
 an unclassified failure in place of the model seam's classified one. This is a
 reachable path on a conforming provider, not a defensive one.
 
-> **Normative.** The composing stage validates the completion **before**
-> constructing a `TurnOutcome`. A completion whose content is blank, or which is
-> otherwise unusable as an answer, is raised as `ModelResponseError` — the
-> corpus's existing name for "the provider replied, but the response was malformed
-> or unusable" — and becomes neither a `reply` nor a `None`. No pydantic
-> `ValidationError` from `TurnOutcome` construction reaches a caller of the two
-> turn calls.
+**Where that check goes decides whether routing still works, and above the seam it
+does not.** `ModelResponseError` is `routable = True`, because "the mismatch is
+often with *this model's* capabilities, and another may answer usably" — and
+`RoutingProvider` acts on exactly that flag. But a blank completion is *contract-
+valid*: the router sees a successful call, returns it, and stops. A stage that
+then raises a routable error raises it after every route is gone, so the flag
+promises a fallback that cannot happen. The check has to sit where the router can
+still act on it.
+
+> **Normative.** The blank-completion check belongs **inside the model seam**. A
+> `ModelProvider` implementation that would return an assistant message with blank
+> content raises `ModelResponseError` instead of returning it, so a routing
+> provider sees a routable failure and may try another route. The composing stage
+> does not implement this check in place of the seam.
+
+> **Normative.** The composing stage still refuses a blank or otherwise unusable
+> completion before constructing a `TurnOutcome`, so that a provider violating the
+> clause above yields a classified failure rather than a pydantic
+> `ValidationError` escaping the engine. That refusal is **not routable**: at that
+> point routing has already returned and no route remains to try, and a routable
+> error there would misreport what a caller can do about it.
+
+> **Normative.** The two turn calls never surface a `ValidationError` from
+> `TurnOutcome` construction to a caller.
 
 > **Normative.** A composed answer is engine-supplied text, and every adapter
 > neutralises it before display exactly as it does the confirmation content, the
@@ -489,11 +544,11 @@ reachable path on a conforming provider, not a defensive one.
 
 ### 9. What this ADR does not decide
 
-> **Normative.** Beyond §§1–8 and §10, this ADR decides nothing. It adds no Protocol,
-> registers no tool, designates no seam, adds no setting, changes no method
-> signature, and adds no `core` name other than §3's single field. A lane needing
-> any of those needs its own change and, where golden rule 5 reaches it, its own
-> ADR.
+> **Normative.** Beyond §§1–8 — §5a included — and §10, this ADR decides nothing.
+> It adds no Protocol, registers no tool, designates no seam, adds no setting,
+> changes no method signature, and adds no `core` name other than §3's single
+> field. A lane needing any of those needs its own change and, where golden rule 5
+> reaches it, its own ADR.
 
 - **Streaming.** This decides a whole answer returned as one result payload.
   ADR-0042 §5's deferred streaming façade method stays deferred, and the hub-side
@@ -524,26 +579,35 @@ reachable path on a conforming provider, not a defensive one.
 Mostly a checklist of obligations already marked above, so the lane's brief can be
 short. It owes: §3's single field with §4's two-directional validator; the
 composing stage in `orchestration` per §2 and its composition-root wiring; §5's
-inputs actually threaded to it; §7's `PROTOCOL_VERSION` bump and note in the same
-change; §8's three clauses; §6's rendering floor honoured in `interfaces/cli.py`;
-and the pipeline stage list in `orchestration`'s module docstring amended per §1.
-That it may not touch `core/protocols.py` follows from §2 rather than being added
-here. One obligation is genuinely new and is therefore marked:
+inputs actually threaded to it; §5a's non-forgeable attribution; §7's
+`PROTOCOL_VERSION` bump and note in the same change; §8's clauses, including the
+seam-side blank check; §6's rendering floor honoured in `interfaces/cli.py`; and
+the pipeline stage list in `orchestration`'s module docstring amended per §1. That
+it may not touch `core/protocols.py` follows from §2 rather than being added here.
+Two obligations are genuinely new and are therefore marked:
 
 > **Normative.** In the same change as the field, the implementing lane lands tests
 > pinning: §4's invariant in both directions; §5's construction obligations — that
 > the stage is handed the undriven steps and each driven step's disposition, status
-> and failure, and that `memory_degraded` reaches it; §6's guarantee under a
-> **deliberately contradictory provider**, a fake whose completion claims an action
-> the step account records as `NO_CAPABLE_TOOL` and again as `DENIED`, asserting
-> that the outcome's disposition and the rendered step account are unchanged by
-> what the reply says; and §8's `ModelResponseError` on a blank completion.
+> and failure, and that `memory_degraded` reaches it; §5a's ADR-0098 §9 test; §6's
+> guarantee under a **deliberately contradictory provider**, a fake whose completion
+> claims an action the step account records as `NO_CAPABLE_TOOL` and again as
+> `DENIED`, asserting that the outcome's disposition and the rendered step account
+> are unchanged by what the reply says; and §8's blank-completion path at **both**
+> ends — that the seam raises, and that a routing provider handed a blank primary
+> still reaches its fallback.
+
+> **Normative.** Where §8's seam-side check and §3's field cannot land as one
+> change under `CLAUDE.md`'s one-subsystem rule, the lane splits rather than
+> widening: the `models/` half lands first, and neither half is deferred past the
+> other's merge.
 
 The contradictory-provider test is the one that matters most and is the easiest to
 omit, because every natural test of a composing stage uses a fake that cooperates.
 A cooperating fake cannot distinguish a design whose guarantee is structural from
 one whose guarantee is a hope about the prompt — which is exactly the distinction
-§5 and §6 were rewritten to make.
+§5 and §6 were rewritten to make. The routing-fallback test is second, and for the
+same reason: a single-provider fake cannot see the bug at all.
 
 ## Consequences
 
