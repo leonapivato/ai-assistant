@@ -222,16 +222,42 @@ that answer it are already rendered above; *"send Ana an email"* plans, because
 sending is an act and no amount of context performs it. A goal that needs both —
 recall something and then act on it — is a plan, because the act is required.
 
-### 5. Bounded repair never pushes a decline back into inventing a capability
+### 5. Bounded repair steers the model toward neither shape
 
 > **Normative.** `_repair_prompt`'s message states both legal envelope shapes and
 > does not instruct the model to produce steps. It may not close by requiring a
 > non-empty `steps` list.
 
-> **Normative.** Where the extraction failure was a decline-shaped reply — an
-> empty `steps` list without the marker, or a decline envelope failing §3's
-> rationale condition — the repair message names that specific defect and asks for
-> the decline to be completed. It does not ask for steps.
+> **Normative.** A reply whose `steps` is an empty list and which carries no
+> `no_capability_needed` marker is **unclassified malformed output**, not a
+> decline-shaped reply. Its repair message restates both legal envelope shapes and
+> §4's test, and asks the model to choose between them by the goal. It does not
+> name the decline as the intended correction, and it does not ask for steps.
+
+> **Normative.** Decline-specific repair is reserved for a reply that **carries
+> the marker** and fails §3's rationale condition. That repair message names the
+> missing, null, non-string or blank rationale, asks for it, and does not ask for
+> steps.
+
+> **Normative.** The implementing lane ships a deterministic two-reply test at the
+> planning seam: on a goal that requires an action, a first model reply of a bare
+> empty `steps` list with no marker, then a second reply carrying a plan envelope,
+> asserting that the resulting `ActionPlan` carries that plan's steps. A test
+> asserting only that the repair message mentions both shapes does not satisfy
+> this clause.
+
+**The two failures are split because only one of them carries evidence of
+intent**, and running them together would have been this decision contradicting
+itself one section after making its central claim. A bare empty `steps` list is
+what a truncation, a template echo or a dropped array produces; §1 refuses to
+read it as a decline for exactly that reason, and a repair message inviting the
+model to "complete the decline" would quietly convert that refusal into a
+suggestion. For *"send Ana an email"*, a first reply of `{"steps": []}` followed
+by a repair that offers the decline is a wrong decline **this system
+constructed** — not the model-judgement residual §7 admits, and not something
+ADR-0170 §6's account excuses, since that account would report nothing done for a
+goal that plainly required an act. Only a reply carrying the marker has said what
+it meant. There, and only there, is completing the decline the right ask.
 
 Today `_repair_prompt` closes with "with a non-empty `steps` list", which under
 this decision would take a model that correctly judged no capability was needed
@@ -435,9 +461,12 @@ is rewritten.
   ADR-0071 already flag.
 - **A decline is strictly harder for a model to emit than a plan** (§3's rationale
   condition, §1's two-part marker), and a model that fumbles the shape falls into
-  bounded repair. §5's repair wording is what keeps that from degrading into the
-  original defect, so §5 is load-bearing rather than a courtesy — a lane that
-  implements §1 and §3 without §5 has shipped a regression dressed as a fix.
+  bounded repair. §5's repair wording is what keeps that from degrading, in
+  **either** direction: a repair that asks for steps turns a correct judgement
+  back into the original invented capability, and a repair that offers the
+  decline on an unmarked empty list manufactures a wrong decline the model never
+  asserted. §5 is load-bearing rather than a courtesy — a lane that implements §1
+  and §3 without it has shipped a regression dressed as a fix.
 - **The boundary itself is not guaranteed and cannot be** (§7). A wrong decline
   under-responds and a wrong plan invents; both are bounded, and both are
   disclosed by ADR-0170 §6's deterministic account beside the answer. This is the
