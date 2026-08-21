@@ -9,8 +9,9 @@ these tests are deterministic and never touch the network — the shape
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Final
 
 import pytest
@@ -275,6 +276,39 @@ class TestTheStreamingSeamItself:
 
         with pytest.raises(ModelResponseError):
             await _drain(world.completer.stream(_a_question()))
+
+    async def test_a_model_override_is_threaded_to_the_agent(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A non-`None` "provider:model" override cannot be resolved offline, so
+        # the shared contract only checks the keyword is accepted. Here the
+        # override is proved to actually reach the underlying agent, by capturing
+        # what `run_stream` receives — the same gap, and the same closure, as
+        # `test_provider.py` uses for the completing seam. Without it, an
+        # implementation that hard-coded `model=None` would satisfy every other
+        # case while silently answering every caller from the configured default.
+        completer = PydanticAIStreamingCompleter(default_model=TestModel())
+        captured: dict[str, object] = {}
+
+        @asynccontextmanager
+        async def fake_run_stream(**kwargs: object) -> AsyncIterator[SimpleNamespace]:
+            captured["model"] = kwargs.get("model")
+
+            async def stream_text(**_options: object) -> AsyncIterator[str]:
+                yield "routed"
+
+            yield SimpleNamespace(stream_text=stream_text)
+
+        monkeypatch.setattr(
+            completer._agent,  # pyright: ignore[reportPrivateUsage]
+            "run_stream",
+            fake_run_stream,
+        )
+
+        deltas = await _drain(completer.stream(_a_question(), model="prov:model"))
+
+        assert deltas == ["routed"]
+        assert captured["model"] == "prov:model"
 
     def test_construction_resolves_no_model_and_needs_no_credential(self) -> None:
         # `defer_model_check=True`, as on the completing provider: wiring the hub
