@@ -1,6 +1,6 @@
 # 173. An answer streams as chunks of one reply, and the result frame is still the answer
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-21
 - **This ADR is milestone 18's ruling on `track:conversation` (#1312)**, the
   milestone whose exit test is *a streamed answer over the wire, resumed
