@@ -529,11 +529,17 @@ selection step and "takes no entry".
 
 ### 6. What a browser reaches is a closed enumeration of five operations
 
-> **Normative.** The browser-facing surface resolves to calls on exactly these
+> **Normative.** A browser request resolves to calls on exactly these **five**
 > operations of the promoted engine surface and no others: `converse`,
-> `converse_streaming` (ADR-0173 §4), `recent_conversations`, `conversation`,
-> `forget_conversation`, and `next_notification` — which no browser request names,
-> which no browser argument reaches, and which only §4's poll originates.
+> `converse_streaming` (ADR-0173 §4), `recent_conversations`, `conversation`, and
+> `forget_conversation`.
+
+> **Normative.** `next_notification` is the **sixth** operation the gateway calls
+> and is not one of the five, because no browser request resolves to it: the
+> gateway's own poll originates it under §4, no browser request names it, and no
+> browser argument reaches it. That is what a delivery stream being served from a
+> poll the gateway already holds means, and §12 is where §1's biconditional is
+> checked against it.
 
 > **Normative.** Every other operation the promoted surface carries is unreached
 > from a browser, and no lane may add one without its own ratified decision.
