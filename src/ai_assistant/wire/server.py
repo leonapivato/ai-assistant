@@ -4,8 +4,9 @@ The *listener* is the hub's (:mod:`ai_assistant.service.transport`) — where to
 bind, when to start accepting, how many connections to hold — because those are
 deployment facts and ADR-0083 §8 owns them. What lives here is the protocol
 itself, which is the same on both sides of the socket and depends on ``core``
-alone: the handshake, the frame loop, the dispatch onto the fifteen methods, and
-the mapping from a declared failure to an error frame.
+alone: the handshake, the frame loop, the dispatch onto whatever methods the
+promoted surface declares (``wire.surface.METHODS``, read off the Protocol rather
+than counted here), and the mapping from a declared failure to an error frame.
 
 **Two classes of failure, and the boundary is the envelope** (ADR-0084 §3):
 
@@ -19,6 +20,13 @@ the mapping from a declared failure to an error frame.
 closes. A correlated error would carry the *second* request's id, "which the
 mismatch rule separately obliges the client to reject — so the refusal could never
 be consumed. A rule whose own response violates the adjacent rule is not a rule."
+
+**One request may now be answered by many frames** (ADR-0173 §1): a streaming method
+writes zero or more chunk frames and then exactly one terminal frame, every one of
+them carrying the request's own correlation id. The connection stays serial — there
+is still one *request* — and the serial rule is enforced *while the stream runs*
+rather than after it, because a hub that finished the stream and closed afterwards
+would satisfy the letter of §1 and none of its point (:func:`_dispatch_stream`).
 """
 
 from __future__ import annotations
