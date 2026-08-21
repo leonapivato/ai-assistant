@@ -355,6 +355,24 @@ class DeliveryFanOut:
         "A poll the gateway cannot complete ends every open delivery stream with a
         terminal value reporting it… The gateway polls again only when a browser
         establishes a delivery stream afresh, and retries no poll of its own motion."
+
+        **A stream whose previous write has not completed is abandoned instead, and
+        that is §4 rather than a shortfall of it.** Three of its clauses meet here and
+        the other two decide the case: the gateway "holds at most one value pending
+        per stream and queues nothing behind one", and "a write that has not completed
+        when the next value is due on that stream is abandoned and the stream is
+        ended". A terminal value is the next value due, so a stalled stream meets the
+        abandonment clause exactly as it would on an ordinary delivery — and the
+        browser is not left guessing, because §2 rules that a body which ended without
+        a terminal value **is** a transport failure and the front end reports it as
+        one. §4 prices the remedy in the same breath: "a reconnect — which is free,
+        because a session outlives its connections".
+
+        The alternative would breach two clauses to satisfy one. Holding the terminal
+        value behind the pending one is the queue §4 forbids; replacing the pending
+        one is withholding a value from a browser, which §4 forbids in terms — and on
+        a *delivery* it would retire a notification nobody ever saw, because §5
+        acknowledges on the offer.
         """
         for stream in tuple(self._streams):
             if not stream.offer(value):
