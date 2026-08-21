@@ -179,6 +179,7 @@ if TYPE_CHECKING:
         SourceGrant,
         TurnResult,
     )
+    from ai_assistant.orchestration.composing import ComposedReply, ComposingStage
     from ai_assistant.orchestration.connections import ConnectionOperations
     from ai_assistant.orchestration.consolidation import (
         ConsolidationReport,
@@ -885,7 +886,7 @@ class Engine:
     construct concretes (ADR-0042 §2).
     """
 
-    def __init__(  # noqa: PLR0913 — one parameter per injected collaborator plus its knobs
+    def __init__(  # noqa: PLR0913, PLR0915 — one parameter per injected collaborator plus its knobs, and one assignment or wiring check per parameter
         self,
         *,
         loop: LearningLoop,
@@ -898,6 +899,7 @@ class Engine:
         trace_sink: TraceSink,
         trace_retention: timedelta | None,
         conversations: ConversationLifecycle,
+        composing: ComposingStage,
         observation: ObservationStage,
         questions: QuestionStage,
         grant_operations: GrantOperations,
@@ -1025,6 +1027,25 @@ class Engine:
                 Required rather than optional, deliberately — an engine that could
                 be built without it is an engine that can silently record nothing,
                 which is the one failure ADR-0074 §9 item 6 asks to be *reported*.
+            composing: The **terminal composing stage** (ADR-0170 §1, §2) — the one
+                that speaks. Given the turn's goal, its assembled context, the
+                memories retrieved for it, its plan and what became of the step the
+                turn drove, it composes the natural-language answer
+                :attr:`~ai_assistant.core.types.TurnOutcome.reply` carries. It holds
+                its own injected ``ModelProvider`` and this façade holds none:
+                ``Engine.__init__`` takes no ``ModelProvider`` and no
+                ``ContextProvider``, and reaching a concrete subsystem's internals
+                to find one is what golden rule 1 forbids (ADR-0170 §2). So the
+                stage is injected already wired, exactly as ``observation`` and
+                ``consolidation`` are.
+
+                **Required rather than optional, and that is ADR-0170 §4.** An
+                optional collaborator defaults to unwired, and an unwired composer
+                is an engine that returns ``reply=None`` on turns §4 says must carry
+                one — a state the ``TurnOutcome`` validator refuses, so an engine
+                built without it could not return a conforming outcome at all. It is
+                required for the reason ``conversations`` is: an engine that can be
+                built without it is an engine that silently does not answer.
             observation: The observation stage (ADR-0077 §8) — the other layer
                 holding both durable stores, because selecting a batch of episodes
                 spans them exactly as capture does. It must be wired to the *same*
@@ -1305,6 +1326,7 @@ class Engine:
         # instant and the purge's horizon are read through one seam (ADR-0026 §7).
         self._operation_traces = OperationTraces(sink=trace_sink, now=self._clock)
         self._conversations = conversations
+        self._composing = composing
         self._observation = observation
         self._questions = questions
         self._grants = grant_operations
@@ -2004,8 +2026,14 @@ class Engine:
         Returns:
             The turn's result and the disposition of the step it drove — including
             a parked confirmation to render and relay (ADR-0042 §4) — plus the
-            conversation it ran under and whether recording it degraded. ``step`` is
-            ``None`` when the plan had no step.
+            conversation it ran under, whether recording it degraded, and the
+            composed answer (ADR-0170 §3). ``step`` is ``None`` when the plan had no
+            step. ``reply`` carries prose on every shape but a park, where what the
+            user must answer is the confirmation, and a pass whose composition
+            failed, which sets ``reply_degraded`` instead (ADR-0170 §4). The
+            adapter renders the answer **in addition to** the step account, never
+            instead of it: where the two disagree the step account is correct by
+            construction (ADR-0170 §6).
 
         Raises:
             RuntimeError: If the engine is shutting down (:meth:`aclose` has been
@@ -2076,8 +2104,12 @@ class Engine:
             timeout: The per-attempt budget, as :meth:`converse`.
 
         Returns:
-            The resumed turn: the parked turn's own result, and the step's
-            resolved disposition (``EXECUTED`` or ``DENIED``).
+            The resumed turn: the parked turn's own result, the step's resolved
+            disposition (``EXECUTED`` or ``DENIED``), and the answer composed for
+            it. A resume driven from a **recovered** park composes nothing —
+            ``turn`` is ``None`` there, so context and memories were never persisted
+            and there is nothing to compose from, which ADR-0170 §4 makes a ``None``
+            ``reply`` with ``reply_degraded`` ``False``.
 
         Raises:
             RuntimeError: If the engine is shutting down.
@@ -4071,7 +4103,10 @@ class Engine:
             # persisted as an auditable record (ADR-0014 §2).
             await self._plans.save_goal(turn.goal)
             await self._plans.save_plan(turn.plan)
-            return await self._capture(conversation.id, turn=turn, step=None, resumed=False)
+            composed = await self._compose(turn, None)
+            return await self._capture(
+                conversation.id, turn=turn, step=None, resumed=False, composed=composed
+            )
         first = turn.plan.steps[0]
         # Admit-and-reserve *before* anything is persisted or driven, atomically
         # (no await), so a backpressure refusal at the ceiling writes no durable
@@ -4101,9 +4136,55 @@ class Engine:
             if step.confirmation is not None
             else None
         )
+        # The terminal composing stage, after execution and before the exchange is
+        # recorded (ADR-0170 §1). Ordering against capture is free — ADR-0170 §9
+        # leaves whether the answer joins the captured episode to `track:memory`
+        # (#1314) — so composing first is chosen for the reason that the capture
+        # point is the single place a ``TurnOutcome`` is built, and folding one more
+        # already-computed value into it beats threading a second construction site.
+        composed = await self._compose(turn, step)
         return await self._capture(
-            conversation.id, turn=turn, step=step, resumed=False, parked=parked
+            conversation.id, turn=turn, step=step, resumed=False, parked=parked, composed=composed
         )
+
+    async def _compose(
+        self, turn: TurnResult | None, step: StepOutcome | None
+    ) -> ComposedReply | None:
+        """Compose this pass's answer, or decline to on the shapes that owe none.
+
+        ADR-0170 §4 gives ``reply`` three ``None`` shapes and §8 says what each
+        costs. Two of them are decided **here, before the stage is reached**, so no
+        prompt is assembled and no model is called on either — which is what keeps
+        ``reply_degraded`` ``False`` there rather than leaving it to a stage that
+        would have to know not to answer:
+
+        - a pass whose step parked for confirmation, where what the user must answer
+          is the ``Confirmation`` the adapter renders and relays. A second,
+          model-written account of the same pending action beside it is where the
+          two can disagree, and the resume that follows composes in the ordinary way
+          (ADR-0170 §4).
+        - a pass with no ``turn`` — a resume driven from a **recovered** park
+          (ADR-0052 §3) — where context and memories were never persisted and there
+          is nothing to compose from.
+
+        The third shape, a composition that *failed*, is the stage's own report and
+        arrives as a :class:`~ai_assistant.orchestration.composing.ComposedReply`
+        with ``degraded`` set.
+
+        **The undriven steps are computed here and handed over** (ADR-0170 §5): the
+        stage is told which of the plan's steps were not driven rather than handed
+        the plan alone and left to infer it. Until the plan-driving stage lands
+        (#242) that is every step but the one this pass drove.
+
+        Returns:
+            What the stage composed, or ``None`` where no answer was owed.
+        """
+        if turn is None or (step is not None and step.confirmation is not None):
+            return None
+        undriven = (
+            () if step is None else tuple(one for one in turn.plan.steps if one.id != step.step_id)
+        )
+        return await self._composing.compose(turn=turn, step=step, undriven=undriven)
 
     def _check_plan_is_for_goal(self, turn: TurnResult) -> None:
         """Refuse a plan that was not built for this turn's goal (ADR-0037 §2 in spirit).
@@ -4173,9 +4254,17 @@ class Engine:
             # single-resolution index anyway; evicting keeps the table bounded and
             # turns a replay into a clean "unknown token" (ADR-0042 §4).
             self._parked.pop(token.handle, None)
-            return await self._capture_resumption(parked, step)
+            # Composed inside the lock, like the capture below it. A resume from a
+            # *recovered* park composes nothing at all (ADR-0170 §4), and the live
+            # case pays one model call on a path the comment above already accepts
+            # as human-paced — a resolution waits on a person, so serialising the
+            # few of them behind this lock stays free in practice.
+            composed = await self._compose(parked.turn, step)
+            return await self._capture_resumption(parked, step, composed)
 
-    async def _capture_resumption(self, parked: _Parked, step: StepOutcome) -> TurnOutcome:
+    async def _capture_resumption(
+        self, parked: _Parked, step: StepOutcome, composed: ComposedReply | None
+    ) -> TurnOutcome:
         """Record the resolution in the conversation that parked, or say it was not.
 
         The association is **durable and recovered rather than passed** (ADR-0074
@@ -4197,18 +4286,25 @@ class Engine:
             _log.warning("conversation_binding_unresolved", exc_info=True)
             origin = None
         if origin is None:
-            return TurnOutcome(turn=parked.turn, step=step, capture_degraded=True)
+            return TurnOutcome(
+                turn=parked.turn,
+                step=step,
+                capture_degraded=True,
+                reply=None if composed is None else composed.text,
+                reply_degraded=composed is not None and composed.degraded,
+            )
         return await self._capture(
-            origin.conversation_id, turn=parked.turn, step=step, resumed=True
+            origin.conversation_id, turn=parked.turn, step=step, resumed=True, composed=composed
         )
 
-    async def _capture(
+    async def _capture(  # noqa: PLR0913 — the capture point's five inputs plus the parked binding; every one is a distinct fact about the pass
         self,
         conversation_id: str,
         *,
         turn: TurnResult | None,
         step: StepOutcome | None,
         resumed: bool,
+        composed: ComposedReply | None,
         parked: ParkedBinding | None = None,
     ) -> TurnOutcome:
         """Record the exchange and fold what became of it into the outcome (§3, §9).
@@ -4219,6 +4315,12 @@ class Engine:
         holding the episode open until the park resolves, would make the record of
         an exchange depend on a confirmation the user may never answer, so an
         abandoned park would erase the question they actually asked.
+
+        ``composed`` is what the composing stage produced for this pass, or ``None``
+        where no answer was owed (:meth:`_compose`). It reaches the outcome and
+        nothing else: what is captured is the exchange, and whether the composed
+        answer joins the episode is ADR-0170 §9's deferral to ``track:memory``
+        (#1314) rather than this method's to decide.
         """
         report = await self._conversations.capture(
             conversation_id,
@@ -4231,6 +4333,8 @@ class Engine:
             step=step,
             conversation_id=report.conversation_id,
             capture_degraded=report.degraded,
+            reply=None if composed is None else composed.text,
+            reply_degraded=composed is not None and composed.degraded,
         )
 
     async def _learn(self, event: FeedbackEvent) -> LearnOutcome:

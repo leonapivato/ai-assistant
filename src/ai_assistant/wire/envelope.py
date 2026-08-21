@@ -118,7 +118,25 @@ from ai_assistant.wire.errors import (
 #: natural response to one is to send it again (ADR-0151 §2a), which is why the
 #: handshake refusal this number buys is worth more on this surface than on any
 #: before it.
-PROTOCOL_VERSION: Final[int] = 7
+#: **8 since ADR-0170 §3**, which adds ``reply`` and ``reply_degraded`` to
+#: :class:`~ai_assistant.core.types.TurnOutcome` — the natural-language answer a
+#: turn composes, and whether composing it failed. ADR-0124 §9's **second** limb,
+#: as ADR-0133 §6's bump was: "a change to a wire-carried ``core`` type that makes a
+#: value one peer emits invalid for the other, whether the change widens or narrows
+#: the type". A single reading of the tree confirms it bites rather than merely
+#: applying — ``TurnOutcome`` is ``extra="forbid"`` and ``wire.surface``'s
+#: ``return_adapter`` validates a result against the method's declared return
+#: annotation, so an older client handed a ``TurnOutcome`` carrying ``reply`` fails
+#: with ``extra_forbidden`` on that member and a turn it asked for arrives as an
+#: unexplained decode error. ADR-0122's optional ``FeedbackEvent.memory_kind`` is
+#: the precedent ADR-0124 §9 cites for exactly this shape, a widening an old peer
+#: refuses. The promoted surface's method set is untouched and this number still
+#: moves; ADR-0170 §7 records the obligation as falling on this same change, and
+#: **no other module under** ``wire/`` **changes for it** — a result payload takes
+#: the shape of the method's own declared return annotation (ADR-0085 §10), so the
+#: field crosses without a second declaration and nothing transcribes it into a
+#: wire-side schema.
+PROTOCOL_VERSION: Final[int] = 8
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

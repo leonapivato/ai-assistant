@@ -335,7 +335,13 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     is not evidence of a fault in either direction: it is a lane being made to
     look at ADR-0124 §9 and say which limb it is under. ADR-0139 §2's
     ``standing_grants`` is back under the **first** limb, and takes the surface to
-    twenty-six and the version to 6.
+    twenty-six and the version to 6. ADR-0170 §3 is under the **second** limb again,
+    and it is the clearest case the corpus has: ``TurnOutcome`` gains ``reply`` and
+    ``reply_degraded``, ``TurnOutcome`` is ``extra="forbid"``, and
+    ``wire.surface.return_adapter`` validates a result against the method's declared
+    return annotation — so an older client handed a ``TurnOutcome`` carrying
+    ``reply`` fails with ``extra_forbidden`` on that member. The method set does not
+    move for it and the version goes to 8.
 
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
@@ -345,7 +351,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (31, 7), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (31, 8), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

@@ -35,6 +35,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
 )
 from ai_assistant.orchestration import (
+    ComposingStage,
     ConnectionOperations,
     ConversationLifecycle,
     Engine,
@@ -59,6 +60,7 @@ from ai_assistant.testing import (
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
+    FakeModelProvider,
     FakeObserver,
     FakeSourceGrantStore,
     FakeToolInvoker,
@@ -73,6 +75,17 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
+
+
+def _composing() -> ComposingStage:
+    """The terminal composing stage every engine now takes (ADR-0170 §2).
+
+    Wired to a cooperating fake provider, which is all these tests need: what the
+    composed answer *says*, and what the engine does when composing it fails, are
+    pinned in ``tests/orchestration/test_composing.py`` and
+    ``tests/orchestration/test_engine_composing.py``.
+    """
+    return ComposingStage(model=FakeModelProvider())
 
 
 def _grant_ids() -> Callable[[], str]:
@@ -197,6 +210,7 @@ def _make_engine(
         id_factory=lambda: uuid4().hex,
     )
     return Engine(
+        composing=_composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
         loop=loop,

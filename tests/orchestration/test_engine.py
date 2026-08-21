@@ -79,6 +79,7 @@ from ai_assistant.core.types import (
     secret_value,
 )
 from ai_assistant.orchestration import (
+    ComposingStage,
     ConnectionOperations,
     ConversationLifecycle,
     Engine,
@@ -112,6 +113,7 @@ from ai_assistant.testing import (
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
+    FakeModelProvider,
     FakeObserver,
     FakePlanStore,
     FakeReader,
@@ -139,6 +141,17 @@ if TYPE_CHECKING:
     )
 
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
+
+
+def _composing() -> ComposingStage:
+    """The terminal composing stage every engine now takes (ADR-0170 §2).
+
+    Wired to a cooperating fake provider, which is all these tests need: what the
+    composed answer *says*, and what the engine does when composing it fails, are
+    pinned in ``tests/orchestration/test_composing.py`` and
+    ``tests/orchestration/test_engine_composing.py``.
+    """
+    return ComposingStage(model=FakeModelProvider())
 
 
 def _grant_ids() -> Callable[[], str]:
@@ -444,6 +457,7 @@ class Harness:
         self.trace_sink = trace_sink if trace_sink is not None else FakeTraceSink()
         self.trace_retention = trace_retention
         self.engine = Engine(
+            composing=_composing(),
             grant_operations=_grant_operations(),
             connection_operations=_connection_operations(),
             loop=loop,
@@ -647,6 +661,7 @@ def _fresh_facade(harness: Harness) -> Engine:
     the same ``plans`` and ``trail``.
     """
     return Engine(
+        composing=_composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
@@ -763,6 +778,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
     goals = iter(f"g-{n}" for n in range(2, 100))
     harness.engine._loop._id_factory = lambda: next(goals)  # fresh goal ids for new turns
     facade = Engine(
+        composing=_composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
@@ -824,6 +840,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
     goals = iter(f"g-{n}" for n in range(1, 100))
     harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     facade_a = Engine(
+        composing=_composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
@@ -877,6 +894,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
     goals = iter(f"g-{n}" for n in range(1, 100))
     harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     facade = Engine(
+        composing=_composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
@@ -1017,6 +1035,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
             return getattr(self._inner, name)
 
     facade = Engine(
+        composing=_composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
@@ -1763,6 +1782,7 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
     traces.hold(ancient)
     harness = Harness(traces=traces)
     facade = Engine(
+        composing=_composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
@@ -2196,6 +2216,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
     goals = iter(f"g-{n}" for n in range(1, 100))
     harness = Harness(tools=(confirmable(),), loop_id_factory=lambda: next(goals))
     engine = Engine(
+        composing=_composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
@@ -2265,6 +2286,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         tools=(confirmable(),), planner=GatedConfirmPlanner(), loop_id_factory=lambda: next(goals)
     )
     engine = Engine(
+        composing=_composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,
@@ -2300,6 +2322,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
     harness = Harness()
     with pytest.raises(ValueError, match="must be positive"):
         Engine(
+            composing=_composing(),
             grant_operations=_grant_operations(),
             connection_operations=_connection_operations(),
             loop=harness.engine._loop,
@@ -2324,6 +2347,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
     harness = Harness()
     with pytest.raises(TypeError, match="must be an integer"):
         Engine(
+            composing=_composing(),
             grant_operations=_grant_operations(),
             connection_operations=_connection_operations(),
             loop=harness.engine._loop,
