@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 
 import pytest
 
@@ -177,6 +178,29 @@ async def test_a_stream_that_ends_mid_request_is_incomplete_and_not_malformed() 
             "POST /ask HTTP/1.1\nHost: h\nContent-Length: 1\nContent-Length: 2\n",
             id="two lengths that disagree",
         ),
+        # RFC 9110 makes `Content-Length` a `1*DIGIT`, and `int` reads three
+        # spellings that grammar does not have (issue #1333). Each is refused for
+        # this module's stated reason rather than because it mis-frames anything:
+        # a spelling the specification does not have is a line two parsers would
+        # read differently, and the door in front of every local process is where
+        # that matters.
+        pytest.param("POST /ask HTTP/1.1\nHost: h\nContent-Length: +5\n", id="a signed length"),
+        pytest.param(
+            "POST /ask HTTP/1.1\nHost: h\nContent-Length: -0\n",
+            id="a signed zero, which is not negative and so passed the old check",
+        ),
+        pytest.param(
+            "POST /ask HTTP/1.1\nHost: h\nContent-Length: 1_0\n",
+            id="a Python integer separator, read as ten",
+        ),
+        pytest.param(
+            "POST /ask HTTP/1.1\nHost: h\nContent-Length: \n",
+            id="a length declared and left empty",
+        ),
+        pytest.param(
+            "POST /ask HTTP/1.1\nHost: h\nContent-Length: 5 5\n",
+            id="two lengths on one line",
+        ),
     ],
 )
 async def test_a_request_this_door_would_have_to_guess_at_is_refused(head: str) -> None:
@@ -188,6 +212,43 @@ async def test_a_request_this_door_would_have_to_guess_at_is_refused(head: str) 
     """
     with pytest.raises(MalformedRequestError):
         await read_request(_reader(_request(head)), max_bytes=_CAP)
+
+
+async def test_optional_whitespace_around_a_length_is_stripped_and_not_refused() -> None:
+    """The one spelling that looks like the refusals above and is not one.
+
+    RFC 9110 §5.5 puts optional whitespace around *every* field value and has a
+    recipient strip it before interpreting, so `` 5 `` is a well-formed
+    ``Content-Length`` of five where ``+5`` is not a ``Content-Length`` at all.
+    Issue #1333 proposed refusing both; only the second is outside the grammar, and
+    a door that refused the first would be intolerant of a request the
+    specification does have.
+    """
+    payload = _request("POST /ask HTTP/1.1\nHost: h\nContent-Length: \t 5 \t\n", b"hello")
+
+    request = await read_request(_reader(payload), max_bytes=_CAP)
+
+    assert request.body == b"hello"
+
+
+async def test_a_length_too_long_to_convert_is_refused_and_not_raised() -> None:
+    """A digit string past the interpreter's own str-to-int guard.
+
+    Every non-digit spelling is refused before the conversion, which leaves exactly
+    one way for it to fail: CPython declines to convert a decimal string longer than
+    ``sys.get_int_max_str_digits()``. That is still a request this door will not
+    interpret, so it is refused as one — a ``ValueError`` out of the parser would
+    reach a caller that catches :class:`RequestError` and nothing else.
+
+    The cap is raised past the default here because the header has to *fit* for the
+    conversion to be attempted at all; under ``_CAP`` this same request is refused
+    one condition earlier, as too large.
+    """
+    absurd = "9" * (sys.get_int_max_str_digits() + 1)
+    payload = _request(f"POST /ask HTTP/1.1\nHost: h\nContent-Length: {absurd}\n")
+
+    with pytest.raises(MalformedRequestError):
+        await read_request(_reader(payload), max_bytes=len(payload) + 1)
 
 
 async def test_bytes_past_the_declared_body_are_refused_rather_than_reframed() -> None:

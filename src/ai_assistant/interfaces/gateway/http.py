@@ -54,6 +54,11 @@ _REQUEST_LINE_PARTS: Final = 3
 #: read differently.
 _TOKEN = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+-.^_`|~")
 
+#: The characters a `Content-Length` value may be made of — RFC 9110's `1*DIGIT`.
+#: Checked for the same reason `_TOKEN` is: `int` reads spellings that grammar does
+#: not have, and this door refuses rather than guesses (:func:`_content_length`).
+_DIGITS = frozenset("0123456789")
+
 
 class RequestError(Exception):
     """A browser request this door will not interpret.
@@ -343,9 +348,26 @@ def _content_length(headers: tuple[tuple[str, str], ...]) -> int:
     Returns:
         The declared body length, or ``0`` where none is declared.
 
+    **The value is checked against the grammar before it is converted**, exactly as
+    a header name is checked against `token` above. RFC 9110 makes this field value
+    `1*DIGIT`, and :func:`int` accepts three spellings that grammar does not have —
+    a sign, an underscore separator, and a digit outside ASCII. A signed length is
+    still read to exactly that many bytes and still bounded by
+    ``gateway_max_request_bytes``, so nothing is mis-framed by accepting one; what
+    it costs is this module's own rule, which is that a request it cannot parse is
+    refused rather than guessed at. A spelling the specification does not have is a
+    line two parsers would read differently, and this door is the one place a
+    browser's framing is decided (issue #1333).
+
+    Args:
+        headers: The parsed headers.
+
+    Returns:
+        The declared body length, or ``0`` where none is declared.
+
     Raises:
         MalformedRequestError: If a transfer encoding is declared, or the length is
-            absent-by-repetition, not a number, or negative.
+            absent-by-repetition, empty, or anything but ASCII decimal digits.
     """
     if any(name == "transfer-encoding" for name, _ in headers):
         raise MalformedRequestError
@@ -354,13 +376,18 @@ def _content_length(headers: tuple[tuple[str, str], ...]) -> int:
         return 0
     if len(declared) != 1:
         raise MalformedRequestError
-    try:
-        length = int(declared[0])
-    except ValueError as exc:
-        raise MalformedRequestError from exc
-    if length < 0:
+    value = declared[0]
+    if not value or not _DIGITS.issuperset(value):
         raise MalformedRequestError
-    return length
+    try:
+        return int(value)
+    except ValueError as exc:
+        # Every spelling `int` rejects has been refused above, so what is left is
+        # the interpreter's own guard on converting a very long digit string
+        # (`sys.int_info.str_digits_check_threshold`). A value that long is still a
+        # request this door will not interpret, and it is refused as one rather
+        # than raised as a `ValueError` nobody up the stack is catching.
+        raise MalformedRequestError from exc
 
 
 def render(response: Response, *, policy: str) -> bytes:
