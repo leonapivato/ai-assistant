@@ -16,10 +16,12 @@
 - **It supersedes nothing, and it names one supersession it does not write.**
   §13 applies ADR-0070 §1's test clause by clause to every ADR whose text a reader
   might expect this decision to falsify, and finds no record owed on any of them
-  but one: **ADR-0004 §3 is engaged**, because a browser holds its session in a
-  browser's storage rather than in the OS keyring. §6 rules that the narrowly
-  scoped supersession is a **prerequisite of the implementing lane** — its own
-  ADR, merged before any gateway ships — and names the replacements it should
+  but two: **ADR-0004 §3 and §7 are engaged**, because a browser holds its session
+  in a browser's storage rather than in the OS keyring, and because the gateway
+  reads and verifies that session on a path `permissions/` cannot gate and the
+  hub's audit trail does not record. §6 rules that one narrowly scoped
+  supersession covering both is a **prerequisite of the implementing lane** — its
+  own ADR, merged before any gateway ships — and names the replacements it should
   start from. Nothing implements here, so nothing runs unmet in the interval, and
   that is why this change still touches one file.
 - **Two calls were delegated to this lane by #1230 and by `docs/roadmap.md`,
@@ -422,13 +424,23 @@ honour a budget it cannot meet rather than silently shortening one.
 > exchange's own reply (§5), and neither is placed in a URL, in a log record, or
 > in any error the gateway emits.
 
-> **Normative.** Both halves are Tier 0 under ADR-0004 §1 and are held by the
-> browser rather than in the OS keyring ADR-0004 §3 names, so §3 is **engaged**
-> and a narrowly scoped supersession of it — reaching a browser-held web session
-> half and nothing else, with its replacements named and its record written on
-> ADR-0004 — is a **prerequisite of the implementing lane**: its own ADR, merged
-> before any gateway ships. This ADR does not write it, and no lane may implement
-> §6 before it merges.
+> **Normative.** Both halves and the bootstrap value are Tier 0 under ADR-0004 §1,
+> and two of that ADR's clauses are therefore **engaged**: §3, because they are
+> held by the browser rather than in the OS keyring; and §7, because the gateway
+> reads and verifies them on the admission path, which `permissions/` cannot gate
+> and the hub's audit trail does not record.
+
+> **Normative.** A narrowly scoped supersession of ADR-0004 §3 **and** §7 —
+> reaching a browser web session's storage and its admission and nothing else,
+> with its replacements named and its record written on ADR-0004 — is a
+> **prerequisite of the implementing lane**: its own ADR, merged before any
+> gateway ships. This ADR does not write it, and no lane may implement §6 before
+> it merges.
+
+> **Normative.** The gateway records every session admission and every refusal —
+> the request, the outcome, and for a refusal which of §3's, §6's and §7's
+> conditions it failed — and no record carries a session half, a bootstrap value
+> or a verifier.
 
 **That is owed rather than avoidable, and the reason is that no browser session
 design escapes it.** Whatever admits a returning browser is a value the browser
@@ -450,16 +462,51 @@ contract surface, and ADR-0124 §6 for the `SecretStore` Protocol it needed and
 declined to mint. The sequencing obligation above is what makes that a
 requirement rather than a hope.
 
+**§7 is engaged for the same reason and by the same circularity ADR-0124 §6
+identified, which is why it rides in the same prerequisite rather than a
+different one.** §7 requires Tier 0 access to be "gated by the `permissions/`
+layer and recorded in an **audit trail**", and both are the hub's: `permissions/`
+runs inside it and the audit trail is a Tier 1 store it owns exclusively
+(ADR-0083). The access this section creates is the one by which a browser becomes
+able to reach the hub at all, so gating it there is circular — and worse than in
+ADR-0124's case, because §9 requires the gateway to serve its listener whether or
+not the hub is reachable, so a hub-gated admission would make "the hub is down" an
+answer the browser could never be told. An earlier draft of §13 declared §7
+unengaged on the ground that ADR-0124 §6's exemption already covered the
+gateway's credential read. It covers that read and expressly nothing else, and a
+second access is not inside a narrow exemption because it resembles the first.
+Architecture review found it.
+
 **The replacements that lane should start from, so it rules rather than
 re-derives**, and which are stated here as its material and not as clauses of
-this ADR: the value is minted by this system rather than held on behalf of a
-third party, and it admits only what the owner sitting at that machine can
-already do; it is bounded by §8's expiry and dies with the gateway process, so it
-is not the long-lived secret §3's examples are ("OAuth tokens, API keys, refresh
-tokens"); custody is the browser profile's own file permissions, which is the
-same operating-system custody a file-backed keyring gives on that platform; and
-the clauses above keep it out of every place §3 names by exclusion — no database
-this system opens, no committed file, no log, no URL.
+this ADR:
+
+- **One purpose, one path.** The values are read only on the admission path and
+  for no other purpose, exactly as ADR-0124 §6 confines the bootstrap credential
+  read.
+- **Not a long-lived secret.** Each is minted by this system rather than held on
+  behalf of a third party, admits only what the owner sitting at that machine can
+  already do, is bounded by §8's expiry, and dies with the gateway process — so it
+  is not the kind of value §3's examples are ("OAuth tokens, API keys, refresh
+  tokens").
+- **Custody where a gate cannot run.** On the gateway's side the values never
+  leave process memory and are written nowhere (§4); on the browser's side custody
+  is the browser profile's own file permissions, which is the operating-system
+  custody a file-backed keyring gives on that platform. That is ADR-0124 §6's
+  second replacement — the access is gated by the OS where it cannot be gated by
+  `permissions/`.
+- **Auditable use, in place of a gated read.** The admission-record clause above
+  is ADR-0124 §6's third replacement applied here, and it is a clause of *this*
+  ADR because it constrains the gateway directly rather than the lane.
+
+**The replacements are weaker than §3 and §7, and the difference is stated rather
+than smoothed over**, as ADR-0124 §6 stated its own. The gateway's record is its
+own log and not the hub's Tier 1 audit trail, so it is not reviewable beside
+everything else the assistant did; and browser-profile permissions are custody
+rather than a policy decision traceable to an answer the owner gave about *this*
+access. That is the price of a browser being a client at all, it is bounded to a
+session's own admission on one machine, and it is paid visibly here rather than
+deferred to an issue that would have made it look temporary.
 
 > **Normative.** The front end inserts every value the hub returned into the page
 > as **text** and never as markup, and executes nothing derived from one.
@@ -703,8 +750,8 @@ delegated and the whole of what this section answers.
 
 **That is not the same as saying nothing must merge before anything**, and the
 distinction is worth stating because the two sentences look alike. §6 makes the
-narrowly scoped supersession of ADR-0004 §3 a prerequisite of the *implementing*
-lane, so milestone 13's order is: this ADR, then that supersession, then the
+narrowly scoped supersession of ADR-0004 §3 and §7 a prerequisite of the
+*implementing* lane, so milestone 13's order is: this ADR, then that supersession, then the
 gateway. What §11 rules is that the two questions in *this* text are one
 decision; it is not a claim that this text is the only ADR the milestone owes,
 and no lane may read it as one.
@@ -783,9 +830,9 @@ ADR-0082 §1 requires the judgement to be made in this text, naming the clause a
 applying ADR-0070 §1's test: would a reader holding only the earlier text now act
 differently, or read one of its clauses more widely than it now holds?
 
-**One clause is engaged and is called out as such in the list below — ADR-0004
-§3, whose record §6 makes a prerequisite of the implementing lane. No record is
-owed on any of the rest.**
+**Two clauses are engaged and are called out as such in the list below —
+ADR-0004 §3 and §7, whose record §6 makes a prerequisite of the implementing
+lane. No record is owed on any of the rest.**
 
 - **ADR-0084 §1's refusal of a TCP loopback port.** Its subject is stated in its
   own heading and in every reason it gives — the *hub's* transport, chosen so
@@ -855,20 +902,22 @@ owed on any of the rest.**
 - **ADR-0004 §1.** Used as given. Both halves of a session and the bootstrap
   value are classified under it rather than around it, and §6 records the
   consequence of that classification rather than avoiding it.
-- **ADR-0004 §3 is the one exception on this list: it is engaged, and the record
-  it needs is a prerequisite rather than a finding of no-record-owed.** ADR-0070
-  §1's second limb is met — a reader holding only §3 believes every Tier 0 secret
-  in this system's world sits in the OS keyring, and after §6 that is wrong of the
-  browser's half. §6 states the obligation, states why no browser design escapes
-  it, and makes the narrowly scoped supersession a **prerequisite of the
-  implementing lane**, with its replacements named so that lane starts from a
-  ruling. What is *not* engaged is §3 as it reaches this system's own processes:
-  the gateway holds no Tier 0 value at rest at all (§4), and the device credential
-  it reads stays exactly where ADR-0124 §6 put it, through the Protocol ADR-0124
-  §6 requires.
-- **ADR-0004 §7.** Not engaged. No exemption beyond ADR-0124 §6's narrow one is
-  taken, claimed or needed; the gateway's own credential read is the one that ADR
-  already governs.
+- **ADR-0004 §3 and §7 are the exceptions on this list: both are engaged, and the
+  record they need is a prerequisite rather than a finding of no-record-owed.**
+  ADR-0070 §1's second limb is met twice. A reader holding only §3 believes every
+  Tier 0 secret in this system's world sits in the OS keyring, and after §6 that
+  is wrong of the browser's halves. A reader holding only §7 believes every Tier 0
+  access is gated by `permissions/` and recorded in the audit trail, and after §6
+  that is wrong of a session's admission. §6 states both obligations, states why
+  no browser design escapes either, and makes one narrowly scoped supersession
+  covering both a **prerequisite of the implementing lane**, with its replacements
+  named so that lane starts from a ruling.
+- **What is *not* engaged is either clause as it reaches this system's own
+  hub-facing paths.** The gateway holds no Tier 0 value at rest (§4), and the
+  device credential it reads to reach the hub stays exactly where ADR-0124 §6 put
+  it, under the exemption ADR-0124 §6 already ruled and through the Protocol it
+  requires. Nothing here widens that exemption, and §6's is a second one that
+  stands or falls on its own record rather than on ADR-0124's.
 - **ADR-0042 §5 and ADR-0084 §11's streaming deferral.** Untouched. §12 declines
   to add a carrier for it, on the ground those texts give.
 - **ADR-0097 and ADR-0099 §1.** §4's refusals are ADR-0124 §5's, restated for a
@@ -893,10 +942,11 @@ owed on any of the rest.**
   did not happen, and each door's answer is decided by what its transport already
   guarantees.
 - **Milestone 13 gains a second ADR lane, and it is a prerequisite rather than a
-  follow-up**: the narrowly scoped supersession of ADR-0004 §3 for a
-  browser-held session half, merged before any gateway ships (§6). It is small —
-  one clause, one scope, the replacements already named — and it is owed because
-  no browser session design avoids holding a credential in a browser.
+  follow-up**: the narrowly scoped supersession of ADR-0004 §3 and §7 for a
+  browser-held web session and its admission, merged before any gateway ships
+  (§6). It is small — two clauses, one scope, the replacements already named — and
+  it is owed because no browser session design avoids holding a credential in a
+  browser or verifying it somewhere `permissions/` cannot reach.
 - **A session is two values rather than one**, because a cookie is scoped to a
   host and not to a port and would therefore be presented to any other local
   service on `127.0.0.1`. That is a property of the browser's own mechanism, so
