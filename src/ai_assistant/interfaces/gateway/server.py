@@ -69,8 +69,10 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import hmac
 import json
+import socket
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -276,6 +278,59 @@ def _authority(host: str, port: int) -> str:
         The authority.
     """
     return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def _refuse_an_address_this_machine_does_not_hold(address: str) -> None:
+    """Check 3 of ADR-0174 §2: the address is one this machine actually holds.
+
+    **The kernel is the only thing that knows**, and the way to ask it is to bind.
+    So this binds a throwaway socket on an ephemeral port at that address and closes
+    it: a success says the address is assigned to a local interface, and
+    ``EADDRNOTAVAIL`` says it is not. Asked on a port of the kernel's choosing rather
+    than on ``gateway_port``, so it cannot collide with the listener that follows and
+    cannot turn "that port is in use" into an answer about the address.
+
+    **Why the real bind is not left to answer it.** ``asyncio.start_server`` iterates
+    the addresses ``getaddrinfo`` returns and *drops* one that answers
+    ``EADDRNOTAVAIL`` — "assume the family is not enabled (bpo-30945)" — then raises
+    a plain ``OSError`` with **no errno** once none is left. So the one condition
+    ADR-0174 §2 has a rule about is exactly the one that arrives from there
+    unidentifiable, and a gateway reading the errno would have reported it as an
+    accident. Asking directly is what makes this a check rather than an
+    interpretation.
+
+    **What it is not.** It is not a claim that the address is the overlay's — that is
+    check 2's, and neither check stands in for the other. Together they are §2: an
+    overlay assigns each node its own address, so an address that is both on the
+    overlay and assigned locally is this machine's overlay address. It is also not a
+    reservation: the address could be removed between here and the bind, and then the
+    bind fails with the raw errno, which is the stay-down fault
+    ``service/remote.py`` leaves raw for the same reason.
+
+    Args:
+        address: The address the remote browser listener is about to bind.
+
+    Raises:
+        ConfigurationError: If the address is not one this machine holds.
+        OSError: If the probe fails for any other reason, which is a fault about the
+            machine rather than a statement about the configured address.
+    """
+    family = socket.AF_INET6 if ":" in address else socket.AF_INET
+    try:
+        with socket.socket(family, socket.SOCK_STREAM) as probe:
+            probe.bind((address, 0))
+    except OSError as exc:
+        if exc.errno != errno.EADDRNOTAVAIL:
+            raise
+        msg = (
+            f"the remote browser listener is configured to bind {address}, which is not "
+            f"an address of this machine ({exc}). ADR-0174 §2 binds an address that "
+            f"exists on the overlay *and* is this machine's own — the overlay agent "
+            f"answers the first and only the kernel answers the second; set "
+            f"ASSISTANT_GATEWAY_REMOTE_ADDRESS to the address your agent reports for "
+            f"this machine, not for the device you want to browse from"
+        )
+        raise ConfigurationError(msg) from exc
 
 
 def _check_the_remote_listener_can_serve(settings: Settings, *, agent: OverlayAgent | None) -> None:
@@ -663,16 +718,34 @@ class Gateway:
         > gateway with no remote-browser-listener configuration binds only ADR-0168
         > §2's loopback listener.
 
-        **The address is confirmed with the overlay agent before it is bound**, which
-        is the half of §2's bind rule no string can decide. ``Settings`` refuses a
-        wildcard, a name, a loopback, a multicast and a link-local address and a
-        globally routable one; nothing in ``192.168.1.5`` says whether it is an
-        overlay address or an ``eth0`` one, and §2 forbids binding "an address of a
-        physical interface". So the gateway asks the agent whose device holds the
-        address it is about to bind — §2's own words are that "the gateway binds an
-        address the agent provides" — and stays down when the agent places no node
-        there. That is ADR-0124 §2's split at this door, and
-        :mod:`ai_assistant.service.remote` does the same thing for the hub's.
+        **§2's bind rule is decided by three checks in three places, and neither of
+        the two here claims the other's ground.** §2 admits only "an address that
+        exists on that overlay" and forbids a wildcard, a physical interface, a
+        loopback address and a public one.
+
+        1. ``Settings`` refuses what ``ipaddress`` can decide — the wildcard, the
+           name, the loopback, the multicast, the link-local and the globally
+           routable address (ADR-0174 §8).
+        2. :meth:`_confirm_the_address_is_on_the_overlay` asks the agent on this
+           machine whether the overlay places a node at the address, which is the
+           only way to tell an overlay address from an ``eth0`` one — nothing in
+           ``192.168.1.5`` says which it is, and no conforming overlay agent
+           (ADR-0124 §2) reports a node at an address that is not on the overlay.
+        3. :func:`_refuse_an_address_this_machine_does_not_hold` requires the
+           address to be assigned to this machine, which only the kernel knows and
+           only a bind can ask.
+
+        **The conjunction is what satisfies §2, and each check on its own does
+        not** — the distinction adversarial review found on the first round of this
+        PR, correctly. The agent's answer says *the overlay places a node at this
+        address*; it does not say *and that node is us*, because the seam a client
+        holds asks one question ("who is at this address") where the hub's own asks
+        two (:class:`ai_assistant.wire.overlay.OverlayAgent`, which this lane
+        consumes rather than widens). So check 3 supplies the missing half
+        mechanically: an overlay assigns each node its own address, so an address
+        that is both on the overlay and assigned locally is this machine's overlay
+        address. Check 2 alone would admit another node's address, and check 3 alone
+        would admit ``eth0``'s.
 
         **It is also the earliest moment the agent's absence can be reported.** Every
         connection on this listener needs §3's identity, and a connection whose
@@ -685,15 +758,21 @@ class Gateway:
             The bound server, or ``None`` where the listener is off.
 
         Raises:
-            ConfigurationError: If the overlay agent does not place a node at the
-                configured address, or cannot be asked. A stay-down deployment fault
-                (ADR-0083 §5): restarting unchanged never succeeds, and what has to
-                change is the configuration or the overlay.
+            ConfigurationError: If the overlay agent places no node at the configured
+                address or cannot be asked, or if the address is not one this machine
+                holds. Each is a stay-down deployment fault (ADR-0083 §5): restarting
+                unchanged never succeeds, and what has to change is the configuration
+                or the overlay.
+            OSError: If the bind fails for any other reason. Left to propagate for
+                the reason :mod:`ai_assistant.service.remote` leaves it — "the raw
+                errno distinguishes a stay-down fault from a transient one" — and an
+                address in use is exactly such a case.
         """
         address = self._remote_address
         if address is None:
             return None
-        await self._confirm_the_bound_address(address)
+        await self._confirm_the_address_is_on_the_overlay(address)
+        _refuse_an_address_this_machine_does_not_hold(address)
         server = await asyncio.start_server(
             partial(self._handle, remote=True), host=address, port=self._settings.gateway_port
         )
@@ -704,14 +783,19 @@ class Gateway:
         )
         return server
 
-    async def _confirm_the_bound_address(self, address: str) -> None:
-        """Ask this machine's agent to place the address on the overlay (ADR-0174 §2).
+    async def _confirm_the_address_is_on_the_overlay(self, address: str) -> None:
+        """Check 2: the overlay places a node at the address (ADR-0174 §2).
+
+        This is the half no string can decide, and §2's own words are that "the
+        gateway binds an address the agent provides". It says nothing about *which*
+        node — see :meth:`start_remote` for why that is check 3's job rather than a
+        gap.
 
         Args:
             address: The address about to be bound.
 
         Raises:
-            ConfigurationError: If the agent will not place a node there.
+            ConfigurationError: If the agent places no node there, or will not say.
         """
         agent = self._agent
         if agent is None:  # pragma: no cover — the constructor refuses this pairing
@@ -722,7 +806,7 @@ class Gateway:
         except OverlayIdentityUnavailableError as exc:
             msg = (
                 f"the remote browser listener is configured to bind {address}, and the "
-                f"overlay agent on this machine does not place a node there ({exc}). "
+                f"overlay agent on this machine places no node there ({exc}). "
                 f"ADR-0174 §2 binds only an address that exists on the overlay and "
                 f"forbids an address of a physical interface, so the gateway will not "
                 f"bind one it cannot confirm; start the overlay agent and use the address "

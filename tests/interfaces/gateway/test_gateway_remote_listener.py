@@ -70,6 +70,12 @@ _STRANGER = "nSTRANGRCNTRL"
 #: never resolved and never dialled; it only ever appears in a `Host` header.
 _NAME = "phone.example.ts.net"
 
+#: An address ``Settings`` admits — RFC 5737's TEST-NET-1 is private in
+#: ``ipaddress``'s sense, so it passes all five refusals — and which no machine
+#: assigns to an interface. It stands for the overlay address of a *different* node:
+#: on the overlay by check 2's lights, and refused by the kernel at check 3.
+_NOT_THIS_MACHINE = "192.0.2.1"
+
 _BUNDLE = {
     "/": (b"<!doctype html><p>document", "text/html; charset=utf-8"),
     "/app.css": (b"body{}", "text/css; charset=utf-8"),
@@ -81,15 +87,20 @@ _BUNDLE = {
 class _FakeAgent:
     """The overlay agent on the gateway's **own** machine (ADR-0174 §3).
 
-    **The first question is always the bind confirmation**, because §3's
-    per-connection query cannot happen before the listener exists — so the fake
-    answers by call order rather than by inspecting an address, which would make the
-    answer turn on which loopback address the kernel picked as a source.
+    **Two questions are asked of it, and it tells them apart by the address**, not
+    by call order: the bind confirmation asks about the exact ``(address, port)``
+    pair the listener is about to take, and every other question is a peer's. The
+    two cannot collide — a connection whose source was the listener's own bound pair
+    would be that socket connected to itself — and keying on order instead would let
+    the fake return "yes, that address is fine" for a question about something else,
+    which is the mistake adversarial review found the first version of this fake
+    encoding.
 
     Attributes:
-        bound: Who holds the address the listener is about to bind, or ``None`` for
-            an agent that places no node there — ADR-0174 §2's physical-interface
-            case, and the one a string cannot decide.
+        bound_at: The ``(address, port)`` the listener binds, set by the harness.
+        bound: Who the overlay places at ``bound_at``, or ``None`` for an agent that
+            places no node there — ADR-0174 §2's physical-interface case, which is
+            the one a string cannot decide.
         peers: Who the agent names for each connection in turn, consumed from the
             front. A list rather than a mapping keyed on the source port, because
             the gateway asks at accept and a test cannot learn the port before then.
@@ -99,6 +110,7 @@ class _FakeAgent:
             must not serve never reached §3's query at all.
     """
 
+    bound_at: tuple[str, int] | None = None
     bound: str | None = _GATEWAY_NODE
     peers: list[str] = field(default_factory=list)
     default_peer: str | None = _PHONE
@@ -107,7 +119,7 @@ class _FakeAgent:
     async def identify(self, host: str, port: int) -> str:
         """Who is at ``host``, taken from this machine and never from the peer."""
         self.asked.append((host, port))
-        if len(self.asked) == 1:
+        if (host, port) == self.bound_at:
             return _named(self.bound, "the agent places no node at that address")
         found = self.peers.pop(0) if self.peers else self.default_peer
         return _named(found, "the overlay agent knows no node at that address")
@@ -280,7 +292,13 @@ def _gateway(
     clock: Clock,
     timers: Timers,
 ) -> Gateway:
-    """One gateway, built but nothing bound and nothing minted."""
+    """One gateway, built but nothing bound and nothing minted.
+
+    The fake agent is pointed at the pair the listener will ask about, so its answer
+    turns on the address rather than on how many questions have come before.
+    """
+    if agent is not None:
+        agent.bound_at = (str(settings.gateway_remote_address), settings.gateway_port)
     return Gateway(
         settings=settings,
         engine=engine,
@@ -453,13 +471,17 @@ async def test_a_configured_name_is_disclosed_as_an_origin_too() -> None:
 # --- ADR-0174 §2 and §8: what a gateway refuses to start with -----------------
 
 
-async def test_a_gateway_refuses_to_bind_an_address_its_agent_does_not_place() -> None:
-    """§2's physical-interface limb, which no string can decide.
+async def test_a_gateway_refuses_to_bind_an_address_the_overlay_does_not_place() -> None:
+    """§2's check 2 — the physical-interface limb, which no string can decide.
 
     ``Settings`` admits ``192.168.1.5``, because nothing about the value says whether
     it is an overlay address or an ``eth0`` one. The agent is what knows, and §2's own
     words are that "the gateway binds an address the agent provides" — so a gateway
     whose agent places no node there stays down rather than opening a door on the LAN.
+
+    The address here is one this machine genuinely *does* hold, so check 3 would pass
+    it: this is check 2 refusing on its own ground, which is what makes the two
+    independent rather than one dressed as two.
     """
     settings = _settings()
     agent = _FakeAgent(bound=None)
@@ -467,7 +489,35 @@ async def test_a_gateway_refuses_to_bind_an_address_its_agent_does_not_place() -
         settings, agent=agent, engine=FakeAssistantEngine(), clock=Clock(), timers=Timers()
     )
 
-    with pytest.raises(ConfigurationError, match="does not place a node there"):
+    with pytest.raises(ConfigurationError, match="places no node there"):
+        await gateway.start_remote()
+
+
+async def test_a_gateway_refuses_to_bind_an_overlay_address_that_is_not_its_own() -> None:
+    """§2's check 3, and the gap adversarial review found on this PR's first round.
+
+    The agent's answer is *the overlay places a node at this address*; it is not *and
+    that node is us*, because the seam a client holds asks one question where the
+    hub's own asks two. So an address that is genuinely on the overlay but belongs to
+    a **different** node passes check 2 — and it is the kernel that refuses it, with
+    ``EADDRNOTAVAIL``, because an overlay assigns each node its own address.
+
+    That errno is turned into a refusal naming §2 rather than left raw, because it is
+    the one bind failure that is a statement about the configured address rather than
+    about the machine's state — and the mistake it catches is a real one an owner will
+    make: typing the address of the device they want to *browse from*.
+    """
+    settings = Settings(gateway_port=_free_port(), gateway_remote_address="100.64.0.9")
+    elsewhere = settings.model_copy(update={"gateway_remote_address": _NOT_THIS_MACHINE})
+    gateway = _gateway(
+        elsewhere,
+        agent=_FakeAgent(),
+        engine=FakeAssistantEngine(),
+        clock=Clock(),
+        timers=Timers(),
+    )
+
+    with pytest.raises(ConfigurationError, match="not an address of this machine"):
         await gateway.start_remote()
 
 
