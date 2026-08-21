@@ -447,30 +447,41 @@ honour a budget it cannot meet rather than silently shortening one.
 > gateway ships. This ADR does not write it, and no lane may implement §6 before
 > it merges.
 
-> **Normative.** A record is written when a session is minted, when a mint is
-> refused, and when a presented session fails to verify. No record is written for
-> a request a live session admits, which is not an admission decision.
+> **Normative.** The gateway records its own admission decisions and nothing
+> else, and they are two: a session minted, and a request refused on a condition
+> of §3, §4, §5, §6 or §7 — a refused mint included. Nothing is recorded for a
+> request a live session admits, which is not an admission decision, and nothing
+> for a refusal on any other ground, §8's size bound included.
 
-> **Normative.** The record carries **only** Tier 2 facts, enumerated: the
-> instant; which class of request it was, out of the front end's assets, the
-> bootstrap exchange and an assistant request; the outcome; and for a refusal,
-> which of §3's, §6's and §7's conditions it failed.
+> **Normative.** A refusal is decided on exactly one condition — the first the
+> gateway evaluates that the request fails — and every request the gateway
+> receives is of exactly one class, out of four: the front end's assets, the
+> bootstrap exchange, an assistant request, and any other request. Both are
+> enumerations fixed in advance; every record names one class, and every refusal
+> record one condition.
 
-> **Normative.** Failure records are rate-bounded: within one
-> `gateway_record_interval` (§8) each distinct condition is emitted once, carrying
-> how many times it occurred in that interval, so that a caller able to drive a
-> refusal cannot drive a record per attempt.
-
-> **Normative.** The record is emitted through the logging this system already
-> configures, and the gateway **retains none of it**. What the gateway holds for
-> the clause above is one count per refusal condition for the current interval and
-> nothing else — a fixed set of integers, reset each interval — and it keeps no
-> history of what it emitted.
+> **Normative.** A record carries **only** Tier 2 facts, enumerated: the instant,
+> which for a refusal record collapsed under the rate bound below is the interval
+> it covers; the request's class; the outcome; and, for a refusal, the condition
+> it was refused on and the number of times that class and that condition
+> occurred together in that interval.
 
 > **Normative.** No such record carries anything outside that enumeration — no
 > session half, bootstrap value or verifier; no request body; no path, query
 > string or fragment; no header or cookie; and nothing the hub or a model
 > returned.
+
+> **Normative.** Refusal records are rate-bounded rather than written one per
+> refused request: within one `gateway_record_interval` (§8) each distinct
+> **pair** of class and condition is emitted at most once, so that a caller able
+> to drive a refusal cannot drive a record per attempt. A mint record is not
+> rate-bounded and needs no bound, because §5 permits one mint per process life.
+
+> **Normative.** The record is emitted through the logging this system already
+> configures, and the gateway **retains none of it**. What the gateway holds for
+> the clause above is one count per pair of class and condition for the current
+> interval and nothing else — a fixed set of integers, reset each interval — and
+> it keeps no history of what it emitted.
 
 **The record is scoped to admission decisions and rate-bounded, and both are
 corrections rather than refinements.** An earlier draft recorded every admission
@@ -492,8 +503,9 @@ file — so this system installs no file handler anywhere and **retains no recor
 it emits**. Where a record then lands and how long it is kept is the operator's,
 exactly as it already is for the hub and the CLI. So the admission record adds no store, no
 file and no growing artifact. The only state the clauses above create is the
-interval's counters — one integer per refusal condition, reset each interval,
-which is a fixed set fixed in advance. An earlier draft claimed the record was
+interval's counters — one integer per pair of request class and refusal
+condition, reset each interval, which is a fixed set fixed in advance because
+both enumerations are. An earlier draft claimed the record was
 bounded "in count and in age" like the session table, which was false of a
 rate limit and is the wrong frame besides; architecture review was right that a
 rate bound is not a size bound, and the answer is that there is nothing retained
@@ -504,9 +516,13 @@ clause here decides it.
 **The narrowing is also the closer analogue of what ADR-0124 §7 already does.**
 That section has the hub record "each admission and each refusal with the device
 it named" — of a *connection*, not of every request carried on one. A session is
-this door's connection, so recording its mint and its refusals is the same act at
-the same granularity, and recording every request behind a live session would have
-been a different and much larger promise.
+this door's connection, so recording its mint and the refusals of the requests it
+did not admit is the same act, and recording every request behind a live session
+would have been a different and much larger promise. The one place the analogy is
+inexact is §7's pre-session refusals, which are decided per request rather than
+per session because per request is when they are decidable at all; the interval
+bound is what keeps those from becoming the per-request log this paragraph
+rejects.
 
 **The record is an enumeration rather than an exclusion list, because an
 exclusion list was wrong here and its failure is the instructive kind.** An
@@ -518,6 +534,33 @@ logged", so the draft would have created the leak in the very clause written to
 make the access auditable. Architecture review found it. Naming what may appear
 is the only form that stays right when a later lane adds a request shape nobody
 has thought of yet.
+
+**The collapse key is the pair rather than the condition, and both enumerations
+are made total, because a partial one is what kept failing here.** §7 decides a
+`Host` or an `Origin` refusal before the request's class matters, so one
+condition genuinely spans classes: inside a single interval a static asset, a
+bootstrap exchange and an assistant request can each be refused on the same one.
+Collapsing on the condition alone then obliges one record to name a singular
+class it cannot truthfully name. Keying on the pair costs nothing — the product
+of two fixed enumerations is fixed — and it is the move §1's biconditional
+already made: cover every case the gateway can distinguish at once, rather than
+the cases someone happened to list. Adversarial review found it on the seventh
+round.
+
+**Three smaller instances of the same defect were found beside it and are fixed
+in the same clauses.** The class list had three values where §1 names four kinds
+of request — its own reasoning enumerates "admitted and assistant-shaped,
+admitted and not, unadmitted, pre-session", and §12 leaves the request shapes to
+the implementing lane — so a refused request that asks the assistant for nothing
+had no class to be recorded under; the residual fourth class is what makes the
+enumeration total rather than merely long. The condition list named §3, §6 and
+§7, while a refused mint fails §4's ceiling or §5's exchange and so failed none
+of the three it was required to name. And the rate bound obliged every refusal
+record to carry a count that the enumeration — which is exclusive, and says so
+twice — did not list, so a required field was a forbidden one. The trigger clause
+is now the single statement of which decisions are recorded, and the two
+enumerations it draws on are stated once and are total, which is the shape that
+stops the next clause from contradicting them.
 
 **That is owed rather than avoidable, and the reason is that no browser session
 design escapes it.** Whatever admits a returning browser is a value the browser
@@ -949,7 +992,8 @@ lane. No record is owed on any of the rest.**
   body of edge state to test against §9, because the gateway **retains none of
   it**: the record is emitted through the logging this system already configures,
   which installs no file handler and keeps nothing. What §9 does reach there is the
-  interval's counters — one integer per refusal condition, reset each interval —
+  interval's counters — one integer per pair of request class and refusal
+  condition, reset each interval —
   which are bounded in size by a fixed set, bounded in age by the interval, and
   never authoritative, since no clause here gives them an effect on whether
   anything is admitted. Two earlier drafts were wrong about this in opposite
