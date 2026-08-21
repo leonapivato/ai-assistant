@@ -4106,6 +4106,12 @@ def _safe_prose(value: str) -> str:
     return _safe(value.replace("\r\n", "\n").replace("\r", "\n"), keep_line_breaks=True)
 
 
+#: What may follow a ``[`` in Rich markup, taken from the character class its
+#: escaper and its parser share (``\[[a-z#/@][^[]*?]``). A ``[`` followed by
+#: anything else is text under both, so :func:`_settled_prefix` need not hold it.
+_TAG_START: Final = frozenset("abcdefghijklmnopqrstuvwxyz#/@")
+
+
 def _settled_prefix(text: str) -> str:
     r"""The longest prefix of ``text`` whose neutralisation later text cannot change.
 
@@ -4121,12 +4127,17 @@ def _settled_prefix(text: str) -> str:
     Three things at the tail are unsettled, and each is a way :func:`_safe_prose`
     would read the same characters differently once more text follows them:
 
-    - **An unclosed ``[``.** Rich escapes a *complete* tag — its pattern is
-      ``\[[a-z#/@][^[]*?]`` — so ``[/dim`` alone is left verbatim and becomes
-      ``\[/dim]`` the moment a ``]`` lands. Splitting there is exactly the evasion
-      §10 names, so the cut falls at the last ``[`` with no ``]`` after it. A ``[``
-      that already has a ``]`` after it is settled: the match is lazy and ends at
-      that ``]``, and a later ``[`` cannot be reached across it.
+    - **An unclosed ``[`` that could still open a tag.** Rich escapes a *complete*
+      tag — its pattern is ``\[[a-z#/@][^[]*?]`` — so ``[/dim`` alone is left
+      verbatim and becomes ``\[/dim]`` the moment a ``]`` lands. Splitting there is
+      exactly the evasion §10 names, so the cut falls at the last ``[`` with no ``]``
+      after it. Only the *last* one can matter: the body admits no ``[``, so an
+      earlier one can never reach a ``]`` across a later one. And only one whose next
+      character is a tag start (or is not there yet) is held — ``[1`` and ``[Options``
+      can never become markup under either Rich's escaper or its parser, and holding
+      those would stall the rest of an ordinary answer behind a bracket, which is the
+      streaming this whole path exists to do. A ``[`` that already has a ``]`` after
+      it is settled: the match is lazy and ends at that ``]``.
     - **A trailing run of ``\``.** Rich's escape doubles the backslashes running
       into a tag and appends one to a value ending in an odd number of them, so a
       run at the tail is rewritten by whatever follows it.
@@ -4143,7 +4154,8 @@ def _settled_prefix(text: str) -> str:
     """
     cut = len(text)
     opening = text.rfind("[")
-    if opening != -1 and "]" not in text[opening:]:
+    unclosed = opening != -1 and "]" not in text[opening:]
+    if unclosed and (opening + 1 == len(text) or text[opening + 1] in _TAG_START):
         cut = opening
     elif text.endswith("\r"):
         cut -= 1
