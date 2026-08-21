@@ -29,6 +29,7 @@ from ai_assistant.core.errors import (
     DeferralStoreError,
     InvalidGrantError,
     MemoryStoreError,
+    ModelUnavailableError,
     PlanningError,
     UngrantableSourceError,
 )
@@ -57,6 +58,7 @@ from ai_assistant.core.types import (
     LearnOutcome,
     MemoryKind,
     MemorySource,
+    Message,
     NotificationCandidate,
     NotificationCondition,
     NotificationDispositionKind,
@@ -269,6 +271,7 @@ def _engine(
     tools: tuple[ToolDefinition, ...] = (),
     policy: FakeActionPolicy | None = None,
     closers: Sequence[Callable[[], Awaitable[None]]] = (),
+    composing: ComposingStage | None = None,
 ) -> Engine:
     """A real ``Engine`` over canonical fakes, driving a one-step plan."""
     plans = FakePlanStore(now=lambda: AT)
@@ -299,7 +302,7 @@ def _engine(
     )
     conversations = FakeConversationStore(now=lambda: AT)
     return Engine(
-        composing=_composing(),
+        composing=composing if composing is not None else _composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
         loop=loop,
@@ -1949,6 +1952,137 @@ async def test_ask_reports_an_unknown_conversation_rather_than_starting_one(
     assert code == cli._EXIT_ERROR
     assert "Error" in output.getvalue()
     assert await conversations.recent() == []
+
+
+# --- the composed answer, beside the account and never in place of it --------
+# ADR-0170 §6's rendering floor and §8's neutralisation, plus §10's
+# contradictory-provider test, which needs both the outcome and the rendered
+# account and so lives here rather than in ``tests/orchestration``.
+
+
+def _answering(reply: str) -> ComposingStage:
+    """A composing stage whose provider always returns ``reply``."""
+    return ComposingStage(model=FakeModelProvider(reply))
+
+
+async def test_ask_prints_the_composed_answer(output: StringIO) -> None:
+    """Milestone 17's exit shape, as a user sees it: the assistant answers."""
+    engine = _engine(tools=(tool(),), composing=_answering("You prefer hiking."))
+
+    code = await cli._drive_turn(
+        engine, "what do you know about me?", timeout=PATIENT, approver=lambda _c: True
+    )
+
+    assert code == 0
+    assert "You prefer hiking." in output.getvalue()
+    await engine.aclose()
+
+
+async def test_the_answer_is_rendered_in_addition_to_the_step_account(
+    output: StringIO,
+) -> None:
+    """§6: "in addition to the step account it renders today, never instead of it".
+
+    ADR-0084 §8's rule binds unchanged, and #531's exit code with it: the plan
+    listing, the disposition line and the process exit code are all still produced.
+    """
+    engine = _engine(tools=(tool(),), composing=_answering("You prefer hiking."))
+
+    code = await cli._drive_turn(engine, "send it", timeout=PATIENT, approver=lambda _c: True)
+
+    rendered = output.getvalue()
+    assert "You prefer hiking." in rendered
+    assert "Done" in rendered  # the disposition line survived the answer
+    assert "Plan:" in rendered  # and so did the plan listing
+    assert code == 0
+    await engine.aclose()
+
+
+async def test_the_step_account_is_unchanged_by_a_reply_that_contradicts_it(
+    output: StringIO,
+) -> None:
+    """§6 and §10: the deterministic account is the assertion, and the reply is not.
+
+    A cooperating fake cannot distinguish a design whose guarantee is *structural*
+    from one whose guarantee is a hope about the prompt, so this one deliberately
+    contradicts the record. It claims an action the step account records as
+    ``NO_CAPABLE_TOOL`` and again as ``DENIED``; what is asserted is that the
+    outcome's disposition and the rendered account are unchanged by what it says.
+    Nothing about the design *stops* a model saying it — §5 is explicit that no
+    clause of ADR-0170 is a guarantee about model output — and what §6 buys is that
+    the truth is on screen next to the prose whatever the prose says.
+    """
+    lie = "I sent the email. It has been delivered."
+    for policy, expected in (
+        (None, "No tool is available"),
+        (FakeActionPolicy(deny_at=RiskLevel.LOW), "Declined"),
+    ):
+        engine = _engine(
+            tools=() if policy is None else (tool(),),
+            policy=policy,
+            composing=_answering(lie),
+        )
+        outcome = await engine.converse("send it", timeout=PATIENT)
+
+        assert outcome.reply == lie
+        assert outcome.step is not None
+        assert outcome.step.disposition is (
+            Disposition.NO_CAPABLE_TOOL if policy is None else Disposition.DENIED
+        )
+
+        output.truncate(0)
+        output.seek(0)
+        cli._render_turn(outcome)
+        rendered = output.getvalue()
+        assert lie in rendered  # the prose is shown...
+        assert expected in rendered  # ...and contradicted on the same screen
+        await engine.aclose()
+
+
+async def test_a_degraded_composition_is_stated_and_the_account_still_rendered(
+    output: StringIO,
+) -> None:
+    """§6: "never as a silent turn, and never as a failure of the step".
+
+    A turn that acted and then could not describe it still tells the user what was
+    done, in the same words it would have used before ADR-0170 existed; the only
+    thing missing is the prose that was going to sit above them.
+    """
+
+    def refuse(_messages: Sequence[Message]) -> str:
+        msg = "the route is exhausted"
+        raise ModelUnavailableError(msg)
+
+    engine = _engine(tools=(tool(),), composing=ComposingStage(model=FakeModelProvider(refuse)))
+
+    code = await cli._drive_turn(engine, "send it", timeout=PATIENT, approver=lambda _c: True)
+
+    rendered = output.getvalue()
+    assert "no answer could be composed" in rendered
+    assert "Done" in rendered  # the account it carries, rendered as it always was
+    assert code == 0  # and not reported as a failure of the step
+    await engine.aclose()
+
+
+def test_a_composed_answer_is_neutralised_for_the_terminal(output: StringIO) -> None:
+    """§8: engine-supplied text goes through ``_safe``, as a policy's reason does.
+
+    A reply is model output rendered in the assistant's own voice, so Rich markup
+    inside it is a control sequence this terminal would otherwise interpret
+    (ADR-0042 §4).
+    """
+    cli._render_reply(TurnOutcome(turn=None, step=None, reply="[bold red]not markup[/] \x1b[31m"))
+
+    rendered = output.getvalue()
+    assert "not markup" in rendered
+    assert "\x1b[31m" not in rendered
+
+
+def test_an_outcome_owing_no_answer_renders_nothing_for_it(output: StringIO) -> None:
+    """§4's other two ``None`` shapes print no reply line and no degraded notice."""
+    cli._render_reply(TurnOutcome(turn=None, step=None))
+
+    assert output.getvalue() == ""
 
 
 def test_a_degraded_capture_is_reported_beside_the_degraded_memory_note(

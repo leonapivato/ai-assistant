@@ -22,22 +22,29 @@ import pytest
 from pydantic import ValidationError
 
 from ai_assistant.core.types import (
+    ActionPlan,
     AnswerKind,
     AnswerOutcome,
     BeliefBand,
     BeliefSummary,
     Confirmation,
     ContinuationToken,
+    CurrentContext,
     Disposition,
     ExecutionState,
+    Goal,
     IngestSummary,
     LearnDecision,
     MemoryKind,
+    MemorySource,
+    Provenance,
     QuestionState,
     QueuedQuestion,
     QueueOutcome,
     StepOutcome,
+    TimeOfDay,
     TurnOutcome,
+    TurnResult,
 )
 
 AT = datetime(2026, 8, 1, 12, 0, 0, tzinfo=UTC)
@@ -255,6 +262,113 @@ def _summary(*, evidence_count: int = 0, lost_evidence: int = 0) -> BeliefSummar
         evidence_count=evidence_count,
         lost_evidence=lost_evidence,
     )
+
+
+def _turn() -> TurnResult:
+    """One turn's result — the presence of which is what makes an answer owed."""
+    return TurnResult(
+        goal=Goal(
+            id="g-1",
+            statement="what do you know about me?",
+            provenance=Provenance(
+                source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=AT
+            ),
+            created_at=AT,
+        ),
+        context=CurrentContext(
+            now=AT, time_of_day=TimeOfDay.AFTERNOON, is_weekend=False, within_working_hours=True
+        ),
+        memories=(),
+        plan=ActionPlan(id="p-1", goal_id="g-1", steps=(), created_at=AT),
+    )
+
+
+def _parked() -> StepOutcome:
+    """A step outcome awaiting a human answer, which owes no composed reply."""
+    return StepOutcome(
+        disposition=Disposition.AWAITING_CONFIRMATION,
+        state=_state(),
+        step_id="s-1",
+        confirmation=_confirmation(),
+    )
+
+
+class TestTurnOutcomeReply:
+    """ADR-0170 §4, in both directions, ``reply_degraded`` included.
+
+    §4 gives ``reply`` three ``None`` shapes and ``reply_degraded`` exactly one
+    ``True`` shape, and ADR-0170 §4's last clause obliges the invariant to be stated
+    **in both directions** for :meth:`StepOutcome._confirmation_matches_disposition`'s
+    own reason: a silent ``None`` on a turn that ran is an answer the user never got
+    and nobody can point at a contract violation for, and a ``reply`` beside a parked
+    confirmation is prose competing with the yes/no question the user must answer.
+    """
+
+    def test_a_turn_that_ran_must_carry_an_answer_or_say_composing_failed(self) -> None:
+        """The direction a one-sided test would miss: the silent ``None``."""
+        with pytest.raises(ValidationError, match="owed an answer and carries none"):
+            TurnOutcome(turn=_turn())
+
+    def test_an_answer_satisfies_it(self) -> None:
+        """And the ordinary shape passes, carrying the prose unnormalised."""
+        outcome = TurnOutcome(turn=_turn(), reply="  You prefer hiking.  ")
+        assert outcome.reply == "  You prefer hiking.  "
+        assert outcome.reply_degraded is False
+
+    def test_saying_composition_failed_satisfies_it_too(self) -> None:
+        """§4's third ``None`` shape, and the only one that sets the flag."""
+        outcome = TurnOutcome(turn=_turn(), reply_degraded=True)
+        assert outcome.reply is None
+        assert outcome.reply_degraded is True
+
+    def test_a_blank_answer_is_refused(self) -> None:
+        """§3: ``NonBlankEncodableText``, because ``None`` already has a meaning.
+
+        A blank string would be a third state meaning the same thing less legibly —
+        the reasoning ``NotificationCandidate.summary`` already applies to the one
+        line a user is told.
+        """
+        with pytest.raises(ValidationError):
+            TurnOutcome(turn=_turn(), reply="   ")
+
+    def test_a_parked_outcome_carries_no_reply(self) -> None:
+        """§4's first ``None`` shape: the confirmation is what the user must answer."""
+        outcome = TurnOutcome(turn=_turn(), step=_parked())
+        assert outcome.reply is None
+        assert outcome.reply_degraded is False
+
+    def test_a_parked_outcome_may_not_carry_a_reply(self) -> None:
+        """The other direction: prose beside the question is what the user reads."""
+        with pytest.raises(ValidationError, match="parked outcome must carry no reply"):
+            TurnOutcome(turn=_turn(), step=_parked(), reply="I need your permission first.")
+
+    def test_a_park_can_never_be_degraded(self) -> None:
+        """§4: ``reply_degraded`` is "never ``True`` on a park".
+
+        A park owes no answer, so no prompt is assembled and no model is called —
+        there is nothing there that could have failed.
+        """
+        with pytest.raises(ValidationError, match="parked outcome owes no answer"):
+            TurnOutcome(turn=_turn(), step=_parked(), reply_degraded=True)
+
+    def test_a_recovered_resume_carries_no_reply_and_is_never_degraded(self) -> None:
+        """§4's second ``None`` shape, and its half of the flag's rule.
+
+        A resume driven from a recovered park persisted no context or memories, so
+        there is nothing to compose from and nothing that could have failed.
+        """
+        assert TurnOutcome(turn=None).reply is None
+        with pytest.raises(ValidationError, match="an outcome with no turn owes no answer"):
+            TurnOutcome(turn=None, reply_degraded=True)
+
+    def test_the_flag_is_never_true_beside_an_answer(self) -> None:
+        """§4: "never ``True`` beside a non-``None`` ``reply``".
+
+        That is what lets a client tell "no answer was owed" from "an answer was
+        owed and could not be composed" from the value alone.
+        """
+        with pytest.raises(ValidationError, match="there is no reply to carry"):
+            TurnOutcome(turn=_turn(), reply="You prefer hiking.", reply_degraded=True)
 
 
 class TestWhatIsDeliberatelyNotConstrained:
