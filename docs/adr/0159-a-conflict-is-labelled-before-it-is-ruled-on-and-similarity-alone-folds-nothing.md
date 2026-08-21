@@ -32,9 +32,12 @@
   that the retirement set "is where this rule would have destroyed most", and that the
   exclusion "is not a refinement of ADR-0050 §1; it is the condition on which the arm
   in §4(b) may exist at all" — is the reasoning ADR-0171 §2 extends. What §5 could not
-  see is that its protection is computed only over members the reconciler *labelled*,
-  while §3's bound decides how many of those there are: a cost control was silently
-  governing a destructive rule. ADR-0171 §2 states the protection as a rule rather
+  see is that its protection is computed only over members the reconciler *labelled*.
+  §3's `agrees` rung is unconditional and reaches the whole set, so a verbatim
+  restatement is spared at any rank — but everything that rung cannot settle depends on
+  the model, and §3's bound decides how many members reach one. So a cost control was
+  silently governing a destructive rule for every member a string comparison could not
+  judge, which is the whole residue. ADR-0171 §2 states the protection as a rule rather
   than leaving it a statistic, and §1 is what keeps the statistic close to the rule.
 
   **What stands.** §3's bound in every other respect — positive, applied over the
