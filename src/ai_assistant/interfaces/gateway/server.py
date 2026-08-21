@@ -535,6 +535,7 @@ class Gateway:
                 the owner's own named device at every exchange with nothing saying
                 why.
         """
+        _check_the_remote_listener_can_serve(settings, agent=agent)
         self._settings = settings
         self._engine = engine
         self._now = now
@@ -581,7 +582,6 @@ class Gateway:
             for name in (self._remote_address, *settings.gateway_remote_host_names)
             if name is not None
         )
-        _check_the_remote_listener_can_serve(settings, agent=agent)
         #: The four shapes answered whole, by path. A table rather than a chain of
         #: comparisons, so ADR-0175 §6's enumeration is one thing to read against the
         #: ADR — and so a path :data:`_ASSISTANT_PATHS` admits but nothing here
@@ -859,6 +859,14 @@ class Gateway:
         closing, because the gateway has not yet read a request and so has nothing to
         answer; a status line here would be a response to a request that does not
         exist.
+
+        **A connection waiting on this query is already counted**, which is what
+        bounds an agent that has stopped answering: it was admitted to
+        :attr:`_connections` a line earlier, so ``gateway_max_browser_connections``
+        and ``gateway_max_pending_connections`` hold while the query is out, and the
+        query itself is bounded by the agent client's own five-second deadline
+        (``wire.overlay``). ``gateway_read_timeout`` does not reach here, because
+        there is no read yet to bound.
 
         Args:
             writer: The accepted connection, for its peer address.
@@ -1159,6 +1167,21 @@ class Gateway:
         The value is consumed by the mint it produced rather than by the attempt:
         an exchange refused at ADR-0168 §4's ceiling yielded no session, and §5
         makes the value "exchangeable for exactly one **session**".
+
+        **On the remote listener this is reached only from a listed device**, and
+        :meth:`_respond` is where that is decided — one line earlier, so an unlisted
+        device's exchange is "refused without the value being read, compared or
+        consumed" (ADR-0174 §4). Reading the payload here at all would break the
+        first of those three; consuming it would break the third, leaving the owner
+        holding a value an attacker had spent.
+
+        Args:
+            request: The exchange as parsed.
+            connection: The connection it arrived on, for the identity ADR-0174 §3
+                puts on the record a mint or a refusal writes.
+
+        Returns:
+            The two session values, or the refusal.
         """
         presented = _string(_payload(request), "bootstrap_value")
         held = self._bootstrap
