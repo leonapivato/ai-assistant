@@ -23,11 +23,30 @@
   }
 }
 
+/*
+ * Every value the hub returns is inserted as text into a normal-flow element
+ * (ADR-0168 §6), and text does not break inside an unbroken token: a long opaque
+ * identifier in a tool's failure message, a 10,000-character URL in a model reply,
+ * or an id in a fault's detail would run off the panel's edge rather than wrap to
+ * its width (issue #1340).
+ *
+ * `overflow-wrap` inherits, so the rule is written once here rather than per class
+ * — the answer, the rationale, the step lines, a notification's summary and detail,
+ * the conversation rows and the fault all sit under this element, and a rule per
+ * class would owe a new clause to every surface added after it.
+ *
+ * `anywhere` rather than `break-word`: they break identically, and differ only in
+ * whether the break opportunity counts towards intrinsic size. `.conversation-row`
+ * is a flex container, so under `break-word` its `.hint` keeps a `min-width: auto`
+ * as wide as the unbroken token and overflows regardless of the wrapping rule.
+ * Neither value breaks a word that fits, so ordinary prose is unaffected.
+ */
 body {
   margin: 0;
   background: var(--paper);
   color: var(--ink);
   font: 16px/1.55 system-ui, -apple-system, "Segoe UI", sans-serif;
+  overflow-wrap: anywhere;
 }
 
 .shell {

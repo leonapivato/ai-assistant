@@ -143,6 +143,28 @@ def test_the_answer_keeps_the_line_breaks_it_was_composed_with() -> None:
     assert "white-space: pre-wrap;" in stylesheet
 
 
+def test_an_unbreakable_token_wraps_instead_of_running_off_the_page() -> None:
+    """The other half of shaping a value inserted as text (issue #1340).
+
+    ``pre-wrap`` keeps the breaks a value was written with; it creates no break
+    opportunity *inside* an unbroken token. A tool's failure message, a fault's
+    detail, a planner's capability name and a model's reply are all hub values in
+    normal-flow elements, so a long opaque identifier in any of them ran off the
+    panel rather than wrapping to it.
+
+    Asserted on ``body`` rather than per class because ``overflow-wrap`` inherits:
+    one declaration covers every surface on the page, including ones added later,
+    where a rule per class would owe each of them a clause. ``anywhere`` is the
+    value that also shrinks intrinsic size, which is what a flex item like
+    ``.conversation-row .hint`` needs to stop overflowing.
+    """
+    stylesheet = _asset("app.css")
+    declarations = re.search(r"^body \{(.*?)^\}", stylesheet, re.MULTILINE | re.DOTALL)
+
+    assert declarations is not None
+    assert "overflow-wrap: anywhere;" in declarations.group(1)
+
+
 def test_the_header_half_is_held_in_origin_scoped_storage_shared_across_tabs() -> None:
     """§6: "held in browser storage scoped to **scheme, host and port** and shared
     across that origin's tabs".
