@@ -22,12 +22,10 @@ import hmac
 import secrets
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from enum import StrEnum
 from functools import partial
-from typing import TYPE_CHECKING, Final, Protocol
-
-if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
-    from datetime import datetime, timedelta
+from typing import Final, Protocol
 
 #: How many random bytes each half and the bootstrap value carry. ADR-0168 §4 and
 #: §5 require "at least 128 bits drawn from the operating system's cryptographic
@@ -122,6 +120,30 @@ def verifier(value: str) -> bytes:
     return hashlib.sha256(value.encode("utf-8")).digest()
 
 
+def _saturating(moment: datetime, delta: timedelta) -> datetime:
+    """``moment + delta``, or the end of representable time where that overflows.
+
+    **A saturation clause rather than a ceiling on the setting**, and the choice is
+    ADR-0140 §3's rather than ADR-0093 §7a's. ``gateway_session_ttl`` carries
+    ``gt=timedelta(0)``, which admits ``timedelta.max``; a bound above the
+    representable range is a session that never ends by lifetime, which is what
+    saturating says, and it says it without adding a refusal ADR-0168 §8 does not
+    state. The idle bound still binds, because a session ends "at the earlier" of
+    the two — so a lifetime past the end of time is not a session without bounds.
+
+    Args:
+        moment: The reading to add to.
+        delta: The bound being applied.
+
+    Returns:
+        The instant the bound falls on, or the latest representable one.
+    """
+    try:
+        return moment + delta
+    except OverflowError:
+        return datetime.max.replace(tzinfo=moment.tzinfo)
+
+
 def mint_value() -> str:
     """One value of at least 128 bits from the OS cryptographic random source."""
     return secrets.token_urlsafe(_ENTROPY_BYTES)
@@ -188,7 +210,7 @@ class SessionTable:
         session = _Session(
             cookie_verifier=verifier(values.cookie_half),
             header_verifier=verifier(values.header_half),
-            expires_at=moment + self._ttl,
+            expires_at=_saturating(moment, self._ttl),
             last_used_at=moment,
         )
         self._sessions[key] = session
@@ -278,7 +300,7 @@ class SessionTable:
         """
         if session.timer is not None:
             session.timer.cancel()
-        ends_at = min(session.expires_at, session.last_used_at + self._idle_timeout)
+        ends_at = min(session.expires_at, _saturating(session.last_used_at, self._idle_timeout))
         delay = max((ends_at - self._now()).total_seconds(), 0.0)
         session.timer = self._defer(delay, partial(self._end, key))
 
@@ -290,7 +312,9 @@ class SessionTable:
         refuses to admit, whether or not the callback has run yet.
         """
         moment = self._now()
-        return moment >= session.expires_at or moment >= session.last_used_at + self._idle_timeout
+        return moment >= session.expires_at or moment >= _saturating(
+            session.last_used_at, self._idle_timeout
+        )
 
     def _end(self, key: str) -> None:
         """Destroy one session, whichever of its two bounds arrived first."""
