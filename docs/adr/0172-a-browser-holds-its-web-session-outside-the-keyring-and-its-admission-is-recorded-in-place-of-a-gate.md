@@ -214,14 +214,21 @@ that leaves rather than closing it.
 > **Normative.** The **web-session credential class** is exactly three kinds of
 > value, and it is closed: the **cookie half** and the **header half** of a web
 > session (ADR-0168 §6), and the **bootstrap value** a gateway process mints and
-> discloses once (ADR-0168 §5). A verifier retained by the gateway is in the class
-> as well, wherever the clauses below name one.
+> discloses once (ADR-0168 §5).
 
 > **Normative.** Nothing else is in the class. The device credential and the
 > enrolled hub identity a gateway holds to reach the hub are **not** — they stay
 > exactly where ADR-0124 §4 and §6 put them, in the OS keyring, read through the
 > Protocol ADR-0125 §8 hands the client, under ADR-0124 §6's own exemption and no
 > part of this one.
+
+> **Normative.** A **verifier** the gateway retains is not in the class and is not
+> Tier 0. ADR-0124 §6 rules that retaining "only a verifier from which the
+> credential cannot be recovered" means the retaining process "holds no device's
+> Tier 0 secret at rest", ADR-0168 §4 takes that verbatim for the gateway, and
+> ADR-0168 §6 classifies "both halves and the bootstrap value" as Tier 0 and no
+> fourth thing. No clause of this ADR reaches a verifier, and ADR-0168 §4's
+> prohibition on writing one anywhere is applied rather than narrowed.
 
 > **Normative.** No lane may cite this ADR to place any other Tier 0 value outside
 > the OS keyring, to exempt any other Tier 0 access from ADR-0004 §7, or to widen
@@ -292,8 +299,9 @@ once, neither of which permits it.
 > **(d) Bounded power rather than durable custody.** Every value in the class is
 > minted by this system rather than held on behalf of a third party, admits only
 > what the owner sitting at that machine can already do, and **ceases to admit
-> anything** at the earlier of ADR-0168 §8's absolute and idle expiry and the end
-> of the gateway process — the bootstrap value additionally being single-use.
+> anything** no later than the end of the gateway process. A session half
+> additionally ceases at ADR-0168 §8's absolute or idle bound, whichever comes
+> first; the bootstrap value additionally ceases on its single use (ADR-0168 §5).
 > ADR-0004 §3's protection of a long-lived third-party secret is replaced by a
 > value whose power does not outlive the process that minted it.
 
@@ -317,6 +325,20 @@ not observable. The keyring is the right custody for exactly that shape. A web
 session half is the opposite on all four counts, and the substitution is not "a
 weaker place because a stronger one is unavailable" but "a different kind of
 value, whose exposure is bounded by a process's life rather than by a custodian".
+
+**(d) states the bound per value, because ADR-0168 gives the two kinds different
+ones and an earlier draft flattened them.** That draft put every value under
+"ADR-0168 §8's absolute and idle expiry", which is a **session's** pair of bounds:
+`gateway_session_ttl` and `gateway_session_idle_timeout` govern a session, and
+ADR-0168 supplies no clock origin and no idle event for a bootstrap value that has
+never been exchanged. Two conforming gateways could therefore have differed — one
+accepting it until process exit, one expiring it a session-lifetime after start —
+which is the underdetermination ADR-0168 §8 opens by refusing. Adversarial review
+found it on the third round. What actually bounds an unexchanged bootstrap value
+is ADR-0168 §5's own pair: one value per process life, consumed by its single use.
+This ADR supplies no further bound and requires none; a lane that wants one owes
+the figure, on ADR-0084 §3's ground, and **#1329** records the question against
+ADR-0168 rather than answering it here.
 
 **(d) binds the value's power and not its bytes, and an earlier draft got that
 wrong in a way worth recording.** It said every value in the class "dies with the

@@ -1,6 +1,6 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause) and ADR-0172 (§3's keyring clause, §6's Tier 0 purge clause and §7's gating clause, each only as it reaches a browser-held web-session credential)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause) and ADR-0172 (§3's keyring clause, §6's Tier 0 purge clause and §7's gating clause, each only as it reaches a web-session credential)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
@@ -220,9 +220,10 @@
   browser's side, which is why §6 is engaged; on the browser's
   side custody is the browser profile's own file permissions, which is the
   operating system's own access control this clause itself chose; and every value
-  is minted by this system and **ceases to admit anything** at the earlier of
-  ADR-0168 §8's expiry and the end of the gateway process. That fourth
-  replacement binds the value's *capacity to admit* and never the persistence of
+  is minted by this system and **ceases to admit anything** no later than the end
+  of the gateway process — a session half also at ADR-0168 §8's absolute or idle
+  bound, the bootstrap value also on its single use. That fourth replacement
+  binds the value's *capacity to admit* and never the persistence of
   its bytes — no implementation is obliged to make a browser forget anything, and
   bytes a browser keeps past that point verify against nothing, because ADR-0168
   §4 has the gateway reconstruct no session from what a browser presents after a
@@ -231,7 +232,10 @@
   other database, none is ever committed, and the `.env` sentence authorises
   nothing. ADR-0172 §2 also states that a **durable** browser-held credential is
   not authorised: the bound is a condition of the exemption, so a design removing
-  it loses the exemption instead of inheriting it.
+  it loses the exemption instead of inheriting it. The class is closed at those
+  three values; a **verifier** the gateway retains is expressly not in it and not
+  Tier 0, on ADR-0124 §6's rule that retaining only a verifier means holding no
+  Tier 0 secret at rest.
 
   **Replaced — §6's Tier 0 purge clause, only as it reaches that same class.**
   "Deleting the user's data purges Tier 0 (keyring entries) and Tier 1 (database
