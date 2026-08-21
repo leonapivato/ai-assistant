@@ -65,7 +65,7 @@ that lane one open question with both halves of it visible. This ADR takes both.
 > developer convenience only and is git-ignored.
 
 §3's second bullet — the `SecretStore` reader clause — was already replaced by
-ADR-0125 §8 and is untouched here (§7).
+ADR-0125 §8 and is untouched here (this ADR's §7 classifies it).
 
 §7's first bullet:
 
@@ -166,7 +166,7 @@ Where this case differs from both is worth naming in advance, because it is what
 
 ADR-0168 §6's record clause has the gateway record its own **admission
 decisions** and nothing else: a session minted, and a request refused on a
-condition of §3, §4, §5, §6 or §7 — a refused mint included — with refusals
+condition of that ADR's §3, §4, §5, §6 or §7 — a refused mint included — with refusals
 rate-bounded per pair of request class and refusal condition. Nothing is recorded
 for a request a live session admits.
 
@@ -325,7 +325,8 @@ makes this narrow instead of a hole.
 
 > **Normative.** Three replacements stand in this exemption's place, and an
 > implementation that omits any of them does not have it: the read is confined to
-> one purpose and one path (§2's replacement (a), which serves both exemptions);
+> one purpose and one path — this ADR's §2, replacement (a), which serves both
+> exemptions;
 > custody is the operating system's own control, on the browser profile at one end
 > and on process memory at the other, so the access is gated by the OS where it
 > cannot be gated by `permissions/`; and the **session's admission** is auditable
@@ -335,7 +336,7 @@ makes this narrow instead of a hole.
 > **Normative.** The third replacement is **auditable admission and not auditable
 > use**. No implementation and no later lane may state, present or rely on it as
 > the latter: it does not make a successful Tier 0 read on the admission path
-> auditable, and §4 rules that none is recorded.
+> auditable, and this ADR's §4 rules that none is recorded.
 
 > **Normative.** This ADR does not cite ADR-0124 §6's exemption, does not widen
 > it, and does not rest on it; the same for ADR-0126 §11's. Each stays confined to
@@ -383,8 +384,8 @@ session then makes, which is §4's subject.
 
 > **Normative.** No record is written for a Tier 0 read or verification that a
 > live web session admits. The record ADR-0168 §6 requires — a mint, and every
-> refusal — is the whole of what §3's third replacement above supplies, and this
-> ADR adds no obligation to it.
+> refusal — is the whole of what this ADR's §3 supplies in its third
+> replacement, and this ADR adds no obligation to it.
 
 > **Normative.** No clause of this ADR is satisfied by, and no lane may cite it
 > toward, a record written per admitted request.
@@ -459,10 +460,10 @@ could explain to the lane that has to obey it.
 
 **What actually bounds the residual is stated, so that "not recorded" is not read
 as "not defended".** ADR-0168's content-security-policy and text-not-markup
-clauses (§6) are what keep the origin's script trustworthy in the first place; the
-session's absolute and idle expiry (§8) bound how long a rider can ride; the
-ceiling (§4) bounds how many sessions exist; and death with the process (§4)
-bounds the whole exposure to one gateway's lifetime. Those are the defences. The
+clauses (ADR-0168 §6) are what keep the origin's script trustworthy in the first
+place; the session's absolute and idle expiry (ADR-0168 §8) bound how long a
+rider can ride; the ceiling and death with the process (ADR-0168 §4) bound how
+many sessions exist and the whole exposure to one gateway's lifetime. Those are the defences. The
 record was never one of them.
 
 ### 5. The exemption is conditional on ADR-0168's own clauses
@@ -504,7 +505,7 @@ diverge from it.
 > **Normative.** This ADR decides nothing ADR-0168 §12 defers, adds no clause to
 > ADR-0168, and does not reopen any ruling of it. Where a reader finds this ADR
 > and ADR-0168 addressing the same subject, ADR-0168 governs and this one supplies
-> only the ADR-0004 exemption its §6 requires.
+> only the ADR-0004 exemption ADR-0168 §6 requires.
 
 **Deferred, and untouched, by name:**
 
@@ -518,7 +519,8 @@ diverge from it.
   permission.
 - **#74 — whether §7's gate reaches the model provider credential.** Untouched
   and open on its own subject. That credential is read from the process
-  environment by the provider SDK, is pre-existing, and is outside §1's class.
+  environment by the provider SDK, is pre-existing, and is outside this ADR's §1
+  class.
   ADR-0125 §8 records it as not authorised by that ADR, and this one authorises it
   no more.
 - **Whether the gateway's log, or this system's logging in general, carries a
@@ -527,7 +529,8 @@ diverge from it.
 - **Anything about `tools/` egress, residency, or the boundaries.** ADR-0017 §1
   as ADR-0124 §1 replaced it, and ADR-0155's residency and covered-content
   clauses, are not engaged: a loopback listener transmits nothing off the device,
-  and no value in §1's class is covered content or reaches an egress span.
+  and no value in this ADR's §1 class is covered content or reaches an egress
+  span.
 
 ### 7. Classification under ADR-0070 §1 and ADR-0082 §1
 
@@ -540,16 +543,18 @@ owed on any of the rest.**
 
 - **ADR-0004 §3's first bullet — superseded, narrowly (§2).** A reader holding
   only §3 believes every Tier 0 secret in this system's world sits in the OS
-  keyring, and after §2 that is wrong of the web-session credential class. The
+  keyring, and after this ADR's §2 that is wrong of the web-session credential
+  class. The
   record is ADR-0004's `Status` line and an appended dated note. That line is a
   grandfathered `Accepted, partially superseded …` value with no leading token, so
   ADR-0082 §2's exclusion does not apply and the qualifier goes on the line beside
   the note, accumulating as ADR-0070 §4 requires without dropping the five pairs
   already there. The scope names a clause and carries no `ADR-NNNN` token, so
-  §4's target-extraction invariant holds.
+  ADR-0070 §4's target-extraction invariant holds.
 - **ADR-0004 §7's first bullet — superseded, narrowly (§3).** A reader holding
   only §7 believes every Tier 0 access is gated by `permissions/` and recorded in
-  the audit trail, and after §3 that is wrong of a web session's admission. Same
+  the audit trail, and after this ADR's §3 that is wrong of a web session's
+  admission. Same
   record, same line, one pair naming both scopes — which is what ADR-0168 §6
   required when it made "**one** narrowly scoped supersession covering both" the
   prerequisite, and which ADR-0124's own pair on that line (`§6's delete clause
@@ -589,17 +594,17 @@ owed on any of the rest.**
   it to a client's bootstrap credential read. Its requirement that the credential
   be held in the keyring and read through the Protocol is applied to the gateway
   unchanged. Its stacked addition of a third `SecretStore` consumer is untouched,
-  and this ADR adds no fourth — no value in §1's class travels through that seam
-  at all.
+  and this ADR adds no fourth — no value in this ADR's §1 class travels through
+  that seam at all.
 - **ADR-0125 §7, §8 and §9 — used as given (§2).** A reader holding only ADR-0125
   still builds a `SecretStore` that refuses a file, an environment variable or a
   backend without the operating system's own access control, and still hands
   `models/` and `tools/` the reading face alone. `select_backend`'s five-prefix
   allow-list is the clause in code and nothing here relaxes it. ADR-0125 §9's
   statement that it gates nothing and discharges no condition is unaffected.
-- **ADR-0168 §4, §5, §6 and §9 — used as given, and §5 above makes three of them
-  conditions of this exemption.** Nothing is added to any of them and nothing is
-  read more widely. In particular §6's record clause is relied on exactly as
+- **ADR-0168 §4, §5, §6 and §9 — used as given, and §5 above makes two of them —
+  §4's storage clauses and §6's record clause — conditions of this exemption.**
+  Nothing is added to any of them and nothing is read more widely. In particular §6's record clause is relied on exactly as
   written: this ADR's §4 rules the same way it does — nothing recorded for a
   request a live session admits — so it imposes no obligation §6 does not already
   carry, and no record is owed on ADR-0168. §6's fourth replacement bullet
