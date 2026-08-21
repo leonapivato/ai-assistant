@@ -1,11 +1,34 @@
 # 71. Strengthen the planner's envelope extraction to a scanning parse
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0176 (the Decision's envelope-discriminator predicate — the first bullet's "non-empty list" test and the third bullet's rejection of an empty outer envelope)
 - Date: 2026-07-26
 - Partially supersedes: ADR-0047 — §4 step 1's extraction *mechanism* (the "first
   `{` to last `}`" slice); the Decision below replaces it with a scanning parse.
   Every other property of §4 — its goal, steps 2–4, the never-a-corrupt-plan
   guarantee, and §6's bounded repair — stands.
+- Partially superseded: 2026-08-21 by ADR-0176 — **the Decision's
+  envelope-discriminator predicate is no longer "`steps` is a non-empty list"; the
+  scanning parse it selects with is untouched.** The Decision's first bullet takes
+  "the first decoded object whose `steps` is a **non-empty list**" as the envelope
+  and steps over an object carrying "a `steps` key of the wrong type or an empty
+  list"; its third bullet rules that "an outer envelope whose `steps` is empty is
+  therefore rejected as an empty plan (§4)".
+  [ADR-0176](0176-a-planner-may-decline-to-name-a-capability-and-the-decline-is-asserted-rather-than-empty.md)
+  §1 makes an empty `steps` list **accompanied by** a `no_capability_needed` key
+  whose value is the JSON boolean `true` a second legal envelope — a **decline** —
+  and §2 restates the predicate as "the first decoded object that is an envelope,
+  plan-shaped or decline-shaped". A reader holding only ADR-0071 would build a scan
+  that steps over the decline and falls to bounded repair, so ADR-0070 §1 makes this
+  a supersession; ADR-0176 §10 states its extent.
+
+  **What stands is deliberately almost everything.** The `raw_decode` scan itself,
+  the advance-past-never-re-enter rule, the treatment of a non-syntax bounded parse
+  error as a miss, the `_MAX_EXTRACTION_MISSES` budget, the fall-back to the first
+  decoded object, the earlier-of-two-genuine-envelopes rule, and the
+  never-a-corrupt-plan guarantee are all untouched. The widening is one shape, and
+  every shape this Decision rules on today is ruled the same way after it: a bare
+  `{"steps": []}` decoy is still stepped over, and an outer object whose `steps` is
+  empty still cannot be overridden by a non-empty `steps` nested inside it.
 
 ## Context
 
