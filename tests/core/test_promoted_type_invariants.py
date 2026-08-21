@@ -361,6 +361,17 @@ class TestTurnOutcomeReply:
         with pytest.raises(ValidationError, match="an outcome with no turn owes no answer"):
             TurnOutcome(turn=None, reply_degraded=True)
 
+    def test_a_recovered_resume_may_not_carry_a_reply_either(self) -> None:
+        """§4 in the ``reply`` direction on this shape, not only the flag direction.
+
+        "``reply`` is ``None`` on exactly three shapes" — so prose here is a contract
+        violation and not an oddity. There is no turn behind it to have composed it
+        from, and an adapter handed one would render an answer beside a step account
+        with nothing to show for it.
+        """
+        with pytest.raises(ValidationError, match="outcome with no turn must carry no reply"):
+            TurnOutcome(turn=None, reply="You prefer hiking.")
+
     def test_the_flag_is_never_true_beside_an_answer(self) -> None:
         """§4: "never ``True`` beside a non-``None`` ``reply``".
 

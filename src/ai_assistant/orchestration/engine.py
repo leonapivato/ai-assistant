@@ -4218,6 +4218,30 @@ class Engine:
     ) -> TurnOutcome:
         """Reload the parked execution and continue its step.
 
+        **The critical section is the resolution and nothing after it.**
+        :meth:`_resolve_park` runs under ``_recovery_lock`` so a resolution is
+        mutually exclusive with a recovery enumeration; composing the answer and
+        capturing the exchange run outside it, over a resolved step no other caller
+        can still reach. Holding the lock across the composing model call would put
+        an arbitrarily slow provider — one exhausting ADR-0011 §2's retry budget, say
+        — between a second, unrelated ``resume`` and its own park, and between
+        ``pending_confirmations`` and a listing that needs no model at all. Capture
+        runs outside it for the same reason and on ``converse``'s own precedent,
+        which captures under no lock whatever.
+        """
+        parked, step = await self._resolve_park(token, approved=approved, timeout=timeout)
+        composed = await self._compose(parked.turn, step)
+        return await self._capture_resumption(parked, step, composed)
+
+    async def _resolve_park(
+        self,
+        token: ContinuationToken,
+        *,
+        approved: bool,
+        timeout: timedelta,  # noqa: ASYNC109 — threaded through to the seam (ADR-0029 §4)
+    ) -> tuple[_Parked, StepOutcome]:
+        """Record the answer, drive what it authorised, and evict the binding.
+
         Runs under ``_recovery_lock`` so a resolution is mutually exclusive with a
         recovery enumeration: resolving records the decision through the runner and
         evicts the binding's ``_parked`` entry, both of which recovery reads, so the
@@ -4225,6 +4249,9 @@ class Engine:
         lock is held across the runner call — the resolve and any execution it drives
         — so recovery cannot observe a binding mid-resolution. Resolutions are
         human-paced, so serializing them behind this one lock is free in practice.
+
+        Returns:
+            The parked entry this token named, and what became of its step.
         """
         async with self._recovery_lock:
             parked = self._parked.get(token.handle)
@@ -4254,13 +4281,7 @@ class Engine:
             # single-resolution index anyway; evicting keeps the table bounded and
             # turns a replay into a clean "unknown token" (ADR-0042 §4).
             self._parked.pop(token.handle, None)
-            # Composed inside the lock, like the capture below it. A resume from a
-            # *recovered* park composes nothing at all (ADR-0170 §4), and the live
-            # case pays one model call on a path the comment above already accepts
-            # as human-paced — a resolution waits on a person, so serialising the
-            # few of them behind this lock stays free in practice.
-            composed = await self._compose(parked.turn, step)
-            return await self._capture_resumption(parked, step, composed)
+            return parked, step
 
     async def _capture_resumption(
         self, parked: _Parked, step: StepOutcome, composed: ComposedReply | None

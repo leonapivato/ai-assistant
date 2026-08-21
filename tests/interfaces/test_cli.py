@@ -2064,18 +2064,28 @@ async def test_a_degraded_composition_is_stated_and_the_account_still_rendered(
     await engine.aclose()
 
 
-def test_a_composed_answer_is_neutralised_for_the_terminal(output: StringIO) -> None:
+async def test_a_composed_answer_is_neutralised_for_the_terminal(output: StringIO) -> None:
     """§8: engine-supplied text goes through ``_safe``, as a policy's reason does.
 
     A reply is model output rendered in the assistant's own voice, so Rich markup
     inside it is a control sequence this terminal would otherwise interpret
-    (ADR-0042 §4).
+    (ADR-0042 §4). Driven through a real turn rather than a hand-built outcome,
+    because ADR-0170 §4 makes an answer on a turn-less outcome unconstructible —
+    which is the invariant working, not an obstacle to route around.
     """
-    cli._render_reply(TurnOutcome(turn=None, step=None, reply="[bold red]not markup[/] \x1b[31m"))
+    hostile = "[bold red]not markup[/] \x1b[31m"
+    engine = _engine(tools=(tool(),), composing=_answering(hostile))
+    outcome = await engine.converse("send it", timeout=PATIENT)
+    output.truncate(0)
+    output.seek(0)
+
+    cli._render_reply(outcome)
 
     rendered = output.getvalue()
-    assert "not markup" in rendered
+    assert outcome.reply == hostile  # the engine carries it verbatim...
+    assert "not markup" in rendered  # ...and the adapter escapes it on render
     assert "\x1b[31m" not in rendered
+    await engine.aclose()
 
 
 def test_an_outcome_owing_no_answer_renders_nothing_for_it(output: StringIO) -> None:
