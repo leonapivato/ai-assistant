@@ -61,6 +61,11 @@ _UNREACHABLE: Final = "hub-unreachable"
 #: :data:`_UNREACHABLE`, because §9 requires the two "distinguishable".
 _DECLINED: Final = "assistant-declined"
 
+#: The fault for a poll that failed in neither of the two ways ADR-0168 §9 names.
+#: Its own name rather than either of theirs, because §9's distinction is only worth
+#: anything if a third condition is not quietly reported as one of the two.
+_FAILED: Final = "delivery-failed"
+
 #: The fault for the one refusal ADR-0175 §8 names by hand: a
 #: ``gateway_notification_budget`` above the hub's own ceiling. No load-time check
 #: can catch it — ``hub_max_notification_budget`` is another process's setting and
@@ -276,6 +281,37 @@ class DeliveryFanOut:
         paint loses that notification, which is the shape ADR-0131 §2a already
         accepts one hop in — and closing it would mean handing a browser the
         capability ADR-0172 §1 closes its class against.
+
+        **§4's terminal-value guarantee is unconditional, so the catch is too.** "A
+        poll the gateway cannot complete ends every open delivery stream with a
+        terminal value reporting it" names no exception classes, and a browser
+        holding a response body cannot tell a gateway that stopped polling from one
+        with nothing to say — the very condition §4 spends a keep-alive to make
+        observable. So anything the three named classes do not cover still ends every
+        stream, under a fault name that claims nothing about which side failed:
+        ADR-0168 §9 asks for a transport failure and a request the hub received and
+        declined to be distinguishable, and a poll that failed in neither of those
+        ways is a third condition rather than one of them wearing the wrong label.
+        """
+        terminal: Mapping[str, Any] | None = None
+        try:
+            terminal = await self._poll_while_watched()
+        except Exception as exc:
+            # Logged with its traceback because it is, by construction, a condition
+            # nothing here anticipated — and the streams are still ended, because a
+            # browser is owed an ending whatever the gateway met.
+            _log.exception("gateway.delivery.failed")
+            terminal = streams.fault(_FAILED, detail=str(exc))
+        if terminal is not None:
+            self._end_all(terminal)
+
+    async def _poll_while_watched(self) -> Mapping[str, Any] | None:
+        """Poll and fan out until no stream is left, or the poll cannot go on.
+
+        Returns:
+            The terminal value every open stream is owed, or ``None`` where the loop
+            ended because nothing was watching any more — which owes no value,
+            because there is nobody to write one to.
         """
         acknowledging: str | None = None
         while self._streams:
@@ -284,14 +320,11 @@ class DeliveryFanOut:
                     acknowledging=acknowledging, budget=self._budget
                 )
             except TransportError as exc:
-                self._end_all(streams.fault(_UNREACHABLE, detail=str(exc)))
-                return
+                return streams.fault(_UNREACHABLE, detail=str(exc))
             except NotificationBudgetError as exc:
-                self._end_all(streams.fault(_BUDGET_DECLINED, detail=str(exc)))
-                return
+                return streams.fault(_BUDGET_DECLINED, detail=str(exc))
             except AssistantError as exc:
-                self._end_all(streams.fault(_DECLINED, detail=str(exc)))
-                return
+                return streams.fault(_DECLINED, detail=str(exc))
             # A delivery where the poll returned one, and otherwise a value carrying
             # nothing but its own kind (§4). The keep-alive is not decoration: a
             # stream that writes nothing for an hour is one nothing can distinguish
@@ -314,6 +347,7 @@ class DeliveryFanOut:
                     streams_written=written,
                     streams_abandoned=len(watching) - written,
                 )
+        return None
 
     def _end_all(self, value: Mapping[str, Any]) -> None:
         """End every open stream with one terminal value (§4).

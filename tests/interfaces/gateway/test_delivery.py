@@ -528,3 +528,35 @@ async def test_the_ceiling_refuses_a_delivery_stream_rather_than_opening_a_conne
 
     assert fan_out.open() is None
     assert engine.calls == []
+
+
+async def test_a_poll_that_fails_in_no_named_way_still_ends_every_stream() -> None:
+    """§4's terminal-value guarantee names no exception class: "A poll the gateway
+    cannot complete ends every open delivery stream with a terminal value reporting
+    it."
+
+    A browser holding a response body cannot tell a gateway that stopped polling from
+    one with nothing to say — which is the very condition §4 spends a keep-alive to
+    make observable — so a poll that fails outside the three conditions above still
+    owes an ending. The fault is its own name rather than either of ADR-0168 §9's
+    two, because §9's distinction between a transport failure and a request the hub
+    received and declined is only worth anything if a third condition is not quietly
+    reported as one of them.
+
+    The slot comes back with it: ending every stream is what lets each handler close
+    its own, and the last close reaps the poll.
+    """
+    fan_out, engine, slots = _fan_out([RuntimeError("the engine is shutting down")])
+    stream = fan_out.open()
+    assert stream is not None
+    read: list[Mapping[str, Any]] = []
+    reading = asyncio.ensure_future(_drain(stream, read))
+
+    await engine.answer_one_poll()
+    await reading
+
+    assert read == [
+        {"kind": "fault", "fault": "delivery-failed", "detail": "the engine is shutting down"}
+    ]
+    fan_out.close(stream)
+    assert slots.held == 0

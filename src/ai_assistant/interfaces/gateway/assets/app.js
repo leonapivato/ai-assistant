@@ -138,6 +138,10 @@ const FAULTS = {
     "The hub is not reachable, so nothing was asked. This is the gateway " +
     "reporting a transport failure — it is not an answer, and nothing was queued.",
   "assistant-declined": "The hub received the request and declined it.",
+  "delivery-failed":
+    "The gateway could not complete its notification poll, so it stopped watching. " +
+    "This is neither the hub being unreachable nor a request it declined — it is a " +
+    "third condition, and it is said as one. Start watching again to retry.",
   "delivery-budget-declined":
     "The hub declined the poll's budget: gateway_notification_budget is above the " +
     "hub's own hub_max_notification_budget. Nothing is retried; lower one figure or " +
