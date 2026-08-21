@@ -144,8 +144,12 @@ Trace a reply against those three.
   already does with stored memories.
 - **Returning it** puts the answer in the result payload of a request the device
   sent. On a loopback hub that is not egress at all. On the remote listener it is
-  boundary three, ratified by ADR-0124 §1, and it carries no data the request path
-  did not already carry in the other direction.
+  boundary three, ratified by ADR-0124 §1 — and the answer **does** carry user data
+  the request did not. "What do you know about me?" comes back as "you prefer
+  hiking", composed from accumulated memory; that is the milestone's whole point and
+  it needs no minimising. ADR-0124 §1 authorises the hub's transport to an enrolled
+  device as such, and the permission does not turn on the payload being derivable
+  from the request that asked for it.
 - **`tools/` is not on the path.** No registry lookup, no `ToolDefinition`, no
   `ToolInvoker.invoke`, no destination, no recipient, no credential.
 
