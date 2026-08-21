@@ -365,23 +365,45 @@ async def test_a_repeated_entry_takes_the_first_answer() -> None:
     assert relations == {"a": ConflictRelation.ADDS}
 
 
-def test_the_modules_own_default_bound_is_the_one_settings_carries() -> None:
-    """ADR-0171 §5: the module default must not disagree with ``Settings``.
+async def test_the_default_bound_reaching_a_request_is_the_one_settings_carries() -> None:
+    """ADR-0171 §5: the default that *reaches* ``reconcile`` is ``Settings``'.
 
     Three sites hold the bound today — ``Settings.reconciler_max_conflicts``, this
     module's ``DEFAULT_RECONCILER_MAX_CONFLICTS``, and the composition root that
-    carries the first into the constructor. Only the last is wired, so a raise applied
-    to the field and not to the constant leaves a reconciler built without ``Settings``
-    labelling at the *old* bound while every measure reports the new one — a
-    disagreement no other case in this file can see, because each of them passes
-    ``max_conflicts`` explicitly.
+    carries the first into the constructor — and only the last of those is wired. So a
+    raise applied to the field and not to the constant leaves a reconciler built
+    without ``Settings`` labelling at the *old* bound while every measure reports the
+    new one. No other case in this file can see that: each of them passes
+    ``max_conflicts`` explicitly, which is exactly what a default-value regression
+    hides behind.
 
-    Pinned as an equality against ``Settings`` rather than against the literal, so the
-    next measured raise (ADR-0171 §7 leaves the door open at roughly 25) moves one
-    number and this case keeps holding the two together. The literal is pinned once,
-    in ``tests/core/test_config.py``, where the value is the decision.
+    Stated **behaviourally**, over a request, rather than as an equality between two
+    names. An equality would still pass a constructor whose own default argument had
+    drifted off the constant — a fourth link in the chain, and the only one production
+    never exercises, since composition always passes the setting through. The property
+    ADR-0171 §5 asks for is about the value that reaches the model call, so this
+    reaches it.
+
+    The expected count is read from ``Settings`` rather than written as a literal, so
+    the next measured raise (ADR-0171 §7 leaves that open at roughly 25) moves one
+    number and this case keeps the chain welded. The literal is pinned once, in
+    ``tests/core/test_config.py``, where the value is the decision rather than the
+    plumbing.
     """
-    assert Settings().reconciler_max_conflicts == DEFAULT_RECONCILER_MAX_CONFLICTS
+    bound = Settings().reconciler_max_conflicts
+    assert bound == DEFAULT_RECONCILER_MAX_CONFLICTS
+    model = _answering({"a": "adds"})
+    conflicts = [_record(f"member-{index:02d}") for index in range(bound + 1)]
+    beyond = conflicts[-1].id
+
+    # Constructed with **no** ``max_conflicts``, which is the whole point.
+    await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+        _proposal(_record("new")), conflicts
+    )
+
+    sent = "\n".join(message.content for message in model.calls[0].messages)
+    assert sent.count("STORED BELIEF") == bound
+    assert beyond not in sent
 
 
 @pytest.mark.parametrize("bound", [0, -1])
