@@ -216,6 +216,17 @@ class SessionTable:
         if found is None:
             return Admission.NO_LIVE_SESSION
         key, session = found
+        # **The bound is what ends a session, not the scheduler's promptness.** The
+        # timer below is the continuous destruction ADR-0168 §4 requires, and it is
+        # still what removes an expired session with nobody asking; this is the
+        # guard that keeps a *late* callback from admitting one past the bound it
+        # has already crossed. Without it a busy loop, a suspended machine or a
+        # request landing on the same turn as an overdue timer would be admitted —
+        # and `_rearm` would then cancel the very callback that was about to end
+        # it, so a session could outlive both of its bounds indefinitely.
+        if self._expired(session):
+            self._end(key)
+            return Admission.NO_LIVE_SESSION
         if len(cookie_halves) != 1 or not hmac.compare_digest(
             verifier(cookie_halves[0]), session.cookie_verifier
         ):
@@ -271,6 +282,18 @@ class SessionTable:
         delay = max((ends_at - self._now()).total_seconds(), 0.0)
         session.timer = self._defer(delay, partial(self._end, key))
 
+    def _expired(self, session: _Session) -> bool:
+        """Whether either of ADR-0168 §4's two bounds has been reached.
+
+        Read with ``>=`` so that the answer agrees with the timer, which is armed
+        for exactly that instant: a session the timer would have ended is one this
+        refuses to admit, whether or not the callback has run yet.
+        """
+        moment = self._now()
+        return moment >= session.expires_at or moment >= session.last_used_at + self._idle_timeout
+
     def _end(self, key: str) -> None:
         """Destroy one session, whichever of its two bounds arrived first."""
-        self._sessions.pop(key, None)
+        session = self._sessions.pop(key, None)
+        if session is not None and session.timer is not None:
+            session.timer.cancel()

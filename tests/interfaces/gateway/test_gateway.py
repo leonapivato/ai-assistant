@@ -251,10 +251,17 @@ async def _start_session(harness: Harness) -> tuple[str, str]:
 
 
 def _ask(
-    harness: Harness, *, header_half: str | None, cookie_half: str | None
+    harness: Harness,
+    *,
+    header_half: str | None,
+    cookie_half: str | None,
+    conversation: str | None = None,
 ) -> tuple[str, bytes]:
     """Frame one `/ask`, with whichever halves the case presents."""
-    body = json.dumps({"utterance": "what is on today"}).encode()
+    asked: dict[str, str] = {"utterance": "what is on today"}
+    if conversation is not None:
+        asked["conversation_id"] = conversation
+    body = json.dumps(asked).encode()
     lines = [
         "POST /ask HTTP/1.1",
         "Host: {host}",
@@ -434,6 +441,28 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
         "step",
     }
     assert [call[0] for call in harness.engine.calls] == ["converse"]
+
+
+async def test_a_named_conversation_is_relayed_to_the_engine_unchanged(
+    harness: Harness,
+) -> None:
+    """The gateway relays what the browser named and re-derives nothing.
+
+    A conversation is the hub's (ADR-0074 §2); the id it hands back is "what a
+    client keeps and presents to continue", and the gateway is the second adapter
+    to carry that — the CLI already does it with ``--conversation``. Passing an id
+    the assistant does not know is the engine's refusal to author, not this
+    adapter's to invent.
+    """
+    cookie_half, header_half = await _start_session(harness)
+    first = await harness.send(*_ask(harness, header_half=header_half, cookie_half=cookie_half))
+    named = first.payload["outcome"]["conversation_id"]
+
+    await harness.send(
+        *_ask(harness, header_half=header_half, cookie_half=cookie_half, conversation=named)
+    )
+
+    assert harness.engine.calls[-1][1]["conversation_id"] == named
 
 
 async def test_an_admitted_request_that_asks_the_assistant_for_nothing_never_reaches_it(

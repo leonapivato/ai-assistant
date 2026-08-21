@@ -48,6 +48,12 @@ _METHODS: Final = frozenset({"GET", "POST"})
 #: A request line is a method, a target and a version, and nothing else.
 _REQUEST_LINE_PARTS: Final = 3
 
+#: The characters a header name may be made of — RFC 9110's `token`. Checked
+#: rather than assumed, because "refused rather than guessed at" is the rule this
+#: module is built on and a name with a space in it is a line two parsers would
+#: read differently.
+_TOKEN = frozenset("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!#$%&'*+-.^_`|~")
+
 
 class RequestError(Exception):
     """A browser request this door will not interpret.
@@ -271,8 +277,8 @@ def _parse_headers(lines: list[str]) -> tuple[tuple[str, str], ...]:
         The headers, names lower-cased, in arrival order.
 
     Raises:
-        MalformedRequestError: If a line is folded, carries no colon, or has an empty
-            or non-token name.
+        MalformedRequestError: If a line is folded, carries no colon, or has an
+            empty or non-token name.
     """
     headers: list[tuple[str, str]] = []
     for line in lines:
@@ -281,7 +287,7 @@ def _parse_headers(lines: list[str]) -> tuple[tuple[str, str], ...]:
         if line[0] in " \t":
             raise MalformedRequestError
         name, sep, value = line.partition(":")
-        if not sep or not name or name.strip() != name:
+        if not sep or not name or not _TOKEN.issuperset(name):
             raise MalformedRequestError
         headers.append((name.lower(), value.strip()))
     return tuple(headers)

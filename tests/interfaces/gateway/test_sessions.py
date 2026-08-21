@@ -174,21 +174,69 @@ def test_a_session_is_destroyed_by_its_own_timer_and_not_by_the_next_request(
     assert len(table) == 0
 
 
+def test_a_session_past_a_bound_is_not_admitted_by_a_late_timer(
+    clock: Clock, timers: Timers
+) -> None:
+    """The bound ends the session, not the promptness of the callback.
+
+    The timer is armed and has not run — a busy loop, a suspended machine, or a
+    request landing on the same turn as an overdue callback. ADR-0168 §4 says a
+    session "ends at the earlier of its absolute lifetime and its idle timeout",
+    and admitting one past that would be worse than late: the re-arm on admission
+    would cancel the very callback about to end it, so the session could outlive
+    both of its bounds indefinitely.
+    """
+    table = _table(clock, timers)
+    values = table.mint()
+    assert values is not None
+
+    clock.advance(_IDLE)
+    outcome = table.admit(header_half=values.header_half, cookie_halves=(values.cookie_half,))
+
+    assert outcome is Admission.NO_LIVE_SESSION
+    assert len(table) == 0
+    assert timers.armed == []
+
+
+def test_a_session_past_its_absolute_lifetime_is_not_admitted_either(
+    clock: Clock, timers: Timers
+) -> None:
+    """The other of the two bounds, kept in use the whole way so the idle one
+    never binds — which is what makes the absolute one the subject."""
+    table = _table(clock, timers)
+    values = table.mint()
+    assert values is not None
+    for _ in range(23):
+        clock.advance(timedelta(minutes=30))
+        table.admit(header_half=values.header_half, cookie_halves=(values.cookie_half,))
+
+    clock.advance(timedelta(minutes=30))
+    outcome = table.admit(header_half=values.header_half, cookie_halves=(values.cookie_half,))
+
+    assert outcome is Admission.NO_LIVE_SESSION
+
+
 def test_use_restarts_the_idle_clock_but_never_the_absolute_one(
     clock: Clock, timers: Timers
 ) -> None:
     """The two bounds are kept apart: an idle timeout that measured age would be
     the absolute lifetime under another name.
 
-    After eleven and a half hours the session has half an hour of *lifetime* left,
-    so a use re-arms to that rather than to a fresh idle hour.
+    Used every half hour, the session never goes idle — so after eleven and a half
+    hours it is still live, and what is left is half an hour of *lifetime*. A
+    re-arm to a fresh idle hour there would push the death past
+    ``gateway_session_ttl``, which is the bound that may not move.
     """
     table = _table(clock, timers)
     values = table.mint()
     assert values is not None
 
-    clock.advance(timedelta(hours=11, minutes=30))
-    table.admit(header_half=values.header_half, cookie_halves=(values.cookie_half,))
+    for _ in range(23):
+        clock.advance(timedelta(minutes=30))
+        assert (
+            table.admit(header_half=values.header_half, cookie_halves=(values.cookie_half,))
+            is Admission.ADMITTED
+        )
 
     assert timers.armed[-1].delay == pytest.approx(timedelta(minutes=30).total_seconds())
 

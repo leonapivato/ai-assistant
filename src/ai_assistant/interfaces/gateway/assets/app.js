@@ -17,6 +17,13 @@
 const STORAGE_KEY = "assistant.session.header-half";
 const SESSION_HEADER = "X-Assistant-Session";
 
+// The conversation the last turn ran under, kept in page state alone. The hub
+// owns the conversation; this is the id it handed back, held so the next question
+// continues the same one rather than starting a fresh one the owner never asked
+// for — the same thing `assistant ask --conversation` does at the terminal. It is
+// not persisted: a reload is a new page, and the id is the hub's to hand back.
+let conversationId = null;
+
 const el = (id) => document.getElementById(id);
 
 function headerHalf() {
@@ -137,9 +144,14 @@ function renderOutcome(outcome) {
   });
   body.appendChild(list);
   renderStep(body, outcome.step);
-  el("conversation").textContent = outcome.conversation_id
-    ? `Conversation ${outcome.conversation_id}`
-    : "";
+  // `null` only where nothing could be resolved (a recovered park, a deleted
+  // conversation), and the last known id is then kept rather than cleared: the
+  // hub decides which conversation a turn ran under, and forgetting one on an
+  // answer that names none would silently start a new one on the next question.
+  if (outcome.conversation_id) {
+    conversationId = outcome.conversation_id;
+  }
+  el("conversation").textContent = conversationId ? `Conversation ${conversationId}` : "";
   show("answer", true);
 }
 
@@ -192,6 +204,7 @@ async function startSession(event) {
     return;
   }
   el("bootstrap-value").value = "";
+  conversationId = null;
   if (!rememberHeaderHalf(body.header_half)) {
     fault("This browser will not store the session, so it cannot hold one.");
     return;
@@ -210,10 +223,14 @@ async function ask(event) {
   const button = el("ask-button");
   button.disabled = true;
   try {
+    const asked = { utterance: el("utterance").value };
+    if (conversationId !== null) {
+      asked.conversation_id = conversationId;
+    }
     const response = await fetch("/ask", {
       method: "POST",
       headers: { "Content-Type": "application/json", [SESSION_HEADER]: half },
-      body: JSON.stringify({ utterance: el("utterance").value }),
+      body: JSON.stringify(asked),
     });
     const body = await readBody(response);
     if (response.ok) {
