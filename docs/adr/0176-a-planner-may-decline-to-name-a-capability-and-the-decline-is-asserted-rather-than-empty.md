@@ -183,6 +183,14 @@ step 2 already refuses, and it still gets step 2's specific verdict.
 > **ahead of** a well-formed decline envelope, asserting the returned `ActionPlan`
 > has empty `steps` and carries the *second* object's `rationale`.
 
+> **Normative.** No existing extraction test's expectation is edited to
+> accommodate this change. `tests/planning/test_planner.py` already pins
+> ADR-0071's guarantee — `test_a_malformed_steps_decoy_does_not_shadow_the_envelope`
+> over a decoy set that includes a bare empty `steps` list, and
+> `test_a_nested_decoy_does_not_override_an_empty_plan` — and both pass unchanged
+> under this decision. A lane that finds it must edit one has widened the
+> predicate further than §2 rules, and stops rather than editing it.
+
 That test exists because the plausible wrong implementation passes everything
 else. A lane that relaxes step 2's shape check and leaves the scan's predicate at
 "non-empty list" gets the decoy recorded as the fall-back first object, steps
@@ -216,6 +224,20 @@ way, and §7 is why that is acceptable rather than merely bounded.
 > is absent, null, not a string, or blank is an extraction failure and enters
 > ADR-0047 §6's bounded repair. On a plan envelope `rationale` stays optional,
 > exactly as ADR-0047 §4 step 2 leaves it.
+
+> **Normative.** The implementing lane ships a parameterized test over all four
+> conditions — a decline envelope whose `rationale` is absent, null, a non-string,
+> and whitespace-only — asserting in each case that the failure is the planner's
+> own extraction failure driving a repair round carrying §5's decline-specific
+> message, and that no other exception type escapes `plan`.
+
+**The "no other exception type escapes" half is the load-bearing one.** An
+implementation that reaches for `rationale.strip()` before checking the value is
+a string raises `AttributeError` on the null case. That is not `PlanningError`
+and not `ModelError`, so it escapes `Planner.plan` as something the Protocol does
+not document and ADR-0047 §6's bounded-repair property never sees — and every
+other test this decision requires passes with that path broken, because none of
+them sends a malformed rationale.
 
 On a plan, `rationale` supplements: the steps themselves record what was decided,
 and each carries an `intent` and a `capability`. On a decline there are no steps,
@@ -262,6 +284,23 @@ of this decision: *"what do you know about me?"* declines, because the beliefs
 that answer it are already rendered above; *"send Ana an email"* plans, because
 sending is an act and no amount of context performs it. A goal that needs both —
 recall something and then act on it — is a plan, because the act is required.
+
+> **Normative.** The implementing lane ships one narrow test of the prompt: that
+> the system prompt names the `no_capability_needed` key and renders the decline
+> envelope.
+
+> **Normative.** No test is required — and none is demanded of the implementing
+> lane — that string-matches the *wording* of the prompt's test between the two
+> directions.
+
+The first is behaviour rather than wording: a prompt that never names the key can
+never elicit the shape, and every other clause of this decision would pass with
+the whole thing inert. The second is a refusal, and it is deliberate. An
+assertion that the prompt contains a particular sentence fails on every rewording
+that improves the instruction and passes on every rewording that guts it, so it
+pins prose and reports nothing about behaviour. This section's obligation is on
+what the prompt states, a reviewer reading the prompt is what checks it, and §7
+is the same honest limit applied one level up.
 
 ### 5. Bounded repair steers the model toward neither shape
 
@@ -330,6 +369,13 @@ propagates unwrapped.
 > decline, not an artefact of the branch having been unreachable. No
 > `orchestration/` change is required to make it so, and this decision requires
 > none.
+
+> **Normative.** The implementing lane ships a case at the engine seam on a
+> declined plan, asserting that the goal and the plan are persisted, that the turn
+> is composed and captured, and that no execution is started. It is a case on a
+> branch that already exists rather than a change to it; a lane that finds itself
+> editing `orchestration/` to make it pass has found something this decision did
+> not rule and stops.
 
 > **Normative.** A decline is persisted whether or not the composed answer
 > succeeds. It is a decision the system made about the user's request, and ADR-0014
