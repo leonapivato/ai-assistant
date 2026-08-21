@@ -1,7 +1,41 @@
 # 85. The promoted engine surface: fifteen methods, twenty-four types, one closed graph
 
-- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator)
+- Status: Partially superseded by ADR-0107 (§4a's "`Belief` is unchanged … its counts stay derived from it", and §4's normative field rows for `Belief` and `BeliefSummary`) and ADR-0173 (§8a's enumeration of `kind` as one of five values, which gains a sixth for a streamed chunk; and §8c's enforcement clause "on results before return", as it reaches a method returning an async iterator) and ADR-0178 (§4's Group A field row for `Confirmation`, which enumerates five fields where there are now six)
 - Date: 2026-07-31
+- Partially superseded: 2026-08-22 by ADR-0178 — **one row of one table, and
+  §5's walk gains an edge without its conclusion moving.** ADR-0178 closes #1366:
+  ADR-0148 §8's fourth clause requires a `CONFIRM` on an egress call to name the
+  connected account's identity, the canonical destination set in both forms and the
+  payload description, and `Confirmation`'s five members carry none of the three. It
+  adds a sixth, `egress: ConfirmationEgress | None`, required with no default.
+
+  **Replaced — §4's Group A row for `Confirmation`**, "`tool_id: Identifier`,
+  `tool_description: str`, `parameters: FrozenJsonMapping`, `reason: str`, `token:
+  ContinuationToken`". A reader holding only that row builds a five-field model, and
+  an implementation generated from it rejects a conforming hub's frame on
+  `extra_forbidden` — ADR-0070 §1's first limb. ADR-0107's partial supersession of
+  §4's rows for `Belief` and `BeliefSummary` is the precedent for treating a row this
+  way. **No other row of §4 moves**, and §4c's rule that every string on this surface
+  is `EncodableText` is used as given: the new member's text fields layer on it.
+
+  **Not replaced — §5, and this is the half worth stating.** The walk gains one
+  edge, `Confirmation → ConfirmationEgress`, and stops there: §5's own rule is
+  "follow a field's annotation to its declared type, stop at anything already in
+  `core`", and ADR-0178 authors both new types in `core/types.py` directly. "The
+  twenty-four that promote" counts types moving out of `orchestration`, of which
+  this adds none, so the number and the closed boundary are unchanged.
+
+  **Not replaced — §3, §8, §10.** The fifteen signatures and the method set are
+  untouched; §8's contract limit, §8b's 512-byte reserve and §8d's floor are
+  unchanged and are not recomputed (ADR-0178 §9), and §8f's belief page remains the
+  worst case — the new member adds a term linear in the call's own arguments, not a
+  factor. §10's per-method mapping is unchanged, because a result payload takes the
+  shape of the method's declared return annotation and no wire-side schema
+  transcribes the member.
+
+  **What this does cost is the wire version, and ADR-0085 is not where that rule
+  lives.** ADR-0124 §9's second limb moves `PROTOCOL_VERSION` from 9 to 10, on
+  ADR-0170 §3's precedent exactly; ADR-0178 §6 records it.
 - Partially superseded: 2026-08-21 by
   [ADR-0173](0173-an-answer-streams-as-chunks-of-one-reply-and-the-result-frame-is-still-the-answer.md),
   in the scope the `Status` line names — **two envelope clauses, and nothing about
