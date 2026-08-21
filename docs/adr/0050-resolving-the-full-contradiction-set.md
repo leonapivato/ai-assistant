@@ -11,8 +11,10 @@
   corrected, restated" — was measured false by #1188 at the ratified threshold, and
   ADR-0159 §5 acted on that measurement for the members it held relations for. #1294's
   supersede audit (#1302) measures the remainder: the members with *no* relation are
-  the majority, because the reconciler labels at most `reconciler_max_conflicts` of
-  the offered set and the writer sweeps in every unlabelled sibling. The bound
+  the majority. The certain `agrees` rung is unconditional and spares a **verbatim**
+  restatement at any rank, but everything it cannot settle goes to a model bounded by
+  `reconciler_max_conflicts`, and every member past that bound reaches the writer with
+  no relation at all — so the writer sweeps it in. The bound
   accounts for 100% of the replay's 2,522 unlabelled relations, and 56 rulings retired
   146 records.
   [ADR-0171](0171-a-supersession-sweeps-in-only-a-labelled-contradiction-and-the-labelling-bound-rises-to-fifteen.md)

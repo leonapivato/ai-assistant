@@ -7,9 +7,11 @@
   for; §1's ruling and everything §3 argues for promoting the obligation stand.**
   ADR-0159 §5 excluded from the retirement set any conflict the writer holds a
   `RESTATES` or `ADDS` relation for. #1294's supersede audit (#1302) measures what
-  that left: the reconciler labels at most `reconciler_max_conflicts` members, and the
-  writer sweeps in every *unlabelled* sibling because absence is not one of the
-  excluded relations. Across the replay, 56 supersede rulings retired 146 records —
+  that left. The certain `agrees` rung is unconditional and reaches the whole set, so a
+  **verbatim** restatement is spared at any rank; everything it cannot settle goes to a
+  model bounded by `reconciler_max_conflicts`, and every member past that bound reaches
+  the writer carrying no relation at all. The writer sweeps those in, because absence is
+  not one of the excluded relations. Across the replay, 56 supersede rulings retired 146 records —
   2.6 apiece — and the verified worst case offered 13 members, labelled 3, and retired
   12, ten of which no reading calls contradicted.
   [ADR-0171](0171-a-supersession-sweeps-in-only-a-labelled-contradiction-and-the-labelling-bound-rises-to-fifteen.md)

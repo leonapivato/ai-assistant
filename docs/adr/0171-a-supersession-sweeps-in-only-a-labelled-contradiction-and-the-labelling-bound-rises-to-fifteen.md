@@ -65,17 +65,29 @@ warranted to retire"*. Nothing in that set is a member's *absence*. A member the
 writer holds no relation for is therefore swept in, because the lookup returns
 nothing and nothing is not in the set.
 
-Which members carry a relation is decided somewhere else entirely.
-`ConflictReconciler.reconcile`'s only implementation consults a model for
-`conflicts[:max_conflicts]` in rank order — the value coming from
+Which members carry a relation is decided somewhere else entirely, and the two rungs
+are bounded differently. `ConflictReconciler.reconcile`'s only implementation builds
+the certain rung's labels over **the whole conflict set** — a comprehension across
+`conflicts`, labelling `RESTATES` wherever `agrees` holds, exactly as ADR-0159 §3's
+first clause requires ("that predicate is the reconciler's first rung and it is
+unconditional"). Only the *model* consultation is bounded: `conflicts[:max_conflicts]`
+in rank order, minus whatever the rung already settled, the value coming from
 `reconciler_max_conflicts` in `core/config.py`, defaulting to **3**, wired at
-`app/composition.py` and read nowhere in `memory/ingest.py`. The certain rung above
-it labels a member `RESTATES` when it `agrees`, and can never label anything
-`CONTRADICTS`. So on a crossing offering more than three members, everything past
-the third arrives at `_retirement_set` unlabelled, and unlabelled means retirable.
+`app/composition.py` and read nowhere in `memory/ingest.py`.
 
-**ADR-0159 §5 protects a member it has a relation for. The bound decides how many
-members it has a relation for. The two were never connected.**
+**So the protection that exists today is exact where a string comparison can settle
+it, and absent everywhere else.** A member past the bound that restates the proposal
+*verbatim* is labelled `RESTATES` at any rank and is spared. A member past the bound
+that the certain rung could not settle — a paraphrase, a near-duplicate, a distinct
+fact on the same topic, a genuine contradiction — carries no relation at all, and
+`_retirement_set` sweeps it in, because the lookup returns nothing and nothing is not
+in `_UNRETIRABLE_RELATIONS`. That is the residue `agrees` was never able to judge and
+is precisely the population ADR-0159 §3 sends to a model, which is why the bound on
+that call is the thing deciding what survives.
+
+**ADR-0159 §5 protects a member the writer holds a relation for. The bound decides
+how many members get the only relation a model can supply. The two were never
+connected.**
 
 ### What the audit found
 
@@ -168,10 +180,11 @@ is the best evidence available that they are one fix approached from two sides.
 
 > **Normative.** `reconciler_max_conflicts` defaults to **15**.
 
-Everything else ADR-0159 §3 says about the bound stands: it is positive, it is
-applied over the conflict set in rank order, members beyond it are left unlabelled,
-a label the reply carries for one of them is discarded by the reconciler, and one
-ingest still makes at most one model request covering every member consulted.
+Everything else ADR-0159 §3 says about the bound stands, and stands unread by this
+ADR: it is positive, it is applied over the conflict set in rank order, it bounds the
+**model consultation** and not the unconditional `agrees` rung above it, a label the
+reply carries for a member beyond it is discarded by the reconciler, and one ingest
+still makes at most one model request covering every member consulted.
 
 **Fifteen, because fifteen is what was measured.** It is the value the A/B ran on
 the identical proposal stream, and it labels every crossing the distribution puts
@@ -508,6 +521,16 @@ otherwise.
   reconciler's bound is applied to a set that ceiling already caps. Whether the field
   should carry an `le` is a validation question with no measurement behind it, and
   it is adjacent to #1225 rather than to this.
+- **#1325 — ADR-0159 §3's own internal contradiction about what the bound reaches.
+  Left open, and untouched.** §3's second clause ends "members beyond that bound are
+  left unlabelled", which read literally denies its first clause's *unconditional*
+  `agrees` rung. The code resolves it in clause 1's favour — the certain rung ranges
+  over the whole set and only the model consultation is bounded — and so does clause 3,
+  which discards a volunteered label for a member "the `agrees` rung already labelled".
+  §1 restates the bound as a bound on the consultation, which is the reading that was
+  always ratified; whether ADR-0159's own sentence is worth an ADR-0070 §1 amendment is
+  a corpus judgement this ADR does not make. Filed because the false reading is a live
+  trap: it reached this ADR's own first draft and was caught by review.
 - **#1225 — the bound's ceiling unenforced at the writer. Left open, and its priority
   raised.** §4 states what changes about its stakes and why §2 does not answer it.
 - **#1206's remaining half.** `reconciler_model` still meets ADR-0119 §9's stated
