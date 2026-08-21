@@ -162,6 +162,20 @@ can close — closing it is #1314's, and #1314 is `track:memory` ground.
 > rather than a correlated error. This ADR adds no multiplexing, and no lane cites
 > it toward any.
 
+> **Normative.** The hub **notices that violation while the stream is running**
+> and stops writing: it does not finish the stream and close afterwards. A
+> streaming exchange therefore needs the concurrent read ADR-0131 §2a already
+> obliges for an outstanding poll, and a lane that streams without one has not
+> implemented this clause.
+
+**That second clause is stated because the tree has already been caught by its
+absence once.** ADR-0131 §2a records that "an earlier draft claimed
+`_serve_requests` needed no new branch at all, and that claim was wrong" — a
+long-running dispatch leaves nothing reading the socket, so nothing observes what
+arrives on it. `_dispatch_poll` grew a watcher for exactly that. A stream is the
+second long-running dispatch this transport has, it has the same blind spot, and
+the window is now open on every answering turn rather than only on a poll.
+
 > **Normative.** The hub still writes no frame except in answer to an outstanding
 > request (ADR-0131 §1). A chunk frame is solicited — it answers the request whose
 > id it carries — and no lane cites this ADR toward an unsolicited frame, a push
@@ -264,15 +278,18 @@ holding an error, for the same turn. Under ADR-0170 §8 that case is a refusal
 before a byte moves; streaming is what makes it reachable after bytes have moved.
 
 > **Normative.** The streamed answer is bounded by the **same** result-payload
-> ceiling ADR-0170 §8 names and gains no setting of its own. No chunk frame is
-> written whose text the hub is not already able to carry in the terminal frame,
-> so the join property above holds on every terminal shape this ADR admits.
+> ceiling ADR-0170 §8 names and gains no setting of its own. No `ReplyChunk` is
+> yielded whose text the engine is not already able to carry in the terminal
+> `TurnOutcome`, so the join property above holds on every terminal shape this ADR
+> admits, and the bound is the engine's to keep rather than the transport's to
+> discover.
 
-> **Normative.** Where the accumulating answer would breach that ceiling, the hub
-> **stops streaming before the breach** and terminates with §6's fourth shape:
-> `reply` the text actually streamed, `reply_degraded` `True`. It does not write a
-> chunk it cannot repeat, does not refuse a turn whose prose the user has already
-> read, and does not deliver a terminal `reply` that disagrees with the chunks.
+> **Normative.** Where the accumulating answer would breach that ceiling, the
+> engine **stops streaming before the breach** and terminates with §6's fourth
+> shape: `reply` the text actually yielded, `reply_degraded` `True`. It does not
+> yield a chunk it cannot repeat, does not refuse a turn whose prose has already
+> been published, and does not produce a terminal `reply` that disagrees with the
+> chunks.
 
 **This is a disclosed truncation, and that is exactly the distinction ADR-0170 §8
 draws.** §8 forbids "a silent truncation" and makes an over-ceiling answer "that
@@ -446,25 +463,54 @@ make the handshake's version a weaker promise than it currently is.
 This is where ADR-0170 §4 is partially superseded, and the clause replaced is one
 sentence of it.
 
-> **Normative.** The stream has two commit points, nested. The **model seam**
-> commits at its first delta (§5): before it a route may still be substituted,
-> after it none may. The **wire** commits at the first chunk frame written: before
-> it the pass may still degrade to no answer at all, after it the user has read
-> text and no clause may pretend otherwise.
+> **Normative.** The stream has two commit points, nested, and **both are above
+> the transport**. The **model seam** commits at its first delta (§5): before it a
+> route may still be substituted, after it none may. The **surface** commits at
+> the first `ReplyChunk` the engine yields from `converse_streaming`: before it the
+> pass may still degrade to no answer at all, after it an answer has been published
+> and no clause may pretend otherwise.
 
-> **Normative.** A composition failure **before the first chunk frame is written**
-> degrades exactly as ADR-0170 §8 rules and changes nothing: the terminal frame
-> carries `reply` `None` and `reply_degraded` `True`, the turn is returned rather
-> than raised, and ADR-0170 §4's shapes are untouched. This is so whether the
-> failure preceded the first delta or followed it.
+> **Normative.** Neither commit point is defined in terms of a frame being
+> written, and no lane defines one that way. The engine decides both shapes from
+> what it yielded, never from what the transport achieved, so an in-process caller
+> and a caller across the wire observe the same outcome for the same turn.
 
-> **Normative.** A composition failure **after the first chunk frame**, or a stop
-> at §3's result-payload ceiling, produces a fourth shape which ADR-0170 §4 does
-> not admit and this clause adds: the terminal frame carries `reply` set to the
-> text actually streamed and `reply_degraded` `True`. `reply_degraded` therefore
+> **Normative.** A composition failure **before the first `ReplyChunk` is yielded**
+> degrades exactly as ADR-0170 §8 rules and changes nothing: the outcome carries
+> `reply` `None` and `reply_degraded` `True`, the turn is returned rather than
+> raised, and ADR-0170 §4's shapes are untouched. This is so whether the failure
+> preceded the first delta or followed it.
+
+> **Normative.** A composition failure **after the first `ReplyChunk` is yielded**,
+> or a stop at §3's result-payload ceiling, produces a fourth shape which ADR-0170
+> §4 does not admit and this clause adds: the outcome carries `reply` set to the
+> text actually yielded and `reply_degraded` `True`. `reply_degraded` therefore
 > means *composing this answer did not complete* — whether because it failed or
 > because it ran out of room — and it is `True` beside a non-`None` `reply` on
 > exactly this shape and no other.
+
+**Putting the commit point at the surface rather than at the frame is the
+correction that makes this clause implementable at all, and the reason is
+ADR-0084 §5's.** An earlier draft of this ADR committed at "the first chunk frame
+written". The engine cannot observe that: it yields a `ReplyChunk` and something
+below it writes a frame, so on a peer that has gone away the engine would have to
+learn from the transport whether its own outcome carries a partial reply or none
+— transport state reaching across the `core` boundary to decide contract
+semantics. Worse, it would have no meaning at all for the in-process caller, who
+receives `ReplyChunk` values and never has a frame. ADR-0084 §5 promoted this
+façade to a Protocol precisely so that the two are substitutable, and ADR-0131 §2
+already refused a clause for the same defect — a typed error "could only ever be
+raised by the *transport* … an in-process engine has no connections and could
+never raise it, so the same declared contract would mean two different things
+depending on which side of the wire the caller stood." A commit point the engine
+owns has one meaning on both sides.
+
+**What that costs is a conservative disclosure and nothing else.** A chunk yielded
+whose frame never reached the peer makes the outcome report a truncation the user
+did not see — but by §9 that peer is gone and the terminal frame is discarded
+undelivered too, so there is no client to mislead. The error runs in the safe
+direction: the engine may say an answer was cut short when it was merely
+undelivered, and never the reverse.
 
 > **Normative.** ADR-0170 §4's other invariants stand unchanged: `reply_degraded`
 > is never `True` on a park, never `True` where `turn` is `None`, and never `True`
@@ -803,14 +849,26 @@ takes the triad first, because the rest is written against it.
 > **Normative.** The same lane pins §6's four shapes explicitly — no answer owed,
 > owed and none produced, owed and partly produced, owed and produced whole — each
 > from the two field values alone, **including** a failure injected after the first
-> chunk frame has been written, which is the only way the fourth shape is reachable
-> and the one a test of the composing stage alone cannot construct.
+> `ReplyChunk` has been yielded, which is the only way the fourth shape is
+> reachable.
+
+> **Normative.** The same lane pins §6's second clause — that the commit point is
+> the surface's and not the transport's — by asserting the **same** outcome for the
+> same turn driven in process and driven across the wire, including a turn whose
+> chunk frames fail to reach the peer.
+
+> **Normative.** The same lane pins §1's overlap clause deterministically: a peer
+> that sends a second request after receiving a first chunk has its connection
+> closed, with **no further chunk frames written** after the violating request was
+> readable and no correlated error sent. A test that asserts only the eventual
+> close does not satisfy this clause, because an implementation that streams to
+> completion and closes afterwards passes it.
 
 > **Normative.** The same lane pins §3's ceiling at its boundary and one step past
 > it: a stream whose joined text exactly fills the room the terminal frame has
 > terminates whole, with `reply_degraded` `False`; a stream whose next chunk would
-> breach it stops before writing that chunk and terminates with §6's fourth shape.
-> Both assert that **no chunk was written whose text the terminal `reply` does not
+> breach it stops before yielding that chunk and terminates with §6's fourth shape.
+> Both assert that **no chunk was yielded whose text the terminal `reply` does not
 > repeat**, which is the property a chunk-reading and a chunk-ignoring client must
 > agree on.
 
