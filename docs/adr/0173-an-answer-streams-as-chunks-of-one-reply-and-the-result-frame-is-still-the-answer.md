@@ -409,8 +409,14 @@ general over the surface.
 > **Normative.** It declares **one** member, `stream`, taking the same arguments
 > `ModelProvider.complete` takes in the same shape — a positional
 > `messages: Sequence[Message]` and a keyword-only `model: str | None = None` — and
-> returning `AsyncIterator[str]`, the assistant's reply as a sequence of text
-> deltas in order.
+> returning `AsyncIterator[EncodableText]`, the assistant's reply as a sequence of
+> text deltas in order.
+
+> **Normative.** `EncodableText` rather than a bare `str`, so ADR-0085 §4c's rule
+> that every string this system carries has a UTF-8 encoding binds at this seam as
+> it binds at `ModelProvider.complete`'s, whose returned `Message.content` already
+> carries it. A delta with no encoding is refused **at the seam**, before it can
+> reach chunk construction.
 
 > **Normative.** ADR-0066 §1's precondition binds it identically and for the same
 > reason: `messages` must be non-empty and must not end on a `Role.ASSISTANT`
@@ -419,15 +425,16 @@ general over the surface.
 > the model seam's admissible history by nothing.
 
 > **Normative.** An implementation may retry, re-issue or substitute a route
-> **freely until it yields its first delta conveying text, and never after it.**
-> An empty delta publishes nothing, so it commits nothing. Past that first text
-> delta it does not restart, does not fall back, and does not re-issue; a failure
-> there is raised from the iteration rather than repaired beneath it.
+> **freely until it yields its first delta containing a non-whitespace character,
+> and never after it.** A delta that is empty or wholly whitespace publishes
+> nothing, so it commits nothing. Past that first non-blank delta it does not
+> restart, does not fall back, and does not re-issue; a failure there is raised
+> from the iteration rather than repaired beneath it.
 
 > **Normative.** ADR-0011 §1's error taxonomy binds, and a `ModelError` may be
 > raised from the call or from the iteration. Its `retryable` and `routable`
-> dispositions are actionable **only before the first delta conveying text**;
-> after it, no caller or wrapper acts on them.
+> dispositions are actionable **only before the first delta containing a
+> non-whitespace character**; after it, no caller or wrapper acts on them.
 
 > **Normative.** A delta conveying no text is admissible and is the caller's to
 > coalesce. A stream that yields no non-blank text at all is the blank-completion
@@ -450,7 +457,7 @@ objected that a member would "oblige `RetryingProvider` and `RoutingProvider` to
 forward an operation neither one's policy fits". For a batch that was about
 duration and about a handle one provider cannot honour for another. For a stream
 it is about a boundary in time: a fallback is not merely a poor fit, it is
-**incoherent past the first delta carrying text**, because the user has already read text the
+**incoherent past the first non-blank delta**, because the user has already read text the
 substitute route did not write. A member on `ModelProvider` would have obliged
 both wrappers to implement an operation whose safe behaviour contradicts the one
 thing each of them exists to do.
@@ -485,9 +492,9 @@ This is where ADR-0170 §4 is partially superseded, and the clause replaced is o
 sentence of it.
 
 > **Normative.** The stream has two commit points, nested, and **both are above
-> the transport**. The **model seam** commits at its first delta conveying text
-> (§5): before it a route may still be substituted, after it none may. The
-> **surface** commits at
+> the transport**. The **model seam** commits at its first delta containing a
+> non-whitespace character (§5): before it a route may still be substituted, after
+> it none may. The **surface** commits at
 > the first `ReplyChunk` the engine yields from `converse_streaming`: before it the
 > pass may still degrade to no answer at all, after it an answer has been published
 > and no clause may pretend otherwise.
@@ -858,17 +865,23 @@ takes the triad first, because the rest is written against it.
 
 > **Normative.** The triad lane lands §5's Protocol with a conformance suite
 > pinning: ADR-0066 §1's precondition in both refused shapes and the `Role.TOOL`
-> refusal; that a delta-free stream is the blank case; and — the clause a
-> cooperating fake cannot reach — that **no substitution occurs after the first
-> delta conveying text**, asserted against a double that would substitute if
+> refusal; that a stream whose deltas are all blank is the blank case; and — the
+> clause a cooperating fake cannot reach — that **no substitution occurs after the
+> first non-blank delta**, asserted against a double that would substitute if
 > permitted, so the commit boundary is pinned as a boundary rather than assumed.
 
 > **Normative.** The same suite pins the boundary's other side, which a test of
-> the commit clause alone will miss: a stream that yields an **empty** delta and
-> then raises a `routable` `ModelError` may still switch route or retry, because
-> nothing was published. A suite asserting only that substitution stops is
-> satisfied by an implementation that commits on any delta at all, which is
-> exactly the resilience this clause refuses to give away for nothing.
+> the commit clause alone will miss: a stream that yields an **empty** delta, and
+> again one that yields a **wholly whitespace** delta, and then raises a `routable`
+> `ModelError`, may still switch route or retry — because neither could have become
+> a `ReplyChunk`, so neither published anything. A suite asserting only that
+> substitution stops is satisfied by an implementation that commits on any delta at
+> all, which is exactly the resilience this clause refuses to give away for
+> nothing.
+
+> **Normative.** The same suite pins §5's encodability refusal: a delta with no
+> UTF-8 encoding is refused at the seam rather than surfacing later as a validation
+> error from `ReplyChunk` construction.
 
 > **Normative.** The wire lane lands §1's frame sequence with tests pinning: that
 > every frame of one answer carries the request's correlation id; that a chunk
@@ -1021,7 +1034,7 @@ by reading ADR-0170 generously.
 - **The model layer gains a second seam and a boundary in time.** A stream cannot
   be retried or re-routed once it has begun, so the resilience `RetryingProvider`
   and `RoutingProvider` give every other model call is *narrower* on this path —
-  available before the first delta carrying text, gone after it. A streamed turn is genuinely
+  available before the first non-blank delta, gone after it. A streamed turn is genuinely
   less resilient than the same turn unstreamed, and that is a real trade rather
   than an implementation detail: a client that would rather have the fallback
   calls `converse`, which is exactly why §4 keeps it.
@@ -1071,7 +1084,7 @@ prevent it.
 three grounds and a fourth that is stronger here: `Protocol` is structural and
 `ModelProvider` is `@runtime_checkable`, so a member unsatisfies every existing
 implementation at once; and it would oblige `RetryingProvider` and
-`RoutingProvider` to forward an operation whose safe behaviour past the first text-carrying
+`RoutingProvider` to forward an operation whose safe behaviour past the first non-blank
 delta contradicts the one thing each exists to do.
 
 **Let the terminal frame carry `reply` `None` after a failed stream, keeping
