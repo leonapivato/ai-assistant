@@ -437,16 +437,43 @@ honour a budget it cannot meet rather than silently shortening one.
 > gateway ships. This ADR does not write it, and no lane may implement §6 before
 > it merges.
 
-> **Normative.** The gateway records every session admission and every refusal,
-> and the record carries **only** Tier 2 facts, enumerated: the instant; which
-> class of request it was, out of the front end's assets, the bootstrap exchange
-> and an assistant request; the outcome; and for a refusal, which of §3's, §6's
-> and §7's conditions it failed.
+> **Normative.** A record is written when a session is minted, when a mint is
+> refused, and when a presented session fails to verify. No record is written for
+> a request a live session admits, which is not an admission decision.
+
+> **Normative.** The record carries **only** Tier 2 facts, enumerated: the
+> instant; which class of request it was, out of the front end's assets, the
+> bootstrap exchange and an assistant request; the outcome; and for a refusal,
+> which of §3's, §6's and §7's conditions it failed.
+
+> **Normative.** Failure records are bounded: within one `gateway_record_interval`
+> (§8) each distinct condition is written once, carrying how many times it
+> occurred in that interval, so that a caller able to drive a refusal cannot drive
+> an unbounded number of records.
 
 > **Normative.** No such record carries anything outside that enumeration — no
 > session half, bootstrap value or verifier; no request body; no path, query
 > string or fragment; no header or cookie; and nothing the hub or a model
 > returned.
+
+**The record is scoped to admission decisions and rate-bounded, and both are
+corrections rather than refinements.** An earlier draft recorded every admission
+and every refusal per request, which is unbounded in the one direction a hostile
+local process controls: it can drive refusals as fast as it can open sockets, and
+each one obliged a write. That is the failure ADR-0084 §3 spends its ceilings on
+and which §8 restates for this process — "a one-shot CLI could shrug this off; a
+process that runs for weeks cannot" — reintroduced by a clause of my own. It is
+also more edge state than ADR-0094 §9's permission contemplates, since an
+unbounded log is bounded in neither size nor age. Recording the *decision* rather
+than the request removes the amplification on the admitted path, and the interval
+removes it on the refused one. Architecture review found it on the third round.
+
+**The narrowing is also the closer analogue of what ADR-0124 §7 already does.**
+That section has the hub record "each admission and each refusal with the device
+it named" — of a *connection*, not of every request carried on one. A session is
+this door's connection, so recording its mint and its refusals is the same act at
+the same granularity, and recording every request behind a live session would have
+been a different and much larger promise.
 
 **The record is an enumeration rather than an exclusion list, because an
 exclusion list was wrong here and its failure is the instructive kind.** An
@@ -632,6 +659,7 @@ and it binds with more force on a limit whose whole job is to refuse.
 | `gateway_max_sessions` | `int` | 8 |
 | `gateway_max_hub_connections` | `int` | 8 |
 | `gateway_max_request_bytes` | `int` | 1 MiB |
+| `gateway_record_interval` | `timedelta` | 1 min |
 
 > **Normative.** Every field above is refused at settings load unless it is
 > strictly positive, in the `gt=0` / `gt=timedelta(0)` form ADR-0083 §7 adopted.
@@ -880,10 +908,15 @@ lane. No record is owed on any of the rest.**
   its own admission decision, which is the same class of thing as the device
   credential the CLI already holds and which nobody reads as state. No amendment
   is owed and #441 is untouched.
-- **ADR-0094 §9.** Used as given, as the permission it was written to be. The
-  session table is bounded in count and in age (§8), destroyed continuously rather
-  than at a checkpoint (§4), and never authoritative — nothing the hub does
-  depends on it, and the hub is not told it exists (§3).
+- **ADR-0094 §9.** Used as given, as the permission it was written to be, and
+  applied to **both** things this ADR lets the gateway hold. The session table is
+  bounded in count and in age (§8), destroyed continuously rather than at a
+  checkpoint (§4), and never authoritative — nothing the hub does depends on it,
+  and the hub is not told it exists (§3). The admission record is bounded in the
+  same two dimensions by §6's decision scope and its interval, and it is never
+  authoritative either: no clause of this ADR gives it an effect on whether
+  anything is admitted. An earlier draft left it unbounded, which §9 does not
+  permit and which architecture review named.
 - **ADR-0094 §10a's producer clause.** Examined and found not to reach this. Its
   subject is the deferral it marks — the sensor-spectrum amendment, whose content
   §10 states as "the ephemeral buffer, consent-per-capture, and graduated trigger
@@ -954,7 +987,7 @@ lane. No record is owed on any of the rest.**
 - **The system gains a second interface adapter**, in `interfaces/`, reached by a
   subcommand of the existing `assistant` script — the first time ADR-0084 §6's
   own-console-script rule has been examined and found not to fire (§1).
-- **`core` gains six `Settings` fields** (§8), each strictly positive at load,
+- **`core` gains seven `Settings` fields** (§8), each strictly positive at load,
   none nullable. They are contract surface in ADR-0054's sense, which several
   earlier ADRs already were; they are not `core` Protocol or type surface, so
   golden rule 5 is not triggered and no triad is owed.
