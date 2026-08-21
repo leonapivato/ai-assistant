@@ -35,13 +35,15 @@
   ADR-0148 recording that §8's fourth clause now has a carrier. Not a supersession —
   §8's obligation is word-for-word what it was, and a reader acting on it acts
   identically before and after (ADR-0070 §1's second limb).
-- **It discharges ADR-0177 §8's precondition on its own terms, on both limbs.** §8
-  blocks a browser confirmation surface "before a ratified decision supplies what
-  ADR-0148 §8's fourth clause requires … **or** supplies a discriminator by which a
-  surface can refuse an egress confirmation it cannot render". This supplies the
-  content (§2) *and*, as a consequence of the shape rather than as a second
-  mechanism, the discriminator (§4). Discharge by satisfaction is not amendment: §8's
-  clause names its own firing condition and this meets it.
+- **It discharges ADR-0177 §8's precondition on its own terms, on both limbs — on
+  ratification, not on proposal.** §8 blocks a browser confirmation surface "before a
+  **ratified** decision supplies what ADR-0148 §8's fourth clause requires … **or**
+  supplies a discriminator by which a surface can refuse an egress confirmation it
+  cannot render". This supplies the content (§2) *and*, as a consequence of the shape
+  rather than as a second mechanism, the discriminator (§4). Discharge by satisfaction
+  is not amendment: §8's clause names its own firing condition and this meets it —
+  **when this document is ratified and merged, and not while it stands `Proposed`**
+  (§8).
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-22**, the
   durability form ADR-0100 established. Refs #1366, #1365, #1230, #1159.
 
@@ -519,9 +521,12 @@ recipients there are. Both, and the arithmetic is done by `core`.
 > about a `Confirmation` whose `egress` is `None`.
 
 > **Normative.** ADR-0177 §8's precondition is **discharged rather than replaced**, on
-> its own stated firing condition, and this ADR is the ratified decision it names. No
-> further ADR is owed before the browser confirmation surface ships, and the browser
-> lane's remaining obligations are §8's other clauses plus §7 above.
+> its own stated firing condition, and it is discharged **by this ADR's ratification
+> and merge and not before**. While this document stands `Proposed`, §8's block on a
+> browser surface that answers a confirmation is unaffected and no lane cites this
+> section as lifting it. Once it is ratified and merged, no further ADR is owed before
+> that surface ships, and the browser lane's remaining obligations are §8's other
+> clauses plus §7 above.
 
 > **Normative.** Everything else in ADR-0177 §8 binds unchanged: the token relayed
 > opaquely and parsed by nobody; `resume` answered with `approved` and nothing else,
@@ -529,7 +534,14 @@ recipients there are. Both, and the arithmetic is done by `core`.
 > document's own text node; `parameters` rendered whole; and `pending_confirmations`
 > as the one recovery route.
 
-**The precondition is discharged by satisfaction and that is not a supersession.**
+**The precondition is discharged by satisfaction and that is not a supersession —
+and satisfaction means ratified, which is why the clause says so.** ADR-0177 §8 blocks
+the surface "before a **ratified** decision supplies…", and ADR-0165 makes ratification
+a commit of its own after the required reviews are green. A document that called itself
+the ratified decision while standing `Proposed` would be asserting the very fact the
+gate turns on, and a lane reading only that sentence could ship against a proposal that
+was later withdrawn (ADR-0127's path is live). So the clause is written against the
+event rather than against this document's intent.
 §8 wrote its own firing condition — "before a ratified decision supplies what
 ADR-0148 §8's fourth clause requires … or supplies a discriminator" — and a clause
 that names the event which ends it is not amended by that event. This is the

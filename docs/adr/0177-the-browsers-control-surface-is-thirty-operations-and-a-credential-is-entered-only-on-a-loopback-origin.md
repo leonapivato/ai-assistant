@@ -4,7 +4,8 @@
 - Date: 2026-08-22
 - Partially superseded: 2026-08-22 by ADR-0178 — **two sentences of §8, and the
   precondition beside them is discharged rather than replaced.** ADR-0178 is the
-  ratified decision §8's precondition names (#1366): it adds one member to
+  decision §8's precondition names (#1366), and it discharges it on **its own
+  ratification and merge**: it adds one member to
   `Confirmation` carrying the connected account's identity and the binding's payload
   description, derives ADR-0148 §2's canonical destination set from it, and makes the
   member's absence the discriminator §8's second limb asked for. Clause by clause,
@@ -36,8 +37,10 @@
   fourth clause requires … or supplies a discriminator…" ADR-0178 supplies both, and
   a clause naming the event that ends it is not amended by that event — the
   treatment §12 of this ADR itself gave ADR-0151 §14 ("satisfied rather than
-  relaxed"), and ADR-0083 §15's own test. The block on the browser confirmation
-  surface lifts when ADR-0178 merges.
+  relaxed"), and ADR-0083 §15's own test. **The block on the browser confirmation
+  surface lifts when ADR-0178 is ratified and merged, and not while it stands
+  `Proposed`** — §8's gate turns on a *ratified* decision, and ADR-0178 §8 says so in
+  its own clause.
 
   **Not replaced — everything else in §8, and every other section.** The opaque
   token, `resume` answered with `approved` alone, insertion as text through the
