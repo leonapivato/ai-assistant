@@ -181,13 +181,14 @@ letting a lane meet it by surprise.
 
 ### 2. The chunk frame, its payload, and the ordering claim it does not make
 
-> **Normative.** `FrameKind` gains one member for a chunk of a streamed result,
-> and no other. Like every kind but a request it names no method (`wire/envelope.py`
+> **Normative.** `FrameKind` gains one member and no other: `CHUNK`, wire value
+> `"chunk"`. Like every kind but a request it names no method (`wire/envelope.py`
 > already refuses a non-request frame that does), and its payload is a promoted
 > `core` model, as ADR-0084 §3 requires of a result payload.
 
-> **Normative.** That model carries exactly one member: the chunk's text, typed
-> `NonBlankEncodableText`. A chunk conveying no text is not written at all.
+> **Normative.** That model is `ReplyChunk` in `core/types.py`, frozen and
+> `extra="forbid"` as every promoted model is, carrying exactly one member: `text`,
+> typed `NonBlankEncodableText`. A chunk conveying no text is not written at all.
 
 > **Normative.** A chunk carries **no sequence number, no index, and no
 > final-frame flag**. Order is the framing's, and the terminal frame is identified
@@ -248,21 +249,73 @@ What the redundancy buys is that a client may ignore chunks entirely and still b
 correct, which is what makes §4's "composes with rather than replaces" true in
 practice and not only on paper.
 
+**That redundancy has one consequence which is neither small nor exotic, and this
+is the clause that closes it.** A model may yield any number of individually
+valid chunks whose joined text will not fit the terminal payload. Every chunk
+would pass its own frame check, the hub would have already published prose, and
+`check_payload` would then refuse the very `TurnOutcome` §3 makes authoritative —
+leaving a chunk-reading client holding an answer and a chunk-ignoring client
+holding an error, for the same turn. Under ADR-0170 §8 that case is a refusal
+before a byte moves; streaming is what makes it reachable after bytes have moved.
+
+> **Normative.** The streamed answer is bounded by the **same** result-payload
+> ceiling ADR-0170 §8 names and gains no setting of its own. No chunk frame is
+> written whose text the hub is not already able to carry in the terminal frame,
+> so the join property above holds on every terminal shape this ADR admits.
+
+> **Normative.** Where the accumulating answer would breach that ceiling, the hub
+> **stops streaming before the breach** and terminates with §6's fourth shape:
+> `reply` the text actually streamed, `reply_degraded` `True`. It does not write a
+> chunk it cannot repeat, does not refuse a turn whose prose the user has already
+> read, and does not deliver a terminal `reply` that disagrees with the chunks.
+
+**This is a disclosed truncation, and that is exactly the distinction ADR-0170 §8
+draws.** §8 forbids "a silent truncation" and makes an over-ceiling answer "that
+refusal" instead. Silence is what the flag removes: a client is told in the same
+value that the answer is incomplete, and §10 obliges the adapter to say so. A
+refusal is still the right answer where nothing has been published — which is
+`converse`'s case, unchanged — and is the wrong one once the user is reading,
+because it would discard text they have and leave the turn's committed effects
+described by nothing.
+
+**The reserve is computable, which is what makes the clause an obligation rather
+than a wish.** A `TurnOutcome`'s non-reply content is fixed before composition
+begins — its `turn`, `plan`, `memories` and `step` are all settled by the time the
+composing stage is reached (ADR-0170 §2) — and the two members capture supplies,
+`conversation_id` and `capture_degraded`, are an `Identifier` and a `bool`, both
+bounded. So the room left for the reply is known before the first chunk is
+written, and the implementing lane measures it rather than guessing at a fraction
+of the frame size.
+
 ### 4. Streaming is a second entry on the surface, not a change to the first
 
-> **Normative.** `AssistantEngine` gains **one** method, a streaming twin of
-> `converse` taking the same arguments — the utterance, the caller's `timeout`
-> budget, and an optional `conversation_id` — and subject to every clause
-> `converse` declares, including its refusals and its declared failures.
+> **Normative.** `AssistantEngine` gains **one** method, named
+> `converse_streaming`, taking exactly `converse`'s arguments in exactly its
+> shape — a positional `utterance`, then keyword-only `timeout` and
+> `conversation_id` defaulting to `None` — and subject to every clause `converse`
+> declares, including its refusals and each of its declared failures.
 
-> **Normative.** `converse` is unchanged: same signature, same clauses, same one
-> result frame. A caller that wants no stream calls it and observes nothing this
-> ADR adds. No other method of the promoted surface changes.
+> **Normative.** Its return annotation is
+> `AsyncIterator[ReplyChunk | TurnOutcome]`. It yields zero or more `ReplyChunk`
+> values, then **exactly one** `TurnOutcome`, and then stops. The `TurnOutcome` is
+> always the last value yielded and is always present unless the call raises.
 
-> **Normative.** The streaming method's observable answer is §1's frame sequence:
-> the composed reply delivered as chunks as it is composed, then the same
-> `TurnOutcome` `converse` would have returned for the same turn. Its exact Python
-> return spelling is the implementing lane's, constrained only by that.
+> **Normative.** That yielded union maps one-to-one onto §1's frames: a
+> `ReplyChunk` is a chunk frame, the `TurnOutcome` is the terminal result frame,
+> and a raised `AssistantError` is the terminal error frame. **A reader resolves
+> the union by frame kind and never by inspecting a payload**, so the kind stays
+> the single discriminator §2 makes it and the union adds no second claim about
+> what a frame is.
+
+> **Normative.** `converse` is unchanged: same name, same signature, same clauses,
+> same one result frame. A caller that wants no stream calls it and observes
+> nothing this ADR adds. No other method of the promoted surface changes.
+
+> **Normative.** `wire/surface.py`'s reflection gains a rule rather than an
+> exception: a method whose return annotation is an async iterator is adapted by
+> **one adapter per member of the yielded union**, selected by the frame kind
+> being decoded, where a non-streaming method keeps its single result adapter
+> built from its return annotation. No method is adapted by both rules.
 
 **ADR-0042 §5 asked for exactly this and this is the redemption of it**: "it is
 added as an **additive** façade method returning an async iterator of progress
@@ -271,16 +324,29 @@ entry." Two entries for one turn is the deliberate duplication that section
 bought, and it is what keeps every existing client, the gateway included, working
 untouched.
 
-**Leaving the return spelling to the lane is a scoping answer with a precedent,
-not vagueness.** ADR-0084 §11 deferred "the field layout of the promoted DTOs and
-the exact method set of the Protocol" to a decision "written with implementation
-contact", and this is the one place in this ADR where the tree's own machinery
-will teach the answer: `wire/surface.py` builds one `TypeAdapter` from a method's
-return annotation, and a many-frames-one-request mapping is the first thing that
-rule has not covered. What is contract here — the frames, their kinds, their
-order, their payload types and who is authoritative — is fixed above and is what
-a second implementation would need. How Python spells "an iterator of chunks and
-then an outcome" is not.
+**The name and the annotation are fixed here rather than left to a lane, and the
+corpus is why.** An earlier draft of this ADR deferred both on ADR-0084 §11's
+authority. That reads the precedent backwards: §11 deferred "the exact method set
+of the Protocol" **to the surface ADR** — to a ratified decision written with
+implementation contact — and ADR-0085 then fixed exact keyword-only signatures for
+the whole surface. The method name is not an implementation detail on this
+surface, it is a wire-visible fact: `wire/surface.py` derives `METHODS` from the
+Protocol's concrete names, `wire/server._dispatch` refuses "a request [that] names
+… which this build's engine surface does not declare", and ADR-0084 §3's
+exact-match handshake makes a build's method set a promise rather than a
+convention. Two conforming implementations that chose `converse_stream` and
+`converse_streaming` would exchange a version number that says they agree and then
+fail on the first call — which is precisely the failure the version exists to
+prevent, produced by the one field the version cannot cover.
+
+**Why a union rather than an iterator of one type.** The alternative shapes each
+cost more: an iterator of chunks alone has nowhere to put the outcome §3 makes
+authoritative; a handle object exposing an outcome property after exhaustion is
+not a promoted `core` model and has no wire form; and a wrapper event type with a
+`kind` member would put a discriminator inside the payload beside the one already
+in the envelope, which is the second-claim problem §2 refuses. Resolving the union
+by frame kind keeps exactly one discriminator on the wire and gives the Protocol a
+return annotation a second implementation can write against.
 
 > **Normative.** `resume` gains no streaming twin in this milestone. A resumed
 > park composes in the ordinary way (ADR-0170 §4) and returns its answer whole.
@@ -293,14 +359,16 @@ general over the surface.
 ### 5. Streaming reaches the model through a sibling Protocol, and `ModelProvider` is not widened
 
 > **Normative.** Streaming inference is introduced as a **new Protocol** in
-> `core/protocols.py`, a sibling of `ModelProvider`. No member is added to
-> `ModelProvider`, no existing member of it changes signature or clause, and the
-> new Protocol does not inherit from it. An object may implement both; nothing
-> requires that it does.
+> `core/protocols.py`, named `StreamingCompleter`, a sibling of `ModelProvider` as
+> `BatchCompleter` is. No member is added to `ModelProvider`, no existing member of
+> it changes signature or clause, and `StreamingCompleter` does not inherit from
+> it. An object may implement both; nothing requires that it does.
 
-> **Normative.** It declares **one** member, taking the same `messages` and
-> optional `model` arguments `ModelProvider.complete` takes, and yielding the
-> assistant's reply as a sequence of text deltas.
+> **Normative.** It declares **one** member, `stream`, taking the same arguments
+> `ModelProvider.complete` takes in the same shape — a positional
+> `messages: Sequence[Message]` and a keyword-only `model: str | None = None` — and
+> returning `AsyncIterator[str]`, the assistant's reply as a sequence of text
+> deltas in order.
 
 > **Normative.** ADR-0066 §1's precondition binds it identically and for the same
 > reason: `messages` must be non-empty and must not end on a `Role.ASSISTANT`
@@ -385,12 +453,13 @@ sentence of it.
 > than raised, and ADR-0170 §4's shapes are untouched. This is so whether the
 > failure preceded the first delta or followed it.
 
-> **Normative.** A composition failure **after the first chunk frame** produces a
-> fourth shape, which ADR-0170 §4 does not admit and this clause adds: the terminal
-> frame carries `reply` set to the text actually streamed and `reply_degraded`
-> `True`. `reply_degraded` therefore means *composing this answer did not
-> complete*, and it is `True` beside a non-`None` `reply` on exactly this shape and
-> no other.
+> **Normative.** A composition failure **after the first chunk frame**, or a stop
+> at §3's result-payload ceiling, produces a fourth shape which ADR-0170 §4 does
+> not admit and this clause adds: the terminal frame carries `reply` set to the
+> text actually streamed and `reply_degraded` `True`. `reply_degraded` therefore
+> means *composing this answer did not complete* — whether because it failed or
+> because it ran out of room — and it is `True` beside a non-`None` `reply` on
+> exactly this shape and no other.
 
 > **Normative.** ADR-0170 §4's other invariants stand unchanged: `reply_degraded`
 > is never `True` on a park, never `True` where `turn` is `None`, and never `True`
@@ -703,6 +772,14 @@ takes the triad first, because the rest is written against it.
 > chunk frame has been written, which is the only way the fourth shape is reachable
 > and the one a test of the composing stage alone cannot construct.
 
+> **Normative.** The same lane pins §3's ceiling at its boundary and one step past
+> it: a stream whose joined text exactly fills the room the terminal frame has
+> terminates whole, with `reply_degraded` `False`; a stream whose next chunk would
+> breach it stops before writing that chunk and terminates with §6's fourth shape.
+> Both assert that **no chunk was written whose text the terminal `reply` does not
+> repeat**, which is the property a chunk-reading and a chunk-ignoring client must
+> agree on.
+
 > **Normative.** The same lane pins §9: a connection dropped mid-stream leaves the
 > turn completed and captured, with its conversation turn and episode present, and
 > nothing re-executed.
@@ -797,6 +874,12 @@ by reading ADR-0170 generously.
   less resilient than the same turn unstreamed, and that is a real trade rather
   than an implementation detail: a client that would rather have the fallback
   calls `converse`, which is exactly why §4 keeps it.
+- **An answer can now be truncated where before it was refused.** ADR-0170 §8
+  made an over-ceiling answer a refusal because nothing had been published;
+  streaming publishes as it goes, so §3 stops at the same ceiling and discloses
+  it instead. That is a strictly better outcome for a long answer and a new state
+  for a client to render, and it is the one place this decision changes what a
+  user sees on a turn that did not fail.
 - **A fourth outcome shape exists**, and clients read four states off two
   booleans where ADR-0170 gave them three. ADR-0170's Consequences already warned
   that "a fourth [flag] would be the trigger to revisit the shape rather than add
