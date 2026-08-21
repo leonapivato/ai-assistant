@@ -270,6 +270,13 @@ class _Coalescing:
         self.published.append(text)
         self.held = delta[len(delta.rstrip()) :]
         self.held_cost = encoded_text_bytes(self.held) - _QUOTES
+        # **The held bound applies to a tail that arrived attached to text, too.**
+        # ADR-0173 §3 counts held bytes "exactly as emitted text does", and a delta
+        # of ``"ok" + " " * 10_000`` holds the same run a thousand blank deltas
+        # would. Checking only the blank-delta arm would make the outcome depend on
+        # where the provider happened to cut, which is the property this whole
+        # coalescer exists to remove.
+        self.breached = self.held_cost > self._left
         return text
 
 

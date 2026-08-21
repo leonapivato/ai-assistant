@@ -2189,18 +2189,32 @@ class Engine:
         # abandoned stream ordinary, so its failure has to be *observed* somewhere
         # even when no caller is left to be told.
         turn.add_done_callback(_note_failure)
+        # **A settled getter is buffered output, and the loop treats it as such.**
+        # It holds the *oldest* chunk — it took the head of the queue — so it is
+        # drained before the queue itself, and the loop ends only when all three
+        # are empty: the getter, the queue, and the turn. The obvious shape, which
+        # exits on ``turn.done() and chunks.empty()``, is correct only if a settled
+        # getter can never coexist with a queue this loop is still draining; that
+        # happens to hold today, because ``put_nowait`` schedules a parked getter's
+        # wake before anything that could resume this coroutine — but it is an
+        # argument about ready-queue order, and a chunk the terminal ``reply``
+        # repeats and nobody was yielded is too sharp an edge to leave resting on
+        # one (ADR-0173 §3).
         waiting: asyncio.Task[ReplyChunk] | None = None
         try:
-            while not turn.done() or not chunks.empty():
+            while True:
+                if waiting is not None and waiting.done():
+                    yield waiting.result()
+                    waiting = None
+                    continue
                 if not chunks.empty():
                     yield chunks.get_nowait()
                     continue
+                if turn.done():
+                    break
                 if waiting is None:
                     waiting = asyncio.ensure_future(chunks.get())
                 await asyncio.wait({waiting, turn}, return_when=asyncio.FIRST_COMPLETED)
-                if waiting.done():
-                    yield waiting.result()
-                    waiting = None
         finally:
             # Cancelling a parked ``Queue.get`` cannot lose an item: ``put_nowait``
             # appends before it wakes a getter, so anything already queued is still

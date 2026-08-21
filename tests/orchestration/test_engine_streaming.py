@@ -3,7 +3,7 @@
 ADR-0173 §14's obligations that are about the *engine* rather than the stage or the
 transport. The stage's own — §5's coalescing and its own half of §3's ceiling — are
 in ``test_composing.py``; §1's frame sequence and §6's "same outcome in process and
-across the wire" are in ``tests/wire/test_streaming.py``.
+across the wire" are in ``tests/wire/test_streamed_turns.py``.
 
 **The ceiling cases measure rather than assume.** ADR-0173 §3 says "the implementing
 lane measures it rather than guessing at a fraction of the frame size", and a test
@@ -15,6 +15,7 @@ limit — which is the same question a deployment asks.
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
@@ -398,3 +399,34 @@ async def test_a_second_streamed_turn_continues_the_conversation_the_first_began
     assert any("what do you know about me?" in record.content for record in second.turn.memories), (
         "ADR-0074 §5: the conversation's recent turns reach the turn as memories"
     )
+
+
+async def test_every_chunk_the_turn_produced_reaches_a_slow_reader() -> None:
+    """The relay loses nothing to a consumer that suspends between reads (§3).
+
+    The turn runs beside the iterator that relays it, so what the engine yields and
+    what a caller reads are separated by a queue — and §3's join property is a claim
+    about the *caller's* side of it: "no chunk was yielded whose text the terminal
+    ``reply`` does not repeat" is only half the rule if the other half can drop one.
+
+    **A reader that gives the loop a turn between chunks is the shape in which a
+    loss would appear**, because that is the only window in which the relay's own
+    bookkeeping can move underneath it. The loop is written so the answer does not
+    depend on that window's outcome; this is what would notice if it did.
+    """
+    many = tuple(f"word{n} " for n in range(1, 40))
+    harness = _harness(_streaming(*many), planner=NoStepPlanner())
+
+    chunks: list[str] = []
+    outcome: TurnOutcome | None = None
+    async for value in harness.engine.converse_streaming("hello", timeout=PATIENT):
+        if isinstance(value, TurnOutcome):
+            outcome = value
+        else:
+            chunks.append(value.text)
+        await asyncio.sleep(0)
+
+    assert outcome is not None
+    assert len(chunks) == len(many)
+    assert "".join(chunks) == outcome.reply
+    assert outcome.reply_degraded is False
