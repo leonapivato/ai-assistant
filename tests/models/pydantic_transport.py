@@ -13,6 +13,11 @@ Shared by the ``TestModel``-backed provider suite (``test_provider.py``) and the
 real-vendor-stack suite (``test_provider_vendors.py``), which are both
 ``PydanticAIProvider`` bindings whose input observation is identical and
 vendor-independent — it happens before the wire.
+
+:func:`rendered_turns` is public because the streaming seam reads a conversation
+the same way and records it in the same space (``test_streaming.py``): both
+render to pydantic-ai's ``ModelMessage`` list before their first await, so one
+reading of that list serves both.
 """
 
 from __future__ import annotations
@@ -41,7 +46,7 @@ _PART_ROLE = {
 }
 
 
-def _fingerprint_of(history: list[ModelMessage]) -> tuple[tuple[Role, str, str | None], ...]:
+def rendered_turns(history: list[ModelMessage]) -> tuple[tuple[Role, str, str | None], ...]:
     """The turn identities ``PydanticAIProvider`` rendered its conversation into.
 
     Read back off the rendered ``ModelMessage`` history, mapping each part to the
@@ -72,7 +77,7 @@ def suspend_the_transport(
     async def suspending_run(
         *, message_history: list[ModelMessage], **_kwargs: object
     ) -> SimpleNamespace:
-        observed = _fingerprint_of(message_history)
+        observed = rendered_turns(message_history)
         log.record(observed)
         await gate.hold()
         return SimpleNamespace(output=encode_conversation(tuple(c for _r, c, _n in observed)))
