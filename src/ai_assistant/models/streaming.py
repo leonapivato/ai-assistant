@@ -26,6 +26,7 @@ that wants the fallback calls ``ModelProvider.complete``.
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -120,25 +121,48 @@ type _Streamed = _Delta | _Failed | _Ended | _Cancelled
 
 
 async def _next(deltas: asyncio.Queue[_Delta], run: asyncio.Task[_Streamed]) -> _Streamed:
-    """Take the next delta, or — if the run finished instead — how it finished.
+    """Take the next queued delta, or — once there is none — how the run finished.
 
     Waiting on the queue alone is what leaves a reader parked when the run stops
     without a last word, and a run *can* stop that way: a cancellation returns
-    nothing, and a bounded queue may have no slot for a terminal item. Waiting on
-    both closes it, and the delta is preferred whenever both are ready, so the
-    last thing a run produced is never dropped in favour of the news that it
-    ended.
+    nothing, and a bounded queue may have no slot for a terminal item. So the run
+    is waited on as well.
+
+    **A queued delta is taken before the run's terminal is accepted, and it is
+    polled rather than raced.** Racing them — waiting on a fresh queue getter and
+    the run together, and reading the terminal off the run whenever the getter has
+    not finished — leaves the fate of a run's last delta to which of two
+    ``call_soon`` callbacks the loop happens to run first. Both reachable races
+    are ordered in the reader's favour by CPython today, and neither ordering is a
+    documented guarantee: a task's first step is scheduled when the task is
+    constructed, ahead of the done-callback :func:`asyncio.wait` then registers on
+    an already-finished run, and a queue's ``put`` wakes a parked getter ahead of
+    the run's own completion. Text the model produced must not depend on either.
+    Polling removes the question rather than answering it.
+
+    Polling **inside a loop** is what makes the second poll happen, and that is
+    the half a single pre-wait poll would miss: a delta can be queued in the very
+    moment the run ends, with the queue's getter woken and not yet resumed, so the
+    wait can return with the getter unfinished and an item already sitting in the
+    queue. The loop runs at most twice — a wait that returns with the getter
+    unfinished leaves the run done, so the next pass returns either that queued
+    delta or the terminal.
     """
-    getter = asyncio.ensure_future(deltas.get())
-    try:
-        await asyncio.wait({getter, run}, return_when=asyncio.FIRST_COMPLETED)
-        if getter.done():
-            return getter.result()
-        return _how_it_ended(run)
-    finally:
-        # A no-op once it is done, and otherwise safe: `Queue.get` puts nothing
-        # back because it takes nothing until it returns.
-        getter.cancel()
+    while True:
+        with suppress(asyncio.QueueEmpty):
+            return deltas.get_nowait()
+        if run.done():
+            return _how_it_ended(run)
+        getter = asyncio.ensure_future(deltas.get())
+        try:
+            await asyncio.wait({getter, run}, return_when=asyncio.FIRST_COMPLETED)
+            if getter.done():
+                return getter.result()
+        finally:
+            # A no-op once it is done, and otherwise safe: `Queue.get` puts
+            # nothing back because it takes nothing until it returns, and the
+            # next pass polls before it waits again.
+            getter.cancel()
 
 
 def _how_it_ended(run: asyncio.Task[_Streamed]) -> _Streamed:
