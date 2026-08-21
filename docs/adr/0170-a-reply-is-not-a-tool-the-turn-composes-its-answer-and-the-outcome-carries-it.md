@@ -1,7 +1,30 @@
 # 170. A reply is not a tool: the turn composes its answer, and the outcome carries it
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0173 (§4's clause that `reply_degraded` is never `True` beside a non-`None` `reply`, and §8's clause naming `ModelProvider.complete()` as the one call an answer-owing pass originates — each only as it reaches a **streamed** pass; §4's other invariants, §8's one-call budget, and every other section stand)
 - Date: 2026-08-21
+- **Partially superseded: 2026-08-21 by
+  [ADR-0173](0173-an-answer-streams-as-chunks-of-one-reply-and-the-result-frame-is-still-the-answer.md),
+  in the scope the `Status` line names.** Streaming creates a shape this ADR could
+  not have — an answer that **began and did not finish** — so ADR-0173 §6 admits a
+  fourth outcome shape in which `reply` carries the text actually streamed and
+  `reply_degraded` is `True` beside it, and `reply_degraded` comes to mean
+  *composing this answer did not complete*. §4's remaining invariants are
+  unchanged and its purpose is strictly better served: a client still tells the
+  three original states apart from the two field values alone, and now tells a
+  truncated answer from a complete one as well. §4's two-directional
+  `model_validator` is widened to admit that shape and no other. Separately,
+  ADR-0173 §5 rules streaming inference a **new sibling Protocol** rather than a
+  member on `ModelProvider` (ADR-0143 §1's ground), so a streaming pass spends its
+  one model call at that seam and originates no `complete()` call at all —
+  §8's sentence naming the method is superseded to that extent, while §8's
+  *budget*, its refusal of a looping stage, and its argument for degrading rather
+  than raising are restated intact and are not reopened. §7's "no module under
+  `wire/` changes" was scoped to this ADR's own change and is not a rule about
+  later ones; ADR-0173 §11 changes `wire/` and says so. Everything else here
+  stands, and §3's "`reply` is the only place an answer is carried" and §6's
+  authority structure are load-bearing in ADR-0173 rather than merely surviving
+  it. ADR-0173 §§6 and 7 are the operative text; this note records the
+  supersession and does not restate its terms.
 - **This ADR opens `track:conversation` (#1312) and is milestone 17's ruling.** The
   milestone's exit test is the owner asking "what do you know about me?" from an
   enrolled device and receiving a conversational answer drawn from accumulated
