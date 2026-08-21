@@ -199,6 +199,10 @@ def test_the_front_end_tells_a_transport_failure_apart_from_a_refusal() -> None:
     assert "hub-unreachable" in script
     assert "assistant-declined" in script
     assert "cookie-half-mismatch" in script
+    # ADR-0175 §4's poll conditions, each its own: a budget the hub declined, and a
+    # poll that failed in neither of §9's two ways and is not reported as either.
+    assert "delivery-budget-declined" in script
+    assert "delivery-failed" in script
 
 
 # --- ADR-0175: the page's half of the streamed surface ----------------------
