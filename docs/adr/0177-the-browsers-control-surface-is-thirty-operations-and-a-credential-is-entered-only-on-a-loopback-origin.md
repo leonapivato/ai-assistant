@@ -1,7 +1,61 @@
 # 177. The browser's control surface is thirty operations, and a credential is entered only on a loopback origin
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries ADR-0178 §1's egress member)
 - Date: 2026-08-22
+- Partially superseded: 2026-08-22 by ADR-0178 — **two sentences of §8, and the
+  precondition beside them is discharged rather than replaced.** ADR-0178 is the
+  ratified decision §8's precondition names (#1366): it adds one member to
+  `Confirmation` carrying the connected account's identity and the binding's payload
+  description, derives ADR-0148 §2's canonical destination set from it, and makes the
+  member's absence the discriminator §8's second limb asked for. Clause by clause,
+  under ADR-0070 §1's test — would a reader acting on the sentence act differently?
+
+  **Replaced — §8's rendering clause, only as it reaches a surface rendering a
+  `Confirmation` that carries that member.** "A browser turn that parks renders the
+  parked action from the `Confirmation` the turn returned, carrying all four of its
+  content members — `tool_id`, `tool_description`, `parameters` and `reason` — and
+  answers it by relaying `token` to `resume`." The count is now five, and a reader
+  holding only this sentence builds a browser prompt that omits the recipients — the
+  thing ADR-0148 §8's last sentence says is not a confirmation of an egress call.
+  ADR-0178 §8 replaces it with *all* of the confirmation's content members, and its
+  §7 states what the new one owes. Everything else this clause says — that the
+  rendering is from the returned `Confirmation`, and that the answer relays `token`
+  to `resume` — is unchanged.
+
+  **Replaced — §8's no-claim clause, on the same scope.** "**The surface does not
+  claim that what it rendered is ADR-0148 §8's confirmation content.**" It was
+  written for a surface that could not have the content; a surface rendering
+  ADR-0178 §7's floor has it, and refusing to say so would understate the
+  confirmation to the user. **Its three sub-clauses are not replaced and bind
+  unchanged**: the rendered arguments are still not the canonical destination set, a
+  flat destination among the parameters is still not a canonical one, and a
+  connected account the surface was not given is still one it may not name.
+
+  **Discharged, not replaced — §8's precondition.** "No lane ships a browser surface
+  that answers a confirmation before a ratified decision supplies what ADR-0148 §8's
+  fourth clause requires … or supplies a discriminator…" ADR-0178 supplies both, and
+  a clause naming the event that ends it is not amended by that event — the
+  treatment §12 of this ADR itself gave ADR-0151 §14 ("satisfied rather than
+  relaxed"), and ADR-0083 §15's own test. The block on the browser confirmation
+  surface lifts when ADR-0178 merges.
+
+  **Not replaced — everything else in §8, and every other section.** The opaque
+  token, `resume` answered with `approved` alone, insertion as text through the
+  document's own text node, `parameters` rendered whole, `pending_confirmations` as
+  the one recovery route, and §8's closing statement that *this* ADR decides no part
+  of ADR-0148 §8's fourth clause — all stand as written. §1's enumeration of thirty,
+  §3's hop ruling, and §§4–12 are untouched.
+- **§11's first deferral is discharged by the decision it names.** "ADR-0148 §8's
+  fourth clause — what a CONFIRM on an egress call puts to the user… #1366 holds it,
+  and the lane that takes it owes a decision on whether the account identity, the
+  canonical destination set and ADR-0150's spans reach the adapter as members of
+  `Confirmation` or as a separate promoted read, and on what a
+  `pending_confirmations` recovery carries when the trail holds only a digest."
+  ADR-0178 answers all three: members, not a read (its §1); and recovery carries the
+  same content the live path carries, because `PermissionDecision.egress_binding` is
+  stored whole and the digest bounds only the payload (its §5). A deferral discharged
+  by the decision it names is not an amendment of the text that deferred it
+  (ADR-0083 §15), so this bullet records the outcome and §11 is unchanged.
 
 - **This is `track:web-client` milestone 15's control-surface decision** (#1230,
   batch #1365). Its exit test is *the leg-11 and leg-12 exit tests (#1081, #1159)

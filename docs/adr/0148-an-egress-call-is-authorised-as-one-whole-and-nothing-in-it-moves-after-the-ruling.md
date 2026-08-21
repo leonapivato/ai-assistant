@@ -2,6 +2,24 @@
 
 - Status: Accepted
 - Date: 2026-08-13
+- **Amended: 2026-08-22 — §8's fourth clause now has a carrier, and no clause of
+  this ADR changes.** §8 requires a `CONFIRM` on an egress call to name the connected
+  account's identity, the canonical destination set in both forms and the payload
+  description, and §11 flagged the `core` surface that would carry them as owed and
+  not landed. Until 2026-08-22 no surface met the clause: `Confirmation` carried five
+  members — none of the three — and everything the clause names lives on
+  `EgressBinding`, which hangs off `PermissionDecision`, the value ADR-0042 §6 forbids
+  an adapter to read. ADR-0178 (#1366, `track:web-client` milestone 15) adds
+  `Confirmation.egress`, carrying the account identity and the binding's own `spans`,
+  with §2's canonical destination set derived from them; the engine populates it from
+  the recorded decision at both assembly sites, so ADR-0042 §6 stands unchanged. It is
+  absent for a non-egress `CONFIRM`, and ADR-0178 §7 binds every surface to render it.
+  **This note changes no decision of this ADR** (ADR-0070 §1's second limb): §8's
+  fourth clause is word for word what it was, its two policy floors are untouched, and
+  a reader acting on §8 acts identically before and after — what moved is whether a
+  surface *can* obey it. §10's condition-by-condition table and §13's exclusions are
+  unaffected. It is recorded here because a reader arriving at §8 would otherwise have
+  to work out for themselves where the content now travels.
 - **Note (2026-08-14): ratified.** `Proposed` → `Accepted`, after **both**
   required reviews came back green on one tree — adversarial **APPROVE with no
   findings** and architecture **APPROVE with no findings**, both at tree
