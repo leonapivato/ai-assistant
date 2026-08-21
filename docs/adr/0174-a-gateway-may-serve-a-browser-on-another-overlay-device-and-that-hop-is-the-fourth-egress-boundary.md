@@ -798,9 +798,11 @@ notification is not networking."
 
 - **The browser-facing surface itself** — request shapes, paths, the document,
   the streaming carrier, and how a conversation and a notification are rendered.
-  ADR-0168 §12 leaves it to the implementing lane and this ADR reaches none of
-  it; what it adds is §10's direction rule restated for a remote browser and §7's
-  stop condition on a secure context.
+  ADR-0168 §12 leaves it to the implementing lane and ADR-0173 §11 declines it
+  again from the hub side, naming chunked transfer, an event stream and a socket
+  the browser opened as alike-permitted; this ADR reaches none of it. What it
+  adds is §10's direction rule restated for a remote browser and §7's stop
+  condition on a secure context.
 - **A transport-layer security arrangement for the remote browser listener**
   (§7). Fires when a browser capability the milestone-14 or milestone-15 surface
   requires is available only in a secure context, or when voice's first rung
@@ -974,6 +976,18 @@ No record is owed on any other ADR.**
   delivery connection per device and §4's identity rule are untouched; §11 above
   records the fan-out as milestone 14's and names the one arrangement fact this
   decision changes.
+- **ADR-0173 — examined, and no record is owed.** Its subject is the hub-side
+  half of streaming, and §11 of it states its own reach at this edge: it "does
+  not decide the browser-facing carrier and does not reopen ADR-0168 §12's
+  deferral of it", and it carries the same direction rule §10 above carries —
+  "whatever carries a stream to a browser is established **by the browser**".
+  Every sentence stays true after a fourth boundary: a stream still crosses the
+  gateway↔hub leg ADR-0124 §1 authorises, the browser-facing carrier is still
+  undecided by both texts, and §11 of that ADR already counts a streaming call
+  against `gateway_max_hub_connections`, which §8 above makes a total across both
+  listeners rather than a per-listener figure. Its clause that it "moves no
+  egress boundary" is a statement about ADR-0173 and stays true; this ADR moves
+  one, and does so at a different hop.
 - **ADR-0097 and ADR-0099 §1.** Untouched. §4 above restates ADR-0124 §5's
   refusals for a browsing device, which is a new noun inviting the same mistake:
   no grant is created, no principal is added, and neither ADR is read more
