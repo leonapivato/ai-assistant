@@ -199,31 +199,56 @@ class StreamingCompleterContract:
     def test_conforms_to_protocol(self, completer: StreamingCompleter) -> None:
         assert isinstance(completer, StreamingCompleter)
 
-    async def test_stream_yields_the_reply_as_text_deltas(
-        self, completer: StreamingCompleter
-    ) -> None:
-        deltas = await _drain(completer.stream(_a_question()))
+    # The happy-path cases are driven through :meth:`world` and assert the
+    # **scripted** text exactly, rather than through the ``completer`` fixture
+    # asserting that *something* non-blank came back. The difference is not
+    # stylistic: ADR-0173 §5 admits a stream that yields nothing at all, so a
+    # suite requiring a truthy join would reject a conforming implementation
+    # whose subject legitimately answers with nothing — asserting more than the
+    # contract promises, and rejecting the very case the blank clause protects.
+    # Scripting the deltas asserts strictly more about what the seam carries
+    # while requiring nothing the contract does not.
+
+    async def test_the_deltas_join_into_the_answer_in_order(self) -> None:
+        world = self.world(StreamAttempt(deltas=("hello", " ", "world")))
+
+        deltas = await _drain(world.completer.stream(_a_question()))
 
         assert all(isinstance(delta, str) for delta in deltas)
-        # The join is the only thing about the deltas the contract promises
-        # (ADR-0173 §5): not their count, not their size, not a token boundary.
-        assert "".join(deltas).strip()
+        # The join, and only the join (ADR-0173 §5): not the count, not the size,
+        # not a token boundary. Including the blank delta, which is a separator
+        # the model emitted — an implementation that filtered it would produce
+        # "helloworld" and is caught here rather than by a caller's coalescer.
+        assert "".join(deltas) == "hello world"
 
-    async def test_stream_handles_a_multi_turn_conversation(
-        self, completer: StreamingCompleter
-    ) -> None:
-        deltas = await _drain(completer.stream(_conversation()))
+    async def test_a_multi_turn_conversation_is_carried_whole(self) -> None:
+        world = self.world(StreamAttempt(deltas=("an", "swer")))
 
-        assert "".join(deltas).strip()
+        deltas = await _drain(world.completer.stream(_conversation()))
 
-    async def test_stream_accepts_the_model_keyword(self, completer: StreamingCompleter) -> None:
+        assert "".join(deltas) == "answer"
+
+    async def test_stream_accepts_the_model_keyword(self) -> None:
         # The ``model`` override is part of the contract's surface; passing it
         # explicitly (here as ``None``, the "use the default" value) must be
         # accepted without resolving a real model. That an override is actually
         # honoured can only be checked offline per implementation.
-        deltas = await _drain(completer.stream(_a_question(), model=None))
+        world = self.world(StreamAttempt(deltas=("answer",)))
 
-        assert "".join(deltas).strip()
+        deltas = await _drain(world.completer.stream(_a_question(), model=None))
+
+        assert "".join(deltas) == "answer"
+
+    async def test_the_configured_subject_streams_without_a_script(
+        self, completer: StreamingCompleter
+    ) -> None:
+        # The one happy-path case on the plain fixture, so an implementation
+        # cannot satisfy this suite only through the scripted hook. It asserts
+        # exactly what the contract promises about an unscripted subject and no
+        # more: every delta is a ``str``, and the call completed.
+        deltas = await _drain(completer.stream(_a_question()))
+
+        assert all(isinstance(delta, str) for delta in deltas)
 
     # ADR-0066 §1, unwidened by ADR-0173 §5. The three cases below pin every
     # shape the rule refuses, the shape it admits by omission that a plausible
@@ -260,18 +285,56 @@ class StreamingCompleterContract:
         assert failure.retryable is False
         assert failure.routable is False
 
-    async def test_stream_accepts_a_history_ending_on_a_system_turn(
-        self, completer: StreamingCompleter
-    ) -> None:
+    async def test_stream_accepts_a_history_ending_on_a_system_turn(self) -> None:
         # The other side of the boundary, and the reason it is worth a case: the
         # rule is "does not end on an assistant turn", *not* "ends on a user
         # turn". Every other positive case here ends on a user turn, so an
         # implementation writing the over-broad ``if messages[-1].role is not
         # Role.USER: raise`` would satisfy the refusals and the conversation
         # cases alike while rejecting a call that works (ADR-0066 §1).
-        deltas = await _drain(completer.stream(_history([Role.USER, Role.SYSTEM])))
+        world = self.world(StreamAttempt(deltas=("answer",)))
 
-        assert "".join(deltas).strip()
+        deltas = await _drain(world.completer.stream(_history([Role.USER, Role.SYSTEM])))
+
+        assert "".join(deltas) == "answer"
+
+    # --- stopping early (ADR-0060, via this module's cancellation clause) ----
+
+    async def test_abandoning_a_stream_part_way_releases_it_without_raising(self) -> None:
+        """Stopping early is ordinary here, and must cost the caller nothing.
+
+        A composing stage that hits ADR-0173 §3's ceiling stops reading, and so
+        does any caller whose own client went away — so an implementation holding
+        the provider exchange open across its ``yield`` has to be able to unwind
+        that from a *close*, not only from exhaustion. It is easy to get wrong in
+        a way nothing else notices: the run is left mid-flight and the failure
+        surfaces as an unrelated error out of the close.
+
+        ``aclose`` is called through :func:`getattr` because the Protocol's return
+        type is ``AsyncIterator``, which does not declare it. An implementation
+        that returns an async generator (both of ours do) gets the deterministic
+        assertion; one returning a bare iterator is asserted on the ``break`` path
+        below, which every shape has.
+        """
+        world = self.world(StreamAttempt(deltas=("one", "two", "three")))
+        stream = world.completer.stream(_a_question())
+
+        first = await anext(stream)
+        aclose = getattr(stream, "aclose", None)
+        if aclose is not None:
+            await aclose()
+
+        assert first == "one"
+
+    async def test_breaking_out_of_the_iteration_does_not_raise(self) -> None:
+        world = self.world(StreamAttempt(deltas=("one", "two", "three")))
+        seen: list[str] = []
+
+        async for delta in world.completer.stream(_a_question()):
+            seen.append(delta)
+            break
+
+        assert seen == ["one"]
 
     # --- the blank stream (ADR-0173 §5, ADR-0170 §8, #1324) ------------------
 
