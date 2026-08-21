@@ -373,7 +373,24 @@ milestone 16 ("session persistence"), and §12 defers it there.
 
 > **Normative.** The cookie half is marked `HttpOnly` and `SameSite=Strict`, is
 > set with a path of `/` and no `Domain` attribute, is not readable by any script,
-> and carries no persistent expiry, so that closing the browser ends it.
+> and carries no persistent expiry.
+
+> **Normative.** A session's lifetime is decided by the gateway alone — §4's
+> death with the process and §8's absolute and idle bounds — and by no attribute
+> the browser is trusted to honour. No clause of this ADR may be read as making a
+> browser's own behaviour part of the guarantee.
+
+**The lifetime clause is separated from the cookie's attributes because an
+earlier draft fused them and was wrong about the mechanism.** That draft required
+no persistent expiry "so that closing the browser ends it", which a browser
+configured to restore its previous session does not do: it can carry both a
+session cookie and the origin's storage across a close and reopen, and the
+gateway — still running — would admit the restored browser on two halves that
+both verify. Adversarial review found it on the third round. The attribute is
+kept, because a cookie that asks not to be persisted is still the right thing to
+send; what is dropped is the guarantee resting on it. Expiry that the client is
+trusted to enforce is not expiry, which is the same reason ADR-0131 §4 refuses to
+honour a budget it cannot meet rather than silently shortening one.
 
 > **Normative.** A request carrying a header half that verifies against a live
 > session, together with a cookie half that does not verify against that same
@@ -665,11 +682,22 @@ in-memory session sufficient, and §3's amplification is what makes §4 mandator
 **What would have made it two is a `core` surface split**, which is the seam
 ADR-0084 §5 used when it separated the transport decision from the surface ADR
 #281 holds — and there is none here. This ADR decides no Protocol, no type and no
-wire member (§12), so there is no contract half to review as contract surface and
-no lane that must merge before another.
+wire member (§12), so **the gateway seat and web-session identity have no
+contract half to split off from each other**, which is the question #1230
+delegated and the whole of what this section answers.
+
+**That is not the same as saying nothing must merge before anything**, and the
+distinction is worth stating because the two sentences look alike. §6 makes the
+narrowly scoped supersession of ADR-0004 §3 a prerequisite of the *implementing*
+lane, so milestone 13's order is: this ADR, then that supersession, then the
+gateway. What §11 rules is that the two questions in *this* text are one
+decision; it is not a claim that this text is the only ADR the milestone owes,
+and no lane may read it as one.
 
 **The number reserved for the second ADR is therefore unused**, and this change
-takes ADR-0168 alone.
+takes ADR-0168 alone. The supersession above is a different decision about a
+different ADR's clause, not the second half of this one, and its number is
+whoever dispatches it to assign.
 
 ### 12. What this decides no part of
 
