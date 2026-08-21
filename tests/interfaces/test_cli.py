@@ -2088,6 +2088,123 @@ async def test_a_composed_answer_is_neutralised_for_the_terminal(output: StringI
     await engine.aclose()
 
 
+async def test_a_multi_paragraph_answer_keeps_the_breaks_it_was_written_with(
+    output: StringIO,
+) -> None:
+    """The defect QA run #1334 found on every multi-paragraph answer (#1336).
+
+    ``_safe`` replaces every non-printable character but ``\\t`` and space, and
+    ``"\\n".isprintable()`` is ``False`` — so a reply's paragraph breaks reached the
+    screen as ``deep work.��One caveat``. Asserted as the *absence* of the
+    replacement character together with the presence of a blank line, because either
+    half alone passes on the wrong rendering: a run that ate the breaks silently
+    would have no ``�`` either.
+    """
+    answer = "Blocked for deep work.\n\nOne caveat worth being straight about."
+    engine = _engine(tools=(tool(),), composing=_answering(answer))
+    outcome = await engine.converse("send it", timeout=PATIENT)
+    output.truncate(0)
+    output.seek(0)
+
+    cli._render_reply(outcome)
+
+    rendered = output.getvalue()
+    assert "�" not in rendered, "the breaks are content, not characters to neutralise"
+    assert "Blocked for deep work.\n\nOne caveat" in rendered
+    await engine.aclose()
+
+
+@pytest.mark.parametrize("ending", ["\r\n", "\r", "\n"], ids=["crlf", "cr", "lf"])
+async def test_a_reply_written_with_any_line_ending_renders_as_one_break(
+    output: StringIO, ending: str
+) -> None:
+    """A ``\\r`` must neither reach the terminal nor cost the break it was part of.
+
+    A carriage return is a character a terminal acts on — it returns the cursor to
+    column 0, so what follows overwrites what preceded — which is ADR-0042 §4's
+    threat and the reason ``_safe`` replaces it. But a model emitting CRLF is not
+    attacking anything, and replacing the ``\\r`` alone leaves ``�`` sitting at every
+    break: #1336 half-fixed. All three endings therefore render the same way.
+    """
+    engine = _engine(tools=(tool(),), composing=_answering(f"First.{ending}Second."))
+    outcome = await engine.converse("send it", timeout=PATIENT)
+    output.truncate(0)
+    output.seek(0)
+
+    cli._render_reply(outcome)
+
+    rendered = output.getvalue()
+    assert "\r" not in rendered, "the character a terminal would act on never reaches it"
+    assert "�" not in rendered
+    assert "First.\nSecond." in rendered
+    await engine.aclose()
+
+
+async def test_the_newline_carve_out_neutralises_every_other_control_character(
+    output: StringIO,
+) -> None:
+    """Only the break is spared; §4's obligation is otherwise discharged whole.
+
+    The pairing is the point: an answer carrying both a legitimate paragraph break
+    and an ANSI escape must keep the first and lose the second, so neither a helper
+    that neutralised nothing nor the old one that neutralised everything passes.
+    """
+    engine = _engine(tools=(tool(),), composing=_answering("First.\n\x1b[2JSecond.\x07"))
+    outcome = await engine.converse("send it", timeout=PATIENT)
+    output.truncate(0)
+    output.seek(0)
+
+    cli._render_reply(outcome)
+
+    rendered = output.getvalue()
+    assert "\x1b" not in rendered
+    assert "\x07" not in rendered
+    assert rendered.count("�") == 2, "the escape and the bell, and nothing else"
+    assert "First.\n" in rendered
+    await engine.aclose()
+
+
+async def test_rich_markup_split_across_a_break_is_shown_and_not_consumed(
+    output: StringIO,
+) -> None:
+    """Escaping the whole value, rather than line by line, is load-bearing.
+
+    Rich's tag pattern matches across a newline, so ``[red\\nbold]`` is markup to the
+    renderer while each of its halves alone is not. A multi-line helper built by
+    neutralising each line and joining with ``\\n`` would therefore hand Rich a tag
+    it consumes — the reply reaching the screen *emptied* of what it said, which is
+    a worse failure than the ``�`` this fix is for and one that looks like nothing
+    went wrong.
+    """
+    engine = _engine(tools=(tool(),), composing=_answering("[red\nbold]still here"))
+    outcome = await engine.converse("send it", timeout=PATIENT)
+    output.truncate(0)
+    output.seek(0)
+
+    cli._render_reply(outcome)
+
+    rendered = output.getvalue()
+    assert "still here" in rendered
+    assert "[red" in rendered, "shown as text, not consumed as a style"
+    assert "bold]" in rendered
+    await engine.aclose()
+
+
+def test_a_value_sharing_a_line_with_the_adapters_own_text_still_loses_its_newline() -> None:
+    """The default stays as it was, because eating the break is what it is for (#1336).
+
+    Every surface but the reply interpolates a value into a line this adapter wrote,
+    where a newline lets the value forge a second line indistinguishable from the
+    CLI's own — ``_safe``'s reason for replacing it, and untouched by the reply's
+    carve-out. Pinned against ``_safe`` directly rather than one calling surface,
+    since it is the shared default that the carve-out could regress.
+    """
+    forged = "harmless\n  [dim]Why:[/] fabricated"
+
+    assert cli._safe(forged) == "harmless�  \\[dim]Why:\\[/] fabricated"
+    assert "\n" not in cli._safe(forged)
+
+
 def test_an_outcome_owing_no_answer_renders_nothing_for_it(output: StringIO) -> None:
     """§4's other two ``None`` shapes print no reply line and no degraded notice."""
     cli._render_reply(TurnOutcome(turn=None, step=None))
