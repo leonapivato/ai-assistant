@@ -69,48 +69,22 @@ def _encodable(delta: str) -> EncodableText:
         raise ModelResponseError(msg) from exc
 
 
-@dataclass(frozen=True)
-class _Cancellations:
-    """How many times a task had been cancelled at one moment, and which task.
+def _cancellations() -> int:
+    """How many cancellations the task running this code has outstanding.
 
     ``Task.cancelling()`` counts the cancellations requested of a task and not
-    yet balanced by ``uncancel()``, so it is what separates a ``CancelledError``
-    delivered to *us* from one raised by a task we cancelled ourselves. What it
-    is not is a live flag: a caller that caught an earlier cancellation without
-    calling ``uncancel()`` — which ``asyncio.timeout`` and ``TaskGroup`` do for
-    their own, and a hand-written handler does not — leaves the count standing
-    for the rest of the task's life. Reading it as a boolean would then report a
-    cancellation of *this* stream on every later close, so what is compared is
-    the **rise** since the stream began.
-
-    Attributes:
-        task: The task the reading was taken from, or ``None`` outside one.
-        count: Its cancellation count at that moment.
+    yet balanced by ``uncancel()``. Read as a **flag** it is wrong twice over: a
+    caller that caught an earlier cancellation without calling ``uncancel()`` —
+    which ``asyncio.timeout`` and ``TaskGroup`` do for their own, and a
+    hand-written handler does not — leaves the count standing for the rest of
+    that task's life, so every later close would report a cancellation nobody
+    delivered. Read as a **number, compared before and after**, it says exactly
+    what is wanted: whether a cancellation arrived *while* we were doing
+    something. Outside a task there is nothing to have been cancelled and the
+    answer is zero.
     """
-
-    task: asyncio.Task[object] | None
-    count: int
-
-    @classmethod
-    def now(cls) -> _Cancellations:
-        """Read the current task's cancellation count."""
-        task = asyncio.current_task()
-        return cls(task=task, count=task.cancelling() if task is not None else 0)
-
-    def rose_since(self) -> bool:
-        """Whether the task running *now* has been cancelled since this reading.
-
-        A different task from the one the reading was taken in gets a baseline of
-        zero rather than this reading's — an async generator may legitimately be
-        closed from a task other than the one that read it, and that task's own
-        history is not ours to net out. Outside a task there is nothing to have
-        been cancelled and the answer is ``False``.
-        """
-        task = asyncio.current_task()
-        if task is None:
-            return False
-        baseline = self.count if task is self.task else 0
-        return task.cancelling() > baseline
+    task = asyncio.current_task()
+    return task.cancelling() if task is not None else 0
 
 
 @dataclass(frozen=True)
@@ -309,7 +283,6 @@ class PydanticAIStreamingCompleter:
         # that will never free. Splitting the two is what lets this seam have
         # backpressure and a reader that cannot be left waiting.
         deltas: asyncio.Queue[_Delta] = asyncio.Queue(maxsize=1)
-        opened = _Cancellations.now()
         run = asyncio.create_task(self._pump(history, model=model, deltas=deltas))
         try:
             while True:
@@ -332,6 +305,17 @@ class PydanticAIStreamingCompleter:
                     case _Ended():
                         return
         finally:
+            # Read **here**, in whatever task is running this cleanup, and not
+            # when the stream opened: an async generator may legitimately be
+            # closed from a task other than the one that read it, and a baseline
+            # taken in the reader would then be netted against a closer's
+            # unrelated history. Taken at the top of the cleanup it needs no
+            # provenance reasoning at all — the same task takes both readings.
+            #
+            # A cancellation delivered *before* this point is the exception this
+            # `finally` is already unwinding, so it shows no rise and needs none:
+            # it resumes propagating on its own once the block completes.
+            before = _cancellations()
             run.cancel()
             try:
                 await run
@@ -344,10 +328,10 @@ class PydanticAIStreamingCompleter:
                 # onward and never absorbed — and a bare `suppress` here eats
                 # exactly that one, silently, on the cleanup path.
                 #
-                # A *rise* in the cancellation count since the stream opened is
-                # what separates them — not a non-zero count, which an earlier
-                # cancellation this caller already handled would leave standing.
-                if opened.rose_since():
+                # A *rise* across `await run` is what separates them — not a
+                # non-zero count, which an earlier cancellation this caller
+                # already handled would leave standing forever.
+                if _cancellations() > before:
                     raise
 
     async def _pump(
