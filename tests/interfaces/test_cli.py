@@ -2682,6 +2682,35 @@ async def test_an_interrupted_stream_still_closes_the_iterator(output: StringIO)
     assert "half an " in output.getvalue(), "and what had arrived was already on screen"
 
 
+async def test_an_interrupted_stream_closes_the_line_it_was_writing(output: StringIO) -> None:
+    """The other half of the same Ctrl-C, and the one the owner sees (#1352).
+
+    A streamed answer is written with no line ending, because the parts arrive
+    mid-sentence and the next chunk continues the line (ADR-0173 §10). Only
+    ``_end_line`` closes it, and a cancellation took neither path that called one:
+    ``asyncio.CancelledError`` is a ``BaseException``, so it went past the handler
+    that catches an :class:`AssistantError` with the line still open and the owner's
+    next shell prompt landed on the end of half a sentence.
+
+    Cosmetic and client-side alone. ADR-0173 §9 rules the turn is not abandoned
+    hub-side by any of this, and the cancellation itself still propagates unchanged —
+    which the ``raises`` below is asserting as much as the test above it is.
+    """
+    engine = _ScriptedStream("half an ", "answer", stall=asyncio.Event())
+    turn = asyncio.create_task(
+        cli._drive_turn(engine, "say it", timeout=PATIENT, approver=lambda _c: True)
+    )
+    await engine.stalled.wait()
+
+    turn.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await turn
+
+    rendered = output.getvalue()
+    assert "half an " in rendered
+    assert rendered.endswith("\n"), "the line the answer was on is closed, not left open"
+
+
 async def test_a_stream_that_ends_without_an_outcome_is_reported_not_invented(
     output: StringIO,
 ) -> None:
