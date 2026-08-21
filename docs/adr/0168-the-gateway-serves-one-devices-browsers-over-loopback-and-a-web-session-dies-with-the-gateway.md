@@ -134,14 +134,18 @@ this repository**.
 > selection between the loopback and remote transports. It builds no engine, and
 > it never falls back from one transport to the other or to anything else.
 
-> **Normative.** The gateway holds no assistant logic. Every request it accepts
-> from a browser resolves to calls on the promoted engine surface and to
-> rendering what those calls returned; it composes no behaviour the surface does
-> not offer, authors no permission ruling, mints no confirmation, and opens no
-> store.
+> **Normative.** The gateway holds no assistant logic: it composes no behaviour
+> the promoted engine surface does not offer, authors no permission ruling, mints
+> no confirmation, and opens no store.
 
-**The third clause is what makes golden rule 3 checkable rather than
-aspirational**, and it is owed because a long-running HTTP server does not
+> **Normative.** Every browser request that asks the assistant for anything
+> resolves to calls on that surface and to rendering what those calls returned.
+> §3's two pre-session paths — the front end's static assets, and the bootstrap
+> exchange — ask it for nothing, are served without reaching it, and are the only
+> paths of which that is true.
+
+**The third and fourth clauses are what make golden rule 3 checkable rather than
+aspirational**, and they are owed because a long-running HTTP server does not
 *look* like a thin adapter. What makes it one is not its lifetime but where the
 decisions are: `src/ai_assistant/interfaces/cli.py` already renders, sets exit
 codes and holds the device's enrolment secrets, and it authors nothing. The
@@ -596,11 +600,11 @@ gateway with a legible message instead of being buffered and then refused.
 
 ### 9. Hub-down is a legible fault, and the gateway never stands in for the hub
 
-> **Normative.** When the gateway cannot reach the hub it reports that to the
-> browser as a transport failure, distinguishable from a request the hub received
-> and declined. It does not retry silently, does not queue the request, does not
-> answer from anything of its own, and never presents a transport failure as an
-> answer.
+> **Normative.** When the gateway cannot reach the hub for a request that needs
+> it, it reports that to the browser as a transport failure, distinguishable from
+> a request the hub received and declined. It does not retry silently, does not
+> queue the request, does not answer from anything of its own, and never presents
+> a transport failure as an answer.
 
 > **Normative.** The gateway starts and serves its own listener whether or not
 > the hub is reachable, so that a browser reaching a running gateway learns that
