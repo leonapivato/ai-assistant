@@ -314,6 +314,38 @@ class TestCancellationOnTheCleanupPath:
             await reader
         assert seen == ["one"]
 
+    async def test_a_run_cancelled_by_something_else_fails_the_reader(self) -> None:
+        """A run that stops without answering owes the caller an error, not a wait.
+
+        The run is driven beside the iterator, so the iterator learns how it ended
+        by being told. A cancellation arriving in the run from anywhere other than
+        this stream's own cleanup — a deadline inside the library, an anyio scope,
+        a provider raising it — ends the run with the reader still parked, and an
+        implementation that re-raises without saying so leaves it parked forever.
+        Read under `wait_for`, so the defect is a failed case rather than a hung
+        suite.
+        """
+
+        async def cancels_itself(
+            _messages: list[ModelMessage], _info: AgentInfo
+        ) -> AsyncIterator[str]:
+            yield "one"
+            raise asyncio.CancelledError
+
+        completer = PydanticAIStreamingCompleter(
+            default_model=FunctionModel(stream_function=cancels_itself)
+        )
+        seen: list[str] = []
+
+        with pytest.raises(ModelError) as caught:
+            await asyncio.wait_for(drain_into(completer.stream(_a_question()), seen), _A_MOMENT)
+
+        assert seen == ["one"], "the text read before the cancellation is still the caller's"
+        # The bare class: a cancellation says nothing about whether another
+        # attempt or another route would fare better (ADR-0063).
+        assert caught.value.retryable is False
+        assert caught.value.routable is False
+
     async def test_the_cleanup_tells_our_cancellation_from_the_pump_s(self) -> None:
         # The predicate the cleanup branches on, asserted in both states rather
         # than only in the one an integration test happens to reach. `cancelling()`
