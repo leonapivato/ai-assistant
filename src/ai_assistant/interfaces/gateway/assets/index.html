@@ -43,14 +43,42 @@
         <form id="ask-form">
           <label for="utterance">What do you want the assistant to do?</label>
           <textarea id="utterance" name="utterance" rows="3" required></textarea>
+          <!--
+            Which entry a turn takes is the owner's, and visibly so (ADR-0175 §3).
+            The gateway never falls back from one to the other, so on a build whose
+            provider cannot stream this checkbox is the path that still answers.
+          -->
+          <p class="choice">
+            <input type="checkbox" id="stream-answer" name="stream-answer" checked />
+            <label for="stream-answer">Show the answer as it is written</label>
+          </p>
           <button type="submit" id="ask-button">Ask</button>
         </form>
         <p class="hint" id="conversation"></p>
+        <button type="button" id="conversations-button">Conversations</button>
       </section>
 
       <section id="answer" class="panel" hidden>
         <h2>What happened</h2>
         <div id="answer-body"></div>
+      </section>
+
+      <!--
+        Notifications are rendered here and by no other means (ADR-0175 §9). No
+        Notification API, no Push API, no service worker and no operating-system
+        notification: the owner ruled the pushed notification in-page on #1230, and
+        every one of those capabilities needs a secure context ADR-0174 §7 defers.
+      -->
+      <section id="notifications" class="panel" hidden>
+        <h2>Notifications</h2>
+        <p class="hint" id="delivery-state"></p>
+        <button type="button" id="watch-button" hidden>Watch for notifications</button>
+        <ul id="notification-list"></ul>
+      </section>
+
+      <section id="conversations" class="panel" hidden>
+        <h2>Conversations</h2>
+        <div id="conversation-list"></div>
       </section>
 
       <p id="fault" class="fault" hidden></p>

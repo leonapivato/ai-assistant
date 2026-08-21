@@ -124,3 +124,66 @@ button[disabled] {
   padding: 0.8rem 1rem;
   color: var(--alarm);
 }
+
+/*
+ * The choice between the two turn entries (ADR-0175 §3). Laid out on one line
+ * because it is one question, and the gateway never answers it — a silent fallback
+ * from a failed stream to the whole-answer entry is refused by ADR-0168 §9 and
+ * ADR-0173 §7 alike.
+ */
+.choice {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0.6rem 0;
+}
+
+.choice label {
+  font-weight: 400;
+}
+
+/*
+ * The notification list (ADR-0175 §4, §9). Rendered in the open page and by no
+ * other means, newest first, each carrying the producer's summary, its detail where
+ * there is one, and the class it declared — and never a `delivery_id`, which never
+ * leaves the gateway (§5).
+ */
+#notification-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+#notification-list li {
+  border-top: 1px solid var(--line);
+  padding: 0.7rem 0;
+}
+
+.notification-summary {
+  margin: 0;
+  font-weight: 600;
+}
+
+/*
+ * A notification's detail is producer text and may carry the line breaks it was
+ * written with, so it is shaped exactly as a composed answer is and for the same
+ * reason: `pre-wrap` is the only shaping a value inserted as text can have.
+ */
+.notification-detail {
+  margin: 0.3rem 0 0;
+  white-space: pre-wrap;
+}
+
+.conversation-row {
+  border-top: 1px solid var(--line);
+  padding: 0.7rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.conversation-row .hint {
+  flex: 1 1 14rem;
+  margin: 0;
+}
