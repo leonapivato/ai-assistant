@@ -205,7 +205,7 @@ notification path. `converse` has no equivalent.
 A recitable pipeline that omits the stage producing the product is worse than no
 list: it is the sentence every later reader will plan against.
 
-### 2. The stage lives in `orchestration`, over contracts it already has
+### 2. The stage lives in `orchestration`, and consumes exactly one contract
 
 > **Normative.** The composing stage lives in `ai_assistant.orchestration` and
 > reaches the model through the injected `ModelProvider` contract. It is not in
@@ -214,13 +214,21 @@ list: it is the sentence every later reader will plan against.
 > product is an `ActionPlan`.
 
 > **Normative.** The stage adds **no Protocol and no member to one**.
-> `ModelProvider.complete`, `ContextProvider.assemble` and `MemoryStore.search` are
-> the whole of what it consumes; each is already ratified, and each is already
-> injected into the engine. No triad is owed, because no Protocol is new
-> (`CONTRIBUTING.md` → "Adding a Protocol").
+> `ModelProvider.complete` is the whole of what it consumes, it is already
+> ratified, and no triad is owed because no Protocol is new (`CONTRIBUTING.md` →
+> "Adding a Protocol").
 
-> **Normative.** Wiring a `ModelProvider` to the composing stage is a
-> composition-root obligation under ADR-0028 §4 and creates no new contract.
+> **Normative.** The stage consumes **no `ContextProvider` and no `MemoryStore`**.
+> Its context and its memories are the ones the turn already assembled, reaching it
+> as the `TurnResult` the turn produced — `goal`, `context`, `memories`, `plan` and
+> `memory_degraded` — together with the `StepOutcome`. It performs no second
+> context assembly and no second retrieval.
+
+> **Normative.** The stage's `ModelProvider` is injected into it explicitly by the
+> composition root, an ADR-0028 §4 obligation that creates no new contract. No lane
+> obtains one by reaching through `Engine`'s collaborators — `Engine.__init__`
+> receives no `ModelProvider` and no `ContextProvider`, and reaching a concrete
+> subsystem's internals to find one is the import golden rule 1 forbids.
 
 `ModelProvider.complete` is already the right shape and says so itself: "Produce
 the assistant's next message given the conversation so far", returning "The
@@ -229,6 +237,14 @@ completion request must end awaiting an answer — and a composing stage is the
 first caller in the product path for which that description is literal rather than
 a metaphor for planning. `ConsolidationStage` is the precedent for an
 `orchestration` stage holding an injected `ModelProvider`; it takes one today.
+
+**Where the model reaches the turn path today is worth stating, because it is not
+where a reader assumes.** `Engine.__init__` takes a `MemoryStore` but no
+`ModelProvider` and no `ContextProvider`: the context provider is `LearningLoop`'s,
+and the model reaches the loop only *through* the injected `Planner`. So the
+composing stage's provider is a genuinely new injection at the composition root
+rather than a collaborator already in hand — which is why the clause above says so
+rather than leaving a lane to discover it and reach downward for one.
 
 > **Normative.** The composing stage sets no execution status, writes no
 > `StepStatus`, transitions no step and produces no `ActionPlan`. VISION §7's rule
