@@ -3070,6 +3070,15 @@ async def _drive_turn(
     does not abandon the *turn* (§9) — the hub runs it to completion and captures it
     — but the socket is the adapter's to give back.
 
+    **And so is the line the answer was written on.** It is written with no ending so
+    the next chunk can continue it (§10), which means every exit from the read owes
+    :meth:`_StreamedReply.abandon` — including the two that are not errors and are
+    re-raised untouched, since ``asyncio.CancelledError`` and ``KeyboardInterrupt``
+    are ``BaseException`` and pass the handler that catches an
+    :class:`AssistantError`. That is the whole of what the last handler below does:
+    the exception's own path is unchanged, and what would otherwise be left is the
+    owner's next shell prompt on the same line as half a sentence (#1352).
+
     A turn drives at most one step today (ADR-0042 §3), so at most one
     confirmation can arise; ``resume`` resolves it to ``EXECUTED`` or ``DENIED``.
     That resolution is an ordinary one-result call: ADR-0173 §13 leaves "a streaming
@@ -3111,6 +3120,17 @@ async def _drive_turn(
         streamed.abandon()
         _render_error(exc)
         return _EXIT_ERROR
+    except BaseException:
+        # A cancellation is not an error and is not handled here — it is re-raised
+        # exactly as it arrived, and ADR-0173 §9 is explicit that abandoning the
+        # stream does not abandon the turn. What is owed is the line: the answer is
+        # written with no ending so the next chunk can continue it, and
+        # `asyncio.CancelledError` and `KeyboardInterrupt` are `BaseException`, so
+        # Ctrl-C after `half an ` had been rendered went past the handler above and
+        # put the next shell prompt on that same line (#1352). `abandon` is
+        # idempotent, so this costs nothing on a path that already settled.
+        streamed.abandon()
+        raise
     _render_conversation_footer(outcome)
     return _EXIT_ERROR if failed else _EXIT_OK
 
