@@ -23,6 +23,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import (
     ConflictRelation,
@@ -32,7 +33,11 @@ from ai_assistant.core.types import (
     Provenance,
     SemanticMemory,
 )
-from ai_assistant.memory._reconciler import ModelBackedReconciler, ReconcilerOutcome
+from ai_assistant.memory._reconciler import (
+    DEFAULT_RECONCILER_MAX_CONFLICTS,
+    ModelBackedReconciler,
+    ReconcilerOutcome,
+)
 from ai_assistant.testing import FakeModelProvider
 
 if TYPE_CHECKING:
@@ -358,6 +363,25 @@ async def test_a_repeated_entry_takes_the_first_answer() -> None:
     relations = report.relations
 
     assert relations == {"a": ConflictRelation.ADDS}
+
+
+def test_the_modules_own_default_bound_is_the_one_settings_carries() -> None:
+    """ADR-0171 §5: the module default must not disagree with ``Settings``.
+
+    Three sites hold the bound today — ``Settings.reconciler_max_conflicts``, this
+    module's ``DEFAULT_RECONCILER_MAX_CONFLICTS``, and the composition root that
+    carries the first into the constructor. Only the last is wired, so a raise applied
+    to the field and not to the constant leaves a reconciler built without ``Settings``
+    labelling at the *old* bound while every measure reports the new one — a
+    disagreement no other case in this file can see, because each of them passes
+    ``max_conflicts`` explicitly.
+
+    Pinned as an equality against ``Settings`` rather than against the literal, so the
+    next measured raise (ADR-0171 §7 leaves the door open at roughly 25) moves one
+    number and this case keeps holding the two together. The literal is pinned once,
+    in ``tests/core/test_config.py``, where the value is the decision.
+    """
+    assert Settings().reconciler_max_conflicts == DEFAULT_RECONCILER_MAX_CONFLICTS
 
 
 @pytest.mark.parametrize("bound", [0, -1])

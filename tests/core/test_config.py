@@ -2098,15 +2098,23 @@ def test_reconciler_model_accepts_a_route_of_its_own() -> None:
     assert settings.default_model == "anthropic:claude-opus-4-8"
 
 
-def test_reconciler_max_conflicts_defaults_to_three() -> None:
-    """ADR-0159 §3's ratified starting value, and its right value is empirical.
+def test_reconciler_max_conflicts_defaults_to_fifteen() -> None:
+    """ADR-0171 §1's measured value, superseding ADR-0159 §3's ratified three.
 
     **Not a second ``conflict_limit``.** That ceiling is 100 and is a circuit
     breaker on a runaway store (ADR-0079 §1), nowhere near a cost bound; this one is
-    exactly that. Three is where the measured distribution puts the records a
-    proposal could plausibly restate or contradict.
+    exactly that.
+
+    **Fifteen because fifteen is what was measured**, and the number is pinned rather
+    than left to the field because it is the *magnitude* half of ADR-0171: §3 makes
+    this default a precondition of §2's narrowing, so a change that narrows the
+    widening while this still reads three would leave real contradictions standing
+    beside their correction. #1302's A/B ran the identical proposal stream at 3 and at
+    15 — retirements 146 -> 73, supersede decisions 56 -> 58, unlabelled relations
+    39.5% -> 2.9% — which is what refutes ADR-0159 §3's own reasoning that "a fourth
+    is nearly always a topical neighbour".
     """
-    assert Settings().reconciler_max_conflicts == 3
+    assert Settings().reconciler_max_conflicts == 15
 
 
 @pytest.mark.parametrize("bound", [0, -1])

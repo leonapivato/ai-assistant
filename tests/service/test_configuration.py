@@ -239,7 +239,11 @@ async def test_a_default_deployment_records_its_effective_figures(settings: Sett
         NOTIFICATION_RETENTION_SECONDS: timedelta(days=7).total_seconds(),
         NOTIFICATION_RECONSIDER_ARMED: True,
         NOTIFICATION_RECONSIDER_SECONDS: timedelta(minutes=5).total_seconds(),
-        RECONCILER_MAX_CONFLICTS: 3,
+        # Fifteen since ADR-0171 §1. The stamp itself is what makes that raise a
+        # *datable boundary* rather than one figure quietly averaged across two
+        # regimes (ADR-0119 §9, ADR-0120 §8), so this expectation moving with the
+        # default is the mechanism working.
+        RECONCILER_MAX_CONFLICTS: 15,
     }
 
 

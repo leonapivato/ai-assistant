@@ -1633,15 +1633,32 @@ class Settings(BaseSettings):
     # destroys a distinct fact.
     #
     # `reconciler_max_conflicts` is how many members of the conflict set, in rank
-    # order, one ingest may ask a model about; members beyond it are left unlabelled
-    # (ADR-0159 §3). It is **not** a second `conflict_limit`: that ceiling is 100 and
+    # order, one ingest may ask a **model** about; the certain `agrees` rung above it
+    # is unconditional and ranges over the whole set (ADR-0159 §3, restated by
+    # ADR-0171 §1). It is **not** a second `conflict_limit`: that ceiling is 100 and
     # is a circuit breaker on a runaway store (ADR-0079 §1), nowhere near a cost
-    # bound, where this one is exactly that. Three is where the measured
-    # distribution puts the records a proposal could plausibly restate or
-    # contradict, and a fourth is nearly always a topical neighbour. It is a
-    # `Settings` field for the reason `observation_max_proposals` is one (ADR-0077
-    # §2) — a knob an operator tunes against their own corpus, whose right value is
-    # an empirical question ADR-0159 does not pretend to have settled.
+    # bound, where this one is exactly that. It is a `Settings` field for the reason
+    # `observation_max_proposals` is one (ADR-0077 §2) — a knob an operator tunes
+    # against their own corpus.
+    #
+    # **Fifteen, because fifteen is what was measured** (ADR-0171 §1, partially
+    # superseding ADR-0159 §3's default of three). ADR-0159 §3 argued three off a
+    # distribution — "a fourth is nearly always a topical neighbour" — and #1302's
+    # replay refutes it: 657 of 1,753 crossings offer more than three, and the bound
+    # explains 100% of that replay's 2,522 unlabelled relations. The A/B ran the
+    # identical proposal stream at 3 and at 15: supersede retirements halve (146 ->
+    # 73) while supersede decisions stay flat (56 -> 58) and `contradicts` grows only
+    # 66 -> 81, so the raise extends protection rather than inflating supersession,
+    # and final store shrinkage is unchanged (-17.6% against -17.8%). Fifteen labels
+    # 1,730 of the 1,753 crossings; roughly 25 would zero the residual, which
+    # ADR-0171 §7 leaves to a run rather than reading off a distribution.
+    #
+    # **What it costs is tokens, not calls.** ADR-0159 §3's one-request clause is per
+    # ingest and not per member, so a larger bound grows the size of one prompt and
+    # never the number of prompts. And since ADR-0171 §2 turning it down costs
+    # *recall* rather than records: a member the writer holds no relation for is
+    # spared by the supersede widening instead of swept into it, so this is a spend
+    # knob that no longer governs destruction.
     #
     # `reconciler_model` is the route the reconciler **names** rather than
     # inheriting, typed as the same validated spec `observer_model` carries so a
@@ -1656,7 +1673,7 @@ class Settings(BaseSettings):
     # member rather than a failed write, and widening the set of providers shown two
     # stored beliefs is exactly the cost ADR-0004 §7's minimisation rule weighs.
     reconciler_max_conflicts: _IntegerSetting = Field(
-        default=3,
+        default=15,
         ge=1,
         description=(
             "The most conflict-set members, in rank order, one ingest may ask a model "
