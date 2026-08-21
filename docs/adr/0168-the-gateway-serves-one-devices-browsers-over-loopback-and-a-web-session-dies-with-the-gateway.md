@@ -318,9 +318,15 @@ check, and the session is what checks.
 **The second and third clauses are ADR-0124 §6's design applied to a smaller
 secret**, and taking it verbatim is deliberate: the hub "retains only a verifier
 from which the credential cannot be recovered, so the hub holds no device's Tier
-0 secret at rest", and the same sentence should be true of the gateway. It also
-settles ADR-0004 §3 without a supersession — a value never written to a store or
-a file is a value that clause has nothing to say about (§13).
+0 secret at rest", and the same sentence should be true of the gateway. What it
+settles is ADR-0004 §3 **as that clause reaches the gateway's own state, and
+nothing further** — a value never written to a store or a file is a value that
+clause has nothing to say about (§13). It settles nothing about the values the
+*browser* holds: those are Tier 0 outside the OS keyring however little the
+gateway retains, §6 rules §3 engaged on them, and the supersession §6 makes a
+prerequisite of the implementing lane is owed on them whatever this clause does.
+Reading this paragraph as a way to avoid that prerequisite is reading it about a
+different subject.
 
 **Refusing rather than evicting is ADR-0131 §2's direction, for its reason.**
 That section closes the *second* delivery connection rather than the incumbent
@@ -615,18 +621,35 @@ this ADR:
   custody a file-backed keyring gives on that platform. That is ADR-0124 §6's
   second replacement — the access is gated by the OS where it cannot be gated by
   `permissions/`.
-- **Auditable use, in place of a gated read.** The admission-record clause above
-  is ADR-0124 §6's third replacement applied here, and it is a clause of *this*
-  ADR because it constrains the gateway directly rather than the lane.
+- **Auditable admission, in place of a gated read — and not auditable *use*.**
+  The admission-record clause above is ADR-0124 §6's third replacement applied
+  here, and it is a clause of *this* ADR because it constrains the gateway
+  directly rather than the lane. What it makes auditable is the **session's**
+  admission: the mint that created it, and every refusal, a failed verification
+  of the halves included. It does not record the successful reads — every request
+  a live session admits verifies both halves, and no record is written for one.
+  That is the granularity ADR-0124 §7 already audits a *connection* at, and a
+  record per admitted request is the promise the clause above was deliberately
+  narrowed away from. The lane writing the supersession states the replacement in
+  these terms rather than as "auditable use", because the shorter phrase would
+  claim a coverage the record does not have.
 
 **The replacements are weaker than §3 and §7, and the difference is stated rather
 than smoothed over**, as ADR-0124 §6 stated its own. The gateway's record is its
 own log and not the hub's Tier 1 audit trail, so it is not reviewable beside
-everything else the assistant did; and browser-profile permissions are custody
+everything else the assistant did; browser-profile permissions are custody
 rather than a policy decision traceable to an answer the owner gave about *this*
-access. That is the price of a browser being a client at all, it is bounded to a
-session's own admission on one machine, and it is paid visibly here rather than
-deferred to an issue that would have made it look temporary.
+access; and the record covers a session's admission rather than each Tier 0 read
+the live session then makes, so an auditor sees that a session was minted and
+sees every attempt that failed, but not the successful verifications behind it.
+Adversarial review named that third shortfall on the eighth round, and it is
+stated rather than closed: closing it means a record per admitted request, which
+is the unbounded shape architecture review had this same clause narrowed away
+from three rounds earlier. Which of the two costs more is a real question, and it
+belongs to the lane that writes the supersession — with both halves of it visible
+here rather than one. That is the price of a browser being a client at all, it is
+bounded to a session's own admission on one machine, and it is paid visibly here
+rather than deferred to an issue that would have made it look temporary.
 
 > **Normative.** The front end inserts every value the hub returned into the page
 > as **text** and never as markup, and executes nothing derived from one.
