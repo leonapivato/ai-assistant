@@ -512,30 +512,34 @@ reach it; and §3's `NonBlankEncodableText` cannot hold it, so constructing the
 an unclassified failure in place of the model seam's classified one. This is a
 reachable path on a conforming provider, not a defensive one.
 
-**Where that check goes decides whether routing still works, and above the seam it
-does not.** `ModelResponseError` is `routable = True`, because "the mismatch is
-often with *this model's* capabilities, and another may answer usably" — and
-`RoutingProvider` acts on exactly that flag. But a blank completion is *contract-
-valid*: the router sees a successful call, returns it, and stops. A stage that
-then raises a routable error raises it after every route is gone, so the flag
-promises a fallback that cannot happen. The check has to sit where the router can
-still act on it.
+> **Normative.** The composing stage validates the completion **before**
+> constructing a `TurnOutcome`. A completion whose content is blank, or which is
+> otherwise unusable as an answer, becomes neither a `reply` nor a `None`; it is
+> raised as a classified model failure, and the two turn calls never surface a
+> pydantic `ValidationError` from `TurnOutcome` construction to a caller.
 
-> **Normative.** The blank-completion check belongs **inside the model seam**. A
-> `ModelProvider` implementation that would return an assistant message with blank
-> content raises `ModelResponseError` instead of returning it, so a routing
-> provider sees a routable failure and may try another route. The composing stage
-> does not implement this check in place of the seam.
+> **Normative.** That refusal is **not routable**, and no lane reuses a routable
+> failure for it. By the time the stage holds the completion the routing layer has
+> already returned, so a routable error there would tell a caller a fallback is
+> available when none can be attempted.
 
-> **Normative.** The composing stage still refuses a blank or otherwise unusable
-> completion before constructing a `TurnOutcome`, so that a provider violating the
-> clause above yields a classified failure rather than a pydantic
-> `ValidationError` escaping the engine. That refusal is **not routable**: at that
-> point routing has already returned and no route remains to try, and a routable
-> error there would misreport what a caller can do about it.
+**Why not put the check inside the seam, where routing could act on it.** That is
+the better place, and this ADR declines it on scope rather than on merit.
+`ModelResponseError` is `routable = True` — "another may answer usably" — and
+`RoutingProvider` fails over on exactly that flag. But a blank completion is
+*contract-valid*: `Message.content` is `EncodableText`, the conformance suite
+asserts only that a `str` comes back, so the router sees a successful call and
+stops. Obliging every `ModelProvider` to raise instead would be a **new
+postcondition on `ModelProvider.complete`** — a Protocol change, which golden rule
+5 puts behind its own ratified ADR and which `CONTRIBUTING.md` → "Adding a
+Protocol" moves together with its conformance suite and canonical fake. That is a
+different lane and a different subsystem.
 
-> **Normative.** The two turn calls never surface a `ValidationError` from
-> `TurnOutcome` construction to a caller.
+It is also **not a defect this decision introduces**: `ModelBackedPlanner` has the
+same exposure today, a blank completion reaching `_require_steps` with no route
+left to try. Filed as **#1324**, with what a lane picking it up would weigh. Until
+then the honest thing is a refusal that does not claim a failover it cannot
+deliver, which is what the clause above says.
 
 > **Normative.** A composed answer is engine-supplied text, and every adapter
 > neutralises it before display exactly as it does the confirmation content, the
@@ -561,6 +565,10 @@ still act on it.
 - **The planner's non-empty `steps` requirement** (#1315). The answer sits beside
   the plan, so this ruling does not depend on relaxing it, and relaxing it is a
   `planning/` change and a different lane.
+- **Whether a blank completion should be refused inside the model seam** (#1324),
+  which is a `ModelProvider` postcondition change and so its own ADR under golden
+  rule 5. §8 keeps this ADR's refusal above the seam and non-routable, and changes
+  no Protocol.
 - **Whether the composed answer joins the episode the turn captures** (#1314).
   That is `track:memory` ground — ADR-0074 §3's capture and ADR-0162's premise
   about whose turns are recorded — and deciding it inside a conversation-track ADR
@@ -580,11 +588,12 @@ Mostly a checklist of obligations already marked above, so the lane's brief can 
 short. It owes: §3's single field with §4's two-directional validator; the
 composing stage in `orchestration` per §2 and its composition-root wiring; §5's
 inputs actually threaded to it; §5a's non-forgeable attribution; §7's
-`PROTOCOL_VERSION` bump and note in the same change; §8's clauses, including the
-seam-side blank check; §6's rendering floor honoured in `interfaces/cli.py`; and
-the pipeline stage list in `orchestration`'s module docstring amended per §1. That
-it may not touch `core/protocols.py` follows from §2 rather than being added here.
-Two obligations are genuinely new and are therefore marked:
+`PROTOCOL_VERSION` bump and note in the same change; §8's clauses; §6's rendering
+floor honoured in `interfaces/cli.py`; and the pipeline stage list in
+`orchestration`'s module docstring amended per §1. That it may not touch
+`core/protocols.py` follows from §2 rather than being added here, and it is what
+keeps this one lane in one subsystem plus `core`'s single field. One obligation is
+genuinely new and is therefore marked:
 
 > **Normative.** In the same change as the field, the implementing lane lands tests
 > pinning: §4's invariant in both directions; §5's construction obligations — that
@@ -593,21 +602,14 @@ Two obligations are genuinely new and are therefore marked:
 > guarantee under a **deliberately contradictory provider**, a fake whose completion
 > claims an action the step account records as `NO_CAPABLE_TOOL` and again as
 > `DENIED`, asserting that the outcome's disposition and the rendered step account
-> are unchanged by what the reply says; and §8's blank-completion path at **both**
-> ends — that the seam raises, and that a routing provider handed a blank primary
-> still reaches its fallback.
-
-> **Normative.** Where §8's seam-side check and §3's field cannot land as one
-> change under `CLAUDE.md`'s one-subsystem rule, the lane splits rather than
-> widening: the `models/` half lands first, and neither half is deferred past the
-> other's merge.
+> are unchanged by what the reply says; and §8's non-routable refusal on a blank
+> completion.
 
 The contradictory-provider test is the one that matters most and is the easiest to
 omit, because every natural test of a composing stage uses a fake that cooperates.
 A cooperating fake cannot distinguish a design whose guarantee is structural from
 one whose guarantee is a hope about the prompt — which is exactly the distinction
-§5 and §6 were rewritten to make. The routing-fallback test is second, and for the
-same reason: a single-provider fake cannot see the bug at all.
+§5 and §6 were written to make.
 
 ## Consequences
 
