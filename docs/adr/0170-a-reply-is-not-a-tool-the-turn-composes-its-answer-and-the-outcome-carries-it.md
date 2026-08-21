@@ -307,35 +307,51 @@ engine for exactly this purpose (ADR-0042 §4), and a second, model-written acco
 of the same pending action beside it is where the two can disagree. The resume
 that follows composes an answer in the ordinary way.
 
-### 5. Non-answerable steps degrade into the answer honestly
+### 5. Non-answerable steps reach the stage, and what is sought of the answer
 
-#1312's second delegated question. The answer has two halves: what the stage is
-told, and what stops the model from lying about it. This section is the first
-half; §6 is the second, and §6 is the one that makes this more than an aspiration.
+#1312's second delegated question, and answering it honestly means separating two
+things that are easy to run together: what this decision can **guarantee**, and
+what it can only **seek**. Nothing in an ADR constrains arbitrary model output. A
+conforming `ModelProvider` may return "I sent the email" after a step reached
+`Disposition.NO_CAPABLE_TOOL`, and no prompt, clause or test makes that
+impossible. So the obligations below are on the **stage's construction** — what it
+is given and what it asks for, both of which a lane can discharge and a test can
+pin — and the single guaranteed property lives in §6.
 
-> **Normative.** The composing stage is given what became of the plan — which steps
-> were driven, which were not, and for each driven step its `Disposition` and its
-> durable `StepStatus` and `failure`. The answer it composes states what the
-> assistant did **not** do wherever a planned step did not run: skipped for want of
-> a capable tool, denied by policy, refused for its arguments, refused at the
-> egress binding, ambiguous between tools, or never driven at all.
+> **Normative.** The composing stage is given what became of the plan: which steps
+> were driven, which were not driven at all, and for each driven step its
+> `Disposition` and its durable `StepStatus` and `failure`. Withholding any of
+> those from the stage is a defect of this decision.
 
-> **Normative.** An answer never narrates as done a step that did not succeed. The
-> disposition is the gate's verdict and the named step's `status` and `failure` are
-> the outcome (ADR-0084 §8); a composed answer is bound by that distinction exactly
-> as an adapter is, and `EXECUTED` is not licence to say the thing worked.
+> **Normative.** The stage's instruction to the model requires the answer to state
+> what the assistant did **not** do wherever a planned step did not run — skipped
+> for want of a capable tool, denied by policy, refused for its arguments, refused
+> at the egress binding, ambiguous between tools, or never driven at all — and
+> requires it not to narrate as done a step that did not succeed. `EXECUTED` is the
+> gate's verdict and the named step's `status` and `failure` are the outcome
+> (ADR-0084 §8); the instruction carries that distinction to the model rather than
+> assuming it.
 
-> **Normative.** Where `TurnResult.memory_degraded` is true, the composed answer
-> does not claim knowledge of the user the turn did not retrieve.
+> **Normative.** Where `TurnResult.memory_degraded` is true, the stage tells the
+> model so, and its instruction requires the answer not to claim knowledge of the
+> user the turn did not retrieve.
 
 > **Normative.** Until the plan-driving stage (#242) lands, at most a plan's first
-> step is driven. An answer to a turn whose plan had more steps than were driven
-> says so. A composed answer implying an undriven step happened is a **defect of
-> this decision**, not a matter for prompt tuning.
+> step is driven, and the stage is told which of the plan's steps were not driven —
+> not handed the plan alone and left to infer it.
 
-The last clause is stated that way deliberately. "The prompt will handle it" is how
-an obligation becomes nobody's, and the honesty of the answer is the whole
-difference between this milestone and a chatbot bolted onto a planner.
+> **Normative.** No clause of this ADR is a guarantee about the content of model
+> output, and none is read as one. A composed `reply` may still assert something
+> false about execution. Where it does, §6's deterministic account is the record
+> and the reply is wrong; a lane that reads this section as licence to relax §6 has
+> inverted the decision.
+
+That last clause is the one worth stating plainly, because the alternative — a
+marked obligation that no mechanism can discharge — is worse than an honest
+limit. "The prompt will handle it" is how an obligation becomes nobody's. What
+this decision actually buys is that the stage is never *ignorant* of what
+happened, and that the truth is on screen next to the prose whatever the prose
+says.
 
 > **Normative.** The stage supplies the step's outcome to the model as rendered
 > content inside a message role the model seam admits. It constructs no
@@ -350,11 +366,19 @@ difference between this milestone and a chatbot bolted onto a planner.
 > and no adapter drops the disposition line, the named step's status and failure, or
 > the exit code #531 fixed, on the ground that a reply is now present.
 
-This is what makes §5 an obligation the code keeps rather than an instruction a
-model may ignore. A prompt can ask for honesty; it cannot guarantee it. But the
-disposition is a value the engine computed and the adapter prints from, so a model
-that claims it sent the email is contradicted on the same screen by a line saying
-no tool was available — by construction, on every turn, without anyone checking.
+> **Normative.** The deterministic step account — the `Disposition`, the named
+> step's `StepStatus` and `failure`, and the process exit code derived from them —
+> is the assertion this decision guarantees about what the assistant did. The
+> composed `reply` is not. Where the two disagree the step account is correct by
+> construction, and no adapter, setting or later ADR resolves that disagreement in
+> the reply's favour or suppresses the account to remove it.
+
+This is the whole enforceable half, and it is enforceable precisely because it
+does not depend on the model. A prompt can ask for honesty; it cannot guarantee
+it. But the disposition is a value deterministic code committed and the adapter
+prints from, so a model that claims it sent the email is contradicted on the same
+screen by a line saying no tool was available — on every turn, without anyone
+checking, and whether or not the prompt worked.
 
 It also settles what "the answer replaced the plan listing" would have cost. The
 plan listing itself is a rendering choice this ADR does not make; the *step
@@ -407,6 +431,23 @@ at `EGRESS_UNBINDABLE` and at `StepExecution`'s validators. The model seam's
 existing failure carries a retryable/routable disposition already (ADR-0066 §3),
 which is the right shape for "ask again".
 
+**A successful call can still return an unusable answer, and that gap is closed
+here rather than left to the lane.** `Message.content` is `EncodableText`, which
+admits the empty string, so a conforming provider may return an assistant message
+with no content at all. That call did not *fail*, so the clause above does not
+reach it; and §3's `NonBlankEncodableText` cannot hold it, so constructing the
+`TurnOutcome` would raise a bare pydantic `ValidationError` out of the engine —
+an unclassified failure in place of the model seam's classified one. This is a
+reachable path on a conforming provider, not a defensive one.
+
+> **Normative.** The composing stage validates the completion **before**
+> constructing a `TurnOutcome`. A completion whose content is blank, or which is
+> otherwise unusable as an answer, is raised as `ModelResponseError` — the
+> corpus's existing name for "the provider replied, but the response was malformed
+> or unusable" — and becomes neither a `reply` nor a `None`. No pydantic
+> `ValidationError` from `TurnOutcome` construction reaches a caller of the two
+> turn calls.
+
 > **Normative.** A composed answer is engine-supplied text, and every adapter
 > neutralises it before display exactly as it does the confirmation content, the
 > plan's rationale and a policy's reason (ADR-0042 §4). On the CLI that is
@@ -414,7 +455,7 @@ which is the right shape for "ask again".
 
 ### 9. What this ADR does not decide
 
-> **Normative.** Beyond §§1–8, this ADR decides nothing. It adds no Protocol,
+> **Normative.** Beyond §§1–8 and §10, this ADR decides nothing. It adds no Protocol,
 > registers no tool, designates no seam, adds no setting, changes no method
 > signature, and adds no `core` name other than §3's single field. A lane needing
 > any of those needs its own change and, where golden rule 5 reaches it, its own
@@ -455,9 +496,20 @@ and the pipeline stage list in `orchestration`'s module docstring amended per §
 That it may not touch `core/protocols.py` follows from §2 rather than being added
 here. One obligation is genuinely new and is therefore marked:
 
-> **Normative.** The implementing lane lands tests pinning §4's invariant in both
-> directions and §5's honest degradation on at least the `NO_CAPABLE_TOOL` and
-> `DENIED` paths, in the same change as the field.
+> **Normative.** In the same change as the field, the implementing lane lands tests
+> pinning: §4's invariant in both directions; §5's construction obligations — that
+> the stage is handed the undriven steps and each driven step's disposition, status
+> and failure, and that `memory_degraded` reaches it; §6's guarantee under a
+> **deliberately contradictory provider**, a fake whose completion claims an action
+> the step account records as `NO_CAPABLE_TOOL` and again as `DENIED`, asserting
+> that the outcome's disposition and the rendered step account are unchanged by
+> what the reply says; and §8's `ModelResponseError` on a blank completion.
+
+The contradictory-provider test is the one that matters most and is the easiest to
+omit, because every natural test of a composing stage uses a fake that cooperates.
+A cooperating fake cannot distinguish a design whose guarantee is structural from
+one whose guarantee is a hope about the prompt — which is exactly the distinction
+§5 and §6 were rewritten to make.
 
 ## Consequences
 
