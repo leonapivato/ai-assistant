@@ -159,6 +159,7 @@ from ai_assistant.core.errors import (
     UnusableIdentityError,
 )
 from ai_assistant.core.logging import configure_logging
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
     SECRET_VALUE_MAX_BYTES,
@@ -179,6 +180,7 @@ from ai_assistant.core.types import (
     QuestionState,
     QueueOutcome,
     QuietWindow,
+    ReplyChunk,
     SecretScope,
     StepStatus,
     encodable_text,
@@ -201,7 +203,7 @@ from ai_assistant.wire import (
 from ai_assistant.wire.address import check_socket_path
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Sequence
 
     from ai_assistant.core.config import Settings
     from ai_assistant.core.protocols import AssistantEngine
@@ -3048,10 +3050,30 @@ async def _drive_turn(
     approver: Callable[[Confirmation], bool],
     conversation_id: str | None = None,
 ) -> int:
-    """Converse, render, and relay a confirmation if the engine parks one.
+    """Stream a turn, render it, and relay a confirmation if the engine parks one.
+
+    **The turn is driven through** :meth:`AssistantEngine.converse_streaming`
+    (ADR-0173 §4), so the answer reaches the screen while it is still being
+    composed. That method is subject to every clause ``converse`` declares — same
+    arguments, same refusals, same failures, the same ``timeout`` budget relayed
+    unchanged — and the terminal :class:`TurnOutcome` it yields last is the one this
+    function goes on to render. The only outcome shape that reaches here and could
+    not reach ``converse`` is ADR-0173 §6's fourth: a :attr:`~TurnOutcome.reply` set
+    beside ``reply_degraded``, which :func:`_render_reply` renders per ADR-0173 §10.
+
+    **Iteration stops at the terminal frame and the iterator is closed either way.**
+    ADR-0173 §4 makes closing the caller's obligation and it is what hangs up the
+    connection, so the loop runs inside :func:`closing_stream`: breaking on the
+    outcome, an :class:`AssistantError` from the iteration, and a
+    ``KeyboardInterrupt`` or cancellation at any point all release the connection
+    rather than leaving a generator nobody finished. A stream abandoned mid-answer
+    does not abandon the *turn* (§9) — the hub runs it to completion and captures it
+    — but the socket is the adapter's to give back.
 
     A turn drives at most one step today (ADR-0042 §3), so at most one
     confirmation can arise; ``resume`` resolves it to ``EXECUTED`` or ``DENIED``.
+    That resolution is an ordinary one-result call: ADR-0173 §13 leaves "a streaming
+    twin for ``resume``" undecided, and a park owes no answer to stream.
     An :class:`AssistantError` from any stage is rendered and mapped to a non-zero
     exit code — the adapter surfaces the failure, it does not swallow it. **So is a
     step that ran and failed** (#531): a non-zero exit on a failed step is an
@@ -3063,9 +3085,21 @@ async def _drive_turn(
     parked turn and the resolution that answers it are two episodes in one
     conversation, and printing the same id twice would read as two.
     """
+    streamed = _StreamedReply()
     try:
-        outcome = await engine.converse(utterance, timeout=timeout, conversation_id=conversation_id)
-        failed = _render_turn(outcome)
+        settled = await _read_stream(
+            engine.converse_streaming(utterance, timeout=timeout, conversation_id=conversation_id),
+            into=streamed,
+        )
+        if settled is None:
+            streamed.abandon()
+            console.print(
+                "[red]That turn's answer ended without a result[/], so I cannot say "
+                "what became of it. Nothing here was retried."
+            )
+            return _EXIT_ERROR
+        outcome = settled
+        failed = _render_turn(outcome, streamed=streamed)
         step = outcome.step
         if step is not None and step.confirmation is not None:
             approved = approver(step.confirmation)
@@ -3074,10 +3108,47 @@ async def _drive_turn(
             )
             failed = _render_turn(outcome)
     except (AssistantError, TransportError) as exc:
+        streamed.abandon()
         _render_error(exc)
         return _EXIT_ERROR
     _render_conversation_footer(outcome)
     return _EXIT_ERROR if failed else _EXIT_OK
+
+
+async def _read_stream(
+    stream: AsyncIterator[ReplyChunk | TurnOutcome], *, into: _StreamedReply
+) -> TurnOutcome | None:
+    """Render the chunks of one streamed turn and return its terminal outcome.
+
+    **The union is resolved by type and the outcome ends the read** (ADR-0173 §4):
+    zero or more chunks, then exactly one :class:`TurnOutcome`, then stop. Stopping
+    at the outcome rather than reading on is what leaves a peer that kept writing
+    unable to add prose after the answer was settled, and :func:`closing_stream`
+    turns that early exit into the hang-up §4 makes the caller's obligation. The
+    same context manager closes the stream when the iteration raises, and when a
+    ``KeyboardInterrupt`` cancels the read part-way through an answer.
+
+    **``None`` is the contract's own impossibility, rendered rather than crashed.**
+    §4 has the outcome "always present unless the call raises", and both
+    implementations of it read until a terminal frame or fail loudly — so this
+    returns ``None`` only for a producer that ended the iteration silently, and the
+    caller says so instead of inventing an outcome or letting a traceback out
+    (ADR-0042 §7).
+
+    Args:
+        stream: What ``converse_streaming`` handed back, un-iterated.
+        into: The accumulator the chunks are rendered through.
+
+    Returns:
+        The turn's terminal outcome, or ``None`` if the stream ended without one.
+    """
+    async with closing_stream(stream) as values:
+        async for value in values:
+            if isinstance(value, ReplyChunk):
+                into.take(value)
+                continue
+            return value
+    return None
 
 
 async def _drive_conversations(engine: AssistantEngine, *, limit: int, offset: int) -> int:
@@ -4035,6 +4106,158 @@ def _safe_prose(value: str) -> str:
     return _safe(value.replace("\r\n", "\n").replace("\r", "\n"), keep_line_breaks=True)
 
 
+def _settled_prefix(text: str) -> str:
+    r"""The longest prefix of ``text`` whose neutralisation later text cannot change.
+
+    **The renderer's own boundary, which is what ADR-0173 §10's second clause asks
+    for.** A streamed answer is neutralised "to text the adapter has *accumulated*,
+    never independently to each chunk as it arrives", and "an adapter that renders
+    progressively neutralises on boundaries its own renderer controls". This is that
+    boundary: everything before the cut neutralises to a fixed string no matter what
+    arrives next, so writing it out early can never be revised, and everything from
+    the cut is held until it settles. The hub chooses where the *chunks* break; it
+    never chooses where the *escaping* is decided.
+
+    Three things at the tail are unsettled, and each is a way :func:`_safe_prose`
+    would read the same characters differently once more text follows them:
+
+    - **An unclosed ``[``.** Rich escapes a *complete* tag — its pattern is
+      ``\[[a-z#/@][^[]*?]`` — so ``[/dim`` alone is left verbatim and becomes
+      ``\[/dim]`` the moment a ``]`` lands. Splitting there is exactly the evasion
+      §10 names, so the cut falls at the last ``[`` with no ``]`` after it. A ``[``
+      that already has a ``]`` after it is settled: the match is lazy and ends at
+      that ``]``, and a later ``[`` cannot be reached across it.
+    - **A trailing run of ``\``.** Rich's escape doubles the backslashes running
+      into a tag and appends one to a value ending in an odd number of them, so a
+      run at the tail is rewritten by whatever follows it.
+    - **A trailing ``\r``.** :func:`_safe_prose` folds ``\r\n`` to one ``\n`` and a
+      lone ``\r`` to ``\n``; which of the two a final ``\r`` is depends on the next
+      character.
+
+    Args:
+        text: The answer as accumulated so far, verbatim and un-neutralised.
+
+    Returns:
+        The prefix safe to neutralise and write now. Possibly empty — a stream whose
+        first chunk is ``[dim`` settles nothing until its ``]`` arrives.
+    """
+    cut = len(text)
+    opening = text.rfind("[")
+    if opening != -1 and "]" not in text[opening:]:
+        cut = opening
+    elif text.endswith("\r"):
+        cut -= 1
+    while cut > 0 and text[cut - 1] == "\\":
+        cut -= 1
+    return text[:cut]
+
+
+@final
+class _StreamedReply:
+    """One streamed answer, accumulated and written out as it settles (ADR-0173 §10).
+
+    **It holds the raw text, not the rendered text**, which is the whole of §10's
+    second clause. :func:`_safe_prose` is asked of the accumulation and never of a
+    chunk, so the escaping is decided over text this class holds rather than at a
+    boundary the producer picked; :func:`_settled_prefix` then says how much of that
+    accumulation can be written without the answer being revised later.
+
+    **Nothing is written that the terminal outcome does not confirm.** ADR-0173 §3
+    makes :attr:`TurnOutcome.reply` the answer and the chunks "a rendering of it in
+    flight", so :meth:`settle` writes the tail only where the authoritative reply
+    extends what is already on screen, and says so plainly where it does not. The
+    held-back remainder is deliberately not flushed on its own: it reaches the screen
+    from the outcome's ``reply``, or not at all.
+    """
+
+    def __init__(self) -> None:
+        """Start empty, having written nothing."""
+        self._accumulated = ""
+        self._settled = ""
+        self._written = ""
+        self._line_open = False
+
+    @property
+    def shown(self) -> str:
+        """The raw text already written to the terminal."""
+        return self._settled
+
+    def take(self, chunk: ReplyChunk) -> None:
+        """Accumulate one chunk and write however much of the answer it settles.
+
+        Args:
+            chunk: The instalment just yielded.
+        """
+        self._accumulated += chunk.text
+        self._write_through(_settled_prefix(self._accumulated))
+
+    def settle(self, reply: str | None) -> None:
+        """Finish the answer against the value ADR-0173 §3 makes authoritative.
+
+        Args:
+            reply: The terminal outcome's ``reply``. ``None`` where the turn owed no
+                answer or published none.
+        """
+        if reply is not None and reply.startswith(self._settled):
+            # The ordinary case, and the one a turn that streamed nothing takes too:
+            # every prefix extends the empty string, so this writes the whole reply.
+            self._write_through(reply)
+            self._end_line()
+            return
+        self._end_line()
+        if not self._settled:
+            return
+        # ADR-0173 §3: "no implementation treats an accumulated chunk sequence as the
+        # record of what the assistant said". The prose above is already on screen and
+        # cannot be recalled, so it is disowned in words and the answer stated after it.
+        console.print(
+            "[yellow]Note:[/] the hub did not confirm the text above as this turn's "
+            "answer, so read what follows instead of it."
+        )
+        if reply is not None:
+            console.print(_safe_prose(reply))
+
+    def abandon(self) -> None:
+        """Give up on a stream that will produce no outcome, leaving the line whole.
+
+        A partly written answer has no trailing newline — it was written with none, so
+        the next chunk could continue the line — so an error rendered after it would
+        otherwise begin on the same line as the prose it is about.
+        """
+        self._end_line()
+
+    def _write_through(self, settled: str) -> None:
+        """Write the part of ``settled`` not already on screen.
+
+        ``settled`` extends what was written, so its neutralisation extends what was
+        neutralised, and the difference is what has not been seen yet.
+
+        Args:
+            settled: A raw prefix of the answer that is safe to neutralise now.
+        """
+        if len(settled) <= len(self._settled):
+            return
+        rendered = _safe_prose(settled)
+        console.print(rendered[len(self._written) :], end="", soft_wrap=True, highlight=False)
+        self._settled = settled
+        self._written = rendered
+        self._line_open = not rendered.endswith("\n")
+
+    def _end_line(self) -> None:
+        """Close the line the answer was written on, if one is open. Idempotent.
+
+        **Written without a line ending and closed once** — the parts arrive
+        mid-sentence, and Rich would otherwise break the answer wherever a chunk
+        happened to end. ``soft_wrap`` is for the same reason: wrapping each instalment
+        to the console width independently would hard-wrap an answer at whatever column
+        each chunk stopped at, and the terminal wraps the whole far better. Anything
+        printed after the answer therefore has to be given its own line first.
+        """
+        if self._line_open:
+            console.print()
+            self._line_open = False
+
+
 def _argument(value: str) -> str:
     """One value, rendered as a shell argument a person can paste (#984).
 
@@ -4101,8 +4324,16 @@ def _uncopyable(
     )
 
 
-def _render_turn(outcome: TurnOutcome) -> bool:
+def _render_turn(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None) -> bool:
     """Render one turn's answer, its plan, its degraded notices, and its step outcome.
+
+    ``streamed`` is the answer already on screen when the turn was driven through
+    ``converse_streaming``; the reply is finished against it rather than printed
+    afresh (ADR-0173 §10). It is ``None`` for a one-result call — a ``resume``, or a
+    caller that chose ``converse`` — and then the reply is printed whole as before.
+    Either way **the step account is rendered whether or not chunks were rendered**,
+    which is §10's third clause and is the same obligation ADR-0170 §6 already
+    carried.
 
     ``outcome.turn`` is ``None`` on a resume driven from a **recovered** park
     (ADR-0052 §3) — a confirmation reconstructed from durable state after a restart
@@ -4137,7 +4368,7 @@ def _render_turn(outcome: TurnOutcome) -> bool:
         console.print(
             "[yellow]Note:[/] personal memory was unavailable, so this answer is generic."
         )
-    _render_reply(outcome)
+    _render_reply(outcome, streamed=streamed)
     if turn is not None:
         plan = turn.plan
         if plan.rationale:
@@ -4155,8 +4386,12 @@ def _render_turn(outcome: TurnOutcome) -> bool:
     return _render_step(step)
 
 
-def _render_reply(outcome: TurnOutcome) -> None:
-    """Print the composed answer, or say that composing one failed (ADR-0170 §6, §8).
+def _render_reply(outcome: TurnOutcome, *, streamed: _StreamedReply | None = None) -> None:
+    """Print the composed answer, and say where composing it did not finish.
+
+    Four shapes, read off two values (ADR-0170 §4 as ADR-0173 §6 widened it): no
+    answer was owed, one was owed and none was produced, one was owed and **part** of
+    it was, one was owed and the whole of it was.
 
     **Neutralised before display** (ADR-0170 §8). A composed answer is
     engine-supplied text — model output, in the assistant's own voice — so it is put
@@ -4181,18 +4416,41 @@ def _render_reply(outcome: TurnOutcome) -> None:
     to carry — and rendering it as a *failure of the step* would say the action did
     not happen when the account says it did.
 
+    **An answer that began and did not finish is shown, and said to be incomplete**
+    (ADR-0173 §§6, 10). That fourth shape — a ``reply`` set *beside*
+    ``reply_degraded`` — is reachable only from a stream, where a failure or the
+    payload ceiling stopped a composition whose first words the user has already
+    read. §10 obliges "the account it carries plus a statement that the answer is
+    incomplete", and discarding the prose instead would make the authoritative value
+    contradict what is on their screen (ADR-0173 §6). The statement comes *after* the
+    text for the same reason it is a statement at all: it is about prose the user has
+    by then read.
+
     A ``None`` reply with ``reply_degraded`` unset is a shape that owed no answer at
     all: a parked confirmation, whose question the caller renders instead, or a
     resume driven from a recovered park (ADR-0170 §4). Neither prints anything here.
+
+    Args:
+        outcome: The turn's terminal outcome.
+        streamed: The answer already written by ``converse_streaming``'s chunks, or
+            ``None`` where the turn was driven as one result.
     """
-    if outcome.reply_degraded:
+    if streamed is not None:
+        streamed.settle(outcome.reply)
+    elif outcome.reply is not None:
+        console.print(_safe_prose(outcome.reply))
+    if not outcome.reply_degraded:
+        return
+    if outcome.reply is None:
         console.print(
             "[yellow]Note:[/] no answer could be composed for this turn, so what "
             "follows is the record of what was done and nothing more."
         )
         return
-    if outcome.reply is not None:
-        console.print(_safe_prose(outcome.reply))
+    console.print(
+        "[yellow]Note:[/] that answer is incomplete — composing it did not finish, so "
+        "it stops where it stops; what follows is the record of what was done."
+    )
 
 
 def _render_step(step: StepOutcome) -> bool:
