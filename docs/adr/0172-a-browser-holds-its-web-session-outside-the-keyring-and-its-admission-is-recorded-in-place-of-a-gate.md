@@ -703,8 +703,10 @@ ADR-0082 §1 requires the judgement to be made in this text, naming the clause a
 applying ADR-0070 §1's test: would a reader holding only the earlier text now act
 differently, or read one of its clauses more widely than it now holds?
 
-**Two clauses are superseded and their record lands in this change. No record is
-owed on any of the rest.**
+**Three clauses of ADR-0004 are superseded — §3, §6 and §7, each narrowly — and
+one record carrying all three lands in this change. No record is owed on any
+other ADR.** ADR-0168 §6 named two of them; §6 is engaged by this ADR's own §2
+and is argued at §4.
 
 - **ADR-0004 §3's first bullet — superseded, narrowly (§2).** A reader holding
   only §3 believes every Tier 0 secret in this system's world sits in the OS
