@@ -3954,12 +3954,23 @@ def _uncopyable(
 
 
 def _render_turn(outcome: TurnOutcome) -> bool:
-    """Render one turn's plan, degraded-memory notice, and step outcome.
+    """Render one turn's answer, its plan, its degraded notices, and its step outcome.
 
     ``outcome.turn`` is ``None`` on a resume driven from a **recovered** park
     (ADR-0052 §3) — a confirmation reconstructed from durable state after a restart
     has no live turn to render — so only the step is shown there. The action itself
     was already shown from the recovered confirmation before the user answered.
+
+    **The answer is rendered in addition to the step account, never instead of it**
+    (ADR-0170 §6). ADR-0084 §8's rule binds unchanged: the disposition line, the
+    named step's status and failure, and the exit code #531 fixed are all still
+    printed, and none of them is dropped on the ground that a reply is now present.
+    That is the whole enforceable half of ADR-0170, and it is enforceable precisely
+    because it does not depend on the model — a completion that claims it sent the
+    email is contradicted on the same screen by a line saying no tool was available,
+    on every turn, whether or not the prompt worked. Where the two disagree the step
+    account is correct by construction, and nothing here resolves that disagreement
+    in the reply's favour.
 
     Returns:
         Whether a step ran and did not succeed, which the caller folds into the
@@ -3974,11 +3985,12 @@ def _render_turn(outcome: TurnOutcome) -> bool:
             "[yellow]Note:[/] this turn was not recorded, so it will not be part of "
             "this conversation's history."
         )
+    if turn is not None and turn.memory_degraded:
+        console.print(
+            "[yellow]Note:[/] personal memory was unavailable, so this answer is generic."
+        )
+    _render_reply(outcome)
     if turn is not None:
-        if turn.memory_degraded:
-            console.print(
-                "[yellow]Note:[/] personal memory was unavailable, so this answer is generic."
-            )
         plan = turn.plan
         if plan.rationale:
             console.print(f"[bold]Plan:[/] {_safe(plan.rationale)}")
@@ -3993,6 +4005,38 @@ def _render_turn(outcome: TurnOutcome) -> bool:
     if step is None or step.confirmation is not None:
         return False
     return _render_step(step)
+
+
+def _render_reply(outcome: TurnOutcome) -> None:
+    """Print the composed answer, or say that composing one failed (ADR-0170 §6, §8).
+
+    **Neutralised before display** (ADR-0170 §8). A composed answer is
+    engine-supplied text — model output, in the assistant's own voice — so it is put
+    through :func:`_safe` exactly as the confirmation content, the plan's rationale
+    and a policy's reason already are (ADR-0042 §4). Rich markup in a reply is
+    otherwise a control sequence this terminal interprets.
+
+    **A degraded turn is rendered as a statement, never as silence** (ADR-0170 §6).
+    A turn that sent an email and could not then describe it still tells the user the
+    email was sent, in the same words it would have used before ADR-0170 existed; the
+    only thing missing is the prose that was going to sit above them. Rendering it
+    silently would leave a user unable to tell "no answer was owed" from "an answer
+    was owed and could not be composed" — the distinction ``reply_degraded`` exists
+    to carry — and rendering it as a *failure of the step* would say the action did
+    not happen when the account says it did.
+
+    A ``None`` reply with ``reply_degraded`` unset is a shape that owed no answer at
+    all: a parked confirmation, whose question the caller renders instead, or a
+    resume driven from a recovered park (ADR-0170 §4). Neither prints anything here.
+    """
+    if outcome.reply_degraded:
+        console.print(
+            "[yellow]Note:[/] no answer could be composed for this turn, so what "
+            "follows is the record of what was done and nothing more."
+        )
+        return
+    if outcome.reply is not None:
+        console.print(_safe(outcome.reply))
 
 
 def _render_step(step: StepOutcome) -> bool:

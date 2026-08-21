@@ -2,7 +2,16 @@
 
 The heart of the product. For each request it runs the pipeline:
 intent understanding → context assembly → memory retrieval → planning →
-tool selection → permission checking → execution → learning/memory updates.
+tool selection → permission checking → execution → **reply composition** →
+learning/memory updates.
+
+The composing stage is ADR-0170 §1's addition, and the list is amended rather than
+annotated because a recitable pipeline that omits the stage producing the product
+is the sentence every later reader plans against. Every stage after planning used
+to be about *acting*, so a request whose whole point was an answer had nowhere to
+land: the planner is obliged to name a capability, nothing advertises it, the step
+is skipped, and one dim line saying no tool is available was the whole of what the
+user received.
 
 It depends *only* on the Protocols in ``core.protocols`` — never on concrete
 subsystem implementations, which are injected. That inversion is what keeps the
@@ -111,6 +120,18 @@ emitted for that field (ADR-0106 §3). The producer is module-private rather tha
 generic seam until a second exists; ADR-0114 decides two store operations and two
 types and no third contract.
 
+``ComposingStage`` is the **terminal composing stage** (ADR-0170 §1, §2): given the
+turn's goal, its assembled context, the memories retrieved for it, its plan and what
+became of the step the turn drove, it composes the one natural-language answer
+``TurnOutcome.reply`` carries. It holds an injected ``ModelProvider`` and consumes
+nothing else — no ``ContextProvider`` and no ``MemoryStore``, because its context and
+its memories are the ones the turn already assembled — and it adds no Protocol
+(ADR-0170 §2 declines one for having a single implementation and a single consumer).
+A reply is **not** a tool: no registry lookup, no ``ToolDefinition``, no
+``ToolInvoker.invoke``, no destination and no credential (§1). A composition failure
+degrades the turn rather than failing it, and the set of failures that degrade is
+closed (§8).
+
 ``IngestionStage`` is the **ingestion stage** (ADR-0093 §6), the third producer's
 stage: it reads the injected ``Reader`` once, within that reader's own bound, and
 puts every belief the reading proposes through the same write path — because a
@@ -134,6 +155,7 @@ interruption. It concludes nothing else: no model call, no importance judgement,
 no absence, no disposition, and no cursor (ADR-0111 §11).
 """
 
+from ai_assistant.orchestration.composing import ComposedReply, ComposingStage
 from ai_assistant.orchestration.connections import ConnectionOperations
 from ai_assistant.orchestration.consolidation import (
     ConsolidationReport,
@@ -182,6 +204,8 @@ __all__ = [
     "MIN_FRAME_BYTES",
     "AssembledHistory",
     "CaptureReport",
+    "ComposedReply",
+    "ComposingStage",
     "ConnectionOperations",
     "ConsolidationReport",
     "ConsolidationStage",

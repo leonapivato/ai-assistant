@@ -8311,6 +8311,45 @@ class TurnOutcome(BaseModel):
             it is reported beside :attr:`TurnResult.memory_degraded` and not
             swallowed, because a user whose turns are silently not being recorded
             will not find out until they try to continue.
+        reply: The natural-language answer the turn composed, and **the only place
+            an answer is carried** (ADR-0170 §3). ``None`` on exactly three shapes
+            (§4): a pass whose step parked for confirmation, where what the user
+            must answer is :attr:`StepOutcome.confirmation`; a pass whose
+            :attr:`turn` is ``None``, a resume driven from a *recovered* park, where
+            context and memories were never persisted and there is nothing to
+            compose from; and a pass on which composition failed, which is the one
+            of the three that sets :attr:`reply_degraded`. Non-``None`` on every
+            other outcome the two turn calls return.
+
+            :data:`NonBlankEncodableText` rather than :data:`EncodableText` because
+            ``None`` has the precise meaning above and a blank string would be a
+            third state meaning the same thing less legibly — the reasoning
+            :attr:`NotificationCandidate.summary` already applies to the one line a
+            user is told.
+        reply_degraded: Whether composing that answer **failed** on a turn that
+            otherwise ran (ADR-0170 §3, §8). The third of a set:
+            :attr:`TurnResult.memory_degraded` says retrieval failed and
+            :attr:`capture_degraded` says the record could not be written, and each
+            says the same kind of thing — a late stage failed, the turn is still
+            worth returning, and the user is told rather than left to infer it. It
+            is what makes §4's third shape legible: without it a composition failure
+            would be a ``None`` no client could tell from the other two.
+
+            Note the asymmetry with :attr:`reply`: a composition failure is a
+            *classified* one, so ``True`` here means the model call raised a
+            ``ModelError`` or returned a completion unusable as an answer. A defect
+            in the composing stage's own code propagates instead of degrading
+            (ADR-0170 §8), because a stage that could be wholly broken while every
+            turn reported the same classified-looking degradation is the state
+            hardest to notice.
+
+    Note:
+        ADR-0085 §4's Group A table lists this type's four fields as promoted; the
+        tree has six. ADR-0170 §3 added :attr:`reply` and :attr:`reply_degraded` on
+        its own authority and recorded no supersession, which is the practice
+        ADR-0145 §4 and ADR-0152 §9 already set for :class:`Disposition`: the record
+        of a member belongs with the ADR that decided it, not with the one that
+        moved the type into ``core``.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -8327,6 +8366,57 @@ class TurnOutcome(BaseModel):
     capture_degraded: bool = Field(
         default=False, description="Whether the exchange went unrecorded."
     )
+    reply: NonBlankEncodableText | None = Field(
+        default=None, description="The natural-language answer the turn composed (ADR-0170 §3)."
+    )
+    reply_degraded: bool = Field(
+        default=False, description="Whether composing that answer failed (ADR-0170 §3)."
+    )
+
+    @model_validator(mode="after")
+    def _reply_matches_the_shape_of_the_pass(self) -> TurnOutcome:
+        """State ADR-0170 §4's two invariants, in both directions.
+
+        **Both directions, for** :meth:`StepOutcome._confirmation_matches_disposition`
+        **'s own reason.** A silent ``None`` on a turn that ran is an answer the user
+        never got and nobody can point at a contract violation for; a :attr:`reply`
+        beside a parked confirmation is prose competing with the yes/no question the
+        user must answer, and the prose is what they will read.
+
+        The three ``None`` shapes are a park, a recovered resume, and a composition
+        failure — and only the third sets :attr:`reply_degraded`, which is what lets
+        a client tell "no answer was owed" from "an answer was owed and could not be
+        composed" from the value alone. So the flag is refused beside a non-``None``
+        :attr:`reply`, on a park, and where :attr:`turn` is ``None``; and where all
+        three of those are absent, an answer is owed and a bare ``None`` is refused.
+        """
+        parked = self.step is not None and self.step.confirmation is not None
+        if parked and self.reply is not None:
+            msg = (
+                "a parked outcome must carry no reply: what the user must answer is the "
+                "confirmation, and prose beside it competes with the question"
+            )
+            raise ValueError(msg)
+        if self.reply_degraded:
+            if self.reply is not None:
+                msg = "reply_degraded says composition failed, so there is no reply to carry"
+                raise ValueError(msg)
+            if parked:
+                msg = "a parked outcome owes no answer, so composing one cannot have degraded"
+                raise ValueError(msg)
+            if self.turn is None:
+                msg = (
+                    "an outcome with no turn owes no answer — a recovered park persisted no "
+                    "context to compose from — so composing one cannot have degraded"
+                )
+                raise ValueError(msg)
+        elif self.reply is None and not parked and self.turn is not None:
+            msg = (
+                "this outcome owed an answer and carries none: set reply, or set "
+                "reply_degraded to say composing one failed"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class LearnDecision(StrEnum):

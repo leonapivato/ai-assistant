@@ -59,6 +59,7 @@ from ai_assistant.models import (
 )
 from ai_assistant.models.retry import RetryPolicy
 from ai_assistant.orchestration import (
+    ComposingStage,
     ConnectionOperations,
     ConsolidationStage,
     ConversationLifecycle,
@@ -1001,6 +1002,16 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 memory=memory,
                 retention=settings.episode_retention,
             ),
+            # The terminal composing stage (ADR-0170 §1), holding the **same** model
+            # seam the planner reaches through — `model`, the routing-over-retrying
+            # provider built above. One seam and not a second family of settings:
+            # ADR-0170 §9 leaves "which model answers" undecided and §2 gives the
+            # stage no setting of its own, so it takes the deployment's configured
+            # route rather than naming one. This is the explicit composition-root
+            # injection §2 obliges — `Engine` receives no `ModelProvider` of its
+            # own, so a stage that reached for one would have to go through a
+            # concrete subsystem's internals, which golden rule 1 forbids.
+            composing=ComposingStage(model=model),
             # The observation stage (ADR-0077 §8), over the *same* memory store and
             # the *same* writer the learn leg uses, so an observed belief is
             # retrievable, inspectable and forgettable through the surfaces the user

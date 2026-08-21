@@ -277,7 +277,15 @@ class FakeAssistantEngine:
         )
         self.calls.append(("converse", {"utterance": utterance, "conversation_id": selected}))
         held = self._resolve(selected)
-        outcome = self.turn_outcome or TurnOutcome(turn=_turn(utterance), conversation_id=held)
+        # ``reply`` is populated because ADR-0170 §4 obliges an answer on every shape
+        # but a park and a recovered resume, and ``TurnOutcome`` refuses an outcome
+        # that owes one and carries none. A fake that returned ``None`` here would
+        # let a client's tests pass over a shape the type does not admit.
+        outcome = self.turn_outcome or TurnOutcome(
+            turn=_turn(utterance),
+            conversation_id=held,
+            reply=f"This fake engine composed no real answer to {utterance.strip()!r}.",
+        )
         return self._checked(outcome, "converse")
 
     async def resume(

@@ -18,7 +18,7 @@ from datetime import datetime, time, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
-from test_engine import AT, Harness, _connection_operations, _grant_operations
+from test_engine import AT, Harness, _composing, _connection_operations, _grant_operations
 
 from ai_assistant.core.correlation import current_correlation
 from ai_assistant.core.errors import ConfigurationError
@@ -56,6 +56,7 @@ def _wired(
     objects and the same fakes — with the two collaborators ADR-0130 §9 adds.
     """
     return Engine(
+        composing=_composing(),
         grant_operations=_grant_operations(),
         connection_operations=_connection_operations(),
         loop=harness.engine._loop,

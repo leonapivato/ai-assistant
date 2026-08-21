@@ -53,6 +53,7 @@ from ai_assistant.core.types import (
 )
 from ai_assistant.orchestration import (
     DEFAULT_MAX_PAYLOAD_BYTES,
+    ComposingStage,
     ConnectionOperations,
     ConversationLifecycle,
     Engine,
@@ -76,6 +77,7 @@ from ai_assistant.testing import (
     FakeMemoryPolicy,
     FakeMemoryStore,
     FakeMemoryWriter,
+    FakeModelProvider,
     FakeObserver,
     FakePlanStore,
     FakeSourceGrantStore,
@@ -105,6 +107,17 @@ _GRANTABLE = _SOURCE
 
 CAPABILITY = "send_email"
 PARAMETERS = {"to": "someone@example.com"}
+
+
+def _composing() -> ComposingStage:
+    """The terminal composing stage every engine now takes (ADR-0170 §2).
+
+    Wired to a cooperating fake provider, which is all these tests need: what the
+    composed answer *says*, and what the engine does when composing it fails, are
+    pinned in ``tests/orchestration/test_composing.py`` and
+    ``tests/orchestration/test_engine_composing.py``.
+    """
+    return ComposingStage(model=FakeModelProvider())
 
 
 def _confirmable() -> ToolDefinition:
@@ -254,6 +267,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         id_factory=_counter("d"),
     )
     return Engine(
+        composing=_composing(),
         loop=loop,
         runner=runner,
         plans=plans,
