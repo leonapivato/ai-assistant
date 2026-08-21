@@ -45,15 +45,25 @@ two facts rather than one (§4): the device is one the owner listed in
 The assets alone are served on overlay membership, because they are the bundle this
 repository ships to anyone who installs it.
 
-**A browser reaches a closed enumeration of five operations** (ADR-0175 §6):
-``converse``, ``converse_streaming``, ``recent_conversations``, ``conversation``
-and ``forget_conversation``. ``next_notification`` is the **sixth** operation this
-gateway calls and is deliberately not one of the five, because no browser request
-resolves to it — :class:`.delivery.DeliveryFanOut` originates the poll, no browser
-request names it, and no browser argument reaches it. Everything else the promoted
-surface carries is unreached from a browser, and adding one costs a ratified
-decision: ``resume`` and ``pending_confirmations``, the grant surface, the belief
-and question surfaces, and the notification *review* surface are milestone 15's.
+**A browser reaches a closed enumeration of thirty operations** (ADR-0177 §1,
+superseding ADR-0175 §6's first clause and its figure of five). Eighteen of them
+are served here today: milestone 14's ``converse``, ``converse_streaming``,
+``recent_conversations``, ``conversation`` and ``forget_conversation``, together
+with the grant surface — ``grantable_sources``, ``grant``, ``revoke``,
+``recent_grants``, ``standing_grants`` — the belief surface — ``beliefs``,
+``belief``, ``forget`` — the deferred-question surface — ``questions``,
+``interrupted_questions``, ``answer``, ``forget_question`` — and ``observe``.
+``next_notification`` remains the gateway's **own** poll and is none of the thirty,
+because no browser request resolves to it — :class:`.delivery.DeliveryFanOut`
+originates it, no browser request names it, and no browser argument reaches it
+(ADR-0175 §6's second clause, bound unchanged by ADR-0177 §1).
+
+**The residual is smaller and the enumeration is no weaker for it.** ``resume`` and
+``pending_confirmations``, the notification *review* five and the five connection
+operations are admitted by ADR-0177 §1 and are not served here yet; ``learn`` is
+admitted by nothing and stays unreached until its own ratified decision (§11). The
+form is what ADR-0168 §6 chose it for — "naming what may appear is the only form
+that stays right when a later lane adds a request shape nobody has thought of yet".
 
 **Two of those shapes answer on a stream** (ADR-0175 §1): the body of the response
 to the request the browser made, written in pieces, with no socket, no upgrade and
@@ -75,6 +85,7 @@ import json
 import socket
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 from functools import partial
 from importlib import resources
 from typing import TYPE_CHECKING, Any, Final
@@ -85,10 +96,23 @@ from ai_assistant.core.errors import AssistantError, ConfigurationError
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    AnswerOutcome,
+    Belief,
+    BeliefBand,
+    BeliefSummary,
     ConversationDigest,
     ConversationSummary,
     Disposition,
+    Evidence,
+    GrantableSource,
+    GrantScope,
+    MemoryKind,
+    ObservationReport,
+    ObservedProposal,
+    Question,
+    SourceGrant,
     StepOutcome,
+    SuccessorLink,
     TurnOutcome,
 )
 from ai_assistant.interfaces.gateway import streams
@@ -188,6 +212,44 @@ _CONVERSATIONS_PATH: Final = "/conversations"
 _CONVERSATION_PATH: Final = "/conversation"
 _FORGET_CONVERSATION_PATH: Final = "/conversation/forget"
 
+#: ADR-0177 §6's grant surface. **Five paths for five operations, and the two
+#: readings are two paths rather than one answered twice**: ADR-0139 §3's fourth
+#: clause forbids a view presenting a source's configuration state as part of a
+#: grant or a grant as a statement about whether a source is being read, and
+#: ADR-0139 §1 is that neither answer is derivable from the other. A single
+#: ``/grants`` shape that merged :data:`_SOURCES_PATH`'s answer into
+#: :data:`_STANDING_PATH`'s would perform that merge in the gateway, where the
+#: front end could no longer keep the two apart.
+_SOURCES_PATH: Final = "/sources"
+_GRANT_PATH: Final = "/grant"
+_REVOKE_PATH: Final = "/revoke"
+_RECENT_GRANTS_PATH: Final = "/grants/recent"
+_STANDING_PATH: Final = "/grants/standing"
+
+#: ADR-0177 §5's belief surface, in the shape the conversation surface already
+#: uses: a listing, a single read, and a destruction that the single read is the
+#: ceremony for. §5's second clause is why the pair is two paths and not one — the
+#: render the ceremony rests on "is taken from a ``belief`` read issued immediately
+#: before the confirmation is offered, and never from an entry of a ``beliefs``
+#: listing the page rendered earlier".
+_BELIEFS_PATH: Final = "/beliefs"
+_BELIEF_PATH: Final = "/belief"
+_FORGET_BELIEF_PATH: Final = "/belief/forget"
+
+#: ADR-0078 §8's four façade methods, reached as ADR-0177 §1 admits them. The two
+#: listings are separate paths because they answer different questions — one is
+#: what is waiting for an answer, the other is what was begun and never recorded
+#: (ADR-0078 §9) — and no single read of one question exists (#495), which is what
+#: §5's ``forget_question`` ceremony is met with instead.
+_QUESTIONS_PATH: Final = "/questions"
+_INTERRUPTED_PATH: Final = "/questions/interrupted"
+_ANSWER_PATH: Final = "/question/answer"
+_FORGET_QUESTION_PATH: Final = "/question/forget"
+
+#: ADR-0077 §8's passive half, explicit as that section makes it: "nothing triggers
+#: it but a caller", and here the caller is the owner pressing a button.
+_OBSERVE_PATH: Final = "/observe"
+
 #: Which method admits which path. A mapping rather than a chain of comparisons,
 #: because ADR-0168 §6 classifies "from its method and path alone" and the set of
 #: shapes the surface has is now large enough that reading it off one table is what
@@ -199,6 +261,19 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _CONVERSATIONS_PATH): "recent_conversations",
     ("POST", _CONVERSATION_PATH): "conversation",
     ("POST", _FORGET_CONVERSATION_PATH): "forget_conversation",
+    ("POST", _SOURCES_PATH): "grantable_sources",
+    ("POST", _GRANT_PATH): "grant",
+    ("POST", _REVOKE_PATH): "revoke",
+    ("POST", _RECENT_GRANTS_PATH): "recent_grants",
+    ("POST", _STANDING_PATH): "standing_grants",
+    ("POST", _BELIEFS_PATH): "beliefs",
+    ("POST", _BELIEF_PATH): "belief",
+    ("POST", _FORGET_BELIEF_PATH): "forget",
+    ("POST", _QUESTIONS_PATH): "questions",
+    ("POST", _INTERRUPTED_PATH): "interrupted_questions",
+    ("POST", _ANSWER_PATH): "answer",
+    ("POST", _FORGET_QUESTION_PATH): "forget_question",
+    ("POST", _OBSERVE_PATH): "observe",
 }
 
 #: The two shapes that answer on a stream (ADR-0175 §1). They are held apart from
@@ -637,16 +712,36 @@ class Gateway:
             for name in (self._remote_address, *settings.gateway_remote_host_names)
             if name is not None
         )
-        #: The four shapes answered whole, by path. A table rather than a chain of
-        #: comparisons, so ADR-0175 §6's enumeration is one thing to read against the
+        #: The shapes answered whole, by path. A table rather than a chain of
+        #: comparisons, so ADR-0177 §1's enumeration is one thing to read against the
         #: ADR — and so a path :data:`_ASSISTANT_PATHS` admits but nothing here
         #: serves is a ``KeyError`` in this process rather than a silent fallthrough
         #: onto whichever handler happened to be last.
+        #:
+        #: **One entry per operation, and never one entry performing two.** ADR-0168
+        #: §1 forbids the gateway composing behaviour the promoted surface does not
+        #: offer, and ADR-0177 §7 names the one place a lane would be tempted to: an
+        #: amendment is ``revoke`` then ``grant``, composed in the front end as two
+        #: browser requests reaching the two entries below, and there is deliberately
+        #: no third entry that performs both.
         self._unary: Mapping[str, Callable[[Request], Awaitable[Response]]] = {
             _ASK_PATH: self._ask,
             _CONVERSATIONS_PATH: self._recent_conversations,
             _CONVERSATION_PATH: self._conversation,
             _FORGET_CONVERSATION_PATH: self._forget_conversation,
+            _SOURCES_PATH: self._grantable_sources,
+            _GRANT_PATH: self._grant,
+            _REVOKE_PATH: self._revoke,
+            _RECENT_GRANTS_PATH: self._recent_grants,
+            _STANDING_PATH: self._standing_grants,
+            _BELIEFS_PATH: self._beliefs,
+            _BELIEF_PATH: self._belief,
+            _FORGET_BELIEF_PATH: self._forget_belief,
+            _QUESTIONS_PATH: self._questions,
+            _INTERRUPTED_PATH: self._interrupted_questions,
+            _ANSWER_PATH: self._answer,
+            _FORGET_QUESTION_PATH: self._forget_question,
+            _OBSERVE_PATH: self._observe,
         }
 
     @property
@@ -1322,14 +1417,19 @@ class Gateway:
     async def _assistant(
         self, request: Request, header_half: str | None, connection: _Connection
     ) -> Response | _Streamed:
-        """Resolve one admitted assistant request onto ADR-0175 §6's five operations.
+        """Resolve one admitted assistant request onto ADR-0177 §1's enumeration.
 
-        **The enumeration is here and it is closed.** Every other operation the
-        promoted surface carries is unreached from a browser, and no lane adds one
-        without its own ratified decision — which is what keeps ADR-0174's permission
-        to run a gateway on the hub's own machine from quietly handing a browser
-        milestone 15's connection operations, now that a loopback-dialling gateway no
+        **The enumeration is here and it is closed.** Every operation outside it is
+        unreached from a browser, and no lane adds one without its own ratified
+        decision — which is what keeps ADR-0174's permission to run a gateway on the
+        hub's own machine from quietly handing a browser the connection operations
+        ADR-0177 §3 splits by listener, now that a loopback-dialling gateway no
         longer meets the hub's remote refusal (ADR-0174 §11).
+
+        **Every unary handler answers or raises** :class:`_Refused`, and this is
+        where the second becomes the first. A handler therefore reads as one engine
+        call with the arguments the browser supplied, which is the form ADR-0168 §1's
+        biconditional is checkable in.
 
         Args:
             request: The admitted request.
@@ -1343,7 +1443,10 @@ class Gateway:
         """
         shape = (request.method, request.path)
         if shape not in _STREAMED_SHAPES:
-            return await self._unary[request.path](request)
+            try:
+                return await self._unary[request.path](request)
+            except _Refused as refused:
+                return refused.response
         handle = None if header_half is None else self._sessions.handle(header_half)
         if handle is None:  # pragma: no cover — admitted means a session verified it
             return self._refuse(
@@ -1353,29 +1456,56 @@ class Gateway:
             return self._ask_streaming(request, handle)
         return self._delivery_stream(handle)
 
+    async def _relayed[T](self, call: Callable[[], Awaitable[T]]) -> T:
+        """Make one call on the promoted surface, or refuse instead of making it.
+
+        The whole of what every unary handler shares, in one place: the hub-connection
+        ceiling ADR-0168 §8 refuses rather than queues, and ADR-0168 §9's three
+        conditions, each answered as its own. §9 requires a transport failure
+        "distinguishable from a request the hub received and declined" and forbids
+        ever presenting one "as an answer" — and ADR-0177 §7's third clause is what
+        that distinction is *for* at this surface, because a browser composing an
+        amendment reads which of ADR-0139 §4's three outcomes each act got from it and
+        from nothing else.
+
+        The gateway does not retry, does not queue, and answers from nothing of its
+        own. The slot is returned whichever way the call ends, the refusal included.
+
+        Args:
+            call: The one engine call this request resolves to, with the arguments
+                the browser supplied already bound.
+
+        Returns:
+            Whatever the promoted surface returned.
+
+        Raises:
+            _Refused: If no hub connection was free, or the call failed.
+        """
+        if not self._take_hub_slot():
+            raise _Refused(_ceiling())
+        try:
+            return await call()
+        except (TransportError, AssistantError, ValueError) as exc:
+            raise _Refused(_relay_fault(exc)) from exc
+        finally:
+            self._give_hub_slot()
+
     async def _ask(self, request: Request) -> Response:
         """Relay one turn to the hub and render what came back (ADR-0168 §1, §9).
 
-        Every failure mode is kept apart, because §9 requires a transport failure
-        "distinguishable from a request the hub received and declined" and forbids
-        ever presenting one "as an answer". The gateway does not retry, does not
-        queue, and answers from nothing of its own.
+        The budget is the gateway's own and no browser value reaches it: a turn budget
+        is the **caller's** (ADR-0029 §4), which ADR-0177 §1 makes one of exactly two
+        members of the one class of argument this adapter supplies of itself.
         """
         payload = _payload(request)
-        utterance = _string(payload, "utterance")
-        conversation = _string(payload, "conversation_id")
-        if utterance is None:
-            return _fault(400, "Bad Request", "malformed-request")
-        if not self._take_hub_slot():
-            return _ceiling()
-        try:
-            outcome = await self._engine.converse(
-                utterance, timeout=_TURN_BUDGET, conversation_id=conversation
+        outcome = await self._relayed(
+            partial(
+                self._engine.converse,
+                _required_string(payload, "utterance"),
+                timeout=_TURN_BUDGET,
+                conversation_id=_string(payload, "conversation_id"),
             )
-        except (TransportError, AssistantError, ValueError) as exc:
-            return _relay_fault(exc)
-        finally:
-            self._give_hub_slot()
+        )
         return _rendered({"outcome": _outcome_view(outcome)})
 
     def _ask_streaming(self, request: Request, handle: SessionHandle) -> Response | _Streamed:
@@ -1464,20 +1594,15 @@ class Gateway:
         )
 
     async def _recent_conversations(self, request: Request) -> Response:
-        """List conversations, most recently active first (ADR-0074 §2, ADR-0175 §6)."""
+        """List conversations, most recently active first (ADR-0074 §2, ADR-0177 §1)."""
         payload = _payload(request)
-        limit = _integer(payload, "limit", DEFAULT_PAGE_SIZE)
-        offset = _integer(payload, "offset", 0)
-        if limit is None or offset is None:
-            return _fault(400, "Bad Request", "malformed-request")
-        if not self._take_hub_slot():
-            return _ceiling()
-        try:
-            held = await self._engine.recent_conversations(limit=limit, offset=offset)
-        except (TransportError, AssistantError, ValueError) as exc:
-            return _relay_fault(exc)
-        finally:
-            self._give_hub_slot()
+        held = await self._relayed(
+            partial(
+                self._engine.recent_conversations,
+                limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
+                offset=_page(payload, "offset", 0),
+            )
+        )
         return _rendered({"conversations": [_summary_view(one) for one in held]})
 
     async def _conversation(self, request: Request) -> Response:
@@ -1491,17 +1616,8 @@ class Gateway:
         the CLI's own order — read the conversation, then forget it — is the pattern
         this pair makes available.
         """
-        named = _string(_payload(request), "conversation_id")
-        if named is None:
-            return _fault(400, "Bad Request", "malformed-request")
-        if not self._take_hub_slot():
-            return _ceiling()
-        try:
-            digest = await self._engine.conversation(named)
-        except (TransportError, AssistantError, ValueError) as exc:
-            return _relay_fault(exc)
-        finally:
-            self._give_hub_slot()
+        named = _required_string(_payload(request), "conversation_id")
+        digest = await self._relayed(partial(self._engine.conversation, named))
         if digest is None:
             return _fault(404, "Not Found", "no-such-conversation", close=False)
         return _rendered({"conversation": _digest_view(digest)})
@@ -1518,18 +1634,300 @@ class Gateway:
         this adds a destructive operation to a surface that already carried a more
         destructive one, and adds no new class of residual.
         """
-        named = _string(_payload(request), "conversation_id")
-        if named is None:
-            return _fault(400, "Bad Request", "malformed-request")
-        if not self._take_hub_slot():
-            return _ceiling()
-        try:
-            destroyed = await self._engine.forget_conversation(named)
-        except (TransportError, AssistantError, ValueError) as exc:
-            return _relay_fault(exc)
-        finally:
-            self._give_hub_slot()
+        named = _required_string(_payload(request), "conversation_id")
+        destroyed = await self._relayed(partial(self._engine.forget_conversation, named))
         return _rendered({"destroyed": destroyed})
+
+    # --- ADR-0177 §6: the grant surface -----------------------------------
+    #
+    # Five operations and five handlers. **None of them composes an amendment**
+    # (§7): a browser amending a grant sends a `/revoke` and then a `/grant`, and
+    # the gateway holds nothing between them — it does not know the two requests
+    # are related and has nowhere to put the knowledge if it did. That is ADR-0139
+    # §4's own reasoning arriving one hop out: composing the two calls client-side
+    # "is what puts the intermediate state where a surface can report it".
+
+    async def _grantable_sources(
+        self,
+        request: Request,  # noqa: ARG002 — one signature per entry in `_unary`
+    ) -> Response:
+        """Answer *what may I grant?* and nothing else (ADR-0097 §9, ADR-0139 §1).
+
+        The location each entry carries "is on this response and on no stored record"
+        (ADR-0102 §6), and it crosses because a client "renders each ``location`` and
+        takes an explicit act from the user before it calls ``grant``". A gateway that
+        dropped it would leave the front end unable to meet ADR-0139 §5 and therefore
+        unable to grant at all.
+
+        Args:
+            request: The admitted request, which carries no argument.
+
+        Returns:
+            One entry per grantable source.
+        """
+        offered = await self._relayed(self._engine.grantable_sources)
+        return _rendered({"sources": [_source_view(one) for one in offered]})
+
+    async def _grant(self, request: Request) -> Response:
+        """Record one grant, for the uses the browser named (ADR-0097 §2).
+
+        ``source`` is relayed **verbatim** and normalised by nothing: ADR-0102 §2
+        requires that "no implementation may strip, case-fold or otherwise normalise
+        ``source`` at any point before it is compared", and an adapter that trimmed it
+        here would make the gateway admit a call the in-process engine refuses.
+
+        The scope is the browser's own, whole. This adapter neither defaults it, nor
+        widens it, nor infers one member from another — ADR-0133 §2 forbids ranking
+        them, and ADR-0097 §8 forbids anything deciding what the user permitted on
+        their behalf.
+
+        Args:
+            request: The admitted request, carrying ``source`` and ``scope``.
+
+        Returns:
+            The recorded grant, as it was appended.
+        """
+        payload = _payload(request)
+        recorded = await self._relayed(
+            partial(
+                self._engine.grant,
+                _required_string(payload, "source"),
+                scope=_uses(payload, "scope"),
+            )
+        )
+        return _rendered({"grant": _grant_view(recorded)})
+
+    async def _revoke(self, request: Request) -> Response:
+        """Withdraw the live grant on one source, or report there was none.
+
+        **No admission check, deliberately** (ADR-0102 §4): a value no reader declares
+        finds no live grant and answers ``null``, which is what keeps a grant whose
+        reader was later unconfigured revocable. So this handler applies none either —
+        it would be the same refusal one layer out, and would make a grant permanently
+        unrevokable from a browser.
+
+        Args:
+            request: The admitted request, carrying ``source``.
+
+        Returns:
+            The revoking record, or ``null`` where no live grant covered the source.
+        """
+        named = _required_string(_payload(request), "source")
+        withdrawn = await self._relayed(partial(self._engine.revoke, named))
+        return _rendered({"revoked": None if withdrawn is None else _grant_view(withdrawn)})
+
+    async def _recent_grants(self, request: Request) -> Response:
+        """List what was granted and withdrawn, newest first (ADR-0097 §4).
+
+        **``limit`` and no ``offset``**, which is the surface's own departure from the
+        other paging signatures (ADR-0102 §10) and is not repaired here: a gateway
+        offering an offset it would have to implement by over-fetching and slicing
+        would be composing a page the promoted surface does not offer.
+
+        Args:
+            request: The admitted request, carrying an optional ``limit``.
+
+        Returns:
+            The records, newest first.
+        """
+        payload = _payload(request)
+        recorded = await self._relayed(
+            partial(self._engine.recent_grants, limit=_page(payload, "limit", DEFAULT_PAGE_SIZE))
+        )
+        return _rendered({"grants": [_grant_view(one) for one in recorded]})
+
+    async def _standing_grants(
+        self,
+        request: Request,  # noqa: ARG002 — one signature per entry in `_unary`
+    ) -> Response:
+        """Answer *what do I currently authorise?* (ADR-0139 §2).
+
+        The second of ADR-0139 §1's two questions, and the answer to it. It is served
+        on its own path because "neither answer is derivable from the other and no
+        surface may present one as the other" — a gateway that annotated this set from
+        ``grantable_sources``, or dropped a record because no held reader declares its
+        source, would hide exactly the state this operation exists to show.
+
+        Args:
+            request: The admitted request, which carries no argument.
+
+        Returns:
+            Every grant live at the instant the response was computed.
+        """
+        standing = await self._relayed(self._engine.standing_grants)
+        return _rendered({"standing": [_grant_view(one) for one in standing]})
+
+    # --- ADR-0177 §5: the belief surface ----------------------------------
+
+    async def _beliefs(self, request: Request) -> Response:
+        """List what is believed, band-scoped, as summaries (ADR-0073 §1, ADR-0077 §6).
+
+        **An absent filter and an empty one are different answers** and both cross:
+        ``bands`` omitted selects every band, and ``bands: []`` selects nothing. The
+        contract says so in terms, so a reader that folded the two would answer a
+        question the browser did not ask.
+
+        Args:
+            request: The admitted request, carrying optional ``bands``, ``kinds``,
+                ``limit`` and ``offset``.
+
+        Returns:
+            One summary per live belief the filters admit.
+        """
+        payload = _payload(request)
+        held = await self._relayed(
+            partial(
+                self._engine.beliefs,
+                bands=_members(payload, "bands", BeliefBand),
+                kinds=_members(payload, "kinds", MemoryKind),
+                limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
+                offset=_page(payload, "offset", 0),
+            )
+        )
+        return _rendered({"beliefs": [_belief_summary_view(one) for one in held]})
+
+    async def _belief(self, request: Request) -> Response:
+        """Read one belief with its citations resolved (ADR-0077 §6).
+
+        **This is the read ADR-0177 §5's ceremony rests on**, and the reason it is a
+        separate path from the listing: §5's second clause requires the render "taken
+        from a ``belief`` read issued immediately before the confirmation is offered,
+        and never from an entry of a ``beliefs`` listing the page rendered earlier",
+        because "a page holds its listing until it is navigated away from".
+
+        Args:
+            request: The admitted request, carrying ``record_id``.
+
+        Returns:
+            The belief, or the absent-record condition as its own.
+        """
+        named = _required_string(_payload(request), "record_id")
+        held = await self._relayed(partial(self._engine.belief, named))
+        if held is None:
+            return _fault(404, "Not Found", "no-such-belief", close=False)
+        return _rendered({"belief": _belief_view(held)})
+
+    async def _forget_belief(self, request: Request) -> Response:
+        """Destroy one belief, permanently (ADR-0073 §5).
+
+        The ceremony is the **front end's** and this handler is not it: ADR-0073 §5
+        puts the show-then-confirm on the surface, and ADR-0177 §5 binds it at the
+        browser. A gateway that refused an unconfirmed ``forget`` would be authoring a
+        control the promoted surface does not have, and could not tell a confirmed
+        call from an unconfirmed one anyway.
+
+        Args:
+            request: The admitted request, carrying ``record_id``.
+
+        Returns:
+            Whether a record was destroyed — ``false`` where the id named nothing
+            live, which the contract states is not an error.
+        """
+        named = _required_string(_payload(request), "record_id")
+        destroyed = await self._relayed(partial(self._engine.forget, named))
+        return _rendered({"destroyed": destroyed})
+
+    # --- ADR-0078 §8: the deferred-question surface -----------------------
+
+    async def _questions(self, request: Request) -> Response:
+        """List the questions waiting for an answer.
+
+        Args:
+            request: The admitted request, carrying optional ``limit`` and ``offset``.
+
+        Returns:
+            The answerable questions, each with what accepting would retire.
+        """
+        payload = _payload(request)
+        waiting = await self._relayed(
+            partial(
+                self._engine.questions,
+                limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
+                offset=_page(payload, "offset", 0),
+            )
+        )
+        return _rendered({"questions": [_question_view(one) for one in waiting]})
+
+    async def _interrupted_questions(self, request: Request) -> Response:
+        """List the questions whose answer was begun and whose outcome is unrecorded.
+
+        A **second** listing rather than a filter on the first, because it answers a
+        different question: "not 'failed' and not 'retryable': the system does **not**
+        know whether the memory write landed" (ADR-0078 §9).
+
+        Args:
+            request: The admitted request, carrying optional ``limit`` and ``offset``.
+
+        Returns:
+            The interrupted questions.
+        """
+        payload = _payload(request)
+        begun = await self._relayed(
+            partial(
+                self._engine.interrupted_questions,
+                limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
+                offset=_page(payload, "offset", 0),
+            )
+        )
+        return _rendered({"questions": [_question_view(one) for one in begun]})
+
+    async def _answer(self, request: Request) -> Response:
+        """Answer one deferred question, and render what the answer did (ADR-0078 §5).
+
+        ``accept`` is required and is read as a boolean and nothing else: a missing or
+        mistyped member is refused rather than defaulted, because a default would be
+        this adapter deciding whether the user believes something.
+
+        Args:
+            request: The admitted request, carrying ``question_id`` and ``accept``.
+
+        Returns:
+            Which of the five outcomes happened, and what it left behind.
+        """
+        payload = _payload(request)
+        outcome = await self._relayed(
+            partial(
+                self._engine.answer,
+                _required_string(payload, "question_id"),
+                accept=_flag(payload, "accept"),
+            )
+        )
+        return _rendered({"answered": _answer_view(outcome)})
+
+    async def _forget_question(self, request: Request) -> Response:
+        """Destroy one deferred question, so its subject can be asked again.
+
+        The ceremony ADR-0177 §5 gives this verb at *this* surface is the front end's,
+        and it is met with the two listings rather than with a single-question read
+        that ADR-0078 §8 does not have (#495, cited and not absorbed).
+
+        Args:
+            request: The admitted request, carrying ``question_id``.
+
+        Returns:
+            Whether a question was destroyed.
+        """
+        named = _required_string(_payload(request), "question_id")
+        destroyed = await self._relayed(partial(self._engine.forget_question, named))
+        return _rendered({"destroyed": destroyed})
+
+    # --- ADR-0077 §8: the passive half, driven by a caller ----------------
+
+    async def _observe(self, request: Request) -> Response:
+        """Read a bounded batch of a conversation's episodes and report what it did.
+
+        ``conversation_id`` is "a **selector rather than a subject**", so an absent one
+        selects the most recently active conversation rather than being an error.
+
+        Args:
+            request: The admitted request, carrying an optional ``conversation_id``.
+
+        Returns:
+            The proposals with their rulings, the counts kept apart, and the route.
+        """
+        named = _string(_payload(request), "conversation_id")
+        report = await self._relayed(partial(self._engine.observe, conversation_id=named))
+        return _rendered({"observation": _observation_view(report)})
 
     def _refuse(
         self, request_class: RequestClass, condition: RefusalCondition, connection: _Connection
@@ -1562,6 +1960,186 @@ class Gateway:
         self._records.refused(request_class, condition, device=connection.device)
         status, reason = _REFUSAL_STATUS[condition]
         return _fault(status, reason, condition.value)
+
+
+class _Refused(Exception):  # noqa: N818 — it is not an error, it is the answer
+    """One request the gateway answered instead of relaying (ADR-0168 §1, §3).
+
+    Raised by a payload reader that found a member missing or of the wrong type, and
+    by :meth:`Gateway._relayed` where no hub connection was free or the call failed.
+    :meth:`Gateway._assistant` turns it back into the response it carries.
+
+    **An exception rather than a returned union**, and the reason is legibility of
+    the thing this module is judged on: with it, a handler is one engine call with
+    the arguments the browser supplied, so ADR-0168 §1's biconditional — "the gateway
+    composes no behaviour the promoted engine surface does not offer" — is read off
+    the handler's shape. The alternative threads a "or the refusal" value through
+    every argument position and buries the call in it.
+
+    Attributes:
+        response: What to answer instead.
+    """
+
+    def __init__(self, response: Response) -> None:
+        """Carry one answer.
+
+        Args:
+            response: What to answer instead of relaying.
+        """
+        super().__init__(response.status)
+        self.response = response
+
+
+def _malformed() -> _Refused:
+    """The one condition every payload reader below refuses on.
+
+    A single condition rather than one per member, for the reason ADR-0168 §5 gives
+    for the bootstrap exchange: naming *which* member was wrong tells a caller
+    something about the surface's shape that it did not already have, and every
+    caller of this surface ships in the same distribution as it (ADR-0168 §10) and
+    therefore already knows.
+    """
+    return _Refused(_fault(400, "Bad Request", "malformed-request"))
+
+
+def _required_string(payload: Mapping[str, Any], name: str) -> str:
+    """One string member that must be there.
+
+    Relayed **verbatim**: nothing here strips, case-folds or otherwise normalises a
+    value, because ADR-0102 §2 forbids it before a ``source`` is compared and a
+    reader that did it for one member would do it for all of them.
+
+    Args:
+        payload: The request's JSON object.
+        name: The member to read.
+
+    Returns:
+        The value.
+
+    Raises:
+        _Refused: If the member is absent or is not a string.
+    """
+    value = _string(payload, name)
+    if value is None:
+        raise _malformed()
+    return value
+
+
+def _page(payload: Mapping[str, Any], name: str, fallback: int) -> int:
+    """One paging argument, or its default.
+
+    The **range** is not checked here and is not this adapter's to check: the promoted
+    surface refuses an out-of-range page "locally and before any I/O" in every
+    implementation (ADR-0085 §9), and a second bound here would be a second place for
+    the two to disagree. What is checked is the type, which is what tells a page of
+    one from ``true``.
+
+    Args:
+        payload: The request's JSON object.
+        name: The member to read.
+        fallback: What an absent member means.
+
+    Returns:
+        The value, or the fallback.
+
+    Raises:
+        _Refused: If the member is present and is not an integer.
+    """
+    value = _integer(payload, name, fallback)
+    if value is None:
+        raise _malformed()
+    return value
+
+
+def _flag(payload: Mapping[str, Any], name: str) -> bool:
+    """One boolean member that must be there, read as a boolean and nothing else.
+
+    Neither defaulted nor coerced. ``answer``'s ``accept`` is the member this exists
+    for, and a truthy string arriving as an acceptance would have this adapter decide
+    what the user believes — which is the one thing ADR-0097 §8's reasoning forbids a
+    surface anywhere in this system.
+
+    Args:
+        payload: The request's JSON object.
+        name: The member to read.
+
+    Returns:
+        The value.
+
+    Raises:
+        _Refused: If the member is absent or is not a boolean.
+    """
+    value = payload.get(name)
+    if not isinstance(value, bool):
+        raise _malformed()
+    return value
+
+
+def _members[T: StrEnum](
+    payload: Mapping[str, Any], name: str, vocabulary: type[T]
+) -> tuple[T, ...] | None:
+    """One optional filter naming members of a closed vocabulary.
+
+    **An absent member and an empty one are different answers**, which is the whole
+    reason this returns ``None`` rather than an empty tuple for the first: ``bands``
+    omitted means every band and ``bands: []`` "selects nothing, which is a different
+    answer from ``None``" in the contract's own words.
+
+    A value the vocabulary does not carry is refused rather than dropped. Dropping it
+    would answer a narrower question than the browser asked and say nothing about
+    having done so.
+
+    Args:
+        payload: The request's JSON object.
+        name: The member to read.
+        vocabulary: The enumeration its entries must name.
+
+    Returns:
+        The selected members, or ``None`` where the filter is absent.
+
+    Raises:
+        _Refused: If the member is present and is not a list of names the vocabulary
+            carries.
+    """
+    if name not in payload:
+        return None
+    value = payload[name]
+    if not isinstance(value, list):
+        raise _malformed()
+    known = {member.value: member for member in vocabulary}
+    if any(one not in known for one in value):
+        raise _malformed()
+    return tuple(known[one] for one in value)
+
+
+def _uses(payload: Mapping[str, Any], name: str) -> tuple[GrantScope, ...]:
+    """The uses a ``grant`` authorises, as the browser named them.
+
+    Whether the set is empty or repeats a member is **not** decided here: ADR-0097 §2
+    refuses an empty scope at construction and ADR-0097 §10 refuses a duplicate, both
+    locally and before any I/O, so the promoted surface answers it identically for
+    every client and a second rule here could only differ from it. What this refuses
+    is a member of no vocabulary at all, which is not a scope the surface has an
+    answer for.
+
+    Args:
+        payload: The request's JSON object.
+        name: The member to read.
+
+    Returns:
+        The uses, in the order the browser sent them; the record's own validator
+        normalises them to declaration order (ADR-0097 §2).
+
+    Raises:
+        _Refused: If the member is absent, is not a list, or names a use that is not
+            a member of :class:`~ai_assistant.core.types.GrantScope`.
+    """
+    if name not in payload:
+        raise _malformed()
+    selected = _members(payload, name, GrantScope)
+    if selected is None:  # pragma: no cover — the membership check above precedes it
+        raise _malformed()
+    return selected
 
 
 def _payload(request: Request) -> Mapping[str, Any]:
@@ -1826,6 +2404,208 @@ def _digest_view(digest: ConversationDigest) -> dict[str, Any]:
         "started_at": digest.started_at.isoformat(),
         "last_turn_at": None if digest.last_turn_at is None else digest.last_turn_at.isoformat(),
         "recorded_turns": digest.recorded_turns,
+    }
+
+
+def _source_view(source: GrantableSource) -> dict[str, Any]:
+    """One grantable source, as the page that offers a grant reads it (ADR-0102 §6).
+
+    ``location`` crosses because a client "renders each ``location`` and takes an
+    explicit act from the user before it calls ``grant``" (ADR-0139 §5), and it comes
+    to rest nowhere: it is on this response and on no stored record, in no log and in
+    no export (ADR-0097 §9a).
+
+    ``live`` is the hub's own computation from the ``revokes`` relation and is
+    relayed rather than re-derived (ADR-0102 §3). A gateway that answered it by
+    walking ``recent_grants`` would report a withdrawn grant as live the moment a
+    clock had been corrected backwards.
+    """
+    return {
+        "source": source.source,
+        "location": source.location,
+        "live": None if source.live is None else _grant_view(source.live),
+    }
+
+
+def _grant_view(grant: SourceGrant) -> dict[str, Any]:
+    """One grant or revocation, as the record says it happened (ADR-0097 §4).
+
+    ``scope`` carries **exactly** the uses the record names, in the record's own
+    normalised order. Nothing is added and nothing is dropped: ADR-0139 §3's third
+    clause forbids a rendering that adds a use a grant does not name or omits one it
+    does, and a view that padded the tuple to three members would have made that
+    failure the front end's only option.
+
+    ``revokes`` crosses because it is what distinguishes a revocation from a grant on
+    a history page, and it is **not** a liveness computation: ADR-0102 §3 forbids
+    presenting a record from ``recent_grants`` as live or as withdrawn on its own,
+    and the front end says so rather than inferring it from this field.
+    """
+    return {
+        "id": grant.id,
+        "source": grant.source,
+        "scope": [use.value for use in grant.scope],
+        "decided_at": grant.decided_at.isoformat(),
+        "revokes": grant.revokes,
+    }
+
+
+def _belief_fields(belief: Belief | BeliefSummary) -> dict[str, Any]:
+    """What ADR-0073 §4 requires **both** belief views to convey.
+
+    The band, the confidence, the kind, the content, when it was last revised, the
+    end of its validity window where one is set, and the id. The three citation
+    counts travel too, because §4's floor for a ``DERIVED`` belief is that the
+    surface conveys "how many citations stand behind it" and must not "present a
+    derived belief as carrying a warrant it cannot show" — and ADR-0107 §5 owes the
+    elision ceiling beside any rendered count, which needs ``evidence_elided``.
+
+    **The confidence is the presented one**, already lowered for support that has
+    gone (ADR-0077 §6). Nothing here computes it, which is what stops two surfaces
+    quoting different figures for one belief.
+
+    ``unsupported`` is carried rather than left to the page to compute, so the one
+    definition ADR-0085 §4a states holds on both types and on this surface too.
+    """
+    return {
+        "id": belief.id,
+        "band": belief.band.value,
+        "kind": belief.kind.value,
+        "content": belief.content,
+        "confidence": belief.confidence,
+        "last_updated": belief.last_updated.isoformat(),
+        "valid_until": None if belief.valid_until is None else belief.valid_until.isoformat(),
+        "evidence_count": belief.evidence_count,
+        "lost_evidence": belief.lost_evidence,
+        "evidence_elided": belief.evidence_elided,
+        "unsupported": belief.unsupported,
+    }
+
+
+def _belief_summary_view(summary: BeliefSummary) -> dict[str, Any]:
+    """One row of the listing, which ships counts and **not** citations.
+
+    The split is the type's rather than this function's (ADR-0085 §4a): a
+    :class:`~ai_assistant.core.types.BeliefSummary` has nowhere to put a citation, so
+    a conforming listing cannot ship the corpus on every page and this view could not
+    render one if it tried.
+    """
+    return _belief_fields(summary)
+
+
+def _belief_view(belief: Belief) -> dict[str, Any]:
+    """The single-belief view: the same fields, plus the resolved warrant.
+
+    A citation that no longer resolves crosses as an entry whose ``content`` is
+    ``null`` — a **tombstone**, never a bare id and never a silent gap (ADR-0073 §4's
+    floor, ADR-0077 §6). :class:`~ai_assistant.core.types.Evidence` carries no id at
+    all, so no renderer downstream can pass one off as the warrant.
+    """
+    return _belief_fields(belief) | {"evidence": [_evidence_view(one) for one in belief.evidence]}
+
+
+def _evidence_view(evidence: Evidence) -> dict[str, Any]:
+    """One citation, resolved to what it says or tombstoned (ADR-0077 §6)."""
+    return {"content": evidence.content}
+
+
+def _question_view(question: Question) -> dict[str, Any]:
+    """One deferred question, with everything ADR-0078 §8 requires it to convey.
+
+    What accepting would have the assistant believe and the band it **would** enter —
+    carried as the conditional it is, because "a pending question is not a belief of
+    any band"; why the user is being asked; why the proposal was made; what accepting
+    would retire, "which is not decoration but the exact scope the answer authorises";
+    when it was asked and until when it is answerable; its state, which is what tells
+    an interrupted question from an open one; and any successor an answer already
+    raised, with **that** question's own state (§9).
+    """
+    return {
+        "id": question.id,
+        "state": question.state.value,
+        "content": question.content,
+        "kind": question.kind.value,
+        "band": question.band.value,
+        "rationale": question.rationale,
+        "reason": question.reason,
+        "retires": [
+            {"record_id": one.record_id, "content": one.content} for one in question.retires
+        ],
+        "asked_at": question.asked_at.isoformat(),
+        "expires_at": None if question.expires_at is None else question.expires_at.isoformat(),
+        "successor": _successor_view(question.successor),
+    }
+
+
+def _successor_view(successor: SuccessorLink | None) -> dict[str, Any] | None:
+    """The question an answer already raised, carried **with its state** (ADR-0078 §9).
+
+    The state is not optional decoration: only a waiting successor is something the
+    user can go and answer, and naming a declined or interrupted one as "the follow-on
+    question" would advertise something they cannot act on.
+    """
+    if successor is None:
+        return None
+    return {"id": successor.id, "state": successor.state.value}
+
+
+def _answer_view(outcome: AnswerOutcome) -> dict[str, Any]:
+    """What one answer did, as one of five outcomes (ADR-0078 §5, §9).
+
+    ``successor_refused`` and ``disposed`` travel **beside** the outcome and never in
+    place of it: a re-deferral that could queue no follow-up at all is not the same
+    as one that did, and a question destroyed while its answer was being applied is a
+    true statement about the bookkeeping rather than about the answer.
+    """
+    return {
+        "kind": outcome.kind.value,
+        "question_id": outcome.question_id,
+        "record_id": outcome.record_id,
+        "successor": _successor_view(outcome.successor),
+        "successor_refused": outcome.successor_refused,
+        "disposed": outcome.disposed,
+    }
+
+
+def _observation_view(report: ObservationReport) -> dict[str, Any]:
+    """What one observation pass did (ADR-0077 §8).
+
+    The three discard counts are kept **apart** because they are three different
+    facts: what the producer could not use, what it dropped over its own limit, and
+    what the write path refused for want of support. A single "not stored" figure
+    would be this adapter deciding they are the same thing.
+
+    ``route`` is absent where no model read the episodes at all, which is a fact
+    about the pass rather than a missing field.
+    """
+    return {
+        "proposals": [_proposal_view(one) for one in report.proposals],
+        "discarded_unusable": report.discarded_unusable,
+        "discarded_over_limit": report.discarded_over_limit,
+        "dropped_unsupported": report.dropped_unsupported,
+        "route": report.route,
+        "conversation_id": report.conversation_id,
+        "episodes_read": report.episodes_read,
+    }
+
+
+def _proposal_view(proposal: ObservedProposal) -> dict[str, Any]:
+    """One proposal an observation pass made, with how memory folded it.
+
+    ``decision`` is ``null`` where **no ruling was ever made** — the proposal never
+    reached the write path — which is a different thing from a ruling that rejected
+    it, and the two are not flattened into one.
+    """
+    return {
+        "content": proposal.content,
+        "kind": proposal.kind.value,
+        "step": proposal.step.value,
+        "confidence": proposal.confidence,
+        "rationale": proposal.rationale,
+        "decision": None if proposal.decision is None else proposal.decision.value,
+        "record_id": proposal.record_id,
+        "reason": proposal.reason,
+        "evidence": [_evidence_view(one) for one in proposal.evidence],
     }
 
 
