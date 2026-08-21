@@ -560,3 +560,41 @@ async def test_a_poll_that_fails_in_no_named_way_still_ends_every_stream() -> No
     ]
     fan_out.close(stream)
     assert slots.held == 0
+
+
+async def test_a_stalled_stream_is_abandoned_rather_than_queued_behind_a_terminal_value() -> None:
+    """Where §4's clauses meet: a stalled stream and a poll that cannot go on.
+
+    "A poll the gateway cannot complete ends every open delivery stream with a
+    terminal value reporting it" is the clause the case looks like it fails. Two
+    others decide it: the gateway "holds at most one value pending per stream and
+    queues nothing behind one", and "a write that has not completed when the next
+    value is due on that stream is abandoned and the stream is ended". A terminal
+    value is the next value due, so the stalled stream meets the abandonment clause
+    exactly as it would on an ordinary delivery.
+
+    The browser is not left guessing, because §2 rules that ending: a body that ended
+    without a terminal value **is** a transport failure and the front end reports it
+    as one. And §4 prices the remedy in the same breath — "a reconnect, which is
+    free, because a session outlives its connections".
+
+    The stream that *is* reading gets the terminal fault, which is the contrast that
+    makes the rule a rule rather than a hole: what decides the two outcomes is whether
+    the browser kept up, not whether the gateway bothered.
+    """
+    fan_out, engine, _ = _fan_out([None, HubUnavailableError("no hub there")])
+    stalled, reading_one = fan_out.open(), fan_out.open()
+    assert stalled is not None
+    assert reading_one is not None
+    read: list[Mapping[str, Any]] = []
+    reading = asyncio.ensure_future(_drain(reading_one, read))
+
+    await engine.answer_one_poll()  # the keep-alive; the stalled stream never takes it
+    await engine.answer_one_poll()  # the poll that cannot go on
+
+    await reading
+    assert stalled.abandoned.is_set()
+    assert read == [
+        {"kind": "alive"},
+        {"kind": "fault", "fault": "hub-unreachable", "detail": "no hub there"},
+    ]
