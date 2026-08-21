@@ -93,6 +93,18 @@ button[disabled] {
   color: var(--muted);
 }
 
+/*
+ * The composed answer (ADR-0170 §6), which is prose and arrives with its own line
+ * breaks: a paragraph collapses them by default, so an answer written as a list or
+ * as two paragraphs would render as one run-on line. `pre-wrap` keeps the breaks
+ * the model wrote and still wraps on width — the value itself is inserted as text,
+ * never as markup, so this is the only shaping it gets.
+ */
+.reply {
+  white-space: pre-wrap;
+  margin: 0 0 1rem;
+}
+
 .rationale {
   font-weight: 600;
 }

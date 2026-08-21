@@ -17,7 +17,7 @@ import contextlib
 import json
 import socket
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
@@ -25,6 +25,20 @@ from gateway_timing import Clock, Timers
 
 from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import UnknownConversationError
+from ai_assistant.core.types import (
+    ActionPlan,
+    CurrentContext,
+    Disposition,
+    ExecutionState,
+    Goal,
+    MemorySource,
+    PlanStep,
+    Provenance,
+    StepOutcome,
+    TimeOfDay,
+    TurnOutcome,
+    TurnResult,
+)
 from ai_assistant.interfaces.gateway.server import Gateway
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire.errors import HubUnavailableError
@@ -32,9 +46,14 @@ from ai_assistant.wire.errors import HubUnavailableError
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
-    from ai_assistant.core.types import EncodableText, Identifier, TurnOutcome
+    from ai_assistant.core.types import EncodableText, Identifier
 
 pytestmark = pytest.mark.integration
+
+#: The instant every scripted turn in this file is stamped with. Fixed rather than
+#: read from a clock: nothing here turns on time, and a wall-clock reading would be
+#: one more thing a failure could be about.
+_AT = datetime(2026, 1, 2, 15, 0, tzinfo=UTC)
 
 _BUNDLE = {
     "/": (b"<!doctype html><p>document", "text/html; charset=utf-8"),
@@ -421,8 +440,14 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
     """Milestone 13's exit test, in the gateway's half of it.
 
     A browser holding both halves asks, the request reaches the promoted engine
-    surface exactly once, and what comes back is the turn — the plan, the step,
-    and the conversation the browser keeps to continue.
+    surface exactly once, and what comes back is the turn — the answer, the plan,
+    the step, and the conversation the browser keeps to continue.
+
+    The member set is asserted whole rather than by presence, because this
+    enumeration is a decision (``_outcome_view``) and not a projection: a member
+    that stops being carried is as much a defect as one that starts being carried
+    unreviewed. Issue #1337 is that failure in the first direction — the answer was
+    composed, returned over the wire, and dropped here.
     """
     cookie_half, header_half = await _start_session(harness)
     head, body = _ask(harness, header_half=header_half, cookie_half=cookie_half)
@@ -436,6 +461,8 @@ async def test_an_admitted_ask_round_trips_and_renders_what_the_hub_returned(
         "conversation_id",
         "capture_degraded",
         "memory_degraded",
+        "reply",
+        "reply_degraded",
         "rationale",
         "steps",
         "step",
@@ -493,6 +520,162 @@ async def test_a_replaced_cookie_is_reported_as_its_own_condition(harness: Harne
 
     assert answer.status == 409
     assert answer.payload == {"fault": "cookie-half-mismatch"}
+
+
+# --- ADR-0170 §6: the answer is carried beside the step account (#1337) ---
+
+
+_RATIONALE = "one step, and the account of what became of it is the guarantee"
+
+
+def _turn_that_ran() -> TurnResult:
+    """One turn whose plan has a step, so there is an account to survive beside.
+
+    The fake's own turn plans nothing, and a case about the answer arriving *in
+    addition to* the account needs an account with something in it — a rationale
+    and a named step, which are what the page lists.
+    """
+    goal = Goal(
+        id="g-1",
+        statement="send the note",
+        provenance=Provenance(source=MemorySource.USER_ASSERTED, confidence=1.0, last_updated=_AT),
+        created_at=_AT,
+    )
+    return TurnResult(
+        goal=goal,
+        context=CurrentContext(
+            now=_AT, time_of_day=TimeOfDay.AFTERNOON, is_weekend=False, within_working_hours=True
+        ),
+        memories=(),
+        plan=ActionPlan(
+            id="p-1",
+            goal_id=goal.id,
+            steps=(PlanStep(id="s-1", intent="send the note", capability="send_email"),),
+            created_at=_AT,
+            rationale=_RATIONALE,
+        ),
+    )
+
+
+async def test_the_composed_answer_reaches_the_browser_beside_the_step_account(
+    harness: Harness,
+) -> None:
+    """ADR-0170 §6: an adapter renders the answer "**in addition to** the step
+    account it renders today, never instead of it".
+
+    Issue #1337 is the first half failing: ``_outcome_view`` enumerated the
+    pre-ADR-0170 members, so `/ask` answered 200 with the whole account and no
+    answer anywhere in it. The hub had composed one — the same ask through the CLI
+    rendered it from the same store — and the browser was shown the plan and the
+    disposition and never what the assistant said.
+
+    Both halves are asserted, because a fix that carried the answer *instead of*
+    the account would satisfy the issue and violate the clause: the deterministic
+    account is what this system guarantees about what it did, and the answer is
+    not.
+    """
+    harness.engine.turn_outcome = TurnOutcome(
+        turn=_turn_that_ran(),
+        conversation_id="c-1",
+        reply="I have sent the note.",
+    )
+    cookie_half, header_half = await _start_session(harness)
+
+    answer = await harness.send(*_ask(harness, header_half=header_half, cookie_half=cookie_half))
+
+    outcome = answer.payload["outcome"]
+    assert outcome["reply"] == "I have sent the note."
+    assert outcome["reply_degraded"] is False
+    assert outcome["rationale"] == _RATIONALE
+    assert outcome["steps"] == [{"intent": "send the note", "capability": "send_email"}]
+    assert outcome["conversation_id"] == "c-1"
+
+
+async def test_a_turn_whose_answer_could_not_be_composed_says_so_and_keeps_its_account(
+    harness: Harness,
+) -> None:
+    """ADR-0170 §6: "The step account is rendered on a degraded turn too".
+
+    A `reply_degraded` outcome is "the account it carries plus a statement that no
+    answer could be composed — never as a silent turn". The flag is carried rather
+    than left to be inferred from the ``None``, because §4 gives ``reply`` three
+    ``None`` shapes and this is the only one where an answer was owed: without it
+    the page cannot tell "no answer was owed" from "an answer was owed and could
+    not be composed", which is the whole reason the member exists.
+    """
+    harness.engine.turn_outcome = TurnOutcome(
+        turn=_turn_that_ran(), conversation_id="c-1", reply_degraded=True
+    )
+    cookie_half, header_half = await _start_session(harness)
+
+    answer = await harness.send(*_ask(harness, header_half=header_half, cookie_half=cookie_half))
+
+    outcome = answer.payload["outcome"]
+    assert outcome["reply"] is None
+    assert outcome["reply_degraded"] is True
+    assert outcome["rationale"] == _RATIONALE
+    assert outcome["steps"] == [{"intent": "send the note", "capability": "send_email"}]
+
+
+async def test_a_turn_that_owed_no_answer_carries_none_and_the_account_alone(
+    harness: Harness,
+) -> None:
+    """ADR-0170 §4's first ``None`` shape, reaching the page as a ``None``.
+
+    A parked step owes no answer: what the user must answer is the confirmation,
+    and prose beside it competes with the question. So the view carries ``null``
+    and an unset flag, and neither this adapter nor the page it feeds invents text
+    to fill the gap — a "no answer was available" line here would be exactly the
+    silent-``None``-versus-degraded confusion the flag exists to prevent, written
+    the other way round.
+    """
+    harness.engine.turn_outcome = TurnOutcome(
+        turn=_turn_that_ran(),
+        conversation_id="c-1",
+        step=StepOutcome(
+            disposition=Disposition.AWAITING_CONFIRMATION,
+            state=ExecutionState(id="e-1", plan_id="p-1", steps=(), updated_at=_AT),
+            step_id="s-1",
+            confirmation=harness.engine.park("h-1"),
+        ),
+    )
+    cookie_half, header_half = await _start_session(harness)
+
+    answer = await harness.send(*_ask(harness, header_half=header_half, cookie_half=cookie_half))
+
+    outcome = answer.payload["outcome"]
+    assert outcome["reply"] is None
+    assert outcome["reply_degraded"] is False
+    assert outcome["step"]["awaiting_confirmation"] is True
+    assert outcome["steps"] == [{"intent": "send the note", "capability": "send_email"}]
+
+
+# The one case in this file that does not speak HTTP, because what it guards is not
+# a response: it is the enumeration behind every response above.
+def test_a_new_member_of_a_turn_outcome_cannot_reach_the_page_unnoticed() -> None:
+    """The guard #1337 did not have.
+
+    ``_outcome_view`` enumerates by design — the page renders what it returns, so
+    what may appear there is decided in this repository rather than by whatever a
+    future ``TurnOutcome`` happens to carry. The cost of that design is precisely
+    what happened: ADR-0170 added two members and gave the CLI a renderer for them,
+    this adapter's enumeration went on being correct by its own tests, and the
+    answer was dropped one layer short of the person who asked for it. Both of the
+    reviewing lenses on the PR that missed it approved.
+
+    So the roster is pinned here instead of the enumeration being replaced by a
+    dump. A member added to ``TurnOutcome`` fails this test, and whoever adds it
+    decides — in this file, beside the cases above — whether the page sees it.
+    Deciding "no" is a passing answer; not deciding at all is what this catches.
+    """
+    assert set(TurnOutcome.model_fields) == {
+        "turn",
+        "step",
+        "conversation_id",
+        "capture_degraded",
+        "reply",
+        "reply_degraded",
+    }
 
 
 # --- ADR-0168 §7: the two checks that run before the session is read ---

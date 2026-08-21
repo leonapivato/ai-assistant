@@ -607,8 +607,33 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
     An enumeration rather than a dump of the model, for ADR-0168 §6's reason one
     level out: the page renders what this returns, so what may appear in it is
     decided here rather than by whatever a future ``TurnOutcome`` happens to
-    carry. It mirrors the CLI's ``_render_turn`` exactly — the same notices, the
-    same plan, the same step — because the two adapters render the same turn.
+    carry.
+
+    **The answer is carried in addition to the step account, never in place of
+    it** (ADR-0170 §6). ``reply`` and ``reply_degraded`` sit beside the notices,
+    the plan and the step, and none of those is dropped on the ground that a reply
+    is now present: the deterministic account is what this system guarantees about
+    what it did, the composed answer is not, and where the two disagree the
+    account is correct by construction. ``reply_degraded`` is carried rather than
+    inferred from a ``None`` ``reply``, because §4 gives ``reply`` three ``None``
+    shapes and only one of them is a composition that failed — the flag is what
+    lets the page tell "no answer was owed" from "an answer was owed and could not
+    be composed".
+
+    The answer crosses to the page verbatim and is neutralised *there*, by being
+    inserted as text and never as markup (ADR-0168 §6). That is this adapter's
+    half of ADR-0170 §8's rule that every adapter neutralises engine-supplied
+    text for its own output — what :func:`interfaces.cli._safe` is on the CLI's
+    side, applied to the same value the plan's rationale already crosses under.
+
+    It carries what the CLI's ``_render_turn`` renders, because the two adapters
+    render the same turn — but that is a resemblance, not a mechanism, and this
+    docstring used to claim the two mirrored each other *exactly*. They cannot:
+    the enumeration above is what the page may see, so a member added to
+    ``TurnOutcome`` reaches a browser only when it is added here as well.
+    ``reply`` reached the CLI when ADR-0170 landed and did not reach this view
+    until issue #1337 — a turn's answer was composed, returned, and dropped one
+    layer short of the person who asked for it.
     """
     turn = outcome.turn
     plan = None if turn is None else turn.plan
@@ -617,6 +642,8 @@ def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
         "conversation_id": outcome.conversation_id,
         "capture_degraded": outcome.capture_degraded,
         "memory_degraded": turn is not None and turn.memory_degraded,
+        "reply": outcome.reply,
+        "reply_degraded": outcome.reply_degraded,
         "rationale": None if plan is None else plan.rationale,
         "steps": [{"intent": one.intent, "capability": one.capability} for one in steps],
         "step": _step_view(outcome.step),

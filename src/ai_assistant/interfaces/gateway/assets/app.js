@@ -130,6 +130,7 @@ function renderOutcome(outcome) {
   if (outcome.memory_degraded) {
     line(body, "Personal memory was unavailable, so this answer is generic.", "notice");
   }
+  renderReply(body, outcome);
   if (outcome.rationale) {
     line(body, outcome.rationale, "rationale");
   }
@@ -153,6 +154,43 @@ function renderOutcome(outcome) {
   }
   el("conversation").textContent = conversationId ? `Conversation ${conversationId}` : "";
   show("answer", true);
+}
+
+// The composed answer, or a statement that composing one failed (ADR-0170 §6).
+//
+// **Beside the step account, never instead of it.** Everything `renderOutcome`
+// rendered before this function existed is still rendered below it — the plan, the
+// disposition line, the named step's status and failure. The account is what the
+// system guarantees about what it did and the answer is not, so a model that
+// claims it sent the email is contradicted on the same screen by a line saying no
+// tool was available.
+//
+// **A degraded turn is a statement and never silence** (ADR-0170 §6). A turn that
+// sent an email and could not then describe it still says the email was sent; the
+// only thing missing is the prose that was going to sit above it, and saying so is
+// what lets the owner tell that apart from a turn that owed no answer.
+//
+// A `null` reply with the flag unset is one of ADR-0170 §4's other two shapes — a
+// parked confirmation, whose question `renderStep` renders instead, or a resume
+// driven from a recovered park, which persisted nothing to compose from. Neither
+// writes anything here: this renderer has no text of its own to put in an answer's
+// place, and inventing one would be prose about a turn nobody composed for.
+//
+// The answer is model output, so it goes in as text through `line`, exactly as the
+// rationale and every other hub value on this page does (ADR-0168 §6).
+function renderReply(body, outcome) {
+  if (outcome.reply_degraded) {
+    line(
+      body,
+      "No answer could be composed for this turn, so what follows is the record " +
+        "of what was done and nothing more.",
+      "notice"
+    );
+    return;
+  }
+  if (outcome.reply) {
+    line(body, outcome.reply, "reply");
+  }
 }
 
 // Only `succeeded` is success, and taking the rule that way round is the
