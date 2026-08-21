@@ -1,7 +1,42 @@
 # 50. Contradiction resolution retires the full conflict set, and defers assertion-vs-assertion
 
-- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause), ADR-0092 (§1's `EXTERNAL` hold-out from the retirement widening), ADR-0121 (§2's scope over a conflict set whose asserted members all *agree* with the proposal) and ADR-0159 (§1's extensional definition of the retirement set, as it reaches a conflict labelled a restatement or an addition)
+- Status: Partially superseded by ADR-0079 (§1's over-limit surplus clause), ADR-0092 (§1's `EXTERNAL` hold-out from the retirement widening), ADR-0121 (§2's scope over a conflict set whose asserted members all *agree* with the proposal), ADR-0159 (§1's extensional definition of the retirement set, as it reaches a conflict labelled a restatement or an addition) and ADR-0171 (that same definition, as it reaches a conflict the writer holds no relation for on a crossing carrying a labelled contradiction)
 - Date: 2026-07-23
+- Partially superseded: 2026-08-21 by ADR-0171 — **§1's extensional definition of the
+  retirement set no longer reaches a conflict the writer holds *no* relation for,
+  where the crossing carries a labelled contradiction; §1's ruling that a supersession
+  reaches further than its named target, and both of its hold-outs, stand.** §1's
+  premise — "every entry in the conflict set the detector surfaced is a same-kind,
+  at-or-above-threshold contradiction of the proposal; they are all the belief being
+  corrected, restated" — was measured false by #1188 at the ratified threshold, and
+  ADR-0159 §5 acted on that measurement for the members it held relations for. #1294's
+  supersede audit (#1302) measures the remainder: the members with *no* relation are
+  the majority, because the reconciler labels at most `reconciler_max_conflicts` of
+  the offered set and the writer sweeps in every unlabelled sibling. The bound
+  accounts for 100% of the replay's 2,522 unlabelled relations, and 56 rulings retired
+  146 records.
+  [ADR-0171](0171-a-supersession-sweeps-in-only-a-labelled-contradiction-and-the-labelling-bound-rises-to-fifteen.md)
+  §2 rules that where a writer holds a `CONTRADICTS` relation for any member of the
+  ruled-on set, the `SUPERSEDE` retires the named `target` plus only the other
+  `CONTRADICTS` members. Left standing, §1's definition made a **cost control** —
+  a spend knob an operator tunes against their own corpus — the thing deciding how
+  many true facts a correction destroys.
+
+  **What stands.** §1's ruling that a `SUPERSEDE` names a relation and not a record,
+  and that the applier therefore retires more than the named target, is again the
+  reason ADR-0171 §2 is a narrowing rather than a repeal — and §1's definition still
+  binds **in full** on every crossing carrying no labelled contradiction, which is
+  every asserted correction and every crossing under ADR-0159 §6's degraded floor.
+  §1's two hold-outs stand: `USER_ASSERTED` conflicts are never swept in — ADR-0171 §2
+  states ADR-0078 §5b's confirmation exception in terms and reaches no part of it —
+  and the `EXTERNAL` clause stands as ADR-0092 §4 left it, ADR-0171 changing no member
+  of the retirement class. §1's bounded-honesty paragraph, its `conflict_limit`
+  reasoning and its refusal to grow `target_id` are untouched — ADR-0171 keeps the
+  widening applier-side for the reason §1 put it there — as are §§2 and 3 and every
+  earlier partial supersession, whose pairs keep their places on the line (ADR-0070
+  §4's accumulation rule). ADR-0171 §6 applies ADR-0082 §1's test and records this
+  ruling; ADR-0171 lands in the same change, so this line never names an ADR that does
+  not exist, and under ADR-0082 §2 no amendment qualifier joins it. Refs #1302, #1294.
 - Partially superseded: 2026-08-16 by ADR-0159 — **§1's extensional definition of
   the retirement set no longer holds for a conflict a reconciler labelled a
   restatement or an addition; everything §1 says about why a supersession retires
