@@ -17,7 +17,12 @@ from pydantic_ai.exceptions import ModelHTTPError
 from pydantic_ai.models.function import FunctionModel
 from pydantic_ai.models.test import TestModel
 from pydantic_transport import rendered_turns
-from streaming_completer_contract import StreamingCompleterContract, Turn, drain_into
+from streaming_completer_contract import (
+    StreamingCompleterContract,
+    Turn,
+    closing,
+    drain_into,
+)
 
 from ai_assistant.core.errors import (
     ModelError,
@@ -48,6 +53,9 @@ _UNAVAILABLE: Final = 503
 #: Long enough that a scheduling hiccup does not fail a case, short enough that a
 #: genuine hang is a failure rather than a stalled run.
 _A_MOMENT: Final = 5.0
+
+#: How many deltas the throttling case reads before it stops.
+_A_FEW: Final = 3
 
 
 def _a_question() -> list[Message]:
@@ -313,6 +321,47 @@ class TestCancellationOnTheCleanupPath:
         with pytest.raises(asyncio.CancelledError):
             await reader
         assert seen == ["one"]
+
+    async def test_a_runaway_run_is_throttled_by_its_reader(self) -> None:
+        """The reader's pace bounds the run's, so memory is not the only brake.
+
+        A provider that answers faster than the engine coalesces — or one that
+        never stops at all — must be *held*, not buffered. ADR-0173 §3 puts the
+        answer's ceiling on the engine, and the engine can only enforce it if it
+        is still running: an implementation that lets the run outpace its reader
+        reaches the memory limit first, on a turn the ceiling was meant to end
+        cleanly.
+
+        Read under ``wait_for`` because the defect's shape is a producer that
+        never yields, which would hang the suite rather than fail this case.
+        """
+        produced = 0
+
+        async def forever(_messages: list[ModelMessage], _info: AgentInfo) -> AsyncIterator[str]:
+            nonlocal produced
+            while True:
+                produced += 1
+                yield "x"
+
+        completer = PydanticAIStreamingCompleter(
+            default_model=FunctionModel(stream_function=forever)
+        )
+        seen: list[str] = []
+
+        async def read_three() -> None:
+            async with closing(completer.stream(_a_question())) as stream:
+                async for delta in stream:
+                    seen.append(delta)
+                    if len(seen) == _A_FEW:
+                        return
+
+        await asyncio.wait_for(read_three(), _A_MOMENT)
+
+        assert seen == ["x"] * _A_FEW
+        # Generous: the run is held one delta ahead, so the true figure is
+        # `_A_FEW + 1`. The bound is what distinguishes "throttled" from
+        # "buffered", and an unthrottled run would be orders of magnitude past it.
+        assert produced <= _A_FEW * 2, f"the run outran its reader: {produced} deltas produced"
 
     async def test_a_run_cancelled_by_something_else_fails_the_reader(self) -> None:
         """A run that stops without answering owes the caller an error, not a wait.

@@ -116,6 +116,44 @@ class _Cancelled:
 type _Streamed = _Delta | _Failed | _Ended | _Cancelled
 
 
+async def _next(deltas: asyncio.Queue[_Delta], run: asyncio.Task[_Streamed]) -> _Streamed:
+    """Take the next delta, or — if the run finished instead — how it finished.
+
+    Waiting on the queue alone is what leaves a reader parked when the run stops
+    without a last word, and a run *can* stop that way: a cancellation returns
+    nothing, and a bounded queue may have no slot for a terminal item. Waiting on
+    both closes it, and the delta is preferred whenever both are ready, so the
+    last thing a run produced is never dropped in favour of the news that it
+    ended.
+    """
+    getter = asyncio.ensure_future(deltas.get())
+    try:
+        await asyncio.wait({getter, run}, return_when=asyncio.FIRST_COMPLETED)
+        if getter.done():
+            return getter.result()
+        return _how_it_ended(run)
+    finally:
+        # A no-op once it is done, and otherwise safe: `Queue.get` puts nothing
+        # back because it takes nothing until it returns.
+        getter.cancel()
+
+
+def _how_it_ended(run: asyncio.Task[_Streamed]) -> _Streamed:
+    """Read a finished run's terminal state off the task itself."""
+    if run.cancelled():
+        return _Cancelled()
+    failure = run.exception()
+    if failure is None:
+        return run.result()
+    if isinstance(failure, Exception):
+        # The pump itself broke rather than the run — a defect, and the reader is
+        # still owed an answer rather than a wait. `_classify` gives an
+        # unrecognised failure the conservative bare `ModelError`.
+        return _Failed(failure)
+    # `KeyboardInterrupt` and `SystemExit` are not this seam's to classify.
+    raise failure
+
+
 class PydanticAIStreamingCompleter:
     """Streaming completion client implemented on top of pydantic-ai.
 
@@ -231,33 +269,34 @@ class PydanticAIStreamingCompleter:
         ceiling and the text-preservation rule that a transport-level debounce
         knows nothing about.
         """
-        # Unbounded, and the reason is the terminal item rather than throughput.
-        # A bounded queue lets the run end while the consumer is waiting on a slot
-        # that will never free — so the run's last act, saying how it ended, could
-        # fail to be delivered and the consumer would wait forever. What it costs
-        # is that a stalled consumer buffers the answer instead of throttling the
-        # run, and that is exactly the buffer `ModelProvider.complete` holds for
-        # the same answer by construction, so the seam beside this one already
-        # pays it.
-        deltas: asyncio.Queue[_Streamed] = asyncio.Queue()
+        # Depth one: the run stays at most one delta ahead of its reader, so a
+        # provider that answers faster than the engine coalesces — or one that
+        # never stops — is throttled rather than buffered, and ADR-0173 §3's
+        # ceiling stays something the engine can reach before memory does.
+        #
+        # The queue carries **deltas only**. How the run ended is the task's
+        # return value, never an item, because a bounded queue cannot promise to
+        # carry a last word: the run may end while its reader is parked on a slot
+        # that will never free. Splitting the two is what lets this seam have
+        # backpressure and a reader that cannot be left waiting.
+        deltas: asyncio.Queue[_Delta] = asyncio.Queue(maxsize=1)
         run = asyncio.create_task(self._pump(history, model=model, deltas=deltas))
         try:
             while True:
-                match await deltas.get():
+                match await _next(deltas, run):
                     case _Delta(text=text):
                         yield _encodable(text)
                     case _Failed(error=error):
                         raise _classify(error) from error
                     case _Cancelled():
                         # Reached only where the cancellation did **not** come
-                        # from this generator's own cleanup — the cleanup path
-                        # never gets again — so it is a run that was stopped by
-                        # something else and owes the caller an answer rather
-                        # than a wait. The bare class, because a cancellation
-                        # says nothing about whether another attempt or another
-                        # route would fare better, and ADR-0063's rule is that
-                        # misclassifying as retryable is worse than not
-                        # classifying at all.
+                        # from this generator's own cleanup — that path stops
+                        # reading — so it is a run stopped by something else,
+                        # and it owes the caller an answer rather than a wait.
+                        # The bare class, because a cancellation says nothing
+                        # about whether another attempt or another route would
+                        # fare better, and ADR-0063's rule is that misclassifying
+                        # as retryable is worse than not classifying at all.
                         msg = "the streamed run was cancelled before it finished"
                         raise ModelError(msg)
                     case _Ended():
@@ -285,26 +324,20 @@ class PydanticAIStreamingCompleter:
         history: list[ModelMessage],
         *,
         model: str | None,
-        deltas: asyncio.Queue[_Streamed],
-    ) -> None:
-        """Drive one streamed run, posting each delta and then how it ended.
+        deltas: asyncio.Queue[_Delta],
+    ) -> _Streamed:
+        """Drive one streamed run, posting its deltas and **returning** how it ended.
 
-        The failure is posted **unclassified**. Classification belongs to the
+        Returning rather than posting is what makes the terminal answer immune to
+        a full queue, and cancellation — the one path that cannot return at all —
+        is read off the task by :func:`_how_it_ended`. So there is no way for this
+        run to stop without its reader learning that it stopped.
+
+        The failure is carried **unclassified**. Classification belongs to the
         consumer so that a narrowed subclass raised there — ``_encodable``'s
         refusal — cannot be flattened by passing back through ``_classify``, and
         so that the traceback the caller sees is chained from the exception rather
         than from a queue.
-
-        **Every path out of here posts a terminal item, cancellation included,
-        and that is what stops the consumer waiting forever.** The obvious code
-        re-raises a ``CancelledError`` and posts nothing, on the reasoning that a
-        cancelled run is the consumer having gone away and nobody is left to
-        read. That reasoning covers only the cancellation *this* generator's
-        cleanup asked for. A ``CancelledError`` arriving from anywhere else — a
-        deadline inside the library, an anyio scope, a provider raising it — ends
-        this task with the consumer still parked on the queue, and nothing ever
-        wakes it. Posting first and re-raising second costs an item nobody reads
-        on the ordinary path, and closes a hang on the other.
         """
         try:
             async with self._agent.run_stream(
@@ -314,15 +347,10 @@ class PydanticAIStreamingCompleter:
             ) as result:
                 async for delta in result.stream_text(delta=True, debounce_by=None):
                     await deltas.put(_Delta(delta))
-        except asyncio.CancelledError:
-            # `put_nowait` cannot fail: the queue is unbounded, which is the
-            # reason it is unbounded (see `_stream`). Delivered onward, never
-            # absorbed (ADR-0060).
-            deltas.put_nowait(_Cancelled())
-            raise
         except Exception as exc:
             # Broad on purpose: `_classify` is the taxonomy, and its default for an
             # unrecognised failure is the conservative bare `ModelError` (ADR-0063).
-            await deltas.put(_Failed(exc))
-        else:
-            await deltas.put(_Ended())
+            # `CancelledError` is a `BaseException` and is not caught here — it is
+            # delivered onward as ADR-0060 obliges.
+            return _Failed(exc)
+        return _Ended()
