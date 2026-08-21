@@ -1,6 +1,6 @@
 # 4. Privacy and data handling
 
-- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete) ADR-0155 (§2's residency clause) and ADR-0172 (§3's keyring clause and §7's gating clause, each only as it reaches a browser-held web-session credential)
+- Status: Accepted, partially superseded by ADR-0017 (§2's egress clause), ADR-0124 (§6's delete clause and §7's gating clause, each only as it reaches a device the owner has enrolled), ADR-0125 (§3's reader clause), ADR-0126 (§6's Tier 0 purge clause as it reaches a credential held outside the keyring, and §7's gating clause, each only for the offline whole-installation delete), ADR-0155 (§2's residency clause) and ADR-0172 (§3's keyring clause and §7's gating clause, each only as it reaches a browser-held web-session credential)
 - Date: 2026-07-16
 - Amended: 2026-07-19 (§2 — egress is permitted to the user-configured *set* of
   model providers, not exactly one, enabling ADR-0013 routing; see the amendment)
