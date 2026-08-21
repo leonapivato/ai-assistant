@@ -1,6 +1,6 @@
 # 171. A supersession sweeps in only a labelled contradiction, and the labelling bound rises to fifteen
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-21
 - **Partially supersedes:**
   [ADR-0159](0159-a-conflict-is-labelled-before-it-is-ruled-on-and-similarity-alone-folds-nothing.md)
