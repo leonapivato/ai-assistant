@@ -33,7 +33,7 @@ import asyncio
 import contextlib
 import hmac
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from importlib import resources
 from typing import TYPE_CHECKING, Any, Final
@@ -150,9 +150,12 @@ def packaged_bundle() -> Mapping[str, tuple[bytes, str]]:
     }
 
 
-@dataclass
+@dataclass(eq=False)
 class _Connection:
     """One browser connection, and the only fact §8's ceilings turn on.
+
+    Compared by identity — ``eq=False`` — because the population §8 bounds is a
+    set of *connections* and two of them in the same state are not one connection.
 
     "A browser connection is **admitted** from the moment it carries a request the
     gateway admitted under §4, and **unadmitted** before that… no rule of this ADR
@@ -253,18 +256,30 @@ class Gateway:
         self._bootstrap = _Bootstrap(verifier=verifier(value))
         return value
 
-    async def serve(self) -> None:
-        """Bind the loopback listener and serve until cancelled (ADR-0168 §2, §9).
+    async def start(self) -> asyncio.Server:
+        """Bind the loopback listener (ADR-0168 §2, §9).
 
         The listener is bound **whether or not the hub is reachable**, and nothing
         here probes it: "a gateway that refused to start without a hub would
         present the two failures identically", so serving regardless is what turns
         a stopped hub into a message a browser can read (ADR-0168 §9).
+
+        Separate from :meth:`serve` so that the bind and the serving loop can be
+        driven apart — which is what a test needs to send a request and read the
+        answer rather than wait for a signal.
+
+        Returns:
+            The bound server, whose lifetime the caller owns.
         """
         server = await asyncio.start_server(
             self._handle, host=_LOOPBACK, port=self._settings.gateway_port
         )
-        _log.info("gateway.listening", origin=self._origin, protocol_paths=sorted(self._bundle))
+        _log.info("gateway.listening", origin=self._origin, served_paths=sorted(self._bundle))
+        return server
+
+    async def serve(self) -> None:
+        """Bind and serve until cancelled, ending every session on the way out."""
+        server = await self.start()
         try:
             async with server:
                 await server.serve_forever()
@@ -336,9 +351,15 @@ class Gateway:
             response = await self._next(reader, connection, timeout)
             if response is None:
                 return
-            writer.write(render(response, policy=_POLICY))
+            # **The header is written from the decision, not beside it.** §8 closes
+            # an unadmitted connection "once that request's response is complete"
+            # whatever the response was, so a `Connection: keep-alive` on one would
+            # be the rule announced and then disobeyed — and the peer would hold a
+            # socket the gateway had already given up on.
+            closing = response.close or not connection.admitted
+            writer.write(render(replace(response, close=closing), policy=_POLICY))
             await writer.drain()
-            if response.close or not connection.admitted:
+            if closing:
                 return
 
     async def _next(
