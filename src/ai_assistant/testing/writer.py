@@ -136,6 +136,10 @@ def _utcnow() -> datetime:
 #: (ADR-0159 §5). Mirrors ``MemoryIngestor``'s constant and is contract, not tuning:
 #: a fake that retired a restatement where production refuses would certify a
 #: consumer against state the real writer never produces (ADR-0026 §7).
+#:
+#: It is no longer the whole exclusion: what an **unlabelled** member is spared from
+#: is ADR-0171 §2's, decided in :func:`_retirement_set` over the crossing, because a
+#: set of relations has no term for a member's absence from the mapping.
 _UNRETIRABLE_RELATIONS = frozenset({ConflictRelation.RESTATES, ConflictRelation.ADDS})
 
 
@@ -1222,8 +1226,22 @@ def _retirement_set(
     **ADR-0159 §5 narrows the widening.** A conflict this writer holds a
     ``RESTATES`` or ``ADDS`` relation for is never retired, by any ruling: it is not
     the belief being corrected, it is a restatement of one or a distinct fact
-    similarity surfaced beside it. Where this writer holds no relation for a member,
-    the obligation binds exactly as ADR-0079 §3 states it.
+    similarity surfaced beside it.
+
+    **ADR-0171 §2 narrows it again, on the crossing rather than the member.** Where
+    this writer holds a ``CONTRADICTS`` relation for at least one member of the
+    ruled-on set, the set is the named ``target`` plus only those other members it
+    holds ``CONTRADICTS`` for; a member it holds **no** relation for is left live,
+    whatever its source. Where it holds that relation for no member — the asserted
+    arm, which determines no relations at all, and the degraded arm, whose certain
+    rung can only produce ``RESTATES`` — ADR-0079 §3's obligation binds exactly as it
+    stands, so a user's correction still retires every stale sibling it is shown.
+    ADR-0078 §5b's confirmation batch is reached on its own footing below and takes
+    no condition from the narrowing (ADR-0171 §2's second clause).
+
+    Duplicated from ``MemoryIngestor`` for the same reason the rest of this function
+    is: a fake sparing a record production retires, or retiring one production spares,
+    lets a consumer's test pass on state production would never produce.
 
     Args:
         target: The conflict the ruling names, which leads the returned list.
@@ -1235,13 +1253,26 @@ def _retirement_set(
     Returns:
         The named target followed by every other conflict warranted for retirement.
     """
+    # ADR-0171 §2's discriminator, over the whole ruled-on set including the named
+    # target: did this crossing produce a labelled contradiction at all?
+    labelled_contradiction = any(
+        relations.get(conflict.id) is ConflictRelation.CONTRADICTS for conflict in conflicts
+    )
     others = [
         conflict
         for conflict in conflicts
         if conflict.id != target.id
         and relations.get(conflict.id) not in _UNRETIRABLE_RELATIONS
         and (
-            conflict.provenance.source in _RETIREMENT_CLASS
+            (
+                conflict.provenance.source in _RETIREMENT_CLASS
+                and (
+                    not labelled_contradiction
+                    or relations.get(conflict.id) is ConflictRelation.CONTRADICTS
+                )
+            )
+            # ADR-0171 §2's second clause: the confirmation batch keeps its own
+            # footing, so the narrowing above adds no condition to it.
             or (
                 conflict.provenance.source is MemorySource.USER_ASSERTED
                 and _confirmation_covers(

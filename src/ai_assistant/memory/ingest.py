@@ -186,6 +186,16 @@ _WRITE_PRODUCING_KINDS = frozenset(MemoryDecisionKind) - {
 #: ``CONTRADICTS`` is deliberately absent: a labelled contradiction is exactly what a
 #: correction is warranted to retire, and the retirement class still decides whether
 #: it may be.
+#:
+#: **This set is no longer the whole exclusion** (ADR-0171 §2). It says what a
+#: *labelled* member is spared from; what an **unlabelled** member is spared from is
+#: decided in :func:`_retirement_set`, over the crossing rather than the member, and
+#: is not expressible here — a set of relations has no term for a member's *absence*
+#: from the mapping, which is exactly how an unlabelled member came to be swept in.
+#: ``CONTRADICTS`` therefore does a second job now: its presence anywhere in the
+#: crossing is what puts that crossing under the narrowing. The two questions are
+#: separate lookups deliberately, for the reason ADR-0092 §5 gives one set answering
+#: two questions.
 _UNRETIRABLE_RELATIONS = frozenset({ConflictRelation.RESTATES, ConflictRelation.ADDS})
 
 
@@ -900,6 +910,57 @@ def _retirement_set(
     states it, so an ingest ADR-0159 §2 excludes retires precisely what it always
     did.
 
+    **ADR-0171 §2 narrows it a second time, and its discriminator is the crossing
+    rather than the member.** Where this writer holds a ``CONTRADICTS`` relation for
+    at least one member of the ruled-on set, the set is the named ``target`` and,
+    beyond it, only those other members it holds a ``CONTRADICTS`` relation for: a
+    member it holds **no** relation for is left live, whatever its source. Where it
+    holds that relation for *no* member, ADR-0079 §3's obligation binds exactly as it
+    stands, narrowed by ADR-0159 §5 and by nothing else. #1302 measured what the
+    unnarrowed rule destroys — 56 supersessions retired 146 records, and in the worst
+    crossing ten of the twelve retired were never labelled at all.
+
+    **The three arms that reach here sort themselves by construction.** The
+    *reconciled* arm (ADR-0159 §4(b)) always carries a labelled contradiction, since
+    ``DefaultMemoryPolicy`` rules ``SUPERSEDE`` there only at a ``CONTRADICTS``
+    member — this is the arm the narrowing bites on. The *asserted* arm reaches no
+    reconciler at all (:func:`_may_reconcile` excludes an asserted proposal and any
+    crossing holding an asserted member), so this writer holds no relations, no member
+    is labelled, and the whole set is handed to ADR-0079 §3 unchanged: a user's
+    correction still retires every stale sibling it is shown (ADR-0079 §1, #313/#314).
+    **That is the case a narrowing phrased as "retire only labelled contradictions"
+    would have destroyed**, and it is why the rule is stated over the crossing. The
+    *degraded* arm (ADR-0159 §6) holds at most the certain rung's ``RESTATES``
+    labels, and that rung can never produce ``CONTRADICTS``, so §6's ratified floor
+    behaves exactly as it does today — sparing on the strength of a test that was
+    never run would be the wrong direction, and this does not.
+
+    **ADR-0078 §5b's confirmation batch is untouched** (ADR-0171 §2's second clause),
+    which is why the narrowing sits on the retirement-class limb below and on nothing
+    else: an asserted conflict a confirmation genuinely covers is retired on exactly
+    the footing it had before, with no condition added and none removed. The two
+    cannot meet on one crossing anyway — a crossing carrying a ``CONTRADICTS``
+    relation is one this writer reconciled, and a reconciled crossing holds no
+    ``USER_ASSERTED`` member — but the clause is honoured in the code rather than left
+    to that argument, because a contract leaving it to inference is one §5b can be
+    read out of.
+
+    **Why the crossing and not the member.** This writer cannot tell a member left
+    unlabelled *beyond the bound* from one no reconciler ever judged:
+    :meth:`MemoryIngestor._relations_for` holds no consulted set to except it with,
+    which ADR-0164 §6 and §9 decline to supply and #1225 records as open. So the
+    predicate asks the coarser question this writer can answer from what it already
+    holds — not *why* is this member unlabelled, but did this crossing produce a
+    labelled contradiction at all (ADR-0171 §4). Nothing new crosses any seam and this
+    function's signature does not grow.
+
+    **An untrusted label stays untrusted in the safe direction only.** A reconciler
+    that under-reports ``CONTRADICTS`` causes records to be spared. One that
+    volunteers a label for a member ADR-0159 §3 required it to discard can now put
+    that member in the retirement set — but this writer would have swept the same
+    record in today, unlabelled, so the narrowing takes destruction away from that
+    reconciler and never grants it (ADR-0171 §4, #1225).
+
     The relations are **this writer's own**, handed to no policy (ADR-0159 §8): if
     the writer's mapping and the policy's were one object, a safety property
     ADR-0038 §2a requires the *writer* to hold would rest on the untrusted ruling —
@@ -915,13 +976,28 @@ def _retirement_set(
     Returns:
         The named target followed by every other conflict warranted for retirement.
     """
+    # ADR-0171 §2's discriminator, read over the whole ruled-on set including the
+    # named target: did this crossing produce a labelled contradiction at all? Where
+    # it did, the widening reaches only the other members labelled the same way;
+    # where it did not, the third clause hands the set to ADR-0079 §3 unchanged.
+    labelled_contradiction = any(
+        relations.get(conflict.id) is ConflictRelation.CONTRADICTS for conflict in conflicts
+    )
     others = [
         conflict
         for conflict in conflicts
         if conflict.id != target.id
         and relations.get(conflict.id) not in _UNRETIRABLE_RELATIONS
         and (
-            conflict.provenance.source in _RETIREMENT_CLASS
+            (
+                conflict.provenance.source in _RETIREMENT_CLASS
+                and (
+                    not labelled_contradiction
+                    or relations.get(conflict.id) is ConflictRelation.CONTRADICTS
+                )
+            )
+            # ADR-0171 §2's second clause: the confirmation batch is reached on its
+            # own footing, so the narrowing above is not a condition on it.
             or (
                 conflict.provenance.source is MemorySource.USER_ASSERTED
                 and _confirmation_covers(

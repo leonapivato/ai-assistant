@@ -1494,9 +1494,24 @@ class MemoryWriter(Protocol):
         member, and a ``SUPERSEDE`` naming *it* is refused rather than performed.
         The relation is one the **writer** holds and determined for itself, never
         one read off the ruling — ADR-0038 §2a's shape, at the boundary that
-        performs the write. Where a writer holds no relation for a member, the
-        obligation above binds it exactly as ADR-0079 §3 states it, so a writer
-        that determines none conforms unchanged.
+        performs the write.
+
+        **A supersession sweeps in only what the writer labelled a contradiction**
+        (ADR-0171 §2, narrowing the obligation above a second time). Where the
+        writer holds a ``CONTRADICTS`` relation for at least one member of the set
+        the policy ruled on, the ``SUPERSEDE`` retires the record ``target_id``
+        names and, beyond it, **only** those other members of that set it holds a
+        ``CONTRADICTS`` relation for; a member it holds **no** relation for is left
+        live, whatever its source. Where the writer holds that relation for **no**
+        member of the set, ADR-0079 §3's obligation binds exactly as it stands,
+        narrowed by ADR-0159 §5 and by nothing further — so a writer that determines
+        no relations at all conforms unchanged, and a user's correction, which
+        determines none by construction, still retires every stale sibling it is
+        shown (ADR-0079 §1). ADR-0078 §5b's confirmed batch is untouched by the
+        narrowing: an asserted conflict a confirmation covers is retired on exactly
+        the footing it had before, with no condition added and none removed. Like
+        the exclusion above, the relations are the writer's **own** and are never
+        read off the ruling.
 
         **A retirement clamps, and never resurrects** (ADR-0080 §1). Each record a
         supersession retires is written back with its window closed at the
