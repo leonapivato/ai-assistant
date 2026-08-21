@@ -14,8 +14,9 @@
 - **No implementation lands with it.** No `src/`, no `tests/`.
 - **It decides no `core/protocols.py` and no `core/types.py` surface** (§11), so
   golden rule 5 is not triggered. It adds **no** `Settings` field and moves no
-  figure (§9), which makes it the first browser-surface ADR in this track that is
-  not contract surface in ADR-0054's sense either.
+  figure (§9), so it is not contract surface in ADR-0054's sense either — the
+  position ADR-0172 was in, rather than ADR-0168 §8's, ADR-0174 §8's or ADR-0175
+  §8's.
 - **It partially supersedes one ADR, in one clause, and that record rides this
   change** (ADR-0070 §1, ADR-0082 §1, ADR-0083 §15): **ADR-0175 §6's first
   clause**, "A browser request resolves to calls on exactly these **five**
@@ -968,9 +969,9 @@ dated header notes.
 - **ADR-0099 §1 and §4.** §1's single principal is used as given and §1 above says so.
   §4's rendering floor is applied to a notification's content at §10 and to a
   confirmation's at §8, which is the floor obeyed rather than extended.
-- **ADR-0054.** Not engaged. This decision adds no `Settings` field, which is the first
-  browser-surface ADR in this track that does not — ADR-0168 §8 added ten, ADR-0174 §8
-  three and ADR-0175 §8 one.
+- **ADR-0054.** Not engaged. This decision adds no `Settings` field and moves none,
+  which is the position ADR-0172 was in; ADR-0168 §8 added ten, ADR-0174 §8 three and
+  ADR-0175 §8 one, and none of those figures moves here (§9).
 - **Golden rule 3.** §1's fourth clause, §7's refusal to let the gateway compose an
   amendment, and §2's refusal of a fifth request class are each the rule applied. An
   interface adapter that composed two engine calls into one act, or held state between
