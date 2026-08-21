@@ -294,6 +294,20 @@ before a byte moves; streaming is what makes it reachable after bytes have moved
 > repeat, does not refuse a turn whose prose has already been published, and does
 > not produce a terminal `reply` that disagrees with the chunks.
 
+> **Normative.** The ceiling bounds the text the engine is **holding** as well as
+> the chunks it has yielded: text coalesced but not yet emitted counts against the
+> room left, exactly as emitted text does. Where the pending text would breach it,
+> the engine stops under the same partition above.
+
+**That clause closes the one resource path §5's preservation rule opens.** A
+provider may yield `"ok"` and then an unbounded run of whitespace deltas. The
+stage can neither emit them — `NonBlankEncodableText` refuses a blank chunk — nor
+discard them, because a later `"next"` must still produce `"ok next"`. So it
+holds them, and without a bound it holds them forever. Counting pending text
+against the same ceiling makes that stream terminate with `"ok"` and
+`reply_degraded` `True` rather than accumulating, and it needs no second limit to
+do it.
+
 > **Normative.** Where the outcome's **non-reply** content alone breaches the
 > ceiling, so that no `reply` at all would fit, that is ADR-0085 §8c's oversized
 > result and raises `OversizedValueError` exactly as it does on `converse` today.
@@ -937,11 +951,15 @@ takes the triad first, because the rest is written against it.
 > repeat**, which is the property a chunk-reading and a chunk-ignoring client must
 > agree on.
 
-> **Normative.** The same lane pins §3's other two ceiling inputs, which the
-> boundary test above does not reach: a turn whose remaining room cannot hold even
-> the first chunk terminates with `reply` `None` and `reply_degraded` `True`,
-> having yielded nothing; and a turn whose non-reply content alone breaches the
-> ceiling raises `OversizedValueError`, as it does on `converse`.
+> **Normative.** The same lane pins §3's other ceiling inputs, which the boundary
+> test above does not reach: a turn whose remaining room cannot hold even the
+> first chunk terminates with `reply` `None` and `reply_degraded` `True`, having
+> yielded nothing; a turn whose non-reply content alone breaches the ceiling raises
+> `OversizedValueError`, as it does on `converse`; and a stream that yields text
+> and then **whitespace deltas past the remaining room** terminates boundedly,
+> emitting no blank chunk and carrying only the published text as a degraded
+> `reply`. That last one is the pending-text bound, which the "next chunk would
+> breach" test cannot reach because the text at issue is never a chunk.
 
 > **Normative.** The same lane pins §9: a connection dropped mid-stream leaves the
 > turn completed and captured, with its conversation turn and episode present, and
