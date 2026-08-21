@@ -1,6 +1,6 @@
 # 170. A reply is not a tool: the turn composes its answer, and the outcome carries it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-21
 - **This ADR opens `track:conversation` (#1312) and is milestone 17's ruling.** The
   milestone's exit test is the owner asking "what do you know about me?" from an
