@@ -35,15 +35,17 @@
   credential's path, which is the pair ADR-0168, ADR-0174 and ADR-0175 each took
   both lenses for, and `CONTRIBUTING.md` makes a change contract-surface when it is
   the ADR deciding that surface.
-- **One thing it deliberately does not rule is named up front, because it is a
-  defect rather than a deferral.** ADR-0148 §8's fourth clause — that a CONFIRM on
-  an egress call names the connected account's identity, the canonical destination
-  set in both forms, and the payload description — **is met by no surface in this
-  tree, the command line included**, and cannot be met from `Confirmation`'s five
-  members. §8 rules the floor a browser owes now and forbids the claim it must not
-  make; §11 defers the content question with its trigger, and #1366 records
-  it. Milestone 15 does not create that gap and this ADR may not close it, because
-  closing it is `core/types.py` (golden rule 5).
+- **One consequence can move this milestone and is named up front.** ADR-0148 §8's
+  fourth clause — that a CONFIRM on an egress call names the connected account's
+  identity, the canonical destination set in both forms, and the payload description
+  — **is met by no surface in this tree, the command line included**, and cannot be
+  met from `Confirmation`'s five members. This ADR may not close that, because
+  closing it is `core/types.py` (golden rule 5); what it does instead is **refuse to
+  authorise a second instance of the breach**. §8 places a named precondition: the
+  operations are decided and may be built, and **no lane ships a browser surface
+  that answers a confirmation** until a ratified decision supplies §8's content or a
+  discriminator. #1366 holds that decision. Milestone 15's exit test waits on it, and
+  §8 says why that is the right way round.
 - **Every reference below to ADR-NNNN is to its text as merged on 2026-08-22**,
   the durability form ADR-0100 established. Refs #1230, #1365.
 
@@ -214,10 +216,19 @@ surface clauses at the browser edge; and add no figure and no `Settings` field.
 > which is ADR-0175 §6's third clause applied to what this ADR leaves out.
 
 > **Normative.** Every operation admitted above is reached with the arguments the
-> promoted surface declares and with no others, and the gateway composes no
-> operation out of two, derives no argument the browser did not supply, and
-> synthesises no result from a call it did not make. ADR-0168 §1's biconditional
-> binds each of the thirty exactly as it binds the five.
+> promoted surface declares and with no others. Every argument expressing what the
+> **user** asked for is the browser's own: the gateway derives none of them,
+> defaults none of them, composes no operation out of two, and synthesises no
+> result from a call it did not make. ADR-0168 §1's biconditional binds each of the
+> thirty exactly as it binds the five.
+
+> **Normative.** The one class of argument the gateway supplies of its own is a
+> **caller-owned deadline** — the argument ADR-0029 §4 makes the caller's rather
+> than the callee's, and which a browser therefore has no standing to choose. On
+> this surface the class has exactly two members: the turn budget given to
+> `converse`, `converse_streaming` and `resume` (§9), and the budget given to
+> `next_notification` (ADR-0175 §8). No lane widens it by resemblance, and no
+> browser value reaches either.
 
 > **Normative.** This ADR creates no principal, no grant and no per-browser scope,
 > and no operation above is conditioned on which browser asked. ADR-0099 §1's
@@ -235,6 +246,18 @@ non-browser members leaves thirty, and thirty less the five already admitted is
 twenty-five. Every method of the promoted surface is therefore on exactly one side
 of this section, which is the property an enumeration has and a rule about what is
 forbidden does not.
+
+**The deadline carve-out is a fact about the shipped gateway before it is a rule,
+and an earlier draft of the clause above forbade it.** `Gateway._ask` already calls
+`converse(utterance, timeout=_TURN_BUDGET, conversation_id=conversation)` and the
+delivery fan-out already calls `next_notification(budget=gateway_notification_budget)`
+— so a flat "derives no argument the browser did not supply" would have been false of
+milestone 13's gateway on the day it was written and would have made §9's own ruling
+unimplementable. Adversarial review found it. The class is closed at two rather than
+left as an exception, because the reason a deadline is exempt is not that it is
+convenient: ADR-0029 §4 makes a deadline the *caller's* to set, the gateway is the
+caller, and a browser choosing one would be a client setting a bound on a hub's work
+— which is a resource question, not a request.
 
 **The enumeration stays an enumeration for ADR-0168 §6's own reason, restated by
 ADR-0175 §6 and not weakened here.** "Naming what may appear is the only form that
@@ -630,12 +653,35 @@ it, the user's next call can." A page's next load is that next call, and the cla
 names it so that a front end does not restore a hopeful local view of what it thinks
 it granted.
 
-### 8. The CONFIRM prompt: what a browser renders, and the claim it may not make
+### 8. The CONFIRM prompt is decided and its surface is blocked until ADR-0148 §8 can be met
+
+> **Normative.** **No lane ships a browser surface that answers a confirmation
+> before a ratified decision supplies what ADR-0148 §8's fourth clause requires** —
+> the connected account's identity, the canonical destination set in both forms and
+> the payload description — **or supplies a discriminator by which a surface can
+> refuse an egress confirmation it cannot render.** `pending_confirmations` and
+> `resume` are in §1's enumeration and may be built and tested; no installation
+> reaches a browser confirmation until that decision merges. This is a named
+> precondition on the implementing lane, in the form ADR-0021 §3, ADR-0097 §9a,
+> ADR-0149 §8 and ADR-0151 §13 use.
+
+> **Normative.** No lane cites this ADR, its enumeration, or the readiness of an
+> implementation as satisfying that precondition, and no lane narrows it to
+> non-egress confirmations on its own authority. A surface cannot tell an egress
+> confirmation from any other from `Confirmation`'s members, which is why the
+> precondition reaches confirmations whole and why a discriminator discharges it.
+
+**Everything below states what that surface owes when it is unblocked**, so that
+the decision is taken once and the lane that builds it is not writing a second ADR.
 
 > **Normative.** A browser turn that parks renders the parked action from the
 > `Confirmation` the turn returned, carrying all four of its content members —
 > `tool_id`, `tool_description`, `parameters` and `reason` — and answers it by
 > relaying `token` to `resume`.
+
+> **Normative.** The browser's answer supplies `resume`'s `approved` argument and
+> nothing else. `timeout` is the caller-owned deadline §1 and §9 place with the
+> gateway, and no browser value reaches it.
 
 > **Normative.** The `token` is relayed **opaquely**. The front end parses no part
 > of it, derives nothing from it, renders it nowhere, and stores it in no browser
@@ -669,28 +715,48 @@ it granted.
 > confirmation.
 
 > **Normative.** This ADR does **not** decide ADR-0148 §8's fourth clause and no
-> lane cites it as having met it. §11 defers the question with its trigger.
+> lane cites it, or the floor above, as having met it. The floor is what the surface
+> owes **in addition to** the precondition, never in place of it.
 
-**The floor is what a browser can honestly do, and the gate belongs to whoever adds
-the members — which is ADR-0073 §4's own two-part device, used because the situation
-is the one it was invented for.** ADR-0148 §8's fourth clause requires a CONFIRM to
-name the connected account's identity, the canonical destination set in both forms,
-and ADR-0150's payload description. `Confirmation` carries none of the three:
+**A floor alone was this section's first draft and adversarial review was right to
+refuse it.** ADR-0148 §8's fourth clause requires a CONFIRM to name the connected
+account's identity, the canonical destination set in both forms, and ADR-0150's
+payload description. `Confirmation` carries none of the three:
 `BoundAccount.identity`, `EgressBinding.canonical_destination_set` and
 `EgressBinding.spans` all hang off `EgressBinding`, which lives on
 `PermissionDecision` — the value ADR-0042 §6 forbids an adapter to read, and the
-reason `Confirmation` exists. The only shapes that close it are members on
-`Confirmation`, or a promoted read that returns the binding, and both are
-`core/types.py`. Golden rule 5 puts that behind its own ratified ADR merged first, so
-this decision states the floor and stops.
+reason `Confirmation` exists. So a browser answering an egress confirmation would let
+the owner authorise a send **without being shown the recipients**, which §8's own last
+sentence calls out by name: "A confirmation that names the tool and not the recipients
+is not a confirmation of an egress call." That the command line does the same thing
+today is a fact about a breach that exists; it is not a licence for a decision to
+authorise a second instance of it. **A ratified floor is not weakened by being
+unmet** — an ADR admitting a new surface to it is exactly where that would happen
+silently, and this is the document that has to refuse.
 
-**Saying that the gap is not milestone 15's is not a deflection and it is checkable.**
+**So the precondition, and not a refusal of the operations.** Three shapes were
+available. Leaving `pending_confirmations` and `resume` out of §1 would mean a second
+ratified decision later, re-opening an enumeration this one exists to settle. Admitting
+them with a floor alone is the breach above. Admitting them and blocking the *act* is
+the shape the corpus already uses for exactly this — ADR-0151 §14: "The five operations
+may be built and tested; a connection may not be provisioned in an installation until
+#909 lands." The contract is decided once, nothing is built against a shape that will
+change, and the thing that waits is the thing that would otherwise be wrong.
+
+**What it costs is milestone 15's exit test, and that is stated rather than
+discovered.** #1159's item 5 puts exactly one CONFIRM in front of the user and asks
+them to approve a real send, so re-running it entirely from the browser needs this
+surface. Under this section the exit test waits on #1366's contract decision. The
+alternative was an exit test passed by a surface that ADR-0148 §8 says is not a
+confirmation of an egress call, which is a worse thing to have passed.
+
+**The gap is not milestone 15's and that is checkable rather than asserted.**
 `interfaces/cli.py`'s `_render_confirmation` prints the tool, its description, each
-parameter as `key = value`, and the reason — which is `Confirmation`'s four content
-members and nothing else. The terminal that ran #1159's exit test met §8's fourth
-clause no better than a browser will. What milestone 15 changes is that the gap
-acquires a second surface, and a lane building the second one is entitled to know it
-is building to a floor rather than to the clause.
+parameter as `key = value`, and the reason — `Confirmation`'s four content members and
+nothing else. The terminal that ran #1159 met §8's fourth clause no better than a
+browser would. What milestone 15 changes is that the gap acquires a second surface and
+a decision that has to look at it, which is why #1366 exists and why the precondition
+above is the answer rather than a note.
 
 **The claim clause is the whole of what this section protects.** A browser rendering
 `to = alice@example.com` beside a heading that says "recipients" would be asserting
@@ -799,13 +865,14 @@ the state is a fact the hub states.
 **Deferred, by name, each with the condition that fires it:**
 
 - **ADR-0148 §8's fourth clause — what a CONFIRM on an egress call puts to the
-  user.** Unmet at every surface (§8), and closable only with structural members on
-  `Confirmation` or a promoted read of the binding, which is `core/types.py`. Fires
-  with the contract ADR that adds them; the lane that takes it owes a decision on
-  whether the account identity, the canonical destination set and ADR-0150's spans
-  reach the adapter as members of `Confirmation` or as a separate promoted read, and
-  on what a `pending_confirmations` recovery carries when the trail holds only a
-  digest.
+  user.** Unmet at every surface, and closable only with structural members on
+  `Confirmation`, a promoted read of the binding, or a discriminator — all
+  `core/types.py`. **It is not merely deferred: §8 makes it a precondition on the
+  implementing lane**, so the browser confirmation surface does not ship until it
+  lands. #1366 holds it, and the lane that takes it owes a decision on whether the
+  account identity, the canonical destination set and ADR-0150's spans reach the
+  adapter as members of `Confirmation` or as a separate promoted read, and on what a
+  `pending_confirmations` recovery carries when the trail holds only a digest.
 - **`learn` from a browser** (§1). Fires when a surface argument exists for what a
   browser puts in a `FeedbackEvent` — whether an explicit correction form is a
   correction or a second way to assert a belief, and how it relates to the
@@ -951,11 +1018,12 @@ dated header notes.
   as given: §2's one slot, §2a's claim-and-release, §3's outbox and §4's `delivery_id`
   capability are untouched, and §10 above forbids the one route by which a review
   surface could have reached the last of them.
-- **ADR-0148 §§1–14.** Used as given and none of it is met more widely. §8's fourth
-  clause is *unmet*, which is a fact about the tree rather than a reading of the
-  clause; §8 above states a floor and forbids a claim, and §11 defers the content
-  question. Nothing here permits an egress call the policy would refuse, changes the
-  approver, or lets a surface stand in for one.
+- **ADR-0148 §§1–14.** Used as given, and §8 is **obeyed rather than read more
+  narrowly**. Its fourth clause is unmet in the tree, which is a fact about the tree
+  rather than a reading of the clause; §8 above refuses to authorise a surface that
+  would repeat the breach, states what such a surface will owe when it is unblocked,
+  and forbids the claim it must never make. Nothing here permits an egress call the
+  policy would refuse, changes the approver, or lets a surface stand in for one.
 - **ADR-0052 §1, §3.** Used as given. `pending_confirmations` is the recovery read it
   was designed as, each recovered confirmation is rendered before it is answered, and
   §8's fifth clause is ADR-0052 §3's own rule at a second surface.
@@ -997,10 +1065,12 @@ dated header notes.
   through**, and §4 is the whole of what it may do with it. Nothing is stored, nothing
   is logged, nothing is recorded, and the field name is chosen so that redaction reaches
   it if a payload mapping is ever logged anyway.
-- **A browser CONFIRM will be no better than a terminal CONFIRM**, and the reason is
-  now on the record rather than latent (§8). ADR-0148 §8's fourth clause has never been
-  met; milestone 15 gives it a second unmet surface and a filed issue, and closing it is
-  a `core/types.py` decision somebody has to take.
+- **The browser CONFIRM surface is blocked, and milestone 15's exit test waits with
+  it** (§8). ADR-0148 §8's fourth clause has never been met at any surface; rather than
+  give it a second unmet one, this decision blocks the act until #1366's contract lands.
+  That is a real cost to the milestone's schedule, paid to avoid an exit test passed by
+  a confirmation ADR-0148 §8 says is not one. The operations stay in §1's enumeration,
+  so nothing is re-decided when the block lifts.
 - **What becomes harder:** a thirty-member enumeration is a longer thing to check a
   request against than a five-member one, and the check now has two answers on two
   listeners rather than one everywhere. That is the price of splitting the connection
@@ -1048,6 +1118,26 @@ dated header notes.
   be exactly the ordering that rule exists to prevent, and the question is larger than
   a browser — it reaches what a `pending_confirmations` recovery can carry when the
   trail holds only a digest.
+- **Ship the browser CONFIRM to a floor, on the ground that the command line is no
+  better.** This section's first draft, and the shape adversarial review blocked.
+  *Rejected in §8*: ADR-0148 §8's own last sentence says a confirmation naming the tool
+  and not the recipients "is not a confirmation of an egress call", so the floor would
+  have let an owner authorise a real send without being shown who it goes to. An
+  existing breach is a reason to fix it, never a licence for a decision to authorise a
+  second instance — and an ADR admitting a new surface is precisely where that would
+  otherwise happen quietly.
+- **Leave `pending_confirmations` and `resume` out of §1's enumeration until #1366
+  lands.** The other way to keep the surface unreachable, and simpler to state.
+  *Rejected in §8*: it re-opens the enumeration this decision exists to settle, so
+  milestone 15 would owe a second ratified decision for two operations whose surface
+  contract is already written here. ADR-0151 §14's shape — decide the operations, block
+  the act — costs one clause and no second ADR.
+- **Let the browser refuse only *egress* confirmations, and answer the rest.**
+  Narrower than blocking the surface, and it would leave most confirmations reachable.
+  *Rejected in §8*: `Confirmation` carries no member by which a surface can tell an
+  egress call from any other, so the rule is unimplementable without the discriminator
+  that is itself part of what #1366 must decide. §8's precondition names that
+  discriminator as one of the two things that discharges it.
 - **Render the parameters as ADR-0148 §8's destination set anyway, since a
   destination usually appears among them.** It would make the browser prompt read as
   conforming. *Rejected in §8*: the flat form a user typed is not the canonical set,
