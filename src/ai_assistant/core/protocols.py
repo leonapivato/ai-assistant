@@ -584,17 +584,19 @@ class StreamingCompleter(Protocol):
 
     **Stopping early is the caller's to declare, and this is the one obligation
     this seam places on it.** An implementation releases the exchange when the
-    iterator is exhausted, when it fails, and when it is **closed** — but Python
-    does not close an abandoned async iterator at the point of abandonment, so a
-    caller that stops reading part-way closes it, through
-    :func:`contextlib.aclosing` or an ``aclose()`` of its own. Until it does, the
-    exchange is still open and is still being paid for. This is not a weakening
-    of ADR-0060: the clause binds what a method does with a resource *it*
-    acquired at the moment cancellation leaves it, and an iterator nobody has
-    cancelled and nobody has closed has not reached that moment. Stopping early
-    is ordinary here — a composing stage that has run out of room, a turn whose
-    client went away — so the obligation is stated rather than left to be
-    discovered.
+    iterator is exhausted, when it fails, and when it is **closed** — and the
+    iterator it returns supports ``aclose()``, because otherwise a caller would
+    have no way to say it has stopped. Python does not close an abandoned async
+    iterator at the point of abandonment, so a caller that stops reading part-way
+    closes it, through :func:`contextlib.aclosing` or an ``aclose()`` of its own;
+    until it does, the exchange may still be open and still being paid for.
+
+    This is not a weakening of ADR-0060: that clause binds what a method does
+    with a resource *it* acquired at the moment cancellation leaves it, and an
+    iterator nobody has cancelled and nobody has closed has not reached that
+    moment. Stopping early is ordinary here — a composing stage that has run out
+    of room, a turn whose client went away — so the obligation is stated rather
+    than left to be discovered.
     """
 
     def stream(

@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import pytest
-from streaming_completer_contract import StreamingCompleterContract, Turn
+from streaming_completer_contract import StreamingCompleterContract, Turn, closing
 
 from ai_assistant.core.errors import ModelError
 from ai_assistant.core.types import Message, Role
@@ -139,6 +139,25 @@ class TestTheFakeBeyondTheContract:
             _ = [delta async for delta in completer.stream([Message(role=Role.USER, content="hi")])]
 
         assert completer.attempt_count == 2
+
+    async def test_an_abandoned_stream_is_held_until_it_is_closed(self) -> None:
+        # What a consumer testing against the fake will see, which the shared
+        # suite deliberately does not require of every implementation: the fake
+        # produces nothing ahead of its reader, so an abandoned-but-unclosed
+        # stream really is still holding its attempt. A consumer whose early-stop
+        # handling forgets to close is caught here rather than in production.
+        completer = FakeStreamingCompleter.yielding("one", "two", "three")
+        stream = completer.stream([Message(role=Role.USER, content="hi")])
+
+        async for _delta in stream:
+            break
+
+        assert completer.released == 0
+
+        async with closing(stream):
+            pass
+
+        assert completer.released == 1
 
     async def test_the_snapshot_is_taken_on_the_call(self) -> None:
         completer = FakeStreamingCompleter.yielding("answer")

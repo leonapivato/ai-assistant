@@ -357,16 +357,20 @@ class StreamingCompleterContract:
         assert world.attempts == 1
         assert world.released == 1
 
-    async def test_a_retained_iterator_holds_the_exchange_until_it_is_closed(self) -> None:
-        """The caller's obligation, pinned in both directions.
+    async def test_an_abandoned_iterator_is_released_when_it_is_closed(self) -> None:
+        """Breaking out is not closing, and closing is what the caller owes.
 
-        The Protocol says an abandoned iterator is still open until it is closed,
-        because Python closes an async iterator at finalisation and not at the
-        ``break``. Both halves are asserted: unclosed is genuinely still held, and
-        closing it genuinely lets it go. A consumer lane reads this case to learn
-        that ``break`` is not enough — which is exactly the mistake the clause
-        exists to prevent, and one no amount of care inside the implementation can
-        prevent for it.
+        Python closes an async iterator at *finalisation*, not at the ``break``,
+        so a consumer that stops reading and keeps the iterator alive has not
+        released anything yet. What the suite requires is only the half every
+        implementation owes: after the close, the exchange is gone. Whether it was
+        still open beforehand is deliberately **not** asserted — an implementation
+        that runs the exchange ahead of the consumer may already have finished it,
+        which is conforming and is not this case's business.
+
+        A consumer lane reads this case to learn that ``break`` alone is not
+        enough. That is the mistake the Protocol's clause exists to prevent, and
+        one no amount of care inside an implementation can prevent for its caller.
         """
         world = self.world(StreamAttempt(deltas=("one", "two", "three")))
         stream = world.completer.stream(_a_question())
@@ -375,14 +379,11 @@ class StreamingCompleterContract:
         async for delta in stream:
             seen.append(delta)
             break
-        held = world.released
-
         async with closing(stream):
             pass
 
         assert seen == ["one"]
-        assert held == 0, "an abandoned but unclosed iterator is still holding its exchange"
-        assert world.released == 1, "closing it is what lets the exchange go"
+        assert world.released == world.attempts, "closing it is what lets the exchange go"
 
     # --- the blank stream (ADR-0173 §5, ADR-0170 §8, #1324) ------------------
 
