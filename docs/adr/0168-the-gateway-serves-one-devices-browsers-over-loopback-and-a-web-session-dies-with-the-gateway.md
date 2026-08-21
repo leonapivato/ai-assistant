@@ -13,9 +13,15 @@
   golden rule 5 is not triggered. It does add `Settings` fields (§8), which are
   contract surface in ADR-0054's sense but are not `core` Protocol or type
   surface — the same position ADR-0084 was in for its four transport figures.
-- **It supersedes nothing.** §13 applies ADR-0070 §1's test clause by clause to
-  every ADR whose text a reader might expect this decision to falsify, and finds
-  no record owed. That finding is the reason this change touches one file.
+- **It supersedes nothing, and it names one supersession it does not write.**
+  §13 applies ADR-0070 §1's test clause by clause to every ADR whose text a reader
+  might expect this decision to falsify, and finds no record owed on any of them
+  but one: **ADR-0004 §3 is engaged**, because a browser holds its session in a
+  browser's storage rather than in the OS keyring. §6 rules that the narrowly
+  scoped supersession is a **prerequisite of the implementing lane** — its own
+  ADR, merged before any gateway ships — and names the replacements it should
+  start from. Nothing implements here, so nothing runs unmet in the interval, and
+  that is why this change still touches one file.
 - **Two calls were delegated to this lane by #1230 and by `docs/roadmap.md`,
   and both are answered here**: whether this is one ADR or two (§11 — one), and
   whether the front-end bundle lives in this repository or a sibling (§10 —
@@ -366,8 +372,14 @@ milestone 16 ("session persistence"), and §12 defers it there.
 > carrying neither is.
 
 > **Normative.** The cookie half is marked `HttpOnly` and `SameSite=Strict`, is
-> not readable by any script, and carries no persistent expiry, so that closing
-> the browser ends it.
+> set with a path of `/` and no `Domain` attribute, is not readable by any script,
+> and carries no persistent expiry, so that closing the browser ends it.
+
+> **Normative.** A request carrying a header half that verifies against a live
+> session, together with a cookie half that does not verify against that same
+> session or more than one cookie of the gateway's own name, is refused with a
+> **distinct** fault — reported to the owner as its own condition, and never
+> flattened into an expiry, a ceiling refusal or an ordinary absent session.
 
 > **Normative.** The header half is held in browser storage scoped to **scheme,
 > host and port** and shared across that origin's tabs, and it is sent only as a
@@ -377,6 +389,45 @@ milestone 16 ("session persistence"), and §12 defers it there.
 > **Normative.** Neither half is placed in any response body except the bootstrap
 > exchange's own reply (§5), and neither is placed in a URL, in a log record, or
 > in any error the gateway emits.
+
+> **Normative.** Both halves are Tier 0 under ADR-0004 §1 and are held by the
+> browser rather than in the OS keyring ADR-0004 §3 names, so §3 is **engaged**
+> and a narrowly scoped supersession of it — reaching a browser-held web session
+> half and nothing else, with its replacements named and its record written on
+> ADR-0004 — is a **prerequisite of the implementing lane**: its own ADR, merged
+> before any gateway ships. This ADR does not write it, and no lane may implement
+> §6 before it merges.
+
+**That is owed rather than avoidable, and the reason is that no browser session
+design escapes it.** Whatever admits a returning browser is a value the browser
+holds, and a browser holds it in a browser's storage; a cookie is no more the OS
+keyring than web storage is. So the question is not which mechanism avoids the
+clause — none does — but whether the clause is left engaged and unmet. ADR-0124
+§6 faced exactly this and ruled on the instrument: filing it as a gap "was the
+wrong instrument", because "a known violation does not authorise adding another"
+and "creating an access that a ratified clause requires to be gated, and shipping
+it ungated, changes what that clause governs". Read for storage instead of
+access, that is this situation word for word, and ADR-0070 §1 is categorical
+about what the instrument then is.
+
+**It is a prerequisite rather than a clause of this ADR because of what this
+lane is.** Nothing implements here — no `src/`, no `tests/` — so nothing ships
+unmet in the interval, and the corpus's ordinary shape for a dependent ratified
+decision is a separate change merged first: golden rule 5 and ADR-0015 §5 for
+contract surface, and ADR-0124 §6 for the `SecretStore` Protocol it needed and
+declined to mint. The sequencing obligation above is what makes that a
+requirement rather than a hope.
+
+**The replacements that lane should start from, so it rules rather than
+re-derives**, and which are stated here as its material and not as clauses of
+this ADR: the value is minted by this system rather than held on behalf of a
+third party, and it admits only what the owner sitting at that machine can
+already do; it is bounded by §8's expiry and dies with the gateway process, so it
+is not the long-lived secret §3's examples are ("OAuth tokens, API keys, refresh
+tokens"); custody is the browser profile's own file permissions, which is the
+same operating-system custody a file-backed keyring gives on that platform; and
+the clauses above keep it out of every place §3 names by exclusion — no database
+this system opens, no committed file, no log, no URL.
 
 > **Normative.** The front end inserts every value the hub returned into the page
 > as **text** and never as markup, and executes nothing derived from one.
@@ -414,12 +465,33 @@ storage — by a front end that one day renders an answer carelessly — is not 
 its own a session, because the half that admits alongside it is one no script can
 read.
 
-**The residual is stated rather than argued away: script running on the gateway's
-own origin defeats both halves**, because it need not read either — it can simply
-issue requests the browser will authenticate. That is true of every
-browser-resident credential and is not closable by choosing a different one. What
-bounds it here is the last two clauses, the session's ceiling and expiry (§8),
-and the fact that it dies with the gateway process (§4).
+**A cookie's missing port scope cuts both ways, and the second direction is a
+denial rather than a disclosure.** Another local port cannot only *receive* the
+cookie half; it can *set* one of the same name for the same host, and the browser
+will then present the replacement — or, with a narrower path, present both. Our
+session is not disclosed by that, but it is denied: the owner's next request
+carries a good header half and a bad cookie half and is refused. §4 refuses to
+evict a session on the ground that it "hands any local caller a silent lever to
+log the owner out", and the clause above is what keeps this lever from being that
+one: the refusal is its own named condition, so what the owner reads is that
+something replaced their cookie rather than that their session mysteriously
+ended. Adversarial review found the inconsistency on the second round.
+
+**The residual it leaves is bounded to denial, and is stated rather than argued
+away.** A local process that can repeatedly draw the owner's browser to itself can
+keep replacing the cookie, and the remedy is a gateway restart. It never yields
+admission — a replaced cookie verifies against nothing — so the failure direction
+is an outage the owner can see and act on rather than a session someone else
+holds. `Path=/` and no `Domain` are what make the gateway's own cookie
+unambiguous about its scope, so that a second cookie of that name is detectable
+as the anomaly it is rather than silently preferred.
+
+**The larger residual is stated too: script running on the gateway's own origin
+defeats both halves**, because it need not read either — it can simply issue
+requests the browser will authenticate. That is true of every browser-resident
+credential and is not closable by choosing a different one. What bounds it here
+is the text-not-markup and content-security-policy clauses above, the session's
+ceiling and expiry (§8), and the fact that it dies with the gateway process (§4).
 
 ### 7. Origin and host are checked before the session is consulted
 
@@ -668,7 +740,9 @@ ADR-0082 §1 requires the judgement to be made in this text, naming the clause a
 applying ADR-0070 §1's test: would a reader holding only the earlier text now act
 differently, or read one of its clauses more widely than it now holds?
 
-**No record is owed, on any of the following.**
+**One clause is engaged and is called out as such in the list below — ADR-0004
+§3, whose record §6 makes a prerequisite of the implementing lane. No record is
+owed on any of the rest.**
 
 - **ADR-0084 §1's refusal of a TCP loopback port.** Its subject is stated in its
   own heading and in every reason it gives — the *hub's* transport, chosen so
@@ -735,16 +809,23 @@ differently, or read one of its clauses more widely than it now holds?
 - **ADR-0017 §1.** Already replaced by ADR-0124 §1, which is what §2 above reads;
   §§2–9 are not engaged by a loopback listener and no clause of them is read
   either way.
-- **ADR-0004 §1 and §3.** Both halves of a session and the bootstrap value are
-  Tier 0, and §3's clauses stay true of them word for word: none is stored "in the
-  memory database", none reaches "a committed file", and none is read through a
-  path §3's `SecretStore` sentence governs, since the gateway holds no Tier 0
-  value at rest at all (§4). What the *browser* holds is held by software this
-  system neither writes nor chooses the storage of, and §6 bounds it to what the
-  browser's own origin scope and session lifetime already destroy. The device credential the gateway *does* read stays
-  exactly where ADR-0124 §6 put it, through the Protocol ADR-0124 §6 requires.
-  ADR-0004 §7's gating clause is not engaged: no exemption beyond ADR-0124 §6's
-  narrow one is taken, claimed or needed.
+- **ADR-0004 §1.** Used as given. Both halves of a session and the bootstrap
+  value are classified under it rather than around it, and §6 records the
+  consequence of that classification rather than avoiding it.
+- **ADR-0004 §3 is the one exception on this list: it is engaged, and the record
+  it needs is a prerequisite rather than a finding of no-record-owed.** ADR-0070
+  §1's second limb is met — a reader holding only §3 believes every Tier 0 secret
+  in this system's world sits in the OS keyring, and after §6 that is wrong of the
+  browser's half. §6 states the obligation, states why no browser design escapes
+  it, and makes the narrowly scoped supersession a **prerequisite of the
+  implementing lane**, with its replacements named so that lane starts from a
+  ruling. What is *not* engaged is §3 as it reaches this system's own processes:
+  the gateway holds no Tier 0 value at rest at all (§4), and the device credential
+  it reads stays exactly where ADR-0124 §6 put it, through the Protocol ADR-0124
+  §6 requires.
+- **ADR-0004 §7.** Not engaged. No exemption beyond ADR-0124 §6's narrow one is
+  taken, claimed or needed; the gateway's own credential read is the one that ADR
+  already governs.
 - **ADR-0042 §5 and ADR-0084 §11's streaming deferral.** Untouched. §12 declines
   to add a carrier for it, on the ground those texts give.
 - **ADR-0097 and ADR-0099 §1.** §4's refusals are ADR-0124 §5's, restated for a
@@ -768,6 +849,11 @@ differently, or read one of its clauses more widely than it now holds?
   the gateway requires a session — because admission never asserts a check that
   did not happen, and each door's answer is decided by what its transport already
   guarantees.
+- **Milestone 13 gains a second ADR lane, and it is a prerequisite rather than a
+  follow-up**: the narrowly scoped supersession of ADR-0004 §3 for a
+  browser-held session half, merged before any gateway ships (§6). It is small —
+  one clause, one scope, the replacements already named — and it is owed because
+  no browser session design avoids holding a credential in a browser.
 - **A session is two values rather than one**, because a cookie is scoped to a
   host and not to a port and would therefore be presented to any other local
   service on `127.0.0.1`. That is a property of the browser's own mechanism, so
