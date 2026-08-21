@@ -119,6 +119,14 @@ and that reason is a ratified decision rather than a missing mechanism.
 > object is a plan envelope, its steps are planned, and the marker's presence
 > neither changes that nor is an extraction failure.
 
+> **Normative.** The implementing lane ships a parameterized test of the marker's
+> strictness on an otherwise well-formed decline envelope: `1`, `1.0`, `"true"`,
+> `"yes"` and JSON `false` are each rejected, and the JSON boolean `true` is
+> accepted. The numeric cases carry the test and may not be dropped from it: an
+> implementation written as `marker == True` accepts both of them, because Python's
+> `True` equals `1` and `1.0`, and every other clause of this decision would still
+> pass while `{"steps": [], "no_capability_needed": 1}` executed as a decline.
+
 **Both halves are positive assertions, and that is the whole answer to ADR-0047
 §4.** §4's objection is that zero steps is indistinguishable from a failure to
 decompose — that absence cannot be told from breakage. It is a good objection
@@ -241,10 +249,20 @@ recall something and then act on it — is a plan, because the act is required.
 
 > **Normative.** The implementing lane ships a deterministic two-reply test at the
 > planning seam: on a goal that requires an action, a first model reply of a bare
-> empty `steps` list with no marker, then a second reply carrying a plan envelope,
-> asserting that the resulting `ActionPlan` carries that plan's steps. A test
-> asserting only that the repair message mentions both shapes does not satisfy
-> this clause.
+> empty `steps` list with no marker, then a second reply carrying a plan envelope.
+> It asserts on **the repair message the planner sent between them** — that it
+> presents both legal shapes, names neither as the intended correction, and does
+> not ask for steps — as well as on the resulting `ActionPlan`. Asserting only on
+> the resulting plan does not satisfy this clause.
+
+That last sentence is the operative half, and it is worth saying why rather than
+leaving it as a stylistic preference. `FakeModelProvider` is **scripted**: it
+returns its second reply whatever the repair message said. So a test that asserts
+only "the second reply's plan came out" passes unchanged against an
+implementation whose repair message reads "complete the decline" — the exact
+construction this section forbids, in the exact case it was written for. The only
+assertion that can fail on that implementation is one that reads the message the
+planner appended to the conversation.
 
 **The two failures are split because only one of them carries evidence of
 intent**, and running them together would have been this decision contradicting
