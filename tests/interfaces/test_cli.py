@@ -121,6 +121,7 @@ from ai_assistant.testing import (
     FakeToolInvoker,
     FakeTraceRetention,
     FakeTraceSink,
+    StreamAttempt,
 )
 from ai_assistant.wire import TransportError
 from ai_assistant.wire.address import sun_path_limit
@@ -1961,9 +1962,18 @@ async def test_ask_reports_an_unknown_conversation_rather_than_starting_one(
 # account and so lives here rather than in ``tests/orchestration``.
 
 
-def _answering(reply: str) -> ComposingStage:
-    """A composing stage whose provider always returns ``reply``."""
-    return ComposingStage(model=FakeModelProvider(reply), streaming=FakeStreamingCompleter())
+def _answering(reply: str, *deltas: str) -> ComposingStage:
+    """A composing stage that answers ``reply`` however the turn is driven.
+
+    Both seams are scripted to the same answer, because ``assistant ask`` drives the
+    streaming one (ADR-0173 §4) and ``resume`` drives the other, and a test asserting
+    on the prose must not depend on which. ``deltas`` says where the stream breaks;
+    omitted, it yields the whole answer as one chunk.
+    """
+    return ComposingStage(
+        model=FakeModelProvider(reply),
+        streaming=FakeStreamingCompleter.yielding(*(deltas or (reply,))),
+    )
 
 
 async def test_ask_prints_the_composed_answer(output: StringIO) -> None:
@@ -2048,6 +2058,10 @@ async def test_a_degraded_composition_is_stated_and_the_account_still_rendered(
     A turn that acted and then could not describe it still tells the user what was
     done, in the same words it would have used before ADR-0170 existed; the only
     thing missing is the prose that was going to sit above them.
+
+    This is ADR-0173 §6's *second* shape driven over the streaming entry: the attempt
+    fails having published nothing, so nothing was committed and the outcome carries
+    ``reply`` ``None`` beside the flag, exactly as ``converse`` would have.
     """
 
     def refuse(_messages: Sequence[Message]) -> str:
@@ -2057,7 +2071,8 @@ async def test_a_degraded_composition_is_stated_and_the_account_still_rendered(
     engine = _engine(
         tools=(tool(),),
         composing=ComposingStage(
-            model=FakeModelProvider(refuse), streaming=FakeStreamingCompleter()
+            model=FakeModelProvider(refuse),
+            streaming=FakeStreamingCompleter(script=(StreamAttempt(fails=True),)),
         ),
     )
 
@@ -4463,7 +4478,8 @@ def test_an_omitted_optional_id_still_means_no_conversation_was_named(
     assert [call for call in engine.calls if call[0] == "observe"] == [
         ("observe", {"conversation_id": None})
     ]
-    assert [call[1]["conversation_id"] for call in engine.calls if call[0] == "converse"] == [None]
+    streamed = [call for call in engine.calls if call[0] == "converse_streaming"]
+    assert [call[1]["conversation_id"] for call in streamed] == [None]
 
 
 def test_every_id_parameter_on_the_surface_carries_an_id_callback() -> None:
