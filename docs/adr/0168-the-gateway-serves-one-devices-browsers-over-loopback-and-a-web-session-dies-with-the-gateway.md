@@ -362,12 +362,15 @@ to the milestone that actually asks for them.
 > **Normative.** A gateway that cannot disclose its bootstrap value does not
 > start, and reports why.
 
-**"Not in a log record" is a distinction and not a repetition, and it matters
-because the two share a stream.** The gateway's structured records go to standard
-output as well (§6), so the clause above is about the *path*: the bootstrap value
-is written directly and never passes through the logging chain, which is what
-keeps it out of anything an operator ships, aggregates or retains from those
-records.
+**"Not in a log record" buys less than it looks like, and saying so is better
+than letting a later reader over-read it.** The gateway's structured records go
+to standard output too (§6), so the clause keeps the bootstrap value out of the
+*structured* stream — out of anything that parses those records, and out of the
+redaction chain's reach where a missed key would be the failure — and it does
+**not** keep it away from anything capturing the process's output as bytes. A
+collector or a redirect receives both. That is the same residual the paragraph
+below states for redirection, not a second protection, and it is the reason the
+value is single-use rather than durable.
 
 **One value per process life is what makes the exposure argument honest.** The
 value sits in the terminal where the owner started the gateway — a place they
