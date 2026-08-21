@@ -358,8 +358,15 @@ pin — and the single guaranteed property lives in §6.
 
 > **Normative.** The composing stage is given what became of the plan: which steps
 > were driven, which were not driven at all, and for each driven step its
-> `Disposition` and its durable `StepStatus` and `failure`. Withholding any of
-> those from the stage is a defect of this decision.
+> `Disposition`, its durable `StepStatus`, its `SkipReason` where it has one, and
+> its `StepFailure.kind` where a tool produced one. Withholding any of those from
+> the stage is a defect of this decision.
+
+Every value in that list is a **closed vocabulary this system owns** — four enums,
+each exhaustively enumerated in `core/types.py`. That is deliberate and §5a is why:
+the one field of the step account that is free text, `StepFailure.message`, is
+excluded there rather than here, because excluding it is a prompt-safety ruling
+and not a question of what the stage needs to know.
 
 > **Normative.** The stage's instruction to the model requires the answer to state
 > what the assistant did **not** do wherever a planned step did not run — skipped
@@ -409,11 +416,18 @@ nobody told.
 
 > **Normative.** The composing stage is a prompt assembler under ADR-0098 §2 and
 > inherits that section whole. Every span of external content reaching it — a
-> retrieved `MemoryRecord` whose `Provenance.source` marks it external, any facet
-> text of external origin, and any externally-derived text in the step account such
-> as a tool id or a `StepFailure.message` — is presented to the model as
-> third-party data, distinguishable from this system's own instruction and from the
-> user's own words.
+> retrieved `MemoryRecord` whose `Provenance.source` marks it external, and any
+> facet text of external origin — is presented to the model as third-party data,
+> distinguishable from this system's own instruction and from the user's own words.
+
+> **Normative.** Step-account text that carries **no recorded provenance does not
+> reach the model at all**. `StepFailure.message` is free text a failing tool
+> influences and `StepFailure` carries no `Provenance`; a registered tool's
+> identifier and description may originate with an MCP server rather than with this
+> repository (ADR-0147). The stage renders the step account as a **deterministic
+> local summary** built from §5's closed vocabularies — `Disposition`,
+> `StepStatus`, `SkipReason`, `ToolFailureKind` — and passes none of that free text
+> through.
 
 > **Normative.** That distinction is **not forgeable from inside the span**. It is
 > derived from data the assembler holds — `Provenance.source`, an `Attestation`, a
@@ -426,6 +440,15 @@ nobody told.
 > assembled prompt's attribution of every span is unchanged by it. A test asserting
 > only that a label is present does not satisfy that clause and does not satisfy
 > this one.
+
+**Nothing is lost to the operator by that exclusion, and that is what makes it
+cheap.** `StepFailure.message` is a Tier 2 operator-facing explanation, and §6
+keeps the whole step account on screen beside the answer — the message is read
+where it was always read. What changes is only that it stops being *prompt input*,
+which it never needed to be: the model is composing prose about what happened, and
+the four enums say what happened. Giving the step-result surface provenance so such
+text could be attributed conformingly would be a `core` contract change with its
+own ADR, and §9 records it as not decided here rather than as a prerequisite.
 
 ADR-0098 §3 — instructions inside external content are data, and external content
 is never the authority for an action — is satisfied structurally here rather than
@@ -569,6 +592,10 @@ deliver, which is what the clause above says.
 - **The planner's non-empty `steps` requirement** (#1315). The answer sits beside
   the plan, so this ruling does not depend on relaxing it, and relaxing it is a
   `planning/` change and a different lane.
+- **Whether the step-result surface should carry provenance**, so that a tool's
+  own failure text could be rendered into a prompt under ADR-0098 §2 instead of
+  excluded by §5a. That is a `core` contract change and needs its own ADR; §5a's
+  exclusion is what makes this ADR not depend on it.
 - **Whether a blank completion should be refused inside the model seam** (#1324),
   which is a `ModelProvider` postcondition change and so its own ADR under golden
   rule 5. §8 keeps this ADR's refusal above the seam and non-routable, and changes
@@ -601,13 +628,14 @@ genuinely new and is therefore marked:
 
 > **Normative.** In the same change as the field, the implementing lane lands tests
 > pinning: §4's invariant in both directions; §5's construction obligations — that
-> the stage is handed the undriven steps and each driven step's disposition, status
-> and failure, and that `memory_degraded` reaches it; §5a's ADR-0098 §9 test; §6's
-> guarantee under a **deliberately contradictory provider**, a fake whose completion
-> claims an action the step account records as `NO_CAPABLE_TOOL` and again as
-> `DENIED`, asserting that the outcome's disposition and the rendered step account
-> are unchanged by what the reply says; and §8's non-routable refusal on a blank
-> completion.
+> the stage is handed the undriven steps and each driven step's disposition,
+> status, skip reason and failure kind, and that `memory_degraded` reaches it;
+> §5a's ADR-0098 §9 test, **and** that a `StepFailure.message` never appears in the
+> assembled prompt; §6's guarantee under a **deliberately contradictory provider**,
+> a fake whose completion claims an action the step account records as
+> `NO_CAPABLE_TOOL` and again as `DENIED`, asserting that the outcome's disposition
+> and the rendered step account are unchanged by what the reply says; and §8's
+> non-routable refusal on a blank completion.
 
 The contradictory-provider test is the one that matters most and is the easiest to
 omit, because every natural test of a composing stage uses a fake that cooperates.
