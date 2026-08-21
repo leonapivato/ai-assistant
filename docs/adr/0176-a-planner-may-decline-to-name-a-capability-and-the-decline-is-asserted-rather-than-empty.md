@@ -160,6 +160,21 @@ step 2 already refuses, and it still gets step 2's specific verdict.
 > re-entered, the treatment of a non-syntax bounded parse error as a miss, and the
 > `_MAX_EXTRACTION_MISSES` budget all stand as ratified.
 
+> **Normative.** The implementing lane ships a deterministic test of the widened
+> discriminator: one model reply carrying an **unmarked** empty-`steps` object
+> **ahead of** a well-formed decline envelope, asserting the returned `ActionPlan`
+> has empty `steps` and carries the *second* object's `rationale`.
+
+That test exists because the plausible wrong implementation passes everything
+else. A lane that relaxes step 2's shape check and leaves the scan's predicate at
+"non-empty list" gets the decoy recorded as the fall-back first object, steps
+straight past the marked decline because its `steps` is not non-empty, and then
+rejects the fall-back for having no marker — so a reply that contained a valid
+decline falls to bounded repair. §1's strictness test, §3's rationale test and
+§5's two-reply test all pass against that implementation. This clause is the only
+one that fails on it, and the discriminator is the half of this decision the
+corpus actually stood in the way of.
+
 **This preserves ADR-0071's guarantee verbatim on every shape it rules on
 today.** A bare `{"steps": []}` in the model's prose is stepped over now and is
 stepped over after. So is an outer object whose `steps` is empty and whose
