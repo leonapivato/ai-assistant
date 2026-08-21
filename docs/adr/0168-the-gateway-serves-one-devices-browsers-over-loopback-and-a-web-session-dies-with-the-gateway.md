@@ -770,8 +770,9 @@ and it binds with more force on a limit whose whole job is to refuse.
 > is a limit that can never bind.
 
 > **Normative.** The gateway holds at most `gateway_max_hub_connections`
-> connections to the hub at once and queues or refuses beyond that rather than
-> opening more.
+> connections to the hub at once. A browser request that would need one beyond
+> that is **refused**, and the refusal names the limit. The gateway does not
+> queue such a request and does not open a further connection.
 
 > **Normative.** The gateway refuses a browser request whose body exceeds
 > `gateway_max_request_bytes` locally, before any part of it is forwarded, and
@@ -793,6 +794,22 @@ hub connections; without a bound, a gateway can consume the whole of
 `hub_max_connections` and the owner's CLI reads a refusal it has no way to
 attribute. Bounding it at the gateway is what keeps that from looking like a hub
 that is down — ADR-0083's ruling 4 applied to a resource.
+
+**It refuses rather than queues, and an earlier draft's "queues or refuses" was
+wrong twice over.** It was underdetermined, which is the defect the opening of
+this section exists to prevent: two conforming gateways would answer the same
+ninth request differently, one with an error and one with a wait. And the
+queueing branch was unbounded in the direction that matters — an admitted
+browser can submit faster than the hub answers, and a queue with no figure holds
+a body per waiting request, up to `gateway_max_request_bytes` each, so the
+connection cap and the size cap together stop guaranteeing what this section says
+they guarantee. Naming a queue bound would be an eighth figure for a queue
+nothing yet needs; refusing is what §4 does with the session ceiling for the same
+reason, it is legible under §9, and it is what §9 already requires one hop
+later — "does not retry silently, does not queue the request" — when the hub
+cannot take the request at all. Whoever measures that the refusal hurts a real
+front end can buy the queue and its figure then. Adversarial review found it on
+the ninth round.
 
 **`gateway_max_request_bytes` is the gateway's own bound and does not replace the
 hub's.** ADR-0084 §3 makes the hub's `hub_max_frame_bytes` authoritative and has
