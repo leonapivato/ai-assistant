@@ -152,6 +152,50 @@ decomposition and iterative retrieval; harness fidelity and grading; the
 policy and reconciler cluster; the intake surface — are enumerated on #1231,
 which is the census. Issues are labeled `track:memory` as they are touched.
 
+## `track:conversation` — the assistant answers
+
+Live record: **#1312**.
+
+**Purpose:** the hub-side conversational engine — the pipeline's terminal step.
+Today the engine listens, remembers and plans, but a plan ending in "compose a
+reply" halts at "No tool is available": replying was swept up in "tools are
+deferred to MCP" although answering one's own user is not egress — the reply
+travels back on the wire the `ask` arrived on, the shape ADR-0131 gave
+notifications ("an answer the device asked for"). This track owns making the
+assistant *speak*: composing answers from plan + retrieved memory + context,
+streaming them, and eventually routing intents to typed operations. It is
+hub-side work with **no dependency on `track:web-client`'s gateway**; the CLI
+exercises every exit. `track:web-client` milestone 14 (streaming chat in the
+browser) consumes this track's output. Milestones are ordered by **dependency
+only**, and each closes on a QA-driven exit ruling: a QA run
+(`.claude/skills/qa-milestone`) recorded as a `qa` issue, then the owner's ruling
+recorded on #1312.
+
+- **17 — the assistant answers.** An ADR ruling that a reply is not a tool: the
+  pipeline's terminal step composes a natural-language answer (model + memory +
+  context) and returns it as the ask's response, distinct from the tool seam
+  (ADR-0154) and related to ADR-0131's answer-shaped delivery. Then the
+  implementation lane (after the ADR merges, one lane one PR), then QA.
+  *Exit: the owner asks "what do you know about me?" from an enrolled device and
+  receives a conversational answer that draws on accumulated memory.*
+  The ADR lane carries two delegated calls, both recorded on #1312: whether any
+  `core` type changes, and how a plan's non-answerable steps — the ones that
+  need real tools — degrade into the answer honestly.
+- **18 — streaming and the conversation surface.** The hub-side half of
+  streaming (chunked reply frames on the wire), conversation resume carrying
+  context; what `track:web-client` milestone 14 needs from the hub, built here.
+  *Exit: a streamed answer over the wire, resumed mid-conversation, from the
+  CLI.*
+
+**Deferred — stated, not scheduled:**
+
+- **Hub-owned intent routing.** `ask` → typed operation, one-directional — a
+  typed operation is never re-read — with its own confirm rule, distinct from the
+  tool seam. Conceptually moved here from `track:web-client`'s deferred list;
+  #1230's list still names it.
+- The **engagement surface** the Gap register names as on-no-track debt. This
+  track is its natural eventual home, but it stays undesigned until ruled.
+
 ## The backlog
 
 The backlog is a **label, not a track** (#1226 §4, amended). It fails the
