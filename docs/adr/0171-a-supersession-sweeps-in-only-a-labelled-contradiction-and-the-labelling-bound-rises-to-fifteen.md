@@ -223,9 +223,11 @@ over; with it, the raise creates a datable boundary for free.
 > `CONTRADICTS` relation for. A member it holds **no** relation for is left live,
 > whatever its source.
 
-> **Normative.** The clause above excepts a `USER_ASSERTED` member that ADR-0078 §5b's
-> confirmation covers. Such a member is retired exactly as ADR-0078 §5b requires,
-> whatever relations the writer holds, and nothing in this ADR reaches that section.
+> **Normative.** The clause above withholds from the retirement set only what **this
+> ADR** withholds. It does not reach ADR-0078 §5b: a `USER_ASSERTED` member that
+> section's confirmation covers is retired exactly as it requires and on exactly the
+> footing it had before this ADR, and §2 adds no condition to that retirement and
+> removes none.
 
 > **Normative.** Where a writer holds a `CONTRADICTS` relation for **no** member of
 > that set, ADR-0079 §3's obligation binds exactly as it stands, narrowed by
@@ -279,13 +281,26 @@ construction:
   §6's ratified floor behaves exactly as it does today. Sparing on the strength of a
   test that was never run would have been the wrong direction, and the rule does not.
 
-**The two disjointness facts the second and third clauses rest on are properties of
-the invocation condition, not predictions about a policy.** A crossing carrying a
+**The disjointness the second and third clauses rest on is a property of the
+invocation condition, not a prediction about a policy.** A crossing carrying a
 `CONTRADICTS` relation is one the writer reconciled, and a crossing the writer
-reconciled holds no `USER_ASSERTED` member — so the confirmation exception and the
-narrowing cannot both fire on one crossing, and the second clause is a guard against
-a future writer rather than a live branch. It is stated anyway, because a contract
-that leaves it to inference is a contract ADR-0078 §5b can be read out of.
+reconciled holds no `USER_ASSERTED` member — so the confirmation batch and the
+narrowing cannot meet on one crossing. The second clause is stated anyway, because a
+contract that leaves it to inference is a contract ADR-0078 §5b can be read out of.
+
+**The second clause is scoped to this ADR's own withholding, and that scoping is
+load-bearing rather than cautious.** An earlier draft said a confirmation-covered
+member is retired "whatever relations the writer holds", which the architecture
+review found unsatisfiable against the fourth clause below: a writer holding `ADDS`
+for such a member was commanded to retire it and to refuse. The finding is correct,
+and the right response is to stop restating a tension this ADR did not create. That
+tension is already in the ratified corpus — ADR-0159 §5 says a `RESTATES`/`ADDS`
+member is "never retired, by any ruling, at any writer", and ADR-0078 §5b says every
+confirmed asserted conflict is retired in one batch — and it is unreachable there for
+the same structural reason it is unreachable here. Ruling its precedence would mean
+partially superseding ADR-0159 §5's *first* clause, on no evidence, for a case no
+conforming writer can construct. §7 records it as expressly not decided and #1326
+carries it.
 
 **The same asymmetry ADR-0159 §5 relies on is what makes this safe against an
 untrusted label.** A relation is a model-derived input, and §5's last paragraph is
@@ -521,6 +536,17 @@ otherwise.
   reconciler's bound is applied to a set that ceiling already caps. Whether the field
   should carry an `le` is a validation question with no measurement behind it, and
   it is adjacent to #1225 rather than to this.
+- **#1326 — the precedence between ADR-0159 §5's absolute exclusion and ADR-0078 §5b's
+  confirmed batch. Left open, and deliberately not restated.** §5 says a `RESTATES` or
+  `ADDS` member is "never retired, by any ruling, at any writer"; ADR-0078 §5b says
+  every confirmed asserted conflict is retired in one batch. A writer holding `ADDS`
+  for a confirmation-covered member could satisfy neither. It is structurally
+  unreachable — ADR-0159 §2's invocation condition means a writer holds no relation for
+  a `USER_ASSERTED` member at all — and it predates this ADR, which changes nothing
+  about either rule. §2's second clause is scoped to this ADR's own withholding
+  precisely so that it does not promote the tension into a stated one. Ruling it means
+  partially superseding ADR-0159 §5's first clause on no evidence, for a case no
+  conforming writer can construct, and that is a decision to make on its own.
 - **#1325 — ADR-0159 §3's own internal contradiction about what the bound reaches.
   Left open, and untouched.** §3's second clause ends "members beyond that bound are
   left unlabelled", which read literally denies its first clause's *unconditional*
