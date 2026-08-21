@@ -143,6 +143,29 @@
   **discharged by the milestone §12 named** rather than replaced, which is
   ADR-0083 §15's stacked addition on its own test. §12's remaining deferrals stand.
 
+- **Amended: 2026-08-22** by ADR-0177 — **§12's fifth deferral is discharged by
+  the milestone it names, and no clause of this ADR changes.** That deferral,
+  "**Account connection from a browser on another device**", recorded that the
+  five connection methods are refused on the hub's remote listener and refused
+  client-side, and handed the question to milestone 15. ADR-0177
+  (`track:web-client` milestone 15's control-surface decision, #1230, #1365) is
+  that milestone's decision and its §3 answers it: **refused**, for the two
+  operations that take a `SecretValue`, until ADR-0174 §7's own trigger — a
+  transport-layer security arrangement for the remote browser listener — is
+  discharged, because a page served over `http://` from a non-loopback overlay
+  address is not a potentially trustworthy origin and the browser therefore
+  withholds every protection it has for a secret. `disconnect_account`,
+  `connected_accounts` and `recent_connection_acts` carry no credential and are
+  admitted on both listeners; all five are admitted on the loopback listener; and
+  ADR-0151 §13's refusal on the gateway's own hop to the hub is untouched. A
+  deferral discharged by the milestone that deferral names is not an amendment of
+  the text that deferred it (ADR-0083 §15), so this note records the outcome
+  rather than changing §12. Separately, ADR-0177 §1 widens ADR-0175 §6's
+  enumeration of browser-reachable operations from five to thirty; that
+  supersession is recorded on ADR-0175 and reaches no clause of this ADR — §1's
+  biconditional, §6's four request classes and its exclusive record enumeration,
+  and §8's figures all bind unchanged (ADR-0177 §12).
+
 - **This is `track:web-client` milestone 13's decision** (#1230). It takes the
   wire seat ADR-0084 §3 and ADR-0094 §2 hold open — a spoke process that reaches
   the hub over the framed wire and exposes the assistant to a browser — and the

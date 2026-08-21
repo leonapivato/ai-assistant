@@ -1,7 +1,20 @@
 # 175. A browser stream is a response body on the request the browser made, and one delivery fans out to every open stream
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0177 (§6's first clause, the closed enumeration of five browser-reachable operations)
 - Date: 2026-08-21
+- Partially superseded: 2026-08-22 by ADR-0177 — **one clause, and the clause
+  beside it is what authorised the replacement.** ADR-0177 is
+  `track:web-client` milestone 15's control-surface decision (#1230, #1365), and
+  it widens §6's first clause from **five** browser-reachable operations to
+  **thirty**, admitting the grant, belief, question, observation, confirmation,
+  notification-review and connection surfaces. A reader holding only §6 builds a
+  gateway on which twenty-five of the thirty are unreachable, which is ADR-0070
+  §1's first limb. **Nothing else of §6 moves**: its second clause
+  (`next_notification` is the gateway's own sixth operation), its third (every
+  other operation unreached, and no lane adds one without its own ratified
+  decision — the clause ADR-0177 acts under rather than displaces) and its fourth
+  (no principal, no grant, no per-browser scope) are used as given. §§1–5 and
+  §7–§10 are untouched, and ADR-0177 §12 shows the working clause by clause.
 
 - **This is `track:web-client` milestone 14's surface decision** (#1230). Its
   exit test is *a conversation and a pushed notification, end to end, on a
