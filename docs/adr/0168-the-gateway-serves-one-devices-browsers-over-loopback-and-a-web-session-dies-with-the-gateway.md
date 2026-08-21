@@ -773,16 +773,22 @@ and it binds with more force on a limit whose whole job is to refuse.
 > is a limit that can never bind; and `gateway_max_pending_connections` unless it
 > is no greater than `gateway_max_browser_connections`, for that same reason.
 
-> **Normative.** A browser connection that has not delivered a complete request
-> within `gateway_read_timeout` is closed, and the same deadline runs while a
-> connection the gateway is holding open waits for its next request — so a peer
-> that connects and then sends nothing, or sends a request a byte at a time,
-> cannot hold a slot indefinitely.
+> **Normative.** A browser connection is **admitted** from the moment it carries
+> a request the gateway admitted under §4, and **unadmitted** before that. A
+> request the gateway refuses returns its connection to unadmitted. Serving one
+> of §3's two pre-session exceptions changes neither.
 
-> **Normative.** The gateway accepts at most `gateway_max_browser_connections`
-> browser connections at once, and at most `gateway_max_pending_connections` of
-> those may be connections that have not yet delivered a complete request.
-> Beyond either ceiling it refuses rather than queueing without bound.
+> **Normative.** An unadmitted connection carries at most one request. The
+> gateway closes it once that request's response is complete, and in any case
+> `gateway_read_timeout` after it was accepted, whether or not a complete request
+> has arrived by then. At most `gateway_max_pending_connections` unadmitted
+> connections exist at once, and the gateway refuses a further connection rather
+> than queueing it.
+
+> **Normative.** An admitted connection may carry further requests. The gateway
+> closes it `gateway_read_timeout` after the last complete request it carried,
+> and holds at most `gateway_max_browser_connections` connections of both kinds
+> together, refusing rather than queueing beyond that.
 
 > **Normative.** The gateway holds at most `gateway_max_hub_connections`
 > connections to the hub at once. A browser request that would need one beyond
@@ -813,9 +819,33 @@ is the exact pair ADR-0084 §3 separates: "a per-frame deadline bounds each
 connection but says nothing about how many there may be", and "a connection that
 has not completed the handshake has cost the hub a descriptor and a task while
 telling it nothing, which is the cheapest state for a misbehaving peer to
-accumulate". A connection that has delivered no complete request is this door's
-version of that state, and it gets the tighter budget for the same reason.
-Adversarial review found the gap on the tenth round.
+accumulate". A connection that has carried no request the gateway admitted is
+this door's version of that state, and it gets the tighter budget for the same
+reason. Adversarial review found the gap on the tenth round.
+
+**The tighter budget keys on admission rather than on activity, and the round
+that followed is why.** The first draft of it bounded connections that had "not
+yet delivered a complete request", which a peer leaves by sending one: a complete,
+well-formed, session-less request is refused under §3 and costs nothing, and the
+connection then sat under the total ceiling alone, renewing its deadline every 29
+seconds and holding a slot indefinitely. The bound has to be the thing the peer
+cannot fake rather than the thing it can, so it is admission under §4 — which
+needs a session, which needs the bootstrap value — and a refused request returns a
+connection to the unadmitted side rather than leaving it where its last success
+put it. That is §1's biconditional applied to a resource: name the property, and
+every state falls on one side of it, instead of enumerating the states someone
+happened to think of and being shown the next one.
+
+**What it leaves is a denial the owner can see, and that is stated rather than
+argued away.** A local peer can still cycle unadmitted connections — one request
+each, closed each time — and hold `gateway_max_pending_connections` of them, so it
+can delay a *fresh* page load. It cannot reach an admitted connection, because
+that needs a session; it cannot accumulate, because each connection it holds is
+closed on its own response or its own deadline; and an already-admitted browser
+keeps its slot. Cycling is request-rate load, which no ceiling design refuses and
+which ADR-0084 §3's identical pending ceiling does not either. It is the same
+direction of failure §6 accepts for the cookie half: an outage the owner can see
+and act on, never a session someone else holds.
 
 **The gateway owes those three figures with more force than the hub does, not
 less.** ADR-0084 §3 was explicit that its own ceilings are "robustness, not
