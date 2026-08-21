@@ -2,6 +2,24 @@
 
 - Status: Accepted
 - Date: 2026-08-14
+- Amended: 2026-08-22 — **§13's third clause is undischarged and unamended, and
+  ADR-0177 rules a different hop.** ADR-0177 (`track:web-client` milestone 15,
+  #1230, #1365) admits the five connection operations to a browser, and it does so
+  *behind* §13's refusal rather than through it: its §3 requires the gateway to
+  reach these operations only over ADR-0084 §1's loopback socket, leaves
+  `wire/server.py`'s `CONNECTION_METHODS` refusal and `wire/client.py`'s
+  `_refuse_off_loopback` untouched, and rules that a gateway reaching its hub over
+  ADR-0124's remote listener serves none of the five to any browser. **The
+  credential's hop from an enrolled device to the hub — §13's own subject — stays
+  refused**, and ADR-0177 §11 restates it as standing with its trigger. What
+  ADR-0177 §3 rules instead is the hop §13 has no opinion about, from a browser to
+  a gateway that is itself on the loopback socket: admitted on the gateway's
+  loopback listener, and refused on ADR-0174's remote browser listener for
+  `connect_account` and `reprovision_account`, the only two operations taking a
+  `SecretValue` (§6). This note changes no decision of this ADR (ADR-0070 §1's
+  second limb); it records a fact that postdates it, because ADR-0174 §11 already
+  observed that a loopback-dialling gateway does not meet §13's refusal and that
+  the gap is easy to lose.
 - **Decides the surface ADR-0149 §9 names as owed**, on the firing condition §9's
   second clause states — "Its firing condition is this ADR merging" — which
   ADR-0149's merge met. `AssistantEngine` gains **five** methods —
