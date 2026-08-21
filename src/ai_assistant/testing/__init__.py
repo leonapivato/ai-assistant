@@ -75,6 +75,13 @@ from ai_assistant.testing.secrets import (
     SecretMethod,
     disclosure_of,
 )
+from ai_assistant.testing.streaming import (
+    DEFAULT_STREAM_DELTAS,
+    DEFAULT_STREAM_REPLY,
+    FakeStreamingCompleter,
+    StreamAttempt,
+    StreamCall,
+)
 from ai_assistant.testing.tools import FakeToolRegistry
 from ai_assistant.testing.traces import (
     DEFAULT_OCCURRED_AT,
@@ -96,6 +103,8 @@ __all__ = [
     "DEFAULT_MAX_PROPOSALS",
     "DEFAULT_OCCURRED_AT",
     "DEFAULT_READER_NAME",
+    "DEFAULT_STREAM_DELTAS",
+    "DEFAULT_STREAM_REPLY",
     "OTHER_INSTALLATION",
     "SLOT_PREFIX",
     "TRACE_NOT_RECORDED",
@@ -131,6 +140,7 @@ __all__ = [
     "FakeSecrets",
     "FakeSourceGrantStore",
     "FakeSourceGrants",
+    "FakeStreamingCompleter",
     "FakeToolImplementation",
     "FakeToolInvoker",
     "FakeToolRegistry",
@@ -144,6 +154,8 @@ __all__ = [
     "ProgrammedOutcome",
     "SecretBacking",
     "SecretMethod",
+    "StreamAttempt",
+    "StreamCall",
     "attested_proposal",
     "disclosure_of",
     "evaluation_trace",

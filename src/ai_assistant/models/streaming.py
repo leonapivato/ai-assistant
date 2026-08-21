@@ -1,0 +1,189 @@
+"""A :class:`~ai_assistant.core.protocols.StreamingCompleter` backed by pydantic-ai.
+
+The streaming sibling of :mod:`ai_assistant.models.provider`, and the second
+place the vendor is reached (indirectly, via pydantic-ai) so the rest of the
+system stays model-agnostic. ADR-0173 §5's Context named the gap this closes: the
+library underneath does stream, and ``PydanticAIProvider`` uses only
+``Agent.run()``.
+
+**It is a separate class rather than a method on ``PydanticAIProvider``**,
+because ADR-0173 §5 makes ``StreamingCompleter`` a separate Protocol and the
+composition root injects one implementation of each. Nothing forbids one object
+implementing both; keeping them apart is what lets a deployment stream through a
+route it does not complete through, and keeps ``PydanticAIProvider``'s single
+member single.
+
+**Nothing here retries, re-routes or re-issues.** ADR-0173 §5 permits an
+implementation to substitute freely until its first non-blank delta and never
+after; this one substitutes at no point at all, which satisfies the clause the
+strong way. That is not an accident of simplicity — ADR-0013 §3 wires
+``RoutingProvider(RetryingProvider(PydanticAIProvider))`` around *completions*,
+and ADR-0173 §5 is explicit that neither wrapper can forward a stream, so a
+streaming route has no fallback and this module does not invent one. A caller
+that wants the fallback calls ``ModelProvider.complete``.
+"""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from pydantic_ai import Agent
+
+from ai_assistant.core.errors import ModelError, ModelResponseError
+from ai_assistant.core.types import Role, encodable_text
+from ai_assistant.models.provider import _classify, _to_model_messages
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Sequence
+
+    from pydantic_ai import models
+    from pydantic_ai.messages import ModelMessage
+
+    from ai_assistant.core.types import EncodableText, Message
+
+
+def _encodable(delta: str) -> EncodableText:
+    """Refuse a delta with no UTF-8 encoding, **at the seam** (ADR-0173 §5, §14).
+
+    ADR-0085 §4c's rule binds at this seam as it binds at
+    ``ModelProvider.complete``'s, whose ``Message.content`` is already
+    :data:`~ai_assistant.core.types.EncodableText`. Refusing here rather than
+    leaving it to the caller's own construction is what keeps a lone surrogate
+    from surfacing as a pydantic ``ValidationError`` several layers above the
+    thing that produced it.
+
+    :class:`~ai_assistant.core.errors.ModelResponseError` for its disposition:
+    routable, because another provider may not emit half a character, and not
+    retryable, because the same route reproduces it. Past the commit boundary a
+    caller acts on neither (ADR-0173 §5).
+
+    Raises:
+        ModelResponseError: If ``delta`` has no UTF-8 encoding.
+    """
+    try:
+        return encodable_text(delta)
+    except ValueError as exc:
+        msg = f"the model streamed a delta that cannot be encoded: {exc}"
+        raise ModelResponseError(msg) from exc
+
+
+class PydanticAIStreamingCompleter:
+    """Streaming completion client implemented on top of pydantic-ai.
+
+    Structurally implements
+    :class:`~ai_assistant.core.protocols.StreamingCompleter`. The default model
+    may be a ``"provider:model"`` string (the production path) or a pydantic-ai
+    :class:`~pydantic_ai.models.Model` instance (used by tests to inject a
+    deterministic fake without network access), exactly as
+    :class:`~ai_assistant.models.provider.PydanticAIProvider`'s is.
+    """
+
+    def __init__(self, default_model: models.Model | str) -> None:
+        """Initialise the completer.
+
+        Args:
+            default_model: The model used when a call does not override it,
+                either as a pydantic-ai ``"provider:model"`` name or a pre-built
+                ``Model`` instance.
+        """
+        self._default_model = default_model
+        # ``defer_model_check`` keeps construction offline, as it does for the
+        # completing provider: a string model is resolved (and credentials
+        # required) at the first stream rather than at wiring time.
+        self._agent: Agent[None, str] = Agent(model=default_model, defer_model_check=True)
+
+    def stream(
+        self,
+        messages: Sequence[Message],
+        *,
+        model: str | None = None,
+    ) -> AsyncIterator[EncodableText]:
+        """Stream the assistant's next message as text deltas, oldest first.
+
+        Both malformed-argument shapes ADR-0066 §1 names are refused here, before
+        :class:`Agent` is reached, and so is a ``Role.TOOL`` turn — the same
+        boundary ``PydanticAIProvider.complete`` draws, for the same reasons. The
+        trailing-assistant case is the one with teeth: pydantic-ai resolves a
+        history whose last entry is already a response as a *finished* run, so it
+        would replay that assistant turn's text as a stream without a round trip —
+        an echo indistinguishable from a real answer (ADR-0066 §2, issue #351).
+
+        **The conversation is rendered on the call**, not on the first iteration
+        step, which is this seam's discharge of ADR-0065: everything the stream
+        goes on to send derives from that one observation, so a caller mutating
+        its own list while the stream is suspended cannot tear the request. The
+        refusals therefore reach a caller that never iterates.
+
+        Args:
+            messages: Conversation history, oldest first. Must be non-empty, and
+                must not end on a ``Role.ASSISTANT`` turn.
+            model: Optional ``"provider:model"`` override; falls back to the
+                configured default when ``None``.
+
+        Returns:
+            An async iterator over the reply's text deltas, in order.
+
+        Raises:
+            ModelError: If ``messages`` is empty, ends on a ``Role.ASSISTANT``
+                turn, or contains a tool-role message. The bare class — neither
+                retryable nor routable, which is the disposition the Protocol
+                requires — because a caller fixes those at the call site rather
+                than by trying again. A provider failure, or a delta with no UTF-8
+                encoding, is raised from the iteration and narrowed to the most
+                specific subclass.
+        """
+        if not messages:
+            msg = "stream() requires at least one message"
+            raise ModelError(msg)
+        if messages[-1].role is Role.ASSISTANT:
+            msg = (
+                "stream() requires a conversation awaiting a reply; this "
+                "history already ends with an assistant turn"
+            )
+            raise ModelError(msg)
+
+        # `_to_model_messages` raises the bare `ModelError` for a `Role.TOOL`
+        # turn, so the tool refusal rides the render and is not a fourth branch
+        # here that could drift from the completing provider's.
+        history = _to_model_messages(messages)
+        return self._stream(history, model=model)
+
+    async def _stream(
+        self, history: list[ModelMessage], *, model: str | None
+    ) -> AsyncIterator[EncodableText]:
+        """Drive one pydantic-ai streamed run over an already-rendered history.
+
+        ``debounce_by=None`` rather than pydantic-ai's default of 0.1 seconds.
+        The default groups deltas arriving inside a window and emits them
+        together, which delays the *first* word by up to that window — and time to
+        first word is the entire product benefit ADR-0173 exists to buy. Grouping
+        is the caller's job in any case: ADR-0173 §5 makes a delta's shape
+        unpromised and coalescing the composing stage's, which has the chunk
+        ceiling and the text-preservation rule that a transport-level debounce
+        knows nothing about.
+
+        The whole run is inside one ``try``, deliberately: ADR-0173 §5 admits a
+        ``ModelError`` "from the call or from the iteration", and pydantic-ai
+        raises from both — resolving the model on entry, and reading chunks
+        thereafter. Classification is
+        :func:`~ai_assistant.models.provider._classify`'s, unchanged, so a
+        streamed failure and a completed one land on the same taxonomy.
+        ``CancelledError`` is a ``BaseException`` and is not caught here: it is
+        delivered onward as ADR-0060 obliges, and leaving the ``async with`` is
+        what releases the provider connection.
+        """
+        try:
+            async with self._agent.run_stream(
+                user_prompt=None,
+                message_history=history,
+                model=model,
+            ) as result:
+                async for delta in result.stream_text(delta=True, debounce_by=None):
+                    yield _encodable(delta)
+        except ModelError:
+            # Already ours: `_encodable`'s refusal, or a re-raise on a second pass
+            # through this handler. Classifying it again would flatten a narrowed
+            # subclass back to whatever `_classify` makes of a `ModelError`.
+            raise
+        except Exception as exc:
+            raise _classify(exc) from exc
