@@ -57,12 +57,16 @@ if TYPE_CHECKING:
 
 #: ADR-0159 §3's bound on how many conflict-set members one ingest may ask a model
 #: about, in rank order. **Not** a second ``conflict_limit``: that ceiling is 100
-#: and is a circuit breaker (ADR-0079 §1), where this is a cost bound. Three is
-#: where the measured distribution puts the records a proposal could plausibly
-#: restate or contradict; a fourth is nearly always a topical neighbour. Its right
-#: value is an empirical question ADR-0159 does not pretend to have settled, which
-#: is why it reaches here from ``Settings`` rather than living as a constant.
-DEFAULT_RECONCILER_MAX_CONFLICTS: Final = 3
+#: and is a circuit breaker (ADR-0079 §1), where this is a cost bound.
+#:
+#: **Fifteen since ADR-0171 §1**, which partially supersedes ADR-0159 §3's default of
+#: three on #1302's measurement: at three the bound explained every one of a replay's
+#: 2,522 unlabelled relations, and an unlabelled member was swept into the supersede
+#: widening rather than spared by it. It reaches production from ``Settings`` rather
+#: than from here, and **must not disagree with it** (ADR-0171 §5) — this constant
+#: serves a direct construction with no ``Settings`` in hand, and the agreement is
+#: pinned by a test rather than left to a reader noticing two numbers.
+DEFAULT_RECONCILER_MAX_CONFLICTS: Final = 15
 
 #: How many failed decode attempts the envelope scan tolerates before giving up.
 #: Keeps the scan linear on a reply that is mostly prose containing braces.
