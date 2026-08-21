@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import secrets
 from datetime import timedelta
 from itertools import count
 
@@ -239,6 +240,38 @@ def test_use_restarts_the_idle_clock_but_never_the_absolute_one(
         )
 
     assert timers.armed[-1].delay == pytest.approx(timedelta(minutes=30).total_seconds())
+
+
+def test_a_lifetime_past_the_end_of_representable_time_still_mints(
+    clock: Clock, timers: Timers
+) -> None:
+    """``gt=timedelta(0)`` admits ``timedelta.max``, and a mint must not fail on it.
+
+    ADR-0168 §8 refuses ``gateway_session_ttl`` "unless it is strictly positive"
+    and names no ceiling, so a deployment can set one whose sum with any ordinary
+    clock reading is not a representable instant. The bound saturates rather than
+    raising — and the idle bound still binds, because a session ends "at the
+    earlier" of the two, so a lifetime past the end of time is not a session
+    without bounds.
+    """
+    table = SessionTable(
+        max_sessions=1,
+        ttl=timedelta.max,
+        idle_timeout=_IDLE,
+        now=clock,
+        defer=timers,
+        mint_value=lambda: secrets.token_urlsafe(8),
+    )
+
+    values = table.mint()
+
+    assert values is not None
+    assert timers.armed[0].delay == pytest.approx(_IDLE.total_seconds())
+    clock.advance(_IDLE)
+    assert (
+        table.admit(header_half=values.header_half, cookie_halves=(values.cookie_half,))
+        is Admission.NO_LIVE_SESSION
+    )
 
 
 def test_clearing_the_table_ends_every_session_and_disarms_every_timer(
