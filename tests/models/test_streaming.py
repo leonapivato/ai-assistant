@@ -9,6 +9,7 @@ these tests are deterministic and never touch the network — the shape
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Final
 
@@ -33,7 +34,7 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import Message, Role
 from ai_assistant.models import PydanticAIStreamingCompleter
 from ai_assistant.models.streaming import (
-    _cancelled_from_outside,  # pyright: ignore[reportPrivateUsage]
+    _Cancellations,  # pyright: ignore[reportPrivateUsage]
 )
 from ai_assistant.testing import StreamAttempt
 
@@ -395,21 +396,61 @@ class TestCancellationOnTheCleanupPath:
         assert caught.value.retryable is False
         assert caught.value.routable is False
 
-    async def test_the_cleanup_tells_our_cancellation_from_the_pump_s(self) -> None:
-        # The predicate the cleanup branches on, asserted in both states rather
-        # than only in the one an integration test happens to reach. `cancelling()`
-        # is what distinguishes them, and reading it wrong in either direction is
-        # a silent bug: one way absorbs a real cancellation, the other invents one.
-        assert not _cancelled_from_outside()
+    async def test_the_cleanup_tells_our_cancellation_from_the_run_s(self) -> None:
+        # The predicate the cleanup branches on, asserted in every state rather
+        # than only in the one an integration case happens to reach. Reading it
+        # wrong is silent either way: one direction absorbs a real cancellation,
+        # the other invents one on an ordinary close.
+        assert not _Cancellations.now().rose_since()
 
-        async def cancels_itself() -> bool:
+        async def cancelled_after_the_reading() -> bool:
+            opened = _Cancellations.now()
             task = asyncio.current_task()
             assert task is not None
             task.cancel()
             try:
                 await asyncio.sleep(_A_MOMENT)
             except asyncio.CancelledError:
-                return _cancelled_from_outside()
+                return opened.rose_since()
             return False  # pragma: no cover - the sleep is always cancelled
 
-        assert await asyncio.ensure_future(cancels_itself())
+        async def cancelled_before_the_reading() -> bool:
+            # The regression: a caller that handled an earlier cancellation and
+            # did not `uncancel()` keeps a standing count, so a live-flag reading
+            # would report every later close of every later stream as cancelled.
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await asyncio.sleep(_A_MOMENT)
+            opened = _Cancellations.now()
+            return opened.rose_since()
+
+        assert await asyncio.ensure_future(cancelled_after_the_reading())
+        assert not await asyncio.ensure_future(cancelled_before_the_reading())
+
+    async def test_a_caller_that_swallowed_an_earlier_cancellation_still_closes(self) -> None:
+        """The same regression, end to end, on the seam rather than the predicate.
+
+        A stream read and closed inside a task carrying a standing cancellation
+        count must close like any other. Otherwise every stream that task ever
+        opens afterwards reports a cancellation nobody delivered — ADR-0060's
+        provenance rule broken in the inventing direction rather than the
+        absorbing one.
+        """
+        world = _world(StreamAttempt(deltas=("one", "two", "three")))
+        seen: list[str] = []
+
+        async def swallow_then_stream() -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await asyncio.sleep(_A_MOMENT)
+            async with closing(world.completer.stream(_a_question())) as stream:
+                seen.append(await anext(stream))
+
+        await asyncio.ensure_future(swallow_then_stream())
+
+        assert seen == ["one"]
+        assert world.released == 1

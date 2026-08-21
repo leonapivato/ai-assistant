@@ -69,19 +69,48 @@ def _encodable(delta: str) -> EncodableText:
         raise ModelResponseError(msg) from exc
 
 
-def _cancelled_from_outside() -> bool:
-    """Whether something has cancelled the task running this code.
+@dataclass(frozen=True)
+class _Cancellations:
+    """How many times a task had been cancelled at one moment, and which task.
 
     ``Task.cancelling()`` counts the cancellations requested of a task and not
-    yet balanced by ``uncancel()``, so a non-zero count is the one durable
-    signal that a ``CancelledError`` caught during cleanup belongs to *us*
-    rather than to a task we cancelled ourselves. Outside a task — a bare
-    ``coroutine`` driven by hand, or an async generator finalised by the loop's
-    shutdown hook — there is nothing to have been cancelled and the answer is
-    ``False``.
+    yet balanced by ``uncancel()``, so it is what separates a ``CancelledError``
+    delivered to *us* from one raised by a task we cancelled ourselves. What it
+    is not is a live flag: a caller that caught an earlier cancellation without
+    calling ``uncancel()`` — which ``asyncio.timeout`` and ``TaskGroup`` do for
+    their own, and a hand-written handler does not — leaves the count standing
+    for the rest of the task's life. Reading it as a boolean would then report a
+    cancellation of *this* stream on every later close, so what is compared is
+    the **rise** since the stream began.
+
+    Attributes:
+        task: The task the reading was taken from, or ``None`` outside one.
+        count: Its cancellation count at that moment.
     """
-    current = asyncio.current_task()
-    return current is not None and current.cancelling() > 0
+
+    task: asyncio.Task[object] | None
+    count: int
+
+    @classmethod
+    def now(cls) -> _Cancellations:
+        """Read the current task's cancellation count."""
+        task = asyncio.current_task()
+        return cls(task=task, count=task.cancelling() if task is not None else 0)
+
+    def rose_since(self) -> bool:
+        """Whether the task running *now* has been cancelled since this reading.
+
+        A different task from the one the reading was taken in gets a baseline of
+        zero rather than this reading's — an async generator may legitimately be
+        closed from a task other than the one that read it, and that task's own
+        history is not ours to net out. Outside a task there is nothing to have
+        been cancelled and the answer is ``False``.
+        """
+        task = asyncio.current_task()
+        if task is None:
+            return False
+        baseline = self.count if task is self.task else 0
+        return task.cancelling() > baseline
 
 
 @dataclass(frozen=True)
@@ -280,6 +309,7 @@ class PydanticAIStreamingCompleter:
         # that will never free. Splitting the two is what lets this seam have
         # backpressure and a reader that cannot be left waiting.
         deltas: asyncio.Queue[_Delta] = asyncio.Queue(maxsize=1)
+        opened = _Cancellations.now()
         run = asyncio.create_task(self._pump(history, model=model, deltas=deltas))
         try:
             while True:
@@ -314,9 +344,10 @@ class PydanticAIStreamingCompleter:
                 # onward and never absorbed — and a bare `suppress` here eats
                 # exactly that one, silently, on the cleanup path.
                 #
-                # `cancelling()` is what separates them: it is non-zero exactly
-                # when something cancelled the task running this cleanup.
-                if _cancelled_from_outside():
+                # A *rise* in the cancellation count since the stream opened is
+                # what separates them — not a non-zero count, which an earlier
+                # cancellation this caller already handled would leave standing.
+                if opened.rose_since():
                     raise
 
     async def _pump(
