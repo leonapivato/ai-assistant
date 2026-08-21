@@ -216,8 +216,13 @@
   the class is **nowhere at rest** rather than in a weaker place; on the browser's
   side custody is the browser profile's own file permissions, which is the
   operating system's own access control this clause itself chose; and every value
-  is minted by this system, bounded by ADR-0168 §8's expiry, and dies with the
-  gateway process. **The rest of the same bullet is applied rather than
+  is minted by this system and **ceases to admit anything** at the earlier of
+  ADR-0168 §8's expiry and the end of the gateway process. That fourth
+  replacement binds the value's *capacity to admit* and never the persistence of
+  its bytes — no implementation is obliged to make a browser forget anything, and
+  bytes a browser keeps past that point verify against nothing, because ADR-0168
+  §4 has the gateway reconstruct no session from what a browser presents after a
+  restart. **The rest of the same bullet is applied rather than
   superseded** — no value in the class is written to the memory database or any
   other database, none is ever committed, and the `.env` sentence authorises
   nothing. ADR-0172 §2 also states that a **durable** browser-held credential is
@@ -236,20 +241,25 @@
   hub-gated admission could never deliver the message that the hub is down.
   ADR-0172 §3 puts three replacements in its place: one purpose and one path;
   operating-system custody at both ends, where `permissions/` cannot run; and the
-  **session's admission** made auditable under ADR-0168 §6's record clause — the
-  mint that created it and every refusal, a failed verification included.
+  **session's admission** *recorded* under ADR-0168 §6's record clause — the mint
+  that created it and every refusal, a failed verification included. ADR-0172 §3
+  states the replacements as weaker than §7 in three distinct ways: the record is
+  **emitted and not retained**, since ADR-0168 §6 has the gateway retain none of
+  it and where it lands is the operator's; custody is not a policy decision about
+  *this* access; and an admission is not a use.
 
-  **The third replacement is auditable *admission* and not auditable *use*, and
-  ADR-0172 §4 rules the question ADR-0168 §6 left open by name.** No record is
+  **ADR-0172 §4 rules the question ADR-0168 §6 left open by name.** No record is
   written for a Tier 0 read a live session admits. The ground is not cost: a rider
   on a live session issues its requests through the owner's own browser, over the
   owner's own connection, carrying the owner's own two halves, so a per-request
   record increments identically for the owner and the rider and cannot
   distinguish the case it would exist to reveal. The shortfall is stated rather
   than closed — an auditor sees the mint and every failed attempt, not the
-  successful verifications — and the ruling is scoped to a session that dies with
-  its gateway process, so milestone 16's durable session reopens it and may not
-  inherit it.
+  successful verifications — and the ruling is scoped to a session whose power
+  ends with its gateway process, so milestone 16's durable session reopens it and
+  may not inherit it. Nothing in ADR-0172 decides whether this system's logging
+  should carry a retention policy; ADR-0168 §6 declines that as a project-wide
+  question and it stays declined.
 
   **Not replaced — everything else, which is nearly all of both sections.** §3's
   second bullet, the reader clause as ADR-0125 §8 replaced it, is untouched and

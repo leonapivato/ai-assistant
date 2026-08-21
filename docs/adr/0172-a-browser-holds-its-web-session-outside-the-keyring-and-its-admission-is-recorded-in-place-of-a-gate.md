@@ -1,4 +1,4 @@
-# 172. A browser holds its web session outside the keyring, and its admission is audited in place of a gate
+# 172. A browser holds its web session outside the keyring, and its admission is recorded in place of a gate
 
 - Status: Proposed
 - Date: 2026-08-21
@@ -271,18 +271,25 @@ once, neither of which permits it.
 > itself chose, applied at the one door where the `keyring` library has no
 > subject.
 >
-> **(d) Bounded life rather than durable custody.** Every value in the class is
+> **(d) Bounded power rather than durable custody.** Every value in the class is
 > minted by this system rather than held on behalf of a third party, admits only
-> what the owner sitting at that machine can already do, is bounded by ADR-0168
-> §8's absolute and idle expiry, and dies with the gateway process — the bootstrap
-> value additionally being single-use. §3's protection of a long-lived third-party
-> secret is replaced by a value that does not outlive the process that minted it.
+> what the owner sitting at that machine can already do, and **ceases to admit
+> anything** at the earlier of ADR-0168 §8's absolute and idle expiry and the end
+> of the gateway process — the bootstrap value additionally being single-use.
+> ADR-0004 §3's protection of a long-lived third-party secret is replaced by a
+> value whose power does not outlive the process that minted it.
+
+> **Normative.** Replacement (d) binds the value's **capacity to admit**, never
+> the persistence of its bytes, and no implementation is obliged to make a browser
+> forget anything. Bytes a browser retains past that point are not class members
+> in a live position: ADR-0168 §4 has the gateway reconstruct no session from
+> anything a browser presents after a restart, so they verify against nothing.
 
 > **Normative.** This exemption does not authorise a **durable** browser-held
-> credential — one surviving a gateway restart, or minted to. Replacement (d) is
-> a condition of the exemption and not a description of the current
-> implementation, so a design that removes the bound loses the exemption rather
-> than inheriting it, and owes its own ratified decision.
+> credential — one that still admits after a gateway restart, or is minted to.
+> Replacement (d) is a condition of the exemption and not a description of the
+> current implementation, so a design that removes the bound loses the exemption
+> rather than inheriting it, and owes its own ratified decision.
 
 **Replacement (d) is the one doing the real work, and stating why keeps the next
 lane from mistaking it for filler.** §3's examples are "OAuth tokens, API keys,
@@ -292,6 +299,21 @@ not observable. The keyring is the right custody for exactly that shape. A web
 session half is the opposite on all four counts, and the substitution is not "a
 weaker place because a stronger one is unavailable" but "a different kind of
 value, whose exposure is bounded by a process's life rather than by a custodian".
+
+**(d) binds the value's power and not its bytes, and an earlier draft got that
+wrong in a way worth recording.** It said every value in the class "dies with the
+gateway process" — which is false of the half a browser holds, and unsatisfiable
+as a condition. ADR-0168 §6 says so in terms: a browser configured to restore its
+previous session "can carry both a session cookie and the origin's storage across
+a close and reopen", and that section forbids any clause "making a browser's own
+behaviour part of the guarantee". So an implementation could not have satisfied
+the condition as drafted, and an implementation that tried would have been in
+breach of the ADR the condition cites. Adversarial review found it on the first
+round. What survives the process is inert: the gateway reconstructs no session
+from it (ADR-0168 §4), so it verifies against nothing, and the thing §3 protects
+— a secret that still opens something — is exactly what has ended. This ADR's §7
+had the right formulation for ADR-0004 §6 while §2 had the wrong one for the same
+fact, which is the ordinary way a document contradicts itself.
 
 **That is an argument about the value and not about the browser, which is why (c)
 alone would not have been enough.** A browser profile's file permissions are real
@@ -329,14 +351,27 @@ makes this narrow instead of a hole.
 > exemptions;
 > custody is the operating system's own control, on the browser profile at one end
 > and on process memory at the other, so the access is gated by the OS where it
-> cannot be gated by `permissions/`; and the **session's admission** is auditable
-> under ADR-0168 §6's record clause — the mint that created it, and every refusal,
-> a failed verification of the halves included.
+> cannot be gated by `permissions/`; and the **session's admission** is
+> **recorded** under ADR-0168 §6's record clause — the mint that created it, and
+> every refusal, a failed verification of the halves included.
 
-> **Normative.** The third replacement is **auditable admission and not auditable
-> use**. No implementation and no later lane may state, present or rely on it as
-> the latter: it does not make a successful Tier 0 read on the admission path
-> auditable, and this ADR's §4 rules that none is recorded.
+> **Normative.** The third replacement reaches an **admission and not a use**. No
+> implementation and no later lane may state, present or rely on it as the latter:
+> it makes no successful Tier 0 read on the admission path reviewable, and this
+> ADR's §4 rules that none is recorded.
+
+> **Normative.** The third replacement reaches the record's **emission and not its
+> retention**. ADR-0168 §6 has the gateway retain none of what it emits, so where
+> a record lands and how long it survives is the operator's — exactly as it
+> already is for the hub's and the CLI's records. No implementation and no later
+> lane may present this replacement as a durable or reviewable trail, and no
+> implementation acquires a retention obligation from this ADR.
+
+> **Normative.** Nothing in this ADR decides whether this system's logging should
+> carry a retention policy. ADR-0168 §6 declines that as a project-wide question
+> rather than a gateway one, and it stays declined here; a lane that wants the
+> admission record durable owes that decision rather than reading one into this
+> exemption.
 
 > **Normative.** This ADR does not cite ADR-0124 §6's exemption, does not widen
 > it, and does not rest on it; the same for ADR-0126 §11's. Each stays confined to
@@ -371,14 +406,35 @@ is a request from the owner, at their own machine, presenting a value this same
 process minted for them minutes ago — ceremony consuming a decision nobody asked
 for, which is ADR-0126 §11's finding about its own case arriving again.
 
-**The replacements are weaker than §7, and the difference is stated rather than
-smoothed over.** The gateway's record is its own log, emitted through the logging
-this system already configures and retained nowhere, not the hub's Tier 1 audit
-trail — so it is not reviewable beside everything else the assistant did, and an
-auditor reading `audit.db` sees nothing of it. Browser-profile permissions are
-custody, not a policy decision traceable to an answer the owner gave about *this*
-access. And a record of a session's admission is not a record of the reads that
-session then makes, which is §4's subject.
+**The replacements are weaker than ADR-0004 §7 in three distinct ways, and each
+is stated rather than smoothed over.**
+
+- **Emission, not retention.** The gateway's record is emitted through the
+  logging this system already configures and **retained nowhere** — ADR-0168 §6's
+  own words — where §7 names an audit trail, a Tier 1 store. On the ordinary
+  arrangement, standard output to a terminal nobody collects, a mint is emitted
+  and then gone: an auditor arriving later has neither that record nor an
+  `audit.db` entry. So the third replacement supplies a record at the moment of
+  the decision and supplies no trail, and where it lands is the operator's,
+  exactly as it already is for the hub's and the CLI's records.
+- **Custody, not a policy decision.** Browser-profile permissions and process
+  memory are custody, not a ruling traceable to an answer the owner gave about
+  *this* access — ADR-0124 §6's own statement of its own shortfall, and it
+  transfers whole.
+- **Admission, not use.** A record of a session's admission is not a record of
+  the reads that session then makes, which is this ADR's §4 subject.
+
+**The first of the three was an over-claim in an earlier draft, and it is the
+same defect ADR-0168 §6 warned this lane about one level down.** That draft said
+the admission was "auditable". Adversarial review found on the first round that
+the word claims a coverage the mechanism does not have: the condition can be
+satisfied in full while nothing is reviewable afterwards, because the record's
+survival is not a property of any implementation this ADR governs. ADR-0168 §6
+told the writing lane to say "auditable admission" rather than "auditable use"
+because "the shorter phrase would claim a coverage the record does not have" —
+and the instruction turns out to bite twice, on the *use* half and on the
+*auditable* half alike. The clauses above now name what the replacement actually
+delivers, which is a recorded decision, and name the two things it does not.
 
 ### 4. A successful read is not recorded, and the shortfall is stated rather than closed
 
@@ -390,10 +446,10 @@ session then makes, which is §4's subject.
 > **Normative.** No clause of this ADR is satisfied by, and no lane may cite it
 > toward, a record written per admitted request.
 
-> **Normative.** This ruling is scoped to a web session that dies with its gateway
-> process (ADR-0168 §4). A design in which a session survives a restart reopens it
-> and may not inherit it, and owes the question its own answer in the ratified
-> decision that authorises the durable session.
+> **Normative.** This ruling is scoped to a web session whose power ends with its
+> gateway process (ADR-0168 §4). A design in which a session still admits after a
+> restart reopens it and may not inherit it, and owes the question its own answer
+> in the ratified decision that authorises the durable session.
 
 **The ruling is not that the record costs too much. It is that the record cannot
 distinguish the case it would exist to reveal**, and that is the reason worth
@@ -453,8 +509,8 @@ way.** That section accepted the identical shortfall for a *stronger* credential
 "a hub-side record of an admission tells an auditor the credential was used, never
 that it was read — a device that reads it and never connects leaves no trace
 anywhere." The device credential is durable, keyring-held, and carries a whole
-device's authority across restarts. A web session half is ephemeral, dies with a
-process, and carries no more than the gateway already has. Ruling harder here
+device's authority across restarts. A web session half is ephemeral, admits
+nothing once its process ends, and carries no more than the gateway already has. Ruling harder here
 would put the stricter obligation on the weaker value, which is a rule nobody
 could explain to the lane that has to obey it.
 
@@ -609,8 +665,12 @@ owed on any of the rest.**
   request a live session admits — so it imposes no obligation §6 does not already
   carry, and no record is owed on ADR-0168. §6's fourth replacement bullet
   instructs the writing lane to state the third replacement as auditable
-  *admission* rather than auditable *use*, and §3 above states it in those terms
-  and forbids the shorter phrase.
+  *admission* rather than auditable *use*, and this ADR's §3 states it as an
+  admission and not a use, forbidding the shorter phrase. §3 additionally holds
+  the replacement to the record's **emission** rather than its retention, which
+  is ADR-0168 §6's own "the gateway retains none of it" restated as a limit on
+  what this exemption may be said to supply — a narrowing of this ADR's own
+  claim, not of ADR-0168's clause.
 - **ADR-0083 — used as given.** The audit trail is a Tier 1 store the hub owns
   exclusively, and §3 above relies on that exclusivity rather than qualifying it.
   No second audit store is created anywhere, which is also why replacement (b)
@@ -654,7 +714,7 @@ owed on any of the rest.**
   to say what it requires of an access no policy layer can reach, instead of
   exempted a fourth time, is a question this ADR does not answer and files as
   **#1321**.
-- **The corpus now has an answer to "is a successful read audited" for an
+- **The corpus now has an answer to "is a successful read recorded" for an
   admission credential**, and it is the same answer at all three doors: the audit
   unit is the admission. That is stated with its shortfall (§4) rather than as a
   clean property, so a later lane inherits both halves.
