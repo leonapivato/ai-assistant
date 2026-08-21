@@ -41,9 +41,9 @@ from ai_assistant.core.types import (
     ToolFailureKind,
     TurnResult,
 )
-from ai_assistant.orchestration import composing
+from ai_assistant.orchestration import composing, payloads
 from ai_assistant.orchestration.composing import ComposingStage
-from ai_assistant.testing import FakeModelProvider, FakeStreamingCompleter
+from ai_assistant.testing import FakeModelProvider, FakeStreamingCompleter, StreamAttempt
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -599,3 +599,285 @@ async def test_an_episode_is_rendered_whole_with_its_instant_and_outcome() -> No
 def test_the_error_the_degradation_set_names_is_the_ratified_one() -> None:
     """A pin on the classification rather than on the class: §8 names ``ModelError``."""
     assert issubclass(ModelUnavailableError, ModelError)
+
+
+# --- ADR-0173: the streaming twin ------------------------------------------
+#
+# §5's coalescing rule, §3's ceiling in all four of its inputs, and §6's two
+# degradations. The stage's own half; the engine's use of it — the room it
+# computes and the four outcome shapes — is in ``test_engine_streaming.py``.
+
+#: Room enough for any answer these cases compose, so a test that is not about the
+#: ceiling cannot trip over it.
+_AMPLE = 4096
+
+
+async def _streamed(
+    stage: ComposingStage, *, room: int = _AMPLE
+) -> tuple[list[str], composing.ComposedReply]:
+    """Drive one streamed composition, returning its chunk texts and its report."""
+    chunks: list[str] = []
+    report: composing.ComposedReply | None = None
+    produced = stage.compose_streaming(turn=_turn(), step=None, undriven=(), room=room)
+    async for value in produced:
+        if isinstance(value, composing.ComposedReply):
+            report = value
+        else:
+            chunks.append(value.text)
+    assert report is not None, "§4: the report is always the last value"
+    return chunks, report
+
+
+def _stage(*deltas: str) -> ComposingStage:
+    """A stage whose streaming seam yields ``deltas`` and completes."""
+    return ComposingStage(
+        model=FakeModelProvider(), streaming=FakeStreamingCompleter.yielding(*deltas)
+    )
+
+
+async def test_a_blank_delta_is_a_separator_and_is_never_filtered() -> None:
+    """ADR-0173 §5's named case, and §14 pins it because a tidy fake hides it.
+
+    "A provider yielding ``"hello"``, ``" "``, ``"world"`` means ``"hello world"``,
+    and an implementation of the caller that filters the middle delta produces
+    ``"helloworld"``." The middle delta cannot become a chunk of its own —
+    ``NonBlankEncodableText`` refuses it — so the only correct answer is to hold it
+    and join it to the text on the other side.
+    """
+    chunks, report = await _streamed(_stage("hello", " ", "world"))
+
+    assert "".join(chunks) == "hello world"
+    assert report.text == "hello world"
+    assert report.degraded is False
+
+
+async def test_no_chunk_is_ever_blank() -> None:
+    """§2: "a chunk conveying no text is not written at all"."""
+    chunks, _ = await _streamed(_stage("", "  ", "ok", "", " ", "then", "   "))
+
+    assert all(chunk.strip() for chunk in chunks)
+    assert "".join(chunks) == "ok then"
+
+
+async def test_whitespace_around_the_whole_answer_is_stripped() -> None:
+    """§5: the join equals the deltas "but for whitespace leading or trailing".
+
+    Which is what :meth:`ComposingStage.compose` already does to a whole completion,
+    so a streamed answer and a composed one differ in nothing a user could see.
+    """
+    _, report = await _streamed(_stage("  \n ", "hi", " there", "  \n"))
+
+    assert report.text == "hi there"
+
+
+async def test_interior_whitespace_survives_however_the_provider_split_it() -> None:
+    """The property the join is *for*: chunk boundaries are the model's, not ours."""
+    _, report = await _streamed(_stage("a", "  ", "b", "\n\n", "c"))
+
+    assert report.text == "a  b\n\nc"
+
+
+async def test_a_stream_with_no_non_blank_text_is_the_blank_completion_case() -> None:
+    """§5, ADR-0170 §8: classified above the seam, exactly as a blank completion is.
+
+    Not a failure at the seam — "``ModelProvider``'s postcondition does not change"
+    (#1324) — so the stage is what turns it into a degraded pass with no answer.
+    """
+    chunks, report = await _streamed(_stage("", "   ", "\n\t"))
+
+    assert chunks == []
+    assert report.text is None
+    assert report.degraded is True
+
+
+async def test_a_failure_before_the_first_chunk_produces_no_answer_at_all() -> None:
+    """§6's pre-commit shape: nothing was published, so nothing is carried."""
+    stage = ComposingStage(
+        model=FakeModelProvider(),
+        streaming=FakeStreamingCompleter(script=(StreamAttempt(fails=True),)),
+    )
+
+    chunks, report = await _streamed(stage)
+
+    assert chunks == []
+    assert report.text is None
+    assert report.degraded is True
+
+
+async def test_a_failure_after_the_first_chunk_carries_what_was_published() -> None:
+    """§6's fourth shape, which ADR-0170 §4 does not admit and §6 adds.
+
+    "``reply_degraded`` therefore means *composing this answer did not complete*."
+    Discarding the text was the alternative and is the dishonest one: it would make
+    the authoritative value contradict prose the user has already read.
+    """
+    stage = ComposingStage(
+        model=FakeModelProvider(),
+        streaming=FakeStreamingCompleter(script=(StreamAttempt(deltas=("half an",), fails=True),)),
+    )
+
+    chunks, report = await _streamed(stage)
+
+    assert chunks == ["half an"]
+    assert report.text == "half an"
+    assert report.degraded is True
+
+
+async def test_the_stage_never_falls_back_to_the_completing_seam() -> None:
+    """§7: "does not fall back to ``complete()`` when a stream fails".
+
+    It looks like free resilience and it is not: before the first chunk it is a
+    second call the budget forbids, and after it, it produces a complete answer that
+    does not begin with the text the user already read.
+    """
+    model = FakeModelProvider("a whole answer nobody asked for")
+    stage = ComposingStage(
+        model=model,
+        streaming=FakeStreamingCompleter(script=(StreamAttempt(deltas=("half",), fails=True),)),
+    )
+
+    _, report = await _streamed(stage)
+
+    assert report.text == "half"
+    assert model.calls == []
+
+
+async def test_a_streaming_pass_originates_exactly_one_call_at_the_streaming_seam() -> None:
+    """§7: one model call per answer-owing turn, spent at the seam the pass uses.
+
+    A streaming pass "spends it on §5's sibling seam and originates **no**
+    ``complete()`` call at all", so both halves are asserted: one attempt there, and
+    none at all on the completing provider.
+    """
+    model = FakeModelProvider()
+    seam = FakeStreamingCompleter.yielding("one", " answer")
+    stage = ComposingStage(model=model, streaming=seam)
+
+    await _streamed(stage)
+
+    assert seam.attempt_count == 1
+    assert model.calls == []
+
+
+async def test_the_provider_exchange_is_released_when_the_ceiling_stops_the_stream() -> None:
+    """ADR-0060 and ``StreamingCompleter``'s own clause: stopping early **closes**.
+
+    Python does not close an abandoned async iterator at the point of abandonment,
+    so a stage that merely broke out of its loop would leave the exchange open and
+    still being paid for. ``released`` is the fake standing in for that exchange.
+    """
+    seam = FakeStreamingCompleter.yielding("aaaa", "bbbb", "cccc")
+    stage = ComposingStage(model=FakeModelProvider(), streaming=seam)
+
+    chunks, report = await _streamed(stage, room=6)
+
+    assert chunks == ["aaaa"]
+    assert report.degraded is True
+    assert seam.released == 1
+
+
+async def test_a_stream_that_exactly_fills_the_room_terminates_whole() -> None:
+    """§14's boundary case: exactly filling is **not** a breach.
+
+    Read against the escaped byte cost the terminal frame will pay for the reply, so
+    a stage that reserved a byte of slack, or spent one, fails here.
+    """
+    room = _escaped("hello world")
+
+    chunks, report = await _streamed(_stage("hello", " ", "world"), room=room)
+
+    assert "".join(chunks) == "hello world"
+    assert report.text == "hello world"
+    assert report.degraded is False
+
+
+async def test_one_byte_less_room_stops_before_the_chunk_that_would_breach() -> None:
+    """§14's other half: "stops before yielding that chunk", not after it.
+
+    And what it carries is §6's fourth shape — the text actually yielded — so a
+    chunk-reading client and a chunk-ignoring one still agree.
+    """
+    room = _escaped("hello world") - 1
+
+    chunks, report = await _streamed(_stage("hello", " ", "world"), room=room)
+
+    assert "".join(chunks) == "hello"
+    assert report.text == "hello"
+    assert report.degraded is True
+
+
+async def test_room_that_cannot_hold_the_first_chunk_publishes_nothing() -> None:
+    """§3's second case: "the room left could not hold even the first chunk".
+
+    Nothing was published, so §6's question — was anything published? — answers no,
+    and this is the ordinary pre-commit degradation rather than a truncation.
+    """
+    chunks, report = await _streamed(_stage("hello", " world"), room=1)
+
+    assert chunks == []
+    assert report.text is None
+    assert report.degraded is True
+
+
+async def test_held_whitespace_past_the_room_terminates_boundedly() -> None:
+    """§3's pending-text bound, which §14 pins because no chunk test reaches it.
+
+    "A provider may yield ``"ok"`` and then an unbounded run of whitespace deltas.
+    The stage can neither emit them — ``NonBlankEncodableText`` refuses a blank
+    chunk — nor discard them, because a later ``"next"`` must still produce
+    ``"ok next"``. So it holds them, and without a bound it holds them forever."
+    Counting held text against the same ceiling is what makes this terminate.
+    """
+    room = _escaped("ok") + 4
+    seam = FakeStreamingCompleter.yielding("ok", *(" " * 20))
+    stage = ComposingStage(model=FakeModelProvider(), streaming=seam)
+
+    chunks, report = await _streamed(stage, room=room)
+
+    assert chunks == ["ok"]
+    assert report.text == "ok"
+    assert report.degraded is True
+    assert seam.released == 1
+
+
+async def test_held_whitespace_past_the_room_terminates_when_more_text_follows() -> None:
+    """The same bound with the delta that would have made the whitespace interior.
+
+    The second of the two cases #1343 asks to be pinned. It terminates degraded
+    carrying only the published text — and note that **the first case terminates
+    the same way**, which is ADR-0173 §3's ruling ("the engine stops") and §14's
+    pinned wording ("carrying only the published text as a degraded reply") rather
+    than this lane's choice; #1343's preferred answer would need an amendment.
+    """
+    room = _escaped("ok") + 4
+    seam = FakeStreamingCompleter.yielding("ok", *(" " * 20), "next")
+    stage = ComposingStage(model=FakeModelProvider(), streaming=seam)
+
+    chunks, report = await _streamed(stage, room=room)
+
+    assert chunks == ["ok"]
+    assert report.text == "ok"
+    assert report.degraded is True
+
+
+async def test_the_streaming_seam_is_handed_the_same_prompt_the_whole_one_is() -> None:
+    """§7 constrains which seam is spent, not what is said at it.
+
+    So the streamed prompt is the composed prompt: one system turn carrying the
+    stage's own instruction, one user turn carrying the rendered request, and the
+    same ADR-0098 §2 quoting on both paths.
+    """
+    seam = FakeStreamingCompleter.yielding("fine")
+    stage = ComposingStage(model=FakeModelProvider(), streaming=seam)
+
+    await _streamed(stage)
+
+    messages = seam.last_messages
+    assert [message.role for message in messages] == [Role.SYSTEM, Role.USER]
+    assert messages[0].content == composing._SYSTEM_PROMPT
+    assert json.dumps("what do you know about me?") in messages[1].content
+
+
+def _escaped(text: str) -> int:
+    """How many escaped bytes ``text`` costs the terminal frame's reply member."""
+    return payloads.encoded_text_bytes(text) - payloads.JSON_STRING_QUOTE_BYTES

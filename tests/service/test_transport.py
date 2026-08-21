@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING
 import pytest
 
 from ai_assistant.core.config import Settings
+from ai_assistant.core.streams import closing_stream
+from ai_assistant.core.types import ReplyChunk, TurnOutcome
 from ai_assistant.service.transport import Listener
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import HubEngineClient
@@ -251,3 +253,50 @@ async def test_the_listener_lets_go_of_a_connection_nobody_closed(tmp_path: Path
     with contextlib.suppress(Exception):
         await writer.wait_closed()
     del reader
+
+
+async def test_the_hub_serves_a_streamed_turn_over_its_own_socket(tmp_path: Path) -> None:
+    """ADR-0173 §§1, 4 through the listener the hub actually starts.
+
+    **No production module under ``service/`` changed for this**, and asserting it
+    end to end is what makes that claim checkable rather than a claim: the hub hands
+    its engine to :func:`~ai_assistant.wire.server.serve_connection` and names no
+    method, so a streamed turn is served by the wire change alone. The milestone's
+    exit is "a streamed answer over the wire, resumed mid-conversation", and this is
+    the first half of it against a real hub socket.
+    """
+    async with _listening(tmp_path) as hub:
+        client = HubEngineClient(hub.path, read_timeout=_PATIENT)
+        async with closing_stream(client.converse_streaming("hello", timeout=_PATIENT)) as values:
+            produced = [value async for value in values]
+
+    outcome = produced[-1]
+    assert isinstance(outcome, TurnOutcome)
+    chunks = [value for value in produced[:-1] if isinstance(value, ReplyChunk)]
+    assert chunks, "the hub streamed the answer rather than sending it whole"
+    assert "".join(chunk.text for chunk in chunks) == outcome.reply
+
+
+async def test_a_streamed_turn_resumes_the_conversation_the_first_one_began(
+    tmp_path: Path,
+) -> None:
+    """The milestone's exit shape, over the hub's own socket (ADR-0173 §8).
+
+    Two streamed turns under one conversation id, which §8 rules is carried by
+    ADR-0074 §5's existing route with no history parameter and no second read.
+    """
+    async with _listening(tmp_path) as hub:
+        client = HubEngineClient(hub.path, read_timeout=_PATIENT)
+        async with closing_stream(client.converse_streaming("hello", timeout=_PATIENT)) as first:
+            opened = [value async for value in first][-1]
+        assert isinstance(opened, TurnOutcome)
+        assert opened.conversation_id is not None
+        async with closing_stream(
+            client.converse_streaming(
+                "and again", timeout=_PATIENT, conversation_id=opened.conversation_id
+            )
+        ) as second:
+            continued = [value async for value in second][-1]
+
+    assert isinstance(continued, TurnOutcome)
+    assert continued.conversation_id == opened.conversation_id

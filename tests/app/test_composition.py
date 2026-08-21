@@ -80,7 +80,8 @@ from ai_assistant.memory import (
     SqliteMemoryStore,
 )
 from ai_assistant.memory import deferral_store as deferral_store_module
-from ai_assistant.models import BoundedEmbedder, HashingEmbedder
+from ai_assistant.models import BoundedEmbedder, HashingEmbedder, RoutingProvider
+from ai_assistant.models.streaming import PydanticAIStreamingCompleter
 from ai_assistant.orchestration import Engine
 from ai_assistant.orchestration.conversations import BELIEF_KINDS
 from ai_assistant.orchestration.loop import (
@@ -3253,3 +3254,45 @@ class TestBuildConnectionPurger:
 
         with pytest.raises(ConnectionStoreError):
             asyncio.run(opened.purger.connected())
+
+
+# --- ADR-0173 §5: the streaming seam the composition root injects ------------
+
+
+async def test_build_engine_gives_the_composer_an_unwrapped_streaming_seam(
+    tmp_path: Path,
+) -> None:
+    """§5: injected explicitly, and deliberately behind **neither** wrapper.
+
+    "A stream is not atomic. Once a delta has been handed upward, a retry produces
+    a *second* answer to a question already half-answered, and a fallback route
+    produces a different one" — which is why streaming is a sibling Protocol that
+    ``RetryingProvider`` and ``RoutingProvider`` do not implement, and why wrapping
+    one here would reintroduce the failure the sibling exists to avoid, one layer
+    down.
+
+    The composing stage's completing seam is asserted beside it, because the two
+    are different objects on purpose: the whole-answer path keeps every bit of the
+    resilience the streaming path gives up (§4 keeps ``converse`` for exactly that).
+    """
+    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    try:
+        streaming = engine._composing._streaming
+        assert isinstance(streaming, PydanticAIStreamingCompleter)
+        assert isinstance(engine._composing._model, RoutingProvider)
+    finally:
+        await engine.aclose()
+
+
+def test_the_streamed_answer_comes_from_the_route_configured_for_conversation() -> None:
+    """§5's route, and ADR-0173 §9's silence about "which model answers".
+
+    ``default_model`` is the primary the router prefers, so a streamed answer and a
+    whole one come from the same place — and a route that cannot stream is a
+    ``ModelError`` from the call rather than a startup refusal or a capability flag,
+    which is what keeps the promoted surface's method set a fixed property of a
+    build (``wire.surface.METHODS`` is reflective, and ADR-0084 §3's handshake makes
+    that set a promise).
+    """
+    settings = Settings(embedder=EmbedderKind.HASHING)
+    assert composition_module._model_specs(settings)[0] == settings.default_model

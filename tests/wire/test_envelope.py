@@ -268,3 +268,41 @@ def test_an_ordinary_float_still_decodes() -> None:
     """
     decoded = decode_envelope(b'{"kind":"result","id":"c-1","payload":{"confidence":0.9}}')
     assert decoded.payload == {"confidence": 0.9}
+
+
+# --- ADR-0173 §2, §11: the sixth frame kind ---------------------------------
+
+
+def test_a_chunk_frame_round_trips() -> None:
+    """§11 supersedes ADR-0085 §8a's "and no others" to admit a sixth ``kind``.
+
+    Every other row of that table stands: a chunk carries ``id`` and ``payload``
+    like every frame and adds no member to the envelope.
+    """
+    envelope = Envelope(kind=FrameKind.CHUNK, id="c-1", payload={"text": "half an"})
+    assert decode_envelope(encode_envelope(envelope)) == envelope
+
+
+def test_a_chunk_frame_that_names_a_method_is_undecodable() -> None:
+    """§2: "Like every kind but a request it names no method".
+
+    The rule is the envelope's existing one rather than a new one, which is the
+    whole of what "adds no member to the envelope" buys — a chunk is framed and
+    decoded by the rules already there and differs only in its kind and payload.
+    """
+    raw = b'{"kind":"chunk","id":"c-1","payload":{"text":"x"},"method":"converse_streaming"}'
+    with pytest.raises(UndecodableFrameError, match="must not name a method"):
+        decode_envelope(raw)
+
+
+def test_the_sixth_kind_does_not_touch_the_envelope_reserve() -> None:
+    """§11: §8b's 512-byte reserve is "unchanged and is not recomputed".
+
+    "``chunk`` is five bytes against ``connect_ack``'s eleven, so it does not touch
+    the worst case §8b's arithmetic is built on" — asserted rather than asserted
+    *about*, because a longer kind is exactly the change that would silently make
+    the reserve wrong.
+    """
+    assert len(FrameKind.CHUNK.value.encode("utf-8")) < len(
+        FrameKind.CONNECT_ACK.value.encode("utf-8")
+    )

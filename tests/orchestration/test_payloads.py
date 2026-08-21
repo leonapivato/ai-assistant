@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     Evidence,
     MemoryKind,
 )
+from ai_assistant.orchestration import payloads
 from ai_assistant.orchestration.payloads import (
     canonical_payload,
     check_arguments,
@@ -516,3 +517,57 @@ class TestThePagingArguments:
             check_arguments("beliefs", max_bytes=4, limit=2**63 - 1, offset=0)
         assert caught.value.field in {"limit", "offset"}
         assert caught.value.field == "limit"
+
+
+# --- ADR-0173 §3: the arithmetic the streamed ceiling rests on ---------------
+
+
+@pytest.mark.parametrize(
+    ("left", "right"),
+    [
+        ("hello", " world"),
+        ("", "anything"),
+        ('quotes " and \\ backslashes', "\n\ttabs"),
+        ("emoji 🚀", " and accents é"),
+        ("\u2028 line separator", "\u2029 paragraph separator"),
+        ("control \x01 characters", " and \x7f delete"),
+    ],
+)
+def test_encoded_text_bytes_is_additive_over_concatenation(left: str, right: str) -> None:
+    """The property ADR-0173 §3's running total is exact because of.
+
+    ADR-0087 §2's recipe escapes a JSON string character by character and
+    ``ensure_ascii=False`` leaves every other code point as its own UTF-8 bytes, so
+    the escaped *body* of ``a + b`` is the body of ``a`` followed by that of ``b``.
+    A composing stage bounding an answer it is accumulating can therefore keep a
+    running total instead of re-encoding the whole of it on every delta — which is
+    the difference between the ceiling costing linear work and quadratic.
+
+    The awkward inputs are the ones that would break it if the encoding were not
+    character-local: the two escapes JSON does *not* apply (U+2028, U+2029), the two
+    it always does, a control character, and multi-byte code points.
+    """
+    quotes = payloads.JSON_STRING_QUOTE_BYTES
+    body = payloads.encoded_text_bytes
+
+    assert body(left + right) - quotes == (body(left) - quotes) + (body(right) - quotes)
+
+
+def test_encoded_text_bytes_is_what_the_payload_actually_pays() -> None:
+    """And the number is the *payload's* own, not a second encoder's.
+
+    A helper measuring something else would make the ceiling a guess dressed as an
+    arithmetic — so the figure is checked against what ``canonical_payload`` writes
+    for the same string in the same position.
+    """
+    short = payloads.canonical_payload({"reply": "a"})
+    longer = payloads.canonical_payload({"reply": "a longer answer"})
+
+    assert len(longer) - len(short) == payloads.encoded_text_bytes(
+        "a longer answer"
+    ) - payloads.encoded_text_bytes("a")
+
+
+def test_the_empty_string_costs_its_quotes_and_nothing_else() -> None:
+    """The constant the running total subtracts, checked rather than assumed."""
+    assert payloads.encoded_text_bytes("") == payloads.JSON_STRING_QUOTE_BYTES
