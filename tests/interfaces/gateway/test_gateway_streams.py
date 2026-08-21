@@ -837,28 +837,34 @@ async def test_a_conversation_the_hub_declined_is_reported_as_a_declined_request
 @pytest.mark.parametrize(
     "path",
     [
-        "/beliefs",
-        "/grants",
+        "/learn",
         "/notifications",
         "/dismiss_notification",
         "/resume",
         "/pending_confirmations",
         "/connected_accounts",
+        "/nonsense",
     ],
 )
-async def test_an_operation_outside_the_enumeration_reaches_nothing(
+async def test_an_operation_this_gateway_does_not_serve_reaches_nothing(
     harness: Harness, path: str
 ) -> None:
-    """§6: "Every other operation the promoted surface carries is unreached from a
-    browser, and no lane may add one without its own ratified decision."
+    """ADR-0175 §6's third clause, which ADR-0177 §1 leaves standing and acts under.
 
     A request for one "is not an admitted assistant request the gateway declines to
     forward — it is a request the surface has no shape for, which is the same thing a
-    request for ``/nonsense`` is" (§12), so it lands in ADR-0168 §6's residual fourth
-    class and the engine is not reached. That clause is what keeps ADR-0174's
-    permission to run a gateway on the hub's own machine from quietly handing a
-    browser milestone 15's surface, now that a loopback-dialling gateway no longer
-    meets the hub's remote refusal (ADR-0174 §11).
+    request for ``/nonsense`` is" (ADR-0175 §12), so it lands in ADR-0168 §6's residual
+    fourth class and the engine is not reached.
+
+    **Two different reasons are asserted by one test and they are worth telling
+    apart.** ``learn`` is admitted by *nothing*: ADR-0177 §1 leaves it out by name and
+    §11 gives it a trigger, so a shape for it here would be the lane inventing an
+    operation. The other five are in §1's enumeration of thirty and are **not served
+    by this gateway yet** — the notification review five, ``resume`` and
+    ``pending_confirmations`` (whose act §8 blocks until #1366 lands) and the
+    connection five are later lanes'. Either way the answer is §6's fourth class,
+    which is the property that makes an enumeration checkable: a path nothing serves
+    behaves identically to a path nothing has heard of.
     """
     status, body = await harness.whole("POST", path, {})
 
@@ -867,18 +873,38 @@ async def test_an_operation_outside_the_enumeration_reaches_nothing(
     assert harness.engine.calls == []
 
 
-def test_the_surface_resolves_onto_five_operations_and_the_gateways_own_poll() -> None:
-    """§6's enumeration, read off the router: five promoted operations a browser
-    request resolves to, and ``next_notification`` — the **sixth** the gateway calls,
-    which is not one of the five "because no browser request resolves to it: the
-    gateway's own poll originates it under §4, no browser request names it, and no
-    browser argument reaches it"."""
+def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() -> None:
+    """ADR-0177 §1's enumeration, read off the router.
+
+    Eighteen of the thirty operations §1 admits are served here, and
+    ``next_notification`` — the gateway's **own** poll — is none of them "because no
+    browser request resolves to it: the gateway's own poll originates it under
+    ADR-0175 §4, no browser request names it, and no browser argument reaches it"
+    (§1's second clause, bound unchanged).
+
+    Asserted as a set equality rather than a subset, which is the whole point of an
+    enumeration: a lane that adds a route without a ratified decision fails here, and
+    so does a lane that adds one this ADR admits *and* forgets it exists.
+    """
     assert set(_ASSISTANT_PATHS.values()) == {
         "converse",
         "converse_streaming",
         "recent_conversations",
         "conversation",
         "forget_conversation",
+        "grantable_sources",
+        "grant",
+        "revoke",
+        "recent_grants",
+        "standing_grants",
+        "beliefs",
+        "belief",
+        "forget",
+        "questions",
+        "interrupted_questions",
+        "answer",
+        "forget_question",
+        "observe",
         "delivery-stream",
     }
 
