@@ -199,3 +199,210 @@ def test_the_front_end_tells_a_transport_failure_apart_from_a_refusal() -> None:
     assert "hub-unreachable" in script
     assert "assistant-declined" in script
     assert "cookie-half-mismatch" in script
+
+
+# --- ADR-0175: the page's half of the streamed surface ----------------------
+
+
+def test_the_page_reads_a_stream_as_a_response_body_and_opens_no_socket() -> None:
+    """§1: the carrier is "the body of the response to one ordinary HTTP request that
+    browser made", and the gateway "serves no WebSocket, offers no protocol upgrade…
+    and serves nothing a browser reaches with ``EventSource``".
+
+    The reason is mechanical rather than stylistic and it is worth checking on the
+    *file*: neither interface lets a page set a request header on the request that
+    opens it, so on either one ADR-0168 §6's header half has nowhere to go that §6
+    admits — and a request carrying the cookie half alone is refused exactly as one
+    carrying neither is.
+    """
+    script = _code("app.js")
+
+    assert "WebSocket" not in script
+    assert "EventSource" not in script
+    assert "response.body.getReader()" in script
+
+
+def test_the_page_resolves_a_stream_value_by_its_kind_and_never_by_its_shape() -> None:
+    """§2: "a reader resolves a value's kind from a discriminator the value itself
+    carries and never by inspecting what the value contains".
+
+    ADR-0173 §4 requires the same of the reader one hop in, and a browser reading a
+    stream is the second reader of that sequence — a surface that made it guess from a
+    payload's shape would reintroduce, in the half of the system that renders
+    untrusted model output, exactly the ambiguity the wire refuses.
+    """
+    script = _code("app.js")
+
+    assert 'value.kind === "chunk"' in script
+    assert 'value.kind === "notification"' in script
+    assert "TERMINAL_KINDS.has(value.kind)" in script
+
+
+def test_the_page_tells_a_terminal_value_from_a_body_that_simply_stopped() -> None:
+    """§2: "a reader that reached a terminal value has the whole of what the gateway
+    sent; a reader that did not has a transport failure and the front end reports it
+    as one, which is ADR-0168 §9's distinction reaching the browser"."""
+    script = _code("app.js")
+
+    assert "terminal === null" in script
+    assert "STREAM_CUT" in script
+    assert "ended before the gateway finished it" in script
+
+
+def test_the_page_renders_the_terminal_reply_over_what_it_accumulated() -> None:
+    """§3: "The terminal ``TurnOutcome``'s ``reply`` is the answer; where a rendered
+    chunk sequence and it disagree, the front end renders the terminal ``reply``; and
+    no front end treats an accumulated chunk sequence as the record of what the
+    assistant said."
+
+    ``renderOutcome`` clears the panel before rendering, so the chunks the owner
+    watched arrive are replaced by the outcome's own reply rather than left standing
+    beside it.
+    """
+    script = _code("app.js")
+
+    assert "composing.textContent += value.text;" in script
+    assert "renderOutcome(terminal.outcome);" in script
+    assert "clearNode(body);" in script
+
+
+def test_the_page_renders_a_partly_composed_answer_as_incomplete() -> None:
+    """§3's fourth shape, and the clause exists because a browser surface loses it by
+    accident: an outcome carrying a ``reply`` *and* ``reply_degraded`` true "is the
+    natural browser rendering of a stream… which displays that outcome identically to
+    a complete one".
+
+    ADR-0173 §10's own words are what it owes: never "a silent turn, and never as a
+    failure of a step the account records as succeeded". So the partial text is
+    rendered *and* said to be incomplete.
+    """
+    script = _code("app.js")
+
+    assert "That answer is incomplete" in script
+    assert "No answer could be composed for this turn" in script
+
+
+def test_the_page_offers_both_turn_entries_and_falls_back_to_neither() -> None:
+    """§3: keeping the non-streaming entry "is a decision and not inertia" — ADR-0173
+    §5 makes a provider that cannot stream a ``ModelError`` before any delta, so a
+    browser with only the streaming entry would answer nothing at all on a build where
+    the CLI answered normally.
+
+    And the fallback is refused: ADR-0168 §9 forbids the gateway retrying silently,
+    ADR-0173 §7 refuses the same fallback one layer in, and "a second attempt is the
+    caller asking again" — which is why the choice is a control the owner can see.
+    """
+    script = _code("app.js")
+
+    assert '"/ask/stream"' in script
+    assert '"/ask"' in script
+    assert 'el("stream-answer").checked' in script
+    # Each entry is named exactly twice — where it is defined, and at the one call
+    # site the checkbox reaches. A third mention would be a second way in, which is
+    # what an automatic fallback from a failed stream would have to be.
+    assert script.count("askWhole(") == 2
+    assert script.count("askStreaming(") == 2
+
+
+def test_the_page_renders_a_notification_in_the_open_page_and_by_no_other_means() -> None:
+    """§9: "A notification is rendered inside the open page and by no other means.
+    This ADR authorises no Notification API, no Push API, no service worker, and no
+    operating-system notification."
+
+    That is the owner's in-page ruling on #1230 recorded as a clause, and it is also
+    what makes milestone 14 reachable: every one of those capabilities needs a secure
+    context, and ADR-0174 §7 makes a secure-context requirement a stop condition on
+    this lane.
+    """
+    script = _code("app.js")
+    document = _asset("index.html")
+
+    assert "renderNotification" in script
+    assert "notification-list" in document
+    for capability in ("new Notification", "serviceWorker", "PushManager", "requestPermission"):
+        assert capability not in script, capability
+
+
+def test_a_notifications_text_is_neutralised_exactly_as_a_reply_is() -> None:
+    """§9: "A notification's content is engine-supplied text and is neutralised
+    exactly as a reply is" — inserted through the document's own text node, never as
+    markup and never through any interface that parses markup."""
+    script = _code("app.js")
+
+    assert "summary.textContent = value.summary;" in script
+    assert "detail.textContent = value.detail;" in script
+
+
+def test_the_page_never_holds_or_sends_a_delivery_id() -> None:
+    """§5: "A ``delivery_id`` never reaches a browser… and no browser request carries
+    one. No browser acknowledges, retires, withdraws or dismisses a delivery."
+
+    ADR-0131 §4 makes it a capability held by exactly one device, and ADR-0172 §1
+    closes the class of such values a browser holds at three — so a page that named
+    one would be the fourth kind that section says takes its own ratified decision.
+    """
+    script = _code("app.js")
+
+    for named in ("delivery_id", "acknowledg", "dismiss"):
+        assert named not in script, named
+
+
+def test_the_page_says_whether_it_is_watching_rather_than_retrying_unseen() -> None:
+    """§4 has the gateway poll "only when a browser establishes a delivery stream
+    afresh", so re-establishing one is the browser's act — and ADR-0168 §9's rule
+    against silent retrying is what keeps that a visible control rather than a timer.
+
+    A page that spun against an unreachable hub would be the same failure wearing the
+    front end's clothes.
+    """
+    script = _code("app.js")
+    document = _asset("index.html")
+
+    assert "watch-button" in document
+    assert "delivery-state" in document
+    assert "setTimeout" not in script
+    assert "setInterval" not in script
+
+
+def test_the_page_reaches_the_conversation_surface_and_nothing_beyond_it() -> None:
+    """§6's closed enumeration, at the only other place a path could be written down.
+
+    "Every other operation the promoted surface carries is unreached from a browser,
+    and no lane may add one without its own ratified decision" — so a path here that
+    the gateway does not serve would be a front end asking for milestone 15's surface
+    and getting ADR-0168 §6's residual fourth class.
+    """
+    script = _code("app.js")
+
+    for path in ('"/conversations"', '"/conversation"', '"/conversation/forget"'):
+        assert path in script, path
+    for milestone_fifteen in ('"/beliefs"', '"/grants"', '"/notifications"', '"/resume"'):
+        assert milestone_fifteen not in script, milestone_fifteen
+
+
+def test_the_page_reads_a_conversation_before_it_forgets_one() -> None:
+    """ADR-0073 §5's show-then-confirm, at the unit the user thinks in: "what will be
+    destroyed is shown before consent is taken, in a form a human can judge".
+
+    §6 is explicit that the confirmation "is not a control and is not required here" —
+    the origin-resident script the residual is about defeats one — so this is a
+    rendering decision made for the owner's benefit, on the CLI's own order.
+    """
+    script = _code("app.js")
+
+    assert 'relay(half, "/conversation", { conversation_id: id })' in script
+    assert "recorded_turns" in script
+    assert "window.confirm(" in script
+
+
+def test_every_fetch_the_page_makes_is_guarded() -> None:
+    """A rejected ``fetch`` is the gateway having stopped, which is its own condition
+    (ADR-0168 §9) and not silence.
+
+    The milestone-13 bootstrap site is issue #1332's; the sites this decision adds are
+    guarded here, and the count is what keeps a later one from being added unguarded.
+    """
+    script = _code("app.js")
+
+    assert script.count("await fetch(") == script.count("fetch(")
+    assert script.count("GATEWAY_GONE") >= 5

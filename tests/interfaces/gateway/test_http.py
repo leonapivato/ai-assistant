@@ -12,8 +12,12 @@ from ai_assistant.interfaces.gateway.http import (
     Request,
     RequestTooLargeError,
     Response,
+    StreamHead,
     read_request,
     render,
+    render_chunk,
+    render_stream_end,
+    render_stream_head,
 )
 
 _CAP = 4096
@@ -269,3 +273,64 @@ def test_a_request_reports_a_header_that_is_absent_as_none() -> None:
 
     assert request.header("origin") is None
     assert request.cookies("assistant_session") == ()
+
+
+# --- ADR-0175 §1: the second response shape ---------------------------------
+
+
+def test_a_stream_declares_a_chunked_transfer_and_no_length() -> None:
+    """§1's largest single piece of work: ``Response.body`` is ``bytes`` and every
+    response carries a ``Content-Length``, which is exactly what a stream cannot do.
+
+    A length is not merely omitted — declaring one would be a claim about a body
+    whose last piece does not exist yet.
+    """
+    written = render_stream_head(StreamHead(content_type="application/x-ndjson"), policy="p")
+
+    assert b"Transfer-Encoding: chunked" in written
+    assert b"Content-Length" not in written
+    assert written.endswith(b"\r\n\r\n")
+
+
+def test_a_stream_carries_every_header_an_ordinary_response_does() -> None:
+    """ADR-0168 §6 requires the policy on *every* response, "which is why the policy
+    is applied here rather than by each handler that might forget one" — and a
+    streamed response is the shape most easily forgotten.
+    """
+    streamed = render_stream_head(StreamHead(content_type="application/x-ndjson"), policy="p")
+    whole = render(Response(200, "OK"), policy="p")
+
+    for header in (
+        b"Content-Security-Policy: p",
+        b"X-Content-Type-Options: nosniff",
+        b"Cache-Control: no-store",
+    ):
+        assert header in streamed, header
+        assert header in whole, header
+
+
+def test_a_stream_keeps_the_connection_by_default_and_closes_when_told() -> None:
+    """A stream that finished is a response that completed, and ADR-0175 §7 restarts
+    ``gateway_read_timeout`` from there rather than ending the connection."""
+    assert b"Connection: keep-alive" in render_stream_head(StreamHead("t"), policy="p")
+    assert b"Connection: close" in render_stream_head(StreamHead("t", close=True), policy="p")
+
+
+def test_a_chunk_is_framed_by_its_own_length_in_hexadecimal() -> None:
+    """Chunked transfer's own framing, so the reader needs no length up front."""
+    assert render_chunk(b"hello") == b"5\r\nhello\r\n"
+    assert render_chunk(b"x" * 255) == b"ff\r\n" + b"x" * 255 + b"\r\n"
+
+
+def test_a_zero_length_chunk_is_refused_as_a_value() -> None:
+    """It is HTTP's end-of-body marker, so one written mid-stream would end the body
+    while the gateway believed it had written a value — the ending ADR-0175 §2 makes
+    a *transport failure*, manufactured by the writer."""
+    with pytest.raises(ValueError, match="end of a body"):
+        render_chunk(b"")
+
+
+def test_a_stream_ends_with_the_zero_length_chunk_and_no_trailers() -> None:
+    """The clean ending, which is what lets a reader tell a stream that finished from
+    one the network cut (ADR-0175 §2)."""
+    assert render_stream_end() == b"0\r\n\r\n"

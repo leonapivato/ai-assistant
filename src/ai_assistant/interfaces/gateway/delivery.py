@@ -257,14 +257,25 @@ class DeliveryFanOut:
         """Poll while a stream is open, writing each answer to every one (§4, §5).
 
         **The acknowledgement rides the next poll and no connection is held for
-        it** (§5). Where the last stream ends after a delivery was written there is
-        no next poll, so the delivery is left unacknowledged, its lease expires and
-        the hub offers the entry again — at-least-once behaving as ADR-0131 §3 built
-        it, and the owner may see one notification twice. The alternative is
-        available and is declined: ADR-0131 §4's idempotent no-op would make a
-        blind acknowledgement on some later poll safe, but the token would then be
-        held for a period bounded by nothing the gateway controls, because a browser
-        may never come back.
+        it** (§5). This loop issues that poll in the same step it fans a delivery
+        out — nothing is awaited between them — so §5's write-then-disconnect arm is
+        the narrow case where the acknowledgement's own poll does not complete: the
+        delivery is then left unacknowledged, its lease expires and the hub offers
+        the entry again, which is at-least-once behaving as ADR-0131 §3 built it, and
+        the owner may see one notification twice. Either way the token is dropped
+        with the loop, so nothing is carried across a period in which no stream was
+        open. The alternative is available and is declined: ADR-0131 §4's idempotent
+        no-op would make a blind acknowledgement on some later poll safe, but the
+        token would then be held for a period bounded by nothing the gateway
+        controls, because a browser may never come back.
+
+        **A delivery is acknowledged on the offer rather than on the byte**, and §5
+        says why that is where at-least-once stops: "past the gateway the guarantee
+        is that the notification was written to at least one stream, not that a
+        person read it". A browser whose connection dies between the write and the
+        paint loses that notification, which is the shape ADR-0131 §2a already
+        accepts one hop in — and closing it would mean handing a browser the
+        capability ADR-0172 §1 closes its class against.
         """
         acknowledging: str | None = None
         while self._streams:
