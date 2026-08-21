@@ -132,7 +132,7 @@ async def test_a_turn_whose_plan_had_no_step_still_owes_an_answer() -> None:
 
 
 class _NoStep(OneStepPlanner):
-    """A planner producing an empty plan — a fake's shape, never production's."""
+    """A planner producing an empty plan — a **decline**, since ADR-0176 §1."""
 
     async def plan(
         self,
@@ -143,6 +143,60 @@ class _NoStep(OneStepPlanner):
     ) -> ActionPlan:
         built = await super().plan(goal, context=context, memories=memories)
         return built.model_copy(update={"steps": ()})
+
+
+@pytest.mark.parametrize(
+    "composition_fails",
+    [pytest.param(False, id="composed"), pytest.param(True, id="composition-failed")],
+)
+async def test_a_declined_plan_is_persisted_and_composed_and_drives_nothing(
+    *, composition_fails: bool
+) -> None:
+    """ADR-0176 §6, at the engine seam: the empty-plan branch is ruled behaviour now.
+
+    A case on a branch that **already exists** rather than a change to it — ADR-0176
+    §6 endorses ``Engine._run_turn``'s empty-plan handling as the decline's ruled
+    behaviour rather than an artefact of the branch having been unreachable, and
+    requires no ``orchestration/`` change to make it so. What the decline changes is
+    that the branch stops being fake-only.
+
+    Persistence is asserted on **both** parametrisations because §6 rules the audit
+    record owed whether or not the composed answer succeeds: a decline is a decision
+    the system made about the user's request, and ADR-0014 §2 asks for it on the same
+    terms as for a plan.
+
+    Nothing is driven, and that is checked at the store rather than only at the
+    outcome: ``step is None`` says the engine reported no step, and an empty
+    ``executions`` says none was ever started — the property §6 states about the
+    admission ceiling, which throttles *step execution* and therefore has nothing to
+    reserve here.
+    """
+    harness = _wired(
+        FakeModelProvider(_refusing if composition_fails else _ANSWER),
+        planner=_NoStep(),
+        tools=(tool(),),
+    )
+
+    outcome = await harness.engine.converse("what do you know about me?", timeout=PATIENT)
+
+    assert outcome.turn is not None
+    assert outcome.turn.plan.steps == ()
+    # The goal and the plan are persisted, composition succeeding or not.
+    assert await harness.plans.get_goal(outcome.turn.goal.id) is not None
+    assert await harness.plans.get_plan(outcome.turn.plan.id) is not None
+    # Nothing was driven: no step reported, no execution started, no tool invoked.
+    assert outcome.step is None
+    assert (await harness.plans.export()).executions == ()
+    assert harness.invoker.invocations == []
+    # The turn was composed either way — only what came back differs.
+    assert outcome.reply == (None if composition_fails else _ANSWER)
+    assert outcome.reply_degraded is composition_fails
+    # ...and captured either way, which a failing composition does not degrade.
+    assert outcome.capture_degraded is False
+    assert outcome.conversation_id is not None
+    turns = await harness.conversation_store.turns(outcome.conversation_id)
+    assert [one.ordinal for one in turns] == [1]
+    assert await harness.memory.get(turns[0].episode_id) is not None
 
 
 # --- §5: the engine hands over what the stage may not infer ------------------
