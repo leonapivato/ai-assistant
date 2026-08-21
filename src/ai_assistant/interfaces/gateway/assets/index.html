@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Assistant</title>
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <!--
+      No inline script and no inline style anywhere in this document: the gateway
+      serves every response with a content security policy that "permits no inline
+      script" and permits styles from its own origin alone (ADR-0168 §6), so an
+      inline one would be sent and then refused by the browser.
+    -->
+    <main class="shell">
+      <h1>Assistant</h1>
+
+      <section id="bootstrap" class="panel" hidden>
+        <h2>Start a session</h2>
+        <p class="hint">
+          This browser holds no session yet. Paste the value the gateway printed
+          when it started. It is good once, and every session ends when the
+          gateway process does.
+        </p>
+        <form id="bootstrap-form">
+          <label for="bootstrap-value">Bootstrap value</label>
+          <input
+            id="bootstrap-value"
+            name="bootstrap-value"
+            type="password"
+            autocomplete="off"
+            spellcheck="false"
+            required
+          />
+          <button type="submit">Start</button>
+        </form>
+      </section>
+
+      <section id="console" class="panel" hidden>
+        <h2>Ask</h2>
+        <form id="ask-form">
+          <label for="utterance">What do you want the assistant to do?</label>
+          <textarea id="utterance" name="utterance" rows="3" required></textarea>
+          <button type="submit" id="ask-button">Ask</button>
+        </form>
+        <p class="hint" id="conversation"></p>
+      </section>
+
+      <section id="answer" class="panel" hidden>
+        <h2>What happened</h2>
+        <div id="answer-body"></div>
+      </section>
+
+      <p id="fault" class="fault" hidden></p>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
