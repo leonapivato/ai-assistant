@@ -18,6 +18,17 @@ Two boundaries from ADR-0014 shape the whole module:
 Step ids and the plan id are minted here from an injected id factory, never taken
 from the model, so unique step ids are guaranteed structurally and the model is
 kept out of the id space entirely (ADR-0047 §2).
+
+The envelope has **two** legal shapes (ADR-0176 §1). A plan carries a non-empty
+``steps`` list; a **decline** carries an empty one *together with*
+``"no_capability_needed": true`` and a non-blank ``rationale``, and says that the
+goal is answered from what this turn already carries. The second shape is asserted
+rather than merely empty, which is what tells it apart from a failure to
+decompose — the objection ADR-0047 §4 raised against a bare empty list, and one
+that has no purchase on a positive assertion. ``no_capability_needed`` is a key of
+this prompt-level envelope only: it never reaches ``ActionPlan``, which crosses the
+subsystem boundary carrying empty ``steps`` and a ``rationale`` saying why
+(ADR-0176 §8).
 """
 
 from __future__ import annotations
@@ -97,15 +108,25 @@ _STANCE: Final[Mapping[BeliefBand, str]] = {
     BeliefBand.ATTESTED: "a source the user connected reported",
 }
 
+#: The two legal envelope shapes and the test between them (ADR-0176 §4).
+#:
+#: The test is stated as what the goal *requires*, never as a list of request
+#: categories, because the material a goal might be answered from is rendered into
+#: this same prompt one message below (:func:`_render_request`) — so "can this be
+#: answered from what is in front of me?" is a question about the text the model is
+#: already holding, and a category list is not (ADR-0176 §4).
 _SYSTEM_PROMPT = """\
-You are the planning stage of an AI assistant. Decompose the user's goal into an \
-ordered sequence of steps that would accomplish it.
+You are the planning stage of an AI assistant. Decide what the user's goal \
+requires, then reply with exactly one of the two JSON objects below — a single \
+JSON object and nothing else, no prose, no code fence.
 
-Each step names an abstract CAPABILITY — what must be done — not a specific tool, \
+A step names an abstract CAPABILITY — what must be done — not a specific tool, \
 product, or vendor. Use short snake_case names such as `send_email`, \
 `search_calendar`, or `book_flight`. Do not name a concrete tool or service.
 
-Reply with a single JSON object and nothing else — no prose, no code fence:
+Where accomplishing the goal requires the assistant to act in the world, or to \
+reach for something this turn has not already given you, decompose it into an \
+ordered sequence of steps and reply with a PLAN:
 
 {"rationale": "<one sentence on why these steps>",
  "steps": [
@@ -114,9 +135,24 @@ Reply with a single JSON object and nothing else — no prose, no code fence:
     "parameters": {"<name>": "<json value>"}}
  ]}
 
-`steps` must be a non-empty list. `parameters` is optional per step and, when \
-present, must be a JSON object. Do not include step ids; they are assigned \
-downstream."""
+Where the goal is answered from what this turn already carries — the retrieved \
+memories, the assembled context and the conversation set out in the next message \
+— no capability is wanted at all, and the reply is a DECLINE:
+
+{"rationale": "<one sentence on why no capability is needed>",
+ "steps": [],
+ "no_capability_needed": true}
+
+A decline is an ordinary, expected outcome — not a fallback, not an error, not a \
+last resort. Naming a capability for a goal that needs none is the worse answer of \
+the two. Judge which shape is wanted by what the goal requires, not by what kind \
+of request it looks like.
+
+In a plan, `steps` must be a non-empty list, and `parameters` is optional per step \
+and, when present, must be a JSON object. In a decline, `steps` must be the empty \
+list, `no_capability_needed` must be the JSON literal true (not 1, not "true"), \
+and `rationale` must be a non-empty string. Do not include step ids; they are \
+assigned downstream."""
 
 
 def _uuid() -> str:
@@ -133,7 +169,27 @@ class _ExtractionError(Exception):
     Caught within :meth:`ModelBackedPlanner.plan` to drive the bounded repair
     round; converted to :class:`PlanningError` if the attempts are exhausted. Not
     part of the public surface.
+
+    ``declined`` says whether the failed reply **carried the decline marker** and
+    failed only ADR-0176 §3's rationale condition. It selects the repair message
+    (:func:`_repair_prompt`), and it is a flag on the signal rather than a string
+    match on the reason because §5 splits the two failures on evidence of intent:
+    only a reply carrying the marker has said what it meant, so only there may the
+    repair ask the model to complete the decline. Every other malformed reply —
+    a bare empty ``steps`` list included — is unclassified, and its repair presents
+    both shapes without naming either as the correction.
     """
+
+    def __init__(self, message: str, *, declined: bool = False) -> None:
+        """Record the reason and whether the reply asserted a decline.
+
+        Args:
+            message: What was wrong with the reply, echoed into the repair turn.
+            declined: Whether the reply carried the ``no_capability_needed``
+                marker and failed only the rationale condition (ADR-0176 §5).
+        """
+        super().__init__(message)
+        self.declined = declined
 
 
 class ModelBackedPlanner:
@@ -263,7 +319,10 @@ class ModelBackedPlanner:
                 last_error = exc
                 conversation.append(reply)
                 conversation.append(
-                    Message(role=Role.USER, content=_repair_prompt(str(exc))),
+                    Message(
+                        role=Role.USER,
+                        content=_repair_prompt(str(exc), declined=exc.declined),
+                    ),
                 )
 
         msg = f"the model did not return a usable plan for goal {snapshot.id}: {last_error}"
@@ -272,13 +331,24 @@ class ModelBackedPlanner:
     def _build_plan(self, content: str, goal: Goal) -> ActionPlan:
         """Extract and validate one model reply into a frozen ``ActionPlan``.
 
+        A **decline** — an empty ``steps`` list carrying the ``no_capability_needed``
+        marker — is constructed by this same path with ``steps=()``, which is why
+        ADR-0176 §1 keeps one envelope shape rather than two: the per-step
+        validation below is vacuous over it and nothing else branches. Its
+        ``rationale`` is required rather than optional (§3), because with no steps
+        it is the whole of what the persisted plan says.
+
+        The envelope's keys never reach ``model_validate``: the payload is an
+        explicit five-key mapping, so ``no_capability_needed`` cannot leak into the
+        durable ``ActionPlan`` (ADR-0176 §8). That is structural, not asserted.
+
         Raises:
-            _ExtractionError: If the text is not the required envelope or the
-                constructed plan fails a ``core`` invariant.
+            _ExtractionError: If the text is not one of the two legal envelopes or
+                the constructed plan fails a ``core`` invariant.
         """
         envelope = _extract_object(content)
         raw_steps = _require_steps(envelope)
-        rationale = _optional_rationale(envelope)
+        rationale = _optional_rationale(envelope) if raw_steps else _require_rationale(envelope)
 
         step_payloads = [self._step_payload(raw, index) for index, raw in enumerate(raw_steps)]
         try:
@@ -668,12 +738,53 @@ def _split_conversation_tail(
     return memories[:boundary], memories[boundary:]
 
 
-def _repair_prompt(reason: str) -> str:
-    """The user turn that asks the model to fix a malformed reply."""
-    return (
+def _repair_prompt(reason: str, *, declined: bool = False) -> str:
+    """The user turn that asks the model to fix a malformed reply (ADR-0176 §5).
+
+    Two messages, split on whether the reply **asserted** a decline, because the
+    two failures carry different evidence of what the model meant.
+
+    - ``declined`` — the reply carried the ``no_capability_needed`` marker and only
+      its ``rationale`` was missing, null, non-string or blank. The model has said
+      what it meant, so completing the decline is the right ask, and asking for
+      steps here would take a correct judgement and instruct the model to invent a
+      capability in the next turn — the defect #1315 records, on the reply where
+      the judgement was already right.
+    - otherwise — unclassified malformed output, a bare empty ``steps`` list
+      included. A bare empty list is what a truncation, a template echo or a
+      dropped array produces, so offering the decline there would manufacture a
+      wrong decline the model never asserted. The message presents both shapes and
+      the test between them and asks the model to choose by the goal, naming
+      neither as the intended correction.
+
+    Neither message asks for steps, and neither closes by requiring a non-empty
+    ``steps`` list — the wording this function used to carry.
+
+    Args:
+        reason: What was wrong with the reply, echoed back so the model can see it.
+        declined: Whether the reply carried the decline marker (ADR-0176 §5).
+
+    Returns:
+        The user turn to append to the conversation before the repair round.
+    """
+    opening = (
         f"That response could not be used: {reason}. "
-        "Reply with only the JSON object described earlier — no prose, no code "
-        "fence — with a non-empty `steps` list."
+        "Reply with only the JSON object described earlier — no prose, no code fence"
+    )
+    if declined:
+        return (
+            f'{opening} — keeping `"steps": []` and `"no_capability_needed": true`, '
+            'and adding a `"rationale"` whose value is a non-empty string saying why '
+            "no capability is needed for this goal."
+        )
+    return (
+        f"{opening}. Either shape is a correct answer; choose between them by what "
+        "the goal requires. If accomplishing it requires acting in the world, or "
+        "reaching for something this turn has not already given you, send the plan "
+        'shape, with `"steps"` listing those steps. If the goal is answered from '
+        "what this turn already carries, send the decline shape, with "
+        '`"steps": []`, `"no_capability_needed": true`, and a `"rationale"` saying '
+        "why no capability is needed."
     )
 
 
@@ -689,22 +800,31 @@ def _extract_object(content: str) -> dict[str, object]:
     the prose brace and the envelope's closer at once (#293).
 
     Where more than one object decodes, the **envelope** is preferred: the first
-    whose ``steps`` is a non-empty list — the shape ADR-0047 §4 step 2 requires and
-    :func:`_require_steps` accepts — rather than the leftmost object outright, so a
-    decoy object in the prose ahead of the envelope is stepped over instead of
-    planned from, including one that carries a ``steps`` key of the wrong type or an
-    empty list (which would otherwise shadow a valid envelope behind it). Where no
-    decoded object is a well-formed envelope, the first decoded object stands in, so
-    a single malformed one still reaches :func:`_require_steps` and its precise
-    verdict rather than a generic miss. Two genuine envelopes cannot be told apart
-    locally and the earlier wins; the outcome stays bounded and is never a corrupt
-    plan.
+    that is an envelope under :func:`_is_envelope` — a plan or a decline — rather
+    than the leftmost object outright, so a decoy object in the prose ahead of the
+    envelope is stepped over instead of planned from, including one that carries a
+    ``steps`` key of the wrong type, and one whose ``steps`` is an empty list
+    *without* the decline marker (either would otherwise shadow a valid envelope
+    behind it). Where no decoded object is an envelope, the first decoded object
+    stands in, so a single malformed one still reaches :func:`_require_steps` and
+    its precise verdict rather than a generic miss. Two genuine envelopes cannot be
+    told apart locally and the earlier wins **whatever their shapes** (ADR-0176 §2);
+    the outcome stays bounded and is never a corrupt plan.
+
+    **Widening the predicate here is the load-bearing half of ADR-0176.** Relaxing
+    only :func:`_require_steps` and leaving this scan at "a non-empty ``steps``
+    list" steps straight past a marked decline, records the decoy ahead of it as the
+    fall-back, and then rejects the fall-back for carrying no marker — so a reply
+    that contained a valid decline falls to bounded repair. The widening is exactly
+    one shape, and it is one a decoy does not reach by accident: an empty ``steps``
+    list is a plausible fragment or truncation, an empty ``steps`` list *carrying an
+    affirmative boolean marker* is something only a deliberate writer produces.
 
     **A decoded object is advanced *past*, never re-entered:** the scan resumes at
     the object's end, so a nested object is treated as part of its parent, not as a
-    separate candidate. An outer envelope whose ``steps`` is empty is therefore
-    rejected as an empty plan (§4) rather than being overridden by a non-empty
-    ``steps`` nested inside it. Only a brace that does *not* open a decodable object
+    separate candidate. An outer object whose ``steps`` is empty and unmarked is
+    therefore still refused rather than being overridden by a non-empty ``steps``
+    nested inside it. Only a brace that does *not* open a decodable object
     — a brace in the surrounding prose, or a fragment — is stepped over one
     character at a time to the next brace.
 
@@ -756,11 +876,11 @@ def _extract_object(content: str) -> dict[str, object]:
             index += 1  # this brace opened nothing usable; try the next one
             continue
         if isinstance(candidate, dict):
-            steps = candidate.get("steps")
-            if isinstance(steps, list) and steps:
-                # A well-formed envelope (a non-empty `steps` list, exactly what
-                # `_require_steps` accepts). Preferred over an earlier decoy that
-                # only looks envelope-shaped — a `steps` of the wrong type or empty.
+            if _is_envelope(candidate):
+                # A legal envelope, plan-shaped or decline-shaped — exactly what
+                # `_require_steps` accepts. Preferred over an earlier decoy that
+                # only looks envelope-shaped: a `steps` of the wrong type, or an
+                # empty one with no marker behind it.
                 return candidate
             if first is None:
                 first = candidate
@@ -772,20 +892,120 @@ def _extract_object(content: str) -> dict[str, object]:
     raise _ExtractionError(msg)
 
 
+def _declines(envelope: dict[str, object]) -> bool:
+    """Whether ``envelope`` carries the decline marker (ADR-0176 §1).
+
+    The marker is the JSON boolean ``true`` **and nothing else**: ``1``, ``1.0``,
+    ``"true"``, ``"yes"`` and every other truthy value are not it. The identity
+    check is what makes that so — Python's ``bool`` is a subclass of ``int``, so
+    ``True == 1`` and ``True == 1.0``, and an equality test would silently execute
+    ``{"steps": [], "no_capability_needed": 1}`` as a decline while every other
+    clause of ADR-0176 still passed.
+
+    Args:
+        envelope: The decoded object to test.
+
+    Returns:
+        Whether the object positively asserts that no capability is needed.
+    """
+    return envelope.get("no_capability_needed") is True
+
+
+def _is_envelope(candidate: dict[str, object]) -> bool:
+    """Whether ``candidate`` is one of the two legal envelope shapes (ADR-0176 §1).
+
+    A **plan envelope** carries a ``steps`` key whose value is a non-empty list
+    (ADR-0047 §4 step 2, unchanged). A **decline envelope** carries a ``steps`` key
+    whose value is a list of length zero *and* the marker :func:`_declines` tests
+    for. Nothing else is an envelope — an object with no ``steps`` key is not one,
+    which is what keeps the decline unreachable by *omitting* anything.
+
+    **The marker is consulted only where ``steps`` is empty.** On a non-empty
+    ``steps`` it is inert: the object is a plan, its steps are planned, and the
+    marker's presence — at any value at all — neither changes that nor is an
+    extraction failure. Type-checking the marker before looking at ``steps`` would
+    send a perfectly good plan to bounded repair over a key that decides nothing on
+    that shape, which ADR-0047 §4 step 2's "other envelope keys are ignored" rule is
+    what makes wrong.
+
+    Args:
+        candidate: The decoded object to test.
+
+    Returns:
+        Whether the object is a plan envelope or a decline envelope.
+    """
+    steps = candidate.get("steps")
+    if not isinstance(steps, list):
+        return False
+    return bool(steps) or _declines(candidate)
+
+
 def _require_steps(envelope: dict[str, object]) -> list[object]:
-    """Return the envelope's non-empty ``steps`` list.
+    """Return the envelope's ``steps`` list, empty only where it declines.
+
+    An empty ``steps`` list with no marker is **unclassified malformed output**, not
+    a decline (ADR-0176 §5): it is what a truncation, a template echo or a dropped
+    array produces, and the reason message says so without naming the decline, so
+    the repair turn cannot invite the model to complete a decline it never asserted.
 
     Raises:
-        _ExtractionError: If ``steps`` is missing, not a list, or empty.
+        _ExtractionError: If ``steps`` is missing, not a list, or empty without the
+            decline marker.
     """
     steps = envelope.get("steps")
     if not isinstance(steps, list):
-        msg = "the plan envelope has no 'steps' list"
+        msg = "the reply is not one of the two legal envelopes: it has no 'steps' list"
         raise _ExtractionError(msg)
-    if not steps:
-        msg = "the plan has no steps"
+    if not steps and not _declines(envelope):
+        msg = (
+            "the reply's 'steps' list is empty and it does not assert "
+            "'no_capability_needed': true, so it is neither of the two legal envelopes"
+        )
         raise _ExtractionError(msg)
     return steps
+
+
+def _require_rationale(envelope: dict[str, object]) -> str:
+    """Return a decline envelope's non-blank ``rationale`` (ADR-0176 §3).
+
+    A decline has no steps, so ``rationale`` is the whole of what the persisted
+    ``ActionPlan`` says about the decision — the sole record of *why* no capability
+    was named, and what ADR-0014 §2's audit record rests on at this one shape. It is
+    therefore required here where a plan leaves it optional.
+
+    ``core`` does not supply the non-blank condition and is not assumed to:
+    ``rationale`` is ``EncodableText | None``, which refuses unwritable text but
+    neither refuses nor strips ``"   "``.
+
+    **The type is checked before the value is touched.** Reaching for ``.strip()``
+    ahead of the ``isinstance`` would raise ``AttributeError`` on the null case —
+    neither ``PlanningError`` nor ``ModelError``, so it would escape
+    :meth:`ModelBackedPlanner.plan` as something the ``Planner`` Protocol does not
+    document and ADR-0047 §6's bounded repair never sees.
+
+    Args:
+        envelope: The decline envelope to read.
+
+    Returns:
+        The rationale, verbatim.
+
+    Raises:
+        _ExtractionError: If ``rationale`` is absent, null, not a string, or blank.
+            Flagged ``declined``, because the reply carried the marker and so said
+            what it meant: its repair asks for the rationale, never for steps.
+    """
+    rationale = envelope.get("rationale")
+    if rationale is None:
+        stated = "null" if "rationale" in envelope else "missing"
+        msg = f"the decline gives no reason: its 'rationale' is {stated}"
+        raise _ExtractionError(msg, declined=True)
+    if not isinstance(rationale, str):
+        msg = "the decline gives no reason: its 'rationale' is not a string"
+        raise _ExtractionError(msg, declined=True)
+    if not rationale.strip():
+        msg = "the decline gives no reason: its 'rationale' is blank"
+        raise _ExtractionError(msg, declined=True)
+    return rationale
 
 
 def _optional_rationale(envelope: dict[str, object]) -> str | None:

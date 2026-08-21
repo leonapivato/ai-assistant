@@ -1099,3 +1099,263 @@ async def test_the_exhaustion_message_names_the_goal_the_call_began_with() -> No
         await task
     assert "g1" in str(caught.value)
     assert "g-tampered" not in str(caught.value)
+
+
+# --- the decline envelope (ADR-0176) -----------------------------------------
+
+
+_DECLINE_REPLY = json.dumps(
+    {
+        "rationale": "the retrieved memories already answer this",
+        "steps": [],
+        "no_capability_needed": True,
+    }
+)
+
+
+def _decline(**overrides: object) -> str:
+    """A well-formed decline envelope with ``overrides`` applied to it."""
+    envelope: dict[str, object] = {
+        "rationale": "the retrieved memories already answer this",
+        "steps": [],
+        "no_capability_needed": True,
+    }
+    envelope.update(overrides)
+    return json.dumps(envelope)
+
+
+def _repair_turn(model: FakeModelProvider) -> str:
+    """The user turn the planner appended between the first and second calls."""
+    return model.calls[1].messages[-1].content
+
+
+async def test_a_marked_empty_plan_is_a_decline_carrying_its_rationale() -> None:
+    """§1: the second legal envelope, and the whole point of the decision (#1315).
+
+    Before this, a goal answered from the material already in the prompt forced the
+    planner to invent a capability, which reached ``NO_CAPABLE_TOOL`` and made the
+    composed answer disclaim retrieval that had in fact worked (QA run #1334).
+    """
+    model = FakeModelProvider(_DECLINE_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    plan = await planner.plan(_goal(), context=_context())
+
+    assert plan.steps == ()
+    assert plan.rationale == "the retrieved memories already answer this"
+    assert plan.goal_id == "g1"
+    assert plan.created_at == _WHEN
+    assert model.call_count == 1, "a decline is accepted first time, not repaired into one"
+
+
+@pytest.mark.parametrize(
+    ("marker", "accepted"),
+    [
+        pytest.param(True, True, id="json-true"),
+        pytest.param(1, False, id="integer-one"),
+        pytest.param(1.0, False, id="float-one"),
+        pytest.param("true", False, id="string-true"),
+        pytest.param("yes", False, id="string-yes"),
+        pytest.param(False, False, id="json-false"),
+    ],
+)
+async def test_the_decline_marker_is_the_json_boolean_and_nothing_else(
+    marker: object, *, accepted: bool
+) -> None:
+    """§1: the marker is ``true``, not merely something truthy.
+
+    The two **numeric** cases carry this test and may not be dropped from it.
+    Python's ``bool`` is a subclass of ``int``, so ``True == 1`` and ``True == 1.0``:
+    an implementation written as ``marker == True`` accepts both, and every other
+    clause of ADR-0176 still passes while ``{"steps": [], "no_capability_needed": 1}``
+    executes as a decline. Only an identity check fails on them.
+    """
+    model = FakeModelProvider(_decline(no_capability_needed=marker))
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    if accepted:
+        plan = await planner.plan(_goal(), context=_context())
+        assert plan.steps == ()
+    else:
+        with pytest.raises(PlanningError):
+            await planner.plan(_goal(), context=_context())
+
+
+@pytest.mark.parametrize(
+    "marker",
+    [pytest.param(True, id="json-true"), pytest.param("yes", id="non-boolean")],
+)
+async def test_the_marker_is_inert_on_a_plan_envelope(marker: object) -> None:
+    """§1: the marker decides nothing where ``steps`` is non-empty, so it is ignored.
+
+    This guards the opposite mistake from the strictness test above, which cannot
+    see it — every case there has an empty ``steps`` list. A lane that reads
+    "validate the marker" as "validate the marker wherever it appears" type-checks
+    it before looking at ``steps``, and a perfectly good plan carrying a stray
+    ``no_capability_needed`` becomes an extraction failure sent to bounded repair.
+    ADR-0047 §4 step 2's "other envelope keys are ignored" rule is what makes
+    ignoring it right.
+    """
+    reply = json.dumps(
+        {
+            "rationale": "two steps to relocate",
+            "steps": [{"intent": "find a place", "capability": "search_housing"}],
+            "no_capability_needed": marker,
+        }
+    )
+    model = FakeModelProvider(reply)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    plan = await planner.plan(_goal(), context=_context())
+
+    assert [step.capability for step in plan.steps] == ["search_housing"]
+    assert model.call_count == 1, "no repair round was taken over an inert key"
+
+
+async def test_an_unmarked_empty_decoy_does_not_shadow_a_decline_behind_it() -> None:
+    """§2: the widened discriminator, and the one clause the plausible mistake fails.
+
+    A lane that relaxes ``_require_steps`` and leaves the scan's predicate at
+    "non-empty list" records the decoy as the fall-back first object, steps straight
+    past the marked decline because its ``steps`` is not non-empty, then rejects the
+    fall-back for carrying no marker — so a reply that *contained* a valid decline
+    falls to bounded repair. §1's strictness test, §3's rationale test and §5's
+    two-reply test all pass against that implementation; this one does not.
+    """
+    reply = f'Thinking: {{"steps": []}}\n{_decline(rationale="answered from context")}'
+    model = FakeModelProvider(reply)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    plan = await planner.plan(_goal(), context=_context())
+
+    assert plan.steps == ()
+    assert plan.rationale == "answered from context", "the *second* object's rationale"
+
+
+@pytest.mark.parametrize(
+    ("reply", "expected"),
+    [
+        pytest.param(
+            f"{_decline(rationale='nothing to do')}\n{_VALID_REPLY}",
+            "nothing to do",
+            id="decline-before-plan",
+        ),
+        pytest.param(
+            f"{_VALID_REPLY}\n{_decline(rationale='nothing to do')}",
+            "two steps to relocate",
+            id="plan-before-decline",
+        ),
+    ],
+)
+async def test_the_earlier_envelope_wins_whatever_the_two_shapes_are(
+    reply: str, expected: str
+) -> None:
+    """§2: ADR-0071's earlier-wins rule, now ranging over a cross-shape pair.
+
+    Run as a pair because each direction excludes a different plausible
+    implementation. Keeping the first envelope as a fall-back and scanning on for a
+    *plan* specifically — preferring to act — passes the standalone decline test,
+    the decoy-before-decline test and every ADR-0071 test, while silently overriding
+    a decline the model asserted; only the first case here fails on it. Reversing
+    the objects exposes the mirror failure.
+    """
+    model = FakeModelProvider(reply)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    plan = await planner.plan(_goal(), context=_context())
+
+    assert plan.rationale == expected
+    assert (plan.steps == ()) is (expected == "nothing to do")
+
+
+@pytest.mark.parametrize(
+    "envelope",
+    [
+        pytest.param(
+            json.dumps({"steps": [], "no_capability_needed": True}), id="rationale-absent"
+        ),
+        pytest.param(_decline(rationale=None), id="rationale-null"),
+        pytest.param(_decline(rationale=42), id="rationale-not-a-string"),
+        pytest.param(_decline(rationale="   "), id="rationale-blank"),
+    ],
+)
+async def test_a_decline_with_no_usable_rationale_repairs_and_raises_nothing_else(
+    envelope: str,
+) -> None:
+    """§3: a decline states why, and the failure stays inside the planner's own path.
+
+    The "no other exception type escapes" half is the load-bearing one. An
+    implementation reaching for ``rationale.strip()`` before checking that the value
+    is a string raises ``AttributeError`` on the null case — neither
+    ``PlanningError`` nor ``ModelError``, so it escapes ``plan`` as something the
+    Protocol does not document and ADR-0047 §6's bounded repair never sees. Every
+    other test ADR-0176 requires passes with that path broken, because none of them
+    sends a malformed rationale. ``pytest.raises(PlanningError)`` is what fails on it.
+    """
+    model = FakeModelProvider(envelope)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    with pytest.raises(PlanningError):
+        await planner.plan(_goal(), context=_context())
+
+    # It drove a repair round, and that round asked for the rationale rather than
+    # for steps — §5's decline-specific message, reserved for a reply that carried
+    # the marker and so said what it meant.
+    assert model.call_count == 2
+    repair = _repair_turn(model)
+    assert "rationale" in repair
+    assert "no_capability_needed" in repair
+    assert "non-empty `steps`" not in repair
+    assert "listing those steps" not in repair, "the plan shape is not offered here"
+
+
+async def test_the_system_prompt_names_the_marker_and_renders_the_decline() -> None:
+    """§4: a prompt that never names the key can never elicit the shape.
+
+    Narrow deliberately. ADR-0176 §4 refuses a test that string-matches the
+    *wording* of the prompt's test between the two directions: such an assertion
+    fails on every rewording that improves the instruction and passes on every
+    rewording that guts it, so it pins prose and reports nothing about behaviour.
+    What is asserted here is that the key and the shape reach the model at all.
+    """
+    model = FakeModelProvider(_DECLINE_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    await planner.plan(_goal(), context=_context())
+
+    system = next(one.content for one in model.calls[0].messages if one.role is Role.SYSTEM)
+    assert "no_capability_needed" in system
+    assert '"steps": []' in system
+    assert '"no_capability_needed": true' in system
+
+
+async def test_a_bare_empty_steps_reply_is_repaired_toward_neither_shape() -> None:
+    """§5: an unmarked empty list is unclassified malformed output, not a decline.
+
+    On a goal that plainly requires an act, a repair offering the decline would
+    manufacture a wrong decline the model never asserted — a bare empty list is what
+    a truncation, a template echo or a dropped array produces. A repair *asking for
+    steps* is the mirror failure and the original defect (#1315).
+
+    **The assertion on the message is the operative half.** ``FakeModelProvider`` is
+    scripted: it returns its second reply whatever the repair said, so a test
+    asserting only "the second reply's plan came out" passes unchanged against an
+    implementation whose repair message reads "complete the decline" — the exact
+    construction ADR-0176 §5 forbids, in the exact case it was written for.
+    """
+    model = FakeModelProvider.scripted(json.dumps({"steps": []}), _VALID_REPLY)
+    planner = ModelBackedPlanner(model, now=_fixed_now, id_factory=_counter())
+
+    plan = await planner.plan(_goal(), context=_context())
+
+    repair = _repair_turn(model)
+    # Both shapes are presented...
+    assert "no_capability_needed" in repair
+    assert '`"steps"` listing those steps' in repair
+    # ...neither is named as the intended correction: the model is asked to choose
+    # between them by the goal, and nothing points at one of them.
+    assert "choose between them by what the goal requires" in repair
+    # ...and it does not ask for steps — the wording this message used to close on.
+    assert "non-empty `steps`" not in repair
+    assert model.call_count == 2
+    assert [step.capability for step in plan.steps] == ["search_housing", "book_movers"]
