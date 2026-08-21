@@ -1,6 +1,6 @@
 # 174. A gateway may serve a browser on another overlay device, and that hop is the fourth egress boundary
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-21
 
 - **This is `track:web-client` milestone 14's boundary decision** (#1230). Its
