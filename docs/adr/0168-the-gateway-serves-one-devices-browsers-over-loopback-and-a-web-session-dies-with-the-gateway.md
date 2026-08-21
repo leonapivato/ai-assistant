@@ -138,14 +138,25 @@ this repository**.
 > the promoted engine surface does not offer, authors no permission ruling, mints
 > no confirmation, and opens no store.
 
-> **Normative.** Every browser request that asks the assistant for anything
-> resolves to calls on that surface and to rendering what those calls returned.
-> §3's two pre-session paths — the front end's static assets, and the bootstrap
-> exchange — ask it for nothing, are served without reaching it, and are the only
-> paths of which that is true.
+> **Normative.** A browser request reaches the promoted engine surface **if and
+> only if** the gateway has admitted it under §4 *and* it asks the assistant for
+> something — and every request meeting both resolves to calls on that surface and
+> to rendering what those calls returned. A static asset, the bootstrap exchange,
+> a request §7 refuses and a request §3 refuses reach that surface in no case.
 
-**The third and fourth clauses are what make golden rule 3 checkable rather than
-aspirational**, and they are owed because a long-running HTTP server does not
+**The routing clause is stated as a biconditional rather than as a rule about
+what the gateway forwards, and three rounds of adversarial review are why.** Each
+of its one-directional drafts left a class of request obeying one clause of this
+ADR by disobeying another: the first sent static assets and the bootstrap
+exchange to an engine that has nothing to do with either, and the second sent an
+*unadmitted* `ask` there, since it plainly asks the assistant for something and
+§3 plainly refuses it. Naming a necessary and sufficient condition covers every
+class the gateway can see at once — admitted and assistant-shaped, admitted and
+not, unadmitted, pre-session, and refused before the session is read — instead of
+covering them one at a time and discovering the next one in review.
+
+**That clause and the one above it are what make golden rule 3 checkable rather
+than aspirational**, and they are owed because a long-running HTTP server does not
 *look* like a thin adapter. What makes it one is not its lifetime but where the
 decisions are: `src/ai_assistant/interfaces/cli.py` already renders, sets exit
 codes and holds the device's enrolment secrets, and it authors nothing. The
