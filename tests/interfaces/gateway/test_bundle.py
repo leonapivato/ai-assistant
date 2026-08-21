@@ -134,6 +134,23 @@ def test_the_header_half_is_sent_as_a_header_and_never_in_a_url() -> None:
     assert not re.search(r"[?&][A-Za-z_]*(session|token|half)", script)
 
 
+def test_the_front_end_continues_the_conversation_the_hub_named() -> None:
+    """The id the hub hands back is "what a client keeps and presents to continue"
+    (ADR-0074 §2), and a page that rendered it without sending it back would start
+    a fresh conversation on every question the owner asked.
+
+    Held in page state rather than in browser storage: the hub owns the
+    conversation, a reload is a new page asking the hub again, and nothing about a
+    conversation belongs beside the session half.
+    """
+    script = _code("app.js")
+
+    assert "conversationId" in script
+    assert "asked.conversation_id = conversationId" in script
+    assert "localStorage.setItem(STORAGE_KEY" in script
+    assert 'setItem("assistant.conversation' not in script
+
+
 def test_the_front_end_tells_a_transport_failure_apart_from_a_refusal() -> None:
     """§9's distinction has to survive to what the owner reads, not stop at the
     status code: "a transport failure, distinguishable from a request the hub

@@ -152,6 +152,15 @@ async def test_a_stream_that_ends_mid_request_is_incomplete_and_not_malformed() 
         pytest.param("GET / HTTP/1.1\nHost: h\n Continued: yes\n", id="a folded header line"),
         pytest.param("GET / HTTP/1.1\n: empty\n", id="a header with no name"),
         pytest.param(
+            "GET / HTTP/1.1\nHost: h\nbad name: x\n", id="a header name with a space in it"
+        ),
+        pytest.param(
+            "GET / HTTP/1.1\nHost: h\nbad@name: x\n", id="a header name outside the token set"
+        ),
+        pytest.param(
+            "GET / HTTP/1.1\nHost: h\nbad\tname: x\n", id="a header name with a tab in it"
+        ),
+        pytest.param(
             "POST /ask HTTP/1.1\nHost: h\nTransfer-Encoding: chunked\n",
             id="a second framing",
         ),
@@ -239,6 +248,19 @@ def test_a_response_declares_its_own_length() -> None:
 
     assert b"Content-Length: 5" in written
     assert written.endswith(b"\r\n\r\nhello")
+
+
+@pytest.mark.parametrize(
+    "name", ["X-Assistant-Session", "If-None-Match", "x_odd!name", "Accept-Encoding"]
+)
+async def test_a_header_name_inside_the_token_set_is_admitted(name: str) -> None:
+    """The refusal narrows nothing legitimate: RFC 9110's `token` is the whole set,
+    and it is wider than the names this gateway happens to read."""
+    payload = _request(f"GET / HTTP/1.1\nHost: h\n{name}: value\n")
+
+    request = await read_request(_reader(payload), max_bytes=_CAP)
+
+    assert request.header(name.lower()) == "value"
 
 
 def test_a_request_reports_a_header_that_is_absent_as_none() -> None:
