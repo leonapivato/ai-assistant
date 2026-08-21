@@ -1,6 +1,6 @@
 # 124. The hop is a third egress boundary, and a device is admitted by two independent facts
 
-- Status: Partially superseded by ADR-0125 (§6's reader clause) and ADR-0126 (§6's revocation-recording clause, only as it reaches an act that destroys the enrolment record) and ADR-0131 (§7's credential-type clause, only as it reaches the loopback listener)
+- Status: Partially superseded by ADR-0125 (§6's reader clause) and ADR-0126 (§6's revocation-recording clause, only as it reaches an act that destroys the enrolment record) and ADR-0131 (§7's credential-type clause, only as it reaches the loopback listener) and ADR-0174 (§1's rule as an enumeration of the authorised egress boundaries)
 - Date: 2026-08-09
 - Accepted: 2026-08-09
 - Partially superseded: 2026-08-09 by ADR-0125 — **one clause, one limb of it, and
@@ -100,6 +100,41 @@
   **Nothing in the tree changes.** `read_connect` and `read_remote_connect` already
   implement the narrow reading, each with its reasoning attached (#933, #934); what
   was missing was the ratified sentence saying which reading they implement.
+- Partially superseded: 2026-08-21 by ADR-0174 — **one clause, and it is the
+  enumeration.** ADR-0174 is the fourth-boundary decision ADR-0168 §2 deferred by
+  name for `track:web-client` milestone 14 (#1230), whose exit test puts a browser
+  on a phone — a device that cannot host a gateway, so the browser's hop cannot be
+  kept inside one machine.
+
+  **Replaced — §1's rule as an enumeration.** "User data may leave the device only
+  from `models/`, from a designated integration seam inside `tools/`, or across the
+  hub's **remote transport** between the hub and a device the owner has enrolled
+  under §6 … every other egress is a bug." ADR-0174 §1 adds a fourth boundary — the
+  gateway's remote browser transport, its two halves being the gateway's remote
+  browser listener and the front-end bundle this repository serves to that browser
+  — so the sentence becomes false, and false twice over: the gateway's send and the
+  front end's send are each an egress it forbids. A reader holding only §1 reads
+  the browser hop as a bug and refuses to build it, which is ADR-0070 §1's first
+  limb.
+
+  **Not replaced — the rest of §1, and it is most of it.** The clause constraining
+  the client half of *this* boundary is untouched and still binds that client; the
+  clause leaving `models/` and the `tools/` seam unchanged is untouched and is
+  restated in ADR-0174 §1; the accountability argument §1 makes from ADR-0017 §4 is
+  run again there rather than displaced; and no lane may cite ADR-0174 toward
+  ADR-0017 §3's fourteen conditions any more than it may cite this one.
+
+  **Not replaced — §§2–12, none of them.** §2's transport posture is adopted by
+  reference and binds the new listener unchanged; §3's disclosure account is
+  unchanged and no participant is added to a control plane; §4's obligation to
+  obtain a peer's identity from the local agent and never from what the peer
+  asserts is applied at the new door; §§5–8's device vocabulary, enrolment,
+  admission and revocation are untouched, and ADR-0174 §4 states in terms that a
+  browsing device is enrolled at nothing, is not a device in §5's sense, and is
+  neither a principal nor a grant; §9's version rule is used as given and nothing
+  bumps for the new boundary; §10's prohibition on the hub dialling a spoke is
+  untouched and carried one hop further, to a browser; §11's validation plan and
+  §12's records stand exactly as written.
 - **This ADR partially supersedes ADR-0017 and ADR-0004, and both records land in
   this change.** ADR-0004's two clauses are §12's; each is scoped to the one thing
   a device boundary makes unreachable — a hub-side delete cannot purge a keyring

@@ -1,7 +1,66 @@
 # 168. The gateway serves one device's browsers over loopback, and a web session is minted at the gateway and dies with it
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0174 (§2's loopback-only bind clause and its one-gateway-one-device clause, each only as it reaches a separately configured remote browser listener)
 - Date: 2026-08-21
+- Partially superseded: 2026-08-21 by ADR-0174 — **two clauses of §2, one
+  listener, and the deferral §2 wrote for exactly this is discharged rather than
+  replaced.** ADR-0174 is the fourth-boundary decision this ADR's §2 deferred by
+  name, taken for `track:web-client` milestone 14 (#1230), whose exit test puts a
+  browser on a phone — a device that cannot host a gateway.
+
+  **Replaced — §2's first clause, only as it reaches a separately configured
+  remote browser listener.** "The gateway's browser-facing listener binds a
+  **loopback** address and only a loopback address … and no `Settings` value may
+  make it do so. A configuration that would have it bind anything else is refused
+  at load rather than bound." ADR-0174 §2 authorises a second listener on an
+  overlay address, off unless configured on, with the five load-time refusals
+  ADR-0124 §2 already gives the hub's own remote listener. A reader holding only
+  §2 builds a gateway no configuration can make reachable from another device —
+  which is what `src/ai_assistant/interfaces/gateway/server.py` does today, with
+  `_LOOPBACK` a module constant deliberately rather than a setting — so this fails
+  ADR-0070 §1's first limb.
+
+  **Replaced — §2's second clause's first sentence, on the same scope.** "One
+  gateway serves the browsers on its own device." After ADR-0174 §1 a gateway may
+  serve browsers on other devices of the owner's overlay, on two facts: an overlay
+  identity its own local agent attests (ADR-0124 §4's obligation, which had no
+  subject at this door before) and the web session §4 of this ADR already mints.
+
+  **Not replaced — everything §2 says about the loopback listener.** It still
+  binds a loopback address and only a loopback address, no `Settings` value may
+  widen it, and ADR-0174 §2 keeps it bound whether or not the remote one is.
+
+  **Not replaced — §2's proxy prohibition, which is reinforced.** "Reaching a
+  gateway's listener from a second device — by an operator-configured proxy, a
+  port forward, a tunnel, or any other means — is user data leaving a device …
+  and no clause of this ADR authorises it." Only the parenthetical count of
+  boundaries goes stale; a proxy path is outside ADR-0174 §1's enumeration too,
+  and ADR-0174 §2 refuses it a second time on a mechanical ground this ADR did not
+  have — a terminating proxy destroys the peer identity the new listener's
+  admission requires, leaving a header the proxy asserts as the only source, which
+  ADR-0124 §4 forbids taking.
+
+  **Not replaced — §2's third clause, which is the one that sent the question
+  there.** "A gateway serving a browser on a device that cannot itself run a
+  gateway is deferred, not decided. It requires a fourth egress boundary and
+  therefore its own ratified decision superseding ADR-0124 §1's enumeration."
+  That sentence stays true and now has an answer, which is ADR-0083 §15's stacked
+  addition on its own test — the deferral is discharged by the decision it named.
+
+  **Not replaced — §§1, 3–13, none of them.** §3's two pre-session exceptions keep
+  their extent and gain a prior condition on the remote listener (their population
+  is narrowed, never widened); §4's session, §5's single bootstrap value and one
+  mint per process, and §9's hub-down legibility bind the new listener unchanged,
+  and ADR-0174 §9 declines to relax §5 and leaves #1320 and #1329 open; §6's
+  clauses bind it unchanged, its admission record gaining one permitted Tier 2
+  fact — the attested overlay identity — which adds to an exclusive enumeration
+  rather than relaxing what it forbids; §7's `Host` and `Origin` checks are
+  restated for a listener whose bound authority is not loopback, on §7's own
+  scoping to "the loopback names it bound"; §8's ten figures are the gateway's
+  totals across both listeners rather than each listener's, and its rule that none
+  of those ten is nullable is untouched by two new switch fields outside its
+  table; §10's in-repo bundle is what ADR-0174 §1 names as the second half of the
+  new boundary; §11, §12 and §13 stand exactly as written.
 
 - **This is `track:web-client` milestone 13's decision** (#1230). It takes the
   wire seat ADR-0084 §3 and ADR-0094 §2 hold open — a spoke process that reaches
