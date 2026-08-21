@@ -14,13 +14,26 @@
   is prose only. §3 is the surface: **one field on `TurnOutcome`**. The
   implementation is a separate lane against this ADR once it is merged (golden
   rule 5, ADR-0015 §5).
-- **Amends no ADR and supersedes none.** ADR-0084 §4 anticipates this document's
-  kind in terms — "the exact set, the field layouts and the method signatures are
-  ratified by a follow-on contract ADR — not chosen by the implementing lane" —
-  so adding a field to a promoted type under a ratified ADR is the mechanism
-  ADR-0084 §4 provided rather than a change to it. ADR-0085 §4's twenty-four
-  promoted types and their normative fields gain one field on one type by this
-  ADR's own clause; no other field, type or method signature is touched.
+- **Amends no ADR and supersedes none, and the case worth arguing is ADR-0085 §4.**
+  That section's Group A table lists `TurnOutcome`'s four fields, and after this
+  ADR the tree has five — so the question is whether adding a field to a type
+  ADR-0085 §4 promoted changes what ADR-0085 decided (ADR-0070 §1: "anything a
+  reader would act on differently"). It does not, and the corpus has already
+  settled this shape twice on the record. **ADR-0085 §4's Group F row for
+  `Disposition` lists five members; the tree has seven.** `INVALID_PARAMETERS` was
+  added by ADR-0145 §4 and `EGRESS_UNBINDABLE` by ADR-0152 §9, each on its own
+  authority; **neither recorded a supersession against ADR-0085**, and ADR-0145
+  does not cite ADR-0085 at all. `Disposition`'s own docstring in `core/types.py`
+  names those two ADRs as the record, which is where the record belongs: with the
+  ADR that decided the member, not with the one that moved the type into `core`.
+  ADR-0085 §4's decision is *which types promote and in what shape at that moment*,
+  and a reader implementing ADR-0085 alone still implements it correctly. This ADR
+  follows that settled practice rather than opening a third way of doing it.
+- **The consequence is disclosed rather than hidden:** ADR-0085 §4's Group A
+  `TurnOutcome` row will read short against the tree, exactly as its Group F
+  `Disposition` row has since ADR-0145. `core/types.py` carries the pointer, as it
+  does for `Disposition`. Nothing in ADR-0085 is edited by this change — it is
+  outside this ADR's lane and, on the reading above, owed no record.
 - **Nothing here is cited toward the `tools/` egress seam.** ADR-0154 §2's clauses
   stand whole, ADR-0017 §3's fourteen conditions are neither discharged nor
   relaxed, no tool is registered and no destination is approved. §1 argues
@@ -251,6 +264,11 @@ the other thing it is.
 precise meaning and a blank string would be a third state meaning the same thing
 less legibly — the reasoning `NotificationCandidate.summary` already applies to
 the one line a user is told.
+
+> **Normative.** The field's docstring names this ADR as the decision that added
+> it, as `Disposition`'s names ADR-0145 §4 and ADR-0152 §9 for the members they
+> added. That pointer is what keeps ADR-0085 §4's Group A table findable from the
+> tree once the two diverge (header).
 
 > **Normative.** No other `core` type gains a field, member or discriminator for
 > the answer. Specifically: `StepExecution.output` does not carry it,
