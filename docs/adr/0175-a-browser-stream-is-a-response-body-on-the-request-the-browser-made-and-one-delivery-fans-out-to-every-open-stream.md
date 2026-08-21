@@ -1,6 +1,6 @@
 # 175. A browser stream is a response body on the request the browser made, and one delivery fans out to every open stream
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-21
 
 - **This is `track:web-client` milestone 14's surface decision** (#1230). Its
