@@ -287,11 +287,33 @@ class _OpenStream:
 
     writer: asyncio.StreamWriter
     delivery: DeliveryStream | None = None
+    driver: asyncio.Task[Any] | None = None
 
     def end(self) -> None:
-        """End this stream now, tolerating a connection that is already gone."""
+        """End this stream now, tolerating a connection that is already gone.
+
+        **Closing the writer is not enough on its own, and the case that shows it is
+        an answer stream waiting on its first value.** ``converse_streaming`` may be
+        composing when the session expires; a closed socket does not interrupt an
+        ``async for``, so the iteration — and with it the hub connection ADR-0175 §7
+        counts against ``gateway_max_hub_connections`` — would outlive the session by
+        however long the turn took. Cancelling the task that drives the stream is what
+        makes §7's "the gateway ends every stream a session held at the moment that
+        session ends" true of the resources as well as of the bytes: the cancellation
+        unwinds through ``closing_stream``, which closes the engine's iterator, and
+        through the body's own ``finally``, which gives the slot back.
+
+        The driver is the connection's handler task, so cancelling it ends the
+        connection too — which is right, because the stream *is* the response body on
+        it. A task never cancels itself: a request that finds its own session expired
+        is being served on a connection that has no stream open, so the guard is
+        belt-and-braces rather than load-bearing, and it is cheaper than reasoning
+        about it again later.
+        """
         if self.delivery is not None:
             self.delivery.abandon()
+        if self.driver is not None and self.driver is not asyncio.current_task():
+            self.driver.cancel()
         with contextlib.suppress(ConnectionError, OSError):
             self.writer.close()
 
@@ -310,10 +332,19 @@ class _Streamed:
         head: The head to write before the first piece.
         body: Writes the pieces. It owns everything it registered and releases it on
             every exit, early ones included.
+        abandon: Releases what *deciding* to stream took, for the one path on which
+            ``body`` never runs — a peer that went away before the head could be
+            written. The two are mutually exclusive: the head either reaches the
+            browser and ``body`` owns the release, or it does not and this does.
+            Without it a browser that hangs up at exactly the wrong moment leaks the
+            hub slot ADR-0175 §7 counts, and on a delivery stream leaves a poll
+            running for a stream nobody is reading — which is the "while and only
+            while" of §4 quietly broken by an error path.
     """
 
     head: StreamHead
     body: Callable[[asyncio.StreamWriter], Awaitable[None]]
+    abandon: Callable[[], None]
 
 
 class Gateway:
@@ -591,6 +622,21 @@ class Gateway:
             answer: What to stream.
             closing: Whether the connection is closed once this completes.
 
+        **The head is written in its own attempt**, because a peer that went away
+        before it landed is the one path on which ``body`` never runs — and ``body``
+        is what releases the hub slot and unregisters the delivery stream that
+        *deciding* to answer already took. Losing that release is not a slow leak: a
+        browser hanging up at that instant would hold one of
+        ``gateway_max_hub_connections`` for the process's whole life (ADR-0175 §7),
+        and on a delivery stream would leave a poll running for a reader that never
+        existed, which is §4's "while and only while at least one delivery stream is
+        open" broken by an error path rather than by a rule.
+
+        Args:
+            writer: The connection's writer.
+            answer: What to stream.
+            closing: Whether the connection is closed once this completes.
+
         Returns:
             Whether the connection survived. ``False`` where the peer went away,
             which is an ordinary end for a stream and not a fault to report.
@@ -598,6 +644,10 @@ class Gateway:
         try:
             writer.write(render_stream_head(replace(answer.head, close=closing), policy=_POLICY))
             await writer.drain()
+        except ConnectionError, OSError:
+            answer.abandon()
+            return False
+        try:
             await answer.body(writer)
             writer.write(render_stream_end())
             await writer.drain()
@@ -837,6 +887,7 @@ class Gateway:
             body=partial(
                 self._answer_body, handle=handle, utterance=utterance, conversation=conversation
             ),
+            abandon=self._give_hub_slot,
         )
 
     async def _answer_body(
@@ -847,8 +898,13 @@ class Gateway:
         utterance: str,
         conversation: str | None,
     ) -> None:
-        """Write one streamed turn, releasing everything it took on every exit."""
-        held = _OpenStream(writer=writer)
+        """Write one streamed turn, releasing everything it took on every exit.
+
+        The driver is this connection's own task, recorded so that ending the session
+        that admitted the stream can cancel an iteration that is still waiting on its
+        first value (ADR-0175 §7, :meth:`_OpenStream.end`).
+        """
+        held = _OpenStream(writer=writer, driver=asyncio.current_task())
         self._register(handle, held)
         try:
             await self._pump_answer(writer, utterance=utterance, conversation=conversation)
@@ -902,13 +958,14 @@ class Gateway:
         return _Streamed(
             head=StreamHead(content_type=streams.MEDIA_TYPE),
             body=partial(self._delivery_body, handle=handle, stream=opened),
+            abandon=partial(self._deliveries.close, opened),
         )
 
     async def _delivery_body(
         self, writer: asyncio.StreamWriter, *, handle: SessionHandle, stream: DeliveryStream
     ) -> None:
         """Write one delivery stream, closing the poll with the last one (§4, §5)."""
-        held = _OpenStream(writer=writer, delivery=stream)
+        held = _OpenStream(writer=writer, delivery=stream, driver=asyncio.current_task())
         self._register(handle, held)
         try:
             await write_stream(writer, stream, frame=_frame)

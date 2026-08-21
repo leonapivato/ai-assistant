@@ -38,6 +38,7 @@ from ai_assistant.core.types import (
     TurnOutcome,
     TurnResult,
 )
+from ai_assistant.interfaces.gateway.http import Request, Response
 from ai_assistant.interfaces.gateway.server import _ASSISTANT_PATHS, Gateway
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire.errors import HubUnavailableError
@@ -880,3 +881,146 @@ def test_the_surface_resolves_onto_five_operations_and_the_gateways_own_poll() -
         "forget_conversation",
         "delivery-stream",
     }
+
+
+# --- what a peer that goes away at the wrong moment must not cost ------------
+
+
+class _Stalling(FakeAssistantEngine):
+    """An engine that never reaches its first chunk until a test lets it."""
+
+    def __init__(self) -> None:
+        """Start with nothing composed and nothing closed."""
+        super().__init__()
+        self.composing = asyncio.Event()
+        self.closed = asyncio.Event()
+
+    def converse_streaming(
+        self,
+        utterance: EncodableText,
+        *,
+        timeout: timedelta,
+        conversation_id: Identifier | None = None,
+    ) -> AsyncIterator[ReplyChunk | TurnOutcome]:
+        """Compose forever, recording the close the caller owes."""
+        self.calls.append(("converse_streaming", {"utterance": utterance}))
+
+        async def stalled() -> AsyncIterator[ReplyChunk | TurnOutcome]:
+            try:
+                self.composing.set()
+                await asyncio.Event().wait()
+                yield ReplyChunk(text="never")  # pragma: no cover — the wait never ends
+            finally:
+                self.closed.set()
+
+        return stalled()
+
+
+class _GoneWriter:
+    """A connection the peer closed before the stream's head could be written.
+
+    The narrowest possible subject: ``_write_stream`` is the only place that decides
+    what a failed *head* costs, and the failure it turns on is a ``drain`` that
+    raises — which no real socket can be made to do on cue.
+    """
+
+    def __init__(self) -> None:
+        """Start open, and record whether the gateway closed it."""
+        self.closed = False
+        self.written = b""
+
+    def write(self, payload: bytes) -> None:
+        """Take the bytes; the peer is gone but the transport does not say so yet."""
+        self.written += payload
+
+    async def drain(self) -> None:
+        """Fail the way a reset connection fails."""
+        msg = "peer went away"
+        raise ConnectionResetError(msg)
+
+    def close(self) -> None:
+        """Record the close."""
+        self.closed = True
+
+
+async def _fail_the_head(one: Harness, method: str, path: str, payload: dict[str, Any]) -> bool:
+    """Decide one streamed request, then lose the peer before its head lands."""
+    request = Request(
+        method=method,
+        path=path,
+        headers=(("x-assistant-session", one.header_half),),
+        body=json.dumps(payload).encode(),
+    )
+    handle = one.gateway._sessions.handle(one.header_half)
+    assert handle is not None
+    decided = (
+        one.gateway._ask_streaming(request, handle)
+        if path == "/ask/stream"
+        else one.gateway._delivery_stream(handle)
+    )
+    assert not isinstance(decided, Response)
+    return await one.gateway._write_stream(
+        _GoneWriter(),  # type: ignore[arg-type] # a writer is what it writes
+        decided,
+        closing=False,
+    )
+
+
+async def test_a_turn_stream_whose_head_never_landed_gives_its_hub_slot_back() -> None:
+    """§7 counts a stream's hub connection against ``gateway_max_hub_connections``,
+    and a browser that hangs up between its request and the head is the one path on
+    which the body that releases that slot never runs at all.
+
+    At a ceiling of one the leak is immediate and total: the next turn is refused for
+    a connection nobody holds. Asserted through the ceiling rather than through a
+    counter, because the ceiling is what the owner would actually meet.
+    """
+    async with _harness(gateway_max_hub_connections=1) as one:
+        assert (
+            await _fail_the_head(one, "POST", "/ask/stream", {"utterance": "what is on"}) is False
+        )
+
+        status, _ = await one.whole("POST", "/ask", {"utterance": "what is on today"})
+
+        assert status == 200
+
+
+async def test_a_delivery_stream_whose_head_never_landed_leaves_no_poll_running() -> None:
+    """§4: the gateway holds a poll "while and only while at least one delivery stream
+    is open" — a rule an error path must not be able to break.
+
+    A stream registered and then never written to is a reader that never existed, and
+    a poll held for it would take an entry, mint a ``delivery_id`` and start a lease
+    (ADR-0131 §2a) on nobody's behalf. The ceiling is again the observable: at one, a
+    poll still running is a turn refused.
+    """
+    engine = _Delivering([None])
+    async with _harness(engine, gateway_max_hub_connections=1) as one:
+        assert await _fail_the_head(one, "GET", "/deliveries", {}) is False
+
+        status, _ = await one.whole("POST", "/ask", {"utterance": "what is on today"})
+
+        assert status == 200
+
+
+async def test_a_session_ending_closes_an_answer_stream_still_waiting_to_compose() -> None:
+    """§7: "A stream ends no later than the session that admitted it, and the gateway
+    ends every stream a session held at the moment that session ends."
+
+    Closing the socket does not reach an ``async for`` that is waiting on the engine,
+    so a turn still composing when its session expired would hold both the iterator
+    and the hub connection §7 counts — for however long the turn took. Ending the
+    stream cancels the task driving it, which unwinds through ``closing_stream``
+    (ADR-0173's own obligation, §3) and through the release the body owes.
+    """
+    engine = _Stalling()
+    async with _harness(engine, gateway_session_idle_timeout=timedelta(minutes=5)) as one:
+        reader, _, status = await one.send("POST", "/ask/stream", {"utterance": "what is on"})
+        assert status == 200
+        await asyncio.wait_for(engine.composing.wait(), timeout=5)
+
+        one.clock.advance(timedelta(minutes=6))
+        one.timers.fire_all()
+
+        await asyncio.wait_for(engine.closed.wait(), timeout=5)
+        assert await _read_all(reader) == []
