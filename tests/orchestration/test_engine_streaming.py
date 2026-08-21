@@ -5,6 +5,14 @@ transport. The stage's own — §5's coalescing and its own half of §3's ceilin
 in ``test_composing.py``; §1's frame sequence and §6's "same outcome in process and
 across the wire" are in ``tests/wire/test_streamed_turns.py``.
 
+**§10 is not here and is not missing.** ADR-0173 §14 partitions its own
+obligations across lanes in terms — "§§1-4 and §11 are a ``wire``-and-``orchestration``
+change against that contract. **§10 is an ``interfaces/`` change**" — so the
+neutralisation clauses and the split-markup boundary test §14 assigns to "the adapter
+lane" belong to the CLI change tracked in issue #1348, not to this one. The engine
+half of what that lane needs is what these cases pin: the fourth outcome shape it has
+to render, and the join property that lets it accumulate before it neutralises.
+
 **The ceiling cases measure rather than assume.** ADR-0173 §3 says "the implementing
 lane measures it rather than guessing at a fraction of the frame size", and a test
 that hard-coded a byte figure would be asserting this lane's arithmetic against
