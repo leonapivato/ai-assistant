@@ -31,6 +31,15 @@ how to start the hub. It does not spawn the hub (ruling 3) and does not build an
 in-process engine (ruling 5) — the latter now also mechanically impossible, since
 ``interfaces`` may no longer import ``app``.
 
+**One call may read many frames, and that is the largest single cost ADR-0173
+carries** (§11). :meth:`HubClient._call` writes one frame and reads exactly one;
+:meth:`HubClient._stream_call` reads until a terminal frame, checking **every**
+frame's correlation id rather than only the last, and resolving the union it hands
+back by frame kind rather than by inspecting a payload (ADR-0173 §4). The connection
+is still one per call and still serial — there is one *request* — and closing the
+iterator is what hangs it up, which is why the contract states that obligation on
+the caller rather than leaving it to be discovered.
+
 **Two transports, one client** (ADR-0124 §1). Everything above holds on the remote
 transport too, so :class:`HubClient` carries it and the two concrete clients differ
 in exactly one method: how a connection is opened, who is authenticated on the

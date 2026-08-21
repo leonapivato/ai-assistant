@@ -60,6 +60,19 @@ stage cannot use as an answer. Both are classified here deliberately rather than
 caught by breadth — an unexpected exception from this stage's own code is a defect
 and propagates, because a stage that caught ``Exception`` could be wholly broken
 while every turn reported the same classified-looking degradation.
+
+**Two entries, one budget** (ADR-0173 §§4, 7). :meth:`ComposingStage.compose` returns
+the answer whole through the injected ``ModelProvider``;
+:meth:`ComposingStage.compose_streaming` yields it as it arrives through the injected
+``StreamingCompleter``, ADR-0173 §5's sibling seam. A pass that owes an answer
+originates **exactly one** model call, spent at whichever seam that pass uses, and
+the stage never falls back from one to the other: before the first chunk that would
+be a second call the budget forbids, and after it, it would produce a complete answer
+that does not begin with the text the user already read. Everything else is shared —
+the same prompt, the same attribution, the same closed failure set — and the
+streaming path adds two things the whole one cannot have: ADR-0173 §5's coalescing,
+which joins a blank delta to the text beside it rather than dropping it, and §3's
+ceiling, which bounds the text held as well as the text sent.
 """
 
 from __future__ import annotations
