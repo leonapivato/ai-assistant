@@ -1,6 +1,6 @@
 # 168. The gateway serves one device's browsers over loopback, and a web session is minted at the gateway and dies with it
 
-- Status: Partially superseded by ADR-0174 (§2's loopback-only bind clause, §2's one-gateway-one-device clause, §4's sole-admitter clause, and §6's exclusive record enumeration, each only as it reaches a separately configured remote browser listener)
+- Status: Partially superseded by ADR-0174 (§2's loopback-only bind clause, §2's one-gateway-one-device clause, §4's sole-admitter clause, and §6's exclusive record enumeration, each only as it reaches a separately configured remote browser listener) and ADR-0175 (§8's read-deadline clause, only as it reaches a connection carrying a response the gateway has not finished writing)
 - Date: 2026-08-21
 - Partially superseded: 2026-08-21 by ADR-0174 — **four clauses, one listener,
   and the deferral §2 wrote for exactly this is discharged rather than replaced.**
@@ -96,6 +96,52 @@
   nullable is untouched by three new fields outside its table. §10's in-repo
   bundle is what ADR-0174 §1 names as the second half of the new boundary; §11,
   §12 and §13 stand exactly as written.
+
+- **Partially superseded: 2026-08-21** by ADR-0175 — **one sentence of §8, and
+  only where a response is still being written.** ADR-0175 is milestone 14's
+  surface decision, taken for `track:web-client` (#1230), and it carries every
+  message the gateway sends a browser on a **stream**: the body of the response to
+  one ordinary request the browser made.
+
+  **Replaced — §8's read-deadline sentence, only as it reaches a connection
+  carrying a response the gateway has not finished writing.** "The gateway closes
+  it `gateway_read_timeout` after the last complete request it carried." ADR-0175
+  §7 rules that such a connection is **not idle** and runs the deadline from the
+  completion of the last **response** the connection carried instead, closing no
+  connection while a stream on it is open. A reader holding only §8 ends every
+  stream ADR-0175 defines thirty seconds after its request arrived — not a stricter
+  reading of that surface but a gateway on which it cannot exist — so this fails
+  ADR-0070 §1's first limb.
+
+  **Not replaced — every other clause of §8**, on both listeners as ADR-0174 §8
+  requires: the ten figures and their load-time refusals, the rule that none of
+  them is nullable, the admitted-versus-unadmitted partition, the close on a
+  refusal, the one-request bound and `gateway_read_timeout`'s own reach on an
+  unadmitted connection, `gateway_max_browser_connections`,
+  `gateway_max_pending_connections`, `gateway_max_hub_connections` — which
+  ADR-0175 §7 applies to the gateway's delivery connection rather than widening —
+  and `gateway_max_request_bytes`, which bounds a request and not a response.
+  ADR-0175 §8 adds an eleventh field outside that table, which is the position
+  ADR-0174 §8's three were in.
+
+  **Not replaced — §§1–7 and §§9–13, none of them.** §1's biconditional is
+  examined in ADR-0175 §12 and found to survive whole: a delivery stream is
+  answered from calls on the promoted surface and from nothing else, and §1 makes
+  no claim that each request originates one. §3's two pre-session exceptions keep
+  their extent; §4's session bounds are applied rather than narrowed, and ADR-0175
+  §7 refuses to let a held-open stream refresh the idle timeout for that reason;
+  §5's one bootstrap value and one mint per process are untouched and stay
+  milestone 16's to revisit; §6's four request classes gain no fifth — a streamed
+  turn and a delivery stream are both `assistant-request` — and its record
+  enumeration gains nothing beyond ADR-0174 §3's one addition; §7's `Host` and
+  `Origin` checks bind unchanged, and its refusal of a connection upgrade is
+  applied rather than read as authorising one. §9's legibility is relied on three
+  times over. §10's in-repo bundle is what makes ADR-0175 §2 able to leave the
+  framing to the implementing lane. §11 and §13 are untouched, and three of §12's
+  deferrals — the browser-facing surface with its push carrier, the fan-out of one
+  delivery to several browsers, and (with ADR-0174 §11) the streaming carrier — are
+  **discharged by the milestone §12 named** rather than replaced, which is
+  ADR-0083 §15's stacked addition on its own test. §12's remaining deferrals stand.
 
 - **This is `track:web-client` milestone 13's decision** (#1230). It takes the
   wire seat ADR-0084 §3 and ADR-0094 §2 hold open — a spoke process that reaches
