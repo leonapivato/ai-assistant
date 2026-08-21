@@ -84,6 +84,7 @@ from ai_assistant.core.errors import (
     UnusableIdentityError,
 )
 from ai_assistant.core.protocols import AssistantEngine
+from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     ACCOUNT_IDENTITY_MAX_BYTES,
     DEFAULT_PAGE_SIZE,
@@ -98,12 +99,14 @@ from ai_assistant.core.types import (
     GrantScope,
     MemoryKind,
     ProvisioningState,
+    ReplyChunk,
+    TurnOutcome,
     secret_value,
 )
 from ai_assistant.testing import Disclosure, SecretMethod
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Callable
 
     from ai_assistant.core.types import SecretValue
     from ai_assistant.testing import FakeConnectionProvisioner
@@ -189,6 +192,19 @@ def _credential(plaintext: str = "hunter2-correct-horse") -> SecretValue:
     never runs, which is precisely the hazard §3 names.
     """
     return secret_value(SecretStr(plaintext))
+
+
+async def _drain(stream: AsyncIterator[ReplyChunk | TurnOutcome]) -> list[ReplyChunk | TurnOutcome]:
+    """Read one streamed turn to its end, closing it however it ends (ADR-0173 §4)."""
+    async with closing_stream(stream) as values:
+        return [value async for value in values]
+
+
+async def _outcome_of(stream: AsyncIterator[ReplyChunk | TurnOutcome]) -> TurnOutcome:
+    """The terminal outcome of one streamed turn, which §4 makes always the last."""
+    terminal = (await _drain(stream))[-1]
+    assert isinstance(terminal, TurnOutcome)
+    return terminal
 
 
 def _feedback(content: str) -> FeedbackEvent:
@@ -715,6 +731,116 @@ class AssistantEngineContract(ABC):
             "and again", timeout=_PATIENT, conversation_id=outcome.conversation_id
         )
         assert continued.conversation_id == outcome.conversation_id
+
+    # --- ADR-0173 §4: the streaming turn call --------------------------------
+
+    async def test_a_streamed_turn_ends_on_exactly_one_outcome(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§4: "zero or more chunks, then **exactly one** ``TurnOutcome``".
+
+        Asserted of every implementation because the terminal value is what §3 makes
+        authoritative: a stand-in that yielded two outcomes, or none, would leave a
+        client either choosing between answers or holding none — and both are states
+        the union's one-to-one map onto the frames is supposed to make unreachable.
+        """
+        produced = await _drain(engine.converse_streaming("hello", timeout=_PATIENT))
+        assert produced, "a streamed turn yields at least its outcome"
+        assert isinstance(produced[-1], TurnOutcome)
+        assert all(isinstance(value, ReplyChunk) for value in produced[:-1])
+
+    async def test_the_terminal_reply_is_the_join_of_the_chunks(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§3: where the exchange streamed chunks, ``reply`` is what they conveyed.
+
+        "Joined in the order they were written" — so a chunk-reading client and a
+        chunk-ignoring one hold the same answer, which is the whole reason §3 makes
+        the terminal frame authoritative rather than the sequence. An implementation
+        whose chunks say something the outcome does not repeat fails here.
+        """
+        produced = await _drain(engine.converse_streaming("hello", timeout=_PATIENT))
+        outcome = produced[-1]
+        assert isinstance(outcome, TurnOutcome)
+        joined = "".join(value.text for value in produced[:-1] if isinstance(value, ReplyChunk))
+        assert joined == (outcome.reply or "")
+
+    async def test_a_streamed_turn_reports_the_conversation_it_ran_under(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§8: resume is carried identically — the same argument, the same id back.
+
+        The milestone's own exit test is a *resumed* streamed turn, and ADR-0173 §8
+        adds no history parameter and no second read to reach it: a second stream
+        under the id the first returned continues that conversation.
+        """
+        first = await _outcome_of(engine.converse_streaming("hello", timeout=_PATIENT))
+        assert first.conversation_id is not None
+        second = await _outcome_of(
+            engine.converse_streaming(
+                "and again", timeout=_PATIENT, conversation_id=first.conversation_id
+            )
+        )
+        assert second.conversation_id == first.conversation_id
+
+    async def test_a_streamed_turn_refuses_an_unknown_conversation(
+        self, engine: AssistantEngine
+    ) -> None:
+        """§4: "subject to every clause ``converse`` declares", refusals included.
+
+        ADR-0074 §1's refusal is the one a streaming twin is most likely to lose,
+        because it sits behind an iterator a lazy implementation never starts. So it
+        is asserted by *driving* the iterator, which is what the Protocol tells a
+        caller to do.
+        """
+        with pytest.raises(UnknownConversationError):
+            await _outcome_of(
+                engine.converse_streaming("hello", timeout=_PATIENT, conversation_id="no-such-id")
+            )
+
+    async def test_a_streamed_turn_refuses_a_blank_conversation_id_locally(
+        self, engine: AssistantEngine
+    ) -> None:
+        """ADR-0085 §9 on the streaming entry: refused **before any I/O**.
+
+        A refusal an implementation deferred into the iteration would still raise,
+        so this asserts the stronger thing the clause actually says: the call itself
+        raises, before anything is driven.
+        """
+        with pytest.raises(ValueError, match="conversation_id"):
+            engine.converse_streaming("hello", timeout=_PATIENT, conversation_id="   ")
+
+    async def test_a_streamed_turn_measures_its_arguments_like_the_whole_one(
+        self, tiny_engine: AssistantEngine
+    ) -> None:
+        """Clause 5 on the streaming entry, in the argument direction.
+
+        ADR-0173 §11 restates ADR-0085 §8c for a method with no single result, and
+        the *argument* half is unchanged — so an utterance the whole call refuses is
+        one the streaming call refuses too, and by the same class.
+
+        **Driven rather than merely called**, unlike the blank-identifier case
+        above, and the difference is ADR-0084 §3's rather than this suite's: the
+        limit a client enforces is "the number it was told", which arrives in the
+        handshake. A wire implementation cannot measure before it has connected, so
+        requiring the refusal *from the call* would require it to be more eager than
+        the contract is. A blank identifier needs no such knowledge, which is why
+        ADR-0085 §9 puts that one before any I/O and not this one.
+        """
+        with pytest.raises(OversizedValueError):
+            await _drain(tiny_engine.converse_streaming("x" * (_TINY_LIMIT + 1), timeout=_PATIENT))
+
+    async def test_a_streamed_turn_is_closable_part_way(self, engine: AssistantEngine) -> None:
+        """§4: a caller that stops reading closes, and closing must be supported.
+
+        The clause obliges the *caller* to close, which is only meaningful if every
+        implementation's iterator can be closed — and a client across a transport is
+        where that is easiest to get wrong, since closing has a connection to hang
+        up rather than a generator to finish.
+        """
+        stream = engine.converse_streaming("hello", timeout=_PATIENT)
+        async with closing_stream(stream) as values:
+            assert await anext(values) is not None
 
     # --- ADR-0078 §8: only an open question is answerable --------------------
 

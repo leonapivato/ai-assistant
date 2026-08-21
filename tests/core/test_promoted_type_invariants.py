@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     QuestionState,
     QueuedQuestion,
     QueueOutcome,
+    ReplyChunk,
     StepOutcome,
     TimeOfDay,
     TurnOutcome,
@@ -291,6 +292,46 @@ def _parked() -> StepOutcome:
         step_id="s-1",
         confirmation=_confirmation(),
     )
+
+
+class TestReplyChunk:
+    """ADR-0173 §2's one member, and the two it deliberately refuses to have."""
+
+    def test_a_chunk_carries_its_text(self) -> None:
+        """The ordinary case, unnormalised: a chunk is a rendering of the answer."""
+        assert ReplyChunk(text=" world").text == " world"
+
+    def test_a_blank_chunk_is_refused(self) -> None:
+        """§2: "A chunk conveying no text is not written at all".
+
+        ``NonBlankEncodableText`` rather than ``EncodableText``, for ADR-0170 §3's
+        reason one level down: admitting an empty chunk would oblige every client to
+        decide whether it means "nothing yet" or "something ended", and a provider
+        that yields an empty delta is coalesced by the stage instead.
+        """
+        with pytest.raises(ValidationError):
+            ReplyChunk(text="   ")
+        with pytest.raises(ValidationError):
+            ReplyChunk(text="")
+
+    def test_a_chunk_carries_no_sequence_number_and_no_final_flag(self) -> None:
+        """§2 refuses both on ADR-0084 §3's own argument against a second length.
+
+        Order is already fixed by the byte order of a length-prefixed sequence on
+        one connection, so an index would be a second claim about the same fact —
+        and ``FrameKind`` already discriminates the terminal frame, so a frame that
+        is a chunk by kind and final by flag is two answers to one question.
+        Asserted over the whole field set rather than by naming two members, so a
+        *third* claim added later fails here too.
+        """
+        assert set(ReplyChunk.model_fields) == {"text"}
+        with pytest.raises(ValidationError):
+            ReplyChunk(text="x", index=0)  # type: ignore[call-arg]  # extra="forbid"
+
+    def test_a_chunk_is_frozen(self) -> None:
+        """Every promoted model is, and a chunk crossing the wire is no exception."""
+        with pytest.raises(ValidationError):
+            ReplyChunk(text="x").text = "y"
 
 
 class TestTurnOutcomeReply:
