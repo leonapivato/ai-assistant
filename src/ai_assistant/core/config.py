@@ -1494,6 +1494,35 @@ class Settings(BaseSettings):
             "peer cannot fake."
         ),
     )
+    # **The eleventh figure, and ADR-0175 §8 is the ADR that names it.** ADR-0168 §8
+    # named ten and ADR-0172 added none; this one is the first field a later decision
+    # adds to the block, and it is added rather than derived because "a 'bounded
+    # default' with no figure is two conforming stores handing the same continuation
+    # different history" (ADR-0084 §3, ADR-0083 §7).
+    #
+    # **One figure paces two things on purpose** (§8). It is what the gateway hands
+    # ``next_notification`` as its ``budget``, and it is the interval within which
+    # ADR-0175 §4 obliges a write on every open delivery stream — because the write a
+    # browser observes *is* the completion of the poll the budget bounds. A second
+    # heartbeat figure could disagree with this one and neither disagreement has a
+    # defensible reading.
+    #
+    # **No load-time check relates it to ``hub_max_notification_budget``** (§8), which
+    # is another process's setting and may be another machine's. The default sits an
+    # order of magnitude below that ceiling's own 300 s default so an owner who tunes
+    # one has a wide margin; meeting the ceiling is a request the hub received and
+    # declined, reported as one under ADR-0168 §9.
+    gateway_notification_budget: _DurationSetting = Field(
+        default=timedelta(seconds=20),
+        gt=timedelta(0),
+        description=(
+            "How long the gateway asks the hub to hold a notification poll, and the "
+            "interval within which it writes on every open delivery stream (ADR-0175 "
+            "§4, §8). Positive, never nullable, and takes no value meaning 'off'. Not "
+            "validated against hub_max_notification_budget, which is another process's "
+            "setting; a budget the hub declines is reported as a declined request."
+        ),
+    )
 
     @model_validator(mode="after")
     def _the_gateway_bounds_can_bind(self) -> Settings:

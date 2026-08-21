@@ -25,7 +25,19 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from functools import partial
-from typing import Final, Protocol
+from typing import Final, NewType, Protocol
+
+#: What the table calls one live session, for a caller that must associate
+#: something with it and end that thing when it does (ADR-0175 §7: "the gateway
+#: ends every stream a session held at the moment that session ends").
+#:
+#: **It is not a session value and not a verifier** — it is an internal table key,
+#: minted from :func:`secrets.token_hex` and never disclosed to a browser — so
+#: handing one to a caller inside this process is not the disclosure ADR-0168 §4
+#: forbids. It is still process memory that dies with the process, and nothing puts
+#: one in a record: ADR-0168 §6's enumeration of what a record may carry does not
+#: name it, and ``records.py`` is handed no session fact at all.
+SessionHandle = NewType("SessionHandle", str)
 
 #: How many random bytes each half and the bootstrap value carry. ADR-0168 §4 and
 #: §5 require "at least 128 bits drawn from the operating system's cryptographic
@@ -166,6 +178,7 @@ class SessionTable:
         now: Callable[[], datetime],
         defer: Defer,
         mint_value: Callable[[], str] = mint_value,
+        on_ended: Callable[[SessionHandle], None] | None = None,
     ) -> None:
         """Build an empty table.
 
@@ -178,6 +191,12 @@ class SessionTable:
             defer: How a session's death is scheduled.
             mint_value: The entropy source, injected for the same reason as the
                 clock. The default is the operating system's.
+            on_ended: Called with a session's handle the moment that session ends,
+                by whichever of its two bounds and on the way down alike. It is what
+                ADR-0175 §7's "the gateway ends every stream a session held at the
+                moment that session ends" hangs on: without a notification the
+                gateway would learn of an ended session only on the next request
+                that presented it, which a held-open stream never sends.
         """
         self._max_sessions = max_sessions
         self._ttl = ttl
@@ -185,7 +204,8 @@ class SessionTable:
         self._now = now
         self._defer = defer
         self._mint_value = mint_value
-        self._sessions: dict[str, _Session] = {}
+        self._on_ended = on_ended
+        self._sessions: dict[SessionHandle, _Session] = {}
 
     def __len__(self) -> int:
         """How many sessions are live."""
@@ -206,7 +226,7 @@ class SessionTable:
             return None
         values = SessionValues(cookie_half=self._mint_value(), header_half=self._mint_value())
         moment = self._now()
-        key = secrets.token_hex(8)
+        key = SessionHandle(secrets.token_hex(8))
         session = _Session(
             cookie_verifier=verifier(values.cookie_half),
             header_verifier=verifier(values.header_half),
@@ -261,19 +281,50 @@ class SessionTable:
         self._rearm(key, session)
         return Admission.ADMITTED
 
+    def handle(self, header_half: str) -> SessionHandle | None:
+        """The live session that header half names, for a caller that must hold it.
+
+        A second lookup rather than a member on :meth:`admit`'s result, and the
+        cost is bounded by ``gateway_max_sessions``: only the two stream shapes
+        ADR-0175 §1 defines ever ask, because only they outlive the request that
+        established them. Every ordinary request pays nothing.
+
+        **It admits nothing.** The verdict is :meth:`admit`'s alone, and this
+        neither refreshes the idle clock nor consults either bound — ADR-0175 §7:
+        "``gateway_session_idle_timeout`` is refreshed by a request the gateway
+        admits and by nothing else".
+
+        Args:
+            header_half: The value the front end sent as a header.
+
+        Returns:
+            The handle, or ``None`` where no live session verifies it.
+        """
+        found = self._find(header_half)
+        return None if found is None else found[0]
+
     def clear(self) -> None:
         """End every session and cancel every timer (ADR-0168 §4).
 
         "Every session ends when the gateway process ends." This is what the
         gateway calls on the way down, so that a process shutting down leaves no
-        timer armed and no verifier behind.
+        timer armed and no verifier behind — and each handle is announced as it
+        goes, so a stream the session held ends with it (ADR-0175 §7).
         """
+        held = tuple(self._sessions)
         for session in self._sessions.values():
             if session.timer is not None:
                 session.timer.cancel()
         self._sessions.clear()
+        for key in held:
+            self._announce(key)
 
-    def _find(self, header_half: str) -> tuple[str, _Session] | None:
+    def _announce(self, key: SessionHandle) -> None:
+        """Tell an observer one session has ended (ADR-0175 §7)."""
+        if self._on_ended is not None:
+            self._on_ended(key)
+
+    def _find(self, header_half: str) -> tuple[SessionHandle, _Session] | None:
         """The live session whose header verifier matches, with its key."""
         for key, session in self._sessions.items():
             if self._matches(session, header_half):
@@ -285,7 +336,7 @@ class SessionTable:
         """Whether ``header_half`` verifies against ``session``, in constant time."""
         return hmac.compare_digest(verifier(header_half), session.header_verifier)
 
-    def _rearm(self, key: str, session: _Session) -> None:
+    def _rearm(self, key: SessionHandle, session: _Session) -> None:
         """Schedule this session's death at the earlier of its two bounds.
 
         A session "ends at the earlier of its absolute lifetime and its idle
@@ -316,8 +367,17 @@ class SessionTable:
             session.last_used_at, self._idle_timeout
         )
 
-    def _end(self, key: str) -> None:
-        """Destroy one session, whichever of its two bounds arrived first."""
+    def _end(self, key: SessionHandle) -> None:
+        """Destroy one session, whichever of its two bounds arrived first.
+
+        The observer is told **after** the session is gone, so a callback that
+        looks the handle up finds nothing rather than a session in the act of
+        ending — and only where there was one to end, so a timer that fires twice
+        announces once.
+        """
         session = self._sessions.pop(key, None)
-        if session is not None and session.timer is not None:
+        if session is None:
+            return
+        if session.timer is not None:
             session.timer.cancel()
+        self._announce(key)
