@@ -881,3 +881,40 @@ async def test_the_streaming_seam_is_handed_the_same_prompt_the_whole_one_is() -
 def _escaped(text: str) -> int:
     """How many escaped bytes ``text`` costs the terminal frame's reply member."""
     return payloads.encoded_text_bytes(text) - payloads.JSON_STRING_QUOTE_BYTES
+
+
+async def test_a_tail_arriving_attached_to_text_is_bounded_like_any_other() -> None:
+    """§3's held bound does not depend on where the provider cut its deltas.
+
+    A provider may yield ``"ok"`` and a thousand spaces as **one** delta rather than
+    as a thousand, and the run held is identical. Checking only the blank-delta arm
+    would make the outcome a property of the segmentation, which is the property
+    this coalescer exists to remove — and it is the arm a test built from tidy
+    word-sized deltas never reaches (§14).
+    """
+    room = _escaped("ok") + 4
+    seam = FakeStreamingCompleter.yielding("ok" + " " * 20)
+    stage = ComposingStage(model=FakeModelProvider(), streaming=seam)
+
+    chunks, report = await _streamed(stage, room=room)
+
+    assert chunks == ["ok"]
+    assert report.text == "ok"
+    assert report.degraded is True
+
+
+async def test_a_tail_that_fits_leaves_the_answer_whole() -> None:
+    """The discriminating half: the bound refuses what it must and nothing else.
+
+    An ordinary answer ending in a newline is the commonest tail there is, and it
+    must not degrade a turn that had room for it.
+    """
+    room = _escaped("ok") + 4
+    seam = FakeStreamingCompleter.yielding("ok\n")
+    stage = ComposingStage(model=FakeModelProvider(), streaming=seam)
+
+    chunks, report = await _streamed(stage, room=room)
+
+    assert chunks == ["ok"]
+    assert report.text == "ok"
+    assert report.degraded is False
