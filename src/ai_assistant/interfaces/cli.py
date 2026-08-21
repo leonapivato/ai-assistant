@@ -3965,7 +3965,7 @@ def _tuned(current: NotificationPreferences, asked: _Tuning) -> NotificationPref
 # --- rendering (ADR-0042 §4, §6: escaping is the adapter's, per target) --
 
 
-def _safe(value: str) -> str:
+def _safe(value: str, *, keep_line_breaks: bool = False) -> str:
     r"""Neutralise tool-supplied data for this terminal (ADR-0042 §4).
 
     "Safe" is target-specific, so the engine carries values verbatim and each
@@ -3973,9 +3973,66 @@ def _safe(value: str) -> str:
     non-printable control characters (an ANSI escape like ``\\x1b[2J`` a terminal
     would act on) with the replacement character, and escape Rich markup so a
     value like ``[red]`` is shown, not interpreted.
+
+    **``\n`` is a replaced character by default, and that is not incidental**
+    (#1336). Almost every surface here interpolates a value into a line the CLI
+    itself authored — ``  [dim]Why:[/] {reason}``, ``  {index}. {intent}``, a
+    ``[bold cyan]{id}[/]`` under a heading — so a value carrying a newline does not
+    merely wrap: it forges a *second* line indistinguishable from one this adapter
+    wrote. That is §4's threat exactly, arriving without a single control character,
+    and eating the newline is what stops it. Every caller but :func:`_safe_prose`
+    takes this default.
+
+    Args:
+        value: The value as the engine carries it, verbatim.
+        keep_line_breaks: Whether ``\n`` survives instead of being replaced. Only
+            for a value rendered as a block of its own, where there is no
+            adapter-authored text on the line for a forged break to imitate; pass it
+            through :func:`_safe_prose`, which also settles ``\r``.
+
+    Returns:
+        The text to write to this terminal.
     """
-    cleaned = "".join(ch if ch.isprintable() or ch in "\t " else "�" for ch in value)
+    kept = "\t \n" if keep_line_breaks else "\t "
+    cleaned = "".join(ch if ch.isprintable() or ch in kept else "�" for ch in value)
     return escape(cleaned)
+
+
+def _safe_prose(value: str) -> str:
+    r"""Neutralise engine-supplied text that is *legitimately* multi-line (#1336).
+
+    **The same neutralisation, minus the one replacement prose cannot afford.** A
+    composed answer (ADR-0170 §8) is the first engine-supplied value whose newlines
+    are content rather than smuggling: it is printed as a block of its own, with no
+    label sharing its line, so a break in it forges nothing — the argument
+    :func:`_safe` records for taking the opposite default everywhere else. Before
+    the carve-out, every paragraph break in a live answer rendered ``��``. Rich
+    markup is still escaped and every other non-printable character is still
+    replaced, because those are what a terminal would *act on* and a newline is not.
+
+    **``\r`` is normalised, not kept and not replaced**, and the two failures it sits
+    between are why. A carriage return *is* a character a terminal acts on — it
+    returns the cursor to column 0, so text after it overwrites text before it,
+    which is §4's threat in its purest form and must not reach the screen. But
+    replacing it leaves ``deep work.�\nOne caveat`` for a model that simply emits
+    CRLF: the bug half-fixed. Rewriting ``\r\n`` and a lone ``\r`` to ``\n`` settles
+    both at once — it removes the character that overwrites and yields the break the
+    producer meant, and a ``\n`` can only ever *add* a line, never hide one.
+
+    **Escaping happens over the whole value, never line by line.** Neutralising each
+    line and joining with ``\n`` looks equivalent and is not: Rich's tag pattern
+    matches across a newline, so ``[red\nbold]`` survives per-line escaping intact
+    and Rich then consumes it as markup — a value that reaches the screen *emptied*
+    of what it said. So the line endings are settled first and :func:`_safe` is asked
+    once, of the whole.
+
+    Args:
+        value: The prose as the engine carries it, verbatim.
+
+    Returns:
+        The text to write to this terminal, its line structure intact.
+    """
+    return _safe(value.replace("\r\n", "\n").replace("\r", "\n"), keep_line_breaks=True)
 
 
 def _argument(value: str) -> str:
@@ -4103,9 +4160,17 @@ def _render_reply(outcome: TurnOutcome) -> None:
 
     **Neutralised before display** (ADR-0170 §8). A composed answer is
     engine-supplied text — model output, in the assistant's own voice — so it is put
-    through :func:`_safe` exactly as the confirmation content, the plan's rationale
-    and a policy's reason already are (ADR-0042 §4). Rich markup in a reply is
+    through the same neutralisation as the confirmation content, the plan's
+    rationale and a policy's reason (ADR-0042 §4). Rich markup in a reply is
     otherwise a control sequence this terminal interprets.
+
+    **Through :func:`_safe_prose`, because a reply is the first such value that is
+    legitimately multi-line** (#1336). §8's obligation is discharged unchanged —
+    Rich markup escaped, every character a terminal would act on replaced — but a
+    reply is printed as a block of its own rather than interpolated into a line this
+    adapter wrote, so its paragraph breaks forge nothing and are content. Rendering
+    them ``��``, as the shared one-line helper did, damaged every multi-paragraph
+    answer the assistant gave.
 
     **A degraded turn is rendered as a statement, never as silence** (ADR-0170 §6).
     A turn that sent an email and could not then describe it still tells the user the
@@ -4127,7 +4192,7 @@ def _render_reply(outcome: TurnOutcome) -> None:
         )
         return
     if outcome.reply is not None:
-        console.print(_safe(outcome.reply))
+        console.print(_safe_prose(outcome.reply))
 
 
 def _render_step(step: StepOutcome) -> bool:
