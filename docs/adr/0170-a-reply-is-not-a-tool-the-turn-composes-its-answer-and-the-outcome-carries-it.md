@@ -11,12 +11,12 @@
 - **It decides a `core` surface and is therefore reviewed under both lenses.**
   `CONTRIBUTING.md` → "Stop when the required reviews are green" makes a change
   contract-surface "when it is the ADR deciding that surface", even though this PR
-  is prose only. §3 is the surface: **one field on `TurnOutcome`**. The
+  is prose only. §3 is the surface: **two fields on `TurnOutcome`**. The
   implementation is a separate lane against this ADR once it is merged (golden
   rule 5, ADR-0015 §5).
 - **Amends no ADR and supersedes none, and the case worth arguing is ADR-0085 §4.**
   That section's Group A table lists `TurnOutcome`'s four fields, and after this
-  ADR the tree has five — so the question is whether adding a field to a type
+  ADR the tree has six — so the question is whether adding a field to a type
   ADR-0085 §4 promoted changes what ADR-0085 decided (ADR-0070 §1: "anything a
   reader would act on differently"). It does not, and the corpus has already
   settled this shape twice on the record. **ADR-0085 §4's Group F row for
@@ -260,7 +260,7 @@ reaches for, and it is answered rather than waved at: the stage reads the outcom
 deterministic code committed and renders prose about it. Nothing flows the other
 way.
 
-### 3. The contract surface: one field on `TurnOutcome`, and nothing else
+### 3. The contract surface: two fields on `TurnOutcome`, and nothing else
 
 #1312 delegates the question "whether any `core` type change is needed at all —
 the response envelope may already carry text, so possibly no contract surface".
@@ -275,17 +275,26 @@ four fields — `turn`, `step`, `conversation_id`, `capture_degraded` — and
 and `StepFailure.message`. Not one of them is an answer, and each is documented as
 the other thing it is.
 
-> **Normative.** `TurnOutcome` gains exactly one field: `reply`, typed
-> `NonBlankEncodableText | None`, defaulting to `None`, carrying the
-> natural-language answer the turn composed. It is the only place an answer is
-> carried.
+> **Normative.** `TurnOutcome` gains exactly two fields: `reply`, typed
+> `NonBlankEncodableText | None` and defaulting to `None`, carrying the
+> natural-language answer the turn composed; and `reply_degraded`, a `bool`
+> defaulting to `False`, saying whether composing that answer **failed** on a turn
+> that otherwise ran. `reply` is the only place an answer is carried.
 
 `NonBlankEncodableText` rather than `EncodableText`, because §4 gives `None` a
 precise meaning and a blank string would be a third state meaning the same thing
 less legibly — the reasoning `NotificationCandidate.summary` already applies to
 the one line a user is told.
 
-> **Normative.** The field's docstring names this ADR as the decision that added
+**`reply_degraded` is the third of a set, not a new idea.** `TurnResult` already
+carries `memory_degraded` for a retrieval that failed and `TurnOutcome` already
+carries `capture_degraded` for a record that could not be written. Each says the
+same kind of thing: a late stage failed, the turn is still worth returning, and the
+user is told rather than left to infer it. §8 is where composition earns its own,
+and the argument there is `capture_degraded`'s own — "failing would throw away
+[what] the user already has".
+
+> **Normative.** Each field's docstring names this ADR as the decision that added
 > it, as `Disposition`'s names ADR-0145 §4 and ADR-0152 §9 for the members they
 > added. That pointer is what keeps ADR-0085 §4's Group A table findable from the
 > tree once the two diverge (header).
@@ -321,23 +330,36 @@ this ADR does not depend on the planner learning to emit an empty one (#1315).
 
 ### 4. When `reply` is absent, stated in both directions
 
-> **Normative.** `reply` is `None` on exactly two shapes and non-`None` on every
+> **Normative.** `reply` is `None` on exactly three shapes and non-`None` on every
 > other outcome the two turn calls return:
 >
 > - a pass whose step reached `Disposition.AWAITING_CONFIRMATION`, where what the
->   user must answer is the `Confirmation` the adapter renders and relays; and
+>   user must answer is the `Confirmation` the adapter renders and relays;
 > - a pass whose `turn` is `None` — a resume driven from a **recovered** park
 >   (ADR-0052 §3) — where context and memories were never persisted and there is
->   nothing to compose from.
+>   nothing to compose from; and
+> - a pass on which composition **failed** (§8), which is the one of the three that
+>   sets `reply_degraded`.
 
-> **Normative.** The implementing lane states that invariant as a
+> **Normative.** `reply_degraded` is `True` on that third shape and on no other. It
+> is never `True` beside a non-`None` `reply`, never `True` on a park, and never
+> `True` where `turn` is `None` — so a client can tell "no answer was owed" from
+> "an answer was owed and could not be composed" from the value alone.
+
+> **Normative.** The implementing lane states both invariants as a
 > `model_validator(mode="after")` on `TurnOutcome`, in **both** directions, as
 > `StepOutcome._confirmation_matches_disposition` states its own.
 
-Both directions, for that validator's own reason. A `None` on a turn that ran is
-an answer the user never got and nobody can point at a contract violation for; a
-`reply` beside a parked confirmation is prose competing with a yes/no question the
-user must answer, and the prose is what they will read.
+Both directions, for that validator's own reason. A silent `None` on a turn that
+ran is an answer the user never got and nobody can point at a contract violation
+for; a `reply` beside a parked confirmation is prose competing with a yes/no
+question the user must answer, and the prose is what they will read.
+
+**The flag is what makes the third shape legible.** Without it, a composition
+failure would be a `None` no client could tell from the other two — which is the
+argument for making such a failure *raise* instead, and it is a good argument
+against a bare `None` rather than against this one. The flag distinguishes the
+case; §8 is where raising is weighed on its own merits and declined.
 
 Why a park composes nothing rather than composing "I need your permission first":
 the confirmation content is already structured semantic data assembled by the
@@ -492,6 +514,16 @@ It also settles what "the answer replaced the plan listing" would have cost. The
 plan listing itself is a rendering choice this ADR does not make; the *step
 account* is not a rendering choice, and the two are separable.
 
+> **Normative.** The step account is rendered on a degraded turn too. A
+> `reply_degraded` outcome (§8) is rendered as the account it carries plus a
+> statement that no answer could be composed — never as a silent turn, and never as
+> a failure of the step the account says succeeded.
+
+That clause is what makes §8's degradation tolerable rather than merely cheap. A
+turn that sent an email and then could not describe it still tells the user the
+email was sent, in the same words it would have used before this ADR existed; the
+only thing missing is the prose that was going to sit above it.
+
 ### 7. `PROTOCOL_VERSION` moves, and the rest of `wire/` does not
 
 > **Normative.** The lane implementing §3 bumps `PROTOCOL_VERSION` in the **same
@@ -526,56 +558,67 @@ response type" reads like a protocol change with a matching edit somewhere in
 > result symmetrically at both ends (ADR-0085 §8), and an answer that would breach
 > it is that refusal — never a silent truncation.
 
-> **Normative.** A turn whose composition call fails **raises**; it does not return
-> `reply=None`. `None` means the two shapes §4 names and nothing else.
+> **Normative.** A composition failure **degrades the turn; it does not fail it**.
+> The turn returns its `TurnOutcome` with `reply` `None` and `reply_degraded`
+> `True`, carrying its `turn`, its `step` and its `conversation_id` unchanged. The
+> two turn calls do not raise for it.
 
-The reason is §4's invariant rather than a preference about errors. Both of §4's
-shapes are identifiable from the outcome the client holds — a park by its
-disposition, a recovered resume by `turn is None`. A composition failure is not
-identifiable from anything in the value, so representing it with the same `None`
-would hand a client a value it cannot interpret, which is the falsehood-in-a-
-returned-value failure the corpus refuses at `Disposition.INVALID_PARAMETERS`,
-at `EGRESS_UNBINDABLE` and at `StepExecution`'s validators. The model seam's
-existing failure carries a retryable/routable disposition already (ADR-0066 §3),
-which is the right shape for "ask again".
+> **Normative.** A composition failure is any of: the model call failing, a
+> completion whose content is blank or otherwise unusable as an answer, or the
+> stage failing for a reason of its own. All three degrade identically, and none
+> becomes a `reply`.
 
-**A successful call can still return an unusable answer, and that gap is closed
-here rather than left to the lane.** `Message.content` is `EncodableText`, which
-admits the empty string, so a conforming provider may return an assistant message
-with no content at all. That call did not *fail*, so the clause above does not
-reach it; and §3's `NonBlankEncodableText` cannot hold it, so constructing the
-`TurnOutcome` would raise a bare pydantic `ValidationError` out of the engine —
-an unclassified failure in place of the model seam's classified one. This is a
-reachable path on a conforming provider, not a defensive one.
+> **Normative.** The stage makes **one** composition attempt per turn. It does not
+> retry, re-route, or re-plan on failure — a second attempt is the caller asking
+> again, which is a new turn under the caller's own budget.
 
-> **Normative.** The composing stage validates the completion **before**
-> constructing a `TurnOutcome`. A completion whose content is blank, or which is
-> otherwise unusable as an answer, becomes neither a `reply` nor a `None`; it is
-> raised as a classified model failure, and the two turn calls never surface a
-> pydantic `ValidationError` from `TurnOutcome` construction to a caller.
+> **Normative.** The two turn calls never surface a pydantic `ValidationError` from
+> `TurnOutcome` construction to a caller.
 
-> **Normative.** That refusal is **not routable**, and no lane reuses a routable
-> failure for it. By the time the stage holds the completion the routing layer has
-> already returned, so a routable error there would tell a caller a fallback is
-> available when none can be attempted.
+**Degrading rather than raising is `capture_degraded`'s argument, and the case that
+settles it is a side effect that already happened.** A turn can approve a
+non-idempotent tool (`Idempotency.NONE`), execute it successfully, commit its
+`StepExecution` durably to `plans.db` — and only *then* have composition fail. If
+the turn raised there, the caller would hold an error and no outcome: no
+`conversation_id`, no step account, no record of the send in the value they were
+given. The natural recovery from an error is to ask again, which re-plans and can
+perform the effect a second time, and `resume` is not a way back either because
+its continuation is consumed once the step resolved. Raising would therefore turn
+a *successful, irreversible* action into an invisible one, against ADR-0014's
+whole reason for keeping execution state separate from the plan — so that recovery
+is loading what happened rather than redoing it.
 
-**Why not put the check inside the seam, where routing could act on it.** That is
-the better place, and this ADR declines it on scope rather than on merit.
-`ModelResponseError` is `routable = True` — "another may answer usably" — and
-`RoutingProvider` fails over on exactly that flag. But a blank completion is
+That is `capture_degraded` reasoning applied one stage later: "failing would throw
+away an answer the user already has because the record of it could not be written."
+Here the thing already had is the *action*, and what could not be written is the
+prose about it. The prose is the part worth losing.
+
+**The blank-completion path lands in the same place, and it is reachable on a
+conforming provider.** `Message.content` is `EncodableText`, which admits the
+empty string, so a provider may return an assistant message with no content at
+all. That call did not *fail*, and §3's `NonBlankEncodableText` cannot hold the
+result, so a naive implementation would raise a bare pydantic `ValidationError`
+out of the engine. The second clause above makes it a degradation instead, which
+is both classified and identical to every other way composition can come back
+empty-handed.
+
+**Why the blank check is not pushed inside the model seam, where routing could act
+on it.** That is the better place, and this ADR declines it on scope rather than on
+merit. `ModelResponseError` is `routable = True` — "another may answer usably" —
+and `RoutingProvider` fails over on exactly that flag. But a blank completion is
 *contract-valid*: `Message.content` is `EncodableText`, the conformance suite
 asserts only that a `str` comes back, so the router sees a successful call and
-stops. Obliging every `ModelProvider` to raise instead would be a **new
-postcondition on `ModelProvider.complete`** — a Protocol change, which golden rule
-5 puts behind its own ratified ADR and which `CONTRIBUTING.md` → "Adding a
-Protocol" moves together with its conformance suite and canonical fake. That is a
-different lane and a different subsystem.
+stops, and no fallback is ever attempted. Obliging every `ModelProvider` to raise
+instead would be a **new postcondition on `ModelProvider.complete`** — a Protocol
+change, which golden rule 5 puts behind its own ratified ADR and which
+`CONTRIBUTING.md` → "Adding a Protocol" moves together with its conformance suite
+and canonical fake. That is a different lane and a different subsystem.
 
 It is also **not a defect this decision introduces**: `ModelBackedPlanner` has the
 same exposure today, a blank completion reaching `_require_steps` with no route
 left to try. Filed as **#1324**, with what a lane picking it up would weigh. Until
-then the honest thing is a refusal that does not claim a failover it cannot
-deliver, which is what the clause above says.
+then a degraded turn is the honest report: it claims no failover it cannot
+deliver, and it hands the caller the outcome rather than an exception.
 
 > **Normative.** A composed answer is engine-supplied text, and every adapter
 > neutralises it before display exactly as it does the confirmation content, the
@@ -586,8 +629,8 @@ deliver, which is what the clause above says.
 
 > **Normative.** Beyond §§1–8 — §5a included — and §10, this ADR decides nothing.
 > It adds no Protocol, registers no tool, designates no seam, adds no setting,
-> changes no method signature, and adds no `core` name other than §3's single
-> field. A lane needing any of those needs its own change and, where golden rule 5
+> changes no method signature, and adds no `core` name other than §3's two
+> fields. A lane needing any of those needs its own change and, where golden rule 5
 > reaches it, its own ADR.
 
 - **Streaming.** This decides a whole answer returned as one result payload.
@@ -625,29 +668,35 @@ deliver, which is what the clause above says.
 ### 10. What the implementing lane owes
 
 Mostly a checklist of obligations already marked above, so the lane's brief can be
-short. It owes: §3's single field with §4's two-directional validator; the
+short. It owes: §3's two fields with §4's two-directional validator; the
 composing stage in `orchestration` per §2 and its composition-root wiring; §5's
 inputs actually threaded to it; §5a's non-forgeable attribution; §7's
 `PROTOCOL_VERSION` bump and note in the same change; §8's clauses; §6's rendering
 floor honoured in `interfaces/cli.py`; and the pipeline stage list in
 `orchestration`'s module docstring amended per §1. That it may not touch
 `core/protocols.py` follows from §2 rather than being added here, and it is what
-keeps this one lane in one subsystem plus `core`'s single field. One obligation is
-genuinely new and is therefore marked:
+keeps this one lane in one subsystem plus `core`'s two fields. One obligation is
+genuinely new, and two are therefore marked:
 
-> **Normative.** In the same change as the field, the implementing lane lands tests
-> pinning: §4's invariant in both directions; §5's construction obligations — that
-> the stage is handed the undriven steps and each driven step's disposition,
-> status, skip reason and failure kind, and that `memory_degraded` reaches it;
-> §5a's ADR-0098 §9 test, **and** that no provenance-less step-account text reaches
-> the assembled prompt — asserted over a `StepFailure.message` **and** over a
-> syntax-bearing `tool_id`, one carrying the assembler's own container structure,
-> each shown absent from the prompt; §6's guarantee under a **deliberately
-> contradictory provider**,
-> a fake whose completion claims an action the step account records as
-> `NO_CAPABLE_TOOL` and again as `DENIED`, asserting that the outcome's disposition
-> and the rendered step account are unchanged by what the reply says; and §8's
-> non-routable refusal on a blank completion.
+> **Normative.** In the same change as the fields, the implementing lane lands tests
+> pinning: §4's invariants in both directions, `reply_degraded` included; §5's
+> construction obligations — that the stage is handed the undriven steps and each
+> driven step's disposition, status, skip reason and failure kind, and that
+> `memory_degraded` reaches it; §5a's ADR-0098 §9 test, **and** that no
+> provenance-less step-account text reaches the assembled prompt — asserted over a
+> `StepFailure.message` **and** over a syntax-bearing `tool_id`, one carrying the
+> assembler's own container structure, each shown absent from the prompt; §6's
+> guarantee under a **deliberately contradictory provider**, a fake whose completion
+> claims an action the step account records as `NO_CAPABLE_TOOL` and again as
+> `DENIED`, asserting that the outcome's disposition and the rendered step account
+> are unchanged by what the reply says; and §8's degradation on a failing composer
+> and on a blank completion alike.
+
+> **Normative.** §8's post-side-effect case is pinned by a test of its own: a
+> successfully executed `Idempotency.NONE` tool whose step commits, followed by a
+> composer that fails, asserting that the call **returns** rather than raises, that
+> the returned outcome carries the step account and `conversation_id`, that
+> `reply_degraded` is `True`, and that nothing re-executes.
 
 The contradictory-provider test is the one that matters most and is the easiest to
 omit, because every natural test of a composing stage uses a fake that cooperates.
@@ -665,6 +714,17 @@ one whose guarantee is a hope about the prompt — which is exactly the distinct
   "the answer is still the answer", `TurnResult.memory_degraded`'s "an
   unpersonalised answer", and the CLI's "so this answer is generic" all become true
   of a thing that exists.
+- **The turn path carries three degradation flags rather than two**, and a client
+  now checks `reply_degraded` beside `memory_degraded` and `capture_degraded`. That
+  is a cost — three booleans is where a reader starts wanting one structured
+  report — and it is paid deliberately: each names a different stage, and collapsing
+  them would tell a user "something went wrong" where today they are told which
+  thing. A fourth would be the trigger to revisit the shape rather than add it.
+- **A turn can now succeed at acting and fail at speaking.** §8 makes that a
+  degradation, so an irreversible side effect is never hidden behind an exception
+  whose only retry would repeat it; §6 keeps the step account on screen so the user
+  still learns what happened. The user experience of that turn is worse than a
+  normal one and much better than a lie or a double send.
 - **The wire is cheap and the version is not.** No module under `wire/` changes but
   the version constant, and `PROTOCOL_VERSION` moves — to whatever the next number
   is when the lane lands, deliberately not named here, since other lanes may move it
@@ -720,6 +780,17 @@ by golden rule 3 outright — that is business logic in an interface — and by 
 hub-and-spokes stance behind ADR-0083/0084: every spoke would then need a model
 provider, a prompt and a key, and two spokes would answer the same question
 differently. The intelligence belongs to the hub.
+
+**Raise on a composition failure instead of degrading.** One field rather than two,
+and a caller that cannot mistake a failed turn for a successful one. *Rejected*
+in §8. It is correct only while the turn has done nothing irreversible, and the
+turn that most needs an answer is the one that just acted: a successfully executed
+`Idempotency.NONE` tool whose step committed, followed by a failing composer, would
+reach the caller as an exception carrying no outcome — no `conversation_id`, no
+step account, no record of the send — whose natural retry re-plans and can perform
+the effect twice. `resume` is no way back, because the continuation is consumed
+once the step resolved. The corpus had already chosen degradation for the same
+shape one stage earlier, in `capture_degraded`, and for the same reason.
 
 **Rule the reply out of scope until the tool seam is finished.** The status quo,
 stated as a choice. *Rejected.* It rests on the misreading §1 corrects — the reply
