@@ -543,17 +543,20 @@ async def test_a_usable_completion_is_carried_whole() -> None:
     assert composed.degraded is False
 
 
-async def test_the_route_override_is_threaded_to_the_seam() -> None:
-    """§2: the stage adds no setting of its own and names no route by default."""
-    default = FakeModelProvider("answer")
-    await ComposingStage(model=default).compose(turn=_turn(), step=None, undriven=())
-    assert default.calls[0].model is None
+async def test_the_stage_names_no_model_and_so_leaves_routing_alone() -> None:
+    """§2 and §9: no setting of its own, and no per-call override either.
 
-    named = FakeModelProvider("answer")
-    await ComposingStage(model=named, route="vendor:model").compose(
-        turn=_turn(), step=None, undriven=()
-    )
-    assert named.calls[0].model == "vendor:model"
+    ADR-0013 §4 rules that "an explicit ``model=`` override disables routing" and
+    stops the fallback chain at the first route. A composing stage that named a
+    model would therefore take the reply path off the deployment's own fallbacks
+    while planning stayed on them — which is "which model answers", the question
+    ADR-0170 §9 leaves undecided (round 1, architecture).
+    """
+    model = FakeModelProvider("answer")
+
+    await ComposingStage(model=model).compose(turn=_turn(), step=None, undriven=())
+
+    assert model.calls[0].model is None
 
 
 async def test_a_plan_with_no_step_is_rendered_as_a_decision_not_a_gap() -> None:

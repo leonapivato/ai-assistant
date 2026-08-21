@@ -170,8 +170,19 @@ class ComposingStage:
     what keeps ``reply_degraded`` ``False`` there.
     """
 
-    def __init__(self, *, model: ModelProvider, route: str | None = None) -> None:
+    def __init__(self, *, model: ModelProvider) -> None:
         """Wire the stage to the model seam it composes through.
+
+        **One parameter, and no route of its own.** ADR-0170 §9 leaves "which model
+        answers" undecided and §2 gives the stage no setting, so the seam it is
+        handed decides — and ``complete`` is called with **no** ``model=``
+        override. That is not tidiness: ADR-0013 §4 rules that "an explicit
+        ``model=`` override disables routing", so a route knob here would let the
+        reply path silently leave the deployment's own fallback chain while planning
+        stayed on it, which is a decision this ADR declined to make. Should a lane
+        ever want the answer on a named model, ADR-0077 §3's shape is the one to
+        copy — a second *provider* built for that route by the composition root, as
+        ``_build_observer_provider`` does — and it needs its own ADR either way.
 
         Args:
             model: The injected :class:`~ai_assistant.core.protocols.ModelProvider`
@@ -180,14 +191,8 @@ class ComposingStage:
                 obligation that creates no new contract: ``Engine.__init__``
                 receives no ``ModelProvider`` of its own, and reaching a concrete
                 subsystem's internals to find one is what golden rule 1 forbids.
-            route: An optional ``"provider:model"`` override, threaded to
-                ``complete``. ``None`` — the default — takes the seam's configured
-                route, which is what the production wiring passes: ADR-0170 §9
-                leaves "which model answers" undecided, so this stage adds no
-                setting of its own and names no route.
         """
         self._model = model
-        self._route = route
 
     async def compose(
         self,
@@ -236,7 +241,7 @@ class ComposingStage:
             Message(role=Role.USER, content=_render_request(turn, step, undriven)),
         )
         try:
-            answer = await self._model.complete(conversation, model=self._route)
+            answer = await self._model.complete(conversation)
         except ModelError:
             # ADR-0011 §1's taxonomy, whole: the model is down, the route is
             # exhausted, the request was refused. An operating condition that will
