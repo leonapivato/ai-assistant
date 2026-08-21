@@ -563,16 +563,40 @@ response type" reads like a protocol change with a matching edit somewhere in
 > `True`, carrying its `turn`, its `step` and its `conversation_id` unchanged. The
 > two turn calls do not raise for it.
 
-> **Normative.** A composition failure is any of: the model call failing, a
-> completion whose content is blank or otherwise unusable as an answer, or the
-> stage failing for a reason of its own. All three degrade identically, and none
-> becomes a `reply`.
+> **Normative.** A composition failure is a **classified** one, and the set is
+> closed: a `ModelError` out of the call — any member of ADR-0011 §1's taxonomy —
+> or a completion the stage cannot use as an answer, blank content being the case
+> argued below. Both degrade identically and neither becomes a `reply`. The
+> stage catches **those**, never `Exception`: an unexpected exception raised by the
+> stage's own code is a defect, not a composition failure, and it propagates.
 
-> **Normative.** The stage originates **one** `ModelProvider.complete()` call per
-> turn. It does not loop, does not call again on a failure that call returns, and
-> does not re-plan — a second attempt is the caller asking again, which is a new
-> turn under the caller's own budget. What the injected provider does *below* that
-> seam is not this ADR's to constrain.
+**Why the closed set, and what propagating a defect costs.** The pattern this
+section borrows catches by type and not by breadth — `ConversationCapture` catches
+`ConversationStoreError` around its append and `MemoryStoreError` around its
+episode write, so a bug in the code between them still surfaces. A stage that
+caught `Exception` would turn a `KeyError` from the step-account renderer, or an
+assembly regression under §5a, into an ordinary "no answer was available": the
+composing stage could be wholly broken and every turn would report the same
+classified-looking degradation, which is the state hardest to notice and hardest
+to diagnose. Degradation is for an operating condition that will recur whatever
+we do — the model is down, the completion came back empty. A defect is not that.
+
+The residual is real and is accepted deliberately: a defect that lands after a
+committed non-idempotent step does hand the caller an exception rather than the
+outcome, which is the harm argued below. What differs is that the step's
+`StepExecution` is durably committed either way, so the *record* of the send
+survives the exception even though the returned account does not — and a defect
+that surfaces is fixed, where a defect that degrades is paid for on every turn.
+
+> **Normative.** On a pass where an answer is owed — every shape but §4's first
+> two — the stage originates **exactly one** `ModelProvider.complete()` call. On
+> §4's park and on its recovered resume it originates **none**: composition is not
+> owed, the stage is not reached, no prompt is assembled and no model is called, so
+> `reply_degraded` stays `False` there as §4 requires. Where the stage *is*
+> reached it does not loop, does not call again on a failure that call returns,
+> and does not re-plan — a second attempt is the caller asking again, which is a
+> new turn under the caller's own budget. What the injected provider does *below*
+> that seam is not this ADR's to constrain.
 
 **The clause binds the composer, not the provider stack.** Retry and fallback
 routing are cross-cutting behaviour composed by wrapping — ADR-0011 §2 makes a
@@ -610,9 +634,10 @@ conforming provider.** `Message.content` is `EncodableText`, which admits the
 empty string, so a provider may return an assistant message with no content at
 all. That call did not *fail*, and §3's `NonBlankEncodableText` cannot hold the
 result, so a naive implementation would raise a bare pydantic `ValidationError`
-out of the engine. The second clause above makes it a degradation instead, which
-is both classified and identical to every other way composition can come back
-empty-handed.
+out of the engine. It is the second member of the closed set above — "a completion
+the stage cannot use as an answer" — so it degrades instead, and it is a
+classification the stage makes deliberately rather than an exception it happens to
+catch.
 
 **Why the blank check is not pushed inside the model seam, where routing could act
 on it.** That is the better place, and this ADR declines it on scope rather than on
@@ -701,8 +726,12 @@ genuinely new, and two are therefore marked:
 > guarantee under a **deliberately contradictory provider**, a fake whose completion
 > claims an action the step account records as `NO_CAPABLE_TOOL` and again as
 > `DENIED`, asserting that the outcome's disposition and the rendered step account
-> are unchanged by what the reply says; and §8's degradation on a failing composer
-> and on a blank completion alike.
+> are unchanged by what the reply says; §8's degradation on a `ModelError` and on a
+> blank completion alike, **beside** a test that an unexpected exception from the
+> stage's own code propagates rather than degrading, so the closed set is pinned as
+> closed in both directions; and §8's "none on the shapes that owe none" — a
+> provider double asserting it was **not called at all** on a park and on a
+> recovered resume, with `reply_degraded` `False` on each.
 
 > **Normative.** §8's post-side-effect case is pinned by a test of its own: a
 > successfully executed `Idempotency.NONE` tool whose step commits, followed by a
@@ -732,11 +761,13 @@ one whose guarantee is a hope about the prompt — which is exactly the distinct
   report — and it is paid deliberately: each names a different stage, and collapsing
   them would tell a user "something went wrong" where today they are told which
   thing. A fourth would be the trigger to revisit the shape rather than add it.
-- **A turn can now succeed at acting and fail at speaking.** §8 makes that a
-  degradation, so an irreversible side effect is never hidden behind an exception
-  whose only retry would repeat it; §6 keeps the step account on screen so the user
-  still learns what happened. The user experience of that turn is worse than a
-  normal one and much better than a lie or a double send.
+- **A turn can now succeed at acting and fail at speaking.** §8 makes a *classified*
+  composition failure a degradation, so an irreversible side effect is not hidden
+  behind an exception whose only retry would repeat it; §6 keeps the step account on
+  screen so the user still learns what happened. The user experience of that turn is
+  worse than a normal one and much better than a lie or a double send. A **defect**
+  in the stage still propagates, and §8 accepts that residual on the record: a bug
+  that degrades silently is paid for on every turn thereafter.
 - **The wire is cheap and the version is not.** No module under `wire/` changes but
   the version constant, and `PROTOCOL_VERSION` moves — to whatever the next number
   is when the lane lands, deliberately not named here, since other lanes may move it
@@ -747,10 +778,10 @@ one whose guarantee is a hope about the prompt — which is exactly the distinct
   information.** §6 keeps the line on screen. Until #1315 is picked up it will
   appear under conversational answers, because the planner must still invent a
   capability for a request that needs none — visible, honest, and mildly ugly.
-- **The composing stage is a second model call per turn**, after the planner's. It
-  costs latency and tokens on every turn, including turns that drove a tool
-  successfully. That is the price of the product, and it is stated rather than
-  discovered.
+- **The composing stage is a second model call on every turn that owes an answer**,
+  after the planner's. It costs latency and tokens on those turns, including ones
+  that drove a tool successfully; §4's park and recovered resume owe none and pay
+  none. That is the price of the product, and it is stated rather than discovered.
 - **A model now writes text the user reads as the assistant's own voice.** Every
   prior model output in the product path was parsed — a plan, a proposal, a
   distillation — and checked by deterministic code before it meant anything. §5 and
