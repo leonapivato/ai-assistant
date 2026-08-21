@@ -1240,6 +1240,14 @@ def test_every_duration_setting_is_discovered() -> None:
         "gateway_session_idle_timeout",
         "gateway_record_interval",
         "gateway_read_timeout",
+        # ADR-0175 §8's poll budget, acknowledged here for the reason the four above
+        # are: §8 states its range in ADR-0168 §8's own terms — strictly positive,
+        # not nullable, and no value meaning "off" — and joining this tuple is what
+        # subjects it to the parametrised guards below. The ``bool`` guard is the
+        # difference between a twenty-second poll cycle and a one-second one, which
+        # is the spin the figure was chosen to avoid: "long enough that a poll cycle
+        # costs one frame pair rather than being a spin".
+        "gateway_notification_budget",
     }
 
 

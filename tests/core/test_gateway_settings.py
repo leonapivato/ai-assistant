@@ -1,9 +1,15 @@
-"""ADR-0168 §8's ten figures, and the two orderings that make four of them bind.
+"""ADR-0168 §8's ten figures and ADR-0175 §8's eleventh, and the two orderings.
 
 The generic guards in ``test_config.py`` already hold every one of these to "a
 flag is not a count", "a flag is not a duration" and its own default; what is
 here is the part those cannot reach — each field's own range, and the two
 cross-field refusals §8 states.
+
+**The block is now eleven and the count tripwire says which ADR bought which.**
+ADR-0168 §8 named ten and ADR-0172's opening bullet "adds no eleventh"; ADR-0175
+§8 is the decision that does, on §8's own ground — "a 'bounded default' with no
+figure is two conforming stores handing the same continuation different history".
+A twelfth is still a figure no ADR names.
 """
 
 from __future__ import annotations
@@ -26,10 +32,15 @@ _GATEWAY_FIELDS = (
     "gateway_read_timeout",
     "gateway_max_browser_connections",
     "gateway_max_pending_connections",
+    # ADR-0175 §8's one figure, added to this tuple rather than exempted from it:
+    # joining it is what subjects the field to every guard below, and §8 states its
+    # range in ADR-0168 §8's own terms — "refused at settings load unless it is
+    # strictly positive… not nullable and takes no value meaning 'off'".
+    "gateway_notification_budget",
 )
 
 
-def test_the_ten_figures_are_all_present_with_adr_0168_section_8_defaults() -> None:
+def test_the_figures_are_all_present_with_their_adrs_defaults() -> None:
     """§8's table, transcribed. A default that drifts is two gateways disagreeing."""
     settings = Settings()
 
@@ -43,18 +54,52 @@ def test_the_ten_figures_are_all_present_with_adr_0168_section_8_defaults() -> N
     assert settings.gateway_read_timeout == timedelta(seconds=30)
     assert settings.gateway_max_browser_connections == 64
     assert settings.gateway_max_pending_connections == 8
+    assert settings.gateway_notification_budget == timedelta(seconds=20)
 
 
-def test_the_ten_figures_are_exactly_ten() -> None:
-    """A tripwire on the *count*, because §8 names ten and the Consequences say ten.
+def test_the_figures_are_exactly_the_ones_an_adr_names() -> None:
+    """A tripwire on the *count*: a `gateway_*` field no ADR names is the
+    underdetermination ADR-0168 §8 opens by refusing.
 
-    An eleventh `gateway_*` field is a figure no ADR names, which is the
-    underdetermination §8 opens by refusing — and ADR-0172's own opening bullet
-    says it "adds no eleventh". Discovering that here is cheaper than in review.
+    Ten from ADR-0168 §8, none from ADR-0172 ("adds no eleventh"), and the
+    eleventh from ADR-0175 §8. Discovering a twelfth here is cheaper than in
+    review.
     """
     named = {name for name in Settings.model_fields if name.startswith("gateway_")}
 
     assert named == set(_GATEWAY_FIELDS)
+
+
+def test_the_notification_budget_is_far_below_the_hubs_own_ceiling() -> None:
+    """ADR-0175 §8: "deliberately far below the hub's own ceiling, and the
+    cross-process refusal is why".
+
+    ``hub_max_notification_budget`` is another process's setting and may be another
+    machine's, so neither ``Settings`` can validate against the other and §8 forbids
+    a load-time check relating them. What replaces the check is a default an order
+    of magnitude below, which leaves an owner who tunes one figure a wide margin
+    before they meet the other — and meeting it is legible rather than silent.
+    """
+    settings = Settings()
+
+    assert settings.gateway_notification_budget * 10 <= settings.hub_max_notification_budget
+
+
+def test_a_notification_budget_above_the_hubs_ceiling_still_loads() -> None:
+    """§8: "No load-time check relates it to ``hub_max_notification_budget``…
+    and no lane adds one."
+
+    The refusal belongs to the hub, which "refuses a budget above it rather than
+    clamping one", and it arrives as a declined request the gateway reports under
+    ADR-0168 §9. A settings model that refused the pair here would be one machine
+    deciding another machine's configuration.
+    """
+    settings = Settings(
+        gateway_notification_budget=timedelta(hours=1),
+        hub_max_notification_budget=timedelta(seconds=30),
+    )
+
+    assert settings.gateway_notification_budget == timedelta(hours=1)
 
 
 @pytest.mark.parametrize("name", _GATEWAY_FIELDS)

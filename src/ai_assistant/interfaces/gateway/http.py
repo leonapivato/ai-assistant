@@ -165,6 +165,43 @@ class Response:
     set_cookie: str | None = None
 
 
+@dataclass(frozen=True)
+class StreamHead:
+    """The head of a response whose body the gateway writes in pieces (ADR-0175 §1).
+
+    **The second response shape, and it is the largest single piece of work
+    ADR-0175 creates** — its Consequences say so in terms: ``Response.body`` is
+    ``bytes`` and every response carries a ``Content-Length``, which is exactly what
+    a streamed answer and a delivery stream cannot do. A stream's length is unknown
+    when its head is written and its whole purpose is that the browser reads the
+    first piece before the last one exists.
+
+    **Chunked transfer, and not "write and hang up".** Closing the connection to
+    mark the end would make a stream that ended cleanly indistinguishable from one
+    the network cut — and ADR-0175 §2 requires a reader to tell those apart. The
+    terminal *value* is the primary signal, and the zero-length chunk below it is
+    HTTP's own; a body that stops without either is the transport failure the front
+    end reports as one.
+
+    Attributes:
+        content_type: The media type the stream is served with.
+        status: The status line's code. Always a success: everything decidable
+            before the engine is reached — an unadmitted request, a malformed body,
+            a ceiling — is an ordinary :class:`Response` with its own status, and a
+            stream's head is written only once the gateway has committed to
+            answering on one.
+        reason: The status line's phrase.
+        close: Whether the connection is closed once the stream ends. ``False`` by
+            default: a stream that finished is a response that completed, and
+            ADR-0175 §7 restarts ``gateway_read_timeout`` from there.
+    """
+
+    content_type: str
+    status: int = 200
+    reason: str = "OK"
+    close: bool = False
+
+
 @dataclass
 class _Reading:
     """The bytes taken off one connection so far, and the cap they are read against."""
@@ -342,14 +379,79 @@ def render(response: Response, *, policy: str) -> bytes:
         The bytes to write.
     """
     lines = [
-        f"{_HTTP_VERSION} {response.status} {response.reason}",
-        f"Content-Type: {response.content_type}",
+        *_status_and_common(response.status, response.reason, response.content_type, policy),
         f"Content-Length: {len(response.body)}",
-        f"Content-Security-Policy: {policy}",
-        "X-Content-Type-Options: nosniff",
-        "Cache-Control: no-store",
         f"Connection: {'close' if response.close else 'keep-alive'}",
     ]
     if response.set_cookie is not None:
         lines.append(f"Set-Cookie: {response.set_cookie}")
-    return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii") + response.body
+    return _head(lines) + response.body
+
+
+def render_stream_head(head: StreamHead, *, policy: str) -> bytes:
+    """Serialise the head of a streamed response (ADR-0175 §1).
+
+    The same policy and the same sniffing and caching headers every other response
+    carries — ADR-0168 §6 requires them of *every* response, which is why they are
+    built here rather than by each handler — with ``Transfer-Encoding: chunked`` in
+    place of the ``Content-Length`` a stream cannot state.
+
+    Args:
+        head: What is being streamed, and whether the connection survives it.
+        policy: The content security policy value.
+
+    Returns:
+        The bytes to write before the first chunk.
+    """
+    return _head(
+        [
+            *_status_and_common(head.status, head.reason, head.content_type, policy),
+            "Transfer-Encoding: chunked",
+            f"Connection: {'close' if head.close else 'keep-alive'}",
+        ]
+    )
+
+
+def render_chunk(payload: bytes) -> bytes:
+    """Frame one piece of a streamed body.
+
+    Args:
+        payload: The bytes to send. Must not be empty — a zero-length chunk is
+            HTTP's end-of-body marker, and one written mid-stream would end the body
+            while the gateway believed it had written a value.
+
+    Returns:
+        The framed chunk.
+
+    Raises:
+        ValueError: If ``payload`` is empty.
+    """
+    if not payload:
+        msg = "a zero-length chunk is the end of a body, not a value on one"
+        raise ValueError(msg)
+    return f"{len(payload):x}\r\n".encode("ascii") + payload + b"\r\n"
+
+
+def render_stream_end() -> bytes:
+    """The end of a chunked body: the zero-length chunk and no trailers.
+
+    Returns:
+        The bytes that complete the response.
+    """
+    return b"0\r\n\r\n"
+
+
+def _status_and_common(status: int, reason: str, content_type: str, policy: str) -> list[str]:
+    """The status line and the headers every response carries, streamed or not."""
+    return [
+        f"{_HTTP_VERSION} {status} {reason}",
+        f"Content-Type: {content_type}",
+        f"Content-Security-Policy: {policy}",
+        "X-Content-Type-Options: nosniff",
+        "Cache-Control: no-store",
+    ]
+
+
+def _head(lines: list[str]) -> bytes:
+    """Terminate a head's lines and encode them."""
+    return ("\r\n".join(lines) + "\r\n\r\n").encode("ascii")
