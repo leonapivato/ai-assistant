@@ -9,6 +9,7 @@ test are in ``tests/interfaces/test_cli.py``, where both halves of §6's guarant
 
 from __future__ import annotations
 
+import asyncio
 from typing import TYPE_CHECKING
 
 import pytest
@@ -27,6 +28,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     Disposition,
     Idempotency,
+    Message,
     PlanStep,
     Role,
     StepStatus,
@@ -37,7 +39,8 @@ from ai_assistant.testing import FakeModelProvider
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, Message
+    from ai_assistant.core.protocols import ModelProvider
+    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
 
 _ANSWER = "You prefer hiking, and I have not sent anything."
 
@@ -48,9 +51,30 @@ def _refusing(_messages: Sequence[Message]) -> str:
     raise ModelUnavailableError(msg)
 
 
-def _wired(model: FakeModelProvider, **knobs: object) -> Harness:
+def _wired(model: ModelProvider, **knobs: object) -> Harness:
     """A harness whose composing stage runs over ``model``."""
     return Harness(composing=ComposingStage(model=model), **knobs)  # type: ignore[arg-type]  # heterogeneous harness knobs
+
+
+class _GatedProvider:
+    """A ``ModelProvider`` whose completion blocks until it is released.
+
+    Structurally implements
+    :class:`~ai_assistant.core.protocols.ModelProvider`. The canonical fake answers
+    synchronously, which is what makes it useless for asking whether anything is
+    *waiting* on the answer.
+    """
+
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def complete(self, messages: Sequence[Message], *, model: str | None = None) -> Message:
+        """Announce that composition has begun, then wait to be let go."""
+        del messages, model
+        self.entered.set()
+        await self.release.wait()
+        return Message(role=Role.ASSISTANT, content=_ANSWER)
 
 
 class _TwoStepPlanner(OneStepPlanner):
@@ -307,6 +331,34 @@ async def test_a_defect_in_the_stage_propagates_out_of_the_turn_call() -> None:
 
     with pytest.raises(KeyError):
         await monkeypatched.engine.converse("send it", timeout=PATIENT)
+
+
+async def test_composing_a_resume_does_not_hold_the_recovery_lock() -> None:
+    """The composing call runs outside ``_recovery_lock`` (round 1, major).
+
+    The lock exists so a resolution and a recovery enumeration cannot interleave —
+    both read ``_parked`` and the runner's decision. Composing reads neither, and
+    it is the one step on this path whose duration is a *provider's* to decide: a
+    stage waiting out ADR-0011 §2's retry budget would otherwise sit between an
+    unrelated ``pending_confirmations`` and a listing that needs no model at all.
+    """
+    provider = _GatedProvider()
+    harness = _wired(provider, tools=(confirmable(),))
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    resuming = asyncio.create_task(
+        harness.engine.resume(parked.step.confirmation.token, approved=True, timeout=PATIENT)
+    )
+    try:
+        await asyncio.wait_for(provider.entered.wait(), timeout=5)
+        # The step is already resolved and its binding evicted; a recovery
+        # enumeration must not be queued behind the prose about it.
+        assert await asyncio.wait_for(harness.engine.pending_confirmations(), timeout=5) == ()
+    finally:
+        provider.release.set()
+    resumed = await asyncio.wait_for(resuming, timeout=5)
+    assert resumed.reply == _ANSWER
 
 
 # --- the engine's own inputs reach the stage ---------------------------------

@@ -8389,12 +8389,28 @@ class TurnOutcome(BaseModel):
         composed" from the value alone. So the flag is refused beside a non-``None``
         :attr:`reply`, on a park, and where :attr:`turn` is ``None``; and where all
         three of those are absent, an answer is owed and a bare ``None`` is refused.
+
+        **The first two shapes are refused in the ``reply`` direction as well as the
+        flag direction**, which is what "in both directions" costs on each of them
+        rather than only on the last. §4 says ``reply`` is ``None`` on *exactly*
+        three shapes, so a park or a turn-less outcome carrying prose is a contract
+        violation and not merely an oddity: on a recovered park nothing was
+        persisted to compose from, so any answer there is about a turn the outcome
+        cannot show, and an adapter would render it beside a step account with no
+        turn behind it.
         """
         parked = self.step is not None and self.step.confirmation is not None
         if parked and self.reply is not None:
             msg = (
                 "a parked outcome must carry no reply: what the user must answer is the "
                 "confirmation, and prose beside it competes with the question"
+            )
+            raise ValueError(msg)
+        if self.turn is None and self.reply is not None:
+            msg = (
+                "an outcome with no turn must carry no reply: a recovered park persisted "
+                "no context and no memories, so there was nothing to compose from and any "
+                "prose here is about a turn this outcome cannot show"
             )
             raise ValueError(msg)
         if self.reply_degraded:
