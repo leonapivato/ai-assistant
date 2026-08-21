@@ -362,6 +362,13 @@ to the milestone that actually asks for them.
 > **Normative.** A gateway that cannot disclose its bootstrap value does not
 > start, and reports why.
 
+**"Not in a log record" is a distinction and not a repetition, and it matters
+because the two share a stream.** The gateway's structured records go to standard
+output as well (§6), so the clause above is about the *path*: the bootstrap value
+is written directly and never passes through the logging chain, which is what
+keeps it out of anything an operator ships, aggregates or retains from those
+records.
+
 **One value per process life is what makes the exposure argument honest.** The
 value sits in the terminal where the owner started the gateway — a place they
 already have the standing to read the process's own memory from — it is
@@ -476,10 +483,11 @@ removes it on the refused one. Architecture review found it on the third round.
 
 **The gateway keeps no log, and that is what makes the state question small
 rather than a retention policy.** `configure_logging` (`src/ai_assistant/core/logging.py`)
-calls `logging.basicConfig` with no file and no handler of its own, so every
-record this system emits goes to standard error and this system retains none of
-it; where it then lands and how long it is kept is the operator's, exactly as it
-already is for the hub and the CLI. So the admission record adds no store, no
+writes structured records through structlog's `PrintLoggerFactory`, whose stream
+is the process's standard output, and its `logging.basicConfig` call names no
+file — so this system installs no file handler anywhere and **retains no record
+it emits**. Where a record then lands and how long it is kept is the operator's,
+exactly as it already is for the hub and the CLI. So the admission record adds no store, no
 file and no growing artifact. The only state the clauses above create is the
 interval's counters — one integer per refusal condition, reset each interval,
 which is a fixed set fixed in advance. An earlier draft claimed the record was
@@ -936,8 +944,8 @@ lane. No record is owed on any of the rest.**
   checkpoint (§4), and never authoritative — nothing the hub does depends on it,
   and the hub is not told it exists (§3). §6's admission record adds no second
   body of edge state to test against §9, because the gateway **retains none of
-  it**: the record is emitted to the logging this system already configures, which
-  writes to standard error and keeps no file. What §9 does reach there is the
+  it**: the record is emitted through the logging this system already configures,
+  which installs no file handler and keeps nothing. What §9 does reach there is the
   interval's counters — one integer per refusal condition, reset each interval —
   which are bounded in size by a fixed set, bounded in age by the interval, and
   never authoritative, since no clause here gives them an effect on whether
