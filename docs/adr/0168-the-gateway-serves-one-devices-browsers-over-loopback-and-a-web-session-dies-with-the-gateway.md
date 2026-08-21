@@ -1,6 +1,6 @@
 # 168. The gateway serves one device's browsers over loopback, and a web session is minted at the gateway and dies with it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-21
 
 - **This is `track:web-client` milestone 13's decision** (#1230). It takes the
