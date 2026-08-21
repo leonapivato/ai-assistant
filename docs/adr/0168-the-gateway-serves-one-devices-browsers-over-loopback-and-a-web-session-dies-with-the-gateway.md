@@ -437,10 +437,27 @@ honour a budget it cannot meet rather than silently shortening one.
 > gateway ships. This ADR does not write it, and no lane may implement §6 before
 > it merges.
 
-> **Normative.** The gateway records every session admission and every refusal —
-> the request, the outcome, and for a refusal which of §3's, §6's and §7's
-> conditions it failed — and no record carries a session half, a bootstrap value
-> or a verifier.
+> **Normative.** The gateway records every session admission and every refusal,
+> and the record carries **only** Tier 2 facts, enumerated: the instant; which
+> class of request it was, out of the front end's assets, the bootstrap exchange
+> and an assistant request; the outcome; and for a refusal, which of §3's, §6's
+> and §7's conditions it failed.
+
+> **Normative.** No such record carries anything outside that enumeration — no
+> session half, bootstrap value or verifier; no request body; no path, query
+> string or fragment; no header or cookie; and nothing the hub or a model
+> returned.
+
+**The record is an enumeration rather than an exclusion list, because an
+exclusion list was wrong here and its failure is the instructive kind.** An
+earlier draft had the gateway record "the request" and forbade only the session
+values — which still admits the utterance out of a refused `ask`, Tier 1 by
+ADR-0004 §1, and the bootstrap value out of a failed exchange, Tier 0. ADR-0004
+§5 is unqualified that "logs are Tier 2 only" and that Tier 0/1 "must never be
+logged", so the draft would have created the leak in the very clause written to
+make the access auditable. Architecture review found it. Naming what may appear
+is the only form that stays right when a later lane adds a request shape nobody
+has thought of yet.
 
 **That is owed rather than avoidable, and the reason is that no browser session
 design escapes it.** Whatever admits a returning browser is a value the browser
@@ -912,7 +929,12 @@ lane. No record is owed on any of the rest.**
   no browser design escapes either, and makes one narrowly scoped supersession
   covering both a **prerequisite of the implementing lane**, with its replacements
   named so that lane starts from a ruling.
-- **What is *not* engaged is either clause as it reaches this system's own
+- **ADR-0004 §5.** Used as given, and it is what shapes §6's admission record:
+  "logs are Tier 2 only" is why that record is an enumeration of permitted Tier 2
+  facts rather than a list of excluded secrets. Nothing about it is read more
+  widely or more narrowly, and the redaction safety net it names is relied on as
+  a net rather than as the rule.
+- **What is *not* engaged is §3 or §7 as they reach this system's own
   hub-facing paths.** The gateway holds no Tier 0 value at rest (§4), and the
   device credential it reads to reach the hub stays exactly where ADR-0124 §6 put
   it, under the exemption ADR-0124 §6 already ruled and through the Protocol it
