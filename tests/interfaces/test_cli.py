@@ -2445,7 +2445,7 @@ def test_the_settled_prefix_is_one_no_later_text_can_revise() -> None:
     so the delta between two of them is always text that has not been shown and will
     never be contradicted.
     """
-    alphabet = ("[", "]", "\\", "/", "d", "\r", "\n", "1", "@")
+    alphabet = ("[", "]", "\\", "/", "d", "\r", "\n", "1", "@", "A", "#")
     for length in range(1, 5):
         for combination in product(alphabet, repeat=length):
             whole = "".join(combination)
@@ -2455,6 +2455,45 @@ def test_the_settled_prefix_is_one_no_later_text_can_revise() -> None:
                 assert cli._safe_prose(whole).startswith(cli._safe_prose(settled)), whole
                 assert settled.startswith(grown), whole
                 grown = settled
+
+
+async def test_a_bracket_that_can_never_be_markup_does_not_stall_the_stream(
+    output: StringIO,
+) -> None:
+    """Holding back is a cost, so it is paid only where the escaping could still move.
+
+    Rich's escaper and its parser share one character class, so ``[1`` and
+    ``[Options`` are text under both however the answer continues — and an adapter
+    that held every unclosed ``[`` would stop rendering an ordinary answer at the
+    first bracket and resume only at the terminal frame, which is the streaming this
+    path exists to do. Asserted against ``_StreamedReply`` rather than a whole turn
+    because what is at issue is what is on screen *before* the answer ends.
+    """
+    running = cli._StreamedReply()
+
+    running.take(ReplyChunk(text="Options [1 and then"))
+    running.take(ReplyChunk(text=" a good deal more prose"))
+
+    assert "a good deal more prose" in output.getvalue()
+
+
+def test_a_bracket_that_could_still_open_a_tag_is_held_until_it_settles(
+    output: StringIO,
+) -> None:
+    """The other side of the same rule, which the case above would pass without.
+
+    A relaxation that stopped holding brackets altogether renders progressively too,
+    and evades §10 exactly as the per-chunk implementation does. So the tag-shaped
+    bracket must still be off the screen while it is unclosed, and reach it escaped
+    once the ``]`` arrives.
+    """
+    running = cli._StreamedReply()
+
+    running.take(ReplyChunk(text="Options [dim and then"))
+    assert "[dim" not in output.getvalue(), "it could still become a tag"
+
+    running.take(ReplyChunk(text=" more]"))
+    assert "Options [dim and then more]" in output.getvalue()
 
 
 async def test_the_step_account_is_rendered_whether_or_not_chunks_were(
