@@ -1,6 +1,6 @@
 # 178. A confirmation carries the egress it is about, and its absence is the discriminator
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-22
 
 - **This closes #1366**, the contract question `track:web-client` milestone 15's
