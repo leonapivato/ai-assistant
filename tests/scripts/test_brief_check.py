@@ -368,3 +368,16 @@ def test_a_long_section_label_is_not_truncated(tmp_path: Path) -> None:
     assert "§100 " not in result.stdout
     assert "longer than three digits" in _row(result.stdout, "ADR-0001 §1000")
     assert result.returncode == 0
+
+
+def test_an_absurd_section_range_reports_rather_than_crashing(tmp_path: Path) -> None:
+    # CPython refuses to convert an integer literal beyond a few thousand
+    # digits. A brief must not be able to hand this script a traceback in place
+    # of a report, however unlikely the brief.
+    _make_repo(tmp_path)
+    huge = "1" * 4301
+
+    result = _run(tmp_path, f"ADR-0001 §§{huge}-{huge} governs.")
+
+    assert "Traceback" not in result.stderr
+    assert result.returncode in (0, 1)
