@@ -1630,3 +1630,21 @@ def test_the_arguments_are_not_presented_as_the_canonical_destination_set() -> N
     for claim in ("reach", "recipient", "destination", "account"):
         assert claim not in functions["renderParameters"], claim
     assert "It would reach:" in functions["renderEgress"]
+
+
+def test_a_resumed_park_is_not_reported_as_a_turn_that_planned_nothing() -> None:
+    """A defect the browser found once ``resume`` reached this page (#1404).
+
+    ``steps`` comes from the plan, and a resume driven from a **recovered** park
+    carries ``turn`` ``null`` (ADR-0052 §3) — so it has no plan and no steps, and the
+    page wrote "No action was needed." directly above "Done. `smtp` ran.". ADR-0170 §6
+    is that the deterministic account is what this system guarantees about what it did,
+    so a sentence contradicting it on the same screen is the failure that section
+    exists to prevent, arriving from the other direction.
+
+    ``step`` present is that account, which is why the condition reads both members
+    rather than inferring one from the other.
+    """
+    body = _functions(_code("app.js"))["renderOutcome"]
+
+    assert "if (outcome.steps.length === 0 && outcome.step === null) {" in body
