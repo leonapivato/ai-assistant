@@ -219,16 +219,58 @@ def test_the_front_end_continues_the_conversation_the_hub_named() -> None:
     (ADR-0074 §2), and a page that rendered it without sending it back would start
     a fresh conversation on every question the owner asked.
 
-    Held in page state rather than in browser storage: the hub owns the
-    conversation, a reload is a new page asking the hub again, and nothing about a
-    conversation belongs beside the session half.
+    Held in the session's own key family, which is the reversal #1429 asks for and
+    the milestone-14 phone QA is the evidence behind: an earlier draft kept it in page
+    state alone, so a reload silently started a conversation the owner never asked for
+    (#1371's first clause). Web storage is scoped to scheme, host and port — the
+    property ADR-0168 §6 relies on for the header half — so the id at
+    ``127.0.0.1:8422`` is unreadable from ``127.0.0.1:9000``.
+
+    It admits nothing on its own. Every request carrying it is admitted by §6's two
+    values and by nothing else, so an id read out of storage without them reaches no
+    conversation.
     """
     script = _code("app.js")
 
     assert "conversationId" in script
     assert "asked.conversation_id = conversationId" in script
     assert "localStorage.setItem(STORAGE_KEY" in script
-    assert 'setItem("assistant.conversation' not in script
+    assert 'const CONVERSATION_KEY = "assistant.session.conversation-id";' in script
+    assert "let conversationId = storedConversation();" in script
+
+
+def test_the_conversation_is_destroyed_with_the_session_it_sits_beside() -> None:
+    """A thread carried into a session the owner started afresh would be this page
+    continuing something the hub was never asked to continue.
+
+    Three routes end one, and all three go through the same place: the session half
+    being forgotten (a lost session, a replaced one), a new bootstrap exchange, and
+    forgetting the conversation itself.
+    """
+    functions = _functions(_code("app.js"))
+
+    assert "setConversation(null);" in functions["forgetHeaderHalf"]
+    assert "setConversation(null);" in functions["startSession"]
+    assert "setConversation(null);" in functions["forgetConversation"]
+    assert "window.localStorage.removeItem(CONVERSATION_KEY);" in functions["setConversation"]
+
+
+def test_the_page_says_which_conversation_the_next_question_lands_in() -> None:
+    """#1371's first clause, which is the half of that issue #1429 puts in this lane.
+
+    "None yet" is said rather than left blank: the hint was empty until a turn came
+    back, and an empty line is what left the owner on the phone unable to tell a fresh
+    thread from a continued one. The other two clauses of #1371 — prior turns rendered
+    on resume, and a legible outcome for forget — are not taken here.
+    """
+    script = _code("app.js")
+    setter = _functions(script)["setConversation"]
+
+    assert "No conversation yet. Your next question starts one." in setter
+    assert "Your next question continues it." in setter
+    # Said on load and not only after a turn, which is what makes the persisted id
+    # visible at all.
+    assert "setConversation(conversationId);" in _functions(script)["showConsole"]
 
 
 def test_the_front_end_tells_a_transport_failure_apart_from_a_refusal() -> None:
@@ -244,6 +286,81 @@ def test_the_front_end_tells_a_transport_failure_apart_from_a_refusal() -> None:
     # poll that failed in neither of §9's two ways and is not reported as either.
     assert "delivery-budget-declined" in script
     assert "delivery-failed" in script
+
+
+def test_a_fault_is_written_beside_the_act_that_raised_it() -> None:
+    """#1429: one slot at the foot of a thirteen-panel page is a condition the owner
+    has to scroll to find.
+
+    That is ADR-0083's ruling 4 losing at the last hop it has to survive: ADR-0168 §9
+    spends a clause keeping a transport failure distinguishable from a refusal all the
+    way to the browser, and a page that then renders it off-screen has flattened it
+    into silence after all.
+
+    The panel is asserted per call rather than in aggregate — a page that named one
+    panel and sent the other fifteen conditions to the foot would satisfy any count.
+    """
+    script = _code("app.js")
+    document = _asset("index.html")
+    sections = set(re.findall(r'<section id="([a-z-]+)"', document))
+
+    named, unnamed = [], []
+    for call in _fault_calls(script):
+        panel = re.search(r'.,\s*"([a-z-]+)"$', call)
+        (named.append(panel.group(1)) if panel else unnamed.append(call))
+
+    assert set(named) == _FAULT_PANELS
+    assert sections >= _FAULT_PANELS
+    assert tuple(sorted(unnamed)) == _UNNAMED_FAULTS
+
+
+def test_the_page_foot_keeps_the_slot_for_a_fault_no_panel_owns() -> None:
+    """#1429 moves the faults that have a panel and keeps the ones that do not — the
+    page's own load, and the session — because those have no panel to sit beside and
+    the slot has to exist before anything has been built.
+
+    The slot's text is its own element rather than the container's ``textContent``,
+    which is what lets the dismiss control live inside it: writing a message onto the
+    container would destroy the button on the first fault.
+    """
+    document = _markup("index.html")
+    script = _code("app.js")
+
+    assert re.search(r'<div id="fault" class="fault" hidden>', document)
+    assert '<p class="fault-text"></p>' in document
+    assert 'id="fault-dismiss"' in document
+    assert 'node.firstElementChild.textContent = message === null ? "" : message;' in script
+
+
+def test_a_dismiss_control_dismisses_and_does_nothing_else() -> None:
+    """A control that quietly re-ran the act would be the silent retry ADR-0168 §9
+    forbids wearing a button's clothes — so what is pinned is the absence of anything
+    else in it, not the presence of the handler.
+
+    A slot is built by the script rather than written out once per panel in the
+    document, so the check is on the builder: it appends a text node and a button, and
+    it reaches for no value the hub returned.
+    """
+    script = _code("app.js")
+    builder = _functions(script)["offerDismiss"]
+
+    assert 'dismiss.addEventListener("click", () => fault(null, panelId));' in builder
+    assert "fetch(" not in builder
+    assert "relay(" not in builder
+    assert 'el("fault-dismiss").addEventListener("click", () => fault(null));' in script
+
+
+def test_a_fault_reveals_the_panel_it_is_written_into() -> None:
+    """A read that failed before its panel was ever shown would otherwise write the
+    reason into a panel nobody can see, which is the same flattening one layer on.
+
+    The reveal is on the write and not on the clear: `fault(null, …)` must not open a
+    panel the owner never asked for, and that is what the second half asserts.
+    """
+    writer = _functions(_code("app.js"))["fault"]
+
+    assert "if (message !== null && where !== null) {" in writer
+    assert writer.index("message !== null && where !== null") < writer.index("show(where, true)")
 
 
 # --- ADR-0175: the page's half of the streamed surface ----------------------
@@ -290,8 +407,47 @@ def test_the_page_tells_a_terminal_value_from_a_body_that_simply_stopped() -> No
     script = _code("app.js")
 
     assert "terminal === null" in script
-    assert "STREAM_CUT" in script
-    assert "ended before the gateway finished it" in script
+    assert "ANSWER_STREAM_CUT" in script
+    assert "DELIVERY_STREAM_CUT" in script
+    assert script.count("ended before the gateway finished it") == 2
+
+
+def test_a_cut_answer_stream_leaves_no_partial_answer_on_screen() -> None:
+    """§2 makes a body that ended without a terminal value a **transport failure**, and
+    ADR-0173 §3 makes the terminal outcome's ``reply`` the answer — "no front end
+    treats an accumulated chunk sequence as the record of what the assistant said".
+
+    Leaving the chunks on screen renders a non-answer exactly as ADR-0173 §6's fourth
+    shape is rendered: an answer owed and *partly* produced, which arrives as a
+    terminal outcome carrying ``reply_degraded`` and is said to be incomplete in the
+    same breath. That distinction is what ``renderReply``'s middle branch exists to
+    keep, and a cut stream is not that shape.
+
+    Nothing is lost by clearing it: ADR-0175 §10 declines resuming an interrupted
+    stream (#1314), so the whole of the recovery is asking again.
+    """
+    streaming = _functions(_code("app.js"))["askStreaming"]
+    cut = streaming.index("if (terminal === null) {")
+
+    assert streaming.index("clearNode(panel);", cut) < streaming.index("ANSWER_STREAM_CUT")
+    assert streaming.index('show("answer", false);', cut) < streaming.index("ANSWER_STREAM_CUT")
+
+
+def test_the_two_stream_endings_are_not_one_message() -> None:
+    """One wording served both while the delivery stream was the second reader of it,
+    and it told an owner whose notifications had stopped that "the connection carrying
+    that answer" had gone.
+
+    The condition is the same one — §2's body that ended without a terminal value —
+    and what was cut is not, so the sentence about what to do next is not either.
+    """
+    script = _code("app.js")
+
+    assert "A cut stream is asked again, not resumed." in script
+    assert "this browser has stopped watching" in script
+    assert "Start watching again." in script
+    assert "ANSWER_STREAM_CUT" in _functions(script)["askStreaming"]
+    assert "DELIVERY_STREAM_CUT" in _functions(script)["watchDeliveries"]
 
 
 def test_the_page_renders_the_terminal_reply_over_what_it_accumulated() -> None:
@@ -419,6 +575,113 @@ def test_the_page_says_whether_it_is_watching_rather_than_retrying_unseen() -> N
     assert "delivery-state" in document
     assert "setTimeout" not in script
     assert "setInterval" not in script
+
+
+def test_the_delivery_stream_is_re_armed_on_two_events_and_on_no_timer() -> None:
+    """#1429's rule, stated as an extension of ADR-0168 §9: re-arming the delivery
+    stream on foreground or on network return is permitted **when it is announced in
+    the page**, never silently.
+
+    ADR-0175 §4 is why it costs nothing — an abandoned delivery stream costs the
+    browser "a reconnect — which is free, because a session outlives its connections".
+    §4's last clause is also what makes it necessary: a backgrounded phone has its
+    stream abandoned the moment a write to it does not complete, and the panel went on
+    reading "Watching for notifications" until the owner noticed.
+
+    The timers stay out. A page that spun against an unreachable hub would be ADR-0168
+    §9's failure wearing the front end's clothes, and that is a different thing from
+    reconnecting once, on an event the owner caused, and saying so.
+    """
+    script = _code("app.js")
+
+    assert 'document.addEventListener("visibilitychange"' in script
+    assert 'window.addEventListener("online", () => rearm(NETWORK_BACK));' in script
+    assert 'document.visibilityState === "visible"' in script
+    assert "setTimeout" not in script
+    assert "setInterval" not in script
+
+
+def test_a_re_arm_happens_only_where_there_is_a_session_and_no_open_stream() -> None:
+    """The guard is the whole of what keeps a tab switch from costing anything: a
+    healthy page re-arms nothing, and a page with no session half re-arms nothing
+    either, because there is nothing for the gateway to admit.
+
+    ``watching`` is this page's own record of whether a stream is open, and a socket
+    that has died without the ``fetch`` settling still reads as open — so a re-arm
+    there does nothing, and forcing a second stream to find out would hold two of one
+    browser's ``gateway_max_browser_connections`` for one delivery slot.
+    """
+    rearm = _functions(_code("app.js"))["rearm"]
+
+    assert "if (headerHalf() === null || watching) {" in rearm
+    assert rearm.index("return;") < rearm.index("watchDeliveries(")
+
+
+def test_a_re_arm_says_that_it_happened_why_and_what_it_does_not_promise() -> None:
+    """ "Announced in the page" is the condition on which re-arming is permitted at all,
+    so the sentence is not decoration.
+
+    The last clause is the one that has to be right rather than reassuring: the gateway
+    holds a poll only while a stream is open, so nothing was taken out of the hub's
+    durable outbox while this page was not watching (ADR-0175 §4) — but a delivery
+    returned in the moment the last stream ended "is written nowhere" and is not
+    replayed, and a page promising otherwise would be promising what the gateway
+    declines to guarantee.
+    """
+    script = _code("app.js")
+    rearm = _functions(script)["rearm"]
+
+    assert "came back to the foreground with nothing listening" in script
+    assert "network came back with nothing listening" in script
+    assert "announced here rather than done quietly" in script
+    assert "it is polled only while a browser is watching" in script
+    assert "is not repeated" in script
+    assert "NOTHING_REPLAYED" in rearm
+    # The announcement is written where the panel already says whether it is watching,
+    # and it is written before anything can arrive on the re-armed stream.
+    assert "`Watching for notifications. ${because}`" in _functions(script)["watchDeliveries"]
+
+
+def test_the_page_says_why_a_session_ended_while_it_was_only_watching() -> None:
+    """ADR-0175 §7: an open stream is **not** use of the session that admitted it.
+    ``gateway_session_idle_timeout`` "is refreshed by a request the gateway admits and
+    by nothing else — not by a stream's continued existence, not by a value the gateway
+    writes on one, and not by a delivery poll", and a stream ends no later than the
+    session that admitted it.
+
+    So a page left open and watching, asked nothing, expires exactly on time and the
+    stream ends under it — and the bare vocabulary entry for ``no-live-session`` reads,
+    to the owner of that page, as though something went wrong.
+
+    The sentence is on the **delivery** ending alone and deliberately: an answer
+    stream's own request refreshed the timeout on its way in, so ``no-live-session``
+    there is not the hour passing, and saying it was would be a wrong explanation
+    rather than a missing one.
+    """
+    script = _code("app.js")
+
+    assert "gateway_session_idle_timeout" in script
+    assert "Watching does not keep a session alive." in script
+    assert 'value.fault === "no-live-session"' in _functions(script)["describeDeliveryEnd"]
+    assert "describeDeliveryEnd" in _functions(script)["watchDeliveries"]
+    assert "describeDeliveryEnd" not in _functions(script)["askStreaming"]
+
+
+def test_the_page_says_that_a_session_ends_with_the_gateway() -> None:
+    """ADR-0168 §4: a session is "minted at the gateway, held in memory, and dies with
+    the process".
+
+    The page meets that condition as a ``fetch`` that rejected, which says only that
+    the gateway did not answer — so what the owner needs is the sentence for the
+    surprise rather than a restatement of the mechanism: nothing is wrong with the
+    browser, nothing is recoverable, and the way back is a fresh bootstrap value.
+    """
+    script = _code("app.js")
+
+    assert "Every session ends with the gateway" in script
+    assert "written down nowhere" in script
+    assert "has no memory of this one" in script
+    assert "Start the gateway, then start a session with the value it prints." in script
 
 
 def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> None:
@@ -579,7 +842,7 @@ def test_the_page_reads_a_conversation_before_it_forgets_one() -> None:
     """
     script = _code("app.js")
 
-    assert 'relay(half, "/conversation", { conversation_id: id })' in script
+    assert 'relay(half, "/conversation", { conversation_id: id }, "conversations")' in script
     assert "recorded_turns" in script
     assert "window.confirm(" in script
 
@@ -631,6 +894,52 @@ _RELAY_ENTRIES: Final = (
 )
 
 
+#: Every panel a fault can be written into (#1429). Enumerated rather than derived
+#: from the script, for the reason issue #1332 records one file over: a check that read
+#: the panels out of the same expression it is checking would pass whatever that
+#: expression became, including a page that had quietly gone back to one slot.
+_FAULT_PANELS: Final = frozenset(
+    {
+        "bootstrap",
+        "console",
+        "conversations",
+        "confirmations",
+        "notifications",
+        "acts",
+        "sources",
+        "standing",
+        "history",
+        "beliefs",
+        "questions",
+        "review",
+        "tuning",
+        "connections",
+        "connection-log",
+        "observation",
+    }
+)
+
+#: The five ``fault`` calls that do **not** name a panel with a literal, which are the
+#: machinery's own: the two that clear the page-foot slot, the two that clear a built
+#: one — its dismiss control, and the sweep a session start or end makes over all of
+#: them — and the one place a panel is chosen at run time. That last is a condition
+#: that ended the session, reported in the bootstrap panel because `sessionLost` has
+#: just hidden every other one.
+_UNNAMED_FAULTS: Final = (
+    'message, lost ? "bootstrap" : panelId',
+    "null",
+    "null",
+    "null, panelId",
+    "null, panelId",
+)
+
+#: A guard reporting the gateway having gone, into the panel whose act raised it
+#: (#1429). The panel is part of what is pinned: a guard that reported it to the page
+#: foot would be legible here and illegible on a page of thirteen panels, which is the
+#: whole of what that change was for.
+_GATEWAY_GONE: Final = re.compile(r'fault\(GATEWAY_GONE, "[a-z-]+"\)')
+
+
 def _functions(script: str) -> dict[str, str]:
     """Every top-level function in the script, by name, each to the next declaration.
 
@@ -645,6 +954,27 @@ def _functions(script: str) -> dict[str, str]:
         ]
         for index, one in enumerate(opened)
     }
+
+
+def _fault_calls(script: str) -> list[str]:
+    """The argument text of every ``fault(...)`` call, brackets matched.
+
+    Matched rather than pattern-counted because the argument is sometimes a call and
+    sometimes two concatenated strings across three lines, and a regular expression
+    that read either would read a truncated one of the other.
+    """
+    calls = []
+    for opened in re.finditer(r"(?<![\w.])fault\(", script):
+        if script[: opened.start()].endswith("function "):
+            continue
+        depth, index = 0, opened.end() - 1
+        while index < len(script):
+            depth += {"(": 1, ")": -1}.get(script[index], 0)
+            if depth == 0:
+                break
+            index += 1
+        calls.append(" ".join(script[opened.end() : index].split()))
+    return calls
 
 
 def _declaration(script: str, name: str) -> str:
@@ -677,10 +1007,10 @@ def test_every_fetch_the_page_makes_is_guarded() -> None:
     for called, entry in _FETCH_SITES.items():
         guard = functions[entry]
         assert "} catch (" in guard, called
-        assert "fault(GATEWAY_GONE)" in guard, called
+        assert _GATEWAY_GONE.search(guard), called
     # Every other entry point reaching `relay` is its own, and catches for itself.
     for entry in _RELAY_ENTRIES:
-        assert "fault(GATEWAY_GONE)" in functions[entry], entry
+        assert _GATEWAY_GONE.search(functions[entry]), entry
 
 
 def test_a_lost_request_on_a_grant_act_is_reported_as_an_unknown_outcome() -> None:
@@ -798,7 +1128,7 @@ def test_the_page_reads_the_belief_again_immediately_before_it_forgets_one() -> 
     """
     forgetting = _functions(_code("app.js"))["forgetBelief"]
 
-    assert 'relay(half, "/belief", { record_id: id })' in forgetting
+    assert 'relay(half, "/belief", { record_id: id }, "beliefs")' in forgetting
     assert forgetting.index('"/belief"') < forgetting.index("window.confirm(")
     assert forgetting.index("window.confirm(") < forgetting.index('"/belief/forget"')
     assert "forgetWarning(belief.band)" in forgetting
@@ -849,7 +1179,7 @@ def test_forgetting_a_question_sends_only_for_one_the_read_returned() -> None:
     """
     forgetting = _functions(_code("app.js"))["forgetQuestion"]
 
-    assert "relay(half, path, { limit: PAGE, offset })" in forgetting
+    assert 'relay(half, path, { limit: PAGE, offset }, "questions")' in forgetting
     assert "body.questions.find((one) => one.id === id)" in forgetting
     assert "if (question === undefined)" in forgetting
     assert forgetting.index("window.confirm(") < forgetting.index('"/question/forget"')
@@ -1035,7 +1365,7 @@ def test_a_write_of_the_settings_reads_them_first_and_renders_what_came_back() -
     """
     write = _functions(_code("app.js"))["writePreferences"]
 
-    assert 'relay(half, "/notification/preferences", {})' in write
+    assert 'relay(half, "/notification/preferences", {}, "tuning")' in write
     assert '"/notification/preferences/set"' in write
     assert "change(read.preferences)" in write
     assert "renderTuning(written.preferences)" in write
@@ -1096,9 +1426,9 @@ def test_the_page_reads_the_notification_again_immediately_before_destroying_it(
     """
     forget = _functions(_code("app.js"))["forgetNotification"]
 
-    assert 'relay(half, "/notifications", { limit: PAGE, offset })' in forget
+    assert 'relay(half, "/notifications", { limit: PAGE, offset }, "review")' in forget
     assert "body.notifications.find((one) => one.id === id)" in forget
-    assert "fault(NOTIFICATION_GONE)" in forget
+    assert 'fault(NOTIFICATION_GONE, "review")' in forget
     assert forget.index("window.confirm") < forget.index('"/notification/forget"')
 
 
@@ -1268,7 +1598,7 @@ def test_an_unread_state_is_resolved_by_a_read_and_never_by_re_running_the_act()
     """
     after = _functions(_code("app.js"))["stateAfterAct"]
 
-    assert 'relay(half, "/connections", {})' in after
+    assert 'relay(half, "/connections", {}, "connections")' in after
     assert "CONNECTION_STATE_UNREAD" in after
     assert "GATEWAY_GONE" not in after
     assert "/connection/connect" not in after
@@ -1561,7 +1891,7 @@ def test_the_answer_supplies_approved_and_nothing_else() -> None:
     """
     body = _functions(_code("app.js"))["answerConfirmation"]
 
-    assert 'relay(half, "/confirmation/resume", { token, approved })' in body
+    assert 'relay(half, "/confirmation/resume", { token, approved }, "confirmations")' in body
     assert "timeout" not in body
 
 
