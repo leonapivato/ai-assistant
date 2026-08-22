@@ -1318,6 +1318,47 @@ def test_a_verdict_whose_item_went_missing_is_reported_as_a_failure(
     assert controller.exitstatus == pytest.ExitCode.TESTS_FAILED
 
 
+def test_a_parametrized_evidence_check_is_refused_once_and_for_the_real_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A case cannot be decided by an evaluator that decides per function.
+
+    Nothing declares a parametrized evidence-dependent check today, and the
+    correspondence test above would not notice one: it matches on ``__name__``,
+    which a parametrized check still has. Under xdist its cases would arrive as
+    ``…::test_x[one]`` and match no evaluator key -- so the controller must not
+    quietly report the function's verdict under a case it never computed.
+
+    It is refused, and refused *once*: the case claims its function, so the
+    evaluator's own verdict is not additionally reported as itemless. That second
+    failure would blame the handover for losing a name, when the name arrived
+    intact and the real fault is the shape of the check.
+    """
+    _isolated(monkeypatch, conftest._RunRecord(unfiltered=True))
+    case = conftest._ItemPayload(
+        nodeid=f"{_HANDED_ITEM['nodeid']}[one]",
+        path=_HANDED_ITEM["path"],
+        lineno=_HANDED_ITEM["lineno"],
+        domain=_HANDED_ITEM["domain"],
+    )
+    monkeypatch.setattr(conftest, "_HANDED_OVER", [case])
+
+    _hand_over(_Session(_Config(worker=True)))
+    controller = _Session(_Config(numprocesses=2))
+    reported = _finish(controller)
+
+    itemless = f"{conftest._TRIAD_CHECK}::{test_no_exemption_is_stale.__name__}"
+    assert set(reported) == {case["nodeid"], itemless}, (
+        "the case claims its own function, so the only other report is the check "
+        "that genuinely had no item handed over"
+    )
+    outcome, message = reported[case["nodeid"]]
+    assert outcome == "failed"
+    assert "is parametrized" in message
+    assert "one outcome per test *function*" in message
+    assert controller.exitstatus == pytest.ExitCode.TESTS_FAILED
+
+
 def test_a_narrowed_run_whose_verdicts_lack_items_says_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
