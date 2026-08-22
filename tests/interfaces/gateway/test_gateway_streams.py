@@ -838,7 +838,6 @@ async def test_a_conversation_the_hub_declined_is_reported_as_a_declined_request
     "path",
     [
         "/learn",
-        "/notifications",
         "/dismiss_notification",
         "/resume",
         "/pending_confirmations",
@@ -856,15 +855,18 @@ async def test_an_operation_this_gateway_does_not_serve_reaches_nothing(
     request for ``/nonsense`` is" (ADR-0175 §12), so it lands in ADR-0168 §6's residual
     fourth class and the engine is not reached.
 
-    **Two different reasons are asserted by one test and they are worth telling
+    **Three different reasons are asserted by one test and they are worth telling
     apart.** ``learn`` is admitted by *nothing*: ADR-0177 §1 leaves it out by name and
     §11 gives it a trigger, so a shape for it here would be the lane inventing an
-    operation. The other five are in §1's enumeration of thirty and are **not served
-    by this gateway yet** — the notification review five, ``resume`` and
-    ``pending_confirmations`` (whose act §8 blocks until #1366 lands) and the
-    connection five are later lanes'. Either way the answer is §6's fourth class,
-    which is the property that makes an enumeration checkable: a path nothing serves
-    behaves identically to a path nothing has heard of.
+    operation. ``resume`` and ``pending_confirmations`` (whose act §8 blocks until
+    #1366 lands) and the connection five are in §1's enumeration of thirty and are
+    **not served by this gateway yet** — they are later lanes'. And
+    ``/dismiss_notification`` names an operation this gateway now *does* serve, at a
+    different path: a shape is a method and a path together (ADR-0168 §6), so a path
+    that merely names a served operation is no more admitted than ``/nonsense``.
+    Either way the answer is §6's fourth class, which is the property that makes an
+    enumeration checkable: a path nothing serves behaves identically to a path
+    nothing has heard of.
     """
     status, body = await harness.whole("POST", path, {})
 
@@ -876,7 +878,7 @@ async def test_an_operation_this_gateway_does_not_serve_reaches_nothing(
 def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() -> None:
     """ADR-0177 §1's enumeration, read off the router.
 
-    Eighteen of the thirty operations §1 admits are served here, and
+    Twenty-three of the thirty operations §1 admits are served here, and
     ``next_notification`` — the gateway's **own** poll — is none of them "because no
     browser request resolves to it: the gateway's own poll originates it under
     ADR-0175 §4, no browser request names it, and no browser argument reaches it"
@@ -905,6 +907,11 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "answer",
         "forget_question",
         "observe",
+        "notifications",
+        "dismiss_notification",
+        "forget_notification",
+        "notification_preferences",
+        "set_notification_preferences",
         "delivery-stream",
     }
 
