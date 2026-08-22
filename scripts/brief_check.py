@@ -75,8 +75,6 @@ _LARGEST_RANGE = 20
 # is close; what the bound buys is that a brief cannot hand this script a
 # traceback in place of a report.
 _LARGEST_LABEL = 9
-# How much of a label the report shows before shortening it.
-_LABEL_COLUMN = 24
 
 _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 
@@ -404,11 +402,20 @@ def _adr_findings(root: Path, text: str) -> tuple[list[Finding], dict[str, Path]
 
 
 def _cited_as(reference: _Reference) -> str:
-    """Render a reference for the report, shortening a label nobody meant to write."""
-    label = reference.label
-    if len(label) > _LABEL_COLUMN:
-        label = f"{label[: _LABEL_COLUMN - 3]}..."
-    return f"ADR-{int(reference.adr):04d} §{label}" if reference.adr else f"§{label}"
+    """Render a reference the way the brief wrote it.
+
+    The label is never shortened for display. A shortened one was tried and
+    removed: :func:`check` de-duplicates on this string, so two distinct
+    references sharing a prefix would collapse into one row and the second would
+    vanish from the report. An over-long label is an input nobody writes; a row
+    that silently disappears is a class of failure, and the two are not the same
+    size of problem.
+    """
+    return (
+        f"ADR-{int(reference.adr):04d} §{reference.label}"
+        if reference.adr
+        else f"§{reference.label}"
+    )
 
 
 def _section_findings(text: str, files: dict[str, Path]) -> list[Finding]:
