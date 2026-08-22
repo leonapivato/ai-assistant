@@ -157,8 +157,16 @@ motion.
 > log record, not in an error, not in a response body, and not in any URL a browser
 > transmits to a server.
 
+> **Normative.** The mint act is **ordered**, and the order is part of the rule: the
+> gateway mints a candidate, discloses it, and only on a **successful** disclosure
+> does that candidate become the outstanding value of §2 and the previously
+> outstanding value cease. Nothing about a previously outstanding value changes
+> before that point.
+
 > **Normative.** A value the gateway cannot disclose is **not minted**: the gateway
-> destroys it, reports the failure, keeps every live session and keeps serving.
+> destroys the candidate, reports the failure, leaves any previously outstanding
+> value exactly as it was — still outstanding, still on its own clock — and keeps
+> every live session and keeps serving.
 > ADR-0168 §5's "a gateway that cannot disclose its bootstrap value does not start"
 > binds the value minted at start and is untouched; it does not reach a later mint,
 > and no lane may read it as obliging a gateway to stop.
@@ -252,11 +260,24 @@ matters: sessions are already live, and stopping would end all of them to punish
 convenience act that failed. Reporting the failure and continuing leaves the owner
 exactly where they were, which is the direction ADR-0083's ruling 4 points.
 
+**"Exactly where they were" is only true if the order is fixed, and an earlier draft
+left it open.** That draft had §2 replace the outstanding value on a mint and §1
+destroy a value it could not disclose, without saying which happened first — so an
+implementation that replaced before disclosing left the owner with **no** usable
+value after a failure they did not cause, and one that replaced after disclosing left
+the old value live. Two conforming gateways, different admission results for the same
+value, which is the defect §3's opening quotes ADR-0083 §7 about. Adversarial review
+found it on the third round. Disclosure first is the branch that keeps the claim
+above true, and it is also the safer half of the two: the failure mode it accepts is
+an old value living out its own clock, which §3 already bounds, rather than an owner
+locked out of a running gateway by a supervisor closing a pipe.
+
 ### 2. One outstanding value at a time, and four ways it ceases
 
 > **Normative.** At most **one** unexchanged bootstrap value stands at a time. A
-> mint replaces the outstanding value, which ceases to admit anything at that
-> moment, and no gateway holds two.
+> **disclosed** mint (§1) replaces the outstanding value, which ceases to admit
+> anything at that moment, and no gateway holds two — not even for the width of a
+> mint act, because §1 orders disclosure before replacement.
 
 > **Normative.** An outstanding value ceases to admit anything on the first of
 > four events, and there is no fifth: its exchange (ADR-0168 §5's single use),
@@ -915,7 +936,9 @@ clause lands where is part of the decision.
 That a value ceases on each of §2's four events and that a refused exchange discloses
 nothing distinguishing them; that the mint act refuses at the ceiling and the exchange
 refuses at the ceiling, separately, since only one of the two is on the request path;
-that a value the gateway could not disclose is not minted and the gateway keeps
+that a value the gateway could not disclose is not minted, that a previously
+outstanding value still admits after such a failure — the ordering §1 fixes, and the
+one an implementation is most likely to get backwards — and that the gateway keeps
 serving; and that `gateway_bootstrap_ttl` is refused at load on a non-positive value,
 in the `gt=timedelta(0)` form. The monotonic clause of §3 is pinned the way the
 session bounds already are — by driving the injected deferral seam rather than by
