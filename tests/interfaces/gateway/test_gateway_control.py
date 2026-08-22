@@ -710,23 +710,115 @@ async def test_a_refusal_carries_no_fact_about_the_hub() -> None:
         assert body == {"fault": "malformed-request"}
 
 
-async def test_a_page_argument_of_the_wrong_type_is_refused_and_a_range_is_the_hubs() -> None:
-    """The type is this adapter's and the range is not.
+@pytest.mark.parametrize("value", [True, -1, 2**63, "40"])
+async def test_a_page_argument_is_refused_at_this_adapters_own_parse_boundary(
+    value: object,
+) -> None:
+    """``AssistantEngine.beliefs``' own instruction to a client: "an adapter that lets
+    a user supply either **should refuse an out-of-range value at its own parse
+    boundary**".
 
-    ``{"limit": true}`` would otherwise be a page of one that nothing downstream could
-    tell from a request for a page of one. The **range**, though, is refused "locally
-    and before any I/O, in every implementation" (ADR-0085 §9), so a second bound here
-    would be a second place for the two to disagree.
+    A browser is such an adapter, so the bound ADR-0085 §9 declares — ``[0, 2**63)``,
+    refused rather than clamped (ADR-0073 §2) — is applied here, and no hub connection
+    is taken for a page nobody can serve.
 
-    The two faults are what tell the two layers apart: ``malformed-request`` is a
-    refusal this gateway authored, and ``rejected`` is one it relayed.
+    ``True`` is in the list because ``bool`` is an ``int`` by inheritance: without the
+    type check it is a page of one that nothing downstream could tell from a request
+    for one.
     """
     async with _harness() as one:
-        wrong_status, wrong = await one.whole("POST", "/beliefs", {"limit": True})
-        out_status, out = await one.whole("POST", "/beliefs", {"limit": -1})
+        status, body = await one.whole("POST", "/beliefs", {"limit": value})
 
-        assert (wrong_status, wrong["fault"]) == (400, "malformed-request")
-        assert (out_status, out["fault"]) == (400, "rejected")
+        assert status == 400
+        assert body["fault"] == "malformed-request"
+        assert one.engine.calls == []
+
+
+async def test_an_operations_own_paging_rule_stays_the_operations() -> None:
+    """The bound above is the *argument's* and is not narrowed to any operation's.
+
+    ``recent_grants`` requires a strictly positive ``limit`` (ADR-0102 §10), which
+    ``beliefs`` does not — so ``limit: 0`` is well-formed at this boundary, is relayed,
+    and comes back as the hub's own refusal. A gateway that had folded the tighter rule
+    into its parser would refuse a call ``beliefs`` accepts.
+    """
+    async with _harness() as one:
+        paged_status, _ = await one.whole("POST", "/beliefs", {"limit": 0})
+        grants_status, grants = await one.whole("POST", "/grants/recent", {"limit": 0})
+
+        assert paged_status == 200
+        assert (grants_status, grants["fault"]) == (400, "rejected")
+
+
+async def test_a_blank_identifier_is_the_promoted_surfaces_refusal_and_not_a_second_one() -> None:
+    """Blankness is refused by the promoted surface "locally and before any I/O" in
+    every implementation (ADR-0085 §9), so nothing reaches the hub either way — and a
+    second predicate here would be a second definition of "blank".
+
+    That is the failure ADR-0102 §2 is written against one field over: a rule applied
+    a layer below the comparison makes the gateway admit or refuse calls the
+    in-process engine does not. The paging bound above is different in kind and that
+    is why it is here — the surface contract asks an adapter for it by name, and no
+    clause asks an adapter to decide what a blank string is.
+    """
+    async with _harness() as one:
+        status, body = await one.whole("POST", "/belief", {"record_id": "   "})
+
+        assert status == 400
+        assert body["fault"] == "rejected"
+
+
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        ("/beliefs", {"bands": [{}]}),
+        ("/beliefs", {"kinds": [[]]}),
+        ("/grant", {"source": "calendar", "scope": [{"facet": True}]}),
+    ],
+)
+async def test_a_vocabulary_member_that_is_not_a_string_is_refused_and_not_a_fault(
+    path: str, payload: dict[str, Any]
+) -> None:
+    """A body can carry an object or an array where a member name belongs, and neither
+    is hashable — so a reader that asked the vocabulary about one directly would raise
+    a ``TypeError`` this module does not catch.
+
+    ADR-0168 §3's answer to a request the surface has no shape for is a refusal on a
+    condition, not a fault of the process, and the type check is what makes the lookup
+    total over what a JSON body can contain.
+    """
+    async with _harness() as one:
+        status, body = await one.whole("POST", path, payload)
+
+        assert status == 400, path
+        assert body["fault"] == "malformed-request", path
+        assert one.engine.calls == []
+
+
+async def test_a_source_with_no_configured_location_stays_grantable() -> None:
+    """ADR-0102 §6, normatively: ``location`` is ``None`` "only where the source has
+    **no** configured location at all".
+
+    A configured location that cannot be shown is the hazard the clause fails closed
+    on, and it fails closed *hub-side*: ``grantable_sources`` omits such a source and
+    ``grant`` refuses it. So a source that reaches a client with ``location`` absent is
+    one where "§9a's obligation [is] vacuous — there is nothing to show — and the
+    source is grantable with ``location`` absent".
+
+    Written down because the inverse reading is the natural one and would make a
+    grantable source ungrantable from a browser while reaching no hazard at all.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold_source("notes")
+    async with _harness(engine) as one:
+        listed_status, listed = await one.whole("POST", "/sources", {})
+        granted_status, granted = await one.whole(
+            "POST", "/grant", {"source": "notes", "scope": ["facet"]}
+        )
+
+        assert (listed_status, listed["sources"][0]["location"]) == (200, None)
+        assert granted_status == 200
+        assert granted["grant"]["source"] == "notes"
 
 
 async def test_a_grant_store_fault_is_the_hubs_condition_and_not_a_gateway_one() -> None:

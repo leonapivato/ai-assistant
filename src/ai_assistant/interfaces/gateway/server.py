@@ -2025,14 +2025,26 @@ def _required_string(payload: Mapping[str, Any], name: str) -> str:
     return value
 
 
-def _page(payload: Mapping[str, Any], name: str, fallback: int) -> int:
-    """One paging argument, or its default.
+#: The bound ADR-0085 §9 declares for every page argument on the promoted surface,
+#: and ADR-0073 §2 refuses rather than clamps. Written here because the surface
+#: contract asks for it here: "an adapter that lets a user supply either **should
+#: refuse an out-of-range value at its own parse boundary**", and a browser is an
+#: adapter that lets a user supply both.
+_PAGE_CEILING: Final = 2**63
 
-    The **range** is not checked here and is not this adapter's to check: the promoted
-    surface refuses an out-of-range page "locally and before any I/O" in every
-    implementation (ADR-0085 §9), and a second bound here would be a second place for
-    the two to disagree. What is checked is the type, which is what tells a page of
-    one from ``true``.
+
+def _page(payload: Mapping[str, Any], name: str, fallback: int) -> int:
+    """One paging argument, or its default, refused at this adapter's own boundary.
+
+    The type check is what tells a page of one from ``true`` — ``bool`` is an ``int``
+    by inheritance, so ``{"limit": true}`` would otherwise be a page of one that
+    nothing downstream could distinguish from a request for one.
+
+    **The range is the surface's own and is not re-derived**: this is ADR-0085 §9's
+    ``[0, 2**63)`` and nothing narrower. An operation with a tighter rule of its own —
+    ``recent_grants`` requires a strictly positive ``limit`` (ADR-0102 §10) — keeps it,
+    because that rule is the operation's rather than the argument's, and a bound
+    invented here would be the second place ADR-0102 §2's reasoning warns about.
 
     Args:
         payload: The request's JSON object.
@@ -2043,10 +2055,10 @@ def _page(payload: Mapping[str, Any], name: str, fallback: int) -> int:
         The value, or the fallback.
 
     Raises:
-        _Refused: If the member is present and is not an integer.
+        _Refused: If the member is present and is not an integer in ``[0, 2**63)``.
     """
     value = _integer(payload, name, fallback)
-    if value is None:
+    if value is None or not 0 <= value < _PAGE_CEILING:
         raise _malformed()
     return value
 
@@ -2107,7 +2119,12 @@ def _members[T: StrEnum](
     if not isinstance(value, list):
         raise _malformed()
     known = {member.value: member for member in vocabulary}
-    if any(one not in known for one in value):
+    # **A string first, and membership second.** JSON carries objects and arrays, and
+    # neither is hashable, so ``{"bands": [{}]}`` asked of the mapping directly raises
+    # a ``TypeError`` this module does not catch — a request the surface has no shape
+    # for arriving as a fault of the process rather than as a refusal. The type check
+    # is what makes the lookup total over what a body can contain.
+    if any(not isinstance(one, str) or one not in known for one in value):
         raise _malformed()
     return tuple(known[one] for one in value)
 

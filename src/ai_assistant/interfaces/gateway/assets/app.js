@@ -863,8 +863,17 @@ async function listSources() {
 //
 // **The location is rendered and an explicit act is taken before any grant is
 // sent** (ADR-0139 §5, ADR-0102 §6) — including the granting half of an amendment,
-// which is the case §5 exists for. A client that cannot show the location does not
-// send `grant`, so a source whose location is absent says so in place of it.
+// which is the case §5 exists for.
+//
+// **An absent location is not the case that clause fails closed on, and the two are
+// easy to run together.** ADR-0102 §6 is normative that `location` is `None` "only
+// where the source has **no** configured location at all", and that a configured
+// location which cannot be shown makes the source *not grantable* — the hub omits it
+// from this listing entirely. So a source that reaches this page with no location is
+// one where "§9a's obligation [is] vacuous — there is nothing to show — and the
+// source is grantable with `location` absent". Withholding the grant control from it
+// would make a grantable source ungrantable from a browser and reach nothing: the
+// hazard §6 is about never arrives here.
 //
 // **A grant renders exactly the uses it names, and the uses it leaves out are not
 // on screen in any form** (ADR-0177 §6's third clause). No greyed row, no unchecked
@@ -1334,10 +1343,17 @@ async function forgetBelief(id) {
       return;
     }
     const belief = held.belief;
+    // Every field ADR-0073 §4 requires, from the read just taken — the window's end
+    // included, where one is set. A confirmation that showed the listing's fields but
+    // dropped one of them would be showing *less* than the screen the user came from,
+    // which is the opposite of what a ceremony is for.
+    const until =
+      belief.valid_until === null ? "" : `\nBelieved until: ${belief.valid_until}`;
     const asked = window.confirm(
       `About to forget this belief.\n\n${bandWords(belief.band)} · ${belief.kind} · ` +
         `confidence ${belief.confidence.toFixed(2)}\n${belief.content}\n\n` +
-        `Why: ${whyHeld(belief)}\nLast revised: ${belief.last_updated}\nid: ${belief.id}\n\n` +
+        `Why: ${whyHeld(belief)}\nLast revised: ${belief.last_updated}${until}\n` +
+        `id: ${belief.id}\n\n` +
         `${forgetWarning(belief.band)}\n\nThis destroys the record: nothing of it is ` +
         "kept, not even in an export. To fix it instead, tell me it is wrong in a " +
         "conversation.\n\nYou are forgetting whatever belief that id names when you " +
