@@ -29,6 +29,7 @@ is the ordinary state of a batch mid-flight.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import shutil
 import subprocess
@@ -312,8 +313,28 @@ def copy_into(source: Path, target: Path, synced: Sequence[str], *, dry_run: boo
         lines.append(f"  {verb} {relative}")
         if not dry_run:
             dst.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(src, dst)
+            _replace_atomically(src, dst)
     return lines
+
+
+def _replace_atomically(src: Path, dst: Path) -> None:
+    """Copy ``src`` over ``dst`` without ever leaving a partial file in place.
+
+    ``shutil.copy2`` straight onto the destination truncates it and then writes,
+    so anything reading that file meanwhile — an agent already running in the
+    target clone — can read a half-written ``.env``. Writing beside it and
+    renaming means the destination is only ever the old file or the new one.
+
+    Args:
+        src: The file to copy.
+        dst: Where it goes.
+    """
+    temporary = dst.with_name(f".{dst.name}.clone-sync.{os.getpid()}")
+    try:
+        shutil.copy2(src, temporary)
+        temporary.replace(dst)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def _sync(args: argparse.Namespace) -> int:

@@ -210,12 +210,24 @@ def test_with_deps_drops_the_no_deps_flag(tmp_path: Path) -> None:
         ("~/my notes/DEPLOYED", "~/'my notes/DEPLOYED'"),
         ("~", "~"),
         ("~other/x y", "~other/'x y'"),
+        # Anything that is not `~` or `~username` before the first slash is not a
+        # tilde form; leaving it bare would make a path argument a second command.
+        ("~; touch /tmp/pwned", "'~; touch /tmp/pwned'"),
+        ("~ evil", "'~ evil'"),
+        ("~$(id)/x", "'~$(id)/x'"),
+        ("~-weird/x", "'~-weird/x'"),
     ],
 )
 def test_a_remote_path_is_one_shell_word_with_the_tilde_still_live(
     path: str, expected: str
 ) -> None:
     assert _MODULE.remote_path(path) == expected
+
+
+def test_a_hostile_marker_cannot_become_a_second_command(tmp_path: Path) -> None:
+    plan = _dry_run(_repo(tmp_path), "--marker", "~; touch /tmp/pwned")
+
+    assert "> ~; touch /tmp/pwned" not in plan
 
 
 def test_a_marker_path_with_a_space_is_not_split_by_the_redirection(tmp_path: Path) -> None:

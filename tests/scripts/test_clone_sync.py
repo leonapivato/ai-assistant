@@ -201,6 +201,20 @@ def test_dry_run_writes_nothing(tmp_path: Path) -> None:
     assert not (sibling / ".env").exists()
 
 
+def test_a_copy_leaves_no_temporary_behind_and_replaces_atomically(tmp_path: Path) -> None:
+    # `shutil.copy2` straight onto the destination truncates before it writes, so
+    # an agent already running in the target can read a half-written `.env`.
+    source, (sibling,) = _clones(tmp_path, 2)
+    (sibling / ".env").write_text("old\n")
+    listing = _list_file(tmp_path, ".env")
+
+    status, out, _ = _sync(source, listing)
+
+    assert status == 0, out
+    assert (sibling / ".env").read_text() == "ASSISTANT_X=1\n"
+    assert [p.name for p in sibling.iterdir() if "clone-sync" in p.name] == []
+
+
 def test_an_unchanged_file_is_reported_and_not_recopied(tmp_path: Path) -> None:
     source, (sibling,) = _clones(tmp_path, 2)
     (sibling / ".env").write_text("ASSISTANT_X=1\n")
