@@ -1678,8 +1678,17 @@ def test_one_answer_per_park_and_a_second_click_submits_nothing() -> None:
     that *failed* leaves a row that must still be answerable. ``ask`` disables its own
     button across the same window and for the same reason.
     """
-    body = _functions(_code("app.js"))["offerApproval"]
+    functions = _functions(_code("app.js"))
 
-    assert body.count("disabled = true") == 2
-    assert body.count("disabled = false") == 2
-    assert "} finally {" in body
+    assert functions["offerApproval"].count("disabled = true") == 2
+    assert functions["offerApproval"].count("disabled = false") == 2
+    assert "} finally {" in functions["offerApproval"]
+    # **And the guarantee is page-wide rather than per row**, because one park is on
+    # screen twice: a turn that parks renders its confirmation with the answer, and the
+    # recovery listing renders the same park again — carrying the *same* token, since
+    # ``pending_confirmations`` "reuses that entry's token rather than minting a second"
+    # for a binding the engine already holds. Two rows, one park, and a per-row lock
+    # would let the second one submit while the first was in flight.
+    assert "if (answering) {" in functions["answerConfirmation"]
+    assert "answering = true;" in functions["answerConfirmation"]
+    assert "answering = false;" in functions["answerConfirmation"]

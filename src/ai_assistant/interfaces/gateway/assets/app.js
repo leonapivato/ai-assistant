@@ -600,6 +600,20 @@ async function readPending(quiet) {
   }
 }
 
+// Whether an answer is outstanding. **One at a time, page-wide**, and the reason it
+// cannot be per row is that one park is on screen twice: a turn that parks renders its
+// confirmation with the answer, and the recovery listing renders the same park again —
+// with the *same* token, because the engine "reuses that entry's token rather than
+// minting a second" for a binding it already holds. Two rows, one park; answering both
+// at once resolves it with one request and gets the other refused as an unknown
+// continuation, which ADR-0084 §7 makes emphatically not a denial and this page would
+// report as one. Disabling a row's own pair is the visible half and is not the
+// guarantee.
+//
+// Sequential answering needs no guard: the first answer replaces the outcome panel and
+// re-reads the listing, so the second row is gone before it can be clicked.
+let answering = false;
+
 // One answer, relayed. The page conveys consent and rules on nothing (ADR-0042 §6):
 // a refusal comes back as an ordinary outcome whose step was denied, not as a fault,
 // and it is rendered where every other turn's result is rendered.
@@ -608,12 +622,16 @@ async function readPending(quiet) {
 // only thing that changes what is waiting — and re-reading is also how the page gets
 // fresh tokens for whatever is left rather than keeping the ones it has.
 async function answerConfirmation(token, approved) {
+  if (answering) {
+    return;
+  }
   fault(null);
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
+  answering = true;
   try {
     const body = await relay(half, "/confirmation/resume", { token, approved });
     if (body === null) {
@@ -623,6 +641,8 @@ async function answerConfirmation(token, approved) {
     await readPending(true);
   } catch (_) {
     fault(GATEWAY_GONE);
+  } finally {
+    answering = false;
   }
 }
 
