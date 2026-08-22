@@ -338,8 +338,12 @@ def _replace_atomically(src: Path, dst: Path) -> None:
     handle, name = tempfile.mkstemp(dir=dst.parent, prefix=f".{dst.name}.", suffix=".clone-sync")
     temporary = Path(name)
     try:
-        with os.fdopen(handle, "wb") as sink:
-            sink.write(src.read_bytes())
+        # Streamed rather than read whole: `copy2` streamed, and a list entry is
+        # only a config file by convention — nothing stops one naming something
+        # large, and reading it into memory to write it straight back out is a
+        # cost with no purchase.
+        with src.open("rb") as source_file, os.fdopen(handle, "wb") as sink:
+            shutil.copyfileobj(source_file, sink)
         # `copy2`'s other half: mkstemp's 0600 is not the mode the file should
         # land with, and the modification time is worth carrying over too.
         shutil.copystat(src, temporary)

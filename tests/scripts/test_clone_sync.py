@@ -250,6 +250,19 @@ def test_a_copied_file_keeps_the_sources_mode(tmp_path: Path) -> None:
     assert (sibling / ".env").stat().st_mode & 0o777 == 0o640
 
 
+def test_a_large_file_is_streamed_rather_than_read_whole(tmp_path: Path) -> None:
+    # Not a size test — a content test that the streaming path is byte-exact.
+    source, (sibling,) = _clones(tmp_path, 2)
+    payload = bytes(range(256)) * 8192
+    (source / ".env").write_bytes(payload)
+    listing = _list_file(tmp_path, ".env")
+
+    status, out, _ = _sync(source, listing)
+
+    assert status == 0, out
+    assert (sibling / ".env").read_bytes() == payload
+
+
 def test_an_unchanged_file_is_reported_and_not_recopied(tmp_path: Path) -> None:
     source, (sibling,) = _clones(tmp_path, 2)
     (sibling / ".env").write_text("ASSISTANT_X=1\n")

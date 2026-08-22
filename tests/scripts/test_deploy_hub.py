@@ -425,6 +425,33 @@ def test_a_dirty_tree_refuses_because_the_marker_would_lie(tmp_path: Path) -> No
     assert "uncommitted changes" in result.stderr
 
 
+def test_an_unanswered_is_active_check_is_not_reported_as_an_inactive_unit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `systemctl is-active` exits non-zero *because* the unit is not active, so a
+    # status alone cannot separate that from a dropped connection. Empty output
+    # means systemctl never spoke.
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (255, "", "ssh: connect: refused"))
+
+    with pytest.raises(_MODULE.DeployError, match="could not ask whether the unit is active"):
+        _MODULE._assert_active(_plan(_repo(tmp_path)))
+
+
+def test_an_inactive_unit_is_reported_as_inactive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (3, "failed\n", ""))
+
+    with pytest.raises(_MODULE.DeployError, match="the unit is failed"):
+        _MODULE._assert_active(_plan(_repo(tmp_path)))
+
+
+def test_an_active_unit_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, "active\n", ""))
+
+    _MODULE._assert_active(_plan(_repo(tmp_path)))
+
+
 def test_a_failed_journal_poll_is_reported_as_itself(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
