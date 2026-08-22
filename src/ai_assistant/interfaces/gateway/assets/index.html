@@ -56,11 +56,36 @@
         </form>
         <p class="hint" id="conversation"></p>
         <button type="button" id="conversations-button">Conversations</button>
+        <button type="button" id="confirmations-button">What is waiting for your answer</button>
       </section>
 
       <section id="answer" class="panel" hidden>
         <h2>What happened</h2>
         <div id="answer-body"></div>
+      </section>
+
+      <!--
+        The CONFIRM prompt (ADR-0177 §8, ADR-0178 §7). This panel is the **recovery**
+        route and nothing else: `pending_confirmations` is the one way a browser that
+        was closed and reopened, or a gateway that was restarted, gets back to a park
+        (ADR-0052 §1). A confirmation raised by a turn this page just drove is rendered
+        with that turn, in the panel above.
+
+        There is no markup for the prompt itself here, and its absence is deliberate:
+        every part of a confirmation is a value the hub returned, so all of it is built
+        by `app.js` through text nodes (ADR-0168 §6, ADR-0175 §9). A template in this
+        document would be a second place a value could be put, and the one interesting
+        thing about it would be that it parses markup.
+      -->
+      <section id="confirmations" class="panel" hidden>
+        <h2>Waiting for your answer</h2>
+        <p class="hint">
+          Actions the assistant has parked. Each one is shown whole before you answer
+          it — what it would run, and, where it would send something, whose account it
+          would send from and where it would go. Answering one here is the same act as
+          answering it at a terminal.
+        </p>
+        <div id="confirmation-list"></div>
       </section>
 
       <!--

@@ -234,10 +234,21 @@ button[disabled] {
 .belief-row,
 .question-row,
 .notification-row,
-.connection-row {
+.connection-row,
+.confirmation-row {
   border-top: 1px solid var(--line);
   padding: 0.7rem 0;
 }
+
+/*
+ * The CONFIRM prompt (ADR-0178 §7). Like `.source-row` and `.belief-row` above, it
+ * has no rule that could hide part of what it carries — no `max-height`, no
+ * `overflow: hidden`, no clamped line count. §7 requires the occurrences rendered
+ * whole, "none omitted, none truncated silently, and none ordered so as to hide one",
+ * and a stylesheet is where a surface that renders them all can still show a few: a
+ * confirmation whose recipient list scrolled out of a fixed box would put the owner's
+ * approval on the part they could see.
+ */
 
 .source-name {
   margin: 0 0 0.2rem;
