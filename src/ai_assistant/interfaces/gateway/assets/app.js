@@ -1203,6 +1203,17 @@ const PAGE = 25;
 // and would be a claim this page cannot make.
 const readSoFar = { beliefs: 0, questions: 0, interrupted: 0 };
 
+// Which run of each listing is current. An offset is only meaningful against the
+// question that produced it, so starting a listing again — a band unchecked, the
+// button pressed a second time — retires every page still in flight from the last
+// one: a stale answer renders nothing and advances nothing.
+//
+// Without it a response arriving after the restart appends rows the current filter
+// did not ask for and moves the offset the *next* page is read at, which skips
+// beliefs — and a belief with no rendered row has no `Forget` control, so the failure
+// costs the owner a control rather than a little tidiness.
+const runs = { beliefs: 0, questions: 0, interrupted: 0 };
+
 // A full page says so and offers the next one.
 //
 // **A listing that stopped silently would hide a belief the owner cannot then
@@ -1238,16 +1249,21 @@ function bandFilter() {
   return chosen.length === 3 ? null : chosen.map((one) => one.value);
 }
 
+// Start the belief listing again, from the first page. Reached from the panel's own
+// button and from every band checkbox, because an offset counted against one filter
+// means nothing against another: a band unchecked between two pages would otherwise
+// skip the beliefs the narrower question puts first.
 async function listBeliefs() {
+  runs.beliefs += 1;
   readSoFar.beliefs = 0;
   await readBeliefs(false);
 }
 
 // One page of beliefs, from the start or from where the last one stopped.
 //
-// The band filter is re-read on every page rather than captured once, so a page and
-// the boxes above it never disagree about what is being asked — and a filter changed
-// mid-listing starts the listing again through `listBeliefs`.
+// The filter is captured **before** the read and travels with it, so the page that
+// arrives is rendered against the question it was asked — and the run check after the
+// await is what retires it if the owner has since asked a different one.
 async function readBeliefs(more) {
   fault(null);
   const half = headerHalf();
@@ -1255,6 +1271,7 @@ async function readBeliefs(more) {
     showBootstrap();
     return;
   }
+  const run = runs.beliefs;
   const bands = bandFilter();
   const asked = { limit: PAGE, offset: readSoFar.beliefs };
   if (bands !== null) {
@@ -1262,7 +1279,7 @@ async function readBeliefs(more) {
   }
   try {
     const body = await relay(half, "/beliefs", asked);
-    if (body === null) {
+    if (body === null || run !== runs.beliefs) {
       return;
     }
     const list = el("belief-list");
@@ -1460,8 +1477,10 @@ async function forgetBelief(id) {
 // --- the deferred-question surface (ADR-0078 §8, §9) -------------------------
 
 async function listQuestions() {
-  readSoFar.questions = 0;
-  readSoFar.interrupted = 0;
+  Object.values(QUESTION_LISTS).forEach((listing) => {
+    runs[listing.counter] += 1;
+    readSoFar[listing.counter] = 0;
+  });
   await readQuestions("/questions", false);
   await readQuestions("/questions/interrupted", false);
 }
@@ -1493,10 +1512,11 @@ async function readQuestions(path, more) {
     return;
   }
   const listing = QUESTION_LISTS[path];
+  const run = runs[listing.counter];
   const offset = readSoFar[listing.counter];
   try {
     const body = await relay(half, path, { limit: PAGE, offset });
-    if (body === null) {
+    if (body === null || run !== runs[listing.counter]) {
       return;
     }
     const list = el(listing.node);
@@ -1867,6 +1887,12 @@ el("sources-button").addEventListener("click", listSources);
 el("standing-button").addEventListener("click", listStanding);
 el("history-button").addEventListener("click", listGrantHistory);
 el("beliefs-button").addEventListener("click", listBeliefs);
+// A band changed is a different question, so it starts the listing again rather than
+// filtering what is already on screen: this page holds no beliefs of its own and the
+// hub is what answers which ones match.
+["band-asserted", "band-derived", "band-attested"].forEach((box) => {
+  el(box).addEventListener("change", listBeliefs);
+});
 el("questions-button").addEventListener("click", listQuestions);
 el("observe-button").addEventListener("click", observe);
 
