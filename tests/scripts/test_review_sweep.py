@@ -178,6 +178,21 @@ def test_an_artifact_with_no_readable_provenance_is_kept(tmp_path: Path) -> None
     assert artifact.exists()
 
 
+def test_a_gone_branch_with_no_recorded_commit_is_kept(tmp_path: Path) -> None:
+    # The branch is gone, but with no sha there is no way to ask whether the
+    # content survives under another branch name — so it is unclassifiable, and
+    # unclassifiable means kept. `--delete` must not destroy it either.
+    repo = _repo(tmp_path)
+    artifact = _artifact(repo, "a.md", persona="adversarial", branch="gone/lane", tree="t1")
+
+    status, out, _ = _sweep(repo, "--delete")
+
+    assert status == 0, out
+    assert "[unreadable]" in out
+    assert "no sha to check" in out
+    assert artifact.exists()
+
+
 def test_a_legacy_named_artifact_is_classified_from_its_header(tmp_path: Path) -> None:
     # The old name is `<sha>-<persona>.md` and the new one ends in a *tree* hash,
     # so nothing here may parse the filename.

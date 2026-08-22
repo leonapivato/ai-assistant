@@ -255,6 +255,18 @@ def lockfile_drift(repo: Path, deployed: str, target: str) -> str | None:
     return diff or None
 
 
+def lockfile_uncommitted(repo: Path) -> bool:
+    """Report whether ``uv.lock`` is modified in the working tree.
+
+    Args:
+        repo: The repository root.
+
+    Returns:
+        True when the lockfile differs from the index or from ``HEAD``.
+    """
+    return bool(_git("status", "--porcelain", "--", "uv.lock", repo=repo))
+
+
 def marker_commit(marker_text: str) -> str | None:
     """Extract the commit from a marker file's contents.
 
@@ -277,6 +289,32 @@ def marker_commit(marker_text: str) -> str | None:
 # --------------------------------------------------------------------------- #
 # Remote side: how a command reaches the service user                          #
 # --------------------------------------------------------------------------- #
+
+
+def remote_path(path: str) -> str:
+    """Quote a path for the remote shell without disabling ``~`` expansion.
+
+    Every path here is a parameter, and an unquoted one with a space in it stops
+    being a path: ``> /var/lib/deploy marker`` redirects to ``/var/lib/deploy``
+    and passes ``marker`` as an argument. Plain ``shlex.quote`` would fix that and
+    break the other half — ``'~/venv'`` is not tilde-expanded, and these paths are
+    written relative to the service user's home precisely so the login shell
+    resolves them. So the tilde segment is left bare and everything after the
+    first ``/`` is quoted, which is what the shell's own rule for tilde expansion
+    (an unquoted ``~`` up to the first unquoted ``/``) already allows.
+
+    Args:
+        path: The remote path.
+
+    Returns:
+        The path as one shell word.
+    """
+    if not path.startswith("~"):
+        return shlex.quote(path)
+    head, separator, rest = path.partition("/")
+    if not separator:
+        return head
+    return f"{head}/{shlex.quote(rest)}" if rest else f"{head}/"
 
 
 def as_service_user(command: str, user: str) -> str:
@@ -327,19 +365,21 @@ def ssh_command(host: str, ssh_user: str, remote: str) -> list[str]:
     return ["ssh", f"{ssh_user}@{host}", remote]
 
 
-def scp_command(host: str, ssh_user: str, local: Path, remote_path: str) -> list[str]:
+def scp_command(host: str, ssh_user: str, local: Path, destination: str) -> list[str]:
     """Return the local argv that copies the wheel to the box.
 
     Args:
         host: The box's hostname or address.
         ssh_user: The login user ssh authenticates as.
         local: The local wheel.
-        remote_path: The destination path on the box.
+        destination: The destination path on the box.
 
     Returns:
         The argv.
     """
-    return ["scp", str(local), f"{ssh_user}@{host}:{remote_path}"]
+    # The destination path is expanded by a shell on the far side, so it is
+    # quoted for that shell rather than passed raw.
+    return ["scp", str(local), f"{ssh_user}@{host}:{remote_path(destination)}"]
 
 
 # --------------------------------------------------------------------------- #
@@ -415,7 +455,8 @@ class Plan:
         Returns:
             The remote command line. It tolerates an absent marker.
         """
-        return as_service_user(f"cat {self.args.marker} 2>/dev/null || true", self.args.user)
+        marker = remote_path(self.args.marker)
+        return as_service_user(f"cat {marker} 2>/dev/null || true", self.args.user)
 
     def read_version(self) -> str:
         """Return the command that prints the installed package version.
@@ -423,7 +464,7 @@ class Plan:
         Returns:
             The remote command line.
         """
-        python = f"{self.args.venv.rstrip('/')}/bin/python"
+        python = remote_path(f"{self.args.venv.rstrip('/')}/bin/python")
         expr = "import ai_assistant; print(ai_assistant.__version__)"
         inner = f"{python} -c {shlex.quote(expr)} 2>/dev/null || echo '(not installed)'"
         return as_service_user(inner, self.args.user)
@@ -444,7 +485,7 @@ class Plan:
             umask, because an unreadable wheel fails inside ``su`` with a message
             about the file rather than about the permission.
         """
-        return f"chmod 0644 {shlex.quote(self.staged)}"
+        return f"chmod 0644 {remote_path(self.staged)}"
 
     def install(self) -> str:
         """Return the install command, run in the service user's login shell.
@@ -452,11 +493,11 @@ class Plan:
         Returns:
             The remote command line.
         """
-        python = f"{self.args.venv.rstrip('/')}/bin/python"
+        python = remote_path(f"{self.args.venv.rstrip('/')}/bin/python")
         deps = "" if self.args.with_deps else "--no-deps "
         inner = (
-            f"{self.args.uv} pip install --python {python} "
-            f"{deps}--force-reinstall {shlex.quote(self.staged)}"
+            f"{remote_path(self.args.uv)} pip install --python {python} "
+            f"{deps}--force-reinstall {remote_path(self.staged)}"
         )
         return as_service_user(inner, self.args.user)
 
@@ -476,7 +517,7 @@ class Plan:
         """
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         body = f"{_MARKER_COMMIT_PREFIX}{commit}\nwheel_sha256={digest}\ndeployed_at={stamp}\n"
-        inner = f"printf %s {shlex.quote(body)} > {self.args.marker}"
+        inner = f"printf %s {shlex.quote(body)} > {remote_path(self.args.marker)}"
         return as_service_user(inner, self.args.user)
 
     def unstage(self) -> str:
@@ -485,7 +526,7 @@ class Plan:
         Returns:
             The remote command line. Run as the login user, which owns the file.
         """
-        return f"rm -f {shlex.quote(self.staged)}"
+        return f"rm -f {remote_path(self.staged)}"
 
     def restart(self) -> str:
         """Return the restart command, which also prints the new invocation id.
@@ -653,6 +694,19 @@ def _check_drift(plan: Plan, repo: Path, commit: str) -> str:
         DeployError: If ``uv.lock`` moved since the deployed commit and this run
             would have installed with ``--no-deps``.
     """
+    # Checked FIRST, and independently of the marker. A lockfile modified in the
+    # working tree is a dependency change no commit range can see: with
+    # --allow-dirty the deployed commit is HEAD, `git diff HEAD HEAD` is empty,
+    # and a --no-deps install would ship a wheel whose new requirement is not on
+    # the box. Only when this run builds the wheel — a supplied one did not come
+    # from this tree, so this tree's lockfile says nothing about it.
+    building = not plan.args.wheel and not plan.args.with_deps
+    if building and lockfile_uncommitted(repo):
+        raise DeployError(
+            "uv.lock is modified in the working tree, so the wheel this builds may\n"
+            "need a dependency the box does not have — and no commit range can show\n"
+            "it. Commit the lockfile, or re-run with --with-deps."
+        )
     marker = _run_local(ssh_command(plan.args.host, plan.args.ssh_user, plan.read_marker()))
     deployed = marker_commit(marker)
     if deployed is None:

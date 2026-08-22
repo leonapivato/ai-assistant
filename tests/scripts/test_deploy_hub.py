@@ -199,6 +199,42 @@ def test_with_deps_drops_the_no_deps_flag(tmp_path: Path) -> None:
     assert "--force-reinstall" in plan
 
 
+@pytest.mark.parametrize(
+    ("path", "expected"),
+    [
+        ("/srv/wheel.whl", "/srv/wheel.whl"),
+        ("/var/lib/deploy marker", "'/var/lib/deploy marker'"),
+        # A leading tilde stays bare so the login shell expands it — these paths
+        # are written relative to the service user's home precisely for that.
+        ("~/DEPLOYED_COMMIT", "~/DEPLOYED_COMMIT"),
+        ("~/my notes/DEPLOYED", "~/'my notes/DEPLOYED'"),
+        ("~", "~"),
+        ("~other/x y", "~other/'x y'"),
+    ],
+)
+def test_a_remote_path_is_one_shell_word_with_the_tilde_still_live(
+    path: str, expected: str
+) -> None:
+    assert _MODULE.remote_path(path) == expected
+
+
+def test_a_marker_path_with_a_space_is_not_split_by_the_redirection(tmp_path: Path) -> None:
+    # Unquoted, `> /var/lib/deploy marker` redirects to /var/lib/deploy and hands
+    # `marker` to printf as an argument — the marker lands in the wrong file.
+    plan = _dry_run(_repo(tmp_path), "--marker", "/var/lib/deploy marker")
+
+    assert "/var/lib/deploy marker" in plan
+    assert "> /var/lib/deploy marker" not in plan
+
+
+def test_the_default_paths_render_unquoted_so_the_tilde_expands(tmp_path: Path) -> None:
+    plan = _dry_run(_repo(tmp_path))
+
+    assert "--python ~/venv/bin/python" in plan
+    assert "> ~/DEPLOYED_COMMIT" in plan
+    assert "~/.local/bin/uv pip install" in plan
+
+
 def test_ready_timeout_is_a_parameter(tmp_path: Path) -> None:
     assert "up to 5s" in _dry_run(_repo(tmp_path), "--ready-timeout", "5")
 
@@ -375,6 +411,41 @@ def test_a_dirty_tree_refuses_because_the_marker_would_lie(tmp_path: Path) -> No
 
     assert result.returncode == 1
     assert "uncommitted changes" in result.stderr
+
+
+def _plan(repo: Path, *args: str) -> object:
+    """A plan built from parsed arguments, for the checks that run before any ssh."""
+    parsed = _MODULE._parser().parse_args(["hub.example", "--repo", str(repo), *args])
+    return _MODULE.Plan(parsed, "w.whl")
+
+
+def test_an_uncommitted_lockfile_is_visible(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+
+    assert not _MODULE.lockfile_uncommitted(repo)
+    (repo / "uv.lock").write_text("version = 2\n")
+    assert _MODULE.lockfile_uncommitted(repo)
+
+
+def test_an_uncommitted_lockfile_refuses_a_no_deps_install(tmp_path: Path) -> None:
+    # With --allow-dirty the deployed commit is HEAD, so `git diff HEAD HEAD` sees
+    # nothing — the commit range reads clean while the wheel being built needs a
+    # dependency the box does not have. The refusal runs before the box is
+    # contacted at all, which is why this needs no remote.
+    repo = _repo(tmp_path)
+    (repo / "uv.lock").write_text("version = 2\n")
+
+    with pytest.raises(_MODULE.DeployError, match=r"uv\.lock is modified"):
+        _MODULE._check_drift(_plan(repo, "--allow-dirty"), repo, "HEAD")
+
+
+def test_with_deps_accepts_an_uncommitted_lockfile(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    (repo / "uv.lock").write_text("version = 2\n")
+
+    # Reaches the marker read (and therefore the network) rather than refusing.
+    with pytest.raises(_MODULE.DeployError, match=r"ssh|scp"):
+        _MODULE._check_drift(_plan(repo, "--allow-dirty", "--with-deps"), repo, "HEAD")
 
 
 def test_allow_dirty_records_the_commit_as_dirty(tmp_path: Path) -> None:

@@ -45,6 +45,8 @@ DEFAULT_LIST = Path(__file__).with_name("clone_sync_files.txt")
 FREE_BRANCH = "main"
 #: A sibling clone is the source clone's name plus `-<digits>`.
 _SIBLING_SUFFIX = re.compile(r"-(\d+)$")
+#: What an explicit selector on the command line may be, and nothing else.
+_CLONE_NUMBER = re.compile(r"\d+")
 
 
 class SyncError(Exception):
@@ -211,7 +213,18 @@ def find_siblings(source: Path, numbers: Sequence[str]) -> list[Path]:
     """
     parent, base = sibling_root(source)
     if numbers:
+        # Constrained to digits, and then re-checked after resolution. A selector
+        # is pasted straight into a path, and `<base>-../../elsewhere` resolves
+        # clean out of the sibling root — which would copy credentials into any
+        # unrelated checkout that happens to be on `main` and clean.
+        for n in numbers:
+            if not _CLONE_NUMBER.fullmatch(n):
+                raise SyncError(f"{n!r} is not a clone number; give digits, e.g. `2 3`")
         candidates = [parent / f"{base}-{n}" for n in numbers]
+        root = parent.resolve()
+        for candidate in candidates:
+            if candidate.resolve().parent != root:
+                raise SyncError(f"{candidate} is not a sibling of {source}")
     else:
         candidates = [
             path
