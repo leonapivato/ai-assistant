@@ -77,20 +77,24 @@ test *args:
 # on this machine, and /tmp is a tmpfs. Six of them fill it, and what that looks
 # like from inside a clone is not "no space" but ~1700 failures in
 # `tests/memory/test_sqlite_*`, every one of which passes in isolation (issue
-# #1419). So the recipe reaps on entry, and a candidate has to answer all four
-# of: it is named the way `mktemp -d /tmp/pt-XXXXXX` below names one, it holds
-# xdist's own `popen-gw*` directories, its lease is free, and nothing anywhere
-# inside it has been written within the window. Together those say "a kept tree
-# from a finished run of this recipe" rather than "an old directory whose name
-# starts `pt-`", which is all a glob and an age can say.
+# #1419). So the recipe reaps on entry, and it reaps only what it can show is
+# its own and finished: a tree named the way `mktemp -d /tmp/pt-XXXXXX` names
+# one, holding xdist's `popen-gw*` directories, carrying a LEASE FILE this recipe
+# wrote, whose lock nobody holds, and older than the window below.
 #
-# The LEASE is what actually answers "is anyone in there", because no mtime can:
-# a run wedged in one test writes nothing below its own temp tree, and would look
-# idle from outside however long it stood. So each run holds an exclusive `flock`
-# on its own tree for its whole life, and the reaper skips any tree whose lock it
-# cannot take. The kernel drops the lock when the holding process dies, so a run
-# that was killed leaves a reapable tree rather than an immortal one — which a
-# marker file would not, and #1419 is a bug about trees that never go away.
+# The lease is what carries both halves of that. It is the only evidence of
+# ownership available — the temp root has to stay six characters for the
+# `sun_path` budget the next paragraph explains, so the name cannot be made
+# repository-specific, and shape alone (a `pt-` name, `popen-gw*` children) is
+# something any process on this machine could produce. And it is the only thing
+# that can say a live run is live, since a run wedged in one test writes nothing
+# below its own tree and would look idle from outside however long it stood.
+#
+# So each run holds an exclusive `flock` on its lease for its whole life and the
+# reaper skips any tree whose lock it cannot take. The kernel drops the lock when
+# the holder dies, so a killed run leaves a reapable tree rather than an immortal
+# one — which a marker file would not, and #1419 is a bug about trees that never
+# go away.
 #
 # It also reports when /tmp is low, so the 1700-failure run is diagnosed before it
 # happens rather than after.
@@ -118,19 +122,20 @@ test-fast *args:
         # is therefore never reaped -- a leak rather than a wrong deletion, which
         # is the direction to fail in.
         [ -n "$(find "$candidate" -maxdepth 1 -name 'popen-gw*' -print -quit)" ] || continue
-        # Its lease has to be free. This is the one that can say a live run is
-        # live; everything else here can only say a dead one looks dead. An
-        # absent lease file means a tree from a run that predates this, which the
-        # weaker net below is for -- and never creating one here keeps the reaper
-        # from leaving a file behind in a tree it decided not to take.
-        if [ -e "$candidate.lease" ]; then
-            flock -n "$candidate.lease" true 2>/dev/null || continue
-        fi
-        # And a second, weaker net for a tree left by a run that predates the
-        # lease: nothing written anywhere inside it within the window. The
-        # basetemp's own mtime stops moving once the worker directories exist,
-        # so the directory alone cannot answer this.
-        [ -z "$(find "$candidate" -mmin -"$stale_after" -print -quit)" ] || continue
+        # It must carry a lease file, and that lease must be free. The lease is
+        # what makes the tree THIS recipe's rather than merely tree-shaped: a
+        # six-character `pt-` name and `popen-gw*` children describe a shape, and
+        # any process on this machine could produce one. It is also the only
+        # thing that can say a live run is live -- a run wedged in one test writes
+        # nothing below its own tree and looks idle from outside however long it
+        # stands, so no mtime answers this.
+        #
+        # A tree with no lease beside it is therefore never reaped, whoever made
+        # it. That leaks the trees left by runs from before this recipe leased
+        # them; the low-space report below names those, to be removed by hand
+        # once. Leaking is the direction to fail in.
+        [ -e "$candidate.lease" ] || continue
+        flock -n "$candidate.lease" true 2>/dev/null || continue
         stale="${stale}${candidate}"$'\n'
     done < <(find /tmp -maxdepth 1 -type d -name 'pt-??????' -user "$(id -un)" \
         -mmin +"$stale_after" 2>/dev/null || true)
@@ -142,7 +147,9 @@ test-fast *args:
     free_kb="$(df -Pk /tmp | awk 'NR == 2 { print $4 }')"
     if [ "${free_kb:-0}" -lt 3145728 ]; then
         echo "just test-fast: /tmp has $((free_kb / 1024))M free and one run wants" \
-             "~1.3G — these kept trees are why, and none is old enough to reap:" >&2
+             "~1.3G — these kept trees are why, and none of them was reapable" \
+             "(too new, still leased, or with no lease to prove it is ours). If" \
+             "you know one is dead, remove it by hand:" >&2
         ls -ldrt /tmp/pt-* >&2 2>/dev/null || true
     fi
     tmp="$(mktemp -d /tmp/pt-XXXXXX)"
