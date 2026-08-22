@@ -1,0 +1,259 @@
+# First run
+
+You end this page having asked the assistant something in a browser.
+
+Two terminals, and they both stay open. The first runs the hub; the second runs
+the gateway. Nothing here daemonises itself, and neither process starts the
+other.
+
+## 1. Pick a directory to run from
+
+Configuration is read from a file named `.env` **in the directory you run the
+command in**. That is a genuinely relative path, so the same command in two
+directories loads two configurations. Pick one directory, and run everything on
+this page from it.
+
+```bash
+mkdir -p ~/assistant && cd ~/assistant
+```
+
+This is not the data directory — it is just where the configuration file lives.
+
+## 2. Write the configuration
+
+```bash
+cat > .env <<'EOF'
+ASSISTANT_DATA_DIR=/home/you/.ai-assistant
+ASSISTANT_DEFAULT_MODEL=anthropic:claude-sonnet-4-5
+ASSISTANT_TIMEZONE=Europe/Rome
+EOF
+```
+
+Three settings, and each of them says something the system cannot guess.
+
+- **`ASSISTANT_DATA_DIR`** is the directory the hub owns exclusively — its
+  SQLite stores and its instance lock. It must be **absolute**; `~` is expanded
+  for you, and a relative path is refused at load rather than resolved, because
+  the hub and a client run from different directories and would disagree about
+  where it points. Omit the setting entirely and you get `~/.ai-assistant`,
+  which is a fine answer; name it explicitly if you want it somewhere else.
+- **`ASSISTANT_DEFAULT_MODEL`** is a `provider:model` route. The assistant is
+  model-agnostic: this is where you choose. `anthropic:…` and `openai:…` are
+  the two whose vendor libraries ship in the wheel.
+- **`ASSISTANT_TIMEZONE`** is an IANA name, and it is what "this afternoon"
+  means to the assistant.
+
+The repository's [`.env.example`](../../.env.example) is the full menu — every
+setting that arms a feature, with a comment saying what it arms. You do not
+need any of the rest yet.
+
+**An environment variable beats this file.** If `ASSISTANT_DEFAULT_MODEL` is
+already exported in your shell, the `.env` line is not what loads. That is worth
+knowing before you spend twenty minutes editing a file that is not being read.
+
+## 3. Put the model key in the environment — not in `.env`
+
+```bash
+export ANTHROPIC_API_KEY=sk-ant-...
+```
+
+This one is different from everything else on the page and the difference
+matters, because getting it wrong produces a hub that will not start.
+
+`.env` is read by this system's own settings loader, and that loader reads
+`ASSISTANT_*` names and ignores everything else. It does not copy anything into
+the process environment. The **model key is not read by this system at all** —
+it is read straight from the process environment by the provider library that
+makes the call. So a key written into `.env` reaches nobody:
+
+```text
+hub: cannot start: model spec 'anthropic:claude-sonnet-4-5' names provider
+'anthropic', for which this deployment holds no credential: Set the
+`ANTHROPIC_API_KEY` environment variable ...
+```
+
+Export it in the shell you start **the hub** in. The hub is the only process
+that talks to a model; the gateway and the command-line client never do, and
+neither needs the key.
+
+The key is not put in the OS keyring either, and that is deliberate rather than
+an omission. The keyring holds secrets this system mints and owns. A provider
+key is credential material the provider library expects to find in the
+environment, and moving it would mean this system handing it back to that
+library anyway.
+
+## 4. Start the hub
+
+In the first terminal:
+
+```bash
+ai-assistant-hub
+```
+
+It prints structured records and then stays in the foreground. The two lines
+worth reading are the first two:
+
+```text
+hub_listening   socket=/home/you/.ai-assistant/hub.sock max_connections=64 ...
+hub_ready       data_dir=/home/you/.ai-assistant pid=3941190 remote=None
+                jobs=['retention_purge', 'conversation_sweep',
+                'notification_reconsider']
+```
+
+`remote=None` means it is listening on its local socket only — no network
+listener of any kind. That is the default and it is what you want on one
+machine. [`remote-hub.md`](remote-hub.md) is the other case.
+
+The data directory now exists, with one file per store plus the lock and the
+socket:
+
+```text
+audit.db  connections.db  conversations.db  deferrals.db  grants.db
+memory.db  notifications.db  outbox.db  plans.db  traces.db
+hub.lock  hub.sock
+```
+
+All of them are `0600`. `hub.lock` is what stops a second hub taking the same
+directory.
+
+## 5. Ask it something from the command line
+
+Leave the hub running and open a **second terminal**, in the same directory:
+
+```bash
+cd ~/assistant
+assistant ask "In one short sentence, what is the capital of Italy?"
+```
+
+```text
+The capital of Italy is Rome.
+Plan: The question asks for a factual answer about the capital of Italy, which
+can be directly answered from general knowledge without requiring any external
+capability.
+No action was needed.
+
+Conversation: 60a9b895-1e9e-4ca1-8afd-6dfd6e415809  (continue with: assistant
+ask --conversation 60a9b895-1e9e-4ca1-8afd-6dfd6e415809 ...)
+```
+
+This is the cheapest possible proof that the two hard parts are right: the
+client reached the hub, and the hub reached a model. If this works, everything
+that follows is about the browser and nothing else.
+
+## 6. Start the gateway
+
+Still in the second terminal:
+
+```bash
+assistant gateway
+```
+
+```text
+Assistant gateway listening on http://127.0.0.1:8422
+Bootstrap value (good once, and only for this gateway process):
+GxiDDPy-iKHkzc5led4fxv9UwGo5bFs73s-ZU9-UWms
+```
+
+Leave it running too. It binds `127.0.0.1` and nothing else, on port 8422 by
+default (`ASSISTANT_GATEWAY_PORT` moves it). The address is not configurable —
+no setting can widen the loopback listener, and that is a decided property
+rather than an oversight (ADR-0168 §2).
+
+The gateway starts whether or not the hub is running. That is on purpose: a
+browser that reaches a gateway with no hub behind it is told the hub is down,
+which is a different and more useful thing than a browser that reaches nothing.
+
+## 7. Open the page and paste the value
+
+Open **`http://127.0.0.1:8422`** in a browser on this same machine.
+
+The page shows one panel, **Start a session**. Paste the bootstrap value into
+the *Bootstrap value* field and press **Start**.
+
+That value is good exactly once. The gateway mints one when it starts, prints
+it on standard output, and never prints it again — not in a log record, not in
+an error, not in any page. Exchanging it gives this browser a session; a second
+exchange of the same value is refused:
+
+```text
+HTTP/1.1 400 Bad Request
+```
+
+If you lose it, stop the gateway and start it again: you get a new one.
+
+> **This is the part that changes next.** One value per gateway *process* means
+> a second browser today needs a gateway restart. #1429's ruling 1 replaces that
+> with an on-demand mint — the gateway prints a fresh bootstrap value when you
+> ask it to, without restarting, so a second browser joins a running gateway.
+> A session stays bound to the gateway process either way. That lands with lane
+> 2 of milestone 16; until it does, the paragraph above is what the gateway
+> does.
+
+## 8. Ask it something in the browser
+
+The **Ask** panel takes the bootstrap panel's place once the session exists.
+Type into *What do you want the assistant to do?* and send it. The answer
+arrives on the page as it is composed rather than in one piece at the end.
+
+That is the whole of the first run. The rest of the page is the control surface
+over what the assistant remembers, what it may read, and what it is holding to
+tell you — every one of those is also an `assistant` subcommand, and they are
+the same acts either way.
+
+## What a session is, and when it ends
+
+Three facts, because all three surprise people.
+
+- **Every session ends when the gateway process does.** Stopping the gateway
+  with `Ctrl-C` ends every session it minted, in every browser. It says so on
+  the way out: `Gateway stopped. Every session ended with it.` This is a
+  decided property (ADR-0168 §4) — the session lives in the gateway's memory
+  and is not written down anywhere.
+- **A session ends after an hour of not being used.** The idle timeout is one
+  hour by default (`ASSISTANT_GATEWAY_SESSION_IDLE_TIMEOUT`). A tab left open
+  overnight comes back needing a new bootstrap value.
+- **And in any case after twelve hours.** The ceiling is twelve hours from the
+  moment it was minted, however busy it was
+  (`ASSISTANT_GATEWAY_SESSION_TTL`). A session ends at whichever of the three
+  comes first.
+
+Reloading the page does **not** end a session. The browser holds the session
+across a reload, so a refresh costs you nothing. **Closing the browser** is a
+different matter: half of the session is a cookie that does not outlive the
+browser, so the next launch needs a new bootstrap value even if the gateway
+never stopped.
+
+## Stopping
+
+`Ctrl-C` in each terminal, gateway first if you care about the order. The hub
+finishes what it is doing and releases its lock. Neither leaves anything
+running behind it.
+
+## When it does not work
+
+**`The assistant hub is not reachable: no assistant hub is listening at
+/home/you/.ai-assistant/hub.sock.`** The hub is not running, or it is running
+against a different data directory. The message continues: *"Start it with
+'ai-assistant-hub' and leave it running, then try again. (This client never
+starts one for you, and never falls back to running the assistant
+in-process.)"* — which is the whole design in one sentence.
+
+**`hub: cannot start: … for which this deployment holds no credential`** The
+model key is not in the hub's environment. See step 3 — a key in `.env` does
+not count.
+
+**`invalid configuration: 1 validation error for Settings`** A setting is
+malformed. The message names the field, quotes the value it got, and says what
+would be acceptable; the fix is almost always in that sentence.
+
+**The gateway exits with a long traceback ending in `OSError: [Errno 98] …
+address already in use`.** Something else already holds port 8422 — most often
+another gateway you forgot about. Stop it, or set `ASSISTANT_GATEWAY_PORT` to a
+free port. (The traceback is a rough edge, filed as #1436; the cause is what
+the last line says.)
+
+**Nothing happens in the browser and the page keeps showing *Start a
+session*.** The value was already spent, or the gateway was restarted after it
+printed. Restart the gateway and use the value it prints then.
+
+Next, if you want the same page on a phone: [`phone.md`](phone.md).

@@ -40,9 +40,10 @@ running, a client says so plainly rather than quietly doing the work itself.
 - A machine running Linux or macOS. Everything below was run on Linux.
 - **Python 3.14 or newer.** The package requires it and will not install under
   an older one.
-- An API key for one language-model provider — Anthropic, OpenAI or Google.
-  The assistant is model-agnostic and you pick one at configuration time; you
-  need a key for whichever you pick.
+- An API key for **Anthropic** or **OpenAI**. The assistant is model-agnostic
+  and you pick the route at configuration time; those two are the vendors whose
+  libraries ship in the distribution, so they are the two that work without
+  installing anything else.
 - About 1 GB of disk for the install. The wheel is large (it carries a
   vendored embedding model) and its dependency tree is larger.
 
