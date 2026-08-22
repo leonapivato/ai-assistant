@@ -60,9 +60,12 @@ differently the ADRs win.
 
 **The full gate runs and passes at two anchors on a branch, and neither is at
 your discretion:** immediately before the **first review invocation** on that
-branch, and immediately before the **final push preceding `gh pr ready`**. Each
-anchor is a run on the tree as it then stands, so a green run on an earlier tree
-does not discharge it, and an anchor admits no docs-only exemption.
+branch, and on the **tree of the final push**, passing before `just ready`
+(ADR-0180 §1). The closing anchor binds that tree rather than an ordering against
+the push, so you may push first and run it while CI runs — provided the tree is
+byte for byte the pushed head's and you do not modify it while the run is out.
+Each anchor is a run on the tree it names, so a green run on an earlier tree does
+not discharge it, and an anchor admits no docs-only exemption.
 
 **A rebase that moves your base re-opens the obligation, twice over.** Run the
 full gate again, and have it pass, before the **next review invocation** on the
