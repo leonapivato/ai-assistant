@@ -65,9 +65,28 @@ jobs:
         # unevaluable and passes them silently (§6), and the test skips — so this
         # is what makes half of Tier 1 actually run, rather than what makes it
         # pass. It is the workflow's own read-only token; nothing here writes.
+        #
+        # `-n auto` distributes the suite across the runner's cores (four, on
+        # `ubuntu-latest` for a public repository). It is the whole suite either
+        # way: since ADR-0179 the Protocol-triad check aggregates every worker's
+        # record on the controller, so the one file that could not run
+        # distributed now does, and nothing is deselected here or in
+        # `just test-fast`. This step was ~273s of a ~5m28s run.
+        #
+        # `--basetemp` is the same 108-byte `sun_path` margin the `test-fast`
+        # recipe explains at length: xdist adds a `popen-gwN/` component, and
+        # the default root (`/tmp/pytest-of-runner/pytest-N/`) leaves the
+        # suite's worst AF_UNIX path within a byte or two of the budget. A short
+        # root buys the margin back. A fixed name is safe here where it is not
+        # locally: the runner is a fresh VM with exactly one run on it.
+        #
+        # One job, not two. The serial suite is still what `uv run pytest` does
+        # on any machine, and ADR-0136 §1 lets a lane discharge either anchor
+        # with it, so a serial re-run in CI would buy a diagnosis a lane can
+        # already get in one command (ADR-0179 §3).
         env:
           GH_TOKEN: ${{ github.token }}
-        run: uv run pytest
+        run: uv run pytest -n auto --basetemp=/tmp/pt
 
       # Not a sixth gate step: Tier 2 never fails a change (ADR-0088 §3), and
       # Tier 1 already runs inside `Tests` above. This publishes the standing
