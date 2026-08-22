@@ -328,3 +328,26 @@ def test_a_unicode_identifier_is_checked_rather_than_skipped(tmp_path: Path) -> 
     assert "orchestration/engine.py" in _row(present.stdout, "\u0394Engine")
     assert _section_of(absent.stdout, _row(absent.stdout, "\u0394Widget")).startswith("absent")
     assert absent.returncode == 1
+
+
+def test_a_closer_of_the_wrong_delimiter_does_not_end_the_block(tmp_path: Path) -> None:
+    # A closing fence is the same character as the opener and alone on its line.
+    # Ending the block on anything else reads the rest of the code sample as if
+    # the brief had claimed it.
+    _make_repo(tmp_path)
+
+    result = _run(tmp_path, "````\n````~~~~\nADR-0009 and `Nonexistent`\n````\n")
+
+    assert "ADR-0009" not in result.stdout
+    assert "Nonexistent" not in result.stdout
+
+
+def test_an_unclosed_fence_runs_to_the_end_of_the_brief(tmp_path: Path) -> None:
+    # Markdown's rule, and the conservative one: a typo in a fence must not turn
+    # the rest of a code sample into claims about the tree.
+    _make_repo(tmp_path)
+
+    result = _run(tmp_path, "Run:\n\n```bash\ngit switch -c x\nADR-0009\n")
+
+    assert "ADR-0009" not in result.stdout
+    assert result.returncode == 0
