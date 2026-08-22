@@ -8,6 +8,20 @@
 # makes the committed config portable — it finds `npx`, then execs the pinned
 # server package.
 #
+# **This is the coding harness's browser, not the assistant's tool.** Nothing
+# under `src/ai_assistant` launches this server, imports it, or hands it anything;
+# an agent's own editor does, to look at a page served on loopback by a gateway
+# bound over a fake engine. ADR-0147 §4's "no MCP server is connected to ... until
+# a ratified ADR authorises it" is a rule about *this system* connecting one as a
+# tool integration, for the reason it states — "a program this repository did not
+# write becomes a recipient of user data", handed a tool name and an
+# `ActionRequest.parameters` mapping. There is no such call here, no
+# `ToolDefinition` is built from anything this server describes, and no memory,
+# belief, context facet or credential is within its reach. It sits where
+# `just review-codex` sits: developer tooling, which is why ADR-0017 §1 as
+# ADR-0124 §1 replaces it — an enumeration of the components of `ai_assistant`
+# that may transmit — is not reached either.
+#
 # Four things it does that a bare `npx` in `.mcp.json` does not:
 #
 #   1. It looks past PATH for `npx`. An MCP server is spawned by the editor's own
@@ -56,19 +70,43 @@ version="0.0.79"
 
 npx="${PLAYWRIGHT_MCP_NPX:-}"
 
+# A sortable key for one nvm directory name, so that v24.19.0 ranks above
+# v9.99.99 the way a version does and a plain string comparison does not. Written
+# out rather than delegated to `sort -V`, and compared with `>` rather than
+# collected by `mapfile`, because both of those are absent from what macOS ships:
+# BSD `sort` has no `-V`, and the system Bash is 3.2, which has neither `mapfile`
+# nor a negative array index. A developer with nvm-installed Node is exactly who
+# reaches this branch, so a Bash-4-only fallback would fail precisely the case it
+# exists for.
+version_key() {
+    local name="${1#v}" part key=""
+    local IFS=.
+    for part in $name; do
+        # A pre-release tail (`24.0.0-rc.1`) is dropped rather than parsed: it
+        # only has to order consistently, and `printf %05d` on a non-number is an
+        # error, not a comparison.
+        part="${part%%[!0-9]*}"
+        key="$key$(printf '%05d' "${part:-0}")"
+    done
+    printf '%s' "$key"
+}
+
 if [[ -z "$npx" ]] && ! npx="$(command -v npx)"; then
-    # No `npx` on PATH. Look where nvm keeps them and take the newest — `sort -V`
-    # over paths that differ only in their version component, so v24.19.0 sorts
-    # above v9.99.99 the way a version does and a plain sort would not.
+    # No `npx` on PATH. Look where nvm keeps them, and take the newest.
     nvm_dir="${NVM_DIR:-$HOME/.nvm}"
-    shopt -s nullglob
-    candidates=("$nvm_dir"/versions/node/*/bin/npx)
-    shopt -u nullglob
     npx=""
-    if ((${#candidates[@]} > 0)); then
-        mapfile -t candidates < <(printf '%s\n' "${candidates[@]}" | sort -V)
-        npx="${candidates[-1]}"
-    fi
+    best_key=""
+    shopt -s nullglob
+    for candidate in "$nvm_dir"/versions/node/*/bin/npx; do
+        [[ -x "$candidate" ]] || continue
+        candidate_dir="${candidate%/bin/npx}"
+        candidate_key="$(version_key "${candidate_dir##*/}")"
+        if [[ -z "$npx" || "$candidate_key" > "$best_key" ]]; then
+            npx="$candidate"
+            best_key="$candidate_key"
+        fi
+    done
+    shopt -u nullglob
 fi
 
 if [[ -z "$npx" || ! -x "$npx" ]]; then
