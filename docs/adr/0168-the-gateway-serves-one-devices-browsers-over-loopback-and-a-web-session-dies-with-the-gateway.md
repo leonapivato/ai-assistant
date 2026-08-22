@@ -1,6 +1,6 @@
 # 168. The gateway serves one device's browsers over loopback, and a web session is minted at the gateway and dies with it
 
-- Status: Partially superseded by ADR-0174 (§2's loopback-only bind clause, §2's one-gateway-one-device clause, §4's sole-admitter clause, and §6's exclusive record enumeration, each only as it reaches a separately configured remote browser listener) and ADR-0175 (§8's read-deadline clause, only as it reaches a connection carrying a response the gateway has not finished writing)
+- Status: Partially superseded by ADR-0174 (§2's loopback-only bind clause, §2's one-gateway-one-device clause, §4's sole-admitter clause, and §6's exclusive record enumeration, each only as it reaches a separately configured remote browser listener) and ADR-0175 (§8's read-deadline clause, only as it reaches a connection carrying a response the gateway has not finished writing) and ADR-0182 (§5's one-bootstrap-value-per-process cardinality and its one-session-per-process clause)
 - Date: 2026-08-21
 - Partially superseded: 2026-08-21 by ADR-0174 — **four clauses, one listener,
   and the deferral §2 wrote for exactly this is discharged rather than replaced.**
@@ -165,6 +165,70 @@
   supersession is recorded on ADR-0175 and reaches no clause of this ADR — §1's
   biconditional, §6's four request classes and its exclusive record enumeration,
   and §8's figures all bind unchanged (ADR-0177 §12).
+
+- Partially superseded: 2026-08-23 by ADR-0182 — **one section, two
+  cardinalities, and the revisit §12 named by milestone.** ADR-0182 is
+  `track:web-client` milestone 16's sessions decision (#1230, #1429), which §12
+  defers to by name ("A session that survives a gateway restart (§4, §5) … Fires
+  with milestone 16, which names session persistence") and which ADR-0174 §9
+  declined to be. It replaces **cardinality in §5 and nothing else**.
+
+  **Replaced — §5's first clause, only as to how many.** "A gateway process mints
+  one **bootstrap value** at start — at least 128 bits from the operating system's
+  cryptographic random source — and discloses it exactly once, on its own standard
+  output." The start mint, the entropy, the disclosure channel and every place the
+  value may not appear are applied unchanged; what ADR-0182 §1 replaces is "one"
+  and "exactly once", with a value minted at start **and** on each performance of
+  its mint act, each disclosed once by the same rule. A reader holding only §5
+  refuses to disclose a second value.
+
+  **Replaced — §5's second clause, only as to its second sentence.** "The
+  bootstrap value is exchangeable for exactly one session. The exchange consumes
+  it, and after it the gateway mints no further session until its process is
+  restarted." Single use is untouched and applied; "mints no further session until
+  its process is restarted" is replaced by ADR-0182 §1's mint act and §2's rule
+  that at most one unexchanged value stands at a time, a fresh mint replacing the
+  outstanding one. A reader holding only §5 builds a gateway on which the second
+  browser milestone 16 asks for is unreachable — ADR-0070 §1's first limb.
+
+  **Nothing else of §5 moves**, and two of its clauses are leaned on rather than
+  narrowed: a failed exchange still "discloses only that it failed", which is what
+  keeps ADR-0182 §4's ceiling refusal invisible to a browser; and "a gateway that
+  cannot disclose its bootstrap value does not start" keeps its subject, the value
+  minted at start, ADR-0182 §1 stating in terms that a later mint which cannot be
+  disclosed is destroyed and the gateway keeps serving.
+
+  **Nothing else of this ADR moves at all.** §3's two pre-session exceptions gain
+  no third, because ADR-0182 §1's mint act is not a request and no request on
+  either listener mints a value; §4 is applied whole, its `gateway_max_sessions`
+  ceiling becoming reachable rather than changing (#1320 closes with that lane);
+  §6 is applied whole, its four request classes gaining no fifth and its
+  exclusive record enumeration gaining no member; §8's figures bind unchanged;
+  §9 binds the gateway unchanged, ADR-0182 §7's reconnect rule reaching only the
+  page; and §13's argument for ephemeral edge state is applied rather than
+  extended, because ADR-0182 §5 keeps a session's power ended by the gateway
+  process and refuses the durable session outright. ADR-0182 §9 shows the working
+  clause by clause, including why §6's exemption of a mint record from the rate
+  bound stands on a new ground rather than falling.
+
+  **One §6 sentence's stated reason is overtaken and its obligation is not.** "A
+  mint record is not rate-bounded and needs no bound, because §5 permits one mint
+  per process life" — the reason goes with the cardinality above; the obligation
+  stays, because ADR-0182 §1 puts the mint act behind standing at the machine that
+  runs the gateway rather than behind the port, so no caller §6's rate bound is
+  about can drive one. ADR-0182 §9 restates the ground so that two conforming
+  gateways cannot diverge on it.
+
+  **Informational, and asserting no supersession: ADR-0182 §3 adds a gateway
+  `Settings` field, `gateway_bootstrap_ttl`, in its own figure section rather than
+  in §8's table** — the form ADR-0175 §8 used for `gateway_notification_budget`
+  and ADR-0174 §8 used for its three. §8's table is not an exclusive enumeration
+  and its clauses are about the fields it names, so a reader holding only §8 still
+  builds a conforming gateway; this line exists so that such a reader can find the
+  field, and the Consequences' "ten `Settings` fields" is a count of what §8 names
+  and stays true of it. ADR-0182 §9 carries the reasoning and notes that ADR-0174
+  §9's contrary paragraph is unmarked prose (ADR-0089 §3).
+
 
 - **This is `track:web-client` milestone 13's decision** (#1230). It takes the
   wire seat ADR-0084 §3 and ADR-0094 §2 hold open — a spoke process that reaches
