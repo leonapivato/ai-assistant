@@ -2,6 +2,19 @@
 
 - Status: Partially superseded by ADR-0178 (§3's clause that a member of a canonical destination set is a `CanonicalDestination`; §3's clause that an account member carries the account whole; and §3's clause that the canonical destination set is a single derived property of `EgressBinding` — each only as it reaches the canonical destination set a `Confirmation` names)
 - Date: 2026-08-14
+- **Note (2026-08-23): §5's third clause is decided by ADR-0181, and §5's first
+  clause is unchanged.** The third clause left open "how a recorded origin reaches
+  the component that builds a span"; ADR-0181 §2 decides it for the one fact it rules
+  obtainable — that the material this system **selected** into the model call which
+  produced a request's arguments included a record resting on recorded external
+  content — and refuses a per-span externality marker outright, on ADR-0098 §5's
+  unrecoverability finding. **§5's first clause is not narrowed and must not be read
+  as breached.** Its "no separate marker type, no second carriage of provenance in
+  the request, and no field on `ActionRequest` outside the binding" governs **discloser
+  provenance**, whose marker is and stays `EgressSpan.provenance` with ADR-0146 §1's
+  two members and no default. ADR-0181 §1 rules externality a separate axis — the
+  record ADR-0146 §9 asked a lane to make — and puts its field on the **binding**,
+  which is where this clause puts the one carriage. `EgressSpan` gains nothing.
 - Partially superseded: 2026-08-22 by ADR-0178 — **three clauses of §3, at one
   surface, because ADR-0148 §8's fourth clause and §3's account-member clause cannot
   both be obeyed there.** ADR-0178 closes #1366 (`track:web-client` milestone 15,

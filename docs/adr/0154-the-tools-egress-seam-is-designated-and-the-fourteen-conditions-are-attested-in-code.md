@@ -2,6 +2,25 @@
 
 - Status: Accepted
 - Date: 2026-08-14
+- **Note (2026-08-23): §4's standing-authorisation precondition is met by ADR-0181,
+  and §4's floor is unchanged and unlifted.** §4, under "ADR-0098 §3's two obligations
+  on this lane, decided", item (ii), second clause requires that "The ADR that would
+  permit a standing authorisation to cover an egress call at this seam first
+  establishes a **recorded origin** the authoriser evaluates at the moment it rules —
+  a fact the request carries, never an inference about how a model produced it", and
+  adds "Until such a surface exists and an ADR rests on it, the clause above holds as
+  written." **The surface now exists** and the fact is on the binding, before the
+  ruling, transcribed into the recorded decision. **No ADR rests on it**: ADR-0181 §5
+  expressly declines to lift this floor and adds a floor beneath any later ADR that
+  would — such an ADR may not lift it for a call carrying
+  `planned_with_external_content`. So item (ii)'s first clause binds exactly as
+  written, and a lane citing ADR-0181 as having opened standing authorisation has
+  misread both. **§6's first residue bullet** — ADR-0152 §5's provenance residue —
+  moves by the same half ADR-0152's own note records: the caller's carrier is no
+  longer empty, and no span is yet `USER_AUTHORED`. §6's governing clause is
+  honoured: ADR-0181 closes the residue in its own change rather than reading this
+  ADR as having closed it. Nothing in §1, §2, §4's fourteen attestations, §5 or §7
+  changes.
 - **Note (2026-08-14): ratified.** `Proposed` → `Accepted`, after **both** required
   reviews came back green on one tree — adversarial **APPROVE with no findings** and
   architecture **APPROVE with no findings**, both at tree `4d3d68f974a2`, printed

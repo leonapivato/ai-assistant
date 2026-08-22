@@ -1,7 +1,23 @@
 # 178. A confirmation carries the egress it is about, and its absence is the discriminator
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0181 (§2's clause that `ConfirmationEgress` has exactly two fields)
 - Date: 2026-08-22
+- Partially superseded: 2026-08-23 by ADR-0181 — **§2's exactly-two-fields clause,
+  and that clause alone.** §2 rules that `ConfirmationEgress` has "exactly two
+  fields, both required with no default: `account_identity` … and `spans`".
+  ADR-0181 §3 adds a third, `planned_with_external_content: bool`, required with no
+  default, populated from the recorded decision's `egress_binding` at both assembly
+  sites and by no other route — which is §5's rule, obeyed rather than widened. Every
+  other clause of §2 stands whole: `spans` is still the binding's own value and not a
+  second description; no connection reference, credential slot, `SecretName`,
+  `transport_endpoint` or `BoundAccount` is carried, and ADR-0181 §3's field is none
+  of those, so §10's `model_fields` roster test keeps its subject and moves by one
+  entry. **§7's first clause is amended and not superseded** (ADR-0070 §1): its
+  enumeration of what a surface renders before it collects the answer gains one item,
+  and its subject, its timing and its seven other clauses are untouched — including
+  the sixth, which ADR-0181 §6's third and fourth clauses extend to the new fact
+  rather than relax. §1, §3, §4, §5, §6, §8, §9, §11 and §12 are unchanged, and
+  `Confirmation` gains no member.
 
 - **This closes #1366**, the contract question `track:web-client` milestone 15's
   control-surface decision filed rather than answered (batch #1365, #1230).
