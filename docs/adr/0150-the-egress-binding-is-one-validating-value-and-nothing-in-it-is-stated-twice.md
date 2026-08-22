@@ -1,6 +1,6 @@
 # 150. The egress binding is one validating value, and nothing in it is stated twice
 
-- Status: Partially superseded by ADR-0178 (§3's clause that a member of a canonical destination set is a `CanonicalDestination`, and §3's clause that an account member carries the account whole — each only as it reaches the canonical destination set a `Confirmation` names)
+- Status: Partially superseded by ADR-0178 (§3's clause that a member of a canonical destination set is a `CanonicalDestination`; §3's clause that an account member carries the account whole; and §3's clause that the canonical destination set is a single derived property of `EgressBinding` — each only as it reaches the canonical destination set a `Confirmation` names)
 - Date: 2026-08-14
 - Partially superseded: 2026-08-22 by ADR-0178 — **two clauses of §3, at one
   surface, because ADR-0148 §8's fourth clause and §3's account-member clause cannot
@@ -27,8 +27,22 @@
   confirmation at all, leaving ADR-0148 §8's fourth clause unmeetable at every
   surface. That is ADR-0070 §1's first limb.
 
-  **The hazard this clause names is closed where it was closed, and the replacement
-  says so.** §3's own reason is that "either alone is a destination that two different
+  **Replaced — §3's derived-property clause**, "ADR-0148 §2's **canonical destination
+  set** is a single **derived property** of `EgressBinding` and is not a stored field",
+  **only as to where that property may live.** A `Confirmation` cannot reach
+  `EgressBinding` — ADR-0042 §6 keeps it behind the engine — so a reader holding only
+  this clause concludes that the set is unavailable at a confirmation, which is
+  ADR-0070 §1's first limb again. ADR-0178 §3 puts a second derived property, of the
+  same shape, on `ConfirmationEgress`. **Everything else that clause says is adopted
+  rather than replaced** and binds on both: never a stored field, one member per
+  distinct destination the spans carry, the account substitution where the spans carry
+  none, never empty, the same total order, and never accepted from a caller. There are
+  now two computations of one rule and no second *rule*, which is what this ADR's title
+  is about — and ADR-0178 §3 requires the two to correspond member for member for every
+  binding, so a divergence is a test failure rather than a discovery.
+
+  **The hazard §3's account-member clause names is closed where it was closed, and the
+  replacement says so.** §3's own reason is that "either alone is a destination that two different
   accounts can satisfy" — a statement about **comparison**, which is what
   `authorises` does over `EgressBinding`'s set (§9) and what a standing grant does.
   ADR-0178 §3 forbids a `ConfirmationDestination` every comparison and every carrier:
@@ -40,11 +54,11 @@
 
   **Not replaced — everything else in §3, and every other section.** `EgressBinding`'s
   own derived set is untouched: its members stay `CanonicalDestination`, its account
-  arm carries the whole `BoundAccount`, and equality is still over every field. So are
-  the occurrence rule, the function-of-supplied-form refusal, the refusal to move
-  canonicalisation into `core`, the two-shape refusal itself, the derived-property
-  rule, the never-empty rule, the total order, ADR-0148 §8's third floor and the
-  conditional account substitution. §§1–2 and §§4–13 are used as given — §10's four
+  arm carries the whole `BoundAccount`, equality is still over every field, and the set
+  on that type is still the single derived property of it. So are the occurrence rule,
+  the function-of-supplied-form refusal, the refusal to move canonicalisation into
+  `core`, the two-shape refusal itself, ADR-0148 §8's third floor and the conditional
+  account substitution. §§1–2 and §§4–13 are used as given — §10's four
   clauses most heavily, since ADR-0178 discharges the first by **reusing** this ADR's
   `spans` rather than mirroring them, and meets the third by carrying the occurrences
   and not merely the set.
