@@ -270,9 +270,16 @@ direction §8 asks for and in no other.
 > **Normative.** `ConfirmationEgress` exposes the canonical destination set as a
 > **derived property** over its own `spans` and `account_identity`, computed by the
 > rule `EgressBinding.canonical_destination_set` states: one member per distinct
-> destination the spans carry, deduplicated, in that property's total order; and
-> where the spans carry none, exactly one member — the connected account. It is
-> **never empty** and it is **never stored**.
+> destination the spans carry, deduplicated; and where the spans carry none, exactly
+> one member — the connected account. It is **never empty** and it is **never stored**.
+
+> **Normative.** The total order is stated here rather than referred to, because a
+> second implementation has to reproduce it: **account members first, then selected
+> recipients by `protocol` and then by `canonical` form, every string compared by
+> Unicode code point.** That is `EgressBinding.canonical_destination_set`'s own order,
+> restated so that a surface written in another language can derive the same sequence
+> from the same spans without reading Python. No lane orders it a second way, and a
+> lane that finds the two statements disagreeing reports it rather than picking one.
 
 > **Normative.** Its members are `ConfirmationDestination`, a frozen `core/types.py`
 > model with `extra="forbid"` and ADR-0150 §3's **two shapes and no third**: a
@@ -287,9 +294,13 @@ direction §8 asks for and in no other.
 > whole `BoundAccount` there. No lane ships a derivation that can disagree.
 
 > **Normative.** No lane stores this set as a field, transmits it as one, or supplies
-> it from outside. A surface receives the spans and computes it; a producer that sent
-> a materialised set would be sending a value that could disagree with the
-> occurrences it was computed from.
+> it from outside. **A surface receives the spans and computes the set itself**, by the
+> rule and the order stated above — that is the specified route for every surface,
+> including one that is not written in Python and therefore cannot call the property.
+> A producer that sent a materialised set would be sending a value that could disagree
+> with the occurrences it was computed from. Computing it by the stated rule is what
+> §7's clause requires; what that clause forbids is a surface inventing a rule of its
+> own, not a surface doing this arithmetic.
 
 > **Normative.** A `ConfirmationDestination` is a **rendering value and never an
 > authorising one**. No lane compares two of them to decide anything, matches one
@@ -325,6 +336,21 @@ set that disagreed with the occurrences beside it would put a recipient on scree
 that the call does not send to, or hide one it does. And because a Python property
 is not a pydantic field, nothing about it reaches the frame — the wire carries the
 occurrences once, and both ends compute the same set from them.
+
+**A surface that cannot call the property implements the stated rule, and that is not
+the shape the alternatives reject.** `interfaces/cli.py` is Python and calls
+`ConfirmationEgress.canonical_destination_set` directly, so it derives nothing twice.
+The browser is not, and receives only the occurrences — so it computes the set in its
+own language, which is why the clause above states the rule and the order in terms
+rather than pointing at the property. The alternative rejected below is a different
+one: leaving the set *undefined in `core`*, so that each adapter invents its own
+deduplication and there is no authority to disagree with. Here `core` holds the single
+authority, this section states it reproducibly, and §3's correspondence clause is what
+a second implementation is tested against. **The browser lane owes that test** — its
+derived set, for a binding with aliased recipients, equal member for member and in the
+same order to the one `core` derives from the same spans. That obligation travels with
+ADR-0177 §8's lane rather than with §10's, because the browser is not §10's lane; it is
+named here so it is inherited rather than rediscovered.
 
 **A third type rather than reusing `CanonicalDestination`, and this is where two
 ratified clauses actually meet.** (§12 records all three §3 clauses this narrows; the
@@ -507,16 +533,25 @@ carries the redeployment.
 
 > **Normative.** A surface that renders a `Confirmation` whose `egress` is present
 > renders, **before it collects the user's answer**: the `account_identity`; every
-> occurrence the `spans` carry, each with the argument it was selected by, its
-> `supplied` form and its `canonical` form; and the payload description. A surface
-> that renders the tool, the parameters and the reason and stops has not put ADR-0148
-> §8's question.
+> occurrence the `spans` carry, each with the argument it was selected by; and the
+> payload description. A surface that renders the tool, the parameters and the reason
+> and stops has not put ADR-0148 §8's question.
+
+> **Normative.** Both destination forms are rendered for **the occurrences that carry
+> a destination, and for those only**. `EgressSpan.destination` is
+> `EgressDestination | None` and `supplied` and `canonical` are that value's fields, so
+> where it is present the surface renders both forms, and where it is absent there is
+> no destination to render and none is invented: the occurrence is rendered as the
+> payload-description span it is — by its argument and position, its provenance and its
+> extent, and its tier where it states one. A surface that dropped such a span, or
+> rendered it as though it named a recipient, would fail the whole-rendering clause
+> below in the two opposite directions.
 
 > **Normative.** The canonical destination set is rendered **as the derived set**,
-> from §3's property, and not inferred by the surface from the occurrences with a
-> rule of its own. Where that set is the connected account — the spans carrying no
-> destination — the surface names the account as the destination rather than showing
-> no recipients.
+> computed by §3's rule over the occurrences — never inferred by the surface with a
+> rule of its own, and never accepted from the wire as a materialised value. Where that
+> set is the connected account — every span carrying no destination — the surface names
+> the account as the destination rather than showing no recipients.
 
 > **Normative.** Occurrences are rendered **whole**: every span the tuple carries,
 > none omitted, none truncated silently, and none ordered so as to hide one. One
@@ -655,10 +690,20 @@ those clauses forbid is if anything easier to make. They stay.
 > limit governs a confirmation's lifetime, and no lane claims a lifetime reclaims a
 > park (the residual list below, #1382).
 
-> **Normative.** The refusal names the member and the value that did not fit, to
-> ADR-0085 §8e's own standard — "a sentence a user can read and act on rather than a
-> frame that will not send". A refusal that says only that a result was too large,
-> when the member responsible is this one, is not that sentence.
+> **Normative.** ADR-0085 §9's attribution rule is **unchanged, and this ADR does not
+> supersede it**. `OversizedValueError.field` names the largest **top-level** member of
+> the measured payload, by the fixed rule `_largest_member` implements — a rule rather
+> than a judgement precisely because the far side reconstructs that value, so two
+> implementations naming different members would break the round-trip. An oversized
+> `egress` sits at `step.confirmation.egress`, so the member named is the top-level one
+> containing it. No lane changes that rule here, reports a nested path in `field`, or
+> claims the diagnostic names this member.
+
+> **Normative.** What is owed instead is that the shape be *documented* rather than
+> discovered: the commentary clause above stands, and it is what a reader meeting a
+> refusal has to go on. **#1384** holds the question of whether the diagnostic should
+> attribute a nested member at all — it is a change to what `field` means on a
+> reconstructed error, which is ADR-0085's to make and not this ADR's.
 
 **This member does add a product term, and saying otherwise would be false.** An
 earlier draft of this section claimed the addition was linear in the arguments; round
@@ -795,11 +840,14 @@ Obligations, each traceable to a clause above:
   `return_adapter` validation with every member intact, including a `tier` of `None`
   and an `index` of `None`.
 - **§7.** CLI rendering tests: an egress confirmation's output names the account
-  identity, every occurrence with its argument and both forms, and the derived set;
-  the account-only case names the account as the destination; a confirmation whose
-  `egress` is `None` renders as it does today. Values carrying control sequences or
-  markup are neutralised on the way out, as `_safe` already does for the existing
-  members.
+  identity, every occurrence with its argument, and the derived set. A
+  destination-bearing occurrence shows **both** forms; a destination-less one is still
+  rendered — by its argument, position, provenance and extent — and names no recipient,
+  which is the mixed binding (`to` bearing a destination, `body` not) tested as one
+  case rather than assumed away. The account-only case names the account as the
+  destination; a confirmation whose `egress` is `None` renders as it does today. Values
+  carrying control sequences or markup are neutralised on the way out, as `_safe`
+  already does for the existing members.
 - **§9.** No test asserts a size figure that this change did not move; a lane finding
   itself editing one has changed something §9 says is unchanged. A test pins the
   expansion rather than the absence of one: a binding whose argument key is long and
@@ -867,6 +915,11 @@ way the real engine does, and that the suite says so.
   member — `parks × parameters` against one limit, with `max_outstanding_confirmations`
   defaulting to 1024 — and closing it means paging a promoted method or relating two
   figures, both `core/protocols.py` and neither this ADR's.
+- **Whether an oversize diagnostic may attribute a nested member** (§9, #1384). Fires
+  on an installation that meets an oversized `step.confirmation.egress` and finds
+  `OversizedValueError.field` naming its container unactionable. It changes what `field`
+  means on an error the far side reconstructs, so it is ADR-0085 §9's to change and is
+  left exactly as ratified here.
 - **Reclaiming an expired or permanently unanswerable park** (§9, #1382). Fires
   whenever a deployment sets `confirmation_ttl` and a confirmation goes unanswered past
   it: `_check_fresh` refuses the answer without transitioning the step, nothing sweeps
