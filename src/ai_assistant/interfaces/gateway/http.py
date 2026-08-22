@@ -45,6 +45,14 @@ _HTTP_VERSION: Final = "HTTP/1.1"
 #: interpret, which is a malformed request as far as this door is concerned.
 _METHODS: Final = frozenset({"GET", "POST"})
 
+#: The bytes a request line may begin with — the first character of every method
+#: in :data:`_METHODS`, derived rather than written out so a method added there
+#: cannot leave this set behind. It is what lets :func:`read_request` reach the
+#: verdict :func:`_parse_head` would have reached anyway, on the first byte
+#: instead of on a head that may never arrive
+#: (:func:`_refuse_unless_a_method_can_begin`).
+_METHOD_FIRST_BYTES: Final = frozenset(ord(method[0]) for method in _METHODS)
+
 #: A request line is a method, a target and a version, and nothing else.
 _REQUEST_LINE_PARTS: Final = 3
 
@@ -254,11 +262,15 @@ async def read_request(reader: asyncio.StreamReader, *, max_bytes: int) -> Reque
         RequestTooLargeError: If the request passes ``max_bytes``. Raised as soon as
             the bytes read exceed it, not once a whole request has been held.
         IncompleteRequestError: If the peer stopped sending mid-request.
-        MalformedRequestError: If the bytes are not a request this door parses.
+        MalformedRequestError: If the bytes are not a request this door parses —
+            a first byte no method this door serves can begin with included, which
+            is refused as soon as it is read rather than waited out
+            (:func:`_refuse_unless_a_method_can_begin`).
     """
     reading = _Reading(limit=max_bytes)
     while _HEAD_TERMINATOR not in reading.buffer:
         await reading.fill(reader)
+        _refuse_unless_a_method_can_begin(reading.buffer)
     head, _, body = bytes(reading.buffer).partition(_HEAD_TERMINATOR)
     method, path, headers = _parse_head(head)
     length = _content_length(headers)
@@ -280,6 +292,50 @@ async def read_request(reader: asyncio.StreamReader, *, max_bytes: int) -> Reque
             raise IncompleteRequestError
         body += chunk
     return Request(method=method, path=path, headers=headers, body=body)
+
+
+def _refuse_unless_a_method_can_begin(buffer: bytearray) -> None:
+    """Refuse a first byte no method this door serves can begin with (issue #1369).
+
+    **The verdict is unchanged; only the moment is.** :data:`_METHOD_FIRST_BYTES`
+    is derived from :data:`_METHODS`, and :func:`_parse_head` already refuses any
+    request line whose method is not one of those — so every byte refused here is
+    one that would have been refused as malformed at the end of the head. Nothing
+    this door accepted becomes a refusal, and no refusal changes its condition.
+    What changes is that the refusal no longer waits for a
+    :data:`_HEAD_TERMINATOR` the peer is never going to send.
+
+    **That wait is the fault, and it is not hypothetical.** A browser given
+    ``https://`` for this listener by hand sends a TLS ClientHello — a record
+    beginning ``0x16 0x03`` — which contains no blank line, so the loop above read
+    on until ``gateway_read_timeout`` and the connection was then closed with
+    nothing written and nothing recorded. The browser had no fault to show and
+    retried, once every thirty seconds, which is what the milestone-14 phone QA
+    found (#1373). A refusal on the first byte is what lets it fail at once.
+
+    **It is checked against the methods rather than against the token charset**,
+    because the tighter rule is the one this module already states: "a request
+    this module cannot parse is refused rather than guessed at". A first byte
+    inside RFC 9110's `token` but outside this set — ``DELETE``, ``OPTIONS`` — is
+    a request this door does not serve either, and refusing it here rather than a
+    kilobyte later reaches the same answer sooner. The set is derived, so that
+    stays true of whatever :data:`_METHODS` holds.
+
+    **It costs a legitimate slow peer nothing.** The check reads the byte the
+    reader has already handed over and never waits for another, so a request whose
+    first byte arrives late is bounded by the caller's deadline exactly as before,
+    and one whose first byte arrives at all is judged on it and no sooner.
+
+    Args:
+        buffer: The bytes read from the connection so far. It is never empty here
+            — :meth:`_Reading.fill` raises rather than return nothing — and an
+            empty one is read as "nothing to judge yet" rather than as a refusal.
+
+    Raises:
+        MalformedRequestError: If the first byte cannot begin a request line.
+    """
+    if buffer and buffer[0] not in _METHOD_FIRST_BYTES:
+        raise MalformedRequestError
 
 
 def _parse_head(head: bytes) -> tuple[str, str, tuple[tuple[str, str], ...]]:

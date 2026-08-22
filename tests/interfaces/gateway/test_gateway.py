@@ -908,6 +908,54 @@ async def test_an_unadmitted_connection_that_sends_nothing_is_closed_on_the_dead
 
 # --- The remote door under a peer that is not speaking HTTP (#1369, #1370) ---
 
+#: The opening of a TLS ClientHello — the ~1.5 KB the milestone-14 phone QA saw
+#: arrive and sit (#1373). A browser sends it when the address it was given says
+#: ``https://``, and nothing in it is ever going to be a blank line.
+_CLIENT_HELLO = b"\x16\x03\x01\x02\x00\x01" + b"\x00" * 1400
+
+
+async def test_bytes_that_cannot_begin_a_request_are_refused_far_inside_the_deadline(
+    harness: Harness,
+) -> None:
+    """§8 closes an unadmitted connection "in any case ``gateway_read_timeout``
+    after it was accepted" — a maximum, and this door was treating it as the only
+    moment it had. So a browser given ``https://`` by hand got a white screen for
+    thirty seconds, no response and no fault, and retried (#1369).
+
+    The deadline here is the shipped figure and the bound asserted is a second, so
+    what the test pins is promptness rather than merely eventual closure.
+    """
+    assert harness.settings.gateway_read_timeout >= timedelta(seconds=5)
+    reader, writer = await harness.connect()
+    writer.write(_CLIENT_HELLO)
+    await writer.drain()
+
+    answer = await asyncio.wait_for(_read_answer(reader), timeout=1)
+
+    assert answer.status == 400
+    assert answer.payload == {"fault": "malformed-request"}
+    assert answer.closed
+    writer.close()
+
+
+async def test_a_legitimate_request_is_not_hurried_by_that_refusal(harness: Harness) -> None:
+    """The refusal reads the byte it already has and waits for nothing.
+
+    A peer that opens a connection and sends its request a moment later is the
+    ordinary case, not the refused one — the first byte is judged when it arrives,
+    on the deadline the connection already had.
+    """
+    reader, writer = await harness.connect()
+    await asyncio.sleep(0.05)
+    writer.write(b"GET /app.js HTTP/1.1\r\nHost: " + harness.authority.encode() + b"\r\n\r\n")
+    await writer.drain()
+
+    answer = await asyncio.wait_for(_read_answer(reader), timeout=1)
+
+    assert answer.status == 200
+    assert answer.body == _BUNDLE["/app.js"][0]
+    writer.close()
+
 
 async def test_a_peer_that_resets_mid_request_raises_nothing_out_of_the_handler() -> None:
     """Issue #1370: once per connection the phone reset, the gateway's stderr
