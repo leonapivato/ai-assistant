@@ -8,6 +8,8 @@ import sys
 import pytest
 
 from ai_assistant.interfaces.gateway.http import (
+    _METHOD_FIRST_BYTES,
+    _METHODS,
     IncompleteRequestError,
     MalformedRequestError,
     Request,
@@ -150,6 +152,10 @@ async def test_a_stream_that_ends_mid_request_is_incomplete_and_not_malformed() 
     "head",
     [
         pytest.param("PUT / HTTP/1.1\nHost: h\n", id="a method this door does not serve"),
+        pytest.param(
+            "DELETE / HTTP/1.1\nHost: h\n",
+            id="a method whose first byte cannot begin one this door serves",
+        ),
         pytest.param("GET / HTTP/1.0\nHost: h\n", id="a version it was not written against"),
         pytest.param("GET HTTP/1.1\nHost: h\n", id="a request line with two parts"),
         pytest.param("GET app.js HTTP/1.1\nHost: h\n", id="a target that is not a path"),
@@ -212,6 +218,59 @@ async def test_a_request_this_door_would_have_to_guess_at_is_refused(head: str) 
     """
     with pytest.raises(MalformedRequestError):
         await read_request(_reader(_request(head)), max_bytes=_CAP)
+
+
+# --- Issue #1369: a first read that cannot begin a request ------------------
+
+#: The opening of a TLS ClientHello: a handshake record (``0x16``) carrying TLS
+#: 1.0's version number (``0x03 0x01``), then its length and the handshake's own
+#: type. This is what a browser sends when the address it was given says
+#: ``https://``, and it is what the milestone-14 phone QA watched stall (#1373).
+_CLIENT_HELLO = b"\x16\x03\x01\x02\x00\x01" + b"\x00" * 300
+
+
+async def test_a_tls_handshake_is_refused_on_its_first_byte_and_not_waited_out() -> None:
+    """A ClientHello contains no blank line, so a parser that waits for one waits
+    out the deadline — which is what the phone QA found: a white screen, nothing
+    written back, and a fresh attempt every thirty seconds (#1369).
+
+    The reader is endless, so a parser that read on would never stop; the count is
+    what makes the claim. One byte is enough to know these bytes are not a
+    request, and this door refuses what it cannot parse rather than guessing at
+    it.
+    """
+    trickle = _Trickle(_CLIENT_HELLO, endless=True)
+
+    with pytest.raises(MalformedRequestError):
+        await read_request(trickle, max_bytes=_CAP)  # type: ignore[arg-type] # a reader is what it reads
+
+    assert trickle.served == 1
+
+
+async def test_a_request_whose_first_byte_arrives_alone_is_still_parsed() -> None:
+    """The refusal above narrows nothing legitimate.
+
+    The check reads the byte the reader has already handed over and never asks for
+    another, so a peer sending one byte at a time is bounded by the caller's
+    deadline exactly as it was — and a `GET` delivered that way is still a `GET`.
+    """
+    trickle = _Trickle(_request("GET /app.js HTTP/1.1\nHost: h\n"))
+
+    request = await read_request(trickle, max_bytes=_CAP)  # type: ignore[arg-type] # a reader is what it reads
+
+    assert request.method == "GET"
+    assert request.path == "/app.js"
+
+
+def test_the_first_byte_rule_is_derived_from_the_methods_this_door_serves() -> None:
+    """Every byte it refuses is one `_parse_head` would have refused anyway.
+
+    That equivalence is what makes the change a matter of *when* rather than of
+    *what*, and it is pinned rather than described: a door that grows a method
+    must not be left refusing a request it now serves, and one that loses a method
+    must not be left admitting that first byte until the head is complete.
+    """
+    assert {chr(byte) for byte in _METHOD_FIRST_BYTES} == {method[0] for method in _METHODS}
 
 
 async def test_optional_whitespace_around_a_length_is_stripped_and_not_refused() -> None:
