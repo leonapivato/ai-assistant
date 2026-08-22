@@ -44,8 +44,16 @@ test *args:
 # collected — the `pytest` step at either anchor as well. What discharges an
 # anchor is the run and not the command name, so read the summary line.
 #
-# Two flags here are load-bearing rather than tuning, so neither should be
-# dropped without reading what it buys.
+# It runs the whole suite. It used to deselect
+# `tests/core/test_protocol_triad.py`, because that check reads the run record
+# `tests/conftest.py` accumulates and under xdist each worker accumulates only
+# its own — so the check saw none of the contract subclasses that passed on the
+# other workers and reported every Protocol as missing its triad. ADR-0179
+# aggregates the workers' records on the controller instead, so the deselection
+# is gone and this recipe collects and executes every test the tree declares.
+#
+# `--basetemp` is load-bearing rather than tuning, so it should not be dropped
+# without reading what it buys.
 #
 # `--basetemp` is about socket paths, not about tidiness. xdist inserts a
 # `popen-gwN/` component under the temp root, which took the hub's AF_UNIX paths
@@ -64,36 +72,120 @@ test *args:
 # few runs is gone, so a failing run keeps its tree and says where, and a passing
 # one is removed.
 #
-# `--deselect tests/core/test_protocol_triad.py` is structural. That check reads
-# the run record `tests/conftest.py` accumulates across the session; under xdist
-# each worker accumulates only its own, so the check runs on one worker, sees
-# none of the contract subclasses that passed on the others, and reports every
-# Protocol as missing its triad. It is incompatible with a distributed run, not
-# flaky in one. Since ADR-0166 this recipe may also discharge an ADR-0136 anchor,
-# so the deselection is no longer covered by a serial local run: CI's full serial
-# gate on every push to an open PR is what still catches a real triad gap, and
-# ADR-0166 §2 says to pick `just check` when the diff touches a Protocol or a
-# canonical fake. And only a run that COLLECTED THE WHOLE SUITE AND EXECUTED IT
-# discharges an anchor: the `*args` below reach pytest, as does a `PYTEST_ADDOPTS`
-# in the environment (issue #1243), and anything through either that narrows,
-# stops early or only collects makes this a scoped selection under ADR-0136 §2
-# however the recipe is spelled (ADR-0166 §1).
+# Keeping a failed run's tree is deliberate — it is what makes a failure
+# inspectable — but the trees are ~1.3G each, they are shared across every clone
+# on this machine, and /tmp is a tmpfs. Six of them fill it, and what that looks
+# like from inside a clone is not "no space" but ~1700 failures in
+# `tests/memory/test_sqlite_*`, every one of which passes in isolation (issue
+# #1419). So the recipe reaps on entry, and it reaps only what it can show is
+# its own and finished: a tree named the way `mktemp -d /tmp/pt-XXXXXX` names
+# one, holding xdist's `popen-gw*` directories, carrying a LEASE FILE this recipe
+# wrote, whose lock nobody holds, and older than the window below.
+#
+# The lease is what carries both halves of that. It is the only evidence of
+# ownership available — the temp root has to stay six characters for the
+# `sun_path` budget the next paragraph explains, so the name cannot be made
+# repository-specific, and shape alone (a `pt-` name, `popen-gw*` children) is
+# something any process on this machine could produce. And it is the only thing
+# that can say a live run is live, since a run wedged in one test writes nothing
+# below its own tree and would look idle from outside however long it stood.
+#
+# So each run holds an exclusive `flock` on its lease for its whole life and the
+# reaper skips any tree whose lock it cannot take. The kernel drops the lock when
+# the holder dies, so a killed run leaves a reapable tree rather than an immortal
+# one — which a marker file would not, and #1419 is a bug about trees that never
+# go away.
+#
+# It also reports when /tmp is low, so the 1700-failure run is diagnosed before it
+# happens rather than after.
+#
+# Only a run that COLLECTED THE WHOLE SUITE AND EXECUTED IT discharges an anchor:
+# the `*args` below reach pytest, as does a `PYTEST_ADDOPTS` in the environment
+# (issue #1243), and anything through either that narrows, stops early or only
+# collects makes this a scoped selection under ADR-0136 §2 however the recipe is
+# spelled (ADR-0166 §1).
 #
 # Last line, because `just --list` shows only that one: what this recipe runs.
 # The suite in parallel — ADR-0136 §2's fast gate, and, unnarrowed, an anchor
 test-fast *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Four hours: two orders of magnitude longer than a run of this suite, and
+    # short enough that a day of failures across five clones cannot accumulate.
+    stale_after=240
+    # Written into every lease this recipe takes, and required of every lease it
+    # reaps: it is what tells our tree from one that merely shares the shape.
+    # Defined once, so the writer and the reader below cannot drift apart.
+    lease_token='just test-fast lease (ai-assistant, issue #1419)'
+    stale=""
+    # `pt-??????` is exactly and only what the `mktemp` below produces, so a
+    # directory that merely begins `pt-` is not a candidate however old it is.
+    while IFS= read -r candidate; do
+        # It must hold xdist's per-worker directories, which nothing but a run of
+        # this recipe puts there. A tree from `just test-fast -n 0` has none and
+        # is therefore never reaped -- a leak rather than a wrong deletion, which
+        # is the direction to fail in.
+        [ -n "$(find "$candidate" -maxdepth 1 -name 'popen-gw*' -print -quit)" ] || continue
+        # It must carry THIS RECIPE's lease, and that lease must be free. The
+        # lease is what makes the tree ours rather than merely tree-shaped: a
+        # six-character `pt-` name and `popen-gw*` children describe a shape, and
+        # any process on this machine could produce one -- so the lease is READ,
+        # not merely counted, and one that does not name this recipe is somebody
+        # else's and is left alone. The lease is also the only thing that can say
+        # a live run is live -- a run wedged in one test writes nothing below its
+        # own tree and looks idle from outside however long it stands, so no mtime
+        # answers this.
+        #
+        # A tree with no lease of ours beside it is therefore never reaped,
+        # whoever made it. That leaks the trees left by runs from before this
+        # recipe leased them, and any left by another tool that happens to share
+        # the shape; the low-space report below names those, to be removed by hand
+        # once. Leaking is the direction to fail in.
+        grep -q "^${lease_token}$" "$candidate.lease" 2>/dev/null || continue
+        flock -n "$candidate.lease" true 2>/dev/null || continue
+        stale="${stale}${candidate}"$'\n'
+    done < <(find /tmp -maxdepth 1 -type d -name 'pt-??????' -user "$(id -un)" \
+        -mmin +"$stale_after" 2>/dev/null || true)
+    if [ -n "$stale" ]; then
+        echo "just test-fast: reaping kept temp trees older than ${stale_after}m (#1419):" >&2
+        printf '%s' "$stale" | sed 's/^/  /' >&2
+        printf '%s' "$stale" | while IFS= read -r old; do rm -rf "$old" "$old.lease"; done
+    fi
+    free_kb="$(df -Pk /tmp | awk 'NR == 2 { print $4 }')"
+    if [ "${free_kb:-0}" -lt 3145728 ]; then
+        echo "just test-fast: /tmp has $((free_kb / 1024))M free and one run wants" \
+             "~1.3G — these kept trees are why, and none of them was reapable" \
+             "(too new, still leased, or carrying no lease of ours). If" \
+             "you know one is dead, remove it by hand:" >&2
+        ls -ldrt /tmp/pt-* >&2 2>/dev/null || true
+    fi
     tmp="$(mktemp -d /tmp/pt-XXXXXX)"
+    # Take this tree's lease and hold it on an open descriptor for the rest of the
+    # recipe, so another clone's reaper cannot take this run's tree out from under
+    # it however long a test blocks. It is released by the kernel when this shell
+    # exits, killed or not.
+    #
+    # BESIDE the tree, never inside it: pytest deletes and recreates a `--basetemp`
+    # it is given, so a lease file in there would be unlinked on the way in. The
+    # lock would survive on the descriptor and the reaper would then find a fresh
+    # file at that path and take it, which is the whole failure this prevents.
+    exec {lease}>"$tmp.lease"
+    flock -n "$lease"
+    # Say whose lease this is, now that it is held -- and after the `exec`, which
+    # truncates. The reaper above reads this line and reaps nothing without it, so
+    # a tree of this shape made by anything else survives; without the line, that
+    # check would have only presence to go on, which any file answers.
+    printf '%s\n' "$lease_token" >&"$lease"
     # `--basetemp` goes *after* "$@" so a forwarded one cannot displace it: pytest
     # takes the last occurrence, and a run that emptied some other directory while
     # the cleanup below removed this one would be the hazard this recipe exists to
     # avoid, silently. `-n auto` leads instead, so `just test-fast -n 4` still works.
-    if uv run pytest -n auto --deselect tests/core/test_protocol_triad.py \
-            "$@" --basetemp="$tmp"; then
-        rm -rf "$tmp"
+    if uv run pytest -n auto "$@" --basetemp="$tmp"; then
+        rm -rf "$tmp" "$tmp.lease"
     else
         status=$?
+        # The lease file stays with the tree it describes, so that the reaper can
+        # find it later and take both. It is unlocked the moment this shell exits.
         echo "just test-fast: temp tree kept for inspection at $tmp" >&2
         exit "$status"
     fi

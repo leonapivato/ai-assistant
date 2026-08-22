@@ -2,6 +2,9 @@
 
 - Status: Partially superseded by ADR-0167 (the "Branch protection (pragmatic)" clause's administrator-bypass and approving-review bullets, and the settings-change route to tightening)
 - Date: 2026-07-18
+- Amended: 2026-08-22 (the gate's `pytest` step is distributed — see the
+  dated section at the end). It is still the same five steps over the whole
+  suite; nothing decided here changes.
 - Partially superseded: 2026-08-20 by ADR-0167 — **the branch protection named
   below is not the branch protection this repository runs, and the configuration
   is now the decision; everything this ADR decided about the remote gate, PR
@@ -147,3 +150,25 @@ The rename went through GitHub's branch-rename, which moved the default branch
 and carried the protection rules over unchanged: required `gate` check, strict
 up-to-date, one approving review, linear history, no force-pushes, no deletions
 — exactly the settings listed under "Branch protection (pragmatic)" above.
+
+## Amendment (2026-08-22): the gate's `pytest` step runs across the runner's cores
+
+The `Tests` step of `.github/workflows/gate.yml` is now `uv run pytest -n auto`
+rather than `uv run pytest`. Everything above still holds as ratified: it is the
+same five Definition-of-Done steps, in the same order, on the same triggers, over
+the whole suite, and a green `gate` means exactly what it meant before.
+
+Only the invocation changed, and only because the one thing that could not run
+distributed no longer exists. `tests/core/test_protocol_triad.py` reads the run
+record `tests/conftest.py` accumulates, and under `-n auto` each worker
+accumulated only its own; [ADR-0179](0179-the-triad-check-reads-a-distributed-runs-merged-record-so-both-gates-run-across-cores.md)
+merges the workers' halves on the controller, so nothing is deselected, skipped
+or split across jobs. On the 4-vCPU `ubuntu-latest` runner this public
+repository gets, the step went from 273s to 113s and the whole job from 5m28s to
+2m45s.
+
+Recorded as an amendment rather than a supersession because a reader acting on
+this ADR acts identically before and after (ADR-0070 §1): what it decided is that
+a remote gate runs those five steps and binds the merge path, not which process
+count `pytest` uses. ADR-0166 §4's *restatement* — "CI's gate stays the full five
+steps, serial" — did decide serialism, and ADR-0179 supersedes that clause there.
