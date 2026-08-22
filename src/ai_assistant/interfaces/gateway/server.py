@@ -46,24 +46,43 @@ The assets alone are served on overlay membership, because they are the bundle t
 repository ships to anyone who installs it.
 
 **A browser reaches a closed enumeration of thirty operations** (ADR-0177 §1,
-superseding ADR-0175 §6's first clause and its figure of five). Eighteen of them
-are served here today: milestone 14's ``converse``, ``converse_streaming``,
+superseding ADR-0175 §6's first clause and its figure of five). Twenty-eight of
+them are served here today: milestone 14's ``converse``, ``converse_streaming``,
 ``recent_conversations``, ``conversation`` and ``forget_conversation``, together
 with the grant surface — ``grantable_sources``, ``grant``, ``revoke``,
 ``recent_grants``, ``standing_grants`` — the belief surface — ``beliefs``,
 ``belief``, ``forget`` — the deferred-question surface — ``questions``,
-``interrupted_questions``, ``answer``, ``forget_question`` — and ``observe``.
+``interrupted_questions``, ``answer``, ``forget_question`` — ``observe``, the
+notification *review* surface — ``notifications``, ``dismiss_notification``,
+``forget_notification``, ``notification_preferences``,
+``set_notification_preferences`` — and the connection surface —
+``connect_account``, ``reprovision_account``, ``disconnect_account``,
+``connected_accounts``, ``recent_connection_acts``.
 ``next_notification`` remains the gateway's **own** poll and is none of the thirty,
 because no browser request resolves to it — :class:`.delivery.DeliveryFanOut`
 originates it, no browser request names it, and no browser argument reaches it
 (ADR-0175 §6's second clause, bound unchanged by ADR-0177 §1).
 
-**The residual is smaller and the enumeration is no weaker for it.** ``resume`` and
-``pending_confirmations``, the notification *review* five and the five connection
-operations are admitted by ADR-0177 §1 and are not served here yet; ``learn`` is
-admitted by nothing and stays unreached until its own ratified decision (§11). The
-form is what ADR-0168 §6 chose it for — "naming what may appear is the only form
-that stays right when a later lane adds a request shape nobody has thought of yet".
+**The residual is two and the enumeration is no weaker for it.** ``resume`` and
+``pending_confirmations`` are admitted by ADR-0177 §1 and are not served here yet,
+because §8 of that ADR blocks the confirmation surface until ADR-0148 §8's content
+can be met; ``learn`` is admitted by nothing and stays unreached until its own
+ratified decision (§11). The form is what ADR-0168 §6 chose it for — "naming what
+may appear is the only form that stays right when a later lane adds a request shape
+nobody has thought of yet".
+
+**Two of the twenty-eight are narrower than the rest, and the narrowing is about
+the page's own origin rather than about who is asking** (ADR-0177 §3). A credential
+reaches this system through ``connect_account`` and ``reprovision_account`` and
+through no other operation on any surface, and a page served from
+``http://100.x.y.z:8422`` is not a potentially trustworthy origin (ADR-0174 §7) — so
+those two are admitted on the loopback listener and refused on the remote browser
+one, on a condition of their own. And a gateway that reaches its *hub* over
+ADR-0124's remote listener serves none of the five to any browser on either
+listener, because ADR-0151 §13's own question — the credential's hop from an
+enrolled device to the hub — is untouched by ADR-0177 §3 and stays refused.
+:meth:`Gateway._connections_refused` is where both live, and neither is decided
+from anything a browser asserts.
 
 **Two of those shapes answer on a stream** (ADR-0175 §1): the body of the response
 to the request the browser made, written in pieces, with no socket, no upgrade and
@@ -92,8 +111,19 @@ from importlib import resources
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
+from pydantic import SecretStr
 
-from ai_assistant.core.errors import AssistantError, ConfigurationError
+from ai_assistant.core.errors import (
+    AssistantError,
+    ConfigurationError,
+    ConnectionStoreError,
+    DisplacedProvisioningError,
+    IncompleteProvisioningError,
+    ProvisioningOutcomeUnknownError,
+    ResidualCredentialError,
+    UnknownConnectionError,
+    UnusableIdentityError,
+)
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
@@ -102,6 +132,8 @@ from ai_assistant.core.types import (
     BeliefBand,
     BeliefSummary,
     ClassReach,
+    ConnectedAccount,
+    ConnectionAct,
     ConversationDigest,
     ConversationSummary,
     Disposition,
@@ -120,6 +152,7 @@ from ai_assistant.core.types import (
     StepOutcome,
     SuccessorLink,
     TurnOutcome,
+    secret_value,
 )
 from ai_assistant.interfaces.gateway import streams
 from ai_assistant.interfaces.gateway.delivery import DeliveryFanOut, DeliveryStream, write_stream
@@ -275,6 +308,25 @@ _FORGET_NOTIFICATION_PATH: Final = "/notification/forget"
 _NOTIFICATION_PREFERENCES_PATH: Final = "/notification/preferences"
 _SET_NOTIFICATION_PREFERENCES_PATH: Final = "/notification/preferences/set"
 
+#: ADR-0177 §3's connection surface. Five paths for ADR-0151 §1's five operations,
+#: and the split into *what is connected now* and *what was done* is the same one
+#: :data:`_STANDING_PATH` and :data:`_RECENT_GRANTS_PATH` already carry — ADR-0139
+#: §1 rules neither derivable from the other, and ADR-0151 §9 adds the reason it
+#: bites hardest here: a reference whose latest act falls outside the log's page is
+#: one a reader walking the page would report by an *earlier* act.
+#:
+#: **Connecting and re-provisioning are two paths and never one with an optional
+#: reference**, which is ADR-0151 §1's own shape: a fresh connection cannot fail
+#: with an unknown reference or lose a compare-and-swap, and folding them would
+#: hand a browser one shape whose outcomes depend on which member it filled in.
+#: They are also the two that carry a credential, so keeping them apart is what
+#: makes :data:`_CREDENTIAL_PATHS` a set of paths rather than a rule about bodies.
+_CONNECT_PATH: Final = "/connection/connect"
+_REPROVISION_PATH: Final = "/connection/reprovision"
+_DISCONNECT_PATH: Final = "/connection/disconnect"
+_CONNECTIONS_PATH: Final = "/connections"
+_CONNECTION_ACTS_PATH: Final = "/connections/recent"
+
 #: Which method admits which path. A mapping rather than a chain of comparisons,
 #: because ADR-0168 §6 classifies "from its method and path alone" and the set of
 #: shapes the surface has is now large enough that reading it off one table is what
@@ -304,7 +356,35 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _FORGET_NOTIFICATION_PATH): "forget_notification",
     ("POST", _NOTIFICATION_PREFERENCES_PATH): "notification_preferences",
     ("POST", _SET_NOTIFICATION_PREFERENCES_PATH): "set_notification_preferences",
+    ("POST", _CONNECT_PATH): "connect_account",
+    ("POST", _REPROVISION_PATH): "reprovision_account",
+    ("POST", _DISCONNECT_PATH): "disconnect_account",
+    ("POST", _CONNECTIONS_PATH): "connected_accounts",
+    ("POST", _CONNECTION_ACTS_PATH): "recent_connection_acts",
 }
+
+#: ADR-0151 §1's five, as a set the refusals below are decided over. They stay in
+#: :data:`_ASSISTANT_PATHS` on every listener and in every deployment: ADR-0177 §3
+#: requires a refusal "reported as its own condition and never flattened into an
+#: absent path", and a shape dropped from the table above would be exactly that
+#: absent path — ADR-0168 §6's residual fourth class, answered with a `404`.
+_CONNECTION_PATHS: Final = frozenset(
+    {
+        _CONNECT_PATH,
+        _REPROVISION_PATH,
+        _DISCONNECT_PATH,
+        _CONNECTIONS_PATH,
+        _CONNECTION_ACTS_PATH,
+    }
+)
+
+#: The two of the five that carry a ``SecretValue`` (ADR-0151 §6: "No other
+#: operation on any surface accepts one"), and therefore the two ADR-0177 §3 refuses
+#: on a page whose origin the browser will not protect a secret on. The other three
+#: carry a *reference*, which ADR-0151 §3 designed so that it is not a credential —
+#: which is why §3 splits the five rather than refusing all of them, and why the
+#: split is stated over paths rather than over what a body happens to hold.
+_CREDENTIAL_PATHS: Final = frozenset({_CONNECT_PATH, _REPROVISION_PATH})
 
 #: The two shapes that answer on a stream (ADR-0175 §1). They are held apart from
 #: the rest because only they outlive the request that established them, so only
@@ -728,6 +808,19 @@ class Gateway:
         self._origin = f"http://{self._authority}"
         self._agent = agent
         self._remote_address = settings.gateway_remote_address
+        #: Whether this gateway's own connection to its hub is ADR-0084 §1's loopback
+        #: socket, which is the only transport ADR-0151 §13 lets the five connection
+        #: operations cross and which ADR-0177 §3's first clause leaves "whole and
+        #: unamended". Read from the one setting that already decides it —
+        #: ``wire.address.destination`` returns a ``LoopbackDestination`` exactly when
+        #: ``remote_hub_address`` is unset, and ADR-0124 §1 has that be "the switch,
+        #: … because two settings that can disagree about which transport is in use is
+        #: one more state than a deployment has". No field of this gateway's own is
+        #: added for it, and nothing about the engine object is inspected: golden rule
+        #: 1 has this adapter depend on the ``AssistantEngine`` contract rather than on
+        #: which implementation was injected, and the contract says nothing about a
+        #: transport (ADR-0098 §5).
+        self._hub_carries_connections = settings.remote_hub_address is None
         #: Read as a set, "compared for equality against the identity §3 obtained. A
         #: repeated element changes nothing and is not refused; order carries no
         #: meaning; and no element is matched by prefix, suffix, pattern or any form
@@ -777,6 +870,11 @@ class Gateway:
             _FORGET_NOTIFICATION_PATH: self._forget_notification,
             _NOTIFICATION_PREFERENCES_PATH: self._notification_preferences,
             _SET_NOTIFICATION_PREFERENCES_PATH: self._set_notification_preferences,
+            _CONNECT_PATH: self._connect_account,
+            _REPROVISION_PATH: self._reprovision_account,
+            _DISCONNECT_PATH: self._disconnect_account,
+            _CONNECTIONS_PATH: self._connected_accounts,
+            _CONNECTION_ACTS_PATH: self._recent_connection_acts,
         }
 
     @property
@@ -1461,6 +1559,11 @@ class Gateway:
         ADR-0177 §3 splits by listener, now that a loopback-dialling gateway no
         longer meets the hub's remote refusal (ADR-0174 §11).
 
+        **ADR-0177 §3's two refusals are taken here, before the handler and before
+        the body is read.** A credential the surface is about to refuse must not be
+        parsed, held or relayed on the way to being refused, so the decision is made
+        from the shape and the listener alone and nothing of the payload is touched.
+
         **Every handler answers or raises** :class:`_Refused`, and this is where the
         second becomes the first. A handler therefore reads as one engine call with
         the arguments the browser supplied, which is the form ADR-0168 §1's
@@ -1479,6 +1582,9 @@ class Gateway:
             The response, or the stream to write.
         """
         shape = (request.method, request.path)
+        barred = self._connections_refused(request.path, connection)
+        if barred is not None:
+            return barred
         try:
             if shape not in _STREAMED_SHAPES:
                 return await self._unary[request.path](request)
@@ -1493,7 +1599,84 @@ class Gateway:
         except _Refused as refused:
             return refused.response
 
-    async def _relayed[T](self, call: Callable[[], Awaitable[T]]) -> T:
+    def _connections_refused(self, path: str, connection: _Connection) -> Response | None:
+        """ADR-0177 §3's two refusals, decided from the listener and the shape alone.
+
+        **Neither is decided from anything the browser asserts** — "not from a header,
+        an origin value, a body field, or a device identity" — and neither is lifted by
+        ADR-0174 §4's admission, by a device appearing in
+        ``gateway_remote_browser_devices``, or by any configuration §3 does not name.
+        :attr:`_Connection.remote` is which socket accepted the connection and
+        :attr:`_hub_carries_connections` is one setting of this process's own, so a
+        peer has nothing to say about either.
+
+        **The hub's transport is asked about first, because it is the wider refusal.**
+        §3's second clause takes *all five* off a gateway that reaches its hub over
+        ADR-0124's remote listener, "on either listener" — so a loopback browser on
+        such a gateway is refused here too, and the listener split below never gets to
+        answer a question that has already been settled.
+
+        **This is the third refusal shape this class answers with and it is neither of
+        the other two.** It is not one of ADR-0168 §3 to §7's conditions, so
+        :class:`.records.RefusalCondition` does not grow and **nothing is recorded**:
+        §6 records "a request refused on a condition of §3, §4, §5, §6 or §7" and
+        "nothing for a refusal on any other ground", and ADR-0177 §11 adds no clause to
+        ADR-0168. And it is not a relay fault, because no relay was attempted — §3
+        forbids it being "flattened into … a fault attributed to the hub", which a
+        ``502`` or a ``422`` from :func:`_relay_fault` would be. What is left is what
+        the residual `404` beside it already is: an answer to an admitted request,
+        carrying its own name, on a connection that survives.
+
+        **`403` rather than `404`**, which §3 forbids by name ("never flattened into an
+        absent path"): the path exists, this gateway serves it, and what is refused is
+        this request on this listener. The condition is read off the ``fault`` member
+        rather than off the status, exactly as it is for the two ADR-0168 §7 conditions
+        that already share ``403``.
+
+        Args:
+            path: The admitted request's path.
+            connection: The connection it arrived on, which says which listener
+                accepted it.
+
+        Returns:
+            The refusal, or ``None`` where the request is not one of the five or is one
+            this gateway serves on this listener.
+        """
+        if path not in _CONNECTION_PATHS:
+            return None
+        if not self._hub_carries_connections:
+            return _fault(
+                403,
+                "Forbidden",
+                "connections-need-a-local-hub",
+                detail=(
+                    "This gateway reaches its hub over the remote listener, and the "
+                    "connection surface is carried only on the hub's own machine "
+                    "(ADR-0151 §13). Run a gateway there to connect an account."
+                ),
+                close=False,
+            )
+        if connection.remote and path in _CREDENTIAL_PATHS:
+            return _fault(
+                403,
+                "Forbidden",
+                "credential-entry-loopback-only",
+                detail=(
+                    "Entering a credential is available on a loopback origin only. "
+                    "This page is not one, so the browser cannot protect a secret "
+                    "typed into it. Disconnecting and reading the connections are "
+                    "available here."
+                ),
+                close=False,
+            )
+        return None
+
+    async def _relayed[T](
+        self,
+        call: Callable[[], Awaitable[T]],
+        *,
+        fault: Callable[[Exception], Response] | None = None,
+    ) -> T:
         """Make one call on the promoted surface, or refuse instead of making it.
 
         The whole of what every unary handler shares, in one place: the hub-connection
@@ -1508,9 +1691,24 @@ class Gateway:
         The gateway does not retry, does not queue, and answers from nothing of its
         own. The slot is returned whichever way the call ends, the refusal included.
 
+        **How a failure is *named* is the caller's, and exactly one surface needs its
+        own naming.** :func:`_relay_fault`'s three conditions are ADR-0168 §9's and
+        they are total over "did the hub receive this" — which is the whole question
+        everywhere but the connection surface, where ADR-0151 §7 and §8 rule that the
+        *class* of the failure carries facts a caller may not derive from anything
+        else: whether the act landed, whether the reference exists, and whether the
+        state is readable. Collapsing those into one name would make the page infer
+        them, which §7 forbids in terms. :func:`_connection_fault` is the one
+        substitution, and it falls through to :func:`_relay_fault` for everything
+        ADR-0151 does not classify.
+
         Args:
             call: The one engine call this request resolves to, with the arguments
                 the browser supplied already bound.
+            fault: How a failed call becomes a response, or ``None`` for
+                :func:`_relay_fault` — ADR-0168 §9's three conditions. Resolved in the
+                body rather than as a default value, because that function is defined
+                below this class and a default is evaluated as the class is built.
 
         Returns:
             Whatever the promoted surface returned.
@@ -1518,12 +1716,13 @@ class Gateway:
         Raises:
             _Refused: If no hub connection was free, or the call failed.
         """
+        named = _relay_fault if fault is None else fault
         if not self._take_hub_slot():
             raise _Refused(_ceiling())
         try:
             return await call()
         except (TransportError, AssistantError, ValueError) as exc:
-            raise _Refused(_relay_fault(exc)) from exc
+            raise _Refused(named(exc)) from exc
         finally:
             self._give_hub_slot()
 
@@ -2086,6 +2285,163 @@ class Gateway:
         written = await self._relayed(partial(self._engine.set_notification_preferences, asked))
         return _rendered({"preferences": _preferences_view(written)})
 
+    # --- the connection surface (ADR-0151 §1, ADR-0177 §3, §4) ----------------
+    #
+    # **The credential is relayed and nothing else is done with it** (ADR-0177 §4,
+    # third clause): it is read out of the JSON body, wrapped, passed as the
+    # ``credential`` argument, and dropped. It is not logged, not retained beyond the
+    # call, not copied into any other value, not retried with, and not read back —
+    # ADR-0151 §6's `orchestration` clause one hop out, and "the gateway acquires no
+    # standing over the value by carrying it".
+    #
+    # **The field is named ``credential``** so ``core/logging.py``'s key-name
+    # redaction reaches it wherever a payload mapping is logged (§4's second clause).
+    # Nothing here renames it, aliases it, or nests it under a key redaction does not
+    # reach — and the gateway logs no request body at all, which is the belt the
+    # naming is the braces for.
+    #
+    # **No response carries it or anything derived from it** (§4's sixth clause).
+    # :func:`_account_view` renders four members and a credential is none of them, so
+    # a read-back is unreachable rather than merely absent.
+
+    async def _connect_account(self, request: Request) -> Response:
+        """Connect a fresh account under a reference the hub mints (ADR-0151 §2).
+
+        **No reference argument, and none is accepted under another name**: §3's mint
+        makes this call unaimable at an existing record, which is what makes "I meant
+        to replace a credential and created a second connection instead" unreachable
+        rather than merely visible. A browser that wants the other act sends
+        :data:`_REPROVISION_PATH`.
+
+        The identity crosses byte for byte (ADR-0151 §5): nothing here strips,
+        case-folds or normalises it, and the refusals that identity is subject to are
+        raised by the implementation "locally, before any I/O" and arrive as
+        :class:`~ai_assistant.core.errors.UnusableIdentityError`.
+
+        Args:
+            request: The admitted request, carrying ``identity`` and ``credential``.
+
+        Returns:
+            The live record this act wrote.
+        """
+        payload = _payload(request)
+        account = await self._relayed(
+            partial(
+                self._engine.connect_account,
+                identity=_required_string(payload, "identity"),
+                credential=_credential(payload),
+            ),
+            fault=_connection_fault,
+        )
+        return _rendered({"account": _account_view(account)})
+
+    async def _reprovision_account(self, request: Request) -> Response:
+        """Replace the credential under a reference the hub returned (ADR-0151 §2).
+
+        A separate entry from :meth:`_connect_account` and never the same one with an
+        optional member, because ADR-0151 §1 kept the operations apart for a reason a
+        browser makes sharper: two outcomes are reachable here that a fresh connection
+        cannot produce — a reference the store does not hold, and a losing
+        compare-and-swap — and a single shape would decide which act it was performing
+        from whether a member was filled in.
+
+        Args:
+            request: The admitted request, carrying ``reference``, ``identity`` and
+                ``credential``.
+
+        Returns:
+            The live record this act wrote, at the new revision.
+        """
+        payload = _payload(request)
+        account = await self._relayed(
+            partial(
+                self._engine.reprovision_account,
+                _required_string(payload, "reference"),
+                identity=_required_string(payload, "identity"),
+                credential=_credential(payload),
+            ),
+            fault=_connection_fault,
+        )
+        return _rendered({"account": _account_view(account)})
+
+    async def _disconnect_account(self, request: Request) -> Response:
+        """Disconnect a reference and delete its credentials (ADR-0149 §5).
+
+        **A ``None`` is rendered as the absence it is and never as a disconnection**
+        (ADR-0151 §8). It says one thing — no live record was removed by this call —
+        and it is neither a confirmation that a credential was deleted nor a statement
+        that the reference does not exist, so it crosses as ``removed: null`` beside
+        no other member and the page says the one thing in words.
+
+        Args:
+            request: The admitted request, carrying ``reference``.
+
+        Returns:
+            The live record removed, or ``null`` where none was.
+        """
+        named = _required_string(_payload(request), "reference")
+        removed = await self._relayed(
+            partial(self._engine.disconnect_account, named), fault=_connection_fault
+        )
+        return _rendered({"removed": None if removed is None else _account_view(removed)})
+
+    async def _connected_accounts(
+        self,
+        request: Request,  # noqa: ARG002 — one signature per entry in `_unary`
+    ) -> Response:
+        """What is connected now, complete or refused (ADR-0151 §9).
+
+        **It takes no argument and is not paged**, and this handler adds neither: the
+        contract admits no ``limit`` and no ``offset`` because "a truncated answer to
+        'what is connected' is a false answer rather than a partial one", and an
+        adapter that offered one would be inventing the surface §9 refused. Where the
+        set does not fit the frame the call raises and this answers a fault, which is
+        the honest half of the same rule.
+
+        Nothing is merged in and nothing is annotated: no ``recent_connection_acts``
+        read joins this one (ADR-0139 §1), and no record is dropped because its
+        integration is not built — "a connection the hub can do nothing with is
+        exactly what this command exists to show".
+
+        Args:
+            request: The admitted request, which carries no argument.
+
+        Returns:
+            Every live record, in the order the hub returned them.
+        """
+        connected = await self._relayed(self._engine.connected_accounts, fault=_connection_fault)
+        return _rendered({"accounts": [_account_view(one) for one in connected]})
+
+    async def _recent_connection_acts(self, request: Request) -> Response:
+        """What was done to connections, newest first (ADR-0151 §9).
+
+        **There is deliberately no ``offset``** and none is read: the contract has one
+        argument, and an offset over a store that has none "is a paging surface that
+        lies about its cost" (ADR-0102 §10). ``limit``'s strictly-positive rule is the
+        *operation's* rather than the argument's, so it is left where ADR-0085 §9 puts
+        it and refused by the implementation — the same division :meth:`_recent_grants`
+        already stands on, and the reason :func:`_page` does not re-derive a bound.
+
+        **This answers a different question from :meth:`_connected_accounts` and
+        neither derives the other.** Nothing here is joined to that listing, and the
+        rows carry no instant because a connection record has none (ADR-0149 §3).
+
+        Args:
+            request: The admitted request, carrying an optional ``limit``.
+
+        Returns:
+            Up to ``limit`` acts, newest first.
+        """
+        payload = _payload(request)
+        acts = await self._relayed(
+            partial(
+                self._engine.recent_connection_acts,
+                limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
+            ),
+            fault=_connection_fault,
+        )
+        return _rendered({"acts": [_connection_act_view(one) for one in acts]})
+
     def _refuse(
         self, request_class: RequestClass, condition: RefusalCondition, connection: _Connection
     ) -> Response:
@@ -2535,6 +2891,51 @@ def _preferences(payload: Mapping[str, Any]) -> NotificationPreferences:
         raise _malformed() from exc
 
 
+def _credential(payload: Mapping[str, Any]) -> SecretStr:
+    """One supplied credential, in its redacting holder (ADR-0125 §3, ADR-0177 §4).
+
+    **Named ``credential`` and read from the body**, which is §4's first two clauses
+    arriving together: the value travels in the body of the request that performs the
+    act and nowhere else, and it is spelled with the one key ``core/logging.py``
+    redacts by name — so a payload mapping that reached a log record anywhere would
+    carry ``[redacted]`` rather than the secret. Nothing here renames it or nests it.
+
+    **Wrapped before it is anything else.**
+    :func:`~ai_assistant.core.types.secret_value` is ADR-0125 §3's only supported way
+    to build one, and revalidating at this door is what makes a blank, unencodable or
+    oversized credential a refusal *here* rather than after a frame was built around
+    it — the same reasoning ``interfaces/cli._credential`` states one surface over.
+
+    **The refusal is the gateway's own and is named as such**, on
+    :func:`_preferences`' precedent: a value that cannot become a ``SecretValue``
+    leaves no call to relay, so answering with ``rejected`` — :func:`_relay_fault`'s
+    name for a refusal the *hub* authored — would attribute this adapter's refusal to
+    a hub that was never asked. It is not ``malformed-request`` either: that name says
+    the page and the gateway disagree about the shape (ADR-0168 §10), and a person who
+    pasted an empty box has found no such disagreement and can fix this themselves.
+
+    The message is safe to carry: ADR-0125 §6 guarantees it names neither the value
+    nor its length.
+
+    Args:
+        payload: The request's JSON object.
+
+    Returns:
+        The credential, held in a ``SecretStr``.
+
+    Raises:
+        _Refused: If the member is absent, is not a string, or is not an admissible
+            secret value.
+    """
+    plaintext = _required_string(payload, "credential")
+    try:
+        return secret_value(SecretStr(plaintext))
+    except ValueError as exc:
+        raise _Refused(
+            _fault(400, "Bad Request", "credential-unusable", detail=str(exc), close=False)
+        ) from exc
+
+
 def _payload(request: Request) -> Mapping[str, Any]:
     """The request's JSON object, or an empty mapping where there is not one.
 
@@ -2669,6 +3070,7 @@ def _fault(  # noqa: PLR0913 — one parameter per member a fault body may carry
     *,
     detail: str | None = None,
     limit: str | None = None,
+    reference: str | None = None,
     close: bool = True,
 ) -> Response:
     """A machine-readable refusal or failure the front end renders as its own condition."""
@@ -2677,7 +3079,99 @@ def _fault(  # noqa: PLR0913 — one parameter per member a fault body may carry
         body["detail"] = detail
     if limit is not None:
         body["limit"] = limit
+    if reference is not None:
+        body["reference"] = reference
     return Response(status, reason, body=_json(body), content_type="application/json", close=close)
+
+
+def _connection_fault(exc: Exception) -> Response:  # noqa: PLR0911 — one return per condition ADR-0151 §7 and §8 classify, and the enumeration is the point
+    """One failed connection act, classified as ADR-0151 §7 and §8 classify it.
+
+    **The class is the answer and no other value carries it.** §7 has a client
+    resolve a provisioning act's outcome "from two facts the act knows", both of
+    which reach a caller only as the exception's type — so a surface that answered
+    all seven with :func:`_relay_fault`'s single ``assistant-declined`` would oblige
+    the page to infer them from a message, which §7 forbids by name. Each condition
+    therefore keeps its own ``fault``, in the shape ADR-0168 §6 already requires of
+    a refusal and §9 of a relay: its own condition, never flattened into another.
+
+    **The one that must not be got wrong is the last.**
+    :class:`~ai_assistant.core.errors.ResidualCredentialError` means the act
+    **completed** — after a re-provisioning the reference is connected at the new
+    revision, after a disconnection it has no live record — and what failed is a
+    deletion. ADR-0151 §8 is explicit that "no client reports it as a failed
+    connection or a failed disconnection", and a name shared with the failures above
+    it is exactly that report.
+
+    **The order is by specificity and not by preference.**
+    :class:`~ai_assistant.core.errors.UnknownConnectionError` and
+    :class:`~ai_assistant.core.errors.DisplacedProvisioningError` are subclasses of
+    :class:`~ai_assistant.core.errors.ConnectionStoreError`, and the three say
+    opposite things: the first is refused before the first write, the second means no
+    record this act wrote is the live one, and the bare class leaves the act's outcome
+    *not known*. A chain testing the base first would report all three as the third.
+
+    **The reference crosses where the class carries one**, because after
+    ``connect_account`` it is the only handle the caller will ever have — §3 minted it
+    inside the act and no result came back. It is a non-secret value ADR-0149 §3 makes
+    loggable, which is what makes it safe in a body the identity beside it is not.
+    An **empty** member is not an absent one (ADR-0085 §10a nulls ``details`` before
+    it truncates a message), so it is reported as lost rather than rendered as empty.
+
+    **What is *not* here is a second call.** §7 resolves an unread state by reading
+    ``connected_accounts``, and that read is the browser's own request: ADR-0177 §1
+    forbids this adapter composing one operation out of two, so the page issues it and
+    this function states only what the act itself said.
+
+    Args:
+        exc: The failure the act raised.
+
+    Returns:
+        The fault to answer with.
+    """
+    detail = str(exc)
+    if isinstance(exc, UnusableIdentityError):
+        return _fault(422, "Unprocessable Content", "identity-unusable", detail=detail, close=False)
+    if isinstance(exc, ResidualCredentialError):
+        return _fault(
+            422,
+            "Unprocessable Content",
+            "residual-credential",
+            detail=detail,
+            reference=exc.reference or None,
+            close=False,
+        )
+    if isinstance(exc, IncompleteProvisioningError):
+        return _fault(
+            422,
+            "Unprocessable Content",
+            "provisioning-incomplete",
+            detail=detail,
+            reference=exc.reference or None,
+            close=False,
+        )
+    if isinstance(exc, ProvisioningOutcomeUnknownError):
+        return _fault(
+            422,
+            "Unprocessable Content",
+            "provisioning-outcome-unknown",
+            detail=detail,
+            reference=exc.reference or None,
+            close=False,
+        )
+    if isinstance(exc, UnknownConnectionError):
+        return _fault(
+            422, "Unprocessable Content", "no-such-connection", detail=detail, close=False
+        )
+    if isinstance(exc, DisplacedProvisioningError):
+        return _fault(
+            422, "Unprocessable Content", "provisioning-displaced", detail=detail, close=False
+        )
+    if isinstance(exc, ConnectionStoreError):
+        return _fault(
+            422, "Unprocessable Content", "connection-store-unread", detail=detail, close=False
+        )
+    return _relay_fault(exc)
 
 
 def _outcome_view(outcome: TurnOutcome) -> dict[str, Any]:
@@ -3066,6 +3560,58 @@ def _preferences_view(preferences: NotificationPreferences) -> dict[str, Any]:
         ],
         "interruption_budget": str(preferences.interruption_budget),
         "budget_window_microseconds": str(preferences.budget_window // _MICROSECOND),
+    }
+
+
+def _account_view(account: ConnectedAccount) -> dict[str, Any]:
+    """One live connection record, member for member (ADR-0151 §4).
+
+    **Four members, and the three the type does not have are the point.** There is no
+    credential slot and no ``SecretName`` — the slot is `tools`-internal (ADR-0149 §3)
+    and a caller holding one could reach the keyring by the route the seam was built
+    to close — no endpoint, and no timestamp. This view adds none of them, and in
+    particular adds no member derived from the credential (ADR-0177 §4's sixth
+    clause), which is what makes a read-back unreachable rather than merely absent.
+
+    **The identity crosses byte for byte** (ADR-0151 §5). Nothing here strips,
+    case-folds, case-normalises or Unicode-normalises it, and the page inserts it as
+    text and never as markup — this adapter's half of ADR-0170 §8, applied to a value
+    that is Tier 1 personal data and reaches no log line on either side.
+
+    **The revision crosses as a decimal string**, which is
+    :func:`_preferences_view`'s losslessness rule reaching a member the browser only
+    reads. ``revision`` is an ``int`` with no upper bound in the type, and ADR-0151 §4
+    requires it "reported as the store holds it: nothing renumbers, compacts, offsets
+    or resets it" — a JSON number cannot promise that above ``2**53``, because the one
+    reader that matters here parses it into an IEEE-754 double. A rounded revision is
+    a wrong fact shown to the owner rather than a rounding.
+    """
+    return {
+        "reference": account.reference,
+        "identity": account.identity,
+        "revision": str(account.revision),
+        "state": account.state.value,
+    }
+
+
+def _connection_act_view(act: ConnectionAct) -> dict[str, Any]:
+    """One act on one reference, as the store recorded it (ADR-0151 §4, §9).
+
+    **A removal is the absence of ``account`` and never a third state.** ADR-0149 §5
+    forbids one, and ADR-0151 §4 records that an earlier draft's ``kind``
+    discriminator was refused as "a fourth promoted type encoding a distinction one
+    optional field already carries unambiguously" — so ``null`` crosses as the
+    absence it is and the page reads the discrimination off it.
+
+    **No instant is added**, because a connection record has none (ADR-0149 §3). The
+    row's position is the order the store recorded the acts in and nothing more, and
+    a view that stamped one here would manufacture the timing claim ADR-0151 §9
+    forbids every client from making.
+    """
+    return {
+        "reference": act.reference,
+        "revision": str(act.revision),
+        "account": None if act.account is None else _account_view(act.account),
     }
 
 
