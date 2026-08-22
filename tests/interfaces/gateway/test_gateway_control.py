@@ -629,6 +629,46 @@ async def test_the_conversation_is_a_selector_and_an_absent_one_is_not_an_error(
         ]
 
 
+@pytest.mark.parametrize("path", ["/observe", "/ask", "/ask/stream"])
+async def test_a_selector_of_the_wrong_type_is_refused_rather_than_read_as_absent(
+    path: str,
+) -> None:
+    """ADR-0177 §1: "the gateway derives none of them, **defaults none of them**".
+
+    An absent ``conversation_id`` is a selector — "this conversation, or the most
+    recently active" (ADR-0085 §2) — so reading a number as an absence answers a
+    *different* well-formed question instead of refusing a malformed one.
+
+    It matters most where the operation writes: ``observe`` proposes beliefs from the
+    batch it reads, so a mistyped selector silently accepted would put proposals on a
+    conversation nobody named. The two turn entries are here too because the reader is
+    shared and the refusal has to reach the streamed shape as well as the unary ones.
+    """
+    body: dict[str, Any] = {"conversation_id": 7}
+    if path != "/observe":
+        body["utterance"] = "what is on today"
+    async with _harness() as one:
+        status, answered = await one.whole("POST", path, body)
+
+        assert status == 400, path
+        assert answered["fault"] == "malformed-request", path
+        assert one.engine.calls == [], path
+
+
+@pytest.mark.parametrize("path", ["/observe", "/ask"])
+async def test_a_null_selector_is_the_absence_it_says_it_is(path: str) -> None:
+    """JSON has a way of saying "no selector", and a client using it is not getting
+    the type wrong — so ``null`` reads as the absence the omitted member is."""
+    body: dict[str, Any] = {"conversation_id": None}
+    if path != "/observe":
+        body["utterance"] = "what is on today"
+    async with _harness() as one:
+        status, _ = await one.whole("POST", path, body)
+
+        assert status == 200, path
+        assert one.engine.calls[0][1]["conversation_id"] is None, path
+
+
 async def test_an_observation_keeps_its_three_discard_counts_apart() -> None:
     """They are three different facts — what the producer could not use, what it
     dropped over its own limit, and what the write path refused for want of support —
