@@ -111,6 +111,20 @@
           <button type="button" id="review-button">Notifications I am holding</button>
           <button type="button" id="tuning-button">What may reach you unprompted</button>
         </p>
+        <!--
+          The connection surface (ADR-0177 §3, ADR-0151 §1). Two buttons and two
+          panels, and they are two for ADR-0139 §1's reason once more: what is
+          connected now and what was done are answered from different halves of the
+          store. ADR-0151 §9 adds the sharper version — a reference whose latest act
+          falls outside the log's page is one a reader walking the page would report
+          by an *earlier* act, so a surface deriving one from the other would show a
+          disconnected account as connected, on the deployment with the most history
+          and nowhere else.
+        -->
+        <p class="choice">
+          <button type="button" id="connections-button">Accounts I am connected to</button>
+          <button type="button" id="connection-log-button">What was done to connections</button>
+        </p>
       </section>
 
       <section id="sources" class="panel" hidden>
@@ -183,6 +197,41 @@
           moment, the last write wins.
         </p>
         <div id="tuning-body"></div>
+      </section>
+
+      <!--
+        The connection surface's two panels (ADR-0177 §3, §4).
+
+        **There is no credential field in this document, and its absence is the
+        guarantee** (ADR-0177 §4's fourth clause): "the front end presents no
+        credential field on a page whose own origin is not loopback". A field that
+        shipped here hidden would still be in the DOM of a page served over the
+        overlay — reachable by a password manager, by an extension and by the owner
+        with the inspector open — so the connect form is *built* by `app.js`, only on
+        a loopback origin and only after a listing the gateway actually answered. A
+        surface that asked for a secret in order to discover it could not be used
+        would be disclosing it to obtain a refusal.
+      -->
+      <section id="connections" class="panel" hidden>
+        <h3>Accounts I am connected to</h3>
+        <p class="hint">
+          Everything connected right now. This list is never shortened: it arrives
+          whole or not at all. A reference is minted by the hub — you cannot type one,
+          which is why connecting an account a second time can never overwrite the
+          first.
+        </p>
+        <div id="connection-list"></div>
+        <div id="connect-form"></div>
+      </section>
+
+      <section id="connection-log" class="panel" hidden>
+        <h3>What was done to connections</h3>
+        <p class="hint">
+          One row per act, newest first, in the order the store recorded them. There
+          are no times here and the order is not one. No row says what is connected
+          now — the panel above is the only answer to that.
+        </p>
+        <div id="connection-log-list"></div>
       </section>
 
       <section id="observation" class="panel" hidden>

@@ -2379,6 +2379,471 @@ function renderBudget(body, preferences) {
   // reset it on every save.
 }
 
+// --- the connection surface (ADR-0177 §3, §4; ADR-0151; ADR-0149) ------------
+//
+// **A credential is entered on a loopback origin and nowhere else** (ADR-0177 §3).
+// A page served from `http://127.0.0.1:8422` is a potentially trustworthy origin and
+// one served from `http://100.x.y.z:8422` is not, whatever tunnel the second is
+// inside (ADR-0174 §7) — so on the second the browser withholds every protection it
+// has for a secret and tells the owner, correctly, that the page is not secure. This
+// file reads its own origin rather than being told one, and the gateway decides the
+// same thing from the listener the request arrived on, so neither half rests on the
+// other being right.
+//
+// **The field is built here rather than shipped in the document, and never before
+// the gateway has answered a read.** §4's fourth clause forbids presenting a
+// credential field the gateway will refuse: "a surface that asked for a secret in
+// order to discover it could not be used would be disclosing it to obtain a refusal".
+// So the form exists only on a loopback page whose listing came back — which is also
+// what covers the deployment §3's second clause refuses, where the gateway's own hub
+// is remote and the listing is what says so.
+//
+// **What the value never touches**: no URL, no query string, no fragment, no cookie,
+// no `localStorage` and no `sessionStorage`. It is read out of one input, sent in one
+// JSON body, and the input is cleared and removed in the same breath. There is no
+// `<form>` around it either, so there is no submission path that could put it in a
+// query string even with the policy's `form-action 'none'` lifted.
+
+// Whether this page's own origin is one a credential may be typed into (ADR-0177 §3,
+// §4). `127.0.0.1` and nothing else, because that is the single authority the
+// gateway's loopback listener admits a `Host` for — a page reachable at any other
+// name is on the remote browser listener, where the two credential-carrying
+// operations are refused.
+const ON_LOOPBACK = window.location.hostname === "127.0.0.1";
+
+// ADR-0151 §7's and §8's classification, keyed by the condition the gateway named.
+//
+// **Three facts a client may not derive from anything else**: whether the act landed,
+// whether the reference exists, and whether the reference's state can be stated
+// without a read. Each condition therefore gets its own sentence rather than one of
+// three shared phrasings — `residual-credential` in particular means the act
+// **completed**, and §8 forbids reporting it as a failed connection or disconnection.
+//
+// `stateKnown` is the CLI's own test one surface over: exactly two conditions settle
+// the reference's state without a read, and both are refusals that never reached an
+// act. Everything else leaves it unread, which §7 says is resolved by reading the
+// connections and never by re-running the act.
+const CONNECTION_CONDITIONS = {
+  "identity-unusable": {
+    words:
+      "That account name was refused before anything left this page, so no " +
+      "credential was sent and nothing was written. Use a different name.",
+    stateKnown: true,
+  },
+  "no-such-connection": {
+    words:
+      "There is no connection under that reference, so nothing was written. Read " +
+      "the list again — a reference is minted by the hub and cannot be typed.",
+    stateKnown: true,
+  },
+  "provisioning-displaced": {
+    words:
+      "Another act took the record over, so no record this act wrote is the live " +
+      "one. That is not the same as nothing having been written, and nothing was " +
+      "rolled back.",
+    stateKnown: false,
+  },
+  "provisioning-incomplete": {
+    words:
+      "The act did not complete, and the reference it names exists. Nothing this " +
+      "act wrote is the live credential, or ever becomes it.",
+    stateKnown: false,
+  },
+  "provisioning-outcome-unknown": {
+    words:
+      "The outcome is not known. The reference exists, and whether the act " +
+      "completed cannot be said either way — do not run it again on the assumption " +
+      "it failed, which would replace a credential that may be live.",
+    stateKnown: false,
+  },
+  "connection-store-unread": {
+    words:
+      "The connection store could not answer, so the outcome of this act is not " +
+      "known — there may or may not be a reference.",
+    stateKnown: false,
+  },
+  "residual-credential": {
+    words:
+      "The act completed. What failed is deleting a credential it was to remove, so " +
+      "an unreferenced credential remains — this is not a failed act. Running the " +
+      "disconnection again is what removes the residue.",
+    stateKnown: false,
+  },
+};
+
+const CONNECTION_STATE_UNREAD =
+  "Nothing here says what that reference holds now. An act's outcome is a fact " +
+  "about that act; the reference's state is a fact only the hub can state, and the " +
+  "read that would have stated it did not answer.";
+
+// What a live record's provisioning state means, in words (ADR-0148 §6, ADR-0151 §4).
+//
+// **A pending record is never rendered as something in progress.** ADR-0148 §6 rules
+// an interrupted act's state "refused rather than reconciled": nothing is running,
+// the act that wrote it is gone, and the remedy is for the owner to run the act
+// again. Saying it "is being established" would promise a completion that no code
+// anywhere will deliver.
+function stateWords(state) {
+  if (state === "active") {
+    return "Connected.";
+  }
+  if (state === "pending") {
+    return (
+      "Not connectable. Nothing is running — the act that wrote this is gone and " +
+      "nothing repairs it. Connect it again, or disconnect it."
+    );
+  }
+  return `State: ${state}`;
+}
+
+async function listConnections() {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const panel = el("connection-list");
+  const form = el("connect-form");
+  try {
+    // The form is taken down before the read and put back only if the read answered.
+    // A gateway that has started refusing — because its own hub moved to the remote
+    // listener — must not leave a credential field standing from the last time it did
+    // not (ADR-0177 §4's fourth clause).
+    clearNode(form);
+    const held = await relay(half, "/connections", {});
+    if (held === null) {
+      show("connections", true);
+      clearNode(panel);
+      return;
+    }
+    clearNode(panel);
+    show("connections", true);
+    if (held.accounts.length === 0) {
+      line(panel, "Nothing is connected.", "hint");
+    }
+    held.accounts.forEach((account) => renderAccount(panel, account));
+    offerConnect(form);
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+function renderAccount(list, account) {
+  const item = document.createElement("div");
+  item.className = "connection-row";
+  // The identity is the user-recognisable name they supplied, byte for byte, and it
+  // is inserted as text (ADR-0151 §5, ADR-0168 §6).
+  line(item, account.identity, "connection-identity");
+  line(item, stateWords(account.state), account.state === "active" ? "hint" : "notice");
+  // The reference is a minted, non-secret handle (ADR-0151 §3) and the revision is
+  // reported exactly as the store holds it (§4) — never renumbered, and never
+  // presented as a count of anything.
+  line(item, `Reference: ${account.reference} · revision ${account.revision}`, "hint");
+  offerConnectionActs(item, account);
+  list.appendChild(item);
+}
+
+// The two acts a row offers. Re-provisioning carries a credential, so it is offered
+// only where one may be entered; disconnecting carries a reference, which ADR-0151 §3
+// designed so that it is not a credential, so it is offered wherever the page is.
+function offerConnectionActs(item, account) {
+  if (ON_LOOPBACK) {
+    const again = document.createElement("button");
+    again.type = "button";
+    again.textContent = "Replace the credential";
+    again.addEventListener("click", () => offerConnect(el("connect-form"), account));
+    item.appendChild(again);
+  }
+  const drop = document.createElement("button");
+  drop.type = "button";
+  drop.textContent = "Disconnect";
+  drop.addEventListener("click", () => disconnectAccount(account));
+  item.appendChild(drop);
+}
+
+// Step one of the ceremony ADR-0177 §4's fifth clause fixes: the identity is
+// rendered, and the user's confirmation of it taken, **before** the credential field
+// is presented.
+//
+// **The ordering is the whole point and it is not a courtesy.** ADR-0149 §4's third
+// answer to a credential pasted into the identity field is precisely that the value
+// is *seen*, and a page that showed the name after the secret had been typed into the
+// box beside it would show it too late to be that answer.
+function offerConnect(holder, account) {
+  clearNode(holder);
+  if (!ON_LOOPBACK) {
+    line(
+      holder,
+      "Connecting an account is available on the gateway's own machine only. This " +
+        "page is not on one, so your browser cannot protect a credential typed into " +
+        "it — it would have no password manager, and no lock in the address bar. " +
+        "Disconnecting and reading these lists work here.",
+      "hint"
+    );
+    return;
+  }
+  line(
+    holder,
+    account
+      ? `Replacing the credential under ${account.reference}. The account name may ` +
+          "change with it."
+      : "Connect an account. The hub mints the reference — you never type one, so " +
+          "this can never overwrite a connection you already have.",
+    "hint"
+  );
+  const name = document.createElement("input");
+  name.type = "text";
+  name.autocomplete = "off";
+  name.spellcheck = false;
+  name.placeholder = "The account name you will recognise";
+  if (account) {
+    name.value = account.identity;
+  }
+  holder.appendChild(name);
+  const next = document.createElement("button");
+  next.type = "button";
+  next.textContent = "Continue";
+  next.addEventListener("click", () => confirmIdentity(holder, name.value, account));
+  holder.appendChild(next);
+}
+
+// Step two: show what was typed, and take the answer. Nothing has been asked for yet.
+function confirmIdentity(holder, identity, account) {
+  if (identity === "") {
+    fault("An account name is needed before a credential is asked for.");
+    return;
+  }
+  fault(null);
+  clearNode(holder);
+  line(holder, "About to connect this account:", "hint");
+  // Rendered on its own line and as text, so a name with markup in it, or one that is
+  // in fact a pasted token, is legible as exactly the characters that were typed.
+  line(holder, identity, "connection-identity");
+  const yes = document.createElement("button");
+  yes.type = "button";
+  yes.textContent = "That is the account — ask for the credential";
+  yes.addEventListener("click", () => askCredential(holder, identity, account));
+  holder.appendChild(yes);
+  const back = document.createElement("button");
+  back.type = "button";
+  back.textContent = "Change it";
+  back.addEventListener("click", () => offerConnect(holder, account));
+  holder.appendChild(back);
+}
+
+// Step three, and the only step at which a credential field exists at all.
+//
+// `autocomplete` is off because ADR-0177 §4 puts the credential in "no browser
+// storage of any kind", and inviting the browser to keep it is asking for exactly
+// that. The field is cleared and the whole step torn down as soon as the value has
+// been read, so a back-navigation or a second glance finds nothing to repopulate.
+function askCredential(holder, identity, account) {
+  clearNode(holder);
+  line(holder, `Credential for ${identity}`, "hint");
+  line(
+    holder,
+    "It goes to the hub in the body of one request and is kept nowhere here — not " +
+      "in this page's storage, not in the address bar, and not in anything the " +
+      "gateway writes down.",
+    "hint"
+  );
+  const secret = document.createElement("input");
+  secret.type = "password";
+  secret.autocomplete = "off";
+  secret.spellcheck = false;
+  holder.appendChild(secret);
+  const send = document.createElement("button");
+  send.type = "button";
+  send.textContent = account ? "Replace the credential" : "Connect";
+  send.addEventListener("click", () => {
+    const typed = secret.value;
+    secret.value = "";
+    clearNode(holder);
+    sendConnect(identity, typed, account);
+  });
+  holder.appendChild(send);
+  secret.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      send.click();
+    }
+  });
+  secret.focus();
+}
+
+// One provisioning act, reported as ADR-0151 §7 reports it and never as anything
+// else. Two entries and never one: `connect_account` mints its reference and cannot
+// be aimed at an existing record, which is what makes creating a second connection
+// where a replacement was meant unreachable rather than merely visible (§2, §3).
+async function sendConnect(identity, credential, account) {
+  const panel = beginActs(account ? "Replacing a credential" : "Connecting an account");
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const result = account
+    ? await act(half, "/connection/reprovision", {
+        reference: account.reference,
+        identity,
+        credential,
+      })
+    : await act(half, "/connection/connect", { identity, credential });
+  await reportConnectionAct(panel, half, result, account ? account.reference : null);
+  await listConnections();
+}
+
+// Disconnect one reference, and say exactly what that did and did not do.
+//
+// The confirmation is a plain one over the row on screen and is **not** ADR-0073 §5's
+// ceremony: ADR-0177 §5 binds that ceremony to `forget`, `forget_question` and
+// `forget_conversation` by name and stops there, and nothing here claims otherwise.
+// What it does carry is ADR-0151 §8's own warning, which is about the act rather than
+// about consent: a disconnection is prospective.
+async function disconnectAccount(account) {
+  const asked = window.confirm(
+    `About to disconnect this account.\n\n${account.identity}\n` +
+      `Reference: ${account.reference} · revision ${account.revision}\n\n` +
+      "This appends a removal entry and then deletes the credentials. It does not " +
+      "stop anything already in flight, does not cancel an act in progress, and is " +
+      "not a guarantee that the keyring holds nothing for this reference — what it " +
+      "guarantees is that no live record names any credential for it.\n\n" +
+      "This is not the same as deleting your data, and it does not discharge it."
+  );
+  if (!asked) {
+    return;
+  }
+  const panel = beginActs("Disconnecting an account");
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const result = await act(half, "/connection/disconnect", { reference: account.reference });
+  if (result.outcome === LANDED && result.body.removed === null) {
+    // ADR-0151 §8: a `null` says **one** thing. It is not a report of a
+    // disconnection, not a confirmation that a credential was deleted, and not a
+    // statement that the reference does not exist.
+    line(
+      panel,
+      "No live record was removed by that call. That is all it says — it is not a " +
+        "disconnection, not a confirmation that a credential was deleted, and not a " +
+        "statement that the reference does not exist.",
+      "notice"
+    );
+  } else {
+    await reportConnectionAct(panel, half, result, account.reference);
+  }
+  await listConnections();
+}
+
+// Say what one connection act did, from the condition the gateway named and from
+// nothing else — then, where the condition leaves the reference's state unread, take
+// the read that states it.
+//
+// **The read is a second browser request rather than something the gateway did.**
+// ADR-0177 §1 forbids the gateway composing one operation out of two, so the resolve
+// step ADR-0151 §7 prescribes — "read `connected_accounts`, never re-run the act" —
+// is issued from here.
+async function reportConnectionAct(panel, half, result, reference) {
+  if (result.outcome === LANDED) {
+    const account = result.body.account;
+    line(panel, "The act completed.", "reply");
+    if (account) {
+      renderAccount(panel, account);
+    }
+    return;
+  }
+  const named = CONNECTION_CONDITIONS[result.body.fault];
+  const handle = typeof result.body.reference === "string" ? result.body.reference : reference;
+  if (named) {
+    line(panel, named.words, named.stateKnown ? "failed" : "notice");
+  } else {
+    reportAct(panel, "act", result);
+  }
+  if (named && named.stateKnown) {
+    return;
+  }
+  if (handle) {
+    line(panel, `Reference: ${handle}`, "hint");
+  } else {
+    line(
+      panel,
+      "No reference came back with that, so there is none to read — the list below " +
+        "is what says whether anything was made.",
+      "hint"
+    );
+  }
+  await stateAfterAct(panel, half, handle);
+}
+
+// Re-read what is connected and state the reference from it, or say it is unread.
+//
+// A failed read leaves the state **unread** rather than assumed, which is the only
+// safe answer: the alternative is a page that says "nothing is connected" because it
+// could not ask.
+async function stateAfterAct(panel, half, reference) {
+  let held = null;
+  try {
+    held = await relay(half, "/connections", {});
+  } catch (_) {
+    held = null;
+  }
+  if (held === null) {
+    line(panel, CONNECTION_STATE_UNREAD, "notice");
+    return;
+  }
+  if (reference === null) {
+    return;
+  }
+  const found = held.accounts.find((one) => one.reference === reference);
+  if (!found) {
+    line(panel, "That reference has no live record now.", "hint");
+    return;
+  }
+  line(panel, `That reference now: ${stateWords(found.state)}`, "hint");
+}
+
+async function listConnectionLog() {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const held = await relay(half, "/connections/recent", { limit: PAGE });
+    if (held === null) {
+      return;
+    }
+    const list = el("connection-log-list");
+    clearNode(list);
+    show("connection-log", true);
+    if (held.acts.length === 0) {
+      line(list, "Nothing has been done to a connection.", "hint");
+    }
+    held.acts.forEach((one) => renderConnectionAct(list, one));
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// One row of the log. A removal is the **absence** of the act's record and not a
+// third state (ADR-0149 §5), and no time is rendered because a connection record has
+// none (ADR-0151 §9) — so nothing here is a claim about when anything happened.
+function renderConnectionAct(list, one) {
+  const item = document.createElement("div");
+  item.className = "connection-row";
+  if (one.account === null) {
+    line(item, "Disconnected", "connection-identity");
+  } else {
+    line(item, `Connected: ${one.account.identity}`, "connection-identity");
+    line(item, stateWords(one.account.state), "hint");
+  }
+  line(item, `Reference: ${one.reference} · revision ${one.revision}`, "hint");
+  list.appendChild(item);
+}
+
 // --- looking over a conversation (ADR-0077 §8) -------------------------------
 //
 // The passive half of accumulation, and it is deliberately explicit: nothing
@@ -2465,6 +2930,8 @@ const CONTROL_PANELS = [
   "questions",
   "review",
   "tuning",
+  "connections",
+  "connection-log",
   "observation",
 ];
 
@@ -2511,6 +2978,8 @@ el("questions-button").addEventListener("click", listQuestions);
 el("observe-button").addEventListener("click", observe);
 el("review-button").addEventListener("click", listNotifications);
 el("tuning-button").addEventListener("click", listTuning);
+el("connections-button").addEventListener("click", listConnections);
+el("connection-log-button").addEventListener("click", listConnectionLog);
 
 stopWatching();
 if (headerHalf() === null) {

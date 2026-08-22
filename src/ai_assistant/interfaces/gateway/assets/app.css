@@ -233,7 +233,8 @@ button[disabled] {
 .grant-row,
 .belief-row,
 .question-row,
-.notification-row {
+.notification-row,
+.connection-row {
   border-top: 1px solid var(--line);
   padding: 0.7rem 0;
 }
@@ -281,4 +282,32 @@ button[disabled] {
 #tuning-body input[type="time"],
 #tuning-body input[type="number"] {
   width: auto;
+}
+
+/*
+ * The connection surface (ADR-0177 §3, §4). The account identity leads its row for
+ * the reason ADR-0149 §4 gives: it is the value the owner recognises, and ADR-0151
+ * §5's rendering obligation is met by showing it rather than by showing it faintly.
+ *
+ * The connect form is built by the script and only on a loopback origin, so what is
+ * styled here is a container that is empty on every other page. There is no rule for
+ * a credential field beyond what every `input` in this sheet already gets: a rule
+ * naming one would be a place for a later lane to find a selector and conclude the
+ * field exists everywhere.
+ */
+.connection-identity {
+  margin: 0 0 0.2rem;
+  font-weight: 600;
+}
+
+#connect-form {
+  border-top: 1px solid var(--line);
+  margin-top: 0.7rem;
+  padding-top: 0.7rem;
+}
+
+#connect-form:empty {
+  border-top: none;
+  margin-top: 0;
+  padding-top: 0;
 }
