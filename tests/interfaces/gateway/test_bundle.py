@@ -693,6 +693,14 @@ def test_the_page_reads_the_belief_again_immediately_before_it_forgets_one() -> 
     assert forgetting.index("window.confirm(") < forgetting.index('"/belief/forget"')
     assert "forgetWarning(belief.band)" in forgetting
     assert "which may have changed since it was shown" in forgetting
+    # Every field §4 requires, the validity window's end included where one is set. A
+    # confirmation showing less than the listing the user came from is the opposite of
+    # what a ceremony is for.
+    for field in ("belief.band", "belief.kind", "belief.confidence", "belief.content"):
+        assert field in forgetting, field
+    assert "belief.valid_until === null" in forgetting
+    assert "belief.last_updated" in forgetting
+    assert "belief.id" in forgetting
 
 
 def test_the_forget_warning_is_band_appropriate_and_total_over_the_bands() -> None:
