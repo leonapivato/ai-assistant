@@ -1246,7 +1246,7 @@ def test_every_outcome_class_the_contract_names_has_its_own_words() -> None:
     ):
         assert f'"{named}"' in conditions, named
     assert conditions.count("stateKnown: true") == 2
-    assert "The act completed." in conditions
+    assert "This is not a failed act." in conditions
 
 
 def test_an_unread_state_is_resolved_by_a_read_and_never_by_re_running_the_act() -> None:
@@ -1305,3 +1305,46 @@ def test_a_record_an_act_returned_is_not_rendered_as_a_row_of_the_listing() -> N
     assert "immediately before it was removed" in functions["reportConnectionAct"]
     assert "renderActRecord" in functions["reportConnectionAct"]
     assert "renderAccount(" not in functions["reportConnectionAct"]
+
+
+def test_a_refused_identity_does_not_claim_the_credential_stayed_in_the_page() -> None:
+    """ADR-0151 §5 raises ``UnusableIdentityError`` "locally, before any I/O, by every
+    implementation — the wire client included — so no such call reaches the hub and no
+    credential is sent for one".
+
+    The implementation in question is the **gateway's** engine: the browser has
+    already put the value in a request body and sent it one hop by the time the
+    refusal happens. A page telling the owner the credential never left it would
+    reassure them about a Tier 0 value that has in fact travelled — which is the one
+    thing ADR-0177 §4 exists to be exact about.
+    """
+    script = _code("app.js")
+    refusal = script[script.index('"identity-unusable"') : script.index('"no-such-connection"')]
+
+    assert "no credential reached the hub" in refusal
+    assert "did reach the gateway on this machine" in refusal
+    for false_comfort in ("left this page", "never left", "stayed here"):
+        assert false_comfort not in refusal, false_comfort
+
+
+def test_a_residual_credential_is_reported_as_the_act_it_completed() -> None:
+    """ADR-0151 §8: "A client reports the reference as disconnected **and** the
+    deletion as incomplete, and never as a failed disconnection" — and §7 the same for
+    a re-provisioning, where "the reference is connected at the new revision".
+
+    Two different guarantees, so one shared sentence reports neither. The act's own
+    result is said first, and a read taken afterwards — which says what is true *now*
+    and can fail — takes nothing back from it.
+    """
+    script = _code("app.js")
+    report = _functions(script)["reportConnectionAct"]
+    acts = script[
+        script.index("const ACTS = {") : script.index("\n};", script.index("const ACTS = {"))
+    ]
+
+    assert "The account is connected." in acts
+    assert "connected at the new revision" in acts
+    assert "The reference has no live record." in acts
+    assert 'result.body.fault === "residual-credential"' in report
+    assert report.index("words.residual") < report.index("named.words")
+    assert "takes nothing back from what is said above" in script

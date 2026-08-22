@@ -2425,9 +2425,17 @@ const ON_LOOPBACK = window.location.hostname === "127.0.0.1";
 // connections and never by re-running the act.
 const CONNECTION_CONDITIONS = {
   "identity-unusable": {
+    // **What this may not claim is that the credential stayed here.** ADR-0151 §5
+    // raises this "locally, before any I/O, by every implementation — the wire
+    // client included — so no such call reaches the hub and no credential is sent
+    // for one", and the implementation in question is the *gateway's* engine: the
+    // value has already crossed the one hop this page controls by the time the
+    // refusal happens. Telling an owner otherwise would reassure them about a Tier 0
+    // value that has in fact travelled.
     words:
-      "That account name was refused before anything left this page, so no " +
-      "credential was sent and nothing was written. Use a different name.",
+      "That account name was refused before the act began, so nothing was written " +
+      "and no credential reached the hub. It did reach the gateway on this machine, " +
+      "which held it for the call and kept nothing. Use a different name.",
     stateKnown: true,
   },
   "no-such-connection": {
@@ -2463,18 +2471,48 @@ const CONNECTION_CONDITIONS = {
     stateKnown: false,
   },
   "residual-credential": {
+    // **The only condition whose act *completed*, and the only one whose sentence is
+    // therefore the act's own.** ADR-0151 §7 and §8 each guarantee a different
+    // result — "after ``reprovision_account`` the reference is connected at the new
+    // revision; after ``disconnect_account`` the reference has no live record" — so
+    // one shared sentence would report neither. :js:data:`RESIDUAL` carries the
+    // guaranteed half and this carries the residue they share.
     words:
-      "The act completed. What failed is deleting a credential it was to remove, so " +
-      "an unreferenced credential remains — this is not a failed act. Running the " +
-      "disconnection again is what removes the residue.",
+      "What failed is deleting a credential the act was to remove, so an " +
+      "unreferenced credential remains, named by the store and read by no call. " +
+      "This is not a failed act. Disconnecting that reference again is what removes " +
+      "the residue.",
     stateKnown: false,
   },
 };
 
+//: What each act guarantees, said before anything else and never withdrawn.
+//
+// The success line and the residual line are the same fact arriving two ways, which
+// is why they sit together: ADR-0151 §8 requires a residual reported as a
+// disconnection "and never as a failed disconnection", and §7 the same for a
+// re-provisioning. A read taken afterwards says what is true *now* and can fail; what
+// the act did is settled and is not revisited by it.
+const ACTS = {
+  connect: {
+    landed: "Connected.",
+    residual: "The account is connected.",
+  },
+  reprovision: {
+    landed: "The credential was replaced.",
+    residual: "The credential was replaced — the account is connected at the new revision.",
+  },
+  disconnect: {
+    landed: "Disconnected. No live record names any credential for that reference any more.",
+    residual: "Disconnected. The reference has no live record.",
+  },
+};
+
 const CONNECTION_STATE_UNREAD =
-  "Nothing here says what that reference holds now. An act's outcome is a fact " +
-  "about that act; the reference's state is a fact only the hub can state, and the " +
-  "read that would have stated it did not answer.";
+  "Nothing here says what that reference holds now: the read that would have stated " +
+  "it did not answer. That takes nothing back from what is said above — an act's " +
+  "outcome is a fact about that act, and the reference's state is a fact only the " +
+  "hub can state.";
 
 // What a live record's provisioning state means, in words (ADR-0148 §6, ADR-0151 §4).
 //
@@ -2716,7 +2754,7 @@ async function sendConnect(identity, credential, account) {
     half,
     result,
     account ? account.reference : null,
-    account ? "The credential was replaced." : "Connected."
+    account ? ACTS.reprovision : ACTS.connect
   );
   await listConnections();
 }
@@ -2760,13 +2798,7 @@ async function disconnectAccount(account) {
       "notice"
     );
   } else {
-    await reportConnectionAct(
-      panel,
-      half,
-      result,
-      account.reference,
-      "Disconnected. No live record names any credential for that reference any more."
-    );
+    await reportConnectionAct(panel, half, result, account.reference, ACTS.disconnect);
   }
   await listConnections();
 }
@@ -2779,7 +2811,7 @@ async function disconnectAccount(account) {
 // ADR-0177 §1 forbids the gateway composing one operation out of two, so the resolve
 // step ADR-0151 §7 prescribes — "read `connected_accounts`, never re-run the act" —
 // is issued from here.
-async function reportConnectionAct(panel, half, result, reference, landed) {
+async function reportConnectionAct(panel, half, result, reference, words) {
   if (result.outcome === LANDED) {
     // A provisioning act answers under `account` and a disconnection under
     // `removed`, because they are different answers: one is the record this act
@@ -2788,7 +2820,7 @@ async function reportConnectionAct(panel, half, result, reference, landed) {
     // happened without being told what.
     const written = result.body.account;
     const removed = result.body.removed;
-    line(panel, landed, "reply");
+    line(panel, words.landed, "reply");
     if (written) {
       renderActRecord(panel, written, "The record this act wrote:");
     } else if (removed) {
@@ -2803,6 +2835,13 @@ async function reportConnectionAct(panel, half, result, reference, landed) {
   }
   const named = CONNECTION_CONDITIONS[result.body.fault];
   const handle = typeof result.body.reference === "string" ? result.body.reference : reference;
+  if (result.body.fault === "residual-credential") {
+    // Said **first**, and as the act's own result rather than as a failure: this is
+    // the one condition on which the act completed, and ADR-0151 §8's "no client
+    // reports it as a failed connection or a failed disconnection" is a rule about
+    // the first thing the owner reads.
+    line(panel, words.residual, "reply");
+  }
   if (named) {
     line(panel, named.words, named.stateKnown ? "failed" : "notice");
   } else {

@@ -682,3 +682,40 @@ async def _send_loopback(
     answer = await _read_answer(reader)
     writer.close()
     return answer
+
+
+async def test_an_identity_the_contract_refuses_is_refused_by_the_real_implementation(
+    harness: Harness,
+) -> None:
+    """ADR-0151 §5's four refusals, through the shipped fake rather than a scripted
+    exception: an identity carrying a line break is one of them, and it is raised
+    "locally, before any I/O", so nothing is written and the hub is never asked.
+
+    What the *page* may say about it is pinned in ``test_bundle.py``: the credential
+    reached this gateway, which is the hop a browser has already spent by then.
+    """
+    status, body = await harness.whole(
+        "POST", "/connection/connect", {"identity": "ada\nlovelace", "credential": "sekrit"}
+    )
+
+    assert status == 422, body
+    assert body["fault"] == "identity-unusable"
+    assert "ada" not in body["detail"]
+    assert "sekrit" not in body["detail"]
+
+
+async def test_an_identity_equal_to_the_credential_is_refused_and_names_neither(
+    harness: Harness,
+) -> None:
+    """ADR-0149 §4's third answer to a credential pasted into the identity field, and
+    ADR-0151 §5's message rule: it "names neither value, no part of either, and no
+    length of either"."""
+    with structlog.testing.capture_logs() as records:
+        status, body = await harness.whole(
+            "POST", "/connection/connect", {"identity": "sekrit", "credential": "sekrit"}
+        )
+
+    assert status == 422, body
+    assert body["fault"] == "identity-unusable"
+    assert "sekrit" not in body["detail"]
+    assert "sekrit" not in str(records)
