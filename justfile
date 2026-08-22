@@ -275,6 +275,34 @@ review-history *args:
 review-codex persona base="":
     scripts/codex-review.sh "$1" "$2"
 
+# For a lane that owes BOTH lenses — a contract-surface change, or the ADR
+# deciding that surface (`CONTRIBUTING.md` → "Stop when the required reviews are
+# green" owns which set a change requires). One round is both lenses on one
+# committed tree, so a finding one lens raises and the other would reject is
+# visible before anyone edits for it; running adversarial to terminal and
+# architecture only at the end is what bought and refunded three rounds on
+# PR #1377 (issue #1387).
+#
+# Composes the driver twice rather than teaching it a third persona name:
+# `scripts/codex-review.sh` is an ADR-0027 §3 floor path, so editing it re-opens
+# every review on every branch, and it needs to know nothing about this.
+#
+# Sequential in one command, which is what puts both artifacts on one `tree=`:
+# the round figure counts distinct reviewed *trees*, not runs, so a second
+# persona on one tree does not advance it (ADR-0138 §2) and the pair is one
+# round. Adversarial first because it is the lens `ship` requires
+# unconditionally — if the second run dies on quota or a Codex error, the
+# required artifact already exists and the round is not lost.
+#
+# Triage the two verdicts as one queue, before editing. `docs/review/guide.md`
+# → "When a change owes both lenses" carries what to do when they contradict.
+#
+# Last line, because `just --list` shows only that one: what this recipe runs.
+# Both Codex lenses, one round on one tree — for a lane that owes both
+review-codex-both base="":
+    scripts/codex-review.sh adversarial "$1"
+    scripts/codex-review.sh architecture "$1"
+
 # Refuses unless a review artifact covers the content the PR head carries,
 # whatever commit the artifact is filed under. Two paths are accepted
 # (ADR-0027 §2). Base unmoved: the recorded base and tree must both match the
