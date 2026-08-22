@@ -642,6 +642,22 @@ def test_a_re_arm_says_that_it_happened_why_and_what_it_does_not_promise() -> No
     assert "`Watching for notifications. ${because}`" in _functions(script)["watchDeliveries"]
 
 
+def test_a_stream_that_opens_clears_what_ended_the_last_one() -> None:
+    """Every act on this page clears its own panel before it runs, and watching is an
+    act like any other.
+
+    Without it a re-arm that succeeded sits under a standing "the gateway did not
+    answer", which is the page contradicting itself on one screen — the failure this
+    lane exists to stop, rather than something to leave to a dismiss control. Found by
+    driving the page; no check over the source would have asked.
+    """
+    watch = _functions(_code("app.js"))["watchDeliveries"]
+
+    assert 'fault(null, "notifications");' in watch
+    assert watch.index("watching = true;") < watch.index('fault(null, "notifications");')
+    assert watch.index('fault(null, "notifications");') < watch.index("deliveryState(")
+
+
 def test_the_page_says_why_a_session_ended_while_it_was_only_watching() -> None:
     """ADR-0175 §7: an open stream is **not** use of the session that admitted it.
     ``gateway_session_idle_timeout`` "is refreshed by a request the gateway admits and

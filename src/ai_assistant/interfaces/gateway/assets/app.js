@@ -1130,6 +1130,12 @@ async function watchDeliveries(because) {
     return;
   }
   watching = true;
+  // The condition that ended the *last* stream is cleared here, as every other act
+  // clears its own panel before it runs. A re-arm that succeeded above a standing
+  // "the gateway did not answer" is a page contradicting itself on one screen, which
+  // is the thing this lane exists to stop rather than a thing to leave to a dismiss
+  // control. Found by driving the page, not by any check over its source.
+  fault(null, "notifications");
   deliveryState(
     because ? `Watching for notifications. ${because}` : "Watching for notifications."
   );
