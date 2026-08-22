@@ -23,6 +23,7 @@ import pytest
 from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
     BeliefBand,
+    DiscloserProvenance,
     GrantScope,
     NotificationCondition,
     NotificationReach,
@@ -429,8 +430,11 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
     shipped rather than discovered.
 
     The negative half is what is **not** here: ``learn`` is admitted by nothing
-    (§1, §11), and the CONFIRM pair's surface is blocked until ADR-0148 §8's content
-    can be met (§8).
+    (§1, §11). ``/resume`` and ``/pending_confirmations`` stay in that half for a
+    different reason now that the CONFIRM pair is served — a shape is a method and a
+    path together (ADR-0168 §6), and the pair's paths are ``/confirmation/resume`` and
+    ``/confirmations``, so a page reaching for the operation names would get §6's
+    residual fourth class.
     """
     script = _code("app.js")
 
@@ -461,6 +465,8 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
         '"/connection/disconnect"',
         '"/connections"',
         '"/connections/recent"',
+        '"/confirmations"',
+        '"/confirmation/resume"',
     ):
         assert served in script, served
     for later in ('"/learn"', '"/resume"', '"/pending_confirmations"'):
@@ -620,6 +626,8 @@ _RELAY_ENTRIES: Final = (
     "writePreferences",
     "listConnections",
     "listConnectionLog",
+    "readPending",
+    "answerConfirmation",
 )
 
 
@@ -1432,3 +1440,193 @@ def test_every_connection_condition_the_gateway_writes_is_a_condition_the_page_r
         assert f'"{named}"' in faults, named
     # And a store that could not be read is not a store that is empty.
     assert "not that nothing is" in faults
+
+
+# --- the CONFIRM prompt (ADR-0177 §8, ADR-0178 §7) ---------------------------
+#
+# What these check is the *page*, which is the half #1404's obligations reach that a
+# handler test cannot: the gateway builds a view carrying ADR-0178 §7's floor, and a
+# page that received it and rendered half of it would still satisfy every case in
+# ``test_gateway_confirmations.py``.
+
+
+def test_the_prompt_panel_ships_and_carries_no_markup_template() -> None:
+    """ADR-0177 §8: every value a ``Confirmation`` carries is inserted "as text through
+    the document's own text node, never as markup and never through any interface that
+    parses markup".
+
+    So the document carries the panel and none of the prompt: a template here would be
+    a second place a value could be put, and the one interesting thing about it would
+    be that it parses markup.
+    """
+    document = _asset("index.html")
+
+    assert 'id="confirmations"' in document
+    assert 'id="confirmation-list"' in document
+    assert 'id="confirmations-button"' in document
+    assert "account_identity" not in document
+    assert "destinations" not in document
+
+
+def test_the_page_renders_the_set_it_was_handed_and_derives_none_of_it() -> None:
+    """ADR-0178 §3, and #1404's "one further test", at the surface it is about.
+
+    "No lane reimplements the deduplication, the account substitution or the order in
+    another language, in ``interfaces/``, or in a page's script" — that would be
+    business logic in an adapter (golden rule 3) and a second derivation of one fact,
+    and "a page that got any of the three wrong would show a recipient set the ruling
+    was not taken over".
+
+    Checked as an absence rather than as a presence, because the failure this guards
+    is a lane *adding* a derivation: the page reads ``egress.destinations``, the
+    functions that render it hold no set arithmetic at all, and nothing here builds a
+    destination out of the occurrences beside it.
+    """
+    functions = _functions(_code("app.js"))
+    rendering = functions["renderEgress"] + functions["destinationWords"]
+
+    assert "egress.destinations.forEach" in functions["renderEgress"]
+    for derivation in ("sort(", "new Set", ".filter(", ".reduce(", ".indexOf(", ".includes("):
+        assert derivation not in rendering, derivation
+    # The account substitution is `core`'s too: the page branches on the member it was
+    # handed, and never on whether the occurrences carried a destination. Counted, so
+    # the *only* place a destination is spoken of in this function is the set it was
+    # given — a lane deriving one from `egress.spans` would break the equality.
+    assert "spans" not in functions["destinationWords"]
+    egress = functions["renderEgress"]
+    assert egress.count("destination") == egress.count("egress.destinations") + egress.count(
+        "destinationWords("
+    )
+
+
+def test_the_approval_control_is_built_after_the_whole_floor() -> None:
+    """ADR-0178 §7's first clause is an ordering obligation: a surface renders the floor
+    "**before it collects the user's answer**".
+
+    A page that appended the buttons first would satisfy every content check and still
+    offer the owner an approval above the recipients — so the order is asserted, not
+    the membership.
+    """
+    body = _functions(_code("app.js"))["renderConfirmation"]
+
+    assert body.index("renderParameters(") < body.index("offerApproval(")
+    assert body.index("renderEgress(") < body.index("offerApproval(")
+    assert body.index("confirmation.reason") < body.index("offerApproval(")
+
+
+def test_a_confirmation_with_no_egress_says_nothing_about_recipients() -> None:
+    """ADR-0178 §4's third clause and §7's last.
+
+    ``egress is None`` states that "the ruling was taken over an egress binding, and
+    nothing more" — no lane reads it as a warrant that the call transmits nothing,
+    discloses nothing, or reaches no recipient. So the branch has no other arm: there
+    is nothing for a page to say there, and inventing a sentence would be asserting the
+    one thing the discriminator does not carry.
+    """
+    body = _functions(_code("app.js"))["renderConfirmation"]
+
+    assert "if (confirmation.egress !== null) {" in body
+    assert "} else {" not in body
+
+
+def test_the_token_is_relayed_and_never_rendered_or_stored() -> None:
+    """ADR-0177 §8: "The front end parses no part of it, derives nothing from it,
+    renders it nowhere, and stores it in no browser storage."
+
+    The three functions below are the whole of what touches it — it reaches the answer
+    through a closure — and none of them puts it in a text node, in an attribute or in
+    ``localStorage``.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert {name for name, body in functions.items() if "token" in body} == {
+        "renderConfirmation",
+        "offerApproval",
+        "answerConfirmation",
+    }
+    assert not re.search(r"textContent\s*=[^;]*token", script)
+    assert not re.search(r"\bline\([^)]*\btoken\b", script)
+    for name in ("renderConfirmation", "offerApproval", "answerConfirmation"):
+        assert "localStorage" not in functions[name], name
+
+
+def test_the_answer_supplies_approved_and_nothing_else() -> None:
+    """ADR-0177 §8's second clause and §9: "The browser's answer supplies ``resume``'s
+    ``approved`` argument and nothing else", and ``timeout`` is the caller-owned
+    deadline §1 and §9 place with the gateway.
+
+    Read off the request body the page actually writes, which is where a third member
+    would appear.
+    """
+    body = _functions(_code("app.js"))["answerConfirmation"]
+
+    assert 'relay(half, "/confirmation/resume", { token, approved })' in body
+    assert "timeout" not in body
+
+
+def test_pending_confirmations_is_the_pages_one_recovery_route() -> None:
+    """ADR-0177 §8: "A browser that has been closed and reopened, and a gateway that has
+    been restarted, both recover through this read and through no other route."
+
+    So the page reads it as it loads, without being asked, and re-reads it after an
+    answer — which is also how it gets fresh tokens for whatever is left rather than
+    keeping the ones it holds (ADR-0052 §1).
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert {name for name, body in functions.items() if '"/confirmations"' in body} == {
+        "readPending"
+    }
+    assert "readPending(true)" in functions["showConsole"]
+    assert "readPending(true)" in functions["answerConfirmation"]
+
+
+def test_the_page_says_who_disclosed_a_span_in_every_word_core_has() -> None:
+    """ADR-0146 §1's discloser, rendered as **who** and never as a claim about what the
+    span holds — ADR-0178 §7 forbids presenting a ``SYSTEM_SELECTED`` marker "as an
+    assertion about what the text says".
+
+    Read off `core`'s own vocabulary, so a third member added to the enum fails here
+    rather than reaching a person as a bare identifier.
+    """
+    body = _functions(_code("app.js"))["disclosureWords"]
+
+    for provenance in DiscloserProvenance:
+        assert f'"{provenance.value}"' in body, provenance.value
+
+
+def test_the_page_shows_both_forms_and_reconstructs_neither() -> None:
+    """ADR-0178 §7: "No surface reconstructs a ``supplied`` form from a ``canonical``
+    one, or presents a canonical form as the form the user or the model wrote."
+
+    ADR-0148 §14 names that reconstruction as a failure in terms, and the binding
+    carries both forms so neither has to be guessed — so both are read, each is
+    labelled, and nothing here case-folds, trims or normalises either one.
+    """
+    body = _functions(_code("app.js"))["spanWords"]
+
+    assert "span.destination.canonical" in body
+    assert "span.destination.supplied" in body
+    assert "as supplied:" in body
+    assert "names no destination" in body
+    for reconstruction in ("toLowerCase", "toUpperCase", "normalize", "replace(", "trim("):
+        assert reconstruction not in body, reconstruction
+
+
+def test_the_arguments_are_not_presented_as_the_canonical_destination_set() -> None:
+    """ADR-0177 §8's surviving sub-clauses, which ADR-0178 §8 leaves binding unchanged.
+
+    "A browser rendering ``to = alice@example.com`` beside a heading that says
+    'recipients' would be asserting that the user is looking at the bound canonical
+    set, when what they are looking at is the argument the model produced before
+    binding." The set now arrives *beside* the arguments rather than instead of them,
+    which makes that confusion easier to make and the separation more load-bearing.
+    """
+    functions = _functions(_code("app.js"))
+
+    assert "as the assistant wrote them" in functions["renderParameters"]
+    for claim in ("reach", "recipient", "destination", "account"):
+        assert claim not in functions["renderParameters"], claim
+    assert "It would reach:" in functions["renderEgress"]
