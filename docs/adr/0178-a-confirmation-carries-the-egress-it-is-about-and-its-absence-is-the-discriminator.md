@@ -30,8 +30,9 @@
   clause and its no-claim clause**, each only as it reaches a surface rendering a
   `Confirmation` that carries the member §1 adds; **ADR-0085 §4's Group A field row
   for `Confirmation`**, which enumerates five fields where there are now six; and
-  **ADR-0150 §3's member-type and account-member clauses**, only as they reach the
-  canonical destination set a `Confirmation` names — the one place ADR-0150 §3 and
+  **three clauses of ADR-0150 §3** — its member-type, account-member and
+  derived-property clauses — only as they reach the canonical destination set a
+  `Confirmation` names — the one place ADR-0150 §3 and
   ADR-0148 §8's fourth clause cannot both be obeyed, resolved in §8's favour at that
   surface and nowhere else. §12 shows the working for all three.
 - **One amendment rides it and changes no decision**: a dated header note on
@@ -298,11 +299,22 @@ direction §8 asks for and in no other.
 > grant record or an audit row. Its only consumer is a surface rendering the
 > `Confirmation` it arrived on.
 
-> **Normative.** This narrows ADR-0150 §3's account-member clause — "An account member
-> carries the account **whole** … No lane reduces an account member to its identity" —
-> **only** for the set a `Confirmation` names. `EgressBinding`'s own derived set is
+> **Normative.** This narrows **three** clauses of ADR-0150 §3, each **only** for the
+> set a `Confirmation` names: its member-type clause ("A member of a canonical
+> destination set is a `CanonicalDestination`…"), its account-member clause ("An account
+> member carries the account **whole** … No lane reduces an account member to its
+> identity"), and its derived-property clause ("ADR-0148 §2's canonical destination set
+> is a single derived property of `EgressBinding`"), which this section makes a second
+> property of the same shape on a second type. `EgressBinding`'s own derived set is
 > untouched: its members stay `CanonicalDestination`, its account arm still carries the
-> whole `BoundAccount`, and its equality is still over both fields.
+> whole `BoundAccount`, its equality is still over both fields, and the set on that type
+> is still the single derived property of it.
+
+> **Normative.** Every other thing ADR-0150 §3's derived-property clause says is
+> **adopted rather than replaced** and binds here too: never a stored field, one member
+> per distinct destination the spans carry, exactly one member — the account — where the
+> spans carry none, never empty, the same total order, and never accepted from a caller.
+> Two computations of one rule, and no second rule.
 
 **Derived rather than stored is the same decision `EgressBinding` took and for the
 same reason, and it also happens to be free on the wire.** A stored set is a second
@@ -315,7 +327,8 @@ is not a pydantic field, nothing about it reaches the frame — the wire carries
 occurrences once, and both ends compute the same set from them.
 
 **A third type rather than reusing `CanonicalDestination`, and this is where two
-ratified clauses actually meet.** `CanonicalDestination`'s account arm carries a whole
+ratified clauses actually meet.** (§12 records all three §3 clauses this narrows; the
+argument below is about the one that carries the safety reason.) `CanonicalDestination`'s account arm carries a whole
 `BoundAccount`, which carries `reference` — and **ADR-0148 §8's fourth clause bars the
 connection reference from the confirmation in terms**, while **ADR-0150 §3 requires an
 account member to carry the account whole** and says in as many words that "No lane
@@ -787,11 +800,22 @@ differently, or read one of its clauses more widely than it now holds?
   set is not touched** — its members stay `CanonicalDestination`, its account arm
   carries the whole `BoundAccount`, and §3's stated hazard ("either alone is a
   destination that two different accounts can satisfy") is a fact about comparison,
-  which is exactly what the replacement forbids. **Every other clause of ADR-0150 §3
+  which is exactly what the replacement forbids.
+- **ADR-0150 §3's derived-property clause**, "ADR-0148 §2's **canonical destination
+  set** is a single **derived property** of `EgressBinding` and is not a stored field",
+  on the same scope and **only as to where that property may live**. A `Confirmation`
+  cannot reach an `EgressBinding` — ADR-0042 §6 is why — so a reader holding only this
+  clause concludes the set is unavailable at a confirmation and builds a surface that
+  cannot name it. §3 above puts a second property of the same shape on
+  `ConfirmationEgress` and **adopts everything else the clause says**: never stored, one
+  member per distinct destination, the account where the spans carry none, never empty,
+  the same total order, never accepted from a caller — and requires the two to
+  correspond member for member. Two computations of one rule, not two rules, which is
+  the distinction ADR-0150's own title turns on. **Every other clause of ADR-0150 §3
   stands**: the occurrence rule, the function-of-supplied-form refusal, the
-  no-canonicalisation-in-`core` rule, the two-shape refusal itself, the
-  derived-property rule, the never-empty rule, the total order, the field-wise
-  equality, ADR-0148 §8's third floor and the conditional account substitution.
+  no-canonicalisation-in-`core` rule, the two-shape refusal itself, the never-empty
+  rule, the total order, the field-wise equality, ADR-0148 §8's third floor and the
+  conditional account substitution.
 
 **One amendment is recorded and changes no decision**, in ADR-0070 §1's second limb —
 an ADR reconciled with a fact that postdates it, such that a reader acting on it acts
