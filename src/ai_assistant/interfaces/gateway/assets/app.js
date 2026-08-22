@@ -519,11 +519,29 @@ function offerApproval(item, token) {
   const approve = document.createElement("button");
   approve.type = "button";
   approve.textContent = "Yes, do it";
-  approve.addEventListener("click", () => answerConfirmation(token, true));
   const decline = document.createElement("button");
   decline.type = "button";
   decline.textContent = "No";
-  decline.addEventListener("click", () => answerConfirmation(token, false));
+  // **One answer per park, enforced here rather than discovered at the hub.** A
+  // second `resume` on a token the first already resolved raises
+  // `UnknownContinuationError`, which ADR-0084 §7 makes emphatically *not* a denial —
+  // so a double click would put "the hub declined it" on screen for an action that
+  // had in fact just run, which is the one thing this surface exists to get right.
+  // Both are disabled because either one submits, and both come back where the
+  // request failed and the row survives to be answered again — `ask` disables its own
+  // button for the same window and for the same reason.
+  const answer = async (approved) => {
+    approve.disabled = true;
+    decline.disabled = true;
+    try {
+      await answerConfirmation(token, approved);
+    } finally {
+      approve.disabled = false;
+      decline.disabled = false;
+    }
+  };
+  approve.addEventListener("click", () => answer(true));
+  decline.addEventListener("click", () => answer(false));
   item.appendChild(approve);
   item.appendChild(decline);
 }
@@ -536,6 +554,15 @@ function offerApproval(item, token) {
 async function listPending() {
   await readPending(false);
 }
+
+// Which read of the listing is the live one. The questions listing's own device, for
+// the reason it states: two reads can be in flight at once — the page starts one as it
+// loads and an answered park starts another — and the slower one finishing last would
+// clear the list and re-render the snapshot it took *before* the answer. That puts a
+// resolved park back on screen with an approval control whose token the engine has
+// already spent, so the owner's next click reports a refusal for something that ran.
+// Only the most recently started read renders.
+let pendingRun = 0;
 
 // Read it, and say so or not.
 //
@@ -550,9 +577,11 @@ async function readPending(quiet) {
     showBootstrap();
     return;
   }
+  pendingRun += 1;
+  const run = pendingRun;
   try {
     const body = await relay(half, "/confirmations", {});
-    if (body === null) {
+    if (body === null || run !== pendingRun) {
       return;
     }
     const list = el("confirmation-list");

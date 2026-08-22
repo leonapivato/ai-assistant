@@ -1648,3 +1648,38 @@ def test_a_resumed_park_is_not_reported_as_a_turn_that_planned_nothing() -> None
     body = _functions(_code("app.js"))["renderOutcome"]
 
     assert "if (outcome.steps.length === 0 && outcome.step === null) {" in body
+
+
+def test_a_slower_listing_read_cannot_put_an_answered_park_back_on_screen() -> None:
+    """Two reads of the listing can be in flight at once — the page starts one as it
+    loads, and answering a park starts another — and the slower one finishing last
+    would clear the list and re-render the snapshot it took before the answer.
+
+    What that costs is specific: a resolved park back on screen with an approval
+    control whose token the engine has already spent, so the owner's next click gets
+    ``UnknownContinuationError`` — which ADR-0084 §7 makes emphatically *not* a denial
+    — reported as a refusal of something that ran. The questions listing carries the
+    same device for the same reason.
+    """
+    body = _functions(_code("app.js"))["readPending"]
+
+    assert "pendingRun += 1" in body
+    assert "run !== pendingRun" in body
+
+
+def test_one_answer_per_park_and_a_second_click_submits_nothing() -> None:
+    """A second ``resume`` on a token the first resolved raises
+    ``UnknownContinuationError``, and ADR-0084 §7 is that this is never a denial:
+    "nobody ruled on this action".
+
+    So a double click would put "the hub received the request and declined it" on
+    screen for an action that had in fact just run. Both controls are disabled for the
+    request's own window — either one submits — and both come back, because a request
+    that *failed* leaves a row that must still be answerable. ``ask`` disables its own
+    button across the same window and for the same reason.
+    """
+    body = _functions(_code("app.js"))["offerApproval"]
+
+    assert body.count("disabled = true") == 2
+    assert body.count("disabled = false") == 2
+    assert "} finally {" in body
