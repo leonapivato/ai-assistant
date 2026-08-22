@@ -1296,6 +1296,47 @@ def test_halves_that_arrive_carrying_no_item_names_fail_the_same_way(
     assert controller.exitstatus == pytest.ExitCode.TESTS_FAILED
 
 
+def test_a_verdict_whose_item_went_missing_is_reported_as_a_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Losing one item name must not quietly drop the verdict it belonged to.
+
+    The half arrives, the record is whole, and the binding check reports normally
+    -- so nothing about the run looks wrong. The stale-exemption verdict simply
+    has nothing to be reported under, and would go with it.
+    """
+    _isolated(monkeypatch, conftest._RunRecord(unfiltered=True))
+
+    _hand_over(_Session(_Config(worker=True)))
+    controller = _Session(_Config(numprocesses=2))
+    reported = _finish(controller)
+
+    dropped = f"{conftest._TRIAD_CHECK}::{test_no_exemption_is_stale.__name__}"
+    assert set(reported) == {_HANDED_ITEM["nodeid"], dropped}
+    assert reported[dropped][0] == "failed"
+    assert "no worker handed over an item to report it under" in reported[dropped][1]
+    assert controller.exitstatus == pytest.ExitCode.TESTS_FAILED
+
+
+def test_a_narrowed_run_whose_verdicts_lack_items_says_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Because there a check can legitimately not be collected on its own.
+
+    ``-k`` on a name matching one check and not the other leaves exactly the shape
+    the test above calls a fault, so the two are told apart by the run's options
+    and not by the shape.
+    """
+    _isolated(monkeypatch, conftest._RunRecord(unfiltered=False))
+
+    _hand_over(_Session(_Config(worker=True)))
+    controller = _Session(_Config(numprocesses=2))
+    reported = _finish(controller)
+
+    assert set(reported) == {_HANDED_ITEM["nodeid"]}
+    assert controller.exitstatus == pytest.ExitCode.OK
+
+
 def test_a_narrowed_run_that_collected_no_check_reports_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

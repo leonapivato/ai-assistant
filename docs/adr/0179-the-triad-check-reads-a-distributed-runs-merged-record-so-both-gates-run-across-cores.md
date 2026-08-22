@@ -116,12 +116,13 @@ satisfactory on another.
 
 ### 2. A check no process decided is a failure, not a pass
 
-> **Normative.** Where a distributed session hands an evidence-dependent check to
-> the controller and the controller has no evaluator for it, where a worker leaves
-> without handing its half of the record over, or where an unfiltered distributed
-> session brings no evidence-dependent check to the controller to be decided at
-> all, a failure is reported. None of the three may be reported as passed or
-> silently omitted.
+> **Normative.** In a distributed session every item handed to the controller is
+> decided, and every check the controller decides is reported under an item.
+> Wherever that correspondence breaks — an item the controller has no evaluator
+> for, a decision with no item to report it under, or an unfiltered session that
+> hands no evidence-dependent check over at all — and wherever a worker leaves
+> without handing its half of the record over, a failure is reported. None of them
+> may be reported as passed or silently omitted.
 
 This is the one place the arrangement can rot quietly. The items handed over are
 identified by the fixture they request rather than by a list of test names, so a
@@ -143,12 +144,22 @@ arrives at all, and halves arrive whose record survived but whose item names did
 not. The second is the more dangerous, because everything about that run looks
 healthy.
 
-It is judged against the run's **own options**, not against the halves, since
+The correspondence is stated as a correspondence, in both directions, because
+each direction can be broken alone and one of them looks entirely healthy: a half
+that arrives with the record whole but one item name short leaves the other check
+reporting normally while the missing one's verdict — as likely a failing verdict as
+a passing one — is simply dropped. So a decision nothing reports is a failure on
+the same terms as an item nothing decides.
+
+The last clause is judged against the run's **own options**, not against the
+halves, since
 with nothing arriving there is nothing to read a verdict from. An unfiltered
 session collects the whole suite and therefore collects both checks — `--deselect`
 and every other way of not collecting them is itself a filtering option — so on
 an unfiltered run their absence is the failure, and on a narrowed one it is the
-ordinary case and nothing is said. It is reported under a nodeid of its own rather
+ordinary case and nothing is said. The same options question separates the two
+readings of a missing item: `-k` on a name matching one check and not the other
+produces, legitimately, exactly the shape that on an unfiltered run is a fault. It is reported under a nodeid of its own rather
 than under a test's, since no test was ever named.
 
 ### 3. Both gates' `pytest` step is distributed, and it is still the whole suite
