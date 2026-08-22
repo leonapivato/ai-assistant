@@ -6729,6 +6729,17 @@ class ConfirmationEgress(BaseModel):
     second statement of one invariant that could come to disagree with the first —
     the failure this type reuses ``EgressSpan`` to avoid.
 
+    **Every surface rendering a confirmation owes ADR-0178 §7's floor, and the
+    browser's does not get it for free.** §7 is stated over "a surface" rather than
+    over either renderer, so a third adapter inherits it without a third decision;
+    ``interfaces/cli.py`` pays it today. The gateway does **not** yet, and that is a
+    named deferral rather than an omission: ``_step_view`` is an explicit
+    enumeration that reduces a whole confirmation to one boolean, so "a gateway that
+    shipped the approval control while enumerating none of it would satisfy every
+    test above" (ADR-0178 §10). That lane's obligations are #1404's, and a lane
+    building it reads the set from :attr:`canonical_destination_set` in its own
+    Python process rather than reimplementing the rule in a page's script.
+
     **The payload this member joins can exceed the frame limit for a request that
     did not, and ADR-0178 §9 states the arithmetic rather than denying it.**
     ``EgressSpan.argument`` carries the top-level key **once per span**, and an
