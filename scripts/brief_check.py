@@ -54,16 +54,7 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# Fenced blocks are stripped before extraction: a brief's shell snippets are
-# full of paths and flags that are illustrations rather than claims about the
-# tree, and checking them produces noise that buries the real findings.
-# The fence is three *or more* delimiters, not exactly three: a brief that quotes
-# backticked names inside a code block has to open with four, which is precisely
-# the block whose contents are illustrations rather than claims.
-_FENCE_RE = re.compile(
-    r"^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]*(?P=fence)[`~]*[ \t]*$",
-    re.DOTALL | re.MULTILINE,
-)
+_FENCE_OPEN_RE = re.compile(r"`{3,}|~{3,}")
 
 _ADR_RE = re.compile(r"\bADR-(\d{3,4})\b")
 
@@ -121,8 +112,32 @@ class Finding:
 
 
 def strip_code_blocks(text: str) -> str:
-    """Return ``text`` with fenced code blocks removed."""
-    return _FENCE_RE.sub("", text)
+    """Return ``text`` with fenced code blocks removed.
+
+    A brief's code blocks are full of paths, flags and placeholder names that
+    are illustrations rather than claims about the tree, and checking them
+    produces noise that buries the real findings.
+
+    The scan is line-based rather than a regex over the whole document, so it
+    can follow the two rules that decide where a block ends: a closing fence is
+    the **same** delimiter character, at least as long as the opener, and alone
+    on its line; and a fence that is never closed runs to the end of the file.
+    A regex that ends a block early reads a code sample as brief content, and
+    one that ends it late reads brief content as a code sample.
+    """
+    kept: list[str] = []
+    fence: str | None = None
+    for line in text.splitlines(keepends=True):
+        stripped = line.strip()
+        if fence is None:
+            opener = _FENCE_OPEN_RE.match(stripped)
+            if opener is not None:
+                fence = opener.group(0)
+            else:
+                kept.append(line)
+        elif len(stripped) >= len(fence) and set(stripped) == {fence[0]}:
+            fence = None
+    return "".join(kept)
 
 
 def _line_at(text: str, pos: int) -> tuple[int, str]:
