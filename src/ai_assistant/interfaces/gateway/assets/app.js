@@ -107,9 +107,23 @@ function line(parent, text, className) {
   return p;
 }
 
+// One response body, as an object or as nothing.
+//
+// **A body that is not an object is not distinguished from an absent one**, which is
+// the gateway's own `_payload` rule read from this side: every caller reads named
+// members, so a second failure mode would be a second way to say the same thing.
+//
+// The normalisation is load-bearing rather than tidy. `null` is a valid JSON document,
+// so a reader returning it hands every caller a value that throws on the first member
+// read — and on a grant act that throw would escape as "the gateway did not answer",
+// which is not one of the three outcomes ADR-0139 §4 requires the act to be reported
+// as. An unreadable condition has to arrive as an unnamed one, not as an exception.
 async function readBody(response) {
   try {
-    return await response.json();
+    const parsed = await response.json();
+    return parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+      ? parsed
+      : {};
   } catch (_) {
     return {};
   }

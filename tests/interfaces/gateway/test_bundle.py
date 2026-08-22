@@ -674,6 +674,27 @@ def test_a_refusal_this_page_cannot_classify_is_an_unknown_outcome() -> None:
     assert "outcome: LANDED" in acting
 
 
+def test_a_body_that_is_not_an_object_reaches_no_caller_as_one() -> None:
+    """``null`` is a valid JSON document, so a reader that returned it would hand
+    every caller a value that throws on the first member read.
+
+    On a grant act that throw escapes as "the gateway did not answer" — which is not
+    one of the three outcomes ADR-0139 §4 requires an act to be reported as, and is a
+    fourth answer arriving by way of an exception. So an unreadable condition arrives
+    as an **unnamed** one, which :func:`act` already classifies as not known.
+
+    It is the gateway's own ``_payload`` rule read from this side: a body that is not
+    an object is not distinguished from an absent one, because every caller reads
+    named members and a second failure mode would be a second way to say the same
+    thing.
+    """
+    reading = _functions(_code("app.js"))["readBody"]
+
+    assert "parsed !== null" in reading
+    assert 'typeof parsed === "object"' in reading
+    assert "!Array.isArray(parsed)" in reading
+
+
 def test_an_amendment_is_two_requests_and_sends_no_grant_after_an_unresolved_one() -> None:
     """ADR-0177 §7's first and fifth clauses.
 
