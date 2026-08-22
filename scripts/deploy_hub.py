@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import re
 import secrets
 import shlex
 import shutil
@@ -82,6 +83,8 @@ DEFAULT_READY_TIMEOUT = 60
 _POLL_INTERVAL = 2.0
 #: The marker's first field, so a reader (human or the next deploy) can parse it.
 _MARKER_COMMIT_PREFIX = "commit="
+#: The only pre-slash segments left unquoted for the shell: `~` and `~username`.
+_TILDE_SEGMENT = re.compile(r"~[A-Za-z0-9_][A-Za-z0-9_.-]*|~")
 
 
 class DeployError(Exception):
@@ -309,9 +312,14 @@ def remote_path(path: str) -> str:
     Returns:
         The path as one shell word.
     """
-    if not path.startswith("~"):
-        return shlex.quote(path)
     head, separator, rest = path.partition("/")
+    if not _TILDE_SEGMENT.fullmatch(head):
+        # Not a tilde form at all, or not one worth trusting. `~; touch /tmp/x`
+        # partitions to a head with no slash in it, and leaving that bare would
+        # make a path argument a second command; a space in it would redirect
+        # somewhere else entirely. Quoting the whole thing costs only the
+        # expansion, which such a path was never going to get correctly anyway.
+        return shlex.quote(path)
     if not separator:
         return head
     return f"{head}/{shlex.quote(rest)}" if rest else f"{head}/"

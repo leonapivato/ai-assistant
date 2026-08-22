@@ -92,6 +92,8 @@ _DEFAULT_REFS = ("refs/heads/main", "refs/remotes/origin/main")
 #: `sha=`, and the value taken to the next whitespace so a malformed field
 #: mismatches instead of silently truncating to something well-formed.
 _FIELD = "(?<=[\\s]){name}=([^\\s]*)"
+#: A recorded commit id. A field that is not one cannot be asked about.
+_SHA = re.compile(r"[0-9a-f]{40}")
 
 
 #: The two states a sweep acts on. Everything else — including anything this
@@ -341,11 +343,19 @@ def _state(branch: str, sha: str, refs: Refs) -> tuple[str, str]:
         return "live", f"{sha[:12]} is held by a ref"
     if sha and refs.is_merged(sha):
         return "merged", f"{sha[:12]} is on {refs.default}"
-    if not sha:
-        # The branch is gone, but with no recorded commit there is no way to ask
-        # whether its content is retained under another branch name — and an
-        # artifact that cannot be checked is one this keeps.
-        return "unreadable", f"branch {branch} is gone, but no sha to check"
+    if not _SHA.fullmatch(sha):
+        # No commit to check, or a field that is not one — either way the
+        # question "is this content still reachable?" was never actually asked,
+        # and an artifact that cannot be classified is one this keeps.
+        #
+        # A WELL-FORMED sha that no ref holds is a different answer and stays
+        # `stale`, deliberately. Its object may be absent from this clone (a
+        # rebase-merged lane's commit, once `git gc` has run) — but "absent from
+        # the object database AND held by no ref" is *more* certainly dead than
+        # merely unreferenced, not less. Retaining those would make an old clone,
+        # the one with most to sweep, sweep nothing at all.
+        missing = "no sha to check" if not sha else f"sha {sha!r} is not a commit id"
+        return "unreadable", f"branch {branch} is gone, but {missing}" if branch else missing
     return "stale", f"{sha[:12]} is in no ref"
 
 

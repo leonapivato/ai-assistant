@@ -193,6 +193,36 @@ def test_a_gone_branch_with_no_recorded_commit_is_kept(tmp_path: Path) -> None:
     assert artifact.exists()
 
 
+def test_a_malformed_sha_is_kept_rather_than_guessed_at(tmp_path: Path) -> None:
+    # `abc!junk` is not a commit id, so neither git question was actually asked —
+    # and `--delete` must not destroy what was never classified.
+    repo = _repo(tmp_path)
+    artifact = _artifact(
+        repo, "a.md", persona="adversarial", branch="gone/lane", sha="abc!junk", tree="t1"
+    )
+
+    status, out, _ = _sweep(repo, "--delete")
+
+    assert status == 0, out
+    assert "[unreadable]" in out
+    assert "is not a commit id" in out
+    assert artifact.exists()
+
+
+def test_a_well_formed_sha_no_ref_holds_is_still_stale(tmp_path: Path) -> None:
+    # The other half of the same rule, and the one that keeps the sweep useful:
+    # a 40-hex commit absent from every ref is dead whether or not its object
+    # still sits in this clone. Retaining those would make an old clone — the one
+    # with most to sweep — sweep nothing.
+    repo = _repo(tmp_path)
+    _artifact(repo, "a.md", persona="adversarial", branch="gone/lane", sha="0" * 40, tree="t1")
+
+    status, out, _ = _sweep(repo, "--dry-run")
+
+    assert status == 0, out
+    assert "[stale]" in out
+
+
 def test_a_legacy_named_artifact_is_classified_from_its_header(tmp_path: Path) -> None:
     # The old name is `<sha>-<persona>.md` and the new one ends in a *tree* hash,
     # so nothing here may parse the filename.
