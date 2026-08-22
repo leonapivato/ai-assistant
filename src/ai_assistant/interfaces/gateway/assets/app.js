@@ -86,10 +86,19 @@ const TERMINAL_KINDS = new Set(["outcome", "fault"]);
 //
 // **It is an id and not a capability.** It admits nothing on its own: every request
 // carrying it is admitted by ADR-0168 §6's two values and by nothing else, so a
-// conversation id read out of storage without them reaches no conversation. It is
-// destroyed with the half it sits beside — `forgetHeaderHalf` clears both, so a
-// session that was lost or replaced never carries a stale thread into a new one — and
-// by forgetting the conversation itself.
+// conversation id read out of storage without them reaches no conversation.
+//
+// **Which is why clearing it is tidiness rather than a guarantee, and this comment
+// says so rather than claiming the stronger thing.** It goes when *this view* forgets
+// its session half and when the conversation itself is forgotten, and that is the
+// whole of it. A second tab that bootstraps a replacement session clears its own
+// selection and no other, so this tab's next question can continue the thread it was
+// already reading under the new session — which is not a fault to engineer against: a
+// conversation is the hub's, it outlives every gateway session by construction, and
+// `assistant ask --conversation` at a terminal does exactly the same thing. The hint
+// says which conversation it is, so nothing about it is silent. Adversarial review
+// raised it on round 2 against an earlier draft of this paragraph that overclaimed;
+// what was wrong was the sentence, and this is the correction.
 let conversationId = storedConversation();
 
 // Whether a delivery stream is open. One at a time: a second would be a second poll
