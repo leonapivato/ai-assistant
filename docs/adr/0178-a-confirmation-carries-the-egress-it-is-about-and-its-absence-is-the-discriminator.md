@@ -287,16 +287,32 @@ direction §8 asks for and in no other.
 > identity; or *the connected account*, carrying an account identity and neither of
 > the other two. Every other combination is refused at construction.
 
+> **Normative.** The declaration is **`CanonicalDestination`'s, with one field
+> substituted**, and it is stated rather than left to the lane because §7 makes the CLI
+> read these members by name across the `core` → `interfaces` boundary. Three optional
+> fields, no tagged union and no discriminator: `protocol: DestinationProtocol | None`
+> and `canonical: … | None`, both carrying the annotations and the `None` defaults
+> `CanonicalDestination` gives them; and `account_identity: … | None`, defaulting to
+> `None` and carrying the annotation `BoundAccount.identity` carries — which is the
+> substitution, and the whole of it. `model_config` is `extra="forbid"`, `frozen=True`,
+> `hide_input_in_errors=True`, as on `CanonicalDestination`. The two shapes are enforced
+> by a `model_validator(mode="after")` in the same form and for the same reason: a
+> *selected recipient* sets `protocol` and `canonical` and leaves `account_identity`
+> unset, the *connected account* sets `account_identity` and leaves the other two unset,
+> and every other combination raises. The message names no value (ADR-0150 §8). Equality
+> is over every field, so an account member never equals a selected recipient.
+
 > **Normative.** `ConfirmationDestination` is **not a wire type and appears in no
 > frame.** It is the member type of a derived property, and the clause below forbids
 > storing or transmitting that property's value — so nothing this model declares is
 > serialised, no peer ever receives one, and `PROTOCOL_VERSION` 10 does not describe
-> it. Its field declaration is therefore an implementation matter for the lane that
-> writes `core/types.py`, constrained by the two shapes above and by the correspondence
-> clause below, and **not** an interoperability surface: two conforming peers exchange
-> `spans` and `account_identity` and each derives its own set, so they cannot disagree
-> about a model neither of them sends. §6 moves the version for `Confirmation.egress`,
-> whose serialised members are named in §2, and for nothing here.
+> it. The declaration above is therefore binding as a **`core` → `interfaces` consumer
+> contract** — the names the CLI reads — and is **not** an interoperability surface:
+> two conforming peers exchange `spans` and `account_identity` and each derives its own
+> set, so they cannot disagree about a model neither of them sends. A lane that finds
+> itself versioning this type, or reconciling two peers' declarations of it, has
+> mistaken a derived value for a transmitted one. §6 moves the version for
+> `Confirmation.egress`, whose serialised members are named in §2, and for nothing here.
 
 > **Normative.** For every `EgressBinding`, the set this property derives corresponds
 > **member for member and in the same order** to the set
