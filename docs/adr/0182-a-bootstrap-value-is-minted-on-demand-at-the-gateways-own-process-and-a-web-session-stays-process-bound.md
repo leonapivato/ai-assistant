@@ -167,6 +167,15 @@ motion.
 > id, so that the act is discoverable from the disclosure rather than from a
 > document.
 
+> **Normative.** The clause above is robustness and **not a platform claim**.
+> This system's resident processes already require a platform with `AF_UNIX`
+> sockets and asyncio signal dispositions — `service/transport.py` binds the hub's
+> listener with `asyncio.start_unix_server` and `service/hub.py` installs its stop
+> dispositions with `loop.add_signal_handler` — so a platform on which `SIGUSR1`
+> cannot be installed is one that runs no hub, and therefore one on which a gateway
+> has nothing to serve. No lane may cite that clause toward a second mint act, a
+> request-borne mint, or a gateway running without a hub.
+
 > **Normative.** **No request on any listener mints a bootstrap value.** ADR-0168
 > §3's two pre-session exceptions keep their extent and gain no third; ADR-0168
 > §6's four request classes gain no fifth; and no lane may add a path, a request
@@ -213,6 +222,20 @@ its own standard output; adding the act and its own process id costs one line an
 means the most recent disclosure always carries the recipe. Its process id is a
 Tier 2 fact about itself, and nothing in ADR-0168 §6's record enumeration is
 engaged, because a disclosure is not a record.
+
+**The degradation clause is not the seam by which a second act arrives, and it is
+worth being blunt about that.** Adversarial review read it as leaving milestone 16's
+re-entry unreachable on a platform without `SIGUSR1`, on the ground that
+`pyproject.toml` names the Windows Credential Vault among the backends `keyring`
+supplies. That comment is about a dependency's reach and not about this system's:
+the hub's own listener is an `AF_UNIX` socket whose peer credentials ADR-0084 §1
+reads from the kernel, and the hub installs signal dispositions unconditionally, so
+the arrangement in question has no hub in it. A gateway with no hub serves ADR-0168
+§9's hub-down answer and admits nobody to anything, which is why §5's re-entry claim
+and the Consequences' keystroke are claims about the platform this system runs on
+rather than about every platform Python does. Where that ever stops being true, the
+answer is a decision about this system's platform and not a second mint act bolted
+onto this one.
 
 **A failed later mint does not stop the gateway, and the asymmetry with §5 is
 deliberate.** §5's refusal to start protects an owner from a gateway answering a
@@ -283,6 +306,12 @@ from ADR-0084 §3 and ADR-0083 §7 and applied by ADR-0175 §8 to its own figure
 > follows minting inside the same act, so no implementation may key the clock on
 > disclosure, on the first request that presents the value, or on any later event.
 
+> **Normative.** It is measured on a **monotonic** elapsed-time source — one the
+> system clock being moved in either direction does not affect — and a value that
+> has ceased is destroyed through the same deferral seam ADR-0168 §4's continuous
+> destruction already uses, so a bootstrap value and a session do not age on two
+> different clocks.
+
 > **Normative.** No load-time check relates it to `gateway_session_ttl`,
 > `gateway_session_idle_timeout` or any other figure, and no lane adds one. It
 > bounds a value that is not a session, so a relation to a session's bounds would
@@ -304,6 +333,25 @@ a relation between two bounds on the same object. A bootstrap value is a differe
 object with a different life: a ten-minute ticket that opens a twelve-hour session is
 coherent, and so is the reverse. ADR-0175 §8 refuses a cross-process check for the
 same reason in a different direction, and the form is taken from there.
+
+**Naming a monotonic source is ADR-0026's own revisit condition arriving, and it
+is answered here for this figure rather than for the corpus.** ADR-0026 revisits
+"when something needs a **monotonic** clock", and says in terms why its own seam is
+not it: "`Clock` produces wall-clock instants; measuring an elapsed duration across
+a DST transition or an NTP step is a different contract this one does not provide
+and should not be stretched to." A ten-minute bound on a live admission ticket is
+exactly such a duration — measured on the wall clock, an hour's step back keeps the
+ticket admitting for seventy real minutes, and a step forward kills it on the spot —
+so the clause above names the source instead of leaving it to be inferred, and binds
+the destruction to the seam ADR-0168 §4 already spends. Adversarial review found it
+on the first round. **What is deliberately not decided here** is whether ADR-0168
+§8's `gateway_session_ttl` and `gateway_session_idle_timeout` should carry the same
+sentence: they are exposed to the same hazard, the shipped gateway already defers
+their destruction through `asyncio.AbstractEventLoop.call_later`, which is
+monotonic, and requiring the source in text for one figure while two ratified
+figures on the same object leave it unstated is the kind of half-answer §9 exists to
+refuse. That is a change to a ratified decision on a subject wider than this lane's,
+and it is filed rather than taken (#1439).
 
 **The clock's origin is named because #1329 asked which one it is.** "Mint time?
 Disclosure time?" — mint, and the two are separated by the width of one act, so
@@ -509,6 +557,11 @@ should learn *what happened and what to do*, and what to do is mint.
 > A re-establishment the owner cannot see is forbidden, and no clause of this ADR
 > authorises one.
 
+> **Normative.** The page holds at most **one** delivery stream at a time, and
+> re-establishes one only while it holds none — one the gateway ended with ADR-0175
+> §4's terminal value, or one whose connection failed. An event arriving while a
+> stream is open re-establishes nothing.
+
 > **Normative.** After a re-establishment fails, the page does not attempt another
 > until one of §7's two events occurs again or the owner acts. A page may not
 > convert an event-driven re-arm into a retry loop.
@@ -546,6 +599,21 @@ reconnects behind the owner's back reproduces it exactly one layer out, and wors
 is the layer the owner is looking at. So the permission is conditioned on the thing
 that removes the failure rather than on the thing that causes it, and a lane
 implementing this cites the announcement, not the reconnect.
+
+**One stream at a time is a condition of the permission and not a tidiness rule.**
+ADR-0175 §4 writes each delivery "to **every** delivery stream open at the moment it
+returned", so a page holding two streams renders every notification twice, with
+nothing in the gateway able to tell that the two readers are one browser — §4
+forbids it de-duplicating, and ADR-0168 §3 forbids any per-browser identifier
+reaching the hub, so the fan-out has no way to notice. Each stream also holds a
+connection against `gateway_max_browser_connections`, which ADR-0174 §8 makes the
+gateway's total across both listeners, so a page that opened one per visibility
+change would exhaust the owner's own ceiling. A page that re-armed on every event
+regardless of what it already held was the first draft of this section, and
+architecture review found it on the first round. Keying the permission on holding
+none makes the page's own state the thing that gates it, which is a fact it can check
+rather than one it has to remember, and the two ends it may observe are the two the
+corpus already gives it: §4's terminal value, and a connection that failed.
 
 **Events rather than timers is what bounds it with no figure.** A timer is a rate,
 and a rate needs a number, a backoff and a ceiling — three things this decision would
@@ -782,6 +850,14 @@ differently, or read one of its clauses more widely than it now holds?
   travels through `Secrets` or `SecretStore`; the device credential and the enrolled hub
   identity stay exactly where ADR-0124 §4 and §6 put them; and ADR-0126's own
   supersession of ADR-0004 §6 is neither cited nor widened.
+- **ADR-0026.** Its revisit condition fires and no record is owed on it. §3 above
+  names a monotonic elapsed-time source for one new figure; ADR-0026's `Clock` is a
+  civil-instant contract which that ADR says in terms "should not be stretched to"
+  elapsed duration, so naming a different source neither widens `Clock` nor narrows
+  it, and no seam of ADR-0026 gains or loses a consumer. A reader holding only
+  ADR-0026 acts identically. Whether ADR-0168 §8's two session figures should carry
+  the same sentence is a change to a ratified decision beyond this lane's subject and
+  is filed as #1439.
 - **ADR-0083 and ADR-0084.** §1 above takes ADR-0083 §4's "a signal that silently does
   nothing is worse than one that is documented as doing nothing" as a principle and
   installs a signal that does something documented; nothing about the hub's dispositions
@@ -814,13 +890,17 @@ nothing distinguishing them; that the mint act refuses at the ceiling and the ex
 refuses at the ceiling, separately, since only one of the two is on the request path;
 that a value the gateway could not disclose is not minted and the gateway keeps
 serving; and that `gateway_bootstrap_ttl` is refused at load on a non-positive value,
-in the `gt=timedelta(0)` form.
+in the `gt=timedelta(0)` form. The monotonic clause of §3 is pinned the way the
+session bounds already are — by driving the injected deferral seam rather than by
+moving a clock — so that the test asserts the source the gateway uses rather than
+the behaviour of the machine it runs on.
 
 **What the page lane owes is harder to pin and is stated as what it must not do.**
 `tests/interfaces/gateway/test_bundle.py` pins bytes rather than behaviour and there is
 no front-end test runner (#1383), so the announcement obligation of §7 is not fully
 mechanically checkable. What is checkable is the negative: no timer-driven
-re-establishment in the bundle, and no automatic re-issue of an ADR-0177 §6 operation.
+re-establishment in the bundle, no re-establishment while a delivery stream is
+already held, and no automatic re-issue of an ADR-0177 §6 operation.
 A lane that can pin only the negative pins the negative and says so, rather than
 claiming a check it did not make.
 
@@ -851,6 +931,10 @@ claiming a check it did not make.
   a supervisor's configuration can matter to, and one more line in the first-run
   guide — and it is the cheapest form of the act, since the alternative was a listener
   surface (Alternatives).
+- **The gateway's platform is stated where it was implicit.** §1 records that this
+  system's resident processes already require `AF_UNIX` sockets and asyncio signal
+  dispositions, so the mint act asks for nothing the hub does not already ask for.
+  That is a fact about the tree made legible rather than a new requirement.
 - **What becomes harder:** the page owes announcements it did not owe. Every
   re-establishment is a visible state the layout has to carry, on a page #1429's
   survey already found short of room at phone width. That is deliberate: the
