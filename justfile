@@ -77,10 +77,13 @@ test *args:
 # on this machine, and /tmp is a tmpfs. Six of them fill it, and what that looks
 # like from inside a clone is not "no space" but ~1700 failures in
 # `tests/memory/test_sqlite_*`, every one of which passes in isolation (issue
-# #1419). So the recipe reaps by AGE on entry, never by sweep: a tree another
-# clone is writing to right now is minutes old, and one older than the window
-# below belongs to a run nobody is still reading. It also says when /tmp is
-# low, so the 1700-failure run is diagnosed before it happens rather than after.
+# #1419). So the recipe reaps on entry, and a candidate has to answer all three
+# of: it is named the way `mktemp -d /tmp/pt-XXXXXX` below names one, it holds
+# xdist's own `popen-gw*` directories, and nothing anywhere inside it has been
+# written within the window. Together those say "a kept tree from a finished run
+# of this recipe" rather than "an old directory whose name starts `pt-`", which
+# is all a glob and an age can say. It also reports when /tmp is low, so the
+# 1700-failure run is diagnosed before it happens rather than after.
 #
 # Only a run that COLLECTED THE WHOLE SUITE AND EXECUTED IT discharges an anchor:
 # the `*args` below reach pytest, as does a `PYTEST_ADDOPTS` in the environment
@@ -93,16 +96,30 @@ test *args:
 test-fast *args:
     #!/usr/bin/env bash
     set -euo pipefail
-    # Four hours: two orders of magnitude longer than a run of this suite, so no
-    # live tree is ever in range, and short enough that a day of failures across
-    # five clones cannot accumulate. Scoped to this user's own trees.
+    # Four hours: two orders of magnitude longer than a run of this suite, and
+    # short enough that a day of failures across five clones cannot accumulate.
     stale_after=240
-    stale="$(find /tmp -maxdepth 1 -type d -name 'pt-*' -user "$(id -un)" \
-        -mmin +"$stale_after" -print 2>/dev/null || true)"
+    stale=""
+    # `pt-??????` is exactly and only what the `mktemp` below produces, so a
+    # directory that merely begins `pt-` is not a candidate however old it is.
+    while IFS= read -r candidate; do
+        # It must hold xdist's per-worker directories, which nothing but a run of
+        # this recipe puts there. A tree from `just test-fast -n 0` has none and
+        # is therefore never reaped -- a leak rather than a wrong deletion, which
+        # is the direction to fail in.
+        [ -n "$(find "$candidate" -maxdepth 1 -name 'popen-gw*' -print -quit)" ] || continue
+        # And the age has to come from the CONTENTS. A basetemp's own mtime stops
+        # moving once the worker directories exist, so a long or wedged run still
+        # writing inside one looks idle from outside; nothing written anywhere
+        # within the window is what actually says nobody is in there.
+        [ -z "$(find "$candidate" -mmin -"$stale_after" -print -quit)" ] || continue
+        stale="${stale}${candidate}"$'\n'
+    done < <(find /tmp -maxdepth 1 -type d -name 'pt-??????' -user "$(id -un)" \
+        -mmin +"$stale_after" 2>/dev/null || true)
     if [ -n "$stale" ]; then
         echo "just test-fast: reaping kept temp trees older than ${stale_after}m (#1419):" >&2
-        printf '%s\n' "$stale" | sed 's/^/  /' >&2
-        printf '%s\n' "$stale" | while IFS= read -r old; do rm -rf "$old"; done
+        printf '%s' "$stale" | sed 's/^/  /' >&2
+        printf '%s' "$stale" | while IFS= read -r old; do rm -rf "$old"; done
     fi
     free_kb="$(df -Pk /tmp | awk 'NR == 2 { print $4 }')"
     if [ "${free_kb:-0}" -lt 3145728 ]; then
