@@ -717,6 +717,71 @@ def test_an_event_arriving_while_the_last_stream_is_pending_is_not_thrown_away()
     assert watch.index("asked = null;") < watch.index("rearm(held);")
 
 
+def test_the_page_re_issues_no_operation_of_its_own_motion() -> None:
+    """ADR-0182 §7's fifth clause: "The page re-issues **no other request** of its own
+    motion. Every request that asks the assistant for something — each of ADR-0177
+    §6's operations — is re-issued only on an act by the owner."
+
+    An automatic re-issue can duplicate a turn, which is why the permission §7 grants
+    is for the delivery stream and for nothing else. ADR-0182 is not merged at the time
+    of writing; §10 names this among the negatives the page lane can actually pin, and
+    it is pinned where it would live — in what runs after a request failed.
+    """
+    blocks = _catch_blocks(_code("app.js"))
+
+    assert blocks
+    for block in blocks:
+        for reissue in ("fetch(", "relay(", "act(", "watchDeliveries("):
+            assert reissue not in block, block
+
+
+def test_the_page_offers_a_way_out_of_the_thread_it_is_reading() -> None:
+    """The escape a persisted selection owes, and the one the page did not have.
+
+    Until this file kept a conversation across a reload, a reload *was* how you
+    started a fresh one. Now the selection comes back — so a thread the hub will no
+    longer accept, destroyed from a terminal or expired, would be re-sent on every
+    question with no control on screen to clear it. The conversations listing cannot
+    offer one: it can only "Continue" a conversation it is showing, and this is about
+    one it is not. Adversarial review found it on round 3.
+
+    **It sends nothing**, which is what keeps it a local act rather than a thirty-first
+    operation: the hub is not told, nothing is destroyed, and the conversation it was
+    reading is untouched and still in the listing.
+    """
+    script = _code("app.js")
+    document = _asset("index.html")
+    fresh = _functions(script)["startFresh"]
+
+    assert 'id="new-conversation"' in document
+    assert 'el("new-conversation").addEventListener("click", startFresh);' in script
+    assert "setConversation(null);" in fresh
+    for sends in ("fetch(", "relay(", "act("):
+        assert sends not in fresh, sends
+    # Hidden while there is nothing to leave, so it is never a control that does nothing.
+    assert 'el("new-conversation").hidden = id === null;' in _functions(script)["setConversation"]
+
+
+def test_a_stale_selection_is_dropped_where_the_gateway_names_the_condition() -> None:
+    """The narrow half of the same fix. Only ``/conversation`` answers
+    ``no-such-conversation`` — a declined turn arrives as ``assistant-declined``
+    whatever the hub declined it for — so this is what the page can do mechanically,
+    and the control above is what covers the rest.
+
+    ``sent`` is what the request actually carried, and the comparison is what keeps it
+    narrow: forgetting some *other* conversation from the listing and being told it was
+    already gone says nothing about the one this view is reading.
+    """
+    script = _code("app.js")
+    lost = _functions(script)["conversationLost"]
+
+    assert 'body.fault === "no-such-conversation"' in lost
+    assert "sent === conversationId" in lost
+    assert "setConversation(null)" in lost
+    assert "conversationLost(body, payload.conversation_id);" in _functions(script)["relay"]
+    assert "conversationLost(body, asked.conversation_id);" in _functions(script)["askWhole"]
+
+
 def test_the_page_says_why_a_session_ended_while_it_was_only_watching() -> None:
     """ADR-0175 §7: an open stream is **not** use of the session that admitted it.
     ``gateway_session_idle_timeout`` "is refreshed by a request the gateway admits and
@@ -1050,6 +1115,24 @@ def _fault_calls(script: str) -> list[str]:
             index += 1
         calls.append(" ".join(script[opened.end() : index].split()))
     return calls
+
+
+def _catch_blocks(script: str) -> list[str]:
+    """The body of every ``catch`` in the script, brace-matched.
+
+    What a page does *after* a request failed is the whole of ADR-0182 §7's fifth
+    clause, and it is the one place an automatic re-issue would sit.
+    """
+    blocks = []
+    for opened in re.finditer(r"catch \(\w+\) \{", script):
+        depth, index = 0, opened.end() - 1
+        while index < len(script):
+            depth += {"{": 1, "}": -1}.get(script[index], 0)
+            if depth == 0:
+                break
+            index += 1
+        blocks.append(script[opened.end() : index])
+    return blocks
 
 
 def _declaration(script: str, name: str) -> str:

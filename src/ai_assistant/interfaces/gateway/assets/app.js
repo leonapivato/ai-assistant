@@ -169,6 +169,26 @@ function setConversation(id) {
     id === null
       ? "No conversation yet. Your next question starts one."
       : `Conversation ${id}. Your next question continues it.`;
+  el("new-conversation").hidden = id === null;
+}
+
+// Leave the thread this view is reading, and do nothing else.
+//
+// **It sends nothing.** Which conversation the next question lands in is this page's
+// own selection, and dropping it is a local act — the hub is not told, nothing is
+// destroyed, and the conversation it was reading is untouched and still in the
+// listing. Forgetting a conversation is the other control and it is a different act.
+//
+// **It is the escape a persisted selection owes.** Before this file kept one, a
+// reload started a fresh thread; now it does not, so a thread the hub will no longer
+// accept has to have a way out that does not depend on the page being able to tell
+// *why* — and it cannot: the gateway reports a declined turn as `assistant-declined`
+// whatever the hub declined it for, so a page clearing the selection on that name
+// would drop the owner's thread on any refusal at all.
+function startFresh() {
+  fault(null, "console");
+  setConversation(null);
+  el("utterance").focus();
 }
 
 function show(id, visible) {
@@ -431,6 +451,28 @@ function report(panelId, body, message) {
 
 function refused(panelId, body, status) {
   report(panelId, body, describe(body, status));
+}
+
+// A refusal that means the conversation **this view is holding** is gone. The
+// conversation half of `sessionLost`, and it exists for the same reason: forgetting
+// the value is the only thing a page can do about it.
+//
+// **It is the cost of keeping the selection across a reload, and it has to be paid
+// here.** A thread destroyed from a terminal or from another tab used to cost this
+// page nothing, because a reload dropped the id; now the id comes back, is re-sent on
+// every question, and is refused every time — with no control on screen to clear it,
+// because the conversations listing cannot offer "Continue" for a conversation that is
+// not in it. Adversarial review found it on round 3 and it is a real regression rather
+// than a pre-existing edge.
+//
+// **`sent` is what the request actually carried**, and the comparison is what keeps
+// this narrow: forgetting some *other* conversation from the listing and being told it
+// was already gone says nothing about the one this view is reading, and must not clear
+// it.
+function conversationLost(body, sent) {
+  if (body.fault === "no-such-conversation" && conversationId !== null && sent === conversationId) {
+    setConversation(null);
+  }
 }
 
 // Read one `application/x-ndjson` body: one JSON object per line, each carrying the
@@ -981,6 +1023,7 @@ async function askWhole(half, asked) {
     return;
   }
   show("answer", false);
+  conversationLost(body, asked.conversation_id);
   refused("console", body, response.status);
 }
 
@@ -1002,6 +1045,7 @@ async function askStreaming(half, asked) {
   if (!response.ok) {
     const body = await readBody(response);
     show("answer", false);
+    conversationLost(body, asked.conversation_id);
     refused("console", body, response.status);
     return;
   }
@@ -1036,7 +1080,10 @@ async function askStreaming(half, asked) {
     // same reason: it would give a transport failure the wording of an answer the
     // assistant did produce, and there is nothing to be done with the text either way.
     // ADR-0175 §10 declines resuming an interrupted stream (#1314), so the whole of
-    // the recovery is asking again.
+    // the recovery is asking again — and **ADR-0182 §7** states this outcome in terms:
+    // a cut answer stream "is not resumed and its partial text is not left standing as
+    // an answer". Not merged at the time of writing; it ratifies the choice rather
+    // than prompting it.
     clearNode(panel);
     show("answer", false);
     fault(ANSWER_STREAM_CUT, "console");
@@ -1044,6 +1091,7 @@ async function askStreaming(half, asked) {
   }
   if (terminal.kind === "fault") {
     show("answer", false);
+    conversationLost(terminal, asked.conversation_id);
     refused("console", terminal, response.status);
     return;
   }
@@ -1063,14 +1111,35 @@ function deliveryState(text) {
   el("watch-button").hidden = watching;
 }
 
-// --- coming back, and saying so (#1429, ADR-0175 §4) -------------------------
+// --- coming back, and saying so (ADR-0182 §7, ADR-0175 §4) -------------------
 //
-// ADR-0168 §9 rules out the gateway retrying *silently*, and #1429 states the same
-// rule for this page: re-arming the delivery stream when the owner brings the page
-// back, or when the device's network returns, is permitted when it is announced in
-// the page and never when it is silent. ADR-0175 §4 is why it costs nothing — an
-// abandoned delivery stream costs the browser "a reconnect — which is free, because a
-// session outlives its connections".
+// ADR-0168 §9 rules out the gateway retrying *silently*, and **ADR-0182 §7** states
+// the rule for this page — not merged at the time of writing, in its final review
+// round on `web-client/sessions-adr`, and §10 assigns "§7's announced re-arm" to this
+// lane by name. Every clause of it is met here and each is worth naming, because the
+// permission is conditional and a lane that met four of five would read as compliant:
+//
+//   1. **Only a delivery stream, and only on an event** — `visibilitychange` and
+//      `online`, never a timer, a schedule, or the failure itself. There is no
+//      `setTimeout` and no `setInterval` in this file.
+//   2. **The attempt and its outcome are both announced**, at the surface the stream
+//      feeds rather than at the page's foot: the attempt in `#delivery-state`, the
+//      outcome either as the stream running on or as `stopWatching` plus a condition
+//      in the notifications panel.
+//   3. **One stream at a time, re-established only while the page holds none.** An
+//      event arriving while one is open opens nothing — it leaves a reason behind,
+//      and that reason is spent in `watchDeliveries`' `finally`, which runs after the
+//      stream ended in one of the two ways §7 names: the gateway's terminal value, or
+//      a connection that failed.
+//   4. **A failed re-establishment attempts no other.** `asked` is consumed once and
+//      only a fresh event sets it, so nothing here becomes a retry loop.
+//   5. **No other request is re-issued of the page's own motion.** Nothing in this
+//      file re-sends an ADR-0177 §6 operation after a refusal; a failed ask, grant,
+//      forget or resume is reported and waits for the owner, because an automatic
+//      re-issue can duplicate a turn.
+//
+// ADR-0175 §4 is why it costs nothing — an abandoned delivery stream costs the
+// browser "a reconnect — which is free, because a session outlives its connections".
 //
 // **This is the failure the phone kept hitting.** A backgrounded page has its stream
 // abandoned by the gateway the moment a write to it does not complete (§4's last
@@ -1241,6 +1310,9 @@ async function relay(half, path, payload, panelId) {
   if (response.ok) {
     return body;
   }
+  // Every other request that names a conversation goes through here — the digest, the
+  // forget, and `observe`, which sends this view's selection exactly as `ask` does.
+  conversationLost(body, payload.conversation_id);
   refused(panelId, body, response.status);
   return null;
 }
@@ -3766,6 +3838,7 @@ function showConsole() {
 
 el("bootstrap-form").addEventListener("submit", startSession);
 el("ask-form").addEventListener("submit", ask);
+el("new-conversation").addEventListener("click", startFresh);
 // Wrapped rather than passed, because the listener's argument is a `MouseEvent` and
 // `watchDeliveries` reads its first argument as the sentence to announce.
 el("watch-button").addEventListener("click", () => watchDeliveries());
