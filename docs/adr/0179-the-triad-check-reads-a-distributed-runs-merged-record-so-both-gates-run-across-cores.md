@@ -158,12 +158,35 @@ than under a test's, since no test was ever named.
 > unchanged in number, kind and order; nothing is deselected, skipped or split
 > across jobs.
 
-> **Normative.** `just test-fast` deselects nothing. It collects and executes
-> every test the tree declares, so ADR-0166 §1's carve-out for "the one file
-> `just test-fast` deselects" no longer describes it and no longer applies.
-> ADR-0166 §1's collection clause is otherwise untouched: a run narrowed, stopped
-> early or never executed is a scoped selection under ADR-0136 §2, however it was
-> narrowed and wherever that came from.
+> **Normative.** `just test-fast` deselects nothing on its command line. Every
+> test the tree declares is collected and answered, so ADR-0166 §1's carve-out for
+> "the one file `just test-fast` deselects" no longer describes it and no longer
+> applies. ADR-0166 §1's collection clause is otherwise untouched: a run narrowed,
+> stopped early or never executed is a scoped selection under ADR-0136 §2, however
+> it was narrowed and wherever that came from.
+
+> **Normative.** In a distributed session the two evidence-dependent checks are
+> collected on every worker, deselected there, and their assertions evaluated on
+> the controller over the merged record, with the outcome reported under their own
+> nodeids. Their test *functions* execute in no process. This satisfies ADR-0136
+> §1's `pytest` step: what an anchor requires is that every test the tree declares
+> is collected and **answered**, and these two are — by the same predicates their
+> bodies call, over strictly more evidence than any one process holds.
+
+That last is stated rather than left to be noticed, because it is the one place
+where what runs is not what the file appears to say. It turns on the difference
+between a check that is *not answered* and one that is *answered elsewhere*.
+ADR-0166 §3's deselection was the first kind: the checks left the run and nothing
+decided them, which is exactly why §3 had to ratify an accepted risk. These are
+the second: `_binding_gaps` and `_stale_exemptions` — the functions the test
+bodies call — are given a record no worker could assemble alone, and the serial
+run, where the bodies do execute, remains a valid discharge of either anchor and
+reaches the identical verdict from the identical predicates.
+
+Two things stop that drifting. `evaluate_for_controller` is keyed by the test
+functions' own `__name__`, and an item handed over with no entry there is reported
+**failed** (§2); and a test in the same file asserts that every check requesting
+the evidence fixture has an entry, so a third one cannot be added without one.
 
 > **Normative.** ADR-0166 §3's accepted risk is discharged rather than
 > transferred. An anchor discharged by `just test-fast` no longer leaves the
@@ -248,6 +271,13 @@ which §5 states directly.
 > **Normative.** Nothing here alters ADR-0015, ADR-0020, ADR-0025 or ADR-0027:
 > which trees a recorded review covers, when a base move costs a round, and what
 > `ship` will accept are decided there and are untouched.
+
+No record is owed on ADR-0136 for §3's second clause above. It says what the
+`pytest` step's completeness means for two items rather than changing what an
+author does: a reader holding only ADR-0136 runs the suite at each anchor and
+reads the summary line, and gets a complete pass-or-fail answer for every declared
+test before and after. ADR-0070 §1's test is not met, so there is nothing to
+record (ADR-0082 §1).
 
 The last is stated because the two loops run in the same window and are easy to
 conflate, as ADR-0136 §5 and ADR-0166 §4 both stated it. A commit made after a

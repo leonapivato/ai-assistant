@@ -124,9 +124,9 @@ justification owed. What discharges an anchor is a run that **collected the whol
 suite and executed it to a passing result**, so anything leaving it short — a
 filtering option, an early stop, a collect-only mode, passed as a recipe argument
 or sitting in `PYTEST_ADDOPTS` — makes it a scoped selection instead; read the
-summary line. `just test-fast` deselects nothing (ADR-0179): it runs the
-Protocol-triad check exactly as the serial suite does, and CI's `pytest` step is
-distributed on the same ground.
+summary line. `just test-fast` deselects nothing (ADR-0179): the Protocol-triad
+check is answered there too — decided on the controller from every worker's
+record — and CI's `pytest` step is distributed on the same ground.
 
 **Between the anchors, the four static steps stay mandatory before every commit**
 — they cost about two seconds, and they catch what a *selected* test run would
