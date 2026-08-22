@@ -467,10 +467,8 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: object) -> None:
     if output is not None:
         output[_TRIAD_OUTPUT_KEY] = _worker_half()
         return
-    if _WORKER_HALVES or _WORKERS_LOST:
+    if _is_distributed_controller(session.config):
         _report_evidence_checks(session)
-    elif _is_distributed_controller(session.config):
-        _report_that_nothing_was_handed_over(session)
 
 
 def _is_distributed_controller(config: pytest.Config) -> bool:
@@ -486,21 +484,28 @@ def _is_distributed_controller(config: pytest.Config) -> bool:
 
 
 def _report_that_nothing_was_handed_over(session: pytest.Session) -> None:
-    """Fail a distributed run whose workers' halves never arrived at all.
+    """Fail a distributed run that handed no evidence-dependent check over at all.
 
     The one failure this arrangement could otherwise suffer in silence, because
     it takes the nodeids to report under away with it. Every other way the record
-    can be wrong leaves at least one worker's half on the controller, and the
-    handed-over items travel inside those halves -- so there is something to
-    report against. If *no* half arrives, the two evidence-dependent checks were
-    deselected on every worker and then simply vanish: a green run that ran the
-    Protocol-triad check nowhere.
+    can be wrong leaves at least one handed-over item on the controller, so there
+    is something to report against; with none, the checks were deselected on every
+    worker and then simply vanish -- a green run that ran the Protocol-triad check
+    nowhere. Both routes there are covered: no worker's half arrived, and halves
+    that arrived carrying no items.
+
+    It is a failure only where the checks were *collected*, which on an unfiltered
+    run they always are -- ``--deselect`` and every other way of not collecting
+    them makes the run filtered (see ``_FILTERING_OPTIONS``). The controller reads
+    that from its own options rather than from the halves, since with no half
+    there is nothing to read it from.
 
     Reaching this needs the channel itself to have stopped working -- xdist
-    renaming ``workeroutput`` or ``pytest_testnodedown``, or a plugin swallowing
-    them -- which is exactly what ADR-0179's **Revisit if** names as the thing
-    this rests on. ADR-0179 §2 says a check no process decided is a failure, so it
-    is reported as one, under a nodeid of its own rather than under a test's.
+    renaming ``workeroutput`` or ``pytest_testnodedown``, or a handover that keeps
+    the record while dropping the item names -- which is what ADR-0179's
+    **Revisit if** names as the thing this rests on. ADR-0179 §2 says a check no
+    process decided is a failure, so it is reported as one, under a nodeid of its
+    own rather than under a test's.
     """
     session.config.hook.pytest_runtest_logreport(
         report=_as_report(
@@ -512,11 +517,13 @@ def _report_that_nothing_was_handed_over(session: pytest.Session) -> None:
             ),
             (
                 "failed",
-                "this session ran workers, but not one of them handed its half of "
-                "the Protocol-triad record to the controller -- so the checks that "
-                "read it were deselected on every worker and decided by nobody. The "
-                "channel they travel on (xdist's `workeroutput` and "
-                "`pytest_testnodedown`) is what to look at (ADR-0179 §2).",
+                "this session collected the whole suite and ran workers, but not one "
+                "evidence-dependent check reached the controller to be decided -- so "
+                "the Protocol-triad checks were deselected on every worker and "
+                f"decided by nobody ({len(_WORKER_HALVES)} half/halves arrived, "
+                f"{len(_WORKERS_LOST)} worker(s) were lost). The channel they travel "
+                "on (xdist's `workeroutput` and `pytest_testnodedown`, and the item "
+                "names inside each half) is what to look at (ADR-0179 §2).",
             ),
         )
     )
@@ -538,10 +545,14 @@ def _report_evidence_checks(session: pytest.Session) -> None:
     # itself before anything else does.
     from test_protocol_triad import evaluate_for_controller  # noqa: PLC0415 — see above
 
-    outcomes = evaluate_for_controller(_merged_evidence(_WORKER_HALVES))
     handed_over = {
         payload["nodeid"]: payload for half in _WORKER_HALVES for payload in half["items"]
     }
+    if not handed_over:
+        if _is_unfiltered(session.config):
+            _report_that_nothing_was_handed_over(session)
+        return
+    outcomes = evaluate_for_controller(_merged_evidence(_WORKER_HALVES))
     failed = False
     for item in handed_over.values():
         result = _outcome_for(item, outcomes)

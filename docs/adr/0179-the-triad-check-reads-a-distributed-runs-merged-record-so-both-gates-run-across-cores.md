@@ -118,9 +118,10 @@ satisfactory on another.
 
 > **Normative.** Where a distributed session hands an evidence-dependent check to
 > the controller and the controller has no evaluator for it, where a worker leaves
-> without handing its half of the record over, or where no worker's half reaches
-> the controller at all, a failure is reported. None of the three may be reported
-> as passed or silently omitted.
+> without handing its half of the record over, or where an unfiltered distributed
+> session brings no evidence-dependent check to the controller to be decided at
+> all, a failure is reported. None of the three may be reported as passed or
+> silently omitted.
 
 This is the one place the arrangement can rot quietly. The items handed over are
 identified by the fixture they request rather than by a list of test names, so a
@@ -135,13 +136,20 @@ class proves nothing, exactly as it proves nothing on a narrowed run.
 
 The third clause covers the one silence the other two cannot, because it takes
 their nodeids away with it. The checks are reported under the nodeids the workers
-gave up, and those travel *inside* the halves — so if the channel itself stops
-working and no half arrives, there is nothing to report against and the checks
-simply vanish from a green run. That is reachable only by the **Revisit if**
-condition below, xdist's `workeroutput`/`pytest_testnodedown` contract changing
-under the project, which is exactly why it must not be the one failure mode that
-passes quietly. It is reported under a nodeid of its own rather than under a
-test's, since no test was ever named.
+gave up, and those travel *inside* the halves — so where nothing arrives to name
+them, there is nothing to report against and the checks simply vanish from a
+green run. Two routes reach it and the clause is written to cover both: no half
+arrives at all, and halves arrive whose record survived but whose item names did
+not. The second is the more dangerous, because everything about that run looks
+healthy.
+
+It is judged against the run's **own options**, not against the halves, since
+with nothing arriving there is nothing to read a verdict from. An unfiltered
+session collects the whole suite and therefore collects both checks — `--deselect`
+and every other way of not collecting them is itself a filtering option — so on
+an unfiltered run their absence is the failure, and on a narrowed one it is the
+ordinary case and nothing is said. It is reported under a nodeid of its own rather
+than under a test's, since no test was ever named.
 
 ### 3. Both gates' `pytest` step is distributed, and it is still the whole suite
 
