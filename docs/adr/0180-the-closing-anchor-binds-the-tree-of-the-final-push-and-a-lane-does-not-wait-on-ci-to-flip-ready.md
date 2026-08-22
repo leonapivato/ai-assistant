@@ -1,6 +1,6 @@
 # 180. The closing anchor binds the tree of the final push, and a lane does not wait on CI to flip ready
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-22
 - **What this changes and what it does not.** It changes two things about the
   tail of a branch: ADR-0136 §1's closing anchor stops being an *ordering*
