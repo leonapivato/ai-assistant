@@ -70,6 +70,11 @@ _SECTION_RE = re.compile(
     re.IGNORECASE,
 )
 _LARGEST_RANGE = 20
+# CPython refuses to convert an integer literal beyond a few thousand digits, so
+# a label is length-bounded before any `int()` reaches it. Nothing in the corpus
+# is close; what the bound buys is that a brief cannot hand this script a
+# traceback in place of a report.
+_LARGEST_LABEL = 9
 
 _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 
@@ -195,6 +200,8 @@ def find_section(text: str, section: str) -> tuple[int, str] | None:
 def _expand(first: str, last: str | None) -> list[str]:
     """Expand a section range to its members, or return just ``first``."""
     if last is None or not first.isdigit() or not last.isdigit():
+        return [first]
+    if len(first) > _LARGEST_LABEL or len(last) > _LARGEST_LABEL:
         return [first]
     low, high = int(first), int(last)
     if not 0 < high - low <= _LARGEST_RANGE:
