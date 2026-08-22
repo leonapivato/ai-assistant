@@ -565,9 +565,9 @@ _RELAY_ENTRIES: Final = (
     "listSources",
     "listStanding",
     "listGrantHistory",
-    "listBeliefs",
+    "readBeliefs",
     "forgetBelief",
-    "listQuestions",
+    "readQuestions",
     "answerQuestion",
     "forgetQuestion",
     "observe",
@@ -782,7 +782,43 @@ def test_forgetting_a_question_sends_only_for_one_the_read_returned() -> None:
     """
     forgetting = _functions(_code("app.js"))["forgetQuestion"]
 
-    assert "relay(half, path, {})" in forgetting
+    assert "relay(half, path, { limit: PAGE, offset })" in forgetting
     assert "body.questions.find((one) => one.id === id)" in forgetting
     assert "if (question === undefined)" in forgetting
     assert forgetting.index("window.confirm(") < forgetting.index('"/question/forget"')
+
+
+def test_the_re_read_before_a_question_is_destroyed_asks_for_the_page_it_came_from() -> None:
+    """The ceremony's re-read and the listing's paging have to agree.
+
+    ADR-0177 §5's fifth clause has the browser send ``forget_question`` "only for a
+    question that read returned" — so a re-read of the *first* page would report a
+    question rendered from the second as gone, and the owner would be unable to
+    destroy it at all. The offset each row was read at travels with the row.
+    """
+    functions = _functions(_code("app.js"))
+
+    assert "renderQuestion(list, one, path, offset)" in functions["readQuestions"]
+    assert "function renderQuestion(list, question, path, offset)" in functions["renderQuestion"]
+    assert "forgetQuestion(question.id, path, offset)" in functions["renderQuestion"]
+
+
+def test_a_listing_offers_the_next_page_rather_than_stopping_at_a_full_one() -> None:
+    """ADR-0073 §1 makes the belief read an **enumeration** so that what is past a page
+    stays reachable, and a rendered row is the browser's only route to ``forget``.
+
+    A listing that stopped silently at a full page would hide a belief the owner
+    cannot then delete, which is the promise this milestone exists to keep. "Is there
+    more" is answered by asking for the next page and never by a total nobody computed
+    (ADR-0073 §2), so a full page is one whose length equals what was asked for — which
+    is why the page states its own size instead of inheriting the surface's default.
+    """
+    script = _code("app.js")
+    offering = _functions(script)["offerMore"]
+
+    assert "const PAGE = 25;" in script
+    assert "if (returned < PAGE)" in offering
+    assert "That is a full page; there may be more." in offering
+    for paged in ("readBeliefs", "readQuestions"):
+        assert "offerMore(list, body." in _functions(script)[paged], paged
+        assert "limit: PAGE" in _functions(script)[paged], paged

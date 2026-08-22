@@ -1188,6 +1188,43 @@ function renderHistory(list, record) {
 
 // --- the belief surface (ADR-0073, ADR-0077 §6, ADR-0177 §5) -----------------
 
+// How many rows one read asks for. The **page size is this front end's**, which
+// ADR-0177 §11 leaves it: "the request shapes, paths, framing and media types" for
+// everything §1 admits are the implementing lane's, and the front end and the gateway
+// ship and version in one distribution.
+//
+// It is stated rather than inherited from the surface's own default because the page
+// has to *know* it: "is there more" is answered by asking for the next page and never
+// by a total nobody computed (ADR-0073 §2), so a full page is a page whose length
+// equals what was asked for — and a reader that did not ask cannot tell.
+const PAGE = 25;
+
+// How far each listing has read. Not a count of what exists: a total is not available
+// and would be a claim this page cannot make.
+const readSoFar = { beliefs: 0, questions: 0, interrupted: 0 };
+
+// A full page says so and offers the next one.
+//
+// **A listing that stopped silently would hide a belief the owner cannot then
+// delete**, which is this surface's whole promise — ADR-0073 §1 makes the read an
+// enumeration precisely so what is past a page stays reachable, and the browser's
+// only route to `forget` is a rendered row.
+function offerMore(list, returned, again) {
+  if (returned < PAGE) {
+    return;
+  }
+  const note = line(list, "That is a full page; there may be more.", "hint");
+  const more = document.createElement("button");
+  more.type = "button";
+  more.textContent = "Show more";
+  more.addEventListener("click", () => {
+    list.removeChild(note);
+    list.removeChild(more);
+    again();
+  });
+  list.appendChild(more);
+}
+
 function bandFilter() {
   const chosen = [
     { value: "asserted", box: el("band-asserted") },
@@ -1202,6 +1239,16 @@ function bandFilter() {
 }
 
 async function listBeliefs() {
+  readSoFar.beliefs = 0;
+  await readBeliefs(false);
+}
+
+// One page of beliefs, from the start or from where the last one stopped.
+//
+// The band filter is re-read on every page rather than captured once, so a page and
+// the boxes above it never disagree about what is being asked — and a filter changed
+// mid-listing starts the listing again through `listBeliefs`.
+async function readBeliefs(more) {
   fault(null);
   const half = headerHalf();
   if (half === null) {
@@ -1209,18 +1256,25 @@ async function listBeliefs() {
     return;
   }
   const bands = bandFilter();
-  const asked = bands === null ? {} : { bands };
+  const asked = { limit: PAGE, offset: readSoFar.beliefs };
+  if (bands !== null) {
+    asked.bands = bands;
+  }
   try {
     const body = await relay(half, "/beliefs", asked);
     if (body === null) {
       return;
     }
     const list = el("belief-list");
-    clearNode(list);
-    if (body.beliefs.length === 0) {
+    if (!more) {
+      clearNode(list);
+    }
+    if (body.beliefs.length === 0 && !more) {
       line(list, "No live belief matches.", "hint");
     }
     body.beliefs.forEach((one) => renderBelief(list, one));
+    readSoFar.beliefs += body.beliefs.length;
+    offerMore(list, body.beliefs.length, () => readBeliefs(true));
     show("beliefs", true);
   } catch (_) {
     fault(GATEWAY_GONE);
@@ -1406,41 +1460,68 @@ async function forgetBelief(id) {
 // --- the deferred-question surface (ADR-0078 §8, §9) -------------------------
 
 async function listQuestions() {
+  readSoFar.questions = 0;
+  readSoFar.interrupted = 0;
+  await readQuestions("/questions", false);
+  await readQuestions("/questions/interrupted", false);
+}
+
+//: Which listing is which, in one place: the path it is read from, the node it is
+//: rendered into, the counter it advances, and what an empty one says. Two listings
+//: rather than one filtered, because they answer different questions (ADR-0078 §9).
+const QUESTION_LISTS = {
+  "/questions": {
+    node: "question-list",
+    counter: "questions",
+    empty: "Nothing is waiting for you.",
+  },
+  "/questions/interrupted": {
+    node: "interrupted-list",
+    counter: "interrupted",
+    empty: "No answer was begun and left unrecorded.",
+  },
+};
+
+// One page of one question listing. Paged for `readBeliefs`' reason one surface over:
+// a question past the first page would be one the owner can neither answer nor
+// destroy, and a rendered row is the only route to either.
+async function readQuestions(path, more) {
   fault(null);
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
+  const listing = QUESTION_LISTS[path];
+  const offset = readSoFar[listing.counter];
   try {
-    const waiting = await relay(half, "/questions", {});
-    const begun = await relay(half, "/questions/interrupted", {});
-    if (waiting === null || begun === null) {
+    const body = await relay(half, path, { limit: PAGE, offset });
+    if (body === null) {
       return;
     }
-    renderQuestionList(el("question-list"), waiting.questions, "Nothing is waiting for you.");
-    renderQuestionList(
-      el("interrupted-list"),
-      begun.questions,
-      "No answer was begun and left unrecorded."
-    );
+    const list = el(listing.node);
+    if (!more) {
+      clearNode(list);
+    }
+    if (body.questions.length === 0 && !more) {
+      line(list, listing.empty, "hint");
+    }
+    // The offset each row was read at travels with it, because the ceremony that
+    // destroys a question re-reads the listing it came from and must ask for the same
+    // window — a re-read of the first page would report a question on the second as
+    // gone (ADR-0177 §5's fifth clause).
+    body.questions.forEach((one) => renderQuestion(list, one, path, offset));
+    readSoFar[listing.counter] += body.questions.length;
+    offerMore(list, body.questions.length, () => readQuestions(path, true));
     show("questions", true);
   } catch (_) {
     fault(GATEWAY_GONE);
   }
 }
 
-function renderQuestionList(list, questions, empty) {
-  clearNode(list);
-  if (questions.length === 0) {
-    line(list, empty, "hint");
-  }
-  questions.forEach((one) => renderQuestion(list, one));
-}
-
 // One question, with everything ADR-0078 §8 requires it to convey — worded as the
 // conditional it is, because a pending question is not a belief of any band.
-function renderQuestion(list, question) {
+function renderQuestion(list, question, path, offset) {
   const item = document.createElement("div");
   item.className = "question-row";
   line(item, question.content, "reply");
@@ -1476,9 +1557,7 @@ function renderQuestion(list, question) {
   const destroy = document.createElement("button");
   destroy.type = "button";
   destroy.textContent = "Forget the question";
-  const listing =
-    question.state === "interrupted" ? "/questions/interrupted" : "/questions";
-  destroy.addEventListener("click", () => forgetQuestion(question.id, listing));
+  destroy.addEventListener("click", () => forgetQuestion(question.id, path, offset));
   item.appendChild(destroy);
   list.appendChild(item);
 }
@@ -1630,7 +1709,7 @@ function renderAnswer(panel, outcome) {
 // No single-question read is added and none is needed (#495's third ground, cited
 // and not absorbed): the two listings ADR-0078 §8 already gives return the question
 // whole, and re-reading one is a call this page already makes.
-async function forgetQuestion(id, path) {
+async function forgetQuestion(id, path, offset) {
   fault(null);
   const half = headerHalf();
   if (half === null) {
@@ -1638,7 +1717,7 @@ async function forgetQuestion(id, path) {
     return;
   }
   try {
-    const body = await relay(half, path, {});
+    const body = await relay(half, path, { limit: PAGE, offset });
     if (body === null) {
       return;
     }
