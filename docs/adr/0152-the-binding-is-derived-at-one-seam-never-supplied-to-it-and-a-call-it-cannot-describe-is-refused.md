@@ -1,7 +1,20 @@
 # 152. The binding is derived at one seam, never supplied to it, and a call it cannot describe is refused
 
-- Status: Partially superseded by ADR-0157 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone)
+- Status: Partially superseded by ADR-0157 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone) and ADR-0181 (§7's clause that `rebind` takes exactly one thing from `approved`)
 - Date: 2026-08-14
+- Partially superseded: 2026-08-23 by ADR-0181 — **§7's exactly-one-thing clause,
+  by a count of one, and nothing else in §7.** That clause rules that `rebind`
+  "takes from `approved` **exactly one** thing: each span's `provenance`. Nothing
+  else in `approved` is read into the result." ADR-0181 §3 adds a second,
+  `planned_with_external_content`, for §7's own reason applied to a second field: the
+  fact is about a selection made before the confirmation was parked, `rebind`
+  receives no selection set, and a `rebind` that re-derived it would answer `False`
+  and refuse every resumed egress call planned over external material — the failure
+  §7's own prose describes for the provenance. **Everything else in §7 stands**:
+  the afresh derivation from `tool` and `parameters`, the whole-value equality
+  refusal against `approved`, both unmatched-locator refusals, the
+  no-`SYSTEM_SELECTED`-fill rule, and the two `None` limbs. §1, §5, §6, §8–§13 are
+  unchanged.
 - **Note (2026-08-23): §5's provenance residue is closed in one direction by
   ADR-0181 and left open in the other, and no clause of this ADR changes.** The
   residue reads "Nothing in the tree records a span's origin, so every caller passes
