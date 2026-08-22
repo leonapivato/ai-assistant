@@ -353,7 +353,7 @@ and revised as `Proposed`, flipped only once the required reviews returned clean
 **Follow-on.** `.claude/agents/worker.md` carries its own copy of ADR-0166 §2's
 "prefer the serial run when your diff touches a Protocol or a canonical fake",
 which §3 above leaves without a ground; it is dispatch infrastructure outside this
-change's fence and is filed as an issue. Issue #1243 — that a filtering
+change's fence and is filed as issue #1423. Issue #1243 — that a filtering
 `PYTEST_ADDOPTS` narrows either anchor's run silently — is untouched and still
 open; this decision neither widens nor closes it. Issue #1419, the kept temp trees
 that fill this machine's tmpfs, rides in the same change as tooling: it bounds how
