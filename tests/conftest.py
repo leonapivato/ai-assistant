@@ -34,7 +34,7 @@ import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypedDict
 
 import pytest
 
@@ -54,6 +54,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent / "core"))
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from test_protocol_triad import CheckOutcome, TriadEvidence
+
 # Options that narrow what is collected or run. If any is in play the record is
 # a subset of the suite, and the absence of a class proves nothing. `maxfail`
 # covers `-x`, which stops the run before later tests report; `ignore` and
@@ -71,6 +73,10 @@ _FILTERING_OPTIONS = (
 
 #: The check whose subject is every other test, so it has to run after them.
 _TRIAD_CHECK = "tests/core/test_protocol_triad.py"
+
+#: The key a worker files its half of the triad record under, in xdist's own
+#: worker-to-controller channel.
+_TRIAD_OUTPUT_KEY = "triad_record"
 
 #: Volume profiles the leg-7 retrieval instrument can run at. ``gate`` is sized
 #: to keep the Definition-of-Done gate quick; ``full`` is the on-demand run that
@@ -224,6 +230,9 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if deferred:
         items[:] = [item for item in items if not item.nodeid.startswith(_TRIAD_CHECK)] + deferred
 
+    if _is_worker(config):
+        _hand_evidence_checks_to_the_controller(config, items)
+
 
 def _is_satisfactory(report: pytest.TestReport, *, optional: bool) -> bool:
     """Report whether one phase report is consistent with an obligation being met.
@@ -263,18 +272,275 @@ def pytest_runtest_logreport(report: pytest.TestReport) -> None:
 
 
 @pytest.fixture(scope="session")
-def honoured_class_tests() -> dict[type, frozenset[str]]:
-    """Every test class, mapped to the tests on it whose every case was honoured."""
-    return _RECORD.honoured()
+def triad_evidence() -> TriadEvidence:
+    """What this session ran, in the form the Protocol-triad check reads it.
+
+    Serial sessions only: under xdist the items requesting this fixture are
+    handed to the controller instead (see below), because no worker's record is
+    the suite's.
+    """
+    return _evidence_of(_RECORD)
 
 
-@pytest.fixture(scope="session")
-def opted_out_class_tests() -> dict[type, frozenset[str]]:
-    """Every test class, mapped to the tests honoured by opting out, not by passing."""
-    return {cls: frozenset(names) for cls, names in _RECORD.opted_out.items()}
+# ---------------------------------------------------------------------------
+# A distributed session (ADR-0179)
+# ---------------------------------------------------------------------------
+#
+# `_RECORD` is per process, and under `-n auto` there are several: each worker
+# runs its own session over a share of the items, so a contract subclass that
+# passed on `gw3` is simply absent from `gw0`'s record. Read from a worker, the
+# triad check therefore reports every Protocol as missing its binding -- which is
+# why `just test-fast` used to deselect it and why CI stayed serial (ADR-0166 §3).
+#
+# The record is made whole in the one process that outlives every worker. Three
+# moves, and nothing here runs at all in a serial session:
+#
+# 1. At collection, each worker hands the evidence-dependent items *back* -- it
+#    deselects them and remembers how to name them. Which items those are is read
+#    off the fixture they request, not off a list of test names, so a check added
+#    later inherits the arrangement by asking for the evidence.
+# 2. At its session end, each worker exports its half through xdist's own
+#    `workeroutput` channel: the honoured/opted-out names it recorded, plus the
+#    static candidacy of each recorded class, computed here because this is the
+#    process that holds the class objects. Names cross a process boundary; class
+#    objects do not.
+# 3. The controller takes each worker's half as the worker leaves, merges them,
+#    asks `test_protocol_triad` for the verdict, and reports it under the very
+#    nodeids the workers gave up. So the check is decided over the whole suite's
+#    evidence and reads in the summary exactly as it does serially.
+#
+# The evidence travels through xdist's channel rather than a file on disk on
+# purpose: this check exists because file-shaped evidence proves nothing, and a
+# record a later invocation reads back is a record a stale or hand-written file
+# can satisfy.
+
+#: The fixture whose presence marks an item as one only the controller can decide.
+_EVIDENCE_FIXTURE = "triad_evidence"
+
+#: Set on a worker: how to name each item it handed to the controller, in the
+#: three fields a ``TestReport``'s location wants plus the nodeid.
+_HANDED_OVER: list[_ItemPayload] = []
+
+#: Set on the controller: one entry per worker that finished cleanly, and the
+#: names of any that did not (whose share of the record is therefore missing).
+_WORKER_HALVES: list[_TriadPayload] = []
+_WORKERS_LOST: list[str] = []
 
 
-@pytest.fixture(scope="session")
-def run_is_unfiltered() -> bool:
-    """Whether this session runs the whole suite (no ``-k``, no ``-x``, no path args)."""
-    return _RECORD.unfiltered
+class _ItemPayload(TypedDict):
+    """Enough of one handed-over item to report an outcome under its nodeid."""
+
+    nodeid: str
+    path: str
+    lineno: int
+    domain: str
+
+
+class _ClassPayload(TypedDict):
+    """One recorded test class's half of the evidence, as names."""
+
+    reported: list[str]
+    unsatisfactory: list[str]
+    opted_out: list[str]
+    candidacy: dict[str, list[str]]
+
+
+class _TriadPayload(TypedDict):
+    """One worker's whole contribution, in types execnet can carry."""
+
+    classes: dict[str, _ClassPayload]
+    items: list[_ItemPayload]
+    unfiltered: bool
+
+
+def _is_worker(config: pytest.Config) -> bool:
+    """Report whether this process is an xdist worker rather than the controller."""
+    return hasattr(config, "workerinput")
+
+
+def _evidence_of(record: _RunRecord) -> TriadEvidence:
+    """Build the triad's evidence from one process's record.
+
+    Imported here rather than at module scope because the dependency genuinely
+    runs the other way: ``test_protocol_triad`` imports this conftest for the
+    predicates that decide what a report means. What it owns is the
+    *interpretation* of the record -- which classes could bind which Protocol --
+    and that has to be computed where the class objects are.
+    """
+    from test_protocol_triad import (  # noqa: PLC0415 — see `_report_evidence_checks`
+        TriadEvidence,
+        class_key,
+        static_candidacy,
+    )
+
+    return TriadEvidence(
+        honoured={class_key(cls): names for cls, names in record.honoured().items()},
+        opted_out={class_key(cls): frozenset(names) for cls, names in record.opted_out.items()},
+        candidacy={class_key(cls): static_candidacy(cls) for cls in record.reported},
+        unfiltered=record.unfiltered,
+    )
+
+
+def _hand_evidence_checks_to_the_controller(
+    config: pytest.Config, items: list[pytest.Item]
+) -> None:
+    """Deselect the items no worker can decide, and remember how to name them."""
+    handed_over = [item for item in items if _EVIDENCE_FIXTURE in getattr(item, "fixturenames", ())]
+    if not handed_over:
+        return
+    items[:] = [item for item in items if item not in handed_over]
+    config.hook.pytest_deselected(items=handed_over)
+    _HANDED_OVER[:] = [
+        _ItemPayload(
+            nodeid=item.nodeid,
+            path=str(item.location[0]),
+            lineno=int(item.location[1] or 0),
+            domain=str(item.location[2]),
+        )
+        for item in handed_over
+    ]
+
+
+def _worker_half() -> _TriadPayload:
+    """Render this worker's record as something execnet can carry."""
+    from test_protocol_triad import class_key, static_candidacy  # noqa: PLC0415 — as above
+
+    classes: dict[str, _ClassPayload] = {}
+    for cls in set(_RECORD.reported) | set(_RECORD.unsatisfactory) | set(_RECORD.opted_out):
+        classes[class_key(cls)] = _ClassPayload(
+            reported=sorted(_RECORD.reported.get(cls, set())),
+            unsatisfactory=sorted(_RECORD.unsatisfactory.get(cls, set())),
+            opted_out=sorted(_RECORD.opted_out.get(cls, set())),
+            candidacy={
+                protocol: sorted(names) for protocol, names in static_candidacy(cls).items()
+            },
+        )
+    return _TriadPayload(classes=classes, items=list(_HANDED_OVER), unfiltered=_RECORD.unfiltered)
+
+
+def _merged_evidence(halves: list[_TriadPayload]) -> TriadEvidence:
+    """Union every worker's half into the evidence the whole suite produced.
+
+    Unioned rather than intersected, and per test *name*: with the default
+    distribution one class's tests are split across workers, so each worker holds
+    part of one class's obligations. ``honoured`` is derived after the union for
+    the same reason -- a case that failed on one worker must veto the same name
+    reported satisfactory on another.
+    """
+    from test_protocol_triad import TriadEvidence  # noqa: PLC0415 — as above
+
+    reported: dict[str, set[str]] = {}
+    unsatisfactory: dict[str, set[str]] = {}
+    opted_out: dict[str, set[str]] = {}
+    candidacy: dict[str, dict[str, frozenset[str]]] = {}
+    for half in halves:
+        for key, entry in half["classes"].items():
+            reported.setdefault(key, set()).update(entry["reported"])
+            unsatisfactory.setdefault(key, set()).update(entry["unsatisfactory"])
+            opted_out.setdefault(key, set()).update(entry["opted_out"])
+            candidacy.setdefault(key, {}).update(
+                {protocol: frozenset(names) for protocol, names in entry["candidacy"].items()}
+            )
+    return TriadEvidence(
+        honoured={
+            key: frozenset(names - unsatisfactory.get(key, set()))
+            for key, names in reported.items()
+        },
+        opted_out={key: frozenset(names) for key, names in opted_out.items()},
+        candidacy=candidacy,
+        unfiltered=all(half["unfiltered"] for half in halves),
+    )
+
+
+def pytest_testnodedown(node: object, error: object) -> None:
+    """Take a worker's half of the record as it leaves (xdist, controller side)."""
+    half = getattr(node, "workeroutput", {}).get(_TRIAD_OUTPUT_KEY)
+    if error is not None or half is None:
+        _WORKERS_LOST.append(str(getattr(node, "gateway", node)))
+        return
+    _WORKER_HALVES.append(half)
+
+
+def pytest_sessionfinish(session: pytest.Session, exitstatus: object) -> None:
+    """Export this worker's half, or -- on the controller -- decide over them all."""
+    output = getattr(session.config, "workeroutput", None)
+    if output is not None:
+        output[_TRIAD_OUTPUT_KEY] = _worker_half()
+        return
+    if _WORKER_HALVES or _WORKERS_LOST:
+        _report_evidence_checks(session)
+
+
+def _report_evidence_checks(session: pytest.Session) -> None:
+    """Decide the handed-over checks over the merged record, and report them.
+
+    Reported through ``pytest_runtest_logreport`` under the workers' own nodeids,
+    which is the same door xdist puts every worker's result through, so the
+    outcomes land in the counts, the failure list and the short summary exactly
+    as a locally executed test's would. The exit status is set here too: by the
+    time a session finishes, pytest has already decided it from the tests that
+    ran, and these two did not run in any worker.
+    """
+    # Imported here, not at module scope: `test_protocol_triad` imports this
+    # conftest, and pytest has to import (and assertion-rewrite) the test module
+    # itself before anything else does.
+    from test_protocol_triad import evaluate_for_controller  # noqa: PLC0415 — see above
+
+    outcomes = evaluate_for_controller(_merged_evidence(_WORKER_HALVES))
+    handed_over = {
+        payload["nodeid"]: payload for half in _WORKER_HALVES for payload in half["items"]
+    }
+    failed = False
+    for item in handed_over.values():
+        result = _outcome_for(item, outcomes)
+        failed = failed or result[0] == "failed"
+        session.config.hook.pytest_runtest_logreport(report=_as_report(item, result))
+    if failed:
+        session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def _outcome_for(item: _ItemPayload, outcomes: dict[str, CheckOutcome]) -> CheckOutcome:
+    """Return what the merged record decided for one handed-over item.
+
+    Two ways to arrive at a failure without a Protocol being at fault, and both
+    are stated as failures rather than swallowed: a worker that left without
+    handing its half over (the record is then not the suite's, so an absent
+    binding proves nothing), and an item nothing in
+    ``evaluate_for_controller`` claims (a new evidence-dependent check whose
+    author did not wire it up, which must not read as a pass).
+    """
+    if _WORKERS_LOST:
+        return (
+            "failed",
+            f"the record is incomplete: {len(_WORKERS_LOST)} worker(s) left without "
+            f"handing over their half ({', '.join(sorted(_WORKERS_LOST))}), so an "
+            f"absent binding class proves nothing here either",
+        )
+    name = item["nodeid"].rpartition("::")[2]
+    unclaimed: CheckOutcome = (
+        "failed",
+        f"{item['nodeid']} was handed to the controller, but "
+        f"test_protocol_triad.evaluate_for_controller has no entry for {name!r} "
+        f"-- so nothing decided it",
+    )
+    return outcomes.get(name, unclaimed)
+
+
+def _as_report(item: _ItemPayload, result: CheckOutcome) -> pytest.TestReport:
+    """Render one controller-side decision as the report a worker would have sent."""
+    outcome, message = result
+    return pytest.TestReport(
+        nodeid=item["nodeid"],
+        location=(item["path"], item["lineno"], item["domain"]),
+        keywords={},
+        outcome=outcome,
+        longrepr=(
+            (item["path"], item["lineno"], f"Skipped: {message}")
+            if outcome == "skipped"
+            else (message or None)
+        ),
+        when="call",
+        duration=0.0,
+        start=0.0,
+        stop=0.0,
+    )
