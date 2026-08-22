@@ -294,13 +294,31 @@ review-codex persona base="":
 # unconditionally — if the second run dies on quota or a Codex error, the
 # required artifact already exists and the round is not lost.
 #
+# "One tree" is CHECKED here, not assumed. Each driver invocation resolves HEAD
+# for itself (`codex-review.sh:78`) and refuses if HEAD moves *during* its own
+# run (`:1182`), so the only unguarded window is the seam between the two — and
+# a pair split across it would record two trees while claiming one round. This
+# extends the driver's own settled-tree check across that seam, and refuses
+# before the second lens is spent rather than leaving `ship` to reject a stale
+# adversarial artifact after both runs have paid quota.
+#
 # Triage the two verdicts as one queue, before editing. `docs/review/guide.md`
 # → "When a change owes both lenses" carries what to do when they contradict.
 #
 # Last line, because `just --list` shows only that one: what this recipe runs.
 # Both Codex lenses, one round on one tree — for a lane that owes both
 review-codex-both base="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    pinned="$(git rev-parse HEAD)"
     scripts/codex-review.sh adversarial "$1"
+    moved="$(git rev-parse HEAD)"
+    if [ "$moved" != "$pinned" ]; then
+        echo "just review-codex-both: HEAD was ${pinned}, now ${moved} — it moved" \
+             "between the two lenses, so the pair would record two trees and would" \
+             "not be one round. Architecture NOT run; re-run on a settled tree." >&2
+        exit 1
+    fi
     scripts/codex-review.sh architecture "$1"
 
 # Refuses unless a review artifact covers the content the PR head carries,
