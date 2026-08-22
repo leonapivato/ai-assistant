@@ -271,12 +271,12 @@ def copy_into(source: Path, target: Path, synced: Sequence[str], *, dry_run: boo
         SyncError: If a path is tracked in the target, or the destination would
             resolve outside it.
     """
-    lines: list[str] = []
+    # EVERY refusal is decided before the first byte is written. Checking as it
+    # copies would leave a target half-synced when a later path is refused — the
+    # per-clone configuration then disagrees with both the primary and itself,
+    # which is the drift this recipe exists to remove.
     for relative in synced:
-        src = source / relative
-        dst = target / relative
-        if not src.is_file():
-            lines.append(f"  skip {relative}: absent in {source}")
+        if not (source / relative).is_file():
             continue
         if is_tracked(target, relative):
             raise SyncError(
@@ -284,6 +284,14 @@ def copy_into(source: Path, target: Path, synced: Sequence[str], *, dry_run: boo
                 f"checked-in file. Remove it from the list — nothing in the list is committed."
             )
         _refuse_to_escape(target, relative)
+
+    lines: list[str] = []
+    for relative in synced:
+        src = source / relative
+        dst = target / relative
+        if not src.is_file():
+            lines.append(f"  skip {relative}: absent in {source}")
+            continue
         if dst.is_file() and dst.read_bytes() == src.read_bytes():
             lines.append(f"  same {relative}")
             continue

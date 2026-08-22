@@ -172,6 +172,22 @@ def test_a_symlinked_ancestor_is_refused_too(tmp_path: Path) -> None:
     assert not (outside / ".env").exists()
 
 
+def test_a_refusal_on_a_later_path_leaves_the_target_untouched(tmp_path: Path) -> None:
+    # Copying as it checks would leave a clone half-synced, disagreeing with both
+    # the primary and itself — the drift this recipe exists to remove.
+    source, (sibling,) = _clones(tmp_path, 2)
+    (sibling / ".mcp.json").write_text("checked in\n")
+    git(sibling, "add", "-f", ".mcp.json")
+    git(sibling, "commit", "-qm", "track the second one")
+    listing = _list_file(tmp_path, ".env", ".mcp.json")
+
+    status, _, err = _sync(source, listing)
+
+    assert status == 1
+    assert "git tracks .mcp.json" in err
+    assert not (sibling / ".env").exists()
+
+
 def test_dry_run_writes_nothing(tmp_path: Path) -> None:
     source, (sibling,) = _clones(tmp_path, 2)
     listing = _list_file(tmp_path, ".env")

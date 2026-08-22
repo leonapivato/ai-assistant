@@ -123,6 +123,22 @@ def test_an_artifact_whose_commit_reached_main_is_merged(tmp_path: Path) -> None
     assert (repo / ".review" / "archive" / "a.md").exists()
 
 
+def test_origin_head_does_not_keep_a_merged_artifact_alive(tmp_path: Path) -> None:
+    # `git clone` creates `refs/remotes/origin/HEAD` as a symbolic ref to the
+    # default branch, so it *contains* every commit on main under a name that is
+    # not main. Counted as an ordinary holder, it makes every merged artifact
+    # look live and the sweep retires nothing at all.
+    repo = _repo(tmp_path)
+    git(repo, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+    sha = git(repo, "rev-parse", "HEAD")
+    _artifact(repo, "a.md", persona="adversarial", branch="landed/lane", sha=sha, tree="t1")
+
+    status, out, _ = _sweep(repo)
+
+    assert status == 0, out
+    assert "[merged]" in out
+
+
 def test_a_live_branch_wins_over_a_dead_looking_commit(tmp_path: Path) -> None:
     # The branch name is the aggregate's scope key, so an artifact naming a branch
     # that still exists is live whatever its recorded commit says.

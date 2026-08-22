@@ -38,7 +38,9 @@ installed version and marker before and after.
 directory and read back from there, never located by a name predicted from
 ``pyproject.toml``: a predicted name can miss the build's real output, or match a
 stale wheel left in ``dist/`` by an earlier version and ship it under today's
-commit. ``--wheel`` deploys an already-built file instead of building at all.
+commit. ``--wheel`` deploys an already-built file instead of building at all, and
+then ``--wheel-commit`` is required: such a wheel need not have come from this
+checkout, and the marker is what the next deploy trusts to rule on drift.
 
 ``--dry-run`` prints the exact commands the run would issue and contacts nothing.
 It is what the tests drive, because the remote half cannot be exercised from a
@@ -49,6 +51,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import secrets
 import shlex
 import shutil
 import subprocess
@@ -168,6 +171,33 @@ def wheel_name(repo: Path) -> str:
     return f"{normalised}-{version}-py3-none-any.whl"
 
 
+def resolve_commit(repo: Path, ref: str) -> str:
+    """Resolve the commit a supplied wheel was built from.
+
+    Args:
+        repo: The repository root.
+        ref: Whatever the operator attested — a sha, a tag, a branch.
+
+    Returns:
+        The 40-character commit sha.
+
+    Raises:
+        DeployError: If the ref does not resolve to a commit in this clone. It
+            has to resolve *here*, because the marker it becomes is what the next
+            deploy diffs ``uv.lock`` across.
+    """
+    completed = subprocess.run(  # noqa: S603  # fixed argv, no shell, resolved binary
+        [_binary("git"), "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}"],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if completed.returncode != 0 or not completed.stdout.strip():
+        raise DeployError(f"--wheel-commit {ref} is not a commit in {repo}")
+    return completed.stdout.strip()
+
+
 def head_commit(repo: Path, *, allow_dirty: bool) -> str:
     """Return the commit the wheel will be built from.
 
@@ -195,12 +225,15 @@ def head_commit(repo: Path, *, allow_dirty: bool) -> str:
     return f"{sha}-dirty"
 
 
-def lockfile_drift(repo: Path, deployed: str) -> str | None:
-    """Report whether ``uv.lock`` changed between the deployed commit and ``HEAD``.
+def lockfile_drift(repo: Path, deployed: str, target: str) -> str | None:
+    """Report whether ``uv.lock`` changed between two commits.
 
     Args:
         repo: The repository root.
         deployed: The commit recorded by the previous deploy.
+        target: The commit being deployed now — ``HEAD`` for a build, and the
+            commit the operator attested for a supplied wheel. Never assumed,
+            because a supplied wheel need not have been built from this checkout.
 
     Returns:
         The ``git diff --stat`` text when the lockfile moved; ``None`` when it did
@@ -218,7 +251,7 @@ def lockfile_drift(repo: Path, deployed: str) -> str | None:
     )
     if probe.returncode != 0:
         raise DeployError(f"the deployed commit {deployed[:12]} is not in this clone's history")
-    diff = _git("diff", "--stat", deployed, "HEAD", "--", "uv.lock", repo=repo)
+    diff = _git("diff", "--stat", deployed, target, "--", "uv.lock", repo=repo)
     return diff or None
 
 
@@ -330,6 +363,12 @@ class Plan:
         """
         self.args = args
         self.wheel = wheel
+        #: A per-run token in the staged filename. The staging directory is shared
+        #: and world-readable, so a fixed name lets two deploys of one version
+        #: overwrite each other's wheel between `scp` and install — installing one
+        #: build while recording the other's commit and digest in the marker,
+        #: which is exactly the provenance the drift check later trusts.
+        self.token = secrets.token_hex(4)
         #: The wheel on THIS machine. `None` until a real run has one — a dry run
         #: never resolves it, because a dry run never builds.
         self._local: Path | None = None
@@ -368,7 +407,7 @@ class Plan:
         Returns:
             The staged path.
         """
-        return f"{self.args.stage_dir.rstrip('/')}/{self.wheel}"
+        return f"{self.args.stage_dir.rstrip('/')}/deploy-hub-{self.token}-{self.wheel}"
 
     def read_marker(self) -> str:
         """Return the command that reads the deployed-commit marker.
@@ -439,6 +478,14 @@ class Plan:
         body = f"{_MARKER_COMMIT_PREFIX}{commit}\nwheel_sha256={digest}\ndeployed_at={stamp}\n"
         inner = f"printf %s {shlex.quote(body)} > {self.args.marker}"
         return as_service_user(inner, self.args.user)
+
+    def unstage(self) -> str:
+        """Return the command that removes the staged wheel after the install.
+
+        Returns:
+            The remote command line. Run as the login user, which owns the file.
+        """
+        return f"rm -f {shlex.quote(self.staged)}"
 
     def restart(self) -> str:
         """Return the restart command, which also prints the new invocation id.
@@ -529,6 +576,7 @@ def render(plan: Plan, commit: str) -> list[str]:
             [
                 ("perms   ", plan.make_readable()),
                 ("install ", plan.install()),
+                ("unstage ", plan.unstage()),
                 ("marker! ", plan.write_marker(commit, "<sha256 of the built wheel>")),
                 ("restart ", plan.restart()),
                 ("active? ", plan.is_active()),
@@ -590,12 +638,13 @@ def _run_local(argv: list[str], *, check: bool = True, cwd: Path | None = None) 
     return completed.stdout
 
 
-def _check_drift(plan: Plan, repo: Path) -> str:
+def _check_drift(plan: Plan, repo: Path, commit: str) -> str:
     """Read the box's marker and rule on dependency drift.
 
     Args:
         plan: The plan.
         repo: The repository root.
+        commit: The commit being deployed.
 
     Returns:
         The marker text as read from the box (possibly empty).
@@ -615,7 +664,7 @@ def _check_drift(plan: Plan, repo: Path) -> str:
         )
         return marker
     try:
-        drift = lockfile_drift(repo, deployed)
+        drift = lockfile_drift(repo, deployed, commit.removesuffix("-dirty"))
     except DeployError as exc:
         print(f"warning: {exc}; dependency drift is UNKNOWN, not clean.", file=sys.stderr)
         return marker
@@ -702,7 +751,7 @@ def _deploy(plan: Plan, repo: Path, commit: str) -> None:
     def ssh(remote: str) -> list[str]:
         return ssh_command(args.host, args.ssh_user, remote)
 
-    before_marker = _check_drift(plan, repo)
+    before_marker = _check_drift(plan, repo, commit)
     before_version = _run_local(ssh(plan.read_version())).strip()
 
     if args.wheel:
@@ -764,6 +813,7 @@ def _install_and_verify(plan: Plan, commit: str, before_marker: str, before_vers
     _run_local(plan.stage())
     _run_local(ssh(plan.make_readable()))
     _run_local(ssh(plan.install()))
+    _run_local(ssh(plan.unstage()))
     _run_local(ssh(plan.write_marker(commit, digest)))
 
     invocation = invocation_id(_run_local(ssh(plan.restart())))
@@ -781,6 +831,37 @@ def _install_and_verify(plan: Plan, commit: str, before_marker: str, before_vers
     print(f"version: {after_version}")
     print(after_marker.rstrip("\n"))
     print(f"unit {args.unit} is active and logged hub_ready; wheel sha256 {digest[:12]}")
+
+
+def _deployed_commit(args: argparse.Namespace, repo: Path) -> str:
+    """Return the commit this run will record on the box.
+
+    A built wheel is this checkout by construction. A **supplied** one is not:
+    it may have come from another commit or another clone entirely, and recording
+    the current ``HEAD`` for it would put a false provenance in the marker — which
+    the next deploy then trusts to rule on dependency drift. So ``--wheel``
+    requires the operator to say what it was built from.
+
+    Args:
+        args: The parsed arguments.
+        repo: The repository root.
+
+    Returns:
+        The commit to record, with a ``-dirty`` suffix where one applies.
+
+    Raises:
+        DeployError: If a supplied wheel carries no attested commit.
+    """
+    if not args.wheel:
+        return head_commit(repo, allow_dirty=args.allow_dirty)
+    if not args.wheel_commit:
+        raise DeployError(
+            "--wheel needs --wheel-commit <ref>: a supplied wheel need not have been\n"
+            "built from this checkout, and the marker this deploy writes is what the\n"
+            "NEXT deploy diffs uv.lock across to decide whether --no-deps is safe.\n"
+            "Recording HEAD for a wheel built elsewhere makes that answer wrong."
+        )
+    return resolve_commit(repo, args.wheel_commit)
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -807,6 +888,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--stage-dir", default=DEFAULT_STAGE_DIR, help="where to stage the wheel")
     parser.add_argument(
         "--wheel", help="deploy this already-built wheel instead of running uv build"
+    )
+    parser.add_argument(
+        "--wheel-commit", help="the commit --wheel was built from (required with --wheel)"
     )
     parser.add_argument("--repo", default=".", help="the repository root to build from")
     parser.add_argument(
@@ -842,7 +926,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         # Only ever a *prediction*, used to render the plan and to name the file
         # on the box. A real run replaces it with the build's actual output.
         wheel = Path(args.wheel).name if args.wheel else wheel_name(repo)
-        commit = head_commit(repo, allow_dirty=args.allow_dirty)
+        commit = _deployed_commit(args, repo)
         plan = Plan(args, wheel)
         if args.dry_run:
             for line in render(plan, commit):

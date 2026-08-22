@@ -188,6 +188,44 @@ def _git_ok(*args: str, repo: Path) -> bool:
     return completed.returncode == 0
 
 
+def direct_refs(repo: Path, *extra: str) -> list[str]:
+    """List the branch refs, excluding symbolic ones.
+
+    ``refs/remotes/origin/HEAD`` is the one that matters: ``git clone`` creates it
+    as a symbolic ref to the default branch, so it *contains* every commit on
+    ``main`` under a name that is not ``main``. Counted as an ordinary ref it
+    makes every merged artifact look like one a live branch still holds, and the
+    sweep retires nothing.
+
+    Args:
+        repo: The repository root.
+        *extra: Further arguments for ``for-each-ref``, e.g. ``--contains <sha>``.
+
+    Returns:
+        The names of the non-symbolic refs under ``refs/heads`` and
+        ``refs/remotes``.
+
+    Raises:
+        SweepError: If git cannot answer. "No refs" and "git failed" must never
+            be the same result here.
+    """
+    listing = _git(
+        "for-each-ref",
+        "--format=%(refname)\t%(symref)",
+        *extra,
+        "refs/heads",
+        "refs/remotes",
+        repo=repo,
+        check=True,
+    )
+    names: list[str] = []
+    for line in listing.splitlines():
+        refname, _, symref = line.partition("\t")
+        if refname and not symref:
+            names.append(refname)
+    return names
+
+
 class Refs:
     """What the repository's refs currently hold, read once per sweep."""
 
@@ -199,15 +237,7 @@ class Refs:
         """
         self.repo = repo
         self.branches: set[str] = set()
-        listing = _git(
-            "for-each-ref",
-            "--format=%(refname)",
-            "refs/heads",
-            "refs/remotes",
-            repo=repo,
-            check=True,
-        )
-        for line in listing.splitlines():
+        for line in direct_refs(repo):
             if line.startswith("refs/heads/"):
                 self.branches.add(line.removeprefix("refs/heads/"))
             elif line.startswith("refs/remotes/"):
@@ -258,15 +288,7 @@ class Refs:
         """
         if not _git_ok("cat-file", "-e", f"{sha}^{{commit}}", repo=self.repo):
             return False
-        holders = _git(
-            "for-each-ref",
-            "--contains",
-            sha,
-            "--format=%(refname)",
-            "refs/heads",
-            "refs/remotes",
-            repo=self.repo,
-        ).splitlines()
+        holders = direct_refs(self.repo, "--contains", sha)
         return any(ref not in _DEFAULT_REFS for ref in holders)
 
 
