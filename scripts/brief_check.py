@@ -23,7 +23,8 @@ What it extracts, from the brief with fenced code blocks removed:
   for a lettered sub-section), a bold decision paragraph (``**5.** ...``, the
   older corpus's form), and a numbered list item inside ``## Decision``. The
   report prints the line it matched, so a weak match is visible as one;
-- every backticked identifier that looks like a Python symbol → a word-boundary
+- every backticked token that is a Python identifier, or a dotted run of them,
+  and carries a dot, an underscore or a capital → a word-boundary
   search over ``src/`` and ``tests/``, reporting the file that holds it and
   saying so when that file only *mentions* it rather than defining it. A dotted
   path resolves leniently: only the last component is searched, so
@@ -56,7 +57,13 @@ from pathlib import Path
 # Fenced blocks are stripped before extraction: a brief's shell snippets are
 # full of paths and flags that are illustrations rather than claims about the
 # tree, and checking them produces noise that buries the real findings.
-_FENCE_RE = re.compile(r"^[ \t]*(```|~~~).*?^[ \t]*\1[ \t]*$", re.DOTALL | re.MULTILINE)
+# The fence is three *or more* delimiters, not exactly three: a brief that quotes
+# backticked names inside a code block has to open with four, which is precisely
+# the block whose contents are illustrations rather than claims.
+_FENCE_RE = re.compile(
+    r"^[ \t]*(?P<fence>`{3,}|~{3,})[^\n]*\n.*?^[ \t]*(?P=fence)[`~]*[ \t]*$",
+    re.DOTALL | re.MULTILINE,
+)
 
 _ADR_RE = re.compile(r"\bADR-(\d{3,4})\b")
 
@@ -72,7 +79,6 @@ _SECTION_RE = re.compile(
 _LARGEST_RANGE = 20
 
 _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
-_SYMBOL_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*")
 
 # A backticked token is a path only when it names one of these trees. Requiring
 # the prefix is what keeps ``origin/main`` and ``feat(scope)`` out of the report:
@@ -232,7 +238,9 @@ def classify(token: str) -> tuple[str, str] | None:
         return None
     if cleaned.startswith(_PATH_PREFIXES):
         return "path", cleaned
-    if _SYMBOL_RE.fullmatch(cleaned) is None:
+    # Python's own rule for what a name may be, rather than an ASCII imitation of
+    # it, so a Unicode identifier is checked instead of silently skipped.
+    if not all(part.isidentifier() for part in cleaned.split(".")):
         return None
     last = cleaned.rsplit(".", maxsplit=1)[-1]
     if last.lower() in _FILE_SUFFIXES:
@@ -311,7 +319,13 @@ def _check_path(root: Path, token: str) -> Finding:
         cleaned = cleaned[: cleaned.index("*")].rpartition("/")[0]
     if not cleaned:
         return Finding("path", token, UNCHECKED, "no directory before the glob")
-    exists = (root / cleaned).exists()
+    target = root / cleaned
+    # A repository-relative prefix is not proof the path stays inside the
+    # checkout: `src/../..` starts with `src/` and resolves above the root, where
+    # `exists()` answers about a directory this check makes no claim over.
+    if not target.resolve().is_relative_to(root.resolve()):
+        return Finding("path", token, UNCHECKED, "resolves outside the checkout")
+    exists = target.exists()
     detail = f"{cleaned} exists" if exists else f"{cleaned} does not exist"
     return Finding("path", token, PRESENT if exists else ABSENT, detail)
 
