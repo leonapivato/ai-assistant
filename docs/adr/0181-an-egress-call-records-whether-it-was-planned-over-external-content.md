@@ -23,7 +23,10 @@
   ADR that would later lift it.
 - **Refs:** #1427 (track:world, milestone 23), #641 (reader-side threat model,
   which §9 routes rather than folds), #668 (which closes against milestone 23 and
-  not against this ADR), #301, #746, #1404, #1154, #1114, #1162, #1218.
+  not against this ADR), #301, #746, #1404, #1154, #1114, #1162, #1218. **Filed by
+  this lane:** #1431 (ADR-0098 §8's named-source trigger has fired with the second
+  reader) and #1432 (ADR-0140 §10's body gate names a condition ADR-0106 may already
+  have satisfied).
 - **Where this ADR and its dispatching brief disagree about the tree, this ADR is
   the corrected record.** The Context's first three subsections state each
   disagreement with the file that settles it.
@@ -826,8 +829,8 @@ written in this change.**
   **and implemented**". This ADR is neither the ratification of that seam (ADR-0106
   was) nor an implementation of anything. Whether ADR-0106's merge already satisfied
   the condition is a question about ADR-0140's own text that predates this lane and
-  is **filed rather than answered** (§12). Either way a reader holding only ADR-0140
-  acts identically on the strength of this ADR. **Addition.**
+  is **filed rather than answered** (#1432, §12). Either way a reader holding only
+  ADR-0140 acts identically on the strength of this ADR. **Addition.**
 - **ADR-0147 — nothing owed.** Its §6 makes `StepExecution.output` a projection
   defective under ADR-0098 §7's third clause, and §12 defers a durable origin for a
   retained tool result as **#1114**. This ADR adds no field to `StepExecution`,
@@ -885,7 +888,8 @@ into the regime by it.
   ADR-0093 §7's declared identity is the only source name this system holds.
   **Fires with the surface that would act on the difference**, and it inherits
   ADR-0098 §8's second clause, whose own trigger — "the second reader" — has fired
-  (`readers/email.py` is on `main`) and which stays undischarged.
+  (`readers/email.py` is on `main`) and which stays undischarged. **Filed as #1431**,
+  which carries ADR-0093 §11's neighbouring display-label trigger with it.
 - **Whether a span was drawn from the assistant's own store or composed for the
   send** — ADR-0155 §4's gap, filed as **#1154**, whose own trigger ("the first lane
   that registers an integration whose declared arguments admit free text") fired
@@ -903,8 +907,8 @@ into the regime by it.
   first deferral, and ADR-0140 was written after it while treating the condition as
   unmet. Two readings are available and this ADR takes neither, because the question
   is about ADR-0140's own text and answering it here would decide a neighbouring
-  lane's scope by a sentence. **Filed as an issue by this lane**, and it fires with
-  the lane that would ingest a message body.
+  lane's scope by a sentence. **Filed as #1432**, and it fires with the lane that
+  would ingest a message body, which must resolve it in its own text before it does.
 - **Whether taint survives a planning step** — #301, and this ADR does not close it.
   §2's second clause is explicit that the fact is about a selection and not about
   influence, so a lane taking #301 inherits the field and none of its reasoning.
