@@ -72,7 +72,7 @@ You need the client machine's overlay identity, read the same way
 field of the right `Peer`.
 
 ```bash
-ai-assistant-device enrol n33u2icoEW11CNTRL
+ai-assistant-device enrol <the client machine's overlay identity>
 ```
 
 ```text
@@ -83,6 +83,13 @@ Credential: 9-oZ2ybYgTfXzk2i2Q3BgUVzCziGDSVVnmkmW7aCAa4
 Give the device both values. The credential is shown once and never again:
 the hub keeps only a verifier it cannot be recovered from.
 ```
+
+**The two identities above are equal only because that run had one machine
+playing both roles.** On two machines `Device:` is the identity you passed in
+and `Hub:` is a different value — the hub's own, the same one `hub_remote_bound`
+printed in step 1. Read the labels, not the strings: what step 3 needs is the
+`Hub:` line, and passing the `Device:` line there enrols the client at a hub
+that is not the one it will dial.
 
 Two values come out and the client needs **both**. If you lose the credential
 it cannot be recovered — run `enrol` again for the same device, which mints a

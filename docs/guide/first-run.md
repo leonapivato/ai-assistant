@@ -23,11 +23,16 @@ This is not the data directory — it is just where the configuration file lives
 
 ```bash
 cat > .env <<'EOF'
-ASSISTANT_DATA_DIR=/home/you/.ai-assistant
+ASSISTANT_DATA_DIR=~/.ai-assistant
 ASSISTANT_DEFAULT_MODEL=anthropic:claude-sonnet-4-5
 ASSISTANT_TIMEZONE=Europe/Rome
 EOF
 ```
+
+That block is meant to be pasted as it stands. The one thing to change is the
+timezone, if Rome is not where you are. Output quoted further down shows paths
+under `/home/you/` — that is this guide's stand-in for your own home directory,
+which is what `~` above expands to.
 
 Three settings, and each of them says something the system cannot guess.
 
