@@ -331,9 +331,11 @@ from ADR-0084 §3 and ADR-0083 §7 and applied by ADR-0175 §8 to its own figure
 > nullable and takes no value meaning "off", exactly as ADR-0168 §8's ten and
 > ADR-0175 §8's one do.
 
-> **Normative.** Its clock runs from the instant the value is **minted**. Disclosure
-> follows minting inside the same act, so no implementation may key the clock on
-> disclosure, on the first request that presents the value, or on any later event.
+> **Normative.** Its clock runs from the **successful disclosure** that promotes a
+> candidate to the outstanding value (§1) — the same instant the previous outstanding
+> value ceases — and from no other. A candidate not yet disclosed has no clock because
+> it is not yet a value, and no implementation may key the clock on the first request
+> that presents the value or on any later event.
 
 > **Normative.** It is measured on a **monotonic** elapsed-time source — one the
 > system clock being moved in either direction does not affect — and a value that
@@ -399,9 +401,16 @@ putting the new figure on the clock that produced the hazard, and it is filed ra
 than taken (#1439).
 
 **The clock's origin is named because #1329 asked which one it is.** "Mint time?
-Disclosure time?" — mint, and the two are separated by the width of one act, so
-nothing observable turns on the choice. What turns on making it is that a reader
-cannot pick.
+Disclosure time?" — the disclosure, and §1's ordering is what decides it rather than
+a preference. An earlier draft said "mint", on the reasoning that the two are
+separated by the width of one act and nothing observable turns on the choice. That
+was true before §1 fixed the order and false afterwards: the write is the act that can
+block, so a gateway whose standard output is back-pressured could generate a
+candidate, block for longer than the whole bound, and then promote a value already
+past its clock — handing the owner a token that cannot admit a browser and giving them
+no way to see why. Adversarial review found it on the fourth round. Keying the clock
+on the promotion makes the value's life begin when the owner can first read it, which
+is the only instant either of them can act from.
 
 ### 4. `gateway_max_sessions` binds, and it refuses at two doors
 
@@ -432,15 +441,32 @@ cannot pick.
 > report is not a response to a request and reaches no browser, so ADR-0168 §5's
 > disclosure rule is not engaged by it.
 
-**Refusing at both doors is one rule stated at the two moments it is decidable.**
-The mint act is where the owner is standing, so refusing there is the only place
-they can be told *why* — a value minted into a full table is a value that cannot be
-spent, and letting it be minted would produce a failure at the browser with the
-explanation on the wrong side of the room. The exchange is where the session is
-actually created, and sessions expire, so the count at mint time is not the count at
-exchange time; a gateway that checked only at mint would either admit past its
-ceiling or forbid an exchange that is now legal. Two checks, one ceiling, and the
-invariant holds at the moment it is an invariant about.
+> **Normative.** The early refusal above makes the exchange refusal **unreachable**
+> under §1 and §2 as they stand, and that is stated rather than left to be
+> discovered: only one value is outstanding, only its exchange creates a session, and
+> nothing between the two raises the live count. The exchange clause is owed
+> nonetheless — no lane may omit it, and no lane may cite this clause as licence
+> to. What no lane owes is a test that reaches it *through the mint act*: it is
+> pinned at the session table's own seam instead (§10).
+
+**One ceiling, two clauses, and only one of them is on an execution path — which
+is worth stating plainly, because the alternative is the defect this decision
+closes.** The mint act is where the owner is standing, so refusing there is the only
+place they can be told *why*: a value minted into a full table is a value that cannot
+be spent, and letting it be minted would produce a failure at a browser that ADR-0168
+§5 forbids explaining, with the explanation on the wrong side of the room. The
+exchange is where the live count actually changes, so it is where the invariant
+lives, and a module that owns a count does not delegate the count's bound to a check
+in another module. Architecture review found on the fourth round that an earlier draft
+of this section claimed both clauses were reachable, on the reasoning that "sessions
+expire, so the count at mint time is not the count at exchange time" — which is true
+and points the wrong way, because expiry only *lowers* the count and the ceiling is
+breached by raising it. The right account is the one above: the early refusal is the
+reachable one, the exchange refusal is the invariant at its own seam, and a later
+decision permitting a second outstanding value or a second path to a session would
+find the ceiling still held rather than silently gone. #1320's own remedy for a clause
+with no execution is "a sentence in the superseding ADR saying so", and this is that
+sentence written in advance rather than a round later.
 
 **The browser is told nothing and the owner is told everything, which is ADR-0168's
 existing split rather than a new one.** §5 requires a failed exchange to disclose
@@ -934,8 +960,10 @@ clause lands where is part of the decision.
 
 **What the gateway lane owes in tests, named because two of these are easy to omit.**
 That a value ceases on each of §2's four events and that a refused exchange discloses
-nothing distinguishing them; that the mint act refuses at the ceiling and the exchange
-refuses at the ceiling, separately, since only one of the two is on the request path;
+nothing distinguishing them; that the mint act refuses at the ceiling, which is the reachable
+refusal, and that the exchange refuses at the ceiling driven at the session table's
+own seam rather than through the mint act, since §4 says in terms that no execution
+reaches it that way;
 that a value the gateway could not disclose is not minted, that a previously
 outstanding value still admits after such a failure — the ordering §1 fixes, and the
 one an implementation is most likely to get backwards — and that the gateway keeps
