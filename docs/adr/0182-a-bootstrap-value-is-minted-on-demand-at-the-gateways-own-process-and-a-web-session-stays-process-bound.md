@@ -958,7 +958,8 @@ Plural deliberately: #1429 splits this decision across two lanes, and saying whi
 clause lands where is part of the decision.
 
 > **Normative.** The gateway lane lands §1's mint act, §2's replacement rule, §3's
-> figure and §4's two refusals in `interfaces/gateway/`, `interfaces/cli.py` and
+> figure, §4's single exchange refusal and §4's advisory count on every disclosure,
+> in `interfaces/gateway/`, `interfaces/cli.py` and
 > `core/config.py`. It adds no `core/protocols.py` or `core/types.py` name, and a lane
 > that finds it needs one stops (golden rule 5, ADR-0015 §5).
 
