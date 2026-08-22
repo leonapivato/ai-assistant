@@ -553,13 +553,46 @@ def _report_evidence_checks(session: pytest.Session) -> None:
             _report_that_nothing_was_handed_over(session)
         return
     outcomes = evaluate_for_controller(_merged_evidence(_WORKER_HALVES))
-    failed = False
-    for item in handed_over.values():
-        result = _outcome_for(item, outcomes)
-        failed = failed or result[0] == "failed"
+    reported = [(item, _outcome_for(item, outcomes)) for item in handed_over.values()]
+    if _is_unfiltered(session.config):
+        reported += _for_checks_no_item_claimed(handed_over, outcomes)
+    for item, result in reported:
         session.config.hook.pytest_runtest_logreport(report=_as_report(item, result))
-    if failed:
+    if any(outcome == "failed" for _, (outcome, _message) in reported):
         session.exitstatus = pytest.ExitCode.TESTS_FAILED
+
+
+def _for_checks_no_item_claimed(
+    handed_over: dict[str, _ItemPayload], outcomes: dict[str, CheckOutcome]
+) -> list[tuple[_ItemPayload, CheckOutcome]]:
+    """Fail every check the controller decided that no handed-over item names.
+
+    The mirror of ``_outcome_for``'s unclaimed-nodeid case, and the same rule read
+    from the other end: there it is an item nothing decided, here it is a decision
+    with no item to be reported under. Either way something in the handover has
+    gone missing, and the outcome that would otherwise be silently dropped is a
+    *failing* one about as often as not -- so the loss is reported as the failure
+    rather than the decision it swallowed.
+
+    Only on an unfiltered run, where both checks are collected by construction. A
+    narrowed one may legitimately collect one of them and not the other (``-k`` on
+    a name that matches only one), and then a decision with no item is the ordinary
+    case rather than a fault.
+    """
+    claimed = {nodeid.rpartition("::")[2] for nodeid in handed_over}
+    return [
+        (
+            _ItemPayload(nodeid=f"{_TRIAD_CHECK}::{name}", path=_TRIAD_CHECK, lineno=0, domain=""),
+            (
+                "failed",
+                f"the controller decided {name!r} over the merged record, but no "
+                f"worker handed over an item to report it under -- so its verdict "
+                f"would have been dropped. The item names inside each half of the "
+                f"record are what to look at (ADR-0179 §2).",
+            ),
+        )
+        for name in sorted(set(outcomes) - claimed)
+    ]
 
 
 def _outcome_for(item: _ItemPayload, outcomes: dict[str, CheckOutcome]) -> CheckOutcome:
