@@ -155,6 +155,15 @@ button[disabled] {
   align-items: center;
   gap: 0.5rem;
   margin: 0.6rem 0;
+  /*
+   * Without this the row is `nowrap`, so a line of controls narrower than its
+   * content shrinks each one below its own width — and `body`'s `overflow-wrap:
+   * anywhere` then breaks the label inside it, rendering a button as "Remo ve" and a
+   * quiet window's row as a column of letters. A wrapped row is the same controls on
+   * two lines, which is what a phone needs and what the control surface's own row of
+   * buttons needed already.
+   */
+  flex-wrap: wrap;
 }
 
 .choice label {
@@ -223,7 +232,8 @@ button[disabled] {
 .source-row,
 .grant-row,
 .belief-row,
-.question-row {
+.question-row,
+.notification-row {
   border-top: 1px solid var(--line);
   padding: 0.7rem 0;
 }
@@ -251,4 +261,24 @@ button[disabled] {
  */
 #act-log p {
   margin: 0.3rem 0;
+}
+
+/*
+ * The notification review surface (ADR-0177 §10). A held record's row carries the
+ * same `.notification-summary` and `.notification-detail` the delivery list does, so
+ * one notification reads the same whichever way it reached the page — but the two
+ * lists are separate elements, because they are two objects and the surface says so.
+ *
+ * The tuning panel's headings sit inside a panel that already has one, so they are
+ * quieter than an `h3` and are not a second level of panel.
+ */
+#tuning-body h4 {
+  font-size: 0.9rem;
+  margin: 1.1rem 0 0.3rem;
+}
+
+#tuning-body .choice select,
+#tuning-body input[type="time"],
+#tuning-body input[type="number"] {
+  width: auto;
 }

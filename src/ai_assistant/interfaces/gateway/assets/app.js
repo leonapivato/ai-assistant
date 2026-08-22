@@ -1201,7 +1201,7 @@ const PAGE = 25;
 
 // How far each listing has read. Not a count of what exists: a total is not available
 // and would be a claim this page cannot make.
-const readSoFar = { beliefs: 0, questions: 0, interrupted: 0 };
+const readSoFar = { beliefs: 0, questions: 0, interrupted: 0, notifications: 0 };
 
 // Which run of each listing is current. An offset is only meaningful against the
 // question that produced it, so starting a listing again — a band unchecked, the
@@ -1212,7 +1212,7 @@ const readSoFar = { beliefs: 0, questions: 0, interrupted: 0 };
 // did not ask for and moves the offset the *next* page is read at, which skips
 // beliefs — and a belief with no rendered row has no `Forget` control, so the failure
 // costs the owner a control rather than a little tidiness.
-const runs = { beliefs: 0, questions: 0, interrupted: 0 };
+const runs = { beliefs: 0, questions: 0, interrupted: 0, notifications: 0 };
 
 // A full page says so and offers the next one.
 //
@@ -1782,6 +1782,591 @@ async function forgetQuestion(id, path, offset) {
   }
 }
 
+// --- the notification review surface (ADR-0177 §10; ADR-0130 §6, §7, §9) -----
+//
+// **What everything below acts on is the notification *record*.** The panel further
+// up fills from the delivery stream and is about a *delivery*; these are two objects
+// and the surface says so. Nothing here acknowledges, retires, withdraws or
+// completes a delivery, no `delivery_id` is read or sent, and dismissing a record
+// says nothing about whether it was ever delivered — nor does having received a
+// delivery say anything about the record's disposition.
+
+// How far a class may reach you, named in words. **All three, wherever a choice is
+// offered**: `off` in particular is the act ADR-0130 §6 makes reach "every actionable
+// held record of that class", so a control that could not send it would leave "never
+// tell me this" unreachable from a browser.
+const REACHES = [
+  { value: "off", label: "Never tell me this" },
+  { value: "hold", label: "Keep it for when I next look" },
+  { value: "interrupt", label: "May reach me at the time" },
+];
+
+// What a class takes when no preference names it (ADR-0130 §6). Stated here because
+// the tuning panel lists only the classes the user has set, and a reader has to be
+// told what everything else does.
+const DEFAULT_REACH = "hold";
+
+// What each condition of a ruling means, in words rather than in the values on the
+// wire. Total over the vocabulary: a ruling rendered with a missing explanation
+// would answer "why did you not tell me?" with nothing, and the conditions are
+// exactly what a user would have to change.
+//
+// Each is worded in the one polarity it is ever shown in, which the vocabulary makes
+// safe — the four drop conditions are a DROP's reason and the four interrupt
+// conditions appear only in a HOLD's failed set, where every entry is a condition
+// that did **not** hold.
+const CONDITIONS = {
+  expired: "it had already perished by the time I ruled on it",
+  reach_off: "you have set that class to never tell you",
+  duplicate: "I am already holding the same thing",
+  at_cap: "I am holding as many notifications as I may",
+  perishable: "it names no moment it stops mattering, so nothing makes it urgent",
+  reach_interrupt: "that class is not set to interrupt you",
+  quiet_window: "it fell inside your quiet hours",
+  budget: "your interruption budget for that window was already used up",
+};
+
+const NOTIFICATION_GONE =
+  "That notification was not in the list I just read, so I sent nothing. It may " +
+  "have been forgotten already since the page last showed it.";
+
+// A condition named by a ruling, in words — and never dropped when it is a name this
+// page does not carry. Rendering the bare name says less than the phrase and far
+// more than nothing, which is what omitting it would say.
+function conditionPhrase(name) {
+  return CONDITIONS[name] || name;
+}
+
+// Start the listing again, from the first page.
+async function listNotifications() {
+  runs.notifications += 1;
+  readSoFar.notifications = 0;
+  await readNotifications(false, runs.notifications);
+}
+
+// One page of held notifications, oldest first (ADR-0130 §7).
+//
+// **Everything retained is here, an expired record included.** Expiry ends
+// interruptibility and actionability and deletes nothing, so a listing that hid one
+// would hide a record the owner can still destroy — and destroying it is the only
+// way its subject can be raised afresh.
+async function readNotifications(more, run) {
+  fault(null);
+  if (run !== runs.notifications) {
+    return;
+  }
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const offset = readSoFar.notifications;
+  try {
+    const body = await relay(half, "/notifications", { limit: PAGE, offset });
+    if (body === null || run !== runs.notifications) {
+      return;
+    }
+    const list = el("review-list");
+    if (!more) {
+      clearNode(list);
+    }
+    if (body.notifications.length === 0 && !more) {
+      line(
+        list,
+        "I am holding nothing for you. Nothing reaches you unprompted until you say " +
+          "it may — see what you have decided, above.",
+        "hint"
+      );
+    }
+    body.notifications.forEach((one) => renderHeldNotification(list, one, offset));
+    readSoFar.notifications += body.notifications.length;
+    offerMore(list, body.notifications.length, () => readNotifications(true, run));
+    show("review", true);
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// One held record, with what a person needs in order to act on it.
+//
+// **A record still actionable is offered the two acts ADR-0130 §6 names in one step**
+// — dismissing it, and changing how far its class may reach — and both are offered on
+// a held record and not on an interruption alone, a held one being exactly what a
+// person wants to dispose of or to unblock.
+//
+// **Actionability is read in two parts, and the split is about whose clock decided
+// each.** A dismissal and a reconsideration's ruling-out are stamped by the hub, so
+// either ends the offer whatever any clock here reads; expiry is the limb with
+// nothing stored, and the gateway answers it by asking the record's own predicate at
+// one reading for the whole page.
+function renderHeldNotification(list, record, offset) {
+  const item = document.createElement("div");
+  item.className = "notification-row";
+  line(item, record.summary, "notification-summary");
+  if (record.detail) {
+    line(item, record.detail, "notification-detail");
+  }
+  // The class and the producer are producer-declared text and are presented as what
+  // they are: this says a notification is held and what it is about, never that the
+  // assistant vouches for it.
+  line(item, `Class: ${record.notification_class} (noticed by ${record.producer})`, "hint");
+  renderRuling(item, record);
+  line(item, `Noticed: ${record.noticed_at}`, "hint");
+  renderExpiry(item, record);
+  offerNotificationActs(item, record, offset);
+  list.appendChild(item);
+}
+
+// What was decided about one record and why.
+//
+// A held record is explained by its **whole** failed set rather than by its reason
+// alone: the reason is the set's first member, so naming it by itself would answer
+// with one of several true answers and hide the rest.
+function renderRuling(item, record) {
+  if (record.kind === "interrupt") {
+    line(item, "Ruled: to reach you at the time", "hint");
+  } else if (record.kind === "hold") {
+    line(item, "Ruled: held for when you next look", "hint");
+  } else {
+    line(item, `Ruled: ruled out — ${conditionPhrase(record.reason)}`, "hint");
+  }
+  record.failed.forEach((condition) => {
+    line(item, `Not now, because: ${conditionPhrase(condition)}`, "hint");
+  });
+  if (record.dismissed_at) {
+    line(item, `Dismissed: ${record.dismissed_at}`, "hint");
+  }
+  if (record.dropped_at) {
+    line(item, `Ruled out: ${record.dropped_at}`, "hint");
+  }
+}
+
+// Which side of its expiry a record is on (ADR-0130 §7), from the gateway's own
+// answer rather than from a comparison restated here. A record that declares no
+// moment has not perished and never will, which is a third state and not the absence
+// of the other two.
+function renderExpiry(item, record) {
+  if (record.expires_at === null) {
+    line(item, "Expires: never — which is why it is held rather than urgent", "hint");
+    return;
+  }
+  if (record.expired) {
+    line(
+      item,
+      `Expired: ${record.expires_at} — it is kept and readable, and it will not reach you`,
+      "notice"
+    );
+    return;
+  }
+  line(item, `Expires: ${record.expires_at}`, "hint");
+}
+
+function offerNotificationActs(item, record, offset) {
+  const actionable = !record.dismissed_at && !record.dropped_at && !record.expired;
+  if (actionable) {
+    const dismiss = document.createElement("button");
+    dismiss.type = "button";
+    dismiss.textContent = "Dismiss";
+    dismiss.addEventListener("click", () => dismissNotification(record.id));
+    item.appendChild(dismiss);
+  }
+  const destroy = document.createElement("button");
+  destroy.type = "button";
+  destroy.textContent = "Forget";
+  destroy.addEventListener("click", () => forgetNotification(record.id, offset));
+  item.appendChild(destroy);
+  // The second of the two acts §6 says a surface rendering one should offer, on the
+  // record's own class. It is offered whatever the ruling, because the setting is
+  // about the class and not about this record — and a record whose failed set names
+  // the perishable condition is reached by no setting at all, which the line above
+  // has already said in words.
+  item.appendChild(
+    reachControl(
+      `How far may "${record.notification_class}" reach you?`,
+      record.notification_class,
+      null
+    )
+  );
+}
+
+// Deal with one notification and keep the record (ADR-0130 §9).
+//
+// **This is not an acknowledgement.** What ends is the record's actionability; it
+// stays readable and stays in the export, and whether it ever reached a device is a
+// different question about a different object.
+async function dismissNotification(id) {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const done = await relay(half, "/notification/dismiss", { notification_id: id });
+    if (done === null) {
+      return;
+    }
+    if (!done.dismissed) {
+      fault(
+        "There was nothing actionable by that id to dismiss — it may have been " +
+          "dismissed, ruled out or expired already."
+      );
+    }
+    await listNotifications();
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// Destroy one notification, so its subject can be raised again (ADR-0130 §9).
+//
+// **The confirmation here is not ADR-0073 §5's ceremony and does not claim to be.**
+// That ceremony binds a belief, and ADR-0177 §5 carries it to `forget`,
+// `forget_question` and `forget_conversation` and stops there — a notification is not
+// a belief of any band. What this is, is a plain confirmation of a destructive act,
+// over a record re-read immediately before it is offered so that what is destroyed is
+// something the page has just seen rather than something it last saw minutes ago.
+async function forgetNotification(id, offset) {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const body = await relay(half, "/notifications", { limit: PAGE, offset });
+    if (body === null) {
+      return;
+    }
+    const record = body.notifications.find((one) => one.id === id);
+    if (record === undefined) {
+      fault(NOTIFICATION_GONE);
+      await listNotifications();
+      return;
+    }
+    const asked = window.confirm(
+      `About to destroy this notification.\n\n${record.summary}\n\n` +
+        `Class: ${record.notification_class} (noticed by ${record.producer})\n` +
+        `Noticed: ${record.noticed_at}\n\n` +
+        "This destroys the record: it leaves your export, and the same thing can be " +
+        "raised afresh afterwards. To deal with it and keep the record, dismiss it " +
+        "instead. Neither act says anything about whether it reached a device."
+    );
+    if (!asked) {
+      return;
+    }
+    const done = await relay(half, "/notification/forget", { notification_id: id });
+    if (done === null) {
+      return;
+    }
+    await listNotifications();
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// --- the standing settings (ADR-0130 §6, ADR-0177 §10) -----------------------
+//
+// **A read-modify-write, treated as one.** Every control below re-reads the whole
+// value, changes the one thing it names, sends the whole value back, and renders
+// what the call **returned** rather than what it sent. The write replaces what is
+// held rather than merging into it, so a form that assembled a partial value from a
+// read taken some time ago would silently revert a setting — and an act's outcome is
+// a fact about that act, where what stands is a fact only the hub can state.
+
+async function listTuning() {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const body = await relay(half, "/notification/preferences", {});
+    if (body === null) {
+      return;
+    }
+    renderTuning(body.preferences);
+    show("tuning", true);
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// One act on the standing settings: read it whole, change the one thing named, write
+// it whole, and render what came back.
+async function writePreferences(change) {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const read = await relay(half, "/notification/preferences", {});
+    if (read === null) {
+      return;
+    }
+    const written = await relay(
+      half,
+      "/notification/preferences/set",
+      change(read.preferences)
+    );
+    if (written === null) {
+      return;
+    }
+    renderTuning(written.preferences);
+    show("tuning", true);
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// The whole value with one class's reach changed, in place where the class is
+// already named and appended where it is not. Nothing else is touched.
+function withReach(held, notificationClass, reach) {
+  const named = held.reaches.some((row) => row.notification_class === notificationClass);
+  const reaches = held.reaches.map((row) =>
+    row.notification_class === notificationClass
+      ? { notification_class: notificationClass, reach }
+      : row
+  );
+  if (!named) {
+    reaches.push({ notification_class: notificationClass, reach });
+  }
+  return { ...held, reaches };
+}
+
+// Minutes since local midnight, as the wire carries them, rendered as a clock face.
+function clockFace(minutes) {
+  const hours = Math.floor(minutes / 60);
+  return `${String(hours).padStart(2, "0")}:${String(minutes % 60).padStart(2, "0")}`;
+}
+
+// The other direction: what an `<input type="time">` holds, or `null` where it holds
+// nothing readable. A blank field is not an hour and is not read as midnight.
+function minuteOfDay(value) {
+  const parts = /^(\d{2}):(\d{2})$/.exec(value);
+  if (parts === null) {
+    return null;
+  }
+  return Number(parts[1]) * 60 + Number(parts[2]);
+}
+
+// One reach chooser, carrying every member of the vocabulary and no proper subset.
+// `current` is the level in force where the caller knows it, and `null` where the
+// control sits beside a record rather than beside a setting — there the page has not
+// read what the class is set to, and pre-selecting a level would state a setting it
+// has not read back.
+function reachControl(label, notificationClass, current) {
+  const wrapper = document.createElement("p");
+  wrapper.className = "choice";
+  const caption = document.createElement("label");
+  caption.textContent = label;
+  const chooser = document.createElement("select");
+  if (current === null) {
+    const unread = document.createElement("option");
+    unread.value = "";
+    unread.textContent = "Choose a level";
+    chooser.appendChild(unread);
+  }
+  REACHES.forEach((one) => {
+    const option = document.createElement("option");
+    option.value = one.value;
+    option.textContent = one.label;
+    option.selected = one.value === current;
+    chooser.appendChild(option);
+  });
+  chooser.addEventListener("change", () => {
+    if (chooser.value === "") {
+      return;
+    }
+    writePreferences((held) => withReach(held, notificationClass, chooser.value));
+  });
+  wrapper.appendChild(caption);
+  wrapper.appendChild(chooser);
+  return wrapper;
+}
+
+function renderTuning(preferences) {
+  const body = el("tuning-body");
+  clearNode(body);
+  renderReaches(body, preferences);
+  renderQuietWindows(body, preferences);
+  renderBudget(body, preferences);
+}
+
+function renderReaches(body, preferences) {
+  const heading = document.createElement("h4");
+  heading.textContent = "How far each class may reach you";
+  body.appendChild(heading);
+  if (preferences.reaches.length === 0) {
+    line(body, "You have set none, so every class is held for when you next look.", "hint");
+  }
+  preferences.reaches.forEach((row) => {
+    body.appendChild(reachControl(row.notification_class, row.notification_class, row.reach));
+  });
+  // The label is used as it is written. Case-folding it to fit mid-sentence turned
+  // "Keep it for when I next look" into "keep it for when i next look", which is a
+  // rendering deciding how a word is spelled — so the sentence is built around the
+  // label rather than the label bent to fit the sentence.
+  line(
+    body,
+    `A class you have not set takes the default — ${
+      REACHES.find((one) => one.value === DEFAULT_REACH).label
+    }.`,
+    "hint"
+  );
+  const named = document.createElement("input");
+  named.type = "text";
+  named.id = "reach-class";
+  named.placeholder = "A class, as a notification above names it";
+  const caption = document.createElement("label");
+  caption.textContent = "Set a class you have not set before";
+  caption.htmlFor = "reach-class";
+  const chooser = document.createElement("select");
+  REACHES.forEach((one) => {
+    const option = document.createElement("option");
+    option.value = one.value;
+    option.textContent = one.label;
+    chooser.appendChild(option);
+  });
+  const save = document.createElement("button");
+  save.type = "button";
+  save.textContent = "Set";
+  save.addEventListener("click", () => {
+    if (named.value.trim() === "") {
+      fault("Name the class to set. Every notification above prints its own.");
+      return;
+    }
+    writePreferences((held) => withReach(held, named.value, chooser.value));
+  });
+  const form = document.createElement("div");
+  form.className = "scope-form";
+  form.appendChild(caption);
+  form.appendChild(named);
+  form.appendChild(chooser);
+  form.appendChild(save);
+  body.appendChild(form);
+}
+
+function renderQuietWindows(body, preferences) {
+  const heading = document.createElement("h4");
+  heading.textContent = "Hours during which nothing interrupts";
+  body.appendChild(heading);
+  if (preferences.quiet_windows.length === 0) {
+    line(body, "None, so no hour is quiet.", "hint");
+  }
+  preferences.quiet_windows.forEach((quiet, index) => {
+    const row = document.createElement("p");
+    row.className = "choice";
+    const said = document.createElement("span");
+    // Read in your own timezone, and the endpoints carry none: a quiet window is a
+    // statement about the user's day.
+    said.textContent = `${clockFace(quiet.start)} to ${clockFace(quiet.end)}${
+      quiet.start > quiet.end ? ", crossing midnight" : ""
+    }`;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "Remove";
+    remove.addEventListener("click", () => {
+      writePreferences((held) => ({
+        ...held,
+        quiet_windows: held.quiet_windows.filter((_, at) => at !== index),
+      }));
+    });
+    row.appendChild(said);
+    row.appendChild(remove);
+    body.appendChild(row);
+  });
+  body.appendChild(quietWindowForm());
+}
+
+function quietWindowForm() {
+  const form = document.createElement("div");
+  form.className = "scope-form";
+  const caption = document.createElement("label");
+  caption.textContent = "Add quiet hours (they may cross midnight)";
+  const from = document.createElement("input");
+  from.type = "time";
+  from.id = "quiet-from";
+  const to = document.createElement("input");
+  to.type = "time";
+  to.id = "quiet-to";
+  const add = document.createElement("button");
+  add.type = "button";
+  add.textContent = "Add";
+  add.addEventListener("click", () => {
+    const start = minuteOfDay(from.value);
+    const end = minuteOfDay(to.value);
+    if (start === null || end === null) {
+      fault("Give both an hour to start and an hour to end.");
+      return;
+    }
+    // Refused here rather than sent, because the refusal is about what was typed and
+    // a person can act on it: a window whose endpoints are the same minute is
+    // unreadable as either "nothing" or "everything", and a setting whose meaning a
+    // reader has to guess at silently stops every interruption.
+    if (start === end) {
+      fault("A quiet window has to start and end at different times.");
+      return;
+    }
+    writePreferences((held) => ({
+      ...held,
+      quiet_windows: [...held.quiet_windows, { start, end }],
+    }));
+  });
+  form.appendChild(caption);
+  form.appendChild(from);
+  form.appendChild(to);
+  form.appendChild(add);
+  return form;
+}
+
+function renderBudget(body, preferences) {
+  const heading = document.createElement("h4");
+  heading.textContent = "How often I may interrupt you";
+  body.appendChild(heading);
+  const hours = preferences.budget_window_seconds / 3600;
+  line(
+    body,
+    `${preferences.interruption_budget} interruption(s) per rolling ${hours} hour(s).` +
+      (preferences.interruption_budget === 0
+        ? " Zero means never — it is a setting, not a fault."
+        : ""),
+    "hint"
+  );
+  const form = document.createElement("div");
+  form.className = "scope-form";
+  const caption = document.createElement("label");
+  caption.textContent = "Interruptions per rolling window";
+  caption.htmlFor = "budget";
+  const count = document.createElement("input");
+  count.type = "number";
+  count.id = "budget";
+  count.min = "0";
+  count.step = "1";
+  count.value = String(preferences.interruption_budget);
+  const save = document.createElement("button");
+  save.type = "button";
+  save.textContent = "Save";
+  save.addEventListener("click", () => {
+    const asked = Number(count.value);
+    if (!Number.isInteger(asked) || asked < 0) {
+      fault("Give a whole number of interruptions, zero or more.");
+      return;
+    }
+    writePreferences((held) => ({ ...held, interruption_budget: asked }));
+  });
+  form.appendChild(caption);
+  form.appendChild(count);
+  form.appendChild(save);
+  body.appendChild(form);
+  // The window itself is on no control here and travels untouched: it is one of the
+  // three settings ADR-0130 §6 holds, the surface writes the value whole, and a page
+  // that dropped it from what it sends would reset it on every save.
+}
+
 // --- looking over a conversation (ADR-0077 §8) -------------------------------
 //
 // The passive half of accumulation, and it is deliberately explicit: nothing
@@ -1866,6 +2451,8 @@ const CONTROL_PANELS = [
   "acts",
   "beliefs",
   "questions",
+  "review",
+  "tuning",
   "observation",
 ];
 
@@ -1910,6 +2497,8 @@ el("beliefs-button").addEventListener("click", listBeliefs);
 });
 el("questions-button").addEventListener("click", listQuestions);
 el("observe-button").addEventListener("click", observe);
+el("review-button").addEventListener("click", listNotifications);
+el("tuning-button").addEventListener("click", listTuning);
 
 stopWatching();
 if (headerHalf() === null) {
