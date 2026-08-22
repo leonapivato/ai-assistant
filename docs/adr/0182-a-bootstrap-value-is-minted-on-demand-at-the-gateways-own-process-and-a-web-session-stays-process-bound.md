@@ -172,9 +172,11 @@ motion.
 > sockets and asyncio signal dispositions — `service/transport.py` binds the hub's
 > listener with `asyncio.start_unix_server` and `service/hub.py` installs its stop
 > dispositions with `loop.add_signal_handler` — so a platform on which `SIGUSR1`
-> cannot be installed is one that runs no hub, and therefore one on which a gateway
-> has nothing to serve. No lane may cite that clause toward a second mint act, a
-> request-borne mint, or a gateway running without a hub.
+> cannot be installed runs no hub of this system, and a gateway there reaches no
+> assistant however many browsers it admits. No lane may cite that clause toward a
+> second mint act, toward a request-borne mint, or toward any claim that a gateway
+> whose hub is merely **unreachable** admits nobody: ADR-0168 §9 requires the
+> opposite, and §9 of this ADR leaves it untouched.
 
 > **Normative.** **No request on any listener mints a bootstrap value.** ADR-0168
 > §3's two pre-session exceptions keep their extent and gain no third; ADR-0168
@@ -230,10 +232,16 @@ re-entry unreachable on a platform without `SIGUSR1`, on the ground that
 supplies. That comment is about a dependency's reach and not about this system's:
 the hub's own listener is an `AF_UNIX` socket whose peer credentials ADR-0084 §1
 reads from the kernel, and the hub installs signal dispositions unconditionally, so
-the arrangement in question has no hub in it. A gateway with no hub serves ADR-0168
-§9's hub-down answer and admits nobody to anything, which is why §5's re-entry claim
-and the Consequences' keystroke are claims about the platform this system runs on
-rather than about every platform Python does. Where that ever stops being true, the
+the arrangement in question is one **no hub of this system can be started in** — not
+one whose hub is temporarily down. The difference matters and an earlier draft of
+this paragraph elided it: ADR-0168 §9 requires the gateway to start and serve
+"whether or not the hub is reachable", the bootstrap exchange reaches the session
+table and not the hub, and a browser admitted while the hub is down is admitted
+exactly as one admitted while it is up — it simply gets §9's legible transport
+failure when it asks for something. Adversarial review found the over-claim on the
+second round. What survives it is the narrower fact that carried the argument: §5's
+re-entry claim and the Consequences' keystroke are claims about the platform this
+system runs on rather than about every platform Python does. Where that ever stops being true, the
 answer is a decision about this system's platform and not a second mint act bolted
 onto this one.
 
@@ -308,9 +316,14 @@ from ADR-0084 §3 and ADR-0083 §7 and applied by ADR-0175 §8 to its own figure
 
 > **Normative.** It is measured on a **monotonic** elapsed-time source — one the
 > system clock being moved in either direction does not affect — and a value that
-> has ceased is destroyed through the same deferral seam ADR-0168 §4's continuous
-> destruction already uses, so a bootstrap value and a session do not age on two
-> different clocks.
+> has ceased is destroyed continuously, through the deferral seam ADR-0168 §4's own
+> continuous destruction already uses.
+
+> **Normative.** That source is **this figure's alone**. ADR-0168 §4's session
+> bounds and ADR-0168 §8's two session figures are untouched, this ADR names no
+> elapsed-time source for them, and no lane may read the clause above as having
+> changed how a session's expiry is decided or as obliging one to align with the
+> other.
 
 > **Normative.** No load-time check relates it to `gateway_session_ttl`,
 > `gateway_session_idle_timeout` or any other figure, and no lane adds one. It
@@ -344,14 +357,25 @@ exactly such a duration — measured on the wall clock, an hour's step back keep
 ticket admitting for seventy real minutes, and a step forward kills it on the spot —
 so the clause above names the source instead of leaving it to be inferred, and binds
 the destruction to the seam ADR-0168 §4 already spends. Adversarial review found it
-on the first round. **What is deliberately not decided here** is whether ADR-0168
-§8's `gateway_session_ttl` and `gateway_session_idle_timeout` should carry the same
-sentence: they are exposed to the same hazard, the shipped gateway already defers
-their destruction through `asyncio.AbstractEventLoop.call_later`, which is
-monotonic, and requiring the source in text for one figure while two ratified
-figures on the same object leave it unstated is the kind of half-answer §9 exists to
-refuse. That is a change to a ratified decision on a subject wider than this lane's,
-and it is filed rather than taken (#1439).
+on the first round.
+
+**The two figures beside it are on a different clock, and this decision says so
+rather than claiming they are not.** An earlier draft of the clause above added "so
+a bootstrap value and a session do not age on two different clocks", which is false,
+and both lenses found it on the second round. `SessionTable` **decides** expiry from
+its injected wall-clock `now` — `_expired` compares that instant against
+`expires_at` and against the idle bound, and `_rearm` computes its delay from it —
+and uses `call_later` only to schedule the destruction. So a forward step of the
+system clock can end a live session at once while an equally old bootstrap value
+runs its full monotonic ten minutes. That divergence is real, it is a property of a
+ratified decision this lane may not change, and the honest move is to bound the new
+figure correctly, say in terms that the clause reaches nothing else, and file the
+wider question. **What is deliberately not decided here** is whether ADR-0168 §8's
+`gateway_session_ttl` and `gateway_session_idle_timeout` should carry the same
+sentence. Requiring the source in text for one figure while two ratified figures on
+the same object leave it unstated is a half-answer — but it is a better half than
+putting the new figure on the clock that produced the hazard, and it is filed rather
+than taken (#1439).
 
 **The clock's origin is named because #1329 asked which one it is.** "Mint time?
 Disclosure time?" — mint, and the two are separated by the width of one act, so
@@ -855,9 +879,12 @@ differently, or read one of its clauses more widely than it now holds?
   civil-instant contract which that ADR says in terms "should not be stretched to"
   elapsed duration, so naming a different source neither widens `Clock` nor narrows
   it, and no seam of ADR-0026 gains or loses a consumer. A reader holding only
-  ADR-0026 acts identically. Whether ADR-0168 §8's two session figures should carry
-  the same sentence is a change to a ratified decision beyond this lane's subject and
-  is filed as #1439.
+  ADR-0026 acts identically. §3's second clause says in terms that the source is that
+  figure's alone, so ADR-0168 §4's session bounds and §8's two session figures keep the
+  silence they were ratified with and a reader holding only them acts identically too —
+  which is what makes this section's "§4 and §8 unchanged" true rather than asserted.
+  Whether they should carry the same sentence is a change to a ratified decision beyond
+  this lane's subject and is filed as #1439.
 - **ADR-0083 and ADR-0084.** §1 above takes ADR-0083 §4's "a signal that silently does
   nothing is worse than one that is documented as doing nothing" as a principle and
   installs a signal that does something documented; nothing about the hub's dispositions
