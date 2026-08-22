@@ -134,6 +134,19 @@ tells a worker to treat findings as hypotheses; nothing says it of the brief, so
 write it in — **verify the brief's factual claims against the tree before acting
 on them, and report the ones that do not hold.**
 
+**Then check the ones you can check mechanically, before you dispatch.**
+`python3 scripts/brief_check.py <brief>` pulls every `ADR-NNNN`, every section
+reference written against one, every backticked symbol and every backticked path
+out of the brief and reports which of them the checkout does not contain — the
+class of error the paragraph above exists for, answered in seconds rather than by
+the lane an hour in. It reads the working tree, so check out the base the lane
+will branch from first; fix what it reports, or say in the brief why a name is
+one the lane will create. **A clean report is not evidence the brief is right.**
+It says every name resolves, not that the section decides what you claim it
+decides or that the symbol is the one this lane needs — the wrong-section half
+of both failures would have passed it. What it cannot judge it reports as
+unchecked rather than guessing, so read that group too.
+
 The report contract itself lives in `worker.md` — do not restate it in the brief.
 What the brief owes it is **completeness**: a worker treats a missing fence, or a
 missing ADR number where the change needs one, as a STOP rather than as
