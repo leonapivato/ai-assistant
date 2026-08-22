@@ -957,7 +957,10 @@ def _install_and_verify(plan: Plan, commit: str, before_marker: str, before_vers
     def ssh(remote: str) -> list[str]:
         return ssh_command(args.host, args.ssh_user, remote)
 
-    digest = hashlib.sha256(plan.local.read_bytes()).hexdigest()
+    # Streamed: the wheel carries a vendored model (ADR-0024 §4) and is tens of
+    # megabytes today, with no ceiling that says it stays there.
+    with plan.local.open("rb") as wheel_file:
+        digest = hashlib.file_digest(wheel_file, "sha256").hexdigest()
     _run_local(plan.stage())
     _run_local(ssh(plan.make_readable()))
     _run_local(ssh(plan.install()))

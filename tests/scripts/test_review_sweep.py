@@ -164,6 +164,37 @@ def test_a_commit_held_by_a_ref_under_another_name_is_live(tmp_path: Path) -> No
     assert "is held by a ref" in out
 
 
+def test_a_commit_held_only_by_a_tag_is_live(tmp_path: Path) -> None:
+    # "Some ref still holds it" has to mean any ref, not any branch: a tagged
+    # commit is retained whatever became of the branch that carried it.
+    repo = _repo(tmp_path)
+    sha = _branch_with_commit(repo, "gone/lane")
+    git(repo, "tag", "release-x", sha)
+    git(repo, "branch", "-qD", "gone/lane")
+    artifact = _artifact(
+        repo, "a.md", persona="adversarial", branch="gone/lane", sha=sha, tree="t1"
+    )
+
+    status, out, _ = _sweep(repo)
+
+    assert status == 0, out
+    assert "is held by a ref" in out
+    assert artifact.exists()
+
+
+def test_a_tag_is_not_read_as_a_branch_name(tmp_path: Path) -> None:
+    # Tags count for containment and not for the `branch=` lookup, so an artifact
+    # naming a gone branch that happens to share a tag's name is still stale.
+    repo = _repo(tmp_path)
+    git(repo, "tag", "gone/lane")
+    _artifact(repo, "a.md", persona="adversarial", branch="gone/lane", sha="0" * 40, tree="t1")
+
+    status, out, _ = _sweep(repo, "--dry-run")
+
+    assert status == 0, out
+    assert "[stale]" in out
+
+
 def test_an_artifact_with_no_readable_provenance_is_kept(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
     review = repo / ".review"

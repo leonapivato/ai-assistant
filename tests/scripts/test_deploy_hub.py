@@ -536,13 +536,25 @@ def test_an_uncommitted_lockfile_refuses_a_no_deps_install(tmp_path: Path) -> No
         _MODULE._check_drift(_plan(repo, "--allow-dirty"), repo, "HEAD")
 
 
-def test_with_deps_accepts_an_uncommitted_lockfile(tmp_path: Path) -> None:
+def test_with_deps_accepts_an_uncommitted_lockfile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repo = _repo(tmp_path)
     (repo / "uv.lock").write_text("version = 2\n")
+    reads: list[list[str]] = []
 
-    # Reaches the marker read (and therefore the network) rather than refusing.
-    with pytest.raises(_MODULE.DeployError, match=r"ssh|scp"):
-        _MODULE._check_drift(_plan(repo, "--allow-dirty", "--with-deps"), repo, "HEAD")
+    def _record(argv: list[str], **_kwargs: object) -> str:
+        reads.append(argv)
+        return ""
+
+    monkeypatch.setattr(_MODULE, "_run_local", _record)
+
+    # Reaches the marker read rather than refusing — and the read is stubbed,
+    # because a unit test does not contact a host (CONTRIBUTING.md, "Testing").
+    _MODULE._check_drift(_plan(repo, "--allow-dirty", "--with-deps"), repo, "HEAD")
+
+    assert len(reads) == 1
+    assert reads[0][0] == "ssh"
 
 
 def test_allow_dirty_records_the_commit_as_dirty(tmp_path: Path) -> None:
