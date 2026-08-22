@@ -23,7 +23,7 @@ from ai_assistant.interfaces import cli
 from ai_assistant.interfaces.gateway import run_gateway
 from ai_assistant.testing import FakeAssistantEngine
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assistant_env")]
 
 
 def _free_port() -> int:

@@ -54,7 +54,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import EncodableText, Identifier, TurnOutcome
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assistant_env")]
 
 #: The address the remote browser listener binds in these tests. See the module
 #: docstring: a stand-in for an overlay address, applied past the validator.
