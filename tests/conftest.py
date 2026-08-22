@@ -12,6 +12,13 @@ Collection alone is not enough for the same reason, which is why the record is
 built from call-phase reports and the triad check is reordered to run last --
 it is the only test in the suite whose subject is the rest of the suite.
 
+It also holds ``hermetic_assistant_env``, which takes ``ASSISTANT_*`` out of the
+environment for the modules that build ``Settings``. That belongs in a conftest
+rather than in each module because it is a property of the run rather than of any
+one test, and in *this* one because it is the only conftest the corpus has: mypy
+checks ``tests/`` with no ``__init__.py`` anywhere under it, so a second file named
+``conftest.py`` is a duplicate module and fails the gate.
+
 It also registers ``--aged-store-scale``, the one option the leg-7 retrieval
 instrument needs (issue #789). It lives here because ``pytest_addoption`` is
 honoured only in the rootdir conftest, and it is a *volume* switch rather than a
@@ -21,6 +28,7 @@ selection one: both scales run the same tests, so it is deliberately absent from
 
 from __future__ import annotations
 
+import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -85,6 +93,44 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def aged_store_scale(request: pytest.FixtureRequest) -> str:
     """Which volume profile the leg-7 retrieval instrument runs at."""
     return str(request.config.getoption("--aged-store-scale"))
+
+
+#: The prefix ``Settings.model_config`` reads the environment under, matched
+#: case-insensitively because pydantic-settings' loader is (see
+#: ``tests/core/test_env_example.py``): a stray lower-case ``assistant_embedder``
+#: is read exactly as the upper-case name is.
+_SETTINGS_ENV_PREFIX = "ASSISTANT_"
+
+
+@pytest.fixture
+def hermetic_assistant_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Remove every ``ASSISTANT_*`` variable, so the shell cannot change the verdict.
+
+    ``Settings`` reads its fields from the environment, and a test that names some
+    of them in the constructor does **not** thereby pin the rest: the unnamed ones
+    still come from whatever the process was started with. So a test asserting on a
+    default asserts on the developer's shell, and the assertion holds or fails by
+    accident of who ran it (issue #1368). CI is the case that hides this — its
+    environment is bare, so the suite is green there exactly where the exposure
+    would be caught.
+
+    Sweep rather than a list of names, for two reasons. A named list goes stale the
+    moment a field is added, which is the failure mode being fixed rather than a
+    variant of it; and a value that is invalid rather than merely unexpected fails
+    at construction, before the field the test names is ever reached, so the fields
+    a test *does* pin are no protection against it.
+
+    It takes the test's own ``monkeypatch`` rather than opening a context of its
+    own, so that a test which goes on to ``setenv`` one of these names undoes it on
+    the single stack, in order. Two independent stacks can restore in the wrong
+    order and leave the variable deleted for the rest of the session.
+
+    Apply it to a whole module with
+    ``pytestmark = pytest.mark.usefixtures("hermetic_assistant_env")``.
+    """
+    for variable in list(os.environ):
+        if variable.upper().startswith(_SETTINGS_ENV_PREFIX):
+            monkeypatch.delenv(variable, raising=False)
 
 
 @dataclass
