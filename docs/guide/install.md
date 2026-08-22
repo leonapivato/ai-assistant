@@ -13,14 +13,21 @@ It must report **3.14 or newer**. The package declares `requires-python =
 it. If yours is older, install 3.14 — `uv python install 3.14` will do it once
 you have uv (step 2), as will pyenv or your platform's packages.
 
+**Every command below spells that interpreter `python3.14`**, because that is
+what it was called on the machine these commands were run on. If yours answers
+to something else — a plain `python3` that is already 3.14, or a `python3.15` —
+substitute it wherever `python3.14` appears. Only the version matters; the name
+does not.
+
 ## 2. Get the wheel
 
 There is no published release yet. You build the wheel from a source checkout,
 once, and then install the file it produces.
 
-Building needs [uv](https://docs.astral.sh/uv/), which is this project's
-packaging tool and the only prerequisite beyond Python. Its own installer is at
-that link; `pip` will also do it:
+Building needs two things beyond Python: **git**, to get the checkout, and
+[uv](https://docs.astral.sh/uv/), this project's packaging tool. Git comes from
+your platform's packages (`apt install git`, `brew install git`). uv's own
+installer is at the link above; `pip` will also do it:
 
 ```bash
 python3.14 -m pip install uv
