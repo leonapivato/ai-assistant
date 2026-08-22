@@ -129,9 +129,13 @@ satisfactory on another.
 > outcome per test *function*, so a parametrized item requesting the evidence is
 > refused under the clause above as an item nothing can decide — never reported
 > under one of its cases, which would claim a verdict that was not computed for
-> those arguments. `tests/core/test_protocol_triad.py` pins the restriction
-> directly, so it is caught where the check is written rather than only where it
-> is run.
+> those arguments. `tests/core/test_protocol_triad.py` pins this, and the
+> evaluator-coverage rule beside it, against **the collected items the seam
+> itself selects** rather than against this module's function definitions — so
+> both hold for a check written as a method on a `Test…` class, and for one
+> parametrized by a `pytestmark` on its module or class, which are eligible here
+> and invisible to a name-based guard. Caught where the check is written, in
+> either run mode, rather than only where it is run.
 
 This is the one place the arrangement can rot quietly. The items handed over are
 identified by the fixture they request rather than by a list of test names, so a

@@ -230,8 +230,15 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     if deferred:
         items[:] = [item for item in items if not item.nodeid.startswith(_TRIAD_CHECK)] + deferred
 
+    # The seam's eligibility rule, applied once and remembered on every process.
+    # A worker then hands these back; a serial session keeps the list only so the
+    # checks in `test_protocol_triad` can pin the rule against what pytest really
+    # collected, rather than against a name-shaped guess at it.
+    eligible = [item for item in items if _EVIDENCE_FIXTURE in getattr(item, "fixturenames", ())]
+    _EVIDENCE_ITEMS[:] = [item.nodeid for item in eligible]
+
     if _is_worker(config):
-        _hand_evidence_checks_to_the_controller(config, items)
+        _hand_evidence_checks_to_the_controller(config, items, eligible)
 
 
 def _is_satisfactory(report: pytest.TestReport, *, optional: bool) -> bool:
@@ -317,6 +324,16 @@ def triad_evidence() -> TriadEvidence:
 #: The fixture whose presence marks an item as one only the controller can decide.
 _EVIDENCE_FIXTURE = "triad_evidence"
 
+#: Set on every process at collection: the nodeid of each item the seam's own
+#: eligibility rule selects. On a worker these are the items handed over; in a
+#: serial session nothing is handed over and this is kept only so
+#: ``test_protocol_triad`` can pin the seam against what pytest actually
+#: collected. Reading it there rather than introspecting module globals is what
+#: makes the guards see a check written as a class method, or parametrized by a
+#: ``pytestmark`` on its module or class -- shapes a name-based guard misses and
+#: this seam accepts.
+_EVIDENCE_ITEMS: list[str] = []
+
 #: Set on a worker: how to name each item it handed to the controller, in the
 #: three fields a ``TestReport``'s location wants plus the nodeid.
 _HANDED_OVER: list[_ItemPayload] = []
@@ -382,10 +399,9 @@ def _evidence_of(record: _RunRecord) -> TriadEvidence:
 
 
 def _hand_evidence_checks_to_the_controller(
-    config: pytest.Config, items: list[pytest.Item]
+    config: pytest.Config, items: list[pytest.Item], handed_over: list[pytest.Item]
 ) -> None:
     """Deselect the items no worker can decide, and remember how to name them."""
-    handed_over = [item for item in items if _EVIDENCE_FIXTURE in getattr(item, "fixturenames", ())]
     if not handed_over:
         return
     items[:] = [item for item in items if item not in handed_over]

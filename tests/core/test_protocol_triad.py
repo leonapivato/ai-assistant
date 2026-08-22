@@ -1063,6 +1063,30 @@ def test_one_narrowed_worker_makes_the_merged_run_narrowed() -> None:
     assert not conftest._merged_evidence(halves).unfiltered
 
 
+def _evidence_items() -> list[str]:
+    """Every collected item the handover's own rule selects, by nodeid.
+
+    Read out of `tests/conftest.py`, which records it at collection on every
+    process, rather than introspected out of this module's globals. That is the
+    whole point: the seam selects on the fixture an *item* requests, so a check
+    written as a method on a `Test…` class, or parametrized by a `pytestmark` on
+    its module or class, is eligible -- and a guard reading module-level function
+    objects and their own markers would not see either. Same rule, one source.
+
+    An empty list is a failure on an unfiltered run: the rule matching nothing
+    means nothing is handed over, nothing is decided on the controller, and the
+    guards below pin nothing while still passing. On a narrowed run it is the
+    ordinary case, since the checks need not have been collected at all.
+    """
+    items = list(conftest._EVIDENCE_ITEMS)
+    assert items or not conftest._RECORD.unfiltered, (
+        f"this run collected the whole suite, yet no collected item requests "
+        f"{conftest._EVIDENCE_FIXTURE!r} -- so the handover selects nothing, the "
+        f"controller decides nothing, and these guards pin nothing"
+    )
+    return items
+
+
 def test_every_check_that_reads_the_evidence_is_decided_on_the_controller() -> None:
     """The one thing keeping `evaluate_for_controller` in step with the tests.
 
@@ -1071,18 +1095,15 @@ def test_every_check_that_reads_the_evidence_is_decided_on_the_controller() -> N
     line in `evaluate_for_controller` would therefore be collected, deselected,
     and decided by nobody -- so the controller calls an unclaimed nodeid a
     failure, and this test says so before it can happen.
+
+    Keyed by the function part of each nodeid, because that is what
+    `evaluate_for_controller` is keyed by; whether a case suffix should be there
+    at all is the next test's question, not this one's.
     """
     empty = TriadEvidence(honoured={}, opted_out={}, candidacy={}, unfiltered=False)
-    reads_the_evidence = {
-        name
-        for name, obj in globals().items()
-        if name.startswith("test_")
-        and isinstance(obj, FunctionType)
-        and conftest._EVIDENCE_FIXTURE in inspect.signature(obj).parameters
-    }
+    functions = {nodeid.rpartition("::")[2].partition("[")[0] for nodeid in _evidence_items()}
 
-    assert reads_the_evidence, "the check that reads the run record has gone missing"
-    assert reads_the_evidence <= set(evaluate_for_controller(empty))
+    assert functions <= set(evaluate_for_controller(empty))
 
 
 def test_no_check_that_reads_the_evidence_is_parametrized() -> None:
@@ -1093,23 +1114,13 @@ def test_no_check_that_reads_the_evidence_is_parametrized() -> None:
     there (ADR-0179 §2) while passing perfectly well under `uv run pytest`, which
     is the worst way to learn it. The test above pins that every such check has an
     evaluator; this pins that every such check is a shape the evaluator can
-    answer. Both are read off the fixture, so neither can be sidestepped by
-    naming.
+    answer. Both read the collected items, so neither can be sidestepped by where
+    the check is written or by where its marks come from.
     """
-    reads_the_evidence = {
-        name: obj
-        for name, obj in globals().items()
-        if name.startswith("test_")
-        and isinstance(obj, FunctionType)
-        and conftest._EVIDENCE_FIXTURE in inspect.signature(obj).parameters
-    }
     parametrized = sorted(
-        name
-        for name, obj in reads_the_evidence.items()
-        if any(mark.name == "parametrize" for mark in getattr(obj, "pytestmark", ()))
+        nodeid for nodeid in _evidence_items() if "[" in nodeid.rpartition("::")[2]
     )
 
-    assert reads_the_evidence, "the check that reads the run record has gone missing"
     assert not parametrized, (
         f"{', '.join(parametrized)} reads the merged record and is parametrized. The "
         f"controller decides one outcome per function, so each case would be refused "
