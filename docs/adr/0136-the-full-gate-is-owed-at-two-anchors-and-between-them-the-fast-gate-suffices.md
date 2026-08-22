@@ -1,6 +1,6 @@
 # 136. The full gate is owed at two anchors on a branch, and between them the fast gate suffices
 
-- Status: Partially superseded by ADR-0166 (§1's requirement of the whole `pytest` suite at the anchors, and §6's parallel-recipe clause)
+- Status: Partially superseded by ADR-0166 (§1's requirement of the whole `pytest` suite at the anchors, and §6's parallel-recipe clause) and ADR-0180 (§1's closing anchor, in its ordering half)
 - Date: 2026-08-11
 - Partially superseded: 2026-08-20 by
   [ADR-0166](0166-the-parallel-suite-may-serve-as-the-pytest-step-at-both-anchors.md)
@@ -33,6 +33,30 @@
   discretion between the anchors, §3, §4, §5 and §7. Nothing in §1 or §6 is
   rewritten: the clauses above stay legible where they were written, beside this
   note.
+- Partially superseded: 2026-08-22 by
+  [ADR-0180](0180-the-closing-anchor-binds-the-tree-of-the-final-push-and-a-lane-does-not-wait-on-ci-to-flip-ready.md)
+  — **the closing anchor binds the *tree* of the final push rather than an
+  ordering against it, and passes before `just ready`; everything else this ADR
+  decided stands.** One clause is replaced, and only in its ordering half: §1's
+  first normative clause, where *"immediately before the **final push preceding
+  `gh pr ready`**"* forbade running the anchor after that push even on the
+  identical tree. ADR-0180 §1 requires instead that the anchor pass on the tree of
+  the final push, before `just ready`, with the tree byte-for-byte the pushed
+  head's and unmodified while it runs — so the ordering may now overlap CI's own
+  run. A reader holding only this ADR would refuse that overlap, which is
+  ADR-0082 §1's test met, so the record is owed. **This is a supersession and not
+  an amendment** (ADR-0070 §1): the requirement is not reconciled with its own
+  text or with a later fact, it is replaced by a weaker one, so the line takes
+  ADR-0070 §4's leading-token form beside ADR-0166's. Everything else stands as
+  ratified — §1's first anchor, both rebase clauses (which already bound on a
+  *push* rather than on `gh pr ready`), the rule that each anchor is a run on the
+  tree it names, the refusal of a docs-only exemption, §2, §3, §4, §5, §6 and §7.
+  §3 in particular is untouched and is what ADR-0180 §3 restates: a red **final**
+  push is still the failure the closing anchor exists to prevent. What ADR-0180
+  additionally decides — that a lane does not wait on the remote `gate` check
+  before `just ready` — supersedes nothing here, because this ADR never required
+  that wait. Nothing in §1 is rewritten: the clause stays legible where it was
+  written, beside this note.
 - **What this changes and what it does not.** It moves one sentence of ADR-0015's
   `Consequences` — the every-commit full gate — and nothing else. CI's gate is
   untouched (§6), the Definition of Done is untouched, and no Protocol, no
