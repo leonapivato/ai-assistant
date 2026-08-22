@@ -552,6 +552,7 @@ async def test_a_member_left_out_of_a_write_is_refused_rather_than_defaulted(
         pytest.param({"budget_window_seconds": float("inf")}, id="infinite-window"),
         pytest.param({"budget_window_seconds": float("nan")}, id="unreadable-window"),
         pytest.param({"budget_window_seconds": 1e30}, id="unholdable-window"),
+        pytest.param({"budget_window_seconds": 10**310}, id="unfloatable-window"),
     ],
 )
 async def test_a_value_that_will_not_construct_is_the_gateways_own_refusal(
@@ -570,7 +571,10 @@ async def test_a_value_that_will_not_construct_is_the_gateways_own_refusal(
     minute is unreadable as either "nothing" or "everything". Both are refused by the
     core type in every client (ADR-0085 §9), so the gateway could not relay one.
     ``float('nan')`` and the infinities are here because Python's JSON reader accepts
-    all three.
+    all three, and the four-hundred-digit integer is here because the check that
+    catches them converts to ``float`` first: it is well-formed JSON, a value Python
+    holds exactly, and it must arrive as this refusal rather than as an
+    ``OverflowError`` nothing catches.
     """
     async with _harness(_engine()) as one:
         status, answered = await one.whole(
