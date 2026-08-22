@@ -858,11 +858,11 @@ async def test_an_operation_this_gateway_does_not_serve_reaches_nothing(
     **Three different reasons are asserted by one test and they are worth telling
     apart.** ``learn`` is admitted by *nothing*: ADR-0177 §1 leaves it out by name and
     §11 gives it a trigger, so a shape for it here would be the lane inventing an
-    operation. ``resume`` and ``pending_confirmations`` (whose act §8 blocks until
-    #1366 lands) and the connection five are in §1's enumeration of thirty and are
-    **not served by this gateway yet** — they are later lanes'. And
-    ``/dismiss_notification`` names an operation this gateway now *does* serve, at a
-    different path: a shape is a method and a path together (ADR-0168 §6), so a path
+    operation. ``resume`` and ``pending_confirmations`` are in §1's enumeration of
+    thirty and are **not served by this gateway yet** — §8 blocks their surface until
+    ADR-0148 §8's content can be met. And ``/dismiss_notification`` and
+    ``/connected_accounts`` name operations this gateway now *does* serve, at
+    different paths: a shape is a method and a path together (ADR-0168 §6), so a path
     that merely names a served operation is no more admitted than ``/nonsense``.
     Either way the answer is §6's fourth class, which is the property that makes an
     enumeration checkable: a path nothing serves behaves identically to a path
@@ -878,7 +878,7 @@ async def test_an_operation_this_gateway_does_not_serve_reaches_nothing(
 def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() -> None:
     """ADR-0177 §1's enumeration, read off the router.
 
-    Twenty-three of the thirty operations §1 admits are served here, and
+    Twenty-eight of the thirty operations §1 admits are served here, and
     ``next_notification`` — the gateway's **own** poll — is none of them "because no
     browser request resolves to it: the gateway's own poll originates it under
     ADR-0175 §4, no browser request names it, and no browser argument reaches it"
@@ -912,6 +912,11 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "forget_notification",
         "notification_preferences",
         "set_notification_preferences",
+        "connect_account",
+        "reprovision_account",
+        "disconnect_account",
+        "connected_accounts",
+        "recent_connection_acts",
         "delivery-stream",
     }
 

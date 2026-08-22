@@ -2529,9 +2529,8 @@ async function listConnections() {
   }
 }
 
-function renderAccount(list, account) {
-  const item = document.createElement("div");
-  item.className = "connection-row";
+// The three lines every rendering of a live record carries.
+function renderRecordFields(item, account) {
   // The identity is the user-recognisable name they supplied, byte for byte, and it
   // is inserted as text (ADR-0151 §5, ADR-0168 §6).
   line(item, account.identity, "connection-identity");
@@ -2540,8 +2539,31 @@ function renderAccount(list, account) {
   // reported exactly as the store holds it (§4) — never renumbered, and never
   // presented as a count of anything.
   line(item, `Reference: ${account.reference} · revision ${account.revision}`, "hint");
+}
+
+function renderAccount(list, account) {
+  const item = document.createElement("div");
+  item.className = "connection-row";
+  renderRecordFields(item, account);
   offerConnectionActs(item, account);
   list.appendChild(item);
+}
+
+// A record inside the act log, which is a different thing from a row of the listing
+// and is rendered as one.
+//
+// **No act buttons here, and the reason is ADR-0151 §8.** What a disconnection
+// returns is "the live record removed, **as it stood immediately before the removal
+// entry was appended**" — so a row offering `Disconnect` on it would be offering an
+// act on something that no longer exists, and rendering it as a listing row would be
+// this surface presenting an act's result as a statement about the store. The caption
+// is what says which of the two this is.
+function renderActRecord(panel, account, caption) {
+  const item = document.createElement("div");
+  item.className = "connection-row";
+  line(item, caption, "hint");
+  renderRecordFields(item, account);
+  panel.appendChild(item);
 }
 
 // The two acts a row offers. Re-provisioning carries a credential, so it is offered
@@ -2689,7 +2711,13 @@ async function sendConnect(identity, credential, account) {
         credential,
       })
     : await act(half, "/connection/connect", { identity, credential });
-  await reportConnectionAct(panel, half, result, account ? account.reference : null);
+  await reportConnectionAct(
+    panel,
+    half,
+    result,
+    account ? account.reference : null,
+    account ? "The credential was replaced." : "Connected."
+  );
   await listConnections();
 }
 
@@ -2732,7 +2760,13 @@ async function disconnectAccount(account) {
       "notice"
     );
   } else {
-    await reportConnectionAct(panel, half, result, account.reference);
+    await reportConnectionAct(
+      panel,
+      half,
+      result,
+      account.reference,
+      "Disconnected. No live record names any credential for that reference any more."
+    );
   }
   await listConnections();
 }
@@ -2745,12 +2779,25 @@ async function disconnectAccount(account) {
 // ADR-0177 §1 forbids the gateway composing one operation out of two, so the resolve
 // step ADR-0151 §7 prescribes — "read `connected_accounts`, never re-run the act" —
 // is issued from here.
-async function reportConnectionAct(panel, half, result, reference) {
+async function reportConnectionAct(panel, half, result, reference, landed) {
   if (result.outcome === LANDED) {
-    const account = result.body.account;
-    line(panel, "The act completed.", "reply");
-    if (account) {
-      renderAccount(panel, account);
+    // A provisioning act answers under `account` and a disconnection under
+    // `removed`, because they are different answers: one is the record this act
+    // wrote and the other is the record it took away (ADR-0151 §8). Both are worth
+    // rendering, and rendering neither would leave the owner told that something
+    // happened without being told what.
+    const written = result.body.account;
+    const removed = result.body.removed;
+    line(panel, landed, "reply");
+    if (written) {
+      renderActRecord(panel, written, "The record this act wrote:");
+    } else if (removed) {
+      renderActRecord(
+        panel,
+        removed,
+        "The record as it stood immediately before it was removed. It says what was " +
+          "there, and nothing about what is there now:"
+      );
     }
     return;
   }
@@ -2836,8 +2883,14 @@ function renderConnectionAct(list, one) {
   item.className = "connection-row";
   if (one.account === null) {
     line(item, "Disconnected", "connection-identity");
+    line(item, "This act removed the live record for that reference.", "hint");
   } else {
-    line(item, `Connected: ${one.account.identity}`, "connection-identity");
+    line(item, one.account.identity, "connection-identity");
+    // The row carries "the furthest provisioning state that act reached" (ADR-0151
+    // §9), which is a fact about the act and not about the reference now — so it is
+    // introduced as one, and the panel above says no row here states what is
+    // connected.
+    line(item, "A provisioning act. What it left:", "hint");
     line(item, stateWords(one.account.state), "hint");
   }
   line(item, `Reference: ${one.reference} · revision ${one.revision}`, "hint");
