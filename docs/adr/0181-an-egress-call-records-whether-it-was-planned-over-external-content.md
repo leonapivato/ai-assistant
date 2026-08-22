@@ -1,6 +1,6 @@
 # 181. An egress call records whether it was planned over external content, and that fact is the origin the authoriser evaluates
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-23
 - **Decides `core/types.py` surface and one `core/protocols.py` obligation.** One
   boolean field, added to three existing models, and one behavioural clause on
