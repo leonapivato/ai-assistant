@@ -49,6 +49,16 @@ def _asset(name: str) -> str:
     return (_ASSETS / name).read_text(encoding="utf-8")
 
 
+def _markup(name: str) -> str:
+    """One shipped document with its comments removed.
+
+    The comments in that file *name* what it must not carry, for the same reason
+    :func:`_code`'s do — so a check reading the whole file would fail on the prose
+    explaining the rule it enforces.
+    """
+    return re.sub(r"<!--.*?-->", "", _asset(name), flags=re.DOTALL)
+
+
 def _code(name: str) -> str:
     """One shipped script with its comments removed.
 
@@ -418,9 +428,9 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
     two halves ship in one distribution (ADR-0168 §10), so the disagreement would be
     shipped rather than discovered.
 
-    The negative half is what is **not** this lane's: ``learn`` is admitted by
-    nothing (§1, §11), the CONFIRM pair's act is blocked until #1366's contract lands
-    (§8), and the connection five belong to a lane that has not run.
+    The negative half is what is **not** here: ``learn`` is admitted by nothing
+    (§1, §11), and the CONFIRM pair's surface is blocked until ADR-0148 §8's content
+    can be met (§8).
     """
     script = _code("app.js")
 
@@ -446,9 +456,14 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
         '"/notification/forget"',
         '"/notification/preferences"',
         '"/notification/preferences/set"',
+        '"/connection/connect"',
+        '"/connection/reprovision"',
+        '"/connection/disconnect"',
+        '"/connections"',
+        '"/connections/recent"',
     ):
         assert served in script, served
-    for later in ('"/learn"', '"/resume"', '"/pending_confirmations"', '"/connect"'):
+    for later in ('"/learn"', '"/resume"', '"/pending_confirmations"'):
         assert later not in script, later
 
 
@@ -603,6 +618,8 @@ _RELAY_ENTRIES: Final = (
     "forgetNotification",
     "listTuning",
     "writePreferences",
+    "listConnections",
+    "listConnectionLog",
 )
 
 
@@ -1075,3 +1092,198 @@ def test_the_page_reads_the_notification_again_immediately_before_destroying_it(
     assert "body.notifications.find((one) => one.id === id)" in forget
     assert "fault(NOTIFICATION_GONE)" in forget
     assert forget.index("window.confirm") < forget.index('"/notification/forget"')
+
+
+# --- the connection surface (ADR-0177 §3, §4) --------------------------------
+
+
+def test_no_credential_field_ships_in_the_document() -> None:
+    """ADR-0177 §4: "The front end presents no credential field on a page whose own
+    origin is not loopback".
+
+    A field that shipped in `index.html` would be in the DOM of a page served over
+    the overlay whatever hid it — reachable by a password manager, by an extension,
+    and by the owner with the inspector open — so the guarantee is that the document
+    carries exactly one password input and it is the bootstrap value's, which
+    ADR-0168 §5 already governs and which is not a credential.
+    """
+    document = _markup("index.html")
+
+    assert document.count('type="password"') == 1
+    assert 'id="bootstrap-value"' in document
+    assert "credential" not in document.lower()
+    assert "password" not in document.lower().replace('type="password"', "")
+
+
+def test_the_credential_field_is_built_only_on_a_loopback_origin() -> None:
+    """§4's fourth clause: the front end "never presents one it knows the gateway will
+    refuse".
+
+    "The tidy design is one connection page that works everywhere and reports a
+    failure if the gateway refuses — which asks the owner to type a Tier 0 secret into
+    a non-secure page and *then* tells them it was pointless." So the origin is read
+    by the page itself, the form is not offered off loopback, and the input element is
+    created in exactly one function that only a loopback page can reach.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert 'const ON_LOOPBACK = window.location.hostname === "127.0.0.1"' in script
+    assert script.count('type = "password"') == 1
+    assert 'type = "password"' in functions["askCredential"]
+    assert "if (!ON_LOOPBACK) {" in functions["offerConnect"]
+    assert functions["offerConnect"].index("if (!ON_LOOPBACK)") < functions["offerConnect"].index(
+        "createElement"
+    )
+    assert "if (ON_LOOPBACK) {" in functions["offerConnectionActs"]
+
+
+def test_the_connect_form_is_offered_only_after_the_gateway_answered_a_read() -> None:
+    """§4's fourth clause again, for the deployment §3's second clause refuses: a
+    gateway whose own hub is remote serves none of the five, and the listing is what
+    says so. The form is torn down before the read and rebuilt only if it answered."""
+    listing = _functions(_code("app.js"))["listConnections"]
+
+    assert listing.index("clearNode(form)") < listing.index('relay(half, "/connections"')
+    assert listing.index("if (held === null)") < listing.index("offerConnect(form)")
+
+
+def test_the_identity_is_shown_and_confirmed_before_the_credential_is_asked_for() -> None:
+    """§4's fifth clause: "The identity is rendered, and the user's confirmation of it
+    taken, **before** the credential field is presented" — ADR-0149 §4's third answer
+    to a credential pasted into the identity field is precisely that the value is
+    *seen*, and a page rendering it afterwards shows it once the secret has already
+    been typed into the box beside it."""
+    functions = _functions(_code("app.js"))
+
+    assert "askCredential" not in functions["offerConnect"]
+    assert 'type = "password"' not in functions["confirmIdentity"]
+    assert "askCredential(holder, identity, account)" in functions["confirmIdentity"]
+    assert "About to connect this account:" in functions["confirmIdentity"]
+
+
+def test_the_credential_reaches_no_url_and_no_browser_storage() -> None:
+    """§4's first clause: the credential "is placed in no URL, no query string, no
+    fragment, no path segment, no cookie, no response body, no value the gateway
+    writes on a stream, and **no browser storage of any kind**".
+
+    A browser leaks in different places from a terminal — "a URL is written to history
+    and to the referrer, `localStorage` outlives the tab, a form that repopulates on
+    back-navigation holds the value after the page has apparently gone" — so what is
+    asserted is that the two functions holding the value touch none of them, and that
+    the field is emptied and torn down the moment it has been read.
+    """
+    functions = _functions(_code("app.js"))
+    holding = functions["askCredential"] + functions["sendConnect"]
+
+    for leak in (
+        "localStorage",
+        "sessionStorage",
+        "document.cookie",
+        "location",
+        "href",
+        "search",
+        "URLSearchParams",
+        "encodeURIComponent",
+    ):
+        assert leak not in holding, leak
+    assert 'autocomplete = "off"' in functions["askCredential"]
+    assert 'secret.value = ""' in functions["askCredential"]
+    assert functions["askCredential"].index('secret.value = ""') < functions["askCredential"].index(
+        "sendConnect("
+    )
+    assert "clearNode(holder)" in functions["askCredential"]
+
+
+def test_a_pending_record_is_never_rendered_as_something_in_progress() -> None:
+    """ADR-0151 §4: "a surface rendering one says the reference is *not connectable*
+    and that the remedy is to run the act again, and never that the connection is
+    being established, is in progress, or will complete on its own. Nothing is
+    running — ADR-0148 §6 rules an interrupted act's state 'refused rather than
+    reconciled', and the record is inert until a user acts"."""
+    script = _code("app.js")
+    words = _functions(script)["stateWords"]
+
+    assert "Not connectable" in words
+    assert "Connect it again, or disconnect it." in words
+    assert "Nothing is running" in words
+    for promise in ("being established", "is in progress", "will complete"):
+        assert promise not in script, promise
+
+
+def test_a_disconnection_that_removed_nothing_is_reported_as_the_one_thing_it_says() -> None:
+    """ADR-0151 §8: a ``None`` "is **not** a report of a disconnection: no client
+    presents it as one, as a confirmation that a credential was deleted, or as a
+    statement that the reference does not exist. It says one thing — no live record
+    was removed by this call"."""
+    drop = _functions(_code("app.js"))["disconnectAccount"]
+
+    assert "result.body.removed === null" in drop
+    assert "No live record was removed by that call." in drop
+    assert "not a confirmation that a credential was deleted" in drop
+
+
+def test_every_outcome_class_the_contract_names_has_its_own_words() -> None:
+    """ADR-0151 §7 and §8: each condition carries facts a client may not derive from
+    anything else, and ``residual-credential`` in particular means the act
+    **completed** — "no client reports it as a failed connection or a failed
+    disconnection"."""
+    script = _code("app.js")
+    conditions = script[
+        script.index("const CONNECTION_CONDITIONS = {") : script.index(
+            "\n};", script.index("const CONNECTION_CONDITIONS = {")
+        )
+    ]
+
+    for named in (
+        "identity-unusable",
+        "no-such-connection",
+        "provisioning-displaced",
+        "provisioning-incomplete",
+        "provisioning-outcome-unknown",
+        "connection-store-unread",
+        "residual-credential",
+    ):
+        assert f'"{named}"' in conditions, named
+    assert conditions.count("stateKnown: true") == 2
+    assert "The act completed." in conditions
+
+
+def test_an_unread_state_is_resolved_by_a_read_and_never_by_re_running_the_act() -> None:
+    """ADR-0151 §7: the resolution "is to read ``connected_accounts``, never to re-run
+    the act on the assumption it failed", and a read that does not answer leaves the
+    state unread rather than assumed — "the alternative is a client that says 'nothing
+    is connected' because it could not ask".
+
+    The read is the **browser's** own request: ADR-0177 §1 forbids the gateway
+    composing one operation out of two.
+    """
+    after = _functions(_code("app.js"))["stateAfterAct"]
+
+    assert 'relay(half, "/connections", {})' in after
+    assert "CONNECTION_STATE_UNREAD" in after
+    assert "GATEWAY_GONE" not in after
+    assert "/connection/connect" not in after
+
+
+def test_the_page_keeps_the_two_connection_questions_apart() -> None:
+    """ADR-0139 §1 and ADR-0151 §9: "No client derives a reference's current state
+    from this", and neither listing is answered with the other. Two reads, two panels,
+    and neither function calls the other's path."""
+    functions = _functions(_code("app.js"))
+
+    assert "/connections/recent" not in functions["listConnections"]
+    assert '"/connections"' not in functions["listConnectionLog"]
+    assert "connection-log" not in functions["listConnections"]
+
+
+def test_the_log_renders_no_time_and_no_claim_about_what_is_connected() -> None:
+    """ADR-0151 §9: "It carries no instant… no client presents this order as a timing
+    claim, an interval, or a statement about when anything happened", and a removal is
+    the absence of the act's record rather than a third state (ADR-0149 §5)."""
+    row = _functions(_code("app.js"))["renderConnectionAct"]
+
+    assert "one.account === null" in row
+    assert "Disconnected" in row
+    for timing in ("noticed_at", "expires", "Instant"):
+        assert timing not in row, timing
