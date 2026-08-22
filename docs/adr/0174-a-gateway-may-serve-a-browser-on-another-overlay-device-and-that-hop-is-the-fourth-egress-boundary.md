@@ -13,9 +13,12 @@
   performs a mint act at the machine that runs it — the delivery of `SIGUSR1`, so
   the act is not a request and is reachable from neither listener — and at most one
   unexchanged value stands at a time. An unexchanged value gains a clock,
-  `gateway_bootstrap_ttl`, defaulting to ten minutes and running from the mint, so
-  **#1329 is answered**. `gateway_max_sessions` becomes reachable and refuses at two
-  doors, so **#1320 is answered**; both close with that decision's implementing lane.
+  `gateway_bootstrap_ttl`, defaulting to ten minutes and running from the
+  successful disclosure that promotes a candidate to the outstanding value, so
+  **#1329 is answered**. `gateway_max_sessions` becomes reachable and is enforced
+  at the bootstrap exchange, the one act that raises the live session count, with
+  every disclosure carrying the count as advice rather than as a refusal, so
+  **#1320 is answered**; both close with that decision's implementing lane.
   A session's power still ends with the gateway process, so the durable session is
   **refused** rather than granted, and ADR-0172 §2's replacement (d) — the condition
   three ADR-0004 exemptions hang on — is kept.
