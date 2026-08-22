@@ -2428,8 +2428,15 @@ def _seconds(payload: Mapping[str, Any], name: str) -> timedelta:
     **``NaN`` and the infinities are refused explicitly**, because Python's JSON
     reader accepts all three by default: ``timedelta(seconds=float("nan"))`` raises,
     and an infinity would arrive as an ``OverflowError`` from a member that passed
-    every type check. A duration outside ``timedelta``'s own range is refused the
-    same way.
+    every type check.
+
+    **The finiteness test is inside the guard and not before it**, which is the half
+    an earlier version of this got wrong. ``math.isfinite`` converts its argument to
+    a ``float`` first, so a JSON *integer* of four hundred digits — well-formed, and a
+    value Python holds exactly — raises ``OverflowError`` from the check meant to
+    catch the infinities rather than being refused by it. A duration no ``float`` can
+    hold is one ``timedelta`` cannot hold either, so both are refused here together
+    and an oversized integer is an answer rather than a fault of the process.
 
     Args:
         payload: The request's JSON object.
@@ -2445,9 +2452,9 @@ def _seconds(payload: Mapping[str, Any], name: str) -> timedelta:
     value = payload.get(name)
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise _malformed()
-    if not math.isfinite(value) or value <= 0:
-        raise _malformed()
     try:
+        if not math.isfinite(value) or value <= 0:
+            raise _malformed()
         return timedelta(seconds=value)
     except (OverflowError, ValueError) as exc:
         raise _malformed() from exc
