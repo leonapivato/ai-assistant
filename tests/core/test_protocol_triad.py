@@ -23,6 +23,15 @@ Living here it also inherits the gate and CI for free (``uv run pytest``
 already runs in both), and fails as an ordinary test failure naming exactly
 what is missing.
 
+Under ``-n auto`` no single process holds that record: each xdist worker
+accumulates its own, and a contract subclass that passed on one worker is
+invisible to another. So the evidence is split in two -- :func:`static_candidacy`
+computes what a class *would* have to have honoured, where the class objects
+live, and :class:`TriadEvidence` carries the honoured names, which are strings
+and travel. ``tests/conftest.py`` hands each worker's half to the controller,
+merges them there, and asks :func:`evaluate_for_controller` for the verdict
+(ADR-0179).
+
 The predicates below are deliberately strict about *evidence*: a file, a name,
 or a lexical mention is never enough, because each of those was a way past an
 earlier draft of this check (see the negative tests at the bottom).
@@ -58,6 +67,14 @@ type _Outcome = Literal["passed", "failed", "skipped"]
 #: Test class -> the tests on it whose every reported case was honoured, i.e.
 #: passed or opted out of by the contract itself (see tests/conftest.py).
 type CollectedTests = dict[type, frozenset[str]]
+
+#: A recorded test class, named rather than referenced, so that the record can be
+#: built in one process and read in another (see `class_key`).
+type ClassKey = str
+
+#: What one evidence-dependent check decided, spelled as pytest spells an outcome
+#: so that `tests/conftest.py` can report it from a process that never ran a test.
+type CheckOutcome = tuple[_Outcome, str]
 
 _TESTS_ROOT: Final = Path(__file__).resolve().parent.parent
 
@@ -286,31 +303,59 @@ def _suite_declared_tests(suite: type) -> set[str]:
     }
 
 
-def _ran_every_obligation(
-    cls: type, suite: type, honoured: frozenset[str], opted_out: frozenset[str]
-) -> bool:
-    """Report whether ``cls`` honoured every test ``suite`` declares.
+def static_candidacy(cls: type) -> dict[str, frozenset[str]]:
+    """Return, per Protocol, the obligations ``cls`` must honour to bind its fake.
 
-    Enumerating from the suite rather than from what got reported is what makes
-    this exhaustive. A test the subclass suppressed -- overridden with a no-op,
-    rebound to ``None``, hidden behind ``__test__ = False``, or skipped by a
-    mark -- produces no honoured report at all, so a check that only inspects
-    reports cannot notice the obligation went missing.
+    Everything decided here is a property of the class alone; none of it is
+    evidence. A Protocol appears in the result exactly when ``cls``
 
-    An obligation is honoured when it still resolves to the suite's own
-    function object *and* every case pytest reported for it passed, or was one
-    the suite's own body opted out of (see ``tests/conftest.py``).
+    - inherits its conformance suite, and that suite declares tests at all,
+      which an empty ``…Contract`` does not;
+    - still resolves *every* one of the suite's own test functions to the
+      suite's own function object, so neither overriding with a no-op,
+      rebinding to ``None``, nor hiding behind ``__test__ = False`` counts; and
+    - supplies the canonical fake through *every* fixture the suite's tests
+      request and the class supplies, so a real implementation cannot ride
+      along beside it in a second fixture.
 
-    At least one obligation must have been honoured by *passing*: a suite whose
-    obligations are all optional and all skipped has asserted nothing, and must
-    not be able to certify itself.
+    What is left over is the obligation *names*, and whether those actually ran
+    is the one question only the run record answers. Splitting it this way is
+    what lets the check survive a distributed session: the static half is
+    computed in the process that holds the class objects, and only names have to
+    reach the process that holds the whole record (see ``TriadEvidence``).
+
+    Enumerating obligations from the suite rather than from what got reported is
+    what makes the evidence half exhaustive. A test the subclass suppressed
+    produces no honoured report at all, so a check that only inspected reports
+    could not notice the obligation had gone missing.
     """
-    obligations = _suite_declared_tests(suite)
-    honoured_all = all(
-        getattr(cls, name, None) is getattr(suite, name) and name in honoured
-        for name in obligations
-    )
-    return honoured_all and bool(obligations - opted_out)
+    candidacy: dict[str, frozenset[str]] = {}
+    for protocol in _protocol_names():
+        suite = _suite_of(cls, protocol)
+        if suite is None:
+            continue
+        obligations = _suite_declared_tests(suite)
+        if not obligations:
+            continue
+        if any(getattr(cls, name, None) is not getattr(suite, name) for name in obligations):
+            continue
+        if _binds_fake(cls, protocol, _fixtures_requested_by(suite, obligations)):
+            candidacy[protocol] = frozenset(obligations)
+    return candidacy
+
+
+def _honours(
+    obligations: frozenset[str], honoured: frozenset[str], opted_out: frozenset[str]
+) -> bool:
+    """Report whether every obligation ran, and at least one ran by passing.
+
+    An obligation is honoured when every case pytest reported for it passed, or
+    was one the suite's own body opted out of (see ``tests/conftest.py``). At
+    least one must have been honoured by *passing*: a suite whose obligations
+    are all optional and all skipped has asserted nothing, and must not be able
+    to certify itself.
+    """
+    return obligations <= honoured and bool(obligations - opted_out)
 
 
 def _binding_classes(
@@ -318,34 +363,75 @@ def _binding_classes(
 ) -> list[type]:
     """Return the classes that really ran the canonical fake through the suite.
 
-    Every condition closes a way of satisfying the letter of the triad while
-    testing nothing:
-
-    - the suite must declare tests at all, which an empty ``…Contract``
-      does not;
-    - every one of them must have been honoured (see
-      ``_ran_every_obligation``), so neither overriding nor suppressing nor
-      mark-skipping part of the contract counts, and one passing test cannot
-      vouch for nine that never ran; and
-    - the fake must arrive through *every* fixture the suite's tests request
-      and the class supplies, so a real implementation cannot ride along
-      beside it in a second fixture.
+    The class-keyed form of the question ``_protocols_bound`` answers over a
+    merged record. It survives because a caller that still holds the class
+    objects -- this module's own negative tests, which build one and ask about
+    it -- should not have to name them.
     """
-    found = []
-    for cls, honoured_tests in honoured.items():
-        suite = _suite_of(cls, protocol)
-        if suite is None:
-            continue
-        obligations = _suite_declared_tests(suite)
-        if not obligations:
-            continue
-        if not _ran_every_obligation(
-            cls, suite, honoured_tests, (opted_out or {}).get(cls, frozenset())
-        ):
-            continue
-        if _binds_fake(cls, protocol, _fixtures_requested_by(suite, obligations)):
-            found.append(cls)
-    return found
+    opted = opted_out or {}
+    return [
+        cls
+        for cls, honoured_tests in honoured.items()
+        if (obligations := static_candidacy(cls).get(protocol)) is not None
+        and _honours(obligations, honoured_tests, opted.get(cls, frozenset()))
+    ]
+
+
+def class_key(cls: type) -> ClassKey:
+    """Return the name under which ``cls`` is recorded, in any process.
+
+    Module plus qualname, because the record has to survive a process boundary
+    and a class object does not. Only classes pytest *collected* are ever
+    recorded, and pytest collects test classes at module level, so the pair
+    names one class here and the same class in the process that merges the
+    record. (``_binding_classes`` is handed locally defined classes by this
+    module's negative tests; those never cross a boundary and never share a
+    mapping, so the weaker uniqueness of a ``<locals>`` qualname is not load-
+    bearing there.)
+    """
+    return f"{cls.__module__}::{cls.__qualname__}"
+
+
+@dataclass(frozen=True)
+class TriadEvidence:
+    """What a run proved -- one session's, or every worker's of a distributed one.
+
+    Keyed by :func:`class_key` rather than by class object, because the whole
+    point is that it can be built in eight worker processes and read in a ninth.
+    ``candidacy`` is the static half, computed by :func:`static_candidacy` where
+    the class objects live; ``honoured`` and ``opted_out`` are the evidence half,
+    which is names and therefore travels.
+
+    Attributes:
+        honoured: Class key -> the tests on it whose every reported case was
+            satisfactory.
+        opted_out: Class key -> the tests honoured by the suite's own body
+            opting out rather than by passing.
+        candidacy: Class key -> Protocol -> the obligations that class must have
+            honoured for it to count as a binding.
+        unfiltered: Whether the run this evidence came from was the whole suite.
+            A narrowed run proves nothing by an absence, so the checks that read
+            an absence skip on it.
+    """
+
+    honoured: dict[ClassKey, frozenset[str]]
+    opted_out: dict[ClassKey, frozenset[str]]
+    candidacy: dict[ClassKey, dict[str, frozenset[str]]]
+    unfiltered: bool
+
+
+def _protocols_bound(evidence: TriadEvidence) -> set[str]:
+    """Return every Protocol some class really ran the canonical fake through."""
+    bound: set[str] = set()
+    for key, per_protocol in evidence.candidacy.items():
+        honoured = evidence.honoured.get(key, frozenset())
+        opted_out = evidence.opted_out.get(key, frozenset())
+        bound.update(
+            protocol
+            for protocol, obligations in per_protocol.items()
+            if _honours(obligations, honoured, opted_out)
+        )
+    return bound
 
 
 def _missing_parts(
@@ -358,12 +444,22 @@ def _missing_parts(
 
     ``honoured`` may be ``None`` to check only the statically visible parts.
     """
+    bound = None if honoured is None else bool(_binding_classes(protocol, honoured, opted_out))
+    return _missing_given(protocol, declared, bound)
+
+
+def _missing_given(protocol: str, declared: set[str], bound: bool | None) -> tuple[str, ...]:
+    """Return the triad parts ``protocol`` is missing, given the binding verdict.
+
+    ``bound`` is ``None`` where no evidence was consulted, which leaves the
+    binding part unjudged rather than reported missing.
+    """
     missing = []
     if f"{protocol}Contract" not in declared:
         missing.append("suite")
     if _canonical_fake(protocol) is None:
         missing.append("fake")
-    if honoured is not None and not _binding_classes(protocol, honoured, opted_out):
+    if bound is False:
         missing.append("binding")
     return tuple(missing)
 
@@ -416,48 +512,33 @@ def test_every_protocol_has_a_conformance_suite_and_canonical_fake() -> None:
     assert not failures, "\n".join([*failures, "", _TRIAD_RULE])
 
 
-def test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran(
-    honoured_class_tests: CollectedTests,
-    opted_out_class_tests: CollectedTests,
-    run_is_unfiltered: bool,
-) -> None:
-    """Part 3: a subclass really ran each fake through its suite, and passed.
+#: Why each evidence-dependent check declines to decide on a narrowed run. Named
+#: constants because the same sentence has to come out of the test's own frame and
+#: out of `evaluate_for_controller`, and a reader should not be able to tell which
+#: one judged the run.
+_NARROWED_BINDING: Final = (
+    "the run was narrowed (-k, -m, -x, or a path/nodeid argument), so an "
+    "absent binding class proves nothing; the gate runs the full suite"
+)
+_NARROWED_EXEMPTION: Final = "needs a full collection to tell a closed gap from a filtered one"
 
-    This is the part a file-existence check cannot make. The abstract suite
-    collects nothing, so only the binding subclass turns the contract into
-    assertions -- and only executing them turns those assertions into evidence.
-    """
-    if not run_is_unfiltered:
-        pytest.skip(
-            "the run was narrowed (-k, -m, -x, or a path/nodeid argument), so an "
-            "absent binding class proves nothing; the gate runs the full suite"
-        )
+
+def _binding_gaps(evidence: TriadEvidence) -> list[str]:
+    """Return one line per Protocol whose fake no subclass really ran the suite on."""
     declared = _declared_class_names()
-
-    failures = [
+    bound = _protocols_bound(evidence)
+    return [
         _describe(protocol, gaps)
         for protocol in _protocol_names()
-        if (
-            gaps := _unexcused(
-                protocol,
-                _missing_parts(protocol, declared, honoured_class_tests, opted_out_class_tests),
-            )
-        )
+        if (gaps := _unexcused(protocol, _missing_given(protocol, declared, protocol in bound)))
     ]
 
-    assert not failures, "\n".join([*failures, "", _TRIAD_RULE])
 
-
-def test_no_exemption_is_stale(
-    honoured_class_tests: CollectedTests,
-    opted_out_class_tests: CollectedTests,
-    run_is_unfiltered: bool,
-) -> None:
-    """An exemption dies with the gap it describes, so the backlog only shrinks."""
-    if not run_is_unfiltered:
-        pytest.skip("needs a full collection to tell a closed gap from a filtered one")
+def _stale_exemptions(evidence: TriadEvidence) -> list[str]:
+    """Return one line per exemption that has outlived the gap it describes."""
     declared = _declared_class_names()
     known = set(_protocol_names())
+    bound = _protocols_bound(evidence)
 
     failures = []
     for exemption in EXEMPTIONS:
@@ -467,19 +548,76 @@ def test_no_exemption_is_stale(
                 f"core/protocols.py -- drop the entry ({exemption.issue})"
             )
             continue
-        gaps = set(
-            _missing_parts(
-                exemption.protocol, declared, honoured_class_tests, opted_out_class_tests
-            )
-        )
+        gaps = set(_missing_given(exemption.protocol, declared, exemption.protocol in bound))
         if closed := set(exemption.missing) - gaps:
             failures.append(
                 f"{exemption.protocol} is exempted for {sorted(closed)} but that "
                 f"part now exists -- remove it from the exemption and close "
                 f"{exemption.issue}"
             )
+    return failures
+
+
+def test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran(
+    triad_evidence: TriadEvidence,
+) -> None:
+    """Part 3: a subclass really ran each fake through its suite, and passed.
+
+    This is the part a file-existence check cannot make. The abstract suite
+    collects nothing, so only the binding subclass turns the contract into
+    assertions -- and only executing them turns those assertions into evidence.
+    """
+    if not triad_evidence.unfiltered:
+        pytest.skip(_NARROWED_BINDING)
+
+    failures = _binding_gaps(triad_evidence)
+
+    assert not failures, "\n".join([*failures, "", _TRIAD_RULE])
+
+
+def test_no_exemption_is_stale(triad_evidence: TriadEvidence) -> None:
+    """An exemption dies with the gap it describes, so the backlog only shrinks."""
+    if not triad_evidence.unfiltered:
+        pytest.skip(_NARROWED_EXEMPTION)
+
+    failures = _stale_exemptions(triad_evidence)
 
     assert not failures, "\n".join(failures)
+
+
+def evaluate_for_controller(evidence: TriadEvidence) -> dict[str, CheckOutcome]:
+    """Decide the evidence-dependent checks outside any test frame, by test name.
+
+    ``tests/conftest.py`` calls this on the controller of a distributed session,
+    which is the only process that ever holds the whole record: each worker holds
+    a partial one, hands it over as it leaves, and the controller merges them.
+    The outcome comes back as pytest spells one, and the controller reports it
+    under the nodeid the workers gave up -- so the two checks are decided over the
+    same evidence and read the same in the summary either way.
+
+    Keyed by the test function's own ``__name__``, and the caller treats a nodeid
+    with no entry here as a failure. That is the one thing keeping this in step
+    with the tests above: an evidence-dependent check added without a line here
+    fails loudly on the first distributed run rather than quietly not running.
+    """
+    if not evidence.unfiltered:
+        return {
+            test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran.__name__: (
+                "skipped",
+                _NARROWED_BINDING,
+            ),
+            test_no_exemption_is_stale.__name__: ("skipped", _NARROWED_EXEMPTION),
+        }
+    binding = _binding_gaps(evidence)
+    stale = _stale_exemptions(evidence)
+    return {
+        test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran.__name__: (
+            ("failed", "\n".join([*binding, "", _TRIAD_RULE])) if binding else ("passed", "")
+        ),
+        test_no_exemption_is_stale.__name__: (
+            ("failed", "\n".join(stale)) if stale else ("passed", "")
+        ),
+    }
 
 
 def test_no_new_protocol_can_be_exempted() -> None:
@@ -850,3 +988,109 @@ def _suite_and_binding(*, overridden: tuple[str, ...]) -> tuple[type, type]:
     # `_declared_class_names()` (see `_EmptySuite`).
     _Suite.__name__ = "MemoryStoreContract"
     return _Suite, _Bound
+
+
+# ---------------------------------------------------------------------------
+# The merge -- what makes the check survive a distributed run (ADR-0179)
+# ---------------------------------------------------------------------------
+
+
+def _half(
+    *,
+    reported: dict[str, list[str]],
+    unsatisfactory: dict[str, list[str]] | None = None,
+    candidacy: dict[str, dict[str, list[str]]] | None = None,
+    unfiltered: bool = True,
+) -> conftest._TriadPayload:
+    """Build one worker's half of a record, as it would arrive on the controller."""
+    keys = set(reported) | set(unsatisfactory or {}) | set(candidacy or {})
+    return conftest._TriadPayload(
+        classes={
+            key: conftest._ClassPayload(
+                reported=reported.get(key, []),
+                unsatisfactory=(unsatisfactory or {}).get(key, []),
+                opted_out=[],
+                candidacy=(candidacy or {}).get(key, {}),
+            )
+            for key in keys
+        },
+        items=[],
+        unfiltered=unfiltered,
+    )
+
+
+_SPLIT_CANDIDACY = {"m::TestThing": {"MemoryStore": ["test_one", "test_two"]}}
+
+
+def test_a_binding_no_single_worker_saw_whole_is_seen_after_the_merge() -> None:
+    """The property the whole arrangement exists for.
+
+    With the default distribution one class's tests are split across workers, so
+    each worker holds part of one binding's obligations and none holds the
+    binding. Union them and the binding is there.
+    """
+    halves = [
+        _half(reported={"m::TestThing": ["test_one"]}, candidacy=_SPLIT_CANDIDACY),
+        _half(reported={"m::TestThing": ["test_two"]}, candidacy=_SPLIT_CANDIDACY),
+    ]
+
+    assert not _protocols_bound(conftest._merged_evidence(halves[:1]))
+    assert _protocols_bound(conftest._merged_evidence(halves)) == {"MemoryStore"}
+
+
+def test_a_case_that_failed_on_one_worker_vetoes_the_same_name_from_another() -> None:
+    """A parametrized obligation reports once per case, and the cases can split.
+
+    So `honoured` has to be derived after the union, not unioned itself: one
+    worker's passing case must not cover another's failing one.
+    """
+    halves = [
+        _half(reported={"m::TestThing": ["test_one", "test_two"]}, candidacy=_SPLIT_CANDIDACY),
+        _half(
+            reported={"m::TestThing": ["test_two"]},
+            unsatisfactory={"m::TestThing": ["test_one"]},
+            candidacy=_SPLIT_CANDIDACY,
+        ),
+    ]
+
+    assert not _protocols_bound(conftest._merged_evidence(halves))
+
+
+def test_one_narrowed_worker_makes_the_merged_run_narrowed() -> None:
+    """Every worker takes the same argv, so this is belt and braces -- and cheap."""
+    halves = [_half(reported={}, unfiltered=True), _half(reported={}, unfiltered=False)]
+
+    assert not conftest._merged_evidence(halves).unfiltered
+
+
+def test_every_check_that_reads_the_evidence_is_decided_on_the_controller() -> None:
+    """The one thing keeping `evaluate_for_controller` in step with the tests.
+
+    Under xdist the items requesting `triad_evidence` are deselected on every
+    worker and reported from the controller instead. A check added here without a
+    line in `evaluate_for_controller` would therefore be collected, deselected,
+    and decided by nobody -- so the controller calls an unclaimed nodeid a
+    failure, and this test says so before it can happen.
+    """
+    empty = TriadEvidence(honoured={}, opted_out={}, candidacy={}, unfiltered=False)
+    reads_the_evidence = {
+        name
+        for name, obj in globals().items()
+        if name.startswith("test_")
+        and isinstance(obj, FunctionType)
+        and conftest._EVIDENCE_FIXTURE in inspect.signature(obj).parameters
+    }
+
+    assert reads_the_evidence, "the check that reads the run record has gone missing"
+    assert reads_the_evidence <= set(evaluate_for_controller(empty))
+
+
+def test_a_narrowed_distributed_run_decides_nothing_and_says_so() -> None:
+    """Narrowing has to mean the same thing from the controller as from a test."""
+    empty = TriadEvidence(honoured={}, opted_out={}, candidacy={}, unfiltered=False)
+
+    assert set(evaluate_for_controller(empty)) == {
+        test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran.__name__,
+        test_no_exemption_is_stale.__name__,
+    }
+    assert all(outcome == "skipped" for outcome, _ in evaluate_for_controller(empty).values())
