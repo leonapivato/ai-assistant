@@ -1,7 +1,30 @@
 # 166. The parallel suite may serve as the `pytest` step at both anchors
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0179 (§1's carve-out for the file `just test-fast` deselects, §3's accepted risk, and §4's serial-CI clause)
 - Date: 2026-08-20
+- Partially superseded: 2026-08-22 by
+  [ADR-0179](0179-the-triad-check-reads-a-distributed-runs-merged-record-so-both-gates-run-across-cores.md)
+  — **the Protocol-triad check now reads a distributed run's merged record, so
+  `just test-fast` deselects nothing and CI's `pytest` step runs across cores;
+  everything else this ADR decided stands.** Three clauses are replaced:
+  §1's second normative clause only in its parenthetical "less the one file
+  `just test-fast` deselects", which no longer describes that recipe — the rest
+  of the collection clause, including everything it says about narrowing,
+  stopping early and collecting without executing, is untouched and still
+  governs; §3 whole, whose normative accepted risk ("An anchor discharged by
+  `just test-fast` leaves `tests/core/test_protocol_triad.py` … unrun locally")
+  is discharged rather than transferred, and with it §2's added guidance to
+  prefer the serial run for a diff touching a Protocol or a canonical fake —
+  §2's other cases, and §2's own normative clause that the serial run is never
+  wrong, stand; and §4's sentence "CI's gate stays the full five steps, serial",
+  which decided a serialism ADR-0010 only assumed. **Everything else stands as
+  ratified**: §1's permission itself, §2's clause, §4's clauses about ADR-0136,
+  ADR-0020, ADR-0025 and ADR-0027, and §5's record against ADR-0136. This is a
+  supersession rather than an amendment because §3 did not merely observe that no
+  worker sees the suite, it ratified an accepted risk on the strength of it, and
+  withdrawing that is a change to what was decided (ADR-0070 §1). This ADR's own
+  **Revisit if** named the trigger: "the triad check is made to run under
+  `-n auto`".
 - **What this changes and what it does not.** It relaxes one step of one gate at
   two named moments — which `pytest` invocation discharges ADR-0136 §1's anchors.
   The two anchors themselves, the four static steps before every commit, the
