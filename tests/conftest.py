@@ -12,8 +12,10 @@ Collection alone is not enough for the same reason, which is why the record is
 built from call-phase reports and the triad check is reordered to run last --
 it is the only test in the suite whose subject is the rest of the suite.
 
-It also holds ``hermetic_assistant_env``, which takes ``ASSISTANT_*`` out of the
-environment for the modules that build ``Settings``. That belongs in a conftest
+It also holds ``hermetic_assistant_env``, which closes both channels a
+``Settings`` reads ambient configuration through -- ``ASSISTANT_*`` in the
+environment and a ``.env`` beside the working directory -- for the modules that
+build one. That belongs in a conftest
 rather than in each module because it is a property of the run rather than of any
 one test, and in *this* one because it is the only conftest the corpus has: mypy
 checks ``tests/`` with no ``__init__.py`` anywhere under it, so a second file named
@@ -35,6 +37,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
+
+from ai_assistant.core.config import Settings
 
 # A shared conformance suite with no owning subsystem package sits under
 # `tests/core/` — `reader_contract.py` and `secret_contract.py` both do, because
@@ -125,12 +129,23 @@ def hermetic_assistant_env(monkeypatch: pytest.MonkeyPatch) -> None:
     the single stack, in order. Two independent stacks can restore in the wrong
     order and leave the variable deleted for the rest of the session.
 
+    The environment is one of two channels, and closing only it would move the
+    exposure rather than end it: ``model_config`` also names ``env_file=".env"``,
+    resolved against the working directory, and with the variables swept the
+    dotenv source is what a value would then arrive through. A clone holding a
+    ``.env`` is the ordinary way this project is configured
+    (``tests/core/test_env_example.py`` is a test of that instruction), so the
+    file is neutralised too -- by the setting that selects it rather than by
+    moving the working directory, which is the narrower act and the one that says
+    what it closes.
+
     Apply it to a whole module with
     ``pytestmark = pytest.mark.usefixtures("hermetic_assistant_env")``.
     """
     for variable in list(os.environ):
         if variable.upper().startswith(_SETTINGS_ENV_PREFIX):
             monkeypatch.delenv(variable, raising=False)
+    monkeypatch.setitem(Settings.model_config, "env_file", None)
 
 
 @dataclass
