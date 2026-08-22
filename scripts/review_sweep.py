@@ -83,6 +83,11 @@ DISPOSITIONS_DIR = "dispositions"
 #: Candidate default branches, most authoritative first: an artifact's commit is
 #: "merged" when it is an ancestor of the first of these the clone actually has.
 DEFAULT_BRANCHES = ("origin/main", "main")
+#: Where a recorded `branch=` name is looked up.
+_BRANCH_NAMESPACES = ("refs/heads", "refs/remotes")
+#: Where "does anything still hold this commit?" is asked. Tags count: a tagged
+#: commit is retained whatever became of the branch that carried it.
+_HOLDING_NAMESPACES = (*_BRANCH_NAMESPACES, "refs/tags")
 #: The refs that being contained in does NOT make an artifact live — being on the
 #: integration branch is precisely what makes it sweepable.
 _DEFAULT_REFS = ("refs/heads/main", "refs/remotes/origin/main")
@@ -193,7 +198,9 @@ def _git_ok(*args: str, repo: Path) -> bool:
     return completed.returncode == 0
 
 
-def direct_refs(repo: Path, *extra: str) -> list[str]:
+def direct_refs(
+    repo: Path, *extra: str, namespaces: Sequence[str] = _BRANCH_NAMESPACES
+) -> list[str]:
     """List the branch refs, excluding symbolic ones.
 
     ``refs/remotes/origin/HEAD`` is the one that matters: ``git clone`` creates it
@@ -205,10 +212,12 @@ def direct_refs(repo: Path, *extra: str) -> list[str]:
     Args:
         repo: The repository root.
         *extra: Further arguments for ``for-each-ref``, e.g. ``--contains <sha>``.
+        namespaces: Which ref namespaces to read. Branch *names* come from
+            branches only, but "does any ref still hold this commit?" has to
+            include tags — a tagged commit is retained however its branch ended.
 
     Returns:
-        The names of the non-symbolic refs under ``refs/heads`` and
-        ``refs/remotes``.
+        The names of the non-symbolic refs in ``namespaces``.
 
     Raises:
         SweepError: If git cannot answer. "No refs" and "git failed" must never
@@ -218,8 +227,7 @@ def direct_refs(repo: Path, *extra: str) -> list[str]:
         "for-each-ref",
         "--format=%(refname)\t%(symref)",
         *extra,
-        "refs/heads",
-        "refs/remotes",
+        *namespaces,
         repo=repo,
         check=True,
     )
@@ -293,7 +301,7 @@ class Refs:
         """
         if not _git_ok("cat-file", "-e", f"{sha}^{{commit}}", repo=self.repo):
             return False
-        holders = direct_refs(self.repo, "--contains", sha)
+        holders = direct_refs(self.repo, "--contains", sha, namespaces=_HOLDING_NAMESPACES)
         return any(ref not in _DEFAULT_REFS for ref in holders)
 
 
