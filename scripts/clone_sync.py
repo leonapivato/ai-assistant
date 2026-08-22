@@ -2,9 +2,9 @@
 """Mirror the documented untracked per-clone files into the sibling clones.
 
 One agent per clone (ADR-0015 §2), and each clone carries local state that no
-merge ever moves between them: ``.env``, ``.mcp.json``, whatever the next tool
-needs. Drift is discovered the expensive way — a dispatched lane reports a tool
-absent or a setting unset, halfway through its work (issue #1390).
+merge ever moves between them: ``.env``, whatever the next tool needs. Drift is
+discovered the expensive way — a dispatched lane reports a tool absent or a
+setting unset, halfway through its work (issue #1390).
 
 The list is data, not code: ``scripts/clone_sync_files.txt``, one
 repository-relative path per line, with its own note on why nothing in it is
