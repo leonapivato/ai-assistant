@@ -10,14 +10,23 @@ python3 --version
 
 It must report **3.14 or newer**. The package declares `requires-python =
 ">=3.14"`, so an older interpreter refuses the install rather than half-doing
-it. If yours is older, install 3.14 — [uv](https://docs.astral.sh/uv/) will do
-it for you (`uv python install 3.14`), as will pyenv or your platform's
-packages.
+it. If yours is older, install 3.14 — `uv python install 3.14` will do it once
+you have uv (step 2), as will pyenv or your platform's packages.
 
 ## 2. Get the wheel
 
 There is no published release yet. You build the wheel from a source checkout,
-once, and then install the file it produces:
+once, and then install the file it produces.
+
+Building needs [uv](https://docs.astral.sh/uv/), which is this project's
+packaging tool and the only prerequisite beyond Python. Its own installer is at
+that link; `pip` will also do it:
+
+```bash
+python3.14 -m pip install uv
+```
+
+Then:
 
 ```bash
 git clone https://github.com/leonapivato/ai-assistant.git

@@ -40,6 +40,9 @@ running, a client says so plainly rather than quietly doing the work itself.
 - A machine running Linux or macOS. Everything below was run on Linux.
 - **Python 3.14 or newer.** The package requires it and will not install under
   an older one.
+- **[uv](https://docs.astral.sh/uv/)**, to build the wheel from a checkout —
+  there is no published release yet. `install.md` gets it for you if you do not
+  have it.
 - An API key for **Anthropic** or **OpenAI**. The assistant is model-agnostic
   and you pick the route at configuration time; those two are the vendors whose
   libraries ship in the distribution, so they are the two that work without
