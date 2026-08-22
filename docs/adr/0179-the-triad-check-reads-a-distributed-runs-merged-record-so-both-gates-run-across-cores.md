@@ -117,9 +117,10 @@ satisfactory on another.
 ### 2. A check no process decided is a failure, not a pass
 
 > **Normative.** Where a distributed session hands an evidence-dependent check to
-> the controller and the controller has no evaluator for it, or where a worker
-> leaves without handing its half of the record over, the check is reported
-> **failed**. Neither may be reported as passed or silently omitted.
+> the controller and the controller has no evaluator for it, where a worker leaves
+> without handing its half of the record over, or where no worker's half reaches
+> the controller at all, a failure is reported. None of the three may be reported
+> as passed or silently omitted.
 
 This is the one place the arrangement can rot quietly. The items handed over are
 identified by the fixture they request rather than by a list of test names, so a
@@ -131,6 +132,16 @@ correspondence directly, so the failure is caught before a distributed run.
 The lost-worker clause is the same reasoning applied to an incomplete union: a
 record missing a worker's share is not the suite's record, so an absent binding
 class proves nothing, exactly as it proves nothing on a narrowed run.
+
+The third clause covers the one silence the other two cannot, because it takes
+their nodeids away with it. The checks are reported under the nodeids the workers
+gave up, and those travel *inside* the halves — so if the channel itself stops
+working and no half arrives, there is nothing to report against and the checks
+simply vanish from a green run. That is reachable only by the **Revisit if**
+condition below, xdist's `workeroutput`/`pytest_testnodedown` contract changing
+under the project, which is exactly why it must not be the one failure mode that
+passes quietly. It is reported under a nodeid of its own rather than under a
+test's, since no test was ever named.
 
 ### 3. Both gates' `pytest` step is distributed, and it is still the whole suite
 

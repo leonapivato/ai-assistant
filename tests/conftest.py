@@ -469,6 +469,58 @@ def pytest_sessionfinish(session: pytest.Session, exitstatus: object) -> None:
         return
     if _WORKER_HALVES or _WORKERS_LOST:
         _report_evidence_checks(session)
+    elif _is_distributed_controller(session.config):
+        _report_that_nothing_was_handed_over(session)
+
+
+def _is_distributed_controller(config: pytest.Config) -> bool:
+    """Report whether this is the controller of a session that had workers.
+
+    ``numprocesses`` is xdist's own resolved worker count -- an int by the time
+    the option is parsed, so ``-n auto`` reads as the number it chose and ``-n 0``,
+    which is xdist standing down, reads as a serial run.
+    """
+    if _is_worker(config) or config.getoption("collectonly", default=False):
+        return False
+    return bool(getattr(config.option, "numprocesses", 0))
+
+
+def _report_that_nothing_was_handed_over(session: pytest.Session) -> None:
+    """Fail a distributed run whose workers' halves never arrived at all.
+
+    The one failure this arrangement could otherwise suffer in silence, because
+    it takes the nodeids to report under away with it. Every other way the record
+    can be wrong leaves at least one worker's half on the controller, and the
+    handed-over items travel inside those halves -- so there is something to
+    report against. If *no* half arrives, the two evidence-dependent checks were
+    deselected on every worker and then simply vanish: a green run that ran the
+    Protocol-triad check nowhere.
+
+    Reaching this needs the channel itself to have stopped working -- xdist
+    renaming ``workeroutput`` or ``pytest_testnodedown``, or a plugin swallowing
+    them -- which is exactly what ADR-0179's **Revisit if** names as the thing
+    this rests on. ADR-0179 §2 says a check no process decided is a failure, so it
+    is reported as one, under a nodeid of its own rather than under a test's.
+    """
+    session.config.hook.pytest_runtest_logreport(
+        report=_as_report(
+            _ItemPayload(
+                nodeid=f"{_TRIAD_CHECK}::the_workers_record_reached_the_controller",
+                path=_TRIAD_CHECK,
+                lineno=0,
+                domain="",
+            ),
+            (
+                "failed",
+                "this session ran workers, but not one of them handed its half of "
+                "the Protocol-triad record to the controller -- so the checks that "
+                "read it were deselected on every worker and decided by nobody. The "
+                "channel they travel on (xdist's `workeroutput` and "
+                "`pytest_testnodedown`) is what to look at (ADR-0179 §2).",
+            ),
+        )
+    )
+    session.exitstatus = pytest.ExitCode.TESTS_FAILED
 
 
 def _report_evidence_checks(session: pytest.Session) -> None:
