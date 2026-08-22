@@ -182,6 +182,43 @@ def test_a_commit_held_only_by_a_tag_is_live(tmp_path: Path) -> None:
     assert artifact.exists()
 
 
+def test_a_later_release_tag_does_not_retain_every_older_artifact(tmp_path: Path) -> None:
+    # `--contains` over refs/tags asks "is this an ancestor of a tag?", so one
+    # release tag on main would answer yes for every artifact older than it and
+    # the sweep would retire nothing — the `origin/HEAD` hole from the other
+    # direction. A tag retains only the commit it points AT.
+    repo = _repo(tmp_path)
+    old_sha = _branch_with_commit(repo, "gone/lane")
+    git(repo, "branch", "-qD", "gone/lane")
+    git(repo, "merge", "-q", "--ff-only", old_sha)
+    git(repo, "push", "-q", "origin", "main")
+    (repo / "later.txt").write_text("after the artifact\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-qm", "later release")
+    git(repo, "tag", "-a", "v1.0", "-m", "release")
+    git(repo, "push", "-q", "origin", "main")
+    _artifact(repo, "a.md", persona="adversarial", branch="gone/lane", sha=old_sha, tree="t1")
+
+    status, out, _ = _sweep(repo, "--dry-run")
+
+    assert status == 0, out
+    assert "[merged]" in out
+    assert "[live]" not in out
+
+
+def test_an_annotated_tag_pointing_at_the_commit_still_retains_it(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    sha = _branch_with_commit(repo, "gone/lane")
+    git(repo, "tag", "-a", "kept", "-m", "keep this one", sha)
+    git(repo, "branch", "-qD", "gone/lane")
+    _artifact(repo, "a.md", persona="adversarial", branch="gone/lane", sha=sha, tree="t1")
+
+    status, out, _ = _sweep(repo, "--dry-run")
+
+    assert status == 0, out
+    assert "is held by a ref" in out
+
+
 def test_a_tag_is_not_read_as_a_branch_name(tmp_path: Path) -> None:
     # Tags count for containment and not for the `branch=` lookup, so an artifact
     # naming a gone branch that happens to share a tag's name is still stale.

@@ -85,9 +85,6 @@ DISPOSITIONS_DIR = "dispositions"
 DEFAULT_BRANCHES = ("origin/main", "main")
 #: Where a recorded `branch=` name is looked up.
 _BRANCH_NAMESPACES = ("refs/heads", "refs/remotes")
-#: Where "does anything still hold this commit?" is asked. Tags count: a tagged
-#: commit is retained whatever became of the branch that carried it.
-_HOLDING_NAMESPACES = (*_BRANCH_NAMESPACES, "refs/tags")
 #: The refs that being contained in does NOT make an artifact live — being on the
 #: integration branch is precisely what makes it sweepable.
 _DEFAULT_REFS = ("refs/heads/main", "refs/remotes/origin/main")
@@ -198,9 +195,7 @@ def _git_ok(*args: str, repo: Path) -> bool:
     return completed.returncode == 0
 
 
-def direct_refs(
-    repo: Path, *extra: str, namespaces: Sequence[str] = _BRANCH_NAMESPACES
-) -> list[str]:
+def direct_refs(repo: Path, *extra: str) -> list[str]:
     """List the branch refs, excluding symbolic ones.
 
     ``refs/remotes/origin/HEAD`` is the one that matters: ``git clone`` creates it
@@ -212,12 +207,9 @@ def direct_refs(
     Args:
         repo: The repository root.
         *extra: Further arguments for ``for-each-ref``, e.g. ``--contains <sha>``.
-        namespaces: Which ref namespaces to read. Branch *names* come from
-            branches only, but "does any ref still hold this commit?" has to
-            include tags — a tagged commit is retained however its branch ended.
 
     Returns:
-        The names of the non-symbolic refs in ``namespaces``.
+        The names of the non-symbolic branch refs.
 
     Raises:
         SweepError: If git cannot answer. "No refs" and "git failed" must never
@@ -227,7 +219,7 @@ def direct_refs(
         "for-each-ref",
         "--format=%(refname)\t%(symref)",
         *extra,
-        *namespaces,
+        *_BRANCH_NAMESPACES,
         repo=repo,
         check=True,
     )
@@ -260,6 +252,26 @@ class Refs:
                 rest = line.removeprefix("refs/remotes/").split("/", 1)
                 if len(rest) == 2:  # noqa: PLR2004  # a remote name and a branch
                     self.branches.add(rest[1])
+        # Tags are read as POINTS-AT, never as contains. `--contains` over
+        # `refs/tags` asks "is this commit an ancestor of a tag?", so one release
+        # tag on `main` would answer yes for every artifact older than it and the
+        # sweep would retire nothing — the same shape as the `origin/HEAD` hole,
+        # from the opposite direction. What a tag says is that *this* commit was
+        # marked, so only the commit it points at is retained.
+        #
+        # `%(*objectname)` is the peeled target, non-empty only for an annotated
+        # tag; both oids go in, since the tag object's own id can never collide
+        # with a recorded commit and costs nothing to carry.
+        self.tagged: set[str] = set()
+        tags = _git(
+            "for-each-ref",
+            "--format=%(objectname) %(*objectname)",
+            "refs/tags",
+            repo=repo,
+            check=True,
+        )
+        for line in tags.splitlines():
+            self.tagged.update(line.split())
         self.default = next(
             (b for b in DEFAULT_BRANCHES if _git_ok("rev-parse", "--verify", b, repo=repo)),
             None,
@@ -297,11 +309,14 @@ class Refs:
             sha: The commit.
 
         Returns:
-            True when at least one such ref does.
+            True when at least one such branch does, or when a tag points
+            directly at the commit.
         """
         if not _git_ok("cat-file", "-e", f"{sha}^{{commit}}", repo=self.repo):
             return False
-        holders = direct_refs(self.repo, "--contains", sha, namespaces=_HOLDING_NAMESPACES)
+        if sha in self.tagged:
+            return True
+        holders = direct_refs(self.repo, "--contains", sha)
         return any(ref not in _DEFAULT_REFS for ref in holders)
 
 
