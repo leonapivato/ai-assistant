@@ -132,6 +132,7 @@ def test_an_invocation_id_is_read_back(tmp_path: Path) -> None:
 def test_verification_asserts_the_unit_is_active(tmp_path: Path) -> None:
     plan = _dry_run(_repo(tmp_path))
 
+    assert "echo UNIT_STATE=$(" in plan
     assert "systemctl --user is-active ai-assistant-hub" in plan
     assert "hub_ready" in plan
 
@@ -440,16 +441,41 @@ def test_an_unanswered_is_active_check_is_not_reported_as_an_inactive_unit(
 def test_an_inactive_unit_is_reported_as_inactive(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (3, "failed\n", ""))
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, "UNIT_STATE=failed\n", ""))
 
     with pytest.raises(_MODULE.DeployError, match="the unit is failed"):
         _MODULE._assert_active(_plan(_repo(tmp_path)))
 
 
 def test_an_active_unit_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, "active\n", ""))
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, "UNIT_STATE=active\n", ""))
 
     _MODULE._assert_active(_plan(_repo(tmp_path)))
+
+
+def test_a_login_banner_does_not_read_as_a_failed_unit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `su -` starts a LOGIN shell by design, and a real box's profile and MOTD
+    # print to stdout. Comparing all of stdout to "active" would abort a deploy
+    # that worked, after the install and the restart had already happened.
+    banner = "Welcome to Ubuntu 24.04 LTS\n\n * Support: https://example\nUNIT_STATE=active\n"
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, banner, ""))
+
+    _MODULE._assert_active(_plan(_repo(tmp_path)))
+
+
+def test_a_banner_with_no_state_line_is_a_check_that_did_not_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (255, "Welcome\n", "ssh: refused"))
+
+    with pytest.raises(_MODULE.DeployError, match="could not ask whether the unit is active"):
+        _MODULE._assert_active(_plan(_repo(tmp_path)))
+
+
+def test_a_banner_does_not_hide_the_invocation_id(tmp_path: Path) -> None:
+    assert _MODULE.invocation_id("Welcome to Ubuntu\nINVOCATION_ID=abc123\n") == "abc123"
 
 
 def test_a_failed_journal_poll_is_reported_as_itself(

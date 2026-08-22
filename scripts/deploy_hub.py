@@ -566,11 +566,19 @@ class Plan:
     def is_active(self) -> str:
         """Return the command that asks whether the unit is active.
 
+        The answer is emitted on its own labelled line, for the same reason the
+        restart labels the invocation id: this runs in a **login** shell by
+        design, and a login shell on a real box prints whatever its profile and
+        MOTD print. Comparing the whole of stdout to ``active`` would read a
+        banner as a failed unit and abort a deploy that worked.
+
         Returns:
             The remote command line.
         """
-        inner = with_user_bus(f"systemctl --user is-active {shlex.quote(self.args.unit)}")
-        return as_service_user(inner, self.args.user)
+        state = with_user_bus(f"systemctl --user is-active {shlex.quote(self.args.unit)}")
+        # `|| true`: `is-active` exits non-zero *because* the unit is not active,
+        # and that answer must reach the label rather than killing the command.
+        return as_service_user(f"echo UNIT_STATE=$({state} || true)", self.args.user)
 
     def journal_for(self, invocation: str) -> str:
         """Return the command that reads the journal of one unit *start*.
@@ -776,17 +784,17 @@ def _assert_active(plan: Plan) -> None:
         DeployError: If the check could not run, or the unit is not active.
     """
     command = ssh_command(plan.args.host, plan.args.ssh_user, plan.is_active())
-    status, active, error = _probe(command)
-    active = active.strip()
-    if not active:
+    status, out, error = _probe(command)
+    active = _labelled(out, "UNIT_STATE=")
+    if active is None:
         raise DeployError(
             f"could not ask whether the unit is active (exit {status}):\n"
-            f"{error.strip() or '(no output)'}\n"
+            f"{error.strip() or out.strip() or '(no output)'}\n"
             "The wheel is installed and the restart was issued; the check is what\n"
             "could not run."
         )
     if active != "active":
-        raise DeployError(f"the unit is {active} after the restart, not active")
+        raise DeployError(f"the unit is {active or '(no state)'} after the restart, not active")
 
 
 def _wait_for_ready(plan: Plan, invocation: str) -> None:
@@ -827,6 +835,26 @@ def _wait_for_ready(plan: Plan, invocation: str) -> None:
         time.sleep(_POLL_INTERVAL)
 
 
+def _labelled(output: str, label: str) -> str | None:
+    """Read one labelled line out of a login shell's output.
+
+    Every remote answer is labelled because ``su -`` starts a login shell, and a
+    login shell prints whatever its profile and MOTD print. A bare value would be
+    indistinguishable from a banner.
+
+    Args:
+        output: The command's standard output.
+        label: The line prefix, including its ``=``.
+
+    Returns:
+        The value, or ``None`` when no line carries the label.
+    """
+    for line in output.splitlines():
+        if line.startswith(label):
+            return line.removeprefix(label).strip()
+    return None
+
+
 def invocation_id(output: str) -> str:
     """Extract the ``InvocationID`` the restart command printed.
 
@@ -844,11 +872,9 @@ def invocation_id(output: str) -> str:
             replaced. Refusing leaves a deploy that has installed and restarted
             and only lacks its readiness proof, so the message says exactly that.
     """
-    for line in output.splitlines():
-        if line.startswith("INVOCATION_ID="):
-            invocation = line.removeprefix("INVOCATION_ID=").strip()
-            if invocation:
-                return invocation
+    invocation = _labelled(output, "INVOCATION_ID=")
+    if invocation:
+        return invocation
     raise DeployError(
         "the restart printed no unit InvocationID, so the readiness check cannot be\n"
         "bound to THIS start of the unit and would accept an earlier one's hub_ready.\n"
