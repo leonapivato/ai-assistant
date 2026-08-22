@@ -152,6 +152,14 @@ const FAULTS = {
     "A delivery stream holds one of them for as long as it is open.",
   "request-too-large": "That request was larger than the gateway will read.",
   "no-such-conversation": "There is no conversation of that name.",
+  "no-such-belief":
+    "No live belief has that id. It may never have existed, or it may have been " +
+    "revised or forgotten already — this surface shows and destroys only beliefs " +
+    "held right now.",
+  "malformed-request":
+    "The gateway could not read that request. The page and the gateway ship in one " +
+    "distribution, so this means the two halves disagree.",
+  rejected: "The hub refused that as badly formed, so nothing was written.",
 };
 
 // A stream whose body ended without a terminal value (ADR-0175 §2). Not a fault the
@@ -688,11 +696,1027 @@ async function forgetConversation(id) {
   }
 }
 
+// --- the grant surface (ADR-0177 §6, §7; ADR-0139) ---------------------------
+//
+// Two questions and they are never answered with each other (ADR-0139 §1, §3's
+// fourth clause). "What may I grant?" is `/sources`; "what do I currently
+// authorise?" is `/grants/standing`; and the history at `/grants/recent` answers
+// neither. Each has its own panel, its own heading and its own read, and no panel
+// annotates one answer with another.
+
+// Every use a grant may authorise, named in words (ADR-0139 §3's second clause).
+// **All three, wherever a choice is offered**, and never a proper subset: "no
+// client may offer, enumerate or explain a proper subset of the members its own
+// type admits", because a user cannot choose what they are not shown.
+//
+// The phrases say what the reading is *used for* and never what follows from it
+// (ADR-0133 §1): granting the third decides nothing about whether you are ever
+// contacted, so its phrase is about reading, on the same footing as the others.
+const USES = [
+  { value: "facet", label: "Look at it while answering you" },
+  { value: "ingest", label: "Durably remember what it says" },
+  { value: "notify", label: "Read it to raise things with you unprompted" },
+];
+
+// ADR-0139 §4's exactly three outcomes for one act of an amendment.
+const LANDED = "landed";
+const NOT_LANDED = "not-landed";
+const UNKNOWN = "unknown";
+
+// Which faults mean an act's outcome is **not known** (ADR-0177 §7's third
+// clause). Read from ADR-0168 §9's distinction and from nothing else: the hub
+// being unreachable is a transport failure between the gateway and the hub, so
+// the hub may well have committed first. Everything else the gateway answers with
+// is a request that reached a decision before any write — a refusal at the door,
+// at the connection ceiling, or by the hub itself — and is known not to have
+// landed.
+const UNKNOWN_FAULTS = new Set(["hub-unreachable"]);
+
+const STATE_UNREAD =
+  "Nothing above says what this source is granted for now. An act's outcome is a " +
+  "fact about that act; what stands is a fact only the hub can state.";
+
+const QUESTION_GONE =
+  "That question was not in the list I just read, so I sent nothing. It may have " +
+  "been answered or destroyed since the page last showed it.";
+
+// Say what a scope allows, in words rather than in the values on the wire.
+//
+// **Exactly the uses the grant names** (ADR-0139 §3's third clause): nothing is
+// added and nothing is dropped, and in particular a use the vocabulary above does
+// not carry is still rendered — dropping it would omit a use the grant names,
+// which is the half of the clause a lookup table gets wrong.
+function usePhrase(scope) {
+  if (scope.length === 0) {
+    return "nothing";
+  }
+  return scope
+    .map((use) => {
+      const known = USES.find((one) => one.value === use);
+      return known ? known.label.toLowerCase() : use;
+    })
+    .join(", and ");
+}
+
+// One act of the grant surface, classified as one of ADR-0139 §4's three outcomes.
+//
+// **The browser's own request failing is the third producer of the third outcome**
+// (ADR-0177 §7's fourth clause), and it is the one no earlier surface had: the CLI
+// holds the socket to the hub itself, while between this page and the store sit its
+// own request, the gateway, and the gateway's wire connection. So a rejected `fetch`
+// is *not known* rather than "it did not happen" — the gateway may already have
+// called, and ADR-0085 §8e's residual has a second instance here.
+async function act(half, path, payload) {
+  let response;
+  try {
+    response = await fetch(path, {
+      method: "POST",
+      headers: admitted(half, true),
+      body: JSON.stringify(payload),
+    });
+  } catch (_) {
+    return { outcome: UNKNOWN, body: {} };
+  }
+  const body = await readBody(response);
+  if (response.ok) {
+    return { outcome: LANDED, body };
+  }
+  sessionLost(body);
+  return {
+    outcome: UNKNOWN_FAULTS.has(body.fault) ? UNKNOWN : NOT_LANDED,
+    body,
+  };
+}
+
+// Say what one act did, as one of exactly three things (ADR-0139 §4's second
+// clause). "Not merely failed" is the whole of it: a user who reads a failure as
+// "the amendment did not happen" goes away with a source that has stopped being
+// read, silently.
+//
+// Each phrasing is about **this act** and never about the source (§4's third
+// clause). A withdrawal that landed is not a statement that the source is
+// ungranted, and a refused grant is not one either.
+function reportAct(panel, what, result) {
+  const detail = typeof result.body.detail === "string" ? ` ${result.body.detail}` : "";
+  if (result.outcome === LANDED) {
+    line(panel, `The ${what} landed.`, "reply");
+    return;
+  }
+  if (result.outcome === NOT_LANDED) {
+    line(
+      panel,
+      `The ${what} is known not to have landed — I was refused, so nothing was ` +
+        `written.${detail}`,
+      "failed"
+    );
+    return;
+  }
+  line(
+    panel,
+    `The outcome of the ${what} is not known.${detail} I did not get an answer ` +
+      "back, and it may have been done anyway.",
+    "notice"
+  );
+}
+
+// Open the act log fresh, so what is on screen is this act and never the last one.
+function beginActs(heading) {
+  fault(null);
+  const panel = el("act-log");
+  clearNode(panel);
+  line(panel, heading, "hint");
+  show("acts", true);
+  return panel;
+}
+
+async function listSources() {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const body = await relay(half, "/sources", {});
+    if (body === null) {
+      return;
+    }
+    const list = el("source-list");
+    clearNode(list);
+    if (body.sources.length === 0) {
+      line(
+        list,
+        "Nothing is configured for me to read. Configuration says where a source " +
+          "is; a grant says whether I may read it, and neither stands in for the " +
+          "other — so there is nothing to grant until something is configured.",
+        "hint"
+      );
+    }
+    body.sources.forEach((one) => renderSource(list, one));
+    show("sources", true);
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// One grantable source: what it is, where it reads from, and what you decided.
+//
+// **The location is rendered and an explicit act is taken before any grant is
+// sent** (ADR-0139 §5, ADR-0102 §6) — including the granting half of an amendment,
+// which is the case §5 exists for. A client that cannot show the location does not
+// send `grant`, so a source whose location is absent says so in place of it.
+//
+// **A grant renders exactly the uses it names, and the uses it leaves out are not
+// on screen in any form** (ADR-0177 §6's third clause). No greyed row, no unchecked
+// box, no strike-through: a control showing all three states beside a grant naming
+// one is the user's decision presented as a half-filled form.
+function renderSource(list, source) {
+  const item = document.createElement("div");
+  item.className = "source-row";
+  const name = document.createElement("p");
+  name.className = "source-name";
+  name.textContent = source.source;
+  item.appendChild(name);
+  line(
+    item,
+    source.location === null
+      ? "Reads from: not configured"
+      : `Reads from: ${source.location}`,
+    "hint"
+  );
+  if (source.live === null) {
+    line(item, "You have not granted this. I read nothing from it.", "hint");
+    offerScope(item, source, "Grant this", null);
+  } else {
+    line(item, `Granted for ${usePhrase(source.live.scope)}.`, "reply");
+    offerScope(item, source, "Change what it may do", source.live);
+    const withdraw = document.createElement("button");
+    withdraw.type = "button";
+    withdraw.textContent = "Withdraw";
+    withdraw.addEventListener("click", () => revokeSource(source.source));
+    item.appendChild(withdraw);
+  }
+  list.appendChild(item);
+}
+
+// The choice of uses, offered as all three and taken **before** anything is sent
+// (ADR-0139 §4's sixth clause, ADR-0177 §7's sixth). No surface revokes in order to
+// ask: a user who hesitates over this form, or closes the tab while thinking, has
+// withdrawn nothing.
+function offerScope(item, source, label, live) {
+  const open = document.createElement("button");
+  open.type = "button";
+  open.textContent = label;
+  const form = document.createElement("div");
+  form.className = "scope-form";
+  form.hidden = true;
+  const boxes = USES.map((use) => {
+    const row = document.createElement("p");
+    row.className = "choice";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.id = `use-${source.source}-${use.value}`;
+    const text = document.createElement("label");
+    text.htmlFor = box.id;
+    text.textContent = use.label;
+    row.appendChild(box);
+    row.appendChild(text);
+    form.appendChild(row);
+    return { box, value: use.value };
+  });
+  const send = document.createElement("button");
+  send.type = "button";
+  send.textContent = live === null ? "Grant" : "Change it";
+  send.addEventListener("click", () => {
+    const scope = boxes.filter((one) => one.box.checked).map((one) => one.value);
+    if (scope.length === 0) {
+      fault(
+        "Choose at least one thing I may do with it. A grant authorising nothing " +
+          "is not a grant, and the hub refuses one."
+      );
+      return;
+    }
+    if (live === null) {
+      grantSource(source, scope);
+    } else {
+      amendSource(source, scope);
+    }
+  });
+  form.appendChild(send);
+  open.addEventListener("click", () => {
+    form.hidden = !form.hidden;
+  });
+  item.appendChild(open);
+  item.appendChild(form);
+}
+
+// One grant, sent after its disclosure and its explicit act (ADR-0139 §5).
+async function grantSource(source, scope) {
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const panel = beginActs(`Granting ${source.source}.`);
+  try {
+    reportAct(panel, "grant", await act(half, "/grant", { source: source.source, scope }));
+    line(panel, STATE_UNREAD, "hint");
+    await listStanding();
+    await listSources();
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+async function revokeSource(source) {
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const panel = beginActs(`Withdrawing ${source}.`);
+  try {
+    const withdrawal = await act(half, "/revoke", { source });
+    reportAct(panel, "withdrawal", withdrawal);
+    if (withdrawal.outcome === LANDED && withdrawal.body.revoked === null) {
+      line(panel, "There was no live grant for it to withdraw.", "hint");
+    }
+    if (withdrawal.outcome === LANDED) {
+      line(
+        panel,
+        "I will start no further read of it, and nothing a read still running " +
+          "produces will be used. What I already believe from it is untouched.",
+        "hint"
+      );
+    }
+    line(panel, STATE_UNREAD, "hint");
+    await listStanding();
+    await listSources();
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// An amendment: **two browser requests, composed here** (ADR-0177 §7's first
+// clause). The gateway serves no shape that performs both, holds no state between
+// them, and does not know the two are related — which is what puts the intermediate
+// state where this surface can report it (ADR-0139 §4).
+//
+// It is never presented as atomic and never as leaving the source continuously
+// granted: there is a moment in which nothing is granted, and each act gets its own
+// line saying which of three things it did.
+//
+// **Where the withdrawal did not plainly land, no grant is sent** (§7's fifth
+// clause). The clause requires this for the *unknown* branch; a refused withdrawal
+// stops here too, on `interfaces/cli.py`'s own stated conservatism — sending the
+// grant anyway invites reasoning backwards from its result, which is exactly the
+// inference §7's seventh clause forbids, because a refusal is equally consistent
+// with another client having granted in between.
+async function amendSource(source, scope) {
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const panel = beginActs(
+    `Changing what ${source.source} may do. This is two acts — a withdrawal, then a ` +
+      "new grant — and there is a moment between them in which nothing is granted."
+  );
+  try {
+    const withdrawal = await act(half, "/revoke", { source: source.source });
+    reportAct(panel, "withdrawal", withdrawal);
+    if (withdrawal.outcome !== LANDED) {
+      line(
+        panel,
+        withdrawal.outcome === UNKNOWN
+          ? "I sent no new grant. I could not tell whether the withdrawal happened, " +
+              "and sending a second act to find out would only give me an answer I " +
+              "could not read. The amendment is incomplete."
+          : "I sent no new grant. The amendment is incomplete.",
+        "notice"
+      );
+      line(panel, STATE_UNREAD, "hint");
+      await listStanding();
+      return;
+    }
+    reportAct(panel, "grant", await act(half, "/grant", { source: source.source, scope }));
+    line(panel, STATE_UNREAD, "hint");
+    await listStanding();
+    await listSources();
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// What the user currently authorises, from the store and from nothing else
+// (ADR-0139 §2). This is the read that resolves every ambiguity the two acts above
+// leave: a client that lost a response, or was refused by a race, asks what stands
+// and is told.
+//
+// **A page that has not read this says the state is unread** (ADR-0177 §7's seventh
+// clause), which is why the panel carries a state line rather than an empty list
+// that could be mistaken for "nothing is granted".
+async function listStanding() {
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  el("standing-state").textContent = "";
+  show("standing", true);
+  try {
+    const body = await relay(half, "/grants/standing", {});
+    const list = el("standing-list");
+    clearNode(list);
+    if (body === null) {
+      el("standing-state").textContent =
+        "I could not read what you currently authorise, so it is unread. Nothing " +
+        "below states it.";
+      return;
+    }
+    el("standing-state").textContent =
+      body.standing.length === 0
+        ? "Read just now: you authorise nothing."
+        : "Read just now.";
+    body.standing.forEach((one) => renderStanding(list, one));
+  } catch (_) {
+    el("standing-state").textContent =
+      "I could not read what you currently authorise, so it is unread.";
+    fault(GATEWAY_GONE);
+  }
+}
+
+// One standing grant. **The set is presented whole** (ADR-0139 §3's first clause):
+// a grant on a source no held reader declares is exactly what this operation exists
+// to show, and dropping it, or merging it into the sources panel, would hide it
+// again.
+function renderStanding(list, grant) {
+  const item = document.createElement("div");
+  item.className = "grant-row";
+  const name = document.createElement("p");
+  name.className = "source-name";
+  name.textContent = grant.source;
+  item.appendChild(name);
+  line(item, `You authorise ${usePhrase(grant.scope)}.`, "reply");
+  line(item, `Decided ${grant.decided_at}`, "hint");
+  list.appendChild(item);
+}
+
+// The history (ADR-0097 §4). **No row here is presented as live or as withdrawn on
+// its own** (ADR-0139 §3's fifth clause, ADR-0102 §3): liveness is computed hub-side
+// from the `revokes` relation, and a clock corrected backwards can put a revoking
+// record on a different page from the grant it revokes. So a row says which kind of
+// record it is and stops there.
+async function listGrantHistory() {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const body = await relay(half, "/grants/recent", {});
+    if (body === null) {
+      return;
+    }
+    const list = el("history-list");
+    clearNode(list);
+    if (body.grants.length === 0) {
+      line(list, "You have granted and withdrawn nothing yet.", "hint");
+    }
+    body.grants.forEach((one) => renderHistory(list, one));
+    show("history", true);
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+function renderHistory(list, record) {
+  const item = document.createElement("div");
+  item.className = "grant-row";
+  const name = document.createElement("p");
+  name.className = "source-name";
+  name.textContent = record.source;
+  item.appendChild(name);
+  line(
+    item,
+    record.revokes === null
+      ? `You granted ${usePhrase(record.scope)}.`
+      : `You withdrew a grant of ${usePhrase(record.scope)}.`,
+    "hint"
+  );
+  line(item, `Decided ${record.decided_at}`, "hint");
+  list.appendChild(item);
+}
+
+// --- the belief surface (ADR-0073, ADR-0077 §6, ADR-0177 §5) -----------------
+
+function bandFilter() {
+  const chosen = [
+    { value: "asserted", box: el("band-asserted") },
+    { value: "derived", box: el("band-derived") },
+    { value: "attested", box: el("band-attested") },
+  ].filter((one) => one.box.checked);
+  // All three checked sends **no** filter rather than a list of three. The two are
+  // the same answer today and not tomorrow: an absent filter means every band, and
+  // stays right if a band is ever added, while a list of three would quietly become
+  // a proper subset.
+  return chosen.length === 3 ? null : chosen.map((one) => one.value);
+}
+
+async function listBeliefs() {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const bands = bandFilter();
+  const asked = bands === null ? {} : { bands };
+  try {
+    const body = await relay(half, "/beliefs", asked);
+    if (body === null) {
+      return;
+    }
+    const list = el("belief-list");
+    clearNode(list);
+    if (body.beliefs.length === 0) {
+      line(list, "No live belief matches.", "hint");
+    }
+    body.beliefs.forEach((one) => renderBelief(list, one));
+    show("beliefs", true);
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// The band's own name, in the words a person reads it in. Every belief carries one
+// and it is never left to be implied by position (ADR-0073 §4).
+function bandWords(band) {
+  if (band === "asserted") {
+    return "You told me";
+  }
+  if (band === "derived") {
+    return "I worked it out";
+  }
+  if (band === "attested") {
+    return "A connected source reported it";
+  }
+  return band;
+}
+
+// Why a belief is held — band-dependent, and the answer is complete for one band
+// and owed for two (ADR-0073 §4).
+//
+// **The floor is what stops the gap being papered over.** A derived belief conveys
+// how many citations stand behind it and is never presented as carrying a warrant
+// this surface cannot show; an attested one is named as someone else's report, and
+// the line says outright that "last revised" is this system's clock rather than the
+// source's. Beside any rendered count sits ADR-0107 §5's ceiling, because a
+// displaced citation is not a lost one.
+function whyHeld(belief) {
+  if (belief.band === "asserted") {
+    return "You told me, and your own word is the whole of it.";
+  }
+  if (belief.band === "attested") {
+    return (
+      "A source you connected reported it — neither your word nor my inference. I " +
+      "recorded which source, and when it said so, but cannot show them here, so " +
+      "'last revised' is when I changed my mind and not when the source spoke."
+    );
+  }
+  return whyDerived(belief);
+}
+
+function whyDerived(belief) {
+  const ceiling =
+    belief.evidence_elided > 0
+      ? ` Up to ${belief.evidence_elided} more piece(s) stood behind it that I no ` +
+        "longer keep a reference to — those may still exist; I stopped carrying " +
+        "them, they were not lost."
+      : "";
+  if (belief.evidence_count === 0) {
+    return (
+      (ceiling
+        ? "I worked it out, and I carry no evidence for it now."
+        : "I worked it out, and no supporting evidence was recorded.") + ceiling
+    );
+  }
+  if (belief.unsupported) {
+    return (
+      `I worked it out from ${belief.evidence_count} piece(s) of evidence, none of ` +
+      "which still exists. I still hold it — I have not unlearnt it because the " +
+      (ceiling ? "evidence went." : "evidence went — but nothing supports it any more.") +
+      ceiling
+    );
+  }
+  if (belief.lost_evidence > 0) {
+    return (
+      `I worked it out from ${belief.evidence_count} piece(s) of evidence, ` +
+      `${belief.lost_evidence} of which no longer exists. The confidence shown ` +
+      "reflects what is left." +
+      ceiling
+    );
+  }
+  return `I worked it out from ${belief.evidence_count} piece(s) of evidence.` + ceiling;
+}
+
+// One belief, carrying everything ADR-0073 §4 requires of both views: the band, the
+// confidence, the kind, the content, why it is held, when it was last revised, the
+// end of its validity window where one is set, and its id.
+function renderBeliefFields(item, belief) {
+  line(
+    item,
+    `${bandWords(belief.band)} · ${belief.kind} · confidence ${belief.confidence.toFixed(2)}`,
+    "hint"
+  );
+  line(item, belief.content, "reply");
+  line(item, `Why: ${whyHeld(belief)}`, "hint");
+  line(item, `Last revised: ${belief.last_updated}`, "hint");
+  if (belief.valid_until !== null) {
+    line(item, `Believed until: ${belief.valid_until}`, "hint");
+  }
+  line(item, `id: ${belief.id}`, "hint");
+}
+
+function renderBelief(list, belief) {
+  const item = document.createElement("div");
+  item.className = "belief-row";
+  renderBeliefFields(item, belief);
+  const forget = document.createElement("button");
+  forget.type = "button";
+  forget.textContent = "Forget";
+  forget.addEventListener("click", () => forgetBelief(belief.id));
+  item.appendChild(forget);
+  list.appendChild(item);
+}
+
+// What destroying a belief in this band costs (ADR-0073 §5). The ceremony is
+// uniform in mechanism and asymmetric in message, because the consequence is: the
+// surface must represent a deletion as neither more final than it is nor less.
+function forgetWarning(band) {
+  if (band === "asserted") {
+    return "You told me this. Forgetting it is permanent — nothing can work it out again.";
+  }
+  if (band === "attested") {
+    return (
+      "A connected source reported this. Forgetting it destroys my copy but not the " +
+      "source, so a later sync may bring it back."
+    );
+  }
+  return (
+    "I worked this out. Forgetting it destroys the belief but not what I worked it " +
+    "out from, so I may reach it again."
+  );
+}
+
+// Show, then confirm (ADR-0073 §5, ADR-0177 §5).
+//
+// **The render comes from a `belief` read issued immediately before the
+// confirmation**, and never from the listing this page is displaying. A page holds
+// its listing until it is navigated away from, so a listing is not a read taken "as
+// late as it can be" — and a browser is the first surface where the difference is
+// unbounded.
+//
+// What the confirmation covers is stated as ADR-0073 §5 states it: consent to
+// forget the belief that id names, not a guarantee that the bytes destroyed are the
+// bytes rendered.
+async function forgetBelief(id) {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const held = await relay(half, "/belief", { record_id: id });
+    if (held === null) {
+      return;
+    }
+    const belief = held.belief;
+    const asked = window.confirm(
+      `About to forget this belief.\n\n${bandWords(belief.band)} · ${belief.kind} · ` +
+        `confidence ${belief.confidence.toFixed(2)}\n${belief.content}\n\n` +
+        `Why: ${whyHeld(belief)}\nLast revised: ${belief.last_updated}\nid: ${belief.id}\n\n` +
+        `${forgetWarning(belief.band)}\n\nThis destroys the record: nothing of it is ` +
+        "kept, not even in an export. To fix it instead, tell me it is wrong in a " +
+        "conversation.\n\nYou are forgetting whatever belief that id names when you " +
+        "answer, which may have changed since it was shown."
+    );
+    if (!asked) {
+      return;
+    }
+    const done = await relay(half, "/belief/forget", { record_id: id });
+    if (done === null) {
+      return;
+    }
+    if (!done.destroyed) {
+      fault("There was nothing live by that id to destroy.");
+    }
+    await listBeliefs();
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// --- the deferred-question surface (ADR-0078 §8, §9) -------------------------
+
+async function listQuestions() {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const waiting = await relay(half, "/questions", {});
+    const begun = await relay(half, "/questions/interrupted", {});
+    if (waiting === null || begun === null) {
+      return;
+    }
+    renderQuestionList(el("question-list"), waiting.questions, "Nothing is waiting for you.");
+    renderQuestionList(
+      el("interrupted-list"),
+      begun.questions,
+      "No answer was begun and left unrecorded."
+    );
+    show("questions", true);
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+function renderQuestionList(list, questions, empty) {
+  clearNode(list);
+  if (questions.length === 0) {
+    line(list, empty, "hint");
+  }
+  questions.forEach((one) => renderQuestion(list, one));
+}
+
+// One question, with everything ADR-0078 §8 requires it to convey — worded as the
+// conditional it is, because a pending question is not a belief of any band.
+function renderQuestion(list, question) {
+  const item = document.createElement("div");
+  item.className = "question-row";
+  line(item, question.content, "reply");
+  line(
+    item,
+    `Would be held as: ${bandWords(question.band)} · ${question.kind} ` +
+      "(not held yet — I am asking first)",
+    "hint"
+  );
+  line(item, `Why I am asking: ${question.reason}`, "hint");
+  line(item, `Proposed because: ${question.rationale}`, "hint");
+  renderRetirements(item, question);
+  line(item, `Asked: ${question.asked_at}`, "hint");
+  line(
+    item,
+    question.expires_at === null
+      ? "Answerable: indefinitely"
+      : `Answerable until: ${question.expires_at}`,
+    "hint"
+  );
+  if (question.state === "interrupted") {
+    line(
+      item,
+      "An answer to this was begun and its outcome was never recorded. I cannot " +
+        "tell you whether the change landed, so there is nothing to retry — dispose " +
+        "of it, then check what I believe.",
+      "notice"
+    );
+  } else {
+    offerAnswer(item, question);
+  }
+  renderSuccessor(item, question.successor);
+  const destroy = document.createElement("button");
+  destroy.type = "button";
+  destroy.textContent = "Forget the question";
+  const listing =
+    question.state === "interrupted" ? "/questions/interrupted" : "/questions";
+  destroy.addEventListener("click", () => forgetQuestion(question.id, listing));
+  item.appendChild(destroy);
+  list.appendChild(item);
+}
+
+// Exactly what accepting would retire (ADR-0078 §8), which is not decoration but
+// the exact scope the answer authorises. A conflict already retired is rendered as
+// no longer held rather than omitted: omitting it would understate the answer's
+// scope in one direction and overstate it in the other.
+function renderRetirements(item, question) {
+  if (question.retires.length === 0) {
+    line(item, "Accepting would retire: nothing", "hint");
+    return;
+  }
+  line(item, "Accepting would retire:", "hint");
+  question.retires.forEach((one) => {
+    line(
+      item,
+      one.content === null
+        ? `${one.record_id} — no longer held, so accepting would not touch it`
+        : `${one.content} (${one.record_id})`,
+      "hint"
+    );
+  });
+}
+
+// The question an answer already raised, rendered **by its own state** (ADR-0078
+// §9): only a waiting successor is something the user can go and answer, and
+// calling a declined or interrupted one "the follow-on question" advertises
+// something they cannot act on.
+function renderSuccessor(item, successor) {
+  if (successor === null) {
+    return;
+  }
+  if (successor.state === "open") {
+    line(item, `Your answer raised a further question, which is waiting: ${successor.id}`, "notice");
+    return;
+  }
+  if (successor.state === "declined") {
+    line(
+      item,
+      `Your answer landed on a question you had already declined: ${successor.id} ` +
+        "(forget it to be asked again)",
+      "notice"
+    );
+    return;
+  }
+  if (successor.state === "interrupted") {
+    line(
+      item,
+      `Your answer landed on another interrupted answer: ${successor.id} (dispose of that one too)`,
+      "notice"
+    );
+    return;
+  }
+  line(item, `Your answer raised a further question, since settled: ${successor.id}`, "hint");
+}
+
+function offerAnswer(item, question) {
+  const accept = document.createElement("button");
+  accept.type = "button";
+  accept.textContent = "Yes, believe it";
+  accept.addEventListener("click", () => answerQuestion(question.id, true));
+  const reject = document.createElement("button");
+  reject.type = "button";
+  reject.textContent = "No";
+  reject.addEventListener("click", () => answerQuestion(question.id, false));
+  item.appendChild(accept);
+  item.appendChild(reject);
+}
+
+async function answerQuestion(id, accept) {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const panel = beginActs("Answering.");
+  try {
+    const body = await relay(half, "/question/answer", { question_id: id, accept });
+    if (body === null) {
+      return;
+    }
+    renderAnswer(panel, body.answered);
+    await listQuestions();
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// What one answer did, as one of five outcomes (ADR-0078 §5, §9). A re-deferral is
+// reported as a **completed** answer carrying the next question rather than as a
+// failure: the answer was used, and it raised something new.
+function renderAnswer(panel, outcome) {
+  if (outcome.kind === "applied") {
+    line(panel, `Applied. That is what I believe now (${outcome.record_id}).`, "reply");
+  } else if (outcome.kind === "rejected") {
+    line(
+      panel,
+      "Declined. Nothing was written, and I will not ask you this again — forget " +
+        "the question if you want to be asked.",
+      "reply"
+    );
+  } else if (outcome.kind === "stale") {
+    line(
+      panel,
+      "Not applied. What that question was about no longer applies, so accepting it " +
+        "would have stored a belief that was already out of date.",
+      "notice"
+    );
+  } else if (outcome.kind === "not_open") {
+    line(
+      panel,
+      "That question is not open. It may never have existed, or it may have lapsed, " +
+        "been answered, or have an answer already in flight.",
+      "notice"
+    );
+  } else {
+    line(
+      panel,
+      "Not applied yet. Your answer was used, but it turned out to contradict " +
+        "something else you told me that you had not been shown.",
+      "notice"
+    );
+    if (outcome.successor === null && outcome.successor_refused) {
+      line(
+        panel,
+        "The question queue is full, so I could not put the follow-up to you. Answer " +
+          "or forget some of what is waiting, then teach me the correction again.",
+        "notice"
+      );
+    }
+  }
+  renderSuccessor(panel, outcome.successor);
+  if (outcome.disposed) {
+    line(
+      panel,
+      "That question was destroyed while your answer was being applied, so no record " +
+        "of the answer was kept.",
+      "hint"
+    );
+  }
+}
+
+// The ceremony ADR-0177 §5 gives this verb at this surface: the question is
+// rendered from a listing read **immediately before** the confirmation, and
+// `forget_question` is sent only for a question that read returned.
+//
+// No single-question read is added and none is needed (#495's third ground, cited
+// and not absorbed): the two listings ADR-0078 §8 already gives return the question
+// whole, and re-reading one is a call this page already makes.
+async function forgetQuestion(id, path) {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const body = await relay(half, path, {});
+    if (body === null) {
+      return;
+    }
+    const question = body.questions.find((one) => one.id === id);
+    if (question === undefined) {
+      fault(QUESTION_GONE);
+      await listQuestions();
+      return;
+    }
+    const asked = window.confirm(
+      `About to destroy this question.\n\n${question.content}\n\n` +
+        `Would be held as: ${bandWords(question.band)} · ${question.kind}\n` +
+        `Why I am asking: ${question.reason}\nAsked: ${question.asked_at}\n\n` +
+        "Destroying it means I will not put it to you again, and its subject can be " +
+        "raised afresh. It does not answer it, and it writes nothing."
+    );
+    if (!asked) {
+      return;
+    }
+    const done = await relay(half, "/question/forget", { question_id: id });
+    if (done === null) {
+      return;
+    }
+    await listQuestions();
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// --- looking over a conversation (ADR-0077 §8) -------------------------------
+//
+// The passive half of accumulation, and it is deliberately explicit: nothing
+// triggers it but a caller, which here is the owner pressing a button. The
+// conversation id is a **selector rather than a subject** — this one, or the most
+// recently active — so the page sends the one it is working in and nothing when it
+// holds none.
+async function observe() {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  const asked = conversationId === null ? {} : { conversation_id: conversationId };
+  try {
+    const body = await relay(half, "/observe", asked);
+    if (body === null) {
+      return;
+    }
+    renderObservation(body.observation);
+    show("observation", true);
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// What one pass did. The three discard counts are kept apart because they are three
+// different facts, and `decision` being absent means **no ruling was ever made** —
+// which is not the same as a ruling that rejected the proposal.
+function renderObservation(report) {
+  const body = el("observation-body");
+  clearNode(body);
+  line(
+    body,
+    report.conversation_id === null
+      ? `Read ${report.episodes_read} episode(s).`
+      : `Read ${report.episodes_read} episode(s) of conversation ${report.conversation_id}.`,
+    "hint"
+  );
+  if (report.route !== null) {
+    line(body, `Route: ${report.route}`, "hint");
+  }
+  line(
+    body,
+    `${report.discarded_unusable} proposal(s) could not be used, ` +
+      `${report.discarded_over_limit} were over the producer's limit, and ` +
+      `${report.dropped_unsupported} were dropped for want of support.`,
+    "hint"
+  );
+  if (report.proposals.length === 0) {
+    line(body, "Nothing was proposed.", "hint");
+  }
+  report.proposals.forEach((one) => renderProposal(body, one));
+}
+
+function renderProposal(body, proposal) {
+  const item = document.createElement("div");
+  item.className = "belief-row";
+  line(item, proposal.content, "reply");
+  line(
+    item,
+    `${proposal.kind} · ${proposal.step} · confidence ${proposal.confidence.toFixed(2)}`,
+    "hint"
+  );
+  line(item, `Because: ${proposal.rationale}`, "hint");
+  line(
+    item,
+    proposal.decision === null
+      ? `No ruling was made on it. ${proposal.reason}`
+      : `Ruling: ${proposal.decision}. ${proposal.reason}`,
+    "hint"
+  );
+  body.appendChild(item);
+}
+
+const CONTROL_PANELS = [
+  "control",
+  "sources",
+  "standing",
+  "history",
+  "acts",
+  "beliefs",
+  "questions",
+  "observation",
+];
+
 function showBootstrap() {
   show("bootstrap", true);
   show("console", false);
   show("conversations", false);
   show("notifications", false);
+  CONTROL_PANELS.forEach((panel) => show(panel, false));
 }
 
 function showConsole() {
@@ -704,6 +1728,10 @@ function showConsole() {
   // notifications" from "not connected", which is ADR-0083's ruling 4 failure at the
   // one place ADR-0175 §4 spends a keep-alive to prevent it.
   show("notifications", true);
+  // The control surface's own entry points are shown with the console; each panel
+  // below them appears when it has been read, so a panel on screen is always a
+  // panel showing an answer rather than an empty promise.
+  show("control", true);
   el("utterance").focus();
   watchDeliveries();
 }
@@ -712,6 +1740,12 @@ el("bootstrap-form").addEventListener("submit", startSession);
 el("ask-form").addEventListener("submit", ask);
 el("watch-button").addEventListener("click", watchDeliveries);
 el("conversations-button").addEventListener("click", listConversations);
+el("sources-button").addEventListener("click", listSources);
+el("standing-button").addEventListener("click", listStanding);
+el("history-button").addEventListener("click", listGrantHistory);
+el("beliefs-button").addEventListener("click", listBeliefs);
+el("questions-button").addEventListener("click", listQuestions);
+el("observe-button").addEventListener("click", observe);
 
 stopWatching();
 if (headerHalf() === null) {

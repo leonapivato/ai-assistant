@@ -81,6 +81,82 @@
         <div id="conversation-list"></div>
       </section>
 
+      <!--
+        The control surface (ADR-0177). Four subjects, four panels, and the two
+        grant questions are two panels rather than one: ADR-0139 §1 rules that
+        "neither answer is derivable from the other and no surface may present one
+        as the other", and §3's fourth clause forbids a view answering one with the
+        other. A page shows several things at once where a command line answers one
+        question per invocation, so keeping them apart is a layout obligation here
+        and not only a wording one.
+      -->
+      <section id="control" class="panel" hidden>
+        <h2>What I may read, and what I believe</h2>
+        <p class="choice">
+          <button type="button" id="sources-button">Sources</button>
+          <button type="button" id="standing-button">What I may read now</button>
+          <button type="button" id="history-button">Grant history</button>
+          <button type="button" id="beliefs-button">Beliefs</button>
+          <button type="button" id="questions-button">Questions</button>
+          <button type="button" id="observe-button">Look over this conversation</button>
+        </p>
+      </section>
+
+      <section id="sources" class="panel" hidden>
+        <h3>Sources you can connect me to</h3>
+        <p class="hint">
+          This says what is configured and what you have decided about each. It does
+          not say whether anything is being read.
+        </p>
+        <div id="source-list"></div>
+      </section>
+
+      <section id="standing" class="panel" hidden>
+        <h3>What I am currently authorised to read</h3>
+        <p class="hint" id="standing-state"></p>
+        <div id="standing-list"></div>
+      </section>
+
+      <section id="history" class="panel" hidden>
+        <h3>Grant history</h3>
+        <p class="hint">
+          Everything you granted and withdrew, newest first. This is a record of
+          decisions, not a statement of what stands now — no row here says on its own
+          whether it is still live.
+        </p>
+        <div id="history-list"></div>
+      </section>
+
+      <section id="acts" class="panel" hidden>
+        <h3>What happened</h3>
+        <div id="act-log"></div>
+      </section>
+
+      <section id="beliefs" class="panel" hidden>
+        <h3>What I believe</h3>
+        <p class="choice">
+          <input type="checkbox" id="band-asserted" name="band-asserted" checked />
+          <label for="band-asserted">You told me</label>
+          <input type="checkbox" id="band-derived" name="band-derived" checked />
+          <label for="band-derived">I worked it out</label>
+          <input type="checkbox" id="band-attested" name="band-attested" checked />
+          <label for="band-attested">A connected source reported it</label>
+        </p>
+        <div id="belief-list"></div>
+      </section>
+
+      <section id="questions" class="panel" hidden>
+        <h3>Questions waiting for you</h3>
+        <div id="question-list"></div>
+        <h3>Answers that were begun and never recorded</h3>
+        <div id="interrupted-list"></div>
+      </section>
+
+      <section id="observation" class="panel" hidden>
+        <h3>What looking over the conversation proposed</h3>
+        <div id="observation-body"></div>
+      </section>
+
       <p id="fault" class="fault" hidden></p>
     </main>
 
