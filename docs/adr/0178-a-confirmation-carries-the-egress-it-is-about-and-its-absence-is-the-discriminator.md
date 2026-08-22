@@ -643,10 +643,17 @@ those clauses forbid is if anything easier to make. They stay.
 
 > **Normative.** An over-limit confirmation is **undeliverable at that frame size and
 > not lost**, and no lane states or implies otherwise. The park stays durably
-> `AWAITING_APPROVAL`, its recorded `CONFIRM` stays unresolved and answerable, and
+> `AWAITING_APPROVAL`, its recorded `CONFIRM` stays unresolved, and
 > `pending_confirmations` rebuilds the confirmation from that durable state on every
-> call — so raising `hub_max_frame_bytes` makes the same park answerable again with
-> nothing re-derived and nothing re-ruled.
+> call — so raising `hub_max_frame_bytes` makes the same park **deliverable** again
+> with nothing re-derived and nothing re-ruled.
+
+> **Normative.** Deliverable is not answerable, and no lane writes or reasons as though
+> it were. Whether a rebuilt confirmation can still be *answered* is
+> `StepRunner._check_fresh`'s separate question, decided against the record's own
+> `expires_at`, and raising the frame limit does not touch it. No lane claims the frame
+> limit governs a confirmation's lifetime, and no lane claims a lifetime reclaims a
+> park (the residual list below, #1382).
 
 > **Normative.** The refusal names the member and the value that did not fit, to
 > ADR-0085 §8e's own standard — "a sentence a user can read and act on rather than a
@@ -670,23 +677,53 @@ it the whole blast radius and round 6 adversarial review was right to refuse tha
 The refusal lands on a `TurnOutcome` the engine measures **after** the runner has
 committed `AWAITING_APPROVAL` (`Engine._checked`, whose own commentary records that it
 "still runs after the work has committed"). So the caller does not receive the
-continuation token, and the parked step is real. Three facts bound it, and each is a
-property of the tree rather than a hope:
+continuation token, and the parked step is real. Three facts fix what it costs, and
+each is read off the tree rather than hoped for. Two of them bound the refusal; the
+third is a bound that does **not** exist, and it is stated here rather than assumed:
 
 - **Nothing is lost.** `_parked` is in-memory, but ADR-0052 §1's recovery rebuilds
   from durable state: `Engine._pending_confirmations` reads the plan store and
   `AuditTrail.pending_confirmation` and mints a fresh handle. The park survives the
   refusal, the process and the restart.
-- **The lever exists and is an operator's.** `hub_max_frame_bytes` is a `Settings`
-  field with a 1024-byte floor (ADR-0085 §8d) and a 16 MiB default; raising it makes
-  the same read succeed with nothing re-ruled. That is ADR-0085 §8e's ratified stance
-  for the analogous unbounded case, applied rather than invented here.
-- **It does not stand open forever.** A `CONFIRM` carries `expires_at` (ADR-0059 §1),
-  so a park nobody can answer stops being answerable rather than accumulating.
+- **The lever exists, it is an operator's, and it restores delivery rather than
+  time.** `hub_max_frame_bytes` is a `Settings` field with a 1024-byte floor
+  (ADR-0085 §8d) and a 16 MiB default; raising it makes the same read succeed with
+  nothing re-ruled. That is ADR-0085 §8e's ratified stance for the analogous unbounded
+  case, applied rather than invented here. It yields an *answerable* park only while
+  the record still has time on it — raised before `expires_at`, or in a deployment that
+  configured no `confirmation_ttl` at ask time, where there is no deadline to beat.
+  Raised after `expires_at` has passed, the read succeeds and the answer it collects is
+  then refused as stale.
+- **It is not reclaimed either, and an earlier draft of this bullet said the
+  opposite.** That draft claimed a `CONFIRM`'s `expires_at` means such a park "stops
+  being answerable rather than accumulating"; round 7 adversarial review was right that
+  this is false, and it cut the wrong way — it offered expiry as a bound where none
+  exists. Three readings of the tree, none of them ADR-0059 §3's, which is about the
+  legacy NULL-execution park and does not reach this:
+  - `StepRunner._check_fresh` refuses a late answer **without transitioning the
+    step**, and its own commentary states both the consequence and the gap: "Nothing
+    is committed, so the step stays ``AWAITING_APPROVAL``; reclaiming a permanently
+    unanswerable park is a separate concern (a plan-level sweep), not this stage's to
+    invent here." No such sweep exists.
+  - The enumeration does not filter on expiry. `Engine._pending_confirmations` selects
+    on `AWAITING_APPROVAL` plus a non-`None` `AuditTrail.pending_confirmation`, and
+    reads `expires_at` at neither point — so an expired park is rebuilt and presented
+    as pending on every call.
+  - `Settings.confirmation_ttl` **defaults to `None`**, which `_check_fresh` reads as
+    "no lifetime, uniformly". So the default deployment sets no deadline at all, and
+    expiry is not merely an unreliable bound there but an absent one.
+
+  This is **pre-existing** — a property of any unanswerable park, reachable today
+  through #1381's `parks × parameters` product with no `egress` member involved — and
+  the member does not create it. **#1382** holds it. Reclaiming such a park is not this
+  ADR's to decide (§11): it is a plan-store state transition under ADR-0037, ADR-0044
+  and ADR-0059, and ADR-0059's own account of why a park cannot simply be re-decided is
+  why it needs a ruling rather than a paragraph here.
 
 **And the read this lands on is already an unbounded product without this member,
 which is why the answer is a record and not a redesign.** `pending_confirmations`
-returns *every* answerable park in one payload and is measured whole
+returns *every* durably pending park in one payload — expired ones included, per the
+residual above — and is measured whole
 (`checked=True`); each `Confirmation` already carries its `parameters`, and
 `max_outstanding_confirmations` defaults to 1024. So `parks × parameters` can exceed
 the limit today, with no `egress` member involved, and one oversized entry already
@@ -830,6 +867,13 @@ way the real engine does, and that the suite says so.
   member — `parks × parameters` against one limit, with `max_outstanding_confirmations`
   defaulting to 1024 — and closing it means paging a promoted method or relating two
   figures, both `core/protocols.py` and neither this ADR's.
+- **Reclaiming an expired or permanently unanswerable park** (§9, #1382). Fires
+  whenever a deployment sets `confirmation_ttl` and a confirmation goes unanswered past
+  it: `_check_fresh` refuses the answer without transitioning the step, nothing sweeps
+  it, and the recovery enumeration does not filter on expiry, so the park is presented
+  as pending on every call. Pre-existing and reachable with no `egress` member involved.
+  It is a plan-store state transition governed by ADR-0037, ADR-0044 and ADR-0059, and
+  neither this ADR's nor this member's.
 - **A compact locator representation for the description** (§9, #1379). Fires on a
   measurement — a real egress call whose confirmation exceeds a reasonable
   `hub_max_frame_bytes` because its argument keys repeat once per span. Any such
@@ -987,10 +1031,14 @@ array expands. §9 works the arithmetic and states the consequence plainly: an a
 request can produce a confirmation that exceeds the frame limit. It is refused rather
 than truncated — a legible failure, and the direction §9's second clause chooses
 deliberately — and the park survives it: durable state holds it, `pending_confirmations`
-rebuilds it, `hub_max_frame_bytes` is the operator's lever and ADR-0059's lifetime
-retires it if nobody uses that lever. #1379 holds the compact-locator decision for the
-day a measurement says it binds, and #1381 holds the pre-existing unbounded product on
-the same read, which this member joins rather than creates.
+rebuilds it, and `hub_max_frame_bytes` is the operator's lever. What the lever restores
+is *delivery*, not time: an expired record is rebuilt and presented all the same, and
+`_check_fresh` then refuses the answer without retiring the step, so nothing reclaims
+the park — least of all a `confirmation_ttl` that defaults to unset. §9's residual list
+states that in full. #1379 holds the compact-locator decision for the day a measurement
+says it binds, #1381 holds the pre-existing unbounded product on the same read, which
+this member joins rather than creates, and #1382 holds the unreclaimable park, which it
+does not create either.
 
 **Two new `core` types is the ongoing cost.** `ConfirmationEgress` and
 `ConfirmationDestination` are surface that must be kept in step with `EgressBinding`
