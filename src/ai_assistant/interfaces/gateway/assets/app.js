@@ -262,7 +262,15 @@ function renderOutcome(outcome) {
   if (outcome.rationale) {
     line(body, outcome.rationale, "rationale");
   }
-  if (outcome.steps.length === 0) {
+  // **A plan with no steps, and not merely a turn with no plan.** `steps` comes from
+  // the plan, and a resume driven from a **recovered** park carries `turn` `null`
+  // (ADR-0052 §3) — so it has no plan, no steps, and nothing here that says the turn
+  // planned nothing. Saying "no action was needed" above "Done. `smtp` ran." is a
+  // contradiction on one screen, and the browser only started meeting it when
+  // `resume` reached this page (#1404). `step` being present is the deterministic
+  // account that a step was driven, which is exactly ADR-0170 §6's reason to trust it
+  // over anything inferred.
+  if (outcome.steps.length === 0 && outcome.step === null) {
     line(body, "No action was needed.", "notice");
   }
   const list = document.createElement("ol");
