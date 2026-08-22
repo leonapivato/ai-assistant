@@ -27,11 +27,15 @@
 
   **Not replaced — §3, §8, §10.** The fifteen signatures and the method set are
   untouched; §8's contract limit, §8b's 512-byte reserve and §8d's floor are
-  unchanged and are not recomputed (ADR-0178 §9), and §8f's belief page remains the
-  worst case — the new member adds a term linear in the call's own arguments, not a
-  factor. §10's per-method mapping is unchanged, because a result payload takes the
-  shape of the method's declared return annotation and no wire-side schema
-  transcribes the member.
+  unchanged and are not recomputed (ADR-0178 §9). §8f's analysis of `beliefs()` is
+  unaffected and is **not stretched to cover the new member**: because
+  `EgressSpan.argument` repeats a top-level key once per span, an egress confirmation
+  can exceed the limit for a request that did not, which ADR-0178 §9 states with its
+  arithmetic as a second unbounded-response case rather than folding it into §8f's
+  answer. No figure moves either way, and the over-limit case is a refusal — #1379
+  holds the compact-locator question. §10's per-method mapping is unchanged, because a
+  result payload takes the shape of the method's declared return annotation and no
+  wire-side schema transcribes the member.
 
   **What this does cost is the wire version, and ADR-0085 is not where that rule
   lives.** ADR-0124 §9's second limb moves `PROTOCOL_VERSION` from 9 to 10, on

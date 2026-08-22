@@ -622,7 +622,7 @@ untouched by this decision. `parameters` is still the pre-binding arguments; the
 canonical set now arrives *beside* it rather than instead of it, so the confusion
 those clauses forbid is if anything easier to make. They stay.
 
-### 9. The size limit does not move and this is not a new worst case
+### 9. The size limit does not move, and the new expansion term is stated rather than denied
 
 > **Normative.** ADR-0085 §8's figures are untouched: the contract limit stays
 > `hub_max_frame_bytes - 512`, applied to the whole serialised payload; §8b's
@@ -631,26 +631,51 @@ those clauses forbid is if anything easier to make. They stay.
 > for this member.
 
 > **Normative.** No lane resolves an over-limit confirmation by omitting spans,
-> abbreviating a canonical form or dropping the account identity. A payload over the
-> limit is refused as any other is, and a surface that received nothing renders
-> nothing rather than rendering a partial confirmation.
+> abbreviating a canonical form, compacting a locator or dropping the account
+> identity. A payload over the limit is refused as any other is, and a surface that
+> received nothing renders nothing rather than rendering a partial confirmation.
 
-**The member adds a term and does not add a factor, which is the distinction §8f
-turns on.** §8f's answer to "which payload is largest" is `beliefs()`, because its
-evidence payload is a *product* — beliefs × citations × content. A confirmation's
-egress member is bounded by the call's own arguments: at most one span per top-level
-key plus one per array element, each a handful of scalars and at most one destination
-whose two string forms are already substrings of values `parameters` carries in the
-same payload. So the payload of an egress confirmation roughly doubles and stays
-linear in the arguments that were already there. Nothing multiplies, and the belief
-page remains the worst case §8f names.
+> **Normative.** The implementing lane records, in `wire/envelope.py`'s or
+> `core/types.py`'s own commentary, that an egress confirmation's payload can exceed
+> the limit for a request that did not, and states the arithmetic below. No lane
+> claims this member is bounded by the request that produced it, and no lane cites
+> ADR-0085 §8f's belief page as covering it.
 
-**The second clause exists because truncation is the tempting fix and it is the one
-that breaks the floor.** §7 forbids a surface from silently truncating what it
-renders; this forbids the engine from silently truncating what it sends, which is
-where the pressure would actually land if a large recipient list met a small
-`hub_max_frame_bytes`. A confirmation missing recipients is worse than a confirmation
-that did not arrive, because only one of the two is visible to the user.
+**This member does add a product term, and saying otherwise would be false.** An
+earlier draft of this section claimed the addition was linear in the arguments; round
+5 adversarial review was right that it is not. `EgressSpan.argument` carries the
+top-level key **once per span** (ADR-0150 §4), and an array-valued argument of `n`
+elements yields `n` spans. So the description costs roughly `key_length × n` where the
+request paid `key_length + n`. Worked, against a 16 KiB payload limit: a request of
+`{"<4 KiB key>": ["a", …, "a"]}` with a thousand one-character elements is about 8 KiB
+and is accepted; its description repeats the 4 KiB key a thousand times and is about 4
+MiB, which is refused. **An accepted request whose confirmation cannot be delivered is
+a new shape in this system**, and it is named here rather than discovered by an
+operator.
+
+**It is a refusal, and that is the whole of its blast radius.** The frame exceeds the
+limit and the call fails legibly, exactly as an oversized belief page does; nothing is
+sent, nothing is authorised, and the second clause above is what keeps the tempting
+alternative — silently dropping spans to fit — off the table. `parameters` is already
+in the same payload, so the confirmation was never going to be small for a large call;
+what is new is only that it can be large when the call was not.
+
+**ADR-0085 §8f's analysis stands and is not stretched to cover this.** §8f asks which
+*response* is largest and answers `beliefs()`, whose evidence payload is
+`beliefs × citations × content` with `content` unbounded by any contract. That analysis
+is about `beliefs()` and is unaffected. This is a **second** unbounded-response case
+with a different unbounded factor, and folding it into §8f's answer would be claiming
+that section had considered something it had not. No figure of §8 moves either way:
+`hub_max_frame_bytes` is a deployment's number and an installation meeting this in
+practice raises it, exactly as it would for a large belief page.
+
+**A compact locator is the fix if this ever binds, and it is not taken on speculation.**
+Carrying each argument's key once with its spans grouped beneath it would remove the
+factor — and it would also make the confirmation's description a **different shape**
+from the binding's, which is what §2 refuses on ADR-0150 §10's ground that no lane binds
+one artifact and shows another. Buying that on a hypothesis would trade a certain defect
+for a possible one. **#1379** holds it, and it fires on a measurement: an installation
+where a real egress call's confirmation exceeds a reasonable `hub_max_frame_bytes`.
 
 ### 10. What the implementing lane owes, clause by clause
 
@@ -704,7 +729,11 @@ Obligations, each traceable to a clause above:
   markup are neutralised on the way out, as `_safe` already does for the existing
   members.
 - **§9.** No test asserts a size figure that this change did not move; a lane finding
-  itself editing one has changed something §9 says is unchanged.
+  itself editing one has changed something §9 says is unchanged. A test pins the
+  expansion rather than the absence of one: a binding whose argument key is long and
+  whose array is many-element produces a confirmation payload larger than the request
+  that produced it, and the over-limit case is a **refusal** — no span is dropped, no
+  locator is compacted and no identity is omitted to make it fit.
 
 **The conformance suite is where the correspondence obligation belongs**, not a
 single unit test beside the model, because §3's clause binds any producer of a
@@ -759,6 +788,11 @@ way the real engine does, and that the suite says so.
   re-sourced. In particular `parameters` stays the driven step's own arguments,
   pre-binding, and §7's surviving sub-clauses are what keep a surface from calling
   them something else.
+- **A compact locator representation for the description** (§9, #1379). Fires on a
+  measurement — a real egress call whose confirmation exceeds a reasonable
+  `hub_max_frame_bytes` because its argument keys repeat once per span. Any such
+  decision owes ADR-0150 §10's first clause an answer, since a compacted description is
+  a different shape from the bound one.
 - **Any second consumer of `ConfirmationEgress`.** It is a confirmation's member. No
   lane routes a policy, a store, a trace or a notification through it, and a
   consumer wanting the binding reads the binding.
@@ -904,11 +938,14 @@ redeployment of the hub #1230's milestone 14 left running. The failure mode if s
 forgets is the one ADR-0084 §3 built: a handshake refusal naming both versions, not a
 silent divergence.
 
-**A confirmation's payload grows and stays linear.** An egress confirmation carries the
-call's arguments and a description of them; §9 shows this adds a term rather than a
-factor and moves no figure. A very large recipient list against a small
-`hub_max_frame_bytes` is refused rather than truncated, which is a legible failure and
-is the direction §9's second clause chooses deliberately.
+**A confirmation's payload grows, and for one argument shape it grows by a factor.**
+An egress confirmation carries the call's arguments *and* a description of them, and
+because `EgressSpan.argument` repeats the key once per span, a long key naming a large
+array expands. §9 works the arithmetic and states the consequence plainly: an accepted
+request can produce a confirmation that exceeds the frame limit. It is refused rather
+than truncated — a legible failure, and the direction §9's second clause chooses
+deliberately — and #1379 holds the compact-locator decision for the day a measurement
+says it binds.
 
 **Two new `core` types is the ongoing cost.** `ConfirmationEgress` and
 `ConfirmationDestination` are surface that must be kept in step with `EgressBinding`
