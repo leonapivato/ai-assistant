@@ -105,9 +105,10 @@ check. What ADR-0166 bought is a second *complete* run, not a licence to select.
 used to leave out `tests/core/test_protocol_triad.py` — 31 tests, and the
 mechanical enforcement of the Protocol triad rule ("Adding a Protocol", below) —
 because that check reads pytest's own record of what the session ran and under
-`-n auto` no worker sees the whole session; since ADR-0179 the workers' records
-are merged on the controller, so the check runs here exactly as it does serially,
-and CI's `pytest` step is distributed on the same ground (ADR-0010, amended
+`-n auto` no worker sees the whole session. Since ADR-0179 the workers' records
+are merged on the controller and the check is decided there, over strictly more
+evidence than any one process holds and reaching the verdict a serial run reaches;
+CI's `pytest` step is distributed on the same ground (ADR-0010, amended
 2026-08-22). **Choose the serial run when the change is order-dependent, shares
 state through a fixture, or is timing-sensitive.** That is guidance, not a rule:
 the discretion in the paragraph above is flat.
