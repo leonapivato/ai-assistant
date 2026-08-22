@@ -33,8 +33,11 @@ records the branch and the commit it reviewed, and lands in one of:
     exotic one — rebase-merge rewrites the commits, so a landed lane's reviewed
     sha is in no history at all.
 ``unreadable``
-    No parseable provenance line. **Kept**, and reported: an artifact this cannot
-    read is one it cannot classify, and the fail-closed direction is to leave it.
+    No parseable provenance line — or a partial one that names a branch but no
+    reviewed commit, which is the same thing for this purpose: with no commit
+    there is no way to ask whether the content survives under another branch
+    name. **Kept**, and reported: an artifact this cannot classify is one it
+    leaves alone, and that is the direction that costs nothing when it is wrong.
 
 **Archive is the default and deletion is opt-in, but neither is forbidden by an
 ADR.** ADR-0015 §1, ADR-0020 §3 and ADR-0027 §2 all treat an artifact as evidence
@@ -315,16 +318,35 @@ def classify(artifact: Path, refs: Refs) -> Verdict:
     tree = provenance_field("tree", provenance)
     key = (loop, persona, tree) if loop and persona and tree else None
 
+    state, detail = _state(branch, sha, refs)
+    return Verdict(artifact, state, detail, key)
+
+
+def _state(branch: str, sha: str, refs: Refs) -> tuple[str, str]:
+    """Decide one artifact's state from what the refs hold.
+
+    Args:
+        branch: The recorded branch, or the empty string.
+        sha: The recorded commit, or the empty string.
+        refs: The ref state.
+
+    Returns:
+        The state and the one-phrase reason for it.
+    """
     if not branch and not sha:
-        return Verdict(artifact, "unreadable", "no branch or sha in the provenance line", key)
+        return "unreadable", "no branch or sha in the provenance line"
     if branch and refs.has_branch(branch):
-        return Verdict(artifact, "live", f"branch {branch} still exists", key)
+        return "live", f"branch {branch} still exists"
     if sha and refs.held_by_a_ref(sha):
-        return Verdict(artifact, "live", f"{sha[:12]} is held by a ref", key)
+        return "live", f"{sha[:12]} is held by a ref"
     if sha and refs.is_merged(sha):
-        return Verdict(artifact, "merged", f"{sha[:12]} is on {refs.default}", key)
-    gone = f"branch {branch} is gone" if branch else f"{sha[:12]} is in no ref"
-    return Verdict(artifact, "stale", gone, key)
+        return "merged", f"{sha[:12]} is on {refs.default}"
+    if not sha:
+        # The branch is gone, but with no recorded commit there is no way to ask
+        # whether its content is retained under another branch name — and an
+        # artifact that cannot be checked is one this keeps.
+        return "unreadable", f"branch {branch} is gone, but no sha to check"
+    return "stale", f"{sha[:12]} is in no ref"
 
 
 def snapshots_to_sweep(

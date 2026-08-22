@@ -16,6 +16,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent))
 from _operator_recipes import git, init_repo, load, run
 
@@ -235,6 +237,33 @@ def test_the_source_clone_is_never_its_own_target(tmp_path: Path) -> None:
     assert status == 0, out
     assert str(source) not in out
     assert (other / ".env").read_text() == "from four\n"
+
+
+def test_an_explicit_selector_cannot_escape_the_sibling_root(tmp_path: Path) -> None:
+    # A selector is pasted straight into a path, and `<base>-../../victim`
+    # resolves clean out of the sibling root — which would copy credentials into
+    # any unrelated checkout that happens to be on `main` and clean.
+    source, _ = _clones(tmp_path, 2)
+    victim = tmp_path / "victim"
+    init_repo(victim)
+    listing = _list_file(tmp_path, ".env")
+
+    status, _, err = _sync(source, listing, "../../victim")
+
+    assert status == 1
+    assert "not a clone number" in err
+    assert not (victim / ".env").exists()
+
+
+@pytest.mark.parametrize("selector", ["2a", "-1", "", "1/2"])
+def test_only_digits_name_a_clone(tmp_path: Path, selector: str) -> None:
+    source, _ = _clones(tmp_path, 2)
+    listing = _list_file(tmp_path, ".env")
+
+    status, _, err = _sync(source, listing, selector)
+
+    assert status == 1
+    assert "not a clone number" in err
 
 
 def test_no_siblings_is_not_a_failure(tmp_path: Path) -> None:
