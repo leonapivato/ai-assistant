@@ -82,6 +82,7 @@ import contextlib
 import errno
 import hmac
 import json
+import math
 import socket
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -100,16 +101,21 @@ from ai_assistant.core.types import (
     Belief,
     BeliefBand,
     BeliefSummary,
+    ClassReach,
     ConversationDigest,
     ConversationSummary,
     Disposition,
     Evidence,
     GrantableSource,
     GrantScope,
+    HeldNotification,
     MemoryKind,
+    NotificationPreferences,
+    NotificationReach,
     ObservationReport,
     ObservedProposal,
     Question,
+    QuietWindow,
     SourceGrant,
     StepOutcome,
     SuccessorLink,
@@ -250,6 +256,25 @@ _FORGET_QUESTION_PATH: Final = "/question/forget"
 #: it but a caller", and here the caller is the owner pressing a button.
 _OBSERVE_PATH: Final = "/observe"
 
+#: ADR-0177 §10's notification review surface. Five paths for five operations, and
+#: **none of them is** :data:`_DELIVERIES_PATH`: what these operate on is the
+#: notification *record* (ADR-0130), where a delivery is what the gateway's own poll
+#: hands to an open stream. §10's first three clauses turn that distinction into
+#: rules — nothing here acknowledges, retires, withdraws or completes a delivery, no
+#: ``delivery_id`` is read or written on any of them, and neither
+#: ``dismiss_notification`` nor ``forget_notification`` is a route by which one could
+#: reach a browser.
+#:
+#: The write is its own path rather than a second method on the read, because the
+#: door classifies "from its method and path alone" (ADR-0168 §6) and a surface whose
+#: read and whose whole-value write share a shape is one where a body that failed to
+#: parse could be read as the read.
+_NOTIFICATIONS_PATH: Final = "/notifications"
+_DISMISS_NOTIFICATION_PATH: Final = "/notification/dismiss"
+_FORGET_NOTIFICATION_PATH: Final = "/notification/forget"
+_NOTIFICATION_PREFERENCES_PATH: Final = "/notification/preferences"
+_SET_NOTIFICATION_PREFERENCES_PATH: Final = "/notification/preferences/set"
+
 #: Which method admits which path. A mapping rather than a chain of comparisons,
 #: because ADR-0168 §6 classifies "from its method and path alone" and the set of
 #: shapes the surface has is now large enough that reading it off one table is what
@@ -274,6 +299,11 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _ANSWER_PATH): "answer",
     ("POST", _FORGET_QUESTION_PATH): "forget_question",
     ("POST", _OBSERVE_PATH): "observe",
+    ("POST", _NOTIFICATIONS_PATH): "notifications",
+    ("POST", _DISMISS_NOTIFICATION_PATH): "dismiss_notification",
+    ("POST", _FORGET_NOTIFICATION_PATH): "forget_notification",
+    ("POST", _NOTIFICATION_PREFERENCES_PATH): "notification_preferences",
+    ("POST", _SET_NOTIFICATION_PREFERENCES_PATH): "set_notification_preferences",
 }
 
 #: The two shapes that answer on a stream (ADR-0175 §1). They are held apart from
@@ -742,6 +772,11 @@ class Gateway:
             _ANSWER_PATH: self._answer,
             _FORGET_QUESTION_PATH: self._forget_question,
             _OBSERVE_PATH: self._observe,
+            _NOTIFICATIONS_PATH: self._notifications,
+            _DISMISS_NOTIFICATION_PATH: self._dismiss_notification,
+            _FORGET_NOTIFICATION_PATH: self._forget_notification,
+            _NOTIFICATION_PREFERENCES_PATH: self._notification_preferences,
+            _SET_NOTIFICATION_PREFERENCES_PATH: self._set_notification_preferences,
         }
 
     @property
@@ -1929,6 +1964,128 @@ class Gateway:
         report = await self._relayed(partial(self._engine.observe, conversation_id=named))
         return _rendered({"observation": _observation_view(report)})
 
+    # --- ADR-0177 §10: the notification review surface --------------------
+    #
+    # Five operations on the notification **record** (ADR-0130 §7, §9) and none on a
+    # delivery. The two objects are on one screen for the first time here — a browser
+    # watching :data:`_DELIVERIES_PATH` *and* holding a list it can dismiss from — so
+    # §10's first three clauses are what these handlers are checked against: nothing
+    # below acknowledges, retires, withdraws or completes a delivery, and no
+    # ``delivery_id`` is read from a request or written into a response.
+
+    async def _notifications(self, request: Request) -> Response:
+        """List every retained notification, oldest first (ADR-0130 §7).
+
+        **The clock is read once for the whole page**, which is the CLI's own
+        arrangement and for its reason: expiry is the one part of a record's state no
+        field answers, so a page whose rows were judged at different instants could
+        render two records either side of a boundary neither of them crossed.
+
+        Args:
+            request: The admitted request, carrying optional ``limit`` and ``offset``.
+
+        Returns:
+            The page, each record with what a person needs in order to act on it.
+        """
+        payload = _payload(request)
+        held = await self._relayed(
+            partial(
+                self._engine.notifications,
+                limit=_page(payload, "limit", DEFAULT_PAGE_SIZE),
+                offset=_page(payload, "offset", 0),
+            )
+        )
+        now = self._now()
+        return _rendered({"notifications": [_notification_view(one, now=now) for one in held]})
+
+    async def _dismiss_notification(self, request: Request) -> Response:
+        """Dispose of one notification without destroying it (ADR-0130 §9).
+
+        **This is not an acknowledgement** (ADR-0177 §10). It ends the record's
+        actionability; whether the notification was ever *delivered* to this browser
+        or any other is a different question about a different object, and the
+        ``delivery_id`` that would answer it reaches no browser and is carried by no
+        member of this request.
+
+        Args:
+            request: The admitted request, carrying ``notification_id``.
+
+        Returns:
+            Whether an actionable notification was dismissed — ``false`` where the id
+            named nothing, or named one already dismissed, expired or dropped, which
+            the contract states is not an error.
+        """
+        named = _required_string(_payload(request), "notification_id")
+        dismissed = await self._relayed(partial(self._engine.dismiss_notification, named))
+        return _rendered({"dismissed": dismissed})
+
+    async def _forget_notification(self, request: Request) -> Response:
+        """Destroy one notification, so its subject can be proposed again (ADR-0130 §9).
+
+        ADR-0004 §6's delete right, beside the dismissal deliberately: a dismissal
+        leaves the record readable and in the user's export, and this is the surface
+        the delete right reaches.
+
+        **ADR-0177 §5's ceremony does not reach this verb and none is asserted here.**
+        §5 binds ``forget``, ``forget_question`` and ``forget_conversation`` by name
+        and stops there, and ADR-0073 §5 is about a belief — a notification is not one
+        of any band. What the front end offers before it sends this is a plain
+        confirmation of a destructive act, over the row it is displaying, and it does
+        not claim to be that ceremony.
+
+        Args:
+            request: The admitted request, carrying ``notification_id``.
+
+        Returns:
+            Whether a notification was destroyed.
+        """
+        named = _required_string(_payload(request), "notification_id")
+        destroyed = await self._relayed(partial(self._engine.forget_notification, named))
+        return _rendered({"destroyed": destroyed})
+
+    async def _notification_preferences(
+        self,
+        request: Request,  # noqa: ARG002 — one signature per entry in `_unary`
+    ) -> Response:
+        """Read the three standing settings that tune proactive contact (ADR-0130 §6).
+
+        Answerable from an empty store on the first day: every field has a shipped
+        default, and the gateway supplies none of them — what crosses is what the hub
+        said is in force.
+
+        Args:
+            request: The admitted request, which carries no argument.
+
+        Returns:
+            The settings in force.
+        """
+        held = await self._relayed(self._engine.notification_preferences)
+        return _rendered({"preferences": _preferences_view(held)})
+
+    async def _set_notification_preferences(self, request: Request) -> Response:
+        """Write the three standing settings whole (ADR-0130 §6, ADR-0177 §10).
+
+        **A read-modify-write, and the whole value crosses.** The surface replaces
+        what is held rather than merging into it, so a member this handler defaulted
+        would silently clear a setting the browser never meant to touch — which is
+        why every member is required here and none has a fallback. ADR-0177 §1's
+        "the gateway derives none of them, defaults none of them" is the same rule
+        arriving from the other side.
+
+        **What is rendered back is what the call returned**, never what it was sent
+        (§10's fourth clause). The last write wins and this surface carries no version
+        token, so the value in force after a write is a fact only the hub can state.
+
+        Args:
+            request: The admitted request, carrying the whole preferences value.
+
+        Returns:
+            The settings now in force, as the store holds them.
+        """
+        asked = _preferences(_payload(request))
+        written = await self._relayed(partial(self._engine.set_notification_preferences, asked))
+        return _rendered({"preferences": _preferences_view(written)})
+
     def _refuse(
         self, request_class: RequestClass, condition: RefusalCondition, connection: _Connection
     ) -> Response:
@@ -2188,6 +2345,158 @@ def _uses(payload: Mapping[str, Any], name: str) -> tuple[GrantScope, ...]:
     if selected is None:  # pragma: no cover — the membership check above precedes it
         raise _malformed()
     return selected
+
+
+def _rows(payload: Mapping[str, Any], name: str) -> list[Mapping[str, Any]]:
+    """One required member that is a list of JSON objects, and nothing else.
+
+    Required rather than defaulted, because ``set_notification_preferences``
+    **replaces** what is held rather than merging into it (ADR-0130 §6): a member this
+    reader defaulted to the empty list would clear every quiet window, or every reach
+    the user has set, on a request that never mentioned them.
+
+    Args:
+        payload: The request's JSON object.
+        name: The member to read.
+
+    Returns:
+        The rows, unread.
+
+    Raises:
+        _Refused: If the member is absent, is not a list, or holds anything that is
+            not a JSON object.
+    """
+    value = payload.get(name)
+    if not isinstance(value, list) or any(not isinstance(one, dict) for one in value):
+        raise _malformed()
+    return value
+
+
+def _member[T: StrEnum](row: Mapping[str, Any], name: str, vocabulary: type[T]) -> T:
+    """One required member of a closed vocabulary, on one row.
+
+    The singular of :func:`_members`, and refusing rather than defaulting for the same
+    reason ``answer``'s ``accept`` is: a reach the gateway chose would be this adapter
+    deciding how far the assistant may go in reaching the user.
+
+    Args:
+        row: The object to read.
+        name: The member to read.
+        vocabulary: The enumeration it must name.
+
+    Returns:
+        The member.
+
+    Raises:
+        _Refused: If the member is absent or names nothing the vocabulary carries.
+    """
+    value = row.get(name)
+    known = {member.value: member for member in vocabulary}
+    if not isinstance(value, str) or value not in known:
+        raise _malformed()
+    return known[value]
+
+
+def _count(payload: Mapping[str, Any], name: str) -> int:
+    """One required count, in the range the surface declares for it.
+
+    ``[0, 2**63)`` is ``interruption_budget``'s own bound and zero is a member of it:
+    ADR-0130 §6 makes zero "a legible 'never interrupt' rather than a defect", so a
+    reader that treated it as absent would refuse the one setting a user most needs.
+
+    Args:
+        payload: The request's JSON object.
+        name: The member to read.
+
+    Returns:
+        The value.
+
+    Raises:
+        _Refused: If the member is absent, or is not an integer in ``[0, 2**63)``.
+    """
+    if name not in payload:
+        raise _malformed()
+    return _page(payload, name, 0)
+
+
+def _seconds(payload: Mapping[str, Any], name: str) -> timedelta:
+    """One required duration, spelled as a number of seconds.
+
+    JSON carries no duration, and this is the member a browser reads and hands back
+    unchanged rather than one it edits — so the spelling only has to round-trip.
+
+    **``NaN`` and the infinities are refused explicitly**, because Python's JSON
+    reader accepts all three by default: ``timedelta(seconds=float("nan"))`` raises,
+    and an infinity would arrive as an ``OverflowError`` from a member that passed
+    every type check. A duration outside ``timedelta``'s own range is refused the
+    same way.
+
+    Args:
+        payload: The request's JSON object.
+        name: The member to read.
+
+    Returns:
+        The duration.
+
+    Raises:
+        _Refused: If the member is absent, is not a finite number above zero, or names
+            a duration ``timedelta`` cannot hold.
+    """
+    value = payload.get(name)
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise _malformed()
+    if not math.isfinite(value) or value <= 0:
+        raise _malformed()
+    try:
+        return timedelta(seconds=value)
+    except (OverflowError, ValueError) as exc:
+        raise _malformed() from exc
+
+
+def _preferences(payload: Mapping[str, Any]) -> NotificationPreferences:
+    """The whole standing-settings value, as the browser read it and wrote it back.
+
+    **The refusal here is the gateway's own and is named as such.** A body that cannot
+    become a :class:`~ai_assistant.core.types.NotificationPreferences` leaves no call
+    to relay, so answering it with ``rejected`` — the name :func:`_relay_fault` gives a
+    refusal the *hub* authored — would attribute this adapter's refusal to a hub that
+    was never asked, which is the fact about the hub ADR-0168 §3 keeps out of a
+    refusal body.
+
+    The type's own two refusals ride here for the same reason: two rows naming one
+    class, and a quiet window with no readable extent, are refused at construction in
+    every client (ADR-0085 §9's "locally and before any I/O"), so the gateway could
+    not relay one if it tried. The front end says so in the user's words before it
+    sends, which is where a person can act on it.
+
+    Args:
+        payload: The request's JSON object.
+
+    Returns:
+        The value to write.
+
+    Raises:
+        _Refused: If any member is absent, is of the wrong type, or the whole does not
+            construct.
+    """
+    try:
+        return NotificationPreferences(
+            reaches=tuple(
+                ClassReach(
+                    notification_class=_required_string(row, "notification_class"),
+                    reach=_member(row, "reach", NotificationReach),
+                )
+                for row in _rows(payload, "reaches")
+            ),
+            quiet_windows=tuple(
+                QuietWindow(start=_count(row, "start"), end=_count(row, "end"))
+                for row in _rows(payload, "quiet_windows")
+            ),
+            interruption_budget=_count(payload, "interruption_budget"),
+            budget_window=_seconds(payload, "budget_window_seconds"),
+        )
+    except ValueError as exc:
+        raise _malformed() from exc
 
 
 def _payload(request: Request) -> Mapping[str, Any]:
@@ -2612,6 +2921,100 @@ def _answer_view(outcome: AnswerOutcome) -> dict[str, Any]:
         "successor": _successor_view(outcome.successor),
         "successor_refused": outcome.successor_refused,
         "disposed": outcome.disposed,
+    }
+
+
+def _notification_view(record: HeldNotification, *, now: datetime) -> dict[str, Any]:
+    """One held notification, as a person deciding what to do with it reads it.
+
+    An enumeration for ``_outcome_view``'s reason, and a **different** one from
+    :func:`ai_assistant.interfaces.gateway.streams.notification`: that view renders a
+    *delivery* arriving on a stream and carries three members, this one renders the
+    *record* the review surface acts on and carries the id those two verbs take.
+    ADR-0177 §10 is why they are two functions rather than one reused — a
+    ``delivery_id`` reaches no browser, and there is no member here that could carry
+    one.
+
+    **No confidence, no sensitivity, no references and no goal cross**, exactly as
+    they do not on the delivery view: ADR-0130 §4 separates the evidence from the
+    ruling, and a page showing a producer's confidence beside a notification would be
+    presenting the first as though it were the second. ``candidate_key`` is the
+    duplicate-suppression key and is nobody's business but the store's;
+    ``reconsider_at`` and ``retention`` are the reconsideration job's bookkeeping and
+    say nothing a person can act on.
+
+    **The producer's own name crosses**, which the command line already renders
+    ("noticed by …"): "who noticed this" is the first thing a person asks of an
+    unexpected notification, and it is engine-supplied text the page neutralises
+    exactly as it neutralises a summary (ADR-0177 §10's fifth clause, ADR-0099 §4).
+
+    **``expired`` is the record's own predicate asked at one clock reading, not a
+    comparison restated here.** ADR-0130 §7 requires a surface enumerating a record to
+    say which side of its expiry it is on, and no field answers it — so
+    :meth:`~ai_assistant.core.types.NotificationCandidate.is_perishable_at`, "spelled
+    once so that a policy, a store and a suite cannot disagree about" the boundary, is
+    asked rather than reimplemented, here or in JavaScript. What this adapter supplies
+    is the reading, which is what the command line's own renderer supplies too.
+
+    **The two stamped limbs of actionability are carried as stamps and not folded in**
+    (ADR-0130 §7). A dismissal and a reconsideration's ``DROP`` were stamped by the
+    hub; expiry is the limb with nothing stored. Asking
+    :meth:`~ai_assistant.core.types.HeldNotification.is_actionable_at` for all three
+    would put the two stamped ones behind this device's clock as well, so a gateway
+    running behind the hub would offer a dismissal on a record the hub had already
+    dismissed.
+
+    Args:
+        record: The record the engine returned.
+        now: The instant the whole page is judged at, tz-aware.
+
+    Returns:
+        The value to render.
+    """
+    candidate = record.candidate
+    return {
+        "id": record.id,
+        "notification_class": candidate.notification_class,
+        "producer": candidate.producer,
+        "summary": candidate.summary,
+        "detail": candidate.detail,
+        "noticed_at": candidate.noticed_at.isoformat(),
+        "expires_at": None if candidate.expires_at is None else candidate.expires_at.isoformat(),
+        "expired": candidate.expires_at is not None and not candidate.is_perishable_at(now),
+        "kind": record.kind.value,
+        "reason": record.reason.value,
+        "failed": [condition.value for condition in record.failed],
+        "ruled_at": record.ruled_at.isoformat(),
+        "admitted_at": record.admitted_at.isoformat(),
+        "dismissed_at": (None if record.dismissed_at is None else record.dismissed_at.isoformat()),
+        "dropped_at": None if record.dropped_at is None else record.dropped_at.isoformat(),
+    }
+
+
+def _preferences_view(preferences: NotificationPreferences) -> dict[str, Any]:
+    """The three standing settings, whole, so a browser can write them back (§6).
+
+    **Every member the type carries crosses**, which is not this view's usual rule and
+    is required by ADR-0177 §10's fourth clause: the write replaces what is held, so a
+    browser that read a partial value and sent it back would clear whatever this view
+    dropped. ``budget_window`` in particular is on no form the page offers and travels
+    for exactly that reason.
+
+    The window's endpoints are the type's own spelling — minutes since local midnight,
+    carrying no zone and unable to smuggle one in — and are rendered rather than
+    converted here. The duration is seconds, because JSON has no duration and the
+    number is what a browser can hold unchanged and hand back.
+    """
+    return {
+        "reaches": [
+            {"notification_class": row.notification_class, "reach": row.reach.value}
+            for row in preferences.reaches
+        ],
+        "quiet_windows": [
+            {"start": window.start, "end": window.end} for window in preferences.quiet_windows
+        ],
+        "interruption_budget": preferences.interruption_budget,
+        "budget_window_seconds": preferences.budget_window.total_seconds(),
     }
 
 
