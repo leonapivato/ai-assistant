@@ -104,6 +104,7 @@ from ai_assistant.core.types import (
     Belief,
     BeliefSummary,
     Confirmation,
+    ConfirmationEgress,
     ContinuationToken,
     ConversationSummary,
     DeferralAdmissionOutcome,
@@ -734,6 +735,44 @@ def presented_confidence(stored: float, *, cited: int, resolved: int) -> float:
     # zero, so the result is ``stored`` at every level of support — the no-op §6
     # names, with the loss carried by the tombstones instead.
     return floor + (stored - floor) * (resolved / cited)
+
+
+def _confirmation_egress(recorded: PermissionDecision) -> ConfirmationEgress | None:
+    """The egress facts a confirmation puts to the user, or ``None`` (ADR-0178 §5).
+
+    Read from the **recorded** ``PermissionDecision`` the confirmation is about,
+    which is ADR-0148 §1: the binding a confirmation shows is the one the ruling
+    was taken over, fixed before the ruling and not moving after it. Reading it
+    from anything the runner still holds would be a second source that could
+    differ from the authorised one.
+
+    **Two fields off a value already in hand, and nothing else.** It derives no
+    binding, reads no connection record, opens no store, calls no seam and reads no
+    clock — which is what keeps :meth:`Engine._confirmation`'s standing guarantee
+    true (#287): everything that could raise still happens before ``run`` commits
+    ``AWAITING_APPROVAL``, and this raises nothing. The account's ``reference`` and
+    the binding's ``transport_endpoint`` are the two fields deliberately left
+    behind (ADR-0178 §2), so nothing this returns can carry them to an adapter.
+
+    **The same function serves both assembly sites**, which is how ADR-0178 §5's
+    fourth clause is discharged rather than hoped for: a recovered confirmation
+    carries the *same* egress content a live one carries for the same parked step,
+    because ``PermissionDecision.egress_binding`` is a stored field the trail
+    round-trips whole (ADR-0150 §9) and both sites hold a whole decision. There is
+    no reduced, digested or partial recovered form.
+
+    Args:
+        recorded: The recorded ``CONFIRM`` this confirmation is about.
+
+    Returns:
+        The egress facts, or ``None`` where the decision carries no binding — which
+        is ADR-0178 §4's discriminator and states that the ruling was taken over an
+        egress binding and nothing more.
+    """
+    binding = recorded.egress_binding
+    if binding is None:
+        return None
+    return ConfirmationEgress(account_identity=binding.account.identity, spans=binding.spans)
 
 
 def belief_from_record(record: MemoryRecord, evidence: tuple[Evidence, ...] = ()) -> Belief:
@@ -4972,6 +5011,7 @@ class Engine:
             parameters=turn.plan.steps[0].parameters,
             reason=recorded.ruling.reason,
             token=ContinuationToken(handle=handle),
+            egress=_confirmation_egress(recorded),
         )
 
     def _recovered_confirmation(
@@ -4997,6 +5037,7 @@ class Engine:
             parameters=parameters,
             reason=confirmed.ruling.reason,
             token=ContinuationToken(handle=handle),
+            egress=_confirmation_egress(confirmed),
         )
 
     def _handle_for_binding(self, execution_id: str, step_id: str) -> str:

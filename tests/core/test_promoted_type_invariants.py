@@ -64,6 +64,7 @@ def _confirmation() -> Confirmation:
         parameters={},
         reason="an off-device disclosure",
         token=ContinuationToken(handle="h-1"),
+        egress=None,
     )
 
 

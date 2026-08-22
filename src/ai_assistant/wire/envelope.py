@@ -159,7 +159,44 @@ from ai_assistant.wire.errors import (
 #: length prefix, the UTF-8 JSON codec and the connect frame's version member keep
 #: their representation, the connect exchange gains no member, and a chunk frame is
 #: framed and decoded by the existing rules.
-PROTOCOL_VERSION: Final[int] = 9
+#:
+#: **10 since ADR-0178 §6**, which adds ``egress`` to
+#: :class:`~ai_assistant.core.types.Confirmation` — the connected account's
+#: identity and the binding's payload description, the content ADR-0148 §8's
+#: fourth clause requires a ``CONFIRM`` on an egress call to name, or ``None``
+#: where the ruling was taken over no egress binding. ADR-0124 §9's **second**
+#: limb, on ADR-0170 §3's precedent exactly: "a change to a wire-carried ``core``
+#: type that makes a value one peer emits invalid for the other, whether the
+#: change widens or narrows the type". It bites rather than merely applying, and
+#: ADR-0178 §6 reads the tree rather than asserting it — ``Confirmation`` sets
+#: ``extra="forbid"``, ``wire.surface``'s ``return_adapter`` validates every
+#: result against the method's declared return annotation, and ``wire.codec``'s
+#: ``project`` renders a model by ``model_dump()``, which **includes** a ``None``
+#: member rather than omitting it. So a version 10 hub emits ``"egress": null`` on
+#: **every** confirmation, egress or not, and a version 9 client fails with
+#: ``extra_forbidden`` on it — a confirmation it asked for arriving as a decode
+#: error. Both delivery routes are affected, because a ``Confirmation`` reaches a
+#: client on ``TurnOutcome.step.confirmation`` (``converse``,
+#: ``converse_streaming``) and as the element type of ``pending_confirmations``.
+#:
+#: **Nothing else under** ``wire/`` **changes for it**, as at 8 and for the same
+#: reason: the connect exchange gains no member, no frame's encoding changes, no
+#: :class:`FrameKind` is added, and the promoted surface's method set is untouched
+#: (ADR-0084 §3's permanent freeze, ADR-0085 §3). A result payload takes the shape
+#: of the method's own declared return annotation (ADR-0085 §10), so the member
+#: crosses without a second declaration and nothing transcribes it into a
+#: wire-side schema. ``ConfirmationDestination`` is **not** described by this
+#: number at all: it is the member type of a derived property ADR-0178 §3 forbids
+#: storing or transmitting, so no peer ever receives one.
+#:
+#: **A version 9 peer and a version 10 peer do not interoperate**, and no lane
+#: adds a compatibility shim, an optional-member negotiation, a per-member
+#: capability flag or a lenient decode to make them: ADR-0084 §3's exact-match
+#: handshake is the mechanism, and the refusal naming both versions is the
+#: intended user-visible outcome. The operational cost is one redeployment —
+#: hub and clients upgrade together — which ADR-0178 §6 names rather than
+#: minimises.
+PROTOCOL_VERSION: Final[int] = 10
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
