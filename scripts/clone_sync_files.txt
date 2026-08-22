@@ -12,11 +12,14 @@
 # Add a path here when a lane discovers a tool or setting present in one clone
 # and absent in another. Removing a path stops it syncing; it does not delete
 # anything already copied.
+#
+# A path also LEAVES this list when it becomes tracked, and that is a normal
+# ending rather than a regression: git then distributes it to every clone by
+# itself, and there is nothing left to mirror. `.mcp.json` was the first — it was
+# committed in PR #1402, so it came out. `tests/scripts/test_clone_sync.py`'s
+# `test_the_shipped_list_names_only_ignored_files` is what notices, because a
+# tracked entry would otherwise make every sync refuse on its first target.
 
 # Gateway / remote-listener settings and any local credentials (ADR-0003:
 # "Secrets come from the environment via Settings; .env is never committed").
 .env
-
-# Playwright MCP server registration, so a lane dispatched into any clone has the
-# browser arm available (issue #1380).
-.mcp.json
