@@ -18,9 +18,9 @@
   first establishes a **recorded origin** the authoriser evaluates at the moment it
   rules — a fact the request carries, never an inference about how a model produced
   it (ADR-0098 §5, §12) — and states its rule over that fact." This ADR establishes
-  that fact. **It does not rest on it to permit anything**: §5's second clause
-  leaves ADR-0154's floor standing exactly as written and adds a floor beneath any
-  ADR that would later lift it.
+  that fact. **It does not rest on it to permit anything**: §5's sixth clause
+  leaves ADR-0154's floor standing exactly as written, and §5's second clause is a
+  floor beneath any ADR that would later lift it.
 - **Refs:** #1427 (track:world, milestone 23), #641 (reader-side threat model,
   which §9 routes rather than folds), #668 (which closes against milestone 23 and
   not against this ADR), #301, #746, #1404, #1154, #1114, #1162, #1218. **Filed by
@@ -214,8 +214,8 @@ them, not by what would be convenient to record. §2 is that finding.
 - **It may not re-decide ADR-0106 §6.** The memory ruling point has its ceiling and
   its enforcement point. §5's first clause cites it and adds nothing.
 - **It may not lift ADR-0154 §4's standing-authorisation floor.** Establishing the
-  fact that clause names as a precondition is not resting on it. §5's second clause
-  says so and adds a floor beneath any later ADR that would lift it.
+  fact that clause names as a precondition is not resting on it. §5's sixth clause
+  says so, and its second clause is the floor beneath any later ADR that would.
 - **It may not claim influence.** ADR-0106 §1's second clause and ADR-0098 §5's
   marked clause both forbid stating that a marker detects external content embedded
   in text whose recorded origin is not external. §7 inherits both verbatim.
@@ -373,7 +373,7 @@ same fact reaching a surface, not a second statement of it.
 
 **On the binding rather than on a span**, because §2 rules the fact is a property of
 the call. Putting a call-level fact on a span would make it look like a span-level
-claim, which §2's third clause forbids and which §6's third clause forbids a surface
+claim, which §2's third clause forbids and which §6's fifth clause forbids a surface
 from rendering.
 
 ### 4. Computed by whoever selected the material, never read from a producer
@@ -416,21 +416,36 @@ watch the fact clear. A warrant is never un-received, and neither is a selection
 > `MemoryPolicyContract`, and no clause here restates, narrows, widens or supplies a
 > second enforcement point for it.
 
-> **Normative.** At the **egress** ruling point, no `ActionPolicy` returns `ALLOW` on
-> a request whose binding carries `planned_with_external_content` except under
-> ADR-0148 §3's route (a) — a decision of the user recorded in the `AuditTrail` as
-> the resolution of a `CONFIRM` about **that** request. No standing user policy and
-> no standing grant covers such a call, whatever a later ADR permits for calls that
-> do not carry it.
+> **Normative.** At the **egress** ruling point, no ruling an `ActionPolicy` returns
+> is `ALLOW` on a request whose binding carries `planned_with_external_content`
+> except under ADR-0148 §3's route (a) — a decision of the user about **that**
+> request. No standing user policy and no standing grant covers such a call, whatever
+> a later ADR permits for calls that do not carry it.
 
-> **Normative.** The clause above is an obligation of the `ActionPolicy` contract:
-> it is stated on the Protocol and asserted in the shared `ActionPolicyContract`
-> suite, beside the existing floors and by the same predicate. No method is added to
-> `ActionPolicy`, no argument is widened, and no return annotation changes.
+> **Normative.** The clause above binds `decide` and `resolve` **separately**,
+> because the two members hold different inputs and only one of them can see an
+> approval. On `decide`, which receives an `ActionRequest` and holds no
+> `AuditTrail`, route (a) is unavailable by construction — no resolution exists yet —
+> so the obligation is discharged by not returning `ALLOW` at all, and no
+> implementation acquires a trail read in order to look for one. On `resolve`, which
+> receives the recorded `PermissionDecision` the user answered and the answer itself,
+> route (a) is available exactly when `approved` is true and that decision's binding
+> `authorises` the request being resumed — which is ADR-0148 §1's fourth clause and
+> §3's first clause used as they stand, not a second comparison minted here.
+
+> **Normative.** No lane discharges the clause on one member and not the other, and
+> no lane reads `decide`'s unavailability of route (a) as licence to relax the rule on
+> `resolve`. §10 states a test for each member.
+
+> **Normative.** The three clauses above are obligations of the `ActionPolicy`
+> contract: they are stated on the Protocol and asserted in the shared
+> `ActionPolicyContract` suite, beside the existing floors and by the same predicate.
+> No method is added to `ActionPolicy`, no argument is widened, and no return
+> annotation changes.
 
 > **Normative.** ADR-0154 §4's standing-authorisation floor — that **no** standing
 > authorisation covers **any** egress call through the designated seam — is unchanged
-> and unlifted by this ADR. The clause above is a floor beneath it: an ADR that
+> and unlifted by this ADR. The second clause above is a floor beneath it: an ADR that
 > later lifts ADR-0154's floor may not lift it for a call carrying
 > `planned_with_external_content`, and may not read this ADR as having lifted
 > anything.
@@ -470,11 +485,23 @@ is asked about, with the fact in front of them, is the containment #668 asks for
 > and renders it beside the occurrences rather than in place of any of them. This
 > extends ADR-0178 §7's first clause by one fact and changes none of its others.
 
-> **Normative.** The surface renders it as a statement about **the call**: that the
-> material this system selected into the model call that produced this request
-> included content from a source the user connected. It is rendered in both states —
-> a call carrying `False` says so — because a fact shown only when it is alarming is
-> a fact a user learns to read as an alarm.
+> **Normative.** The surface renders it as a statement about **the call**, and at
+> the strength the recorded predicate actually carries: that the material this system
+> selected into the model call which produced this request **did**, or **did not**,
+> include a record marked as resting on recorded external content. No surface names
+> a source, names a kind of source, or says "from a source you connected" — the
+> predicate names none, and ADR-0098 §1's class is wider than connected sources,
+> reaching a tool or MCP result, a provider's error text and a third party's speech
+> captured by a spoke.
+
+> **Normative.** No surface renders `False` as an assurance. It states that no
+> selected record carried the marker, never that no external content was involved,
+> which is §7's first clause read at the renderer and ADR-0106 §1's second clause
+> read one axis over.
+
+> **Normative.** It is rendered in **both** states, because a fact shown only when
+> it is alarming is a fact a user learns to read as an alarm, and its absence as
+> clearance.
 
 > **Normative.** No surface renders it as a statement about a **span**. It is not
 > attributed to an argument, a position, a destination or a payload span, and no
@@ -558,14 +585,31 @@ naming it is preferable to a rule that looks like it closed the gap.
 > measurements below. No lane substitutes a different arm, drops a measurement, or
 > reports the milestone met on a run that did not produce all four figures.
 
-The arms, transcribed from #1427's ruled text:
+#1427's ruled text for arm (a) reads:
+
+```text
+a hostile instruction inside ingested content (a) cannot cause a send — the egress
+is parked and the CONFIRM card shows its origin on the offending field
+```
+
+**It is narrowed in one respect before it is made a clause, and the narrowing is
+declared rather than glossed.** *Cannot cause a send* is stronger than anything this
+decision or ADR-0154 provides: §5 deliberately keeps the confirmation route and the
+Alternatives refuse an outright refusal, so a user who reads the card and approves
+sends the message, and the posture is bounded blast radius rather than prevention
+(ADR-0098 §3, §5). A clause stating the stronger form would be the unobtainable
+bound ADR-0098 §6's second clause forbids, and it would make the arm untestable
+against the figure that measures it, which is `ASR-past-gate` — a count of
+**unauthorised** transmissions. The clause below therefore states what the mechanism
+provides; the ruled text above stands quoted so the difference is visible to whoever
+ratifies this.
 
 > **Normative.** **Arm (a).** A hostile instruction inside ingested content cannot
-> cause a send: the egress is parked, and the CONFIRM card renders, before the answer
-> is collected, every occurrence the binding carries and the call's
-> `planned_with_external_content`. §6's first three clauses are what "shows its
-> origin" is discharged by, and a per-span externality claim is not part of the arm
-> (§2's third clause).
+> cause a send **the user did not authorise for that call**: the egress is parked,
+> and the CONFIRM card renders, before the answer is collected, every occurrence the
+> binding carries and the call's `planned_with_external_content`. §6 is what "shows
+> its origin" is discharged by, and a per-span externality claim is not part of the
+> arm (§2's third clause).
 
 > **Normative.** **Arm (b).** A hostile instruction inside ingested content cannot
 > become a **forbidden belief** that justifies a later send without that origin being
@@ -681,17 +725,33 @@ only in a list item obliges nobody.
 > for two bindings identical but for this field. The last fails an implementation
 > that exempted the field from the comparison.
 
-> **Normative.** The same lane states §5's second clause on the `ActionPolicy`
-> Protocol and adds it to `ActionPolicyContract`, in the same change as the fields.
-> The contract PR therefore touches `core/protocols.py` as well as `core/types.py`.
-> That suite case asserts the clause's boundary as well as its subject: a request
-> carrying `False` is judged on the ordinary path and is not refused by this rule.
+> **Normative.** The same lane states §5's second, third and fourth clauses on the
+> `ActionPolicy` Protocol and adds them to `ActionPolicyContract`, in the same change
+> as the fields. The contract PR therefore touches `core/protocols.py` as well as
+> `core/types.py`. That suite case asserts the clause's boundary as well as its
+> subject: a request carrying `False` is judged on the ordinary path and is not
+> refused by this rule.
 
 > **Normative.** The same lane ships a test in which the selected material contains
 > one record satisfying `rests_on_recorded_external_content` and the model's own
 > output claims the field is `False`, asserting the request reaching the ruling point
 > carries `True` (§4's discard-not-merge). A test built from a selection alone
 > exercises neither half.
+
+> **Normative.** The same lane ships a **multi-selection** test for §4's third
+> clause: a request whose arguments were produced over two selections, the **first**
+> containing a record satisfying `rests_on_recorded_external_content` and the
+> **second** containing none, asserting the request reaching the ruling point carries
+> `True`. An implementation that stamps the binding from the last selection passes
+> every other clause of this section and fails this one, which is the whole reason it
+> is stated separately.
+
+> **Normative.** The same lane ships a test for **each** member the §5 obligation
+> binds: that `decide` returns no `ALLOW` on a request carrying the marker, and that
+> `resolve` returns `ALLOW` on it only where `approved` is true and the recorded
+> decision `authorises` the resumed request. A suite case exercising `decide` alone
+> passes an implementation that relaxed the rule on the path where an approval
+> exists.
 
 > **Normative.** The lane implementing §6 for a surface ships a test that a
 > confirmation carrying `True` renders the fact **and** every occurrence
@@ -770,7 +830,7 @@ written in this change.**
   exists. A reader holding only ADR-0154 would read the precondition as unmet, which
   is a fact about the tree that has changed. **The floor itself is unchanged**: no
   ADR rests on the surface to lift it, this ADR expressly declines to (§5's fourth
-  clause), and §5's second clause adds a floor beneath any later ADR that would.
+  clause), and §5's second clause is a floor beneath any later ADR that would.
   §6's residue bullet likewise moves by half, exactly as ADR-0152's does.
   **Addition, and the note records the precondition as met and the floor as
   standing.**
@@ -870,7 +930,7 @@ into the regime by it.
   milestone 23. Until then the honest per-span facts are the ones `EgressSpan`
   already carries.
 - **Whether a standing authorisation may cover an egress call**, now that the
-  recorded origin ADR-0154 §4 asks for exists. §5's fourth clause leaves that floor
+  recorded origin ADR-0154 §4 asks for exists. §5's sixth clause leaves that floor
   standing and its second clause fixes what such an ADR may not do. **Fires with the
   ADR that establishes standing grants for egress recipients** — ADR-0148 §3's fifth
   clause names the three questions it must answer, and this ADR adds none.
@@ -995,7 +1055,7 @@ external span from one that did not, so an authoriser could only guess" — and 
 read as an exhaustive statement it would be *weaker* than what is ratified: ADR-0154
 §4's first clause closes standing authorisation for **every** egress call at this
 seam, and a rule closing it only for externally-originated ones would read as opening
-it for the rest. §5's fourth clause is the corrected form.
+it for the rest. §5's second and sixth clauses together are the corrected form.
 
 **Refuse the call outright when `planned_with_external_content` is `True`.**
 Refused on ADR-0106 §8's ground one seam over: a system that silently declines
