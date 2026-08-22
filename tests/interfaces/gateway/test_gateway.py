@@ -49,7 +49,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import EncodableText, Identifier
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assistant_env")]
 
 #: The instant every scripted turn in this file is stamped with. Fixed rather than
 #: read from a clock: nothing here turns on time, and a wall-clock reading would be

@@ -39,7 +39,7 @@ from ai_assistant.testing import (
     FakeNotificationStore,
 )
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assistant_env")]
 
 #: The instant the store, the gateway and every scripted value here agree on. It is
 #: :class:`gateway_timing.Clock`'s own default reading, so a case that does not move

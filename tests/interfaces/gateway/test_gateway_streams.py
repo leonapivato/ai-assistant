@@ -48,7 +48,7 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import EncodableText, Identifier
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("hermetic_assistant_env")]
 
 _AT = datetime(2026, 1, 2, 15, 0, tzinfo=UTC)
 
