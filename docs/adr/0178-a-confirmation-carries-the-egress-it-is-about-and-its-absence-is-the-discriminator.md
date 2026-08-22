@@ -15,8 +15,8 @@
   entry. **§7's first clause is amended and not superseded** (ADR-0070 §1): its
   enumeration of what a surface renders before it collects the answer gains one item,
   and its subject, its timing and its seven other clauses are untouched — including
-  the sixth, which ADR-0181 §6's third and fourth clauses extend to the new fact
-  rather than relax. §1, §3, §4, §5, §6, §8, §9, §11 and §12 are unchanged, and
+  the sixth, which ADR-0181 §6's third, fifth and sixth clauses extend to the new
+  fact rather than relax. §1, §3, §4, §5, §6, §8, §9, §11 and §12 are unchanged, and
   `Confirmation` gains no member.
 
 - **This closes #1366**, the contract question `track:web-client` milestone 15's
