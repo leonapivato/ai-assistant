@@ -30,11 +30,22 @@ known and decided cost, with its own trigger for reopening, rather than a bug
 
 ## 1. Put both devices on one overlay network
 
-The guide uses [Tailscale](https://tailscale.com/), because it is what this was
-built and tested against. Nothing here is conditioned on it: any overlay that
+Use [Tailscale](https://tailscale.com/). **In practice it is required**, and it
+is worth being exact about why, because the decision behind this and the code
+implementing it say different-sounding things.
+
+What the decision requires is a *property*, not a vendor: an overlay that
 authenticates every participant before a byte is exchanged, encrypts end to end
 between the two devices with no third party holding a key, and is administered
-by you, satisfies the same requirement.
+by you (ADR-0174 §2). Nothing is conditioned on Tailscale, and moving to another
+overlay with those properties reopens no decision.
+
+What the code speaks today is Tailscale's local API. The gateway asks the agent
+on its own machine who is at a connecting address, and it asks over Tailscale's
+`whois` endpoint at Tailscale's socket paths, reading Tailscale's `StableID`.
+The socket path is configurable — `ASSISTANT_CLIENT_OVERLAY_AGENT_SOCKET` — but
+whatever is behind it has to answer that API. So another overlay is a change to
+this system, not a configuration of it, however well it satisfies the property.
 
 Install it on the laptop and on the phone, and sign both into the same tailnet.
 Then, on the laptop:
