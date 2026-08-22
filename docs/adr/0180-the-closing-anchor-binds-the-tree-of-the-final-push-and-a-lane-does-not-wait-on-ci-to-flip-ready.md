@@ -129,9 +129,27 @@ lane's wait on CI.**
 > while it runs. A run on any other tree does not discharge the anchor, exactly
 > as ADR-0136 §1 already requires.
 
+> **Normative.** An anchor run after the push takes the format step in its
+> **non-rewriting** form — `ruff format --check`, which is what `just check`
+> runs — so that the gate cannot itself move the tree off the pushed head. Drift
+> reported there is a failure of the anchor like any other.
+
 > **Normative.** If the anchor fails, the push it ran on was not the final push:
 > the fix is committed and pushed, and the anchor is owed again on the new head's
-> tree. `just ready` does not happen in between.
+> tree. `just ready` does not happen in between. The same applies where
+> `git status --porcelain` is non-empty after the run: the tree that was tested
+> is not the tree that was pushed, so nothing was discharged.
+
+The format step is called out because it is the one gate step that **writes**.
+`ruff format .` rewrites drifted files and exits 0, so a post-push anchor taking
+that form could pass on a tree it had itself just moved off the pushed head,
+while CI's `ruff format --check` failed on the SHA — the anchor reporting green
+about a tree nobody pushed. There is already a mechanical net under this:
+`scripts/ship.sh` and `scripts/codex-review.sh` both refuse outright on a dirty
+tree, tracked or untracked, so the rewrite stops `just ship` before `just ready`
+is reached. The clause above does not rely on that net, because a rule whose
+safety depends on a later command's refusal is a rule that fails silently
+wherever that command is not in the sequence.
 
 This replaces an ordering with the property the ordering was protecting, and it
 is the whole of the change to ADR-0136. Both of ADR-0136 §1's rebase clauses are
@@ -142,10 +160,11 @@ same way.
 
 ### 2. A lane does not wait on the `gate` check before `just ready`
 
-> **Normative.** An author does not wait on the remote `gate` check before
-> `just ship` or `just ready`. Once §1's anchor has passed on the pushed tree and
-> the required reviews are terminal, the lane ships the review, flips the PR
-> ready, and reports.
+> **Normative.** `just ship`, `just ready` and the lane's report are not held for
+> the remote `gate` check. Once §1's anchor has passed on the pushed tree and the
+> required reviews are terminal, the lane ships the review, flips the PR ready
+> and reports; the check's state at that moment — `pending` included — changes
+> none of those three acts, and no justification is owed for proceeding.
 
 > **Normative.** A lane reports the `gate` check as it stands when it reports,
 > **pending included**, and a pending check is not a reason to delay the report.
@@ -193,10 +212,11 @@ same way.
 - **The first anchor.** Its ordering — before the first review invocation — is
   about a premise the reviewer is handed, not about a push, and nothing here
   touches it.
-- **Whether a lane *may* wait.** §2 removes the obligation and the expectation,
-  not the possibility. An author with a specific reason to watch a particular run
-  may; no justification is owed either way, and no reviewer or coordinator may
-  require one.
+- **Whether anyone may watch a run.** §2 holds none of the three acts for the
+  check; it does not forbid looking at one. An author with a specific reason to
+  watch a particular run — a suspected environment-only failure, a job under
+  investigation — may do so, and owes no justification for that either. What is
+  ruled out is the standing step in a lane's finish, not the attention.
 
 ### 5. What this records against earlier ADRs
 
