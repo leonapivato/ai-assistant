@@ -174,6 +174,32 @@ const FAULTS = {
     "The gateway could not read that request. The page and the gateway ship in one " +
     "distribution, so this means the two halves disagree.",
   rejected: "The hub refused that as badly formed, so nothing was written.",
+  // The connection surface's own conditions (ADR-0177 §3, ADR-0151 §7). They are here
+  // as well as in `CONNECTION_CONDITIONS` because the two answer different questions
+  // and both have to be answerable: this vocabulary is what a **read** shows when it
+  // could not be taken, and that one is what an **act** shows about what it did. A
+  // condition missing here rendered as "the gateway refused that request (HTTP 403)",
+  // which is the flattening ADR-0177 §3 forbids arriving one layer out.
+  "connections-need-a-local-hub":
+    "Connections are managed on the machine the hub is on. This gateway reaches its " +
+    "hub over the network, and a credential does not cross that hop (ADR-0151 §13), " +
+    "so none of the connection surface is served here.",
+  "credential-entry-loopback-only":
+    "Entering a credential is available on the gateway's own machine only, because " +
+    "your browser cannot protect a secret typed into a page it does not consider " +
+    "secure. Disconnecting and reading the lists work here.",
+  "credential-unusable": "That credential cannot be used, so nothing was sent.",
+  "identity-unusable": "That account name cannot be used.",
+  "no-such-connection": "There is no connection under that reference.",
+  "provisioning-displaced": "Another act took that connection record over.",
+  "provisioning-incomplete": "A connection act did not complete.",
+  "provisioning-outcome-unknown": "The outcome of a connection act is not known.",
+  "connection-store-unread":
+    "The connection store could not be read or written, so this says nothing about " +
+    "what is connected — not that nothing is.",
+  "residual-credential":
+    "The act completed and a credential it was to delete did not go, so an " +
+    "unreferenced credential remains.",
 };
 
 // A stream whose body ended without a terminal value (ADR-0175 §2). Not a fault the
@@ -2508,6 +2534,25 @@ const ACTS = {
   },
 };
 
+// Which remedies a condition prescribes on the reference it names, and which it does
+// not. ADR-0151 §7 is explicit for two of them and silent for the rest, and the
+// silence is load-bearing: on ``provisioning-outcome-unknown`` the resolution is "to
+// read ``connected_accounts`` — **never by re-running the act on the assumption it
+// failed**, which would rotate a credential that may already be live", and on
+// ``provisioning-displaced`` there is "no reason to retry the same act blind". So a
+// condition not named here offers nothing, and the read is what the page says instead.
+const REMEDIES = {
+  // "A client names the reference, says the act did not complete, says the
+  // reference's state is unread, and offers ``reprovision_account`` or
+  // ``disconnect_account`` on it — both safe whoever now owns the record, the first
+  // by its own compare-and-swap and the second by being idempotent."
+  "provisioning-incomplete": { replace: true, disconnect: true },
+  // ADR-0149 §5 and ADR-0151 §7: an unreferenced credential is "removed by a
+  // disconnection of that reference and by ADR-0149 §8's purge". Replacing is a
+  // normal act rather than the remedy, so it is not offered as one.
+  "residual-credential": { replace: false, disconnect: true },
+};
+
 const CONNECTION_STATE_UNREAD =
   "Nothing here says what that reference holds now: the read that would have stated " +
   "it did not answer. That takes nothing back from what is said above — an act's " +
@@ -2618,7 +2663,7 @@ function offerConnectionActs(item, account) {
   const drop = document.createElement("button");
   drop.type = "button";
   drop.textContent = "Disconnect";
-  drop.addEventListener("click", () => disconnectAccount(account));
+  drop.addEventListener("click", () => disconnectReference(account.reference, account));
   item.appendChild(drop);
 }
 
@@ -2766,10 +2811,17 @@ async function sendConnect(identity, credential, account) {
 // `forget_conversation` by name and stops there, and nothing here claims otherwise.
 // What it does carry is ADR-0151 §8's own warning, which is about the act rather than
 // about consent: a disconnection is prospective.
-async function disconnectAccount(account) {
+async function disconnectReference(reference, account) {
+  // A reference with no live record on screen is the state an act that did not
+  // complete leaves behind (ADR-0151 §7), and disconnecting it is one of the two
+  // remedies that class prescribes — so the confirmation shows what is actually
+  // known rather than inventing a record to show.
+  const shown = account
+    ? `${account.identity}\nReference: ${reference} · revision ${account.revision}`
+    : `Reference: ${reference}\n(No live record for it is on screen. This is the ` +
+      "reference an act that did not complete left behind.)";
   const asked = window.confirm(
-    `About to disconnect this account.\n\n${account.identity}\n` +
-      `Reference: ${account.reference} · revision ${account.revision}\n\n` +
+    `About to disconnect this account.\n\n${shown}\n\n` +
       "This appends a removal entry and then deletes the credentials. It does not " +
       "stop anything already in flight, does not cancel an act in progress, and is " +
       "not a guarantee that the keyring holds nothing for this reference — what it " +
@@ -2785,7 +2837,7 @@ async function disconnectAccount(account) {
     showBootstrap();
     return;
   }
-  const result = await act(half, "/connection/disconnect", { reference: account.reference });
+  const result = await act(half, "/connection/disconnect", { reference });
   if (result.outcome === LANDED && result.body.removed === null) {
     // ADR-0151 §8: a `null` says **one** thing. It is not a report of a
     // disconnection, not a confirmation that a credential was deleted, and not a
@@ -2798,7 +2850,7 @@ async function disconnectAccount(account) {
       "notice"
     );
   } else {
-    await reportConnectionAct(panel, half, result, account.reference, ACTS.disconnect);
+    await reportConnectionAct(panel, half, result, reference, ACTS.disconnect);
   }
   await listConnections();
 }
@@ -2852,6 +2904,7 @@ async function reportConnectionAct(panel, half, result, reference, words) {
   }
   if (handle) {
     line(panel, `Reference: ${handle}`, "hint");
+    offerRemedies(panel, handle, REMEDIES[result.body.fault]);
   } else {
     line(
       panel,
@@ -2861,6 +2914,43 @@ async function reportConnectionAct(panel, half, result, reference, words) {
     );
   }
   await stateAfterAct(panel, half, handle);
+}
+
+// The acts a condition prescribes on the reference it named, offered on that
+// reference and on nothing else.
+//
+// **These are not a row of the listing and the wording says so.** The listing answers
+// "what is connected now"; this answers "what is safe to do about the reference this
+// act left", which ADR-0151 §7 makes a different question with a different answer —
+// and offering them inside a row would be this surface claiming the reference is
+// live, which is precisely what it has just said it cannot state.
+function offerRemedies(panel, handle, prescribed) {
+  if (!prescribed) {
+    return;
+  }
+  line(
+    panel,
+    "These act on that reference. Neither is a statement that it is connected — they " +
+      "are the acts that are safe whichever record is live now.",
+    "hint"
+  );
+  if (prescribed.replace && ON_LOOPBACK) {
+    const again = document.createElement("button");
+    again.type = "button";
+    again.textContent = "Replace the credential on that reference";
+    again.addEventListener("click", () => {
+      show("connections", true);
+      offerConnect(el("connect-form"), { reference: handle, identity: "" });
+    });
+    panel.appendChild(again);
+  }
+  if (prescribed.disconnect) {
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.textContent = "Disconnect that reference";
+    drop.addEventListener("click", () => disconnectReference(handle, null));
+    panel.appendChild(drop);
+  }
 }
 
 // Re-read what is connected and state the reference from it, or say it is unread.

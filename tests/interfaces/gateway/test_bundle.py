@@ -1216,7 +1216,7 @@ def test_a_disconnection_that_removed_nothing_is_reported_as_the_one_thing_it_sa
     presents it as one, as a confirmation that a credential was deleted, or as a
     statement that the reference does not exist. It says one thing — no live record
     was removed by this call"."""
-    drop = _functions(_code("app.js"))["disconnectAccount"]
+    drop = _functions(_code("app.js"))["disconnectReference"]
 
     assert "result.body.removed === null" in drop
     assert "No live record was removed by that call." in drop
@@ -1319,7 +1319,11 @@ def test_a_refused_identity_does_not_claim_the_credential_stayed_in_the_page() -
     thing ADR-0177 §4 exists to be exact about.
     """
     script = _code("app.js")
-    refusal = script[script.index('"identity-unusable"') : script.index('"no-such-connection"')]
+    opened = script.index("const CONNECTION_CONDITIONS = {")
+    conditions = script[opened : script.index("\n};", opened)]
+    refusal = conditions[
+        conditions.index('"identity-unusable"') : conditions.index('"no-such-connection"')
+    ]
 
     assert "no credential reached the hub" in refusal
     assert "did reach the gateway on this machine" in refusal
@@ -1348,3 +1352,83 @@ def test_a_residual_credential_is_reported_as_the_act_it_completed() -> None:
     assert 'result.body.fault === "residual-credential"' in report
     assert report.index("words.residual") < report.index("named.words")
     assert "takes nothing back from what is said above" in script
+
+
+def test_an_incomplete_act_offers_the_two_remedies_on_the_reference_it_named() -> None:
+    """ADR-0151 §7: "A client names the reference, says the act did not complete, says
+    the reference's state is unread, and offers ``reprovision_account`` or
+    ``disconnect_account`` on it — both safe whoever now owns the record, the first by
+    its own compare-and-swap and the second by being idempotent".
+
+    They are offered from the outcome itself and not from a listing row, because the
+    listing may be exactly what could not be read — and a row would claim the
+    reference is live, which is what the page has just said it cannot state.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert '"provisioning-incomplete": { replace: true, disconnect: true }' in script
+    assert "offerRemedies(panel, handle" in functions["reportConnectionAct"]
+    assert "Neither is a statement that it is connected" in functions["offerRemedies"]
+    assert "disconnectReference(handle, null)" in functions["offerRemedies"]
+    assert (
+        'offerConnect(el("connect-form"), { reference: handle, identity: "" })'
+        in (functions["offerRemedies"])
+    )
+    # A reference with no live record on screen gets a confirmation about what is
+    # actually known, rather than one that invents a record to show.
+    assert "No live record for it is on screen" in functions["disconnectReference"]
+
+
+def test_no_remedy_is_offered_where_the_contract_forbids_retrying_blind() -> None:
+    """ADR-0151 §7's silence is load-bearing. On ``provisioning-outcome-unknown`` the
+    resolution is "to read ``connected_accounts`` — **never by re-running the act on
+    the assumption it failed**, which would rotate a credential that may already be
+    live", and on ``provisioning-displaced`` there is "no reason to retry the same act
+    blind"."""
+    script = _code("app.js")
+    prescribed = script[
+        script.index("const REMEDIES = {") : script.index(
+            "\n};", script.index("const REMEDIES = {")
+        )
+    ]
+
+    assert '"provisioning-outcome-unknown"' not in prescribed
+    assert '"provisioning-displaced"' not in prescribed
+    assert '"connection-store-unread"' not in prescribed
+    assert '"identity-unusable"' not in prescribed
+    assert '"residual-credential": { replace: false, disconnect: true }' in prescribed
+    assert "if (!prescribed) {" in _functions(script)["offerRemedies"]
+
+
+def test_every_connection_condition_the_gateway_writes_is_a_condition_the_page_reads() -> None:
+    """ADR-0177 §3 requires its two refusals "reported as its own condition", and
+    ADR-0168 §9 requires the same of each relay condition.
+
+    The requirement does not stop at the gateway: a condition the page has no words
+    for renders as "the gateway refused that request (HTTP 403)", which is the
+    flattening §3 forbids, arriving one layer out. The two vocabularies answer
+    different questions and both must be total — ``FAULTS`` is what a **read** shows
+    when it could not be taken, ``CONNECTION_CONDITIONS`` what an **act** shows about
+    what it did.
+    """
+    script = _code("app.js")
+    faults = script[
+        script.index("const FAULTS = {") : script.index("\n};", script.index("const FAULTS = {"))
+    ]
+
+    for named in (
+        "connections-need-a-local-hub",
+        "credential-entry-loopback-only",
+        "credential-unusable",
+        "identity-unusable",
+        "no-such-connection",
+        "provisioning-displaced",
+        "provisioning-incomplete",
+        "provisioning-outcome-unknown",
+        "connection-store-unread",
+        "residual-credential",
+    ):
+        assert f'"{named}"' in faults, named
+    # And a store that could not be read is not a store that is empty.
+    assert "not that nothing is" in faults
