@@ -36,6 +36,10 @@ Body.
 
 Body.
 
+### 1000. A section whose label is longer than three digits
+
+Body.
+
 ## Consequences
 """
 
@@ -350,4 +354,17 @@ def test_an_unclosed_fence_runs_to_the_end_of_the_brief(tmp_path: Path) -> None:
     result = _run(tmp_path, "Run:\n\n```bash\ngit switch -c x\nADR-0009\n")
 
     assert "ADR-0009" not in result.stdout
+    assert result.returncode == 0
+
+
+def test_a_long_section_label_is_not_truncated(tmp_path: Path) -> None:
+    # A capped digit run reads `§1000` as `§100` and then reports a section
+    # nobody cited as absent, which is the false absence this checker must not
+    # produce.
+    _make_repo(tmp_path)
+
+    result = _run(tmp_path, "ADR-0001 §1000 governs.")
+
+    assert "§100 " not in result.stdout
+    assert "longer than three digits" in _row(result.stdout, "ADR-0001 §1000")
     assert result.returncode == 0
