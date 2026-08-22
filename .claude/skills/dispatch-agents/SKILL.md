@@ -188,8 +188,10 @@ wrong; two lists disagreeing is not.
 
 **Spend your attention on the right fields.** The gate's pytest line and the
 worker's own `gh pr checks` paste are provenance — `gh pr checks` above supersedes
-them, and the pytest line matters only as evidence the gate ran locally *before*
-the push, which CI cannot show. The fields that carry weight are the file list,
+them, and the pytest line matters only as evidence the closing anchor ran
+locally on the tree the PR head carries, which CI cannot show. A lane no longer
+waits on `gate` before flipping ready (ADR-0180 §2), so `pending` in its paste is
+a complete answer and the sequence below is what settles it. The fields that carry weight are the file list,
 the `ship:$sha` tag, the artifact verdict, the issue numbers, and what the worker
 says it did not do.
 
