@@ -21,6 +21,11 @@
   that fact. **It does not rest on it to permit anything**: §5's closing clause
   leaves ADR-0154's floor standing exactly as written, and §5's second clause is a
   floor beneath any ADR that would later lift it.
+- **Partially supersedes two clauses, each by a count.** ADR-0178 §2's "exactly two
+  fields" on `ConfirmationEgress` becomes three; ADR-0152 §7's "exactly one" thing
+  `rebind` takes from `approved` becomes two. §11 states each scope and argues why
+  nothing else in either section moves. Everything else this ADR does is a stacked
+  addition recorded in §11 and nowhere else (ADR-0082 §1).
 - **Refs:** #1427 (track:world, milestone 23), #641 (reader-side threat model,
   which §9 routes rather than folds), #668 (which closes against milestone 23 and
   not against this ADR), #301, #746, #1404, #1154, #1114, #1162, #1218. **Filed by
@@ -349,6 +354,22 @@ guess.
 > comparison, or re-derives it after the ruling. A resumed call whose rebuilt
 > binding disagrees on this field is refused exactly as one disagreeing on any other
 > member is (ADR-0148 §1's fourth clause, ADR-0152 §7).
+
+> **Normative.** `EgressBinder.rebind` takes `planned_with_external_content` from
+> `approved`, matched to the binding it re-derived, exactly as it takes each span's
+> `provenance` from `approved` and for the same reason: the fact is about a selection
+> made before the confirmation was parked — plausibly before a restart — and `rebind`
+> receives no selection set to recompute it from. It is **not** re-derived, **not**
+> defaulted, and **not** omitted. This narrows ADR-0152 §7's first clause, which
+> takes "exactly one" thing from `approved`, to exactly two, and narrows nothing else
+> in that section: everything else is still re-derived and still compared whole.
+
+> **Normative.** A `rebind` that re-derived this field would receive no selection
+> set, would answer `False`, and would compare unequal to every approved binding
+> carrying `True` — refusing every resumed egress call planned over external
+> material, which is precisely the call the user was asked about and approved. That
+> is ADR-0152 §7's own argument for transcribing the provenance, arriving at the
+> second field, and the fix a lane would otherwise reach for is to stop comparing.
 
 > **Normative.** No field is added to `EgressSpan`, `Provenance`, `MemoryBase`,
 > `ContextFacet`, `MemoryUpdateProposal`, `ToolCall`, `Question`, `Belief`,
@@ -779,6 +800,12 @@ only in a list item obliges nobody.
 > with `approved` false. A suite case exercising `decide` alone passes an
 > implementation that relaxed the rule on the path where an approval exists.
 
+> **Normative.** The same lane ships a **resume round-trip** test: a parked
+> confirmation whose approved binding carries `True`, resumed and approved,
+> asserting that `rebind` transcribes the field, that the re-derived binding compares
+> equal, and that the call reaches execution. An implementation that re-derives or
+> defaults the field passes every other clause of this section and refuses that call.
+
 > **Normative.** The lane implementing §6 for a surface ships a test that a
 > confirmation carrying `True` renders the fact **and** every occurrence
 > ADR-0178 §7's floor already requires, and a test that a confirmation carrying
@@ -841,14 +868,20 @@ written in this change.**
   the two axes separate — but the misreading is available and the note is what
   forecloses it. §3's field is on the binding, which is where §5 puts the one
   carriage. **Addition, with the note stating which axis §5's clause governs.**
-- **ADR-0152.** §5's named residue — that the carrier is empty, every span is
+- **ADR-0152, and this one is a partial supersession rather than an addition.**
+  §7's first clause rules that `rebind` "takes from `approved` **exactly one** thing:
+  each span's `provenance`. Nothing else in `approved` is read into the result."
+  §3's fifth clause takes a second, and the count is the clause's whole content, so a
+  reader holding only ADR-0152 would implement a `rebind` that refuses every resumed
+  egress call planned over external material. **The scope is the count and nothing
+  else**: everything §7 re-derives is still re-derived, its equality refusal is
+  unchanged, its unmatched-locator refusals are unchanged, and its argument for
+  transcribing rather than re-deriving is the argument §3's sixth clause uses.
+  Separately, §5's named residue — that the carrier is empty, every span is
   `SYSTEM_SELECTED`, and "the lane that first records an origin is the lane that
-  closes it" — is addressed here in one direction and **not** in the other, and the
-  note says which. This ADR records a call-level origin and closes the residue's
-  *first* half. It records **no span-level origin**, so no span becomes
-  `USER_AUTHORED` by anything here and ADR-0154's condition-13 limit (b) stands
-  exactly as attested. A reader holding only ADR-0152 would otherwise read the
-  residue as wholly spent. **Addition, with a partial-closure note.**
+  closes it" — is closed in one direction only: this ADR records a call-level origin
+  and **no span-level origin**, so no span becomes `USER_AUTHORED` by anything here
+  and ADR-0154's condition-13 limit (b) stands exactly as attested.
 - **ADR-0154.** §4's item (ii), second clause, names a precondition — "The ADR that
   would permit a standing authorisation … first establishes a **recorded origin** the
   authoriser evaluates at the moment it rules" — and adds "Until such a surface
@@ -936,9 +969,10 @@ written in this change.**
   which is the same posture ADR-0154 §4 declared for itself and is declared here for
   the same reason rather than glossed.
 
-**Nothing here is a supersession**, wholly or partially, except the one narrowing
-§11 names on ADR-0178 §2. No other decision moves, and the branch touches this file
-and five dated header notes.
+**Two narrowings and no other supersession.** ADR-0178 §2's exactly-two-fields
+clause and ADR-0152 §7's exactly-one-thing clause are each narrowed by a count, in
+the scope §11 states and no further. No other decision moves, and the branch touches
+this file and five dated header notes.
 
 **This ADR is marked under ADR-0089** and is in the marked regime: its unmarked
 prose supplies no obligation and exists to determine what the marked clauses mean
