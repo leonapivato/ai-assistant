@@ -641,24 +641,59 @@ those clauses forbid is if anything easier to make. They stay.
 > claims this member is bounded by the request that produced it, and no lane cites
 > ADR-0085 §8f's belief page as covering it.
 
+> **Normative.** An over-limit confirmation is **undeliverable at that frame size and
+> not lost**, and no lane states or implies otherwise. The park stays durably
+> `AWAITING_APPROVAL`, its recorded `CONFIRM` stays unresolved and answerable, and
+> `pending_confirmations` rebuilds the confirmation from that durable state on every
+> call — so raising `hub_max_frame_bytes` makes the same park answerable again with
+> nothing re-derived and nothing re-ruled.
+
+> **Normative.** The refusal names the member and the value that did not fit, to
+> ADR-0085 §8e's own standard — "a sentence a user can read and act on rather than a
+> frame that will not send". A refusal that says only that a result was too large,
+> when the member responsible is this one, is not that sentence.
+
 **This member does add a product term, and saying otherwise would be false.** An
 earlier draft of this section claimed the addition was linear in the arguments; round
 5 adversarial review was right that it is not. `EgressSpan.argument` carries the
 top-level key **once per span** (ADR-0150 §4), and an array-valued argument of `n`
 elements yields `n` spans. So the description costs roughly `key_length × n` where the
-request paid `key_length + n`. Worked, against a 16 KiB payload limit: a request of
-`{"<4 KiB key>": ["a", …, "a"]}` with a thousand one-character elements is about 8 KiB
-and is accepted; its description repeats the 4 KiB key a thousand times and is about 4
-MiB, which is refused. **An accepted request whose confirmation cannot be delivered is
-a new shape in this system**, and it is named here rather than discovered by an
-operator.
+request paid `key_length + n`. Worked, against `hub_max_frame_bytes`'s 16 MiB default:
+a request of `{"<16 KiB key>": ["a", …, "a"]}` with 1,024 one-character elements is
+about 18 KiB and is accepted; its description repeats the 16 KiB key 1,024 times and is
+about 16 MiB, which is refused. **An accepted request whose confirmation cannot be
+delivered is a shape this member introduces**, and it is named here rather than
+discovered by an operator.
 
-**It is a refusal, and that is the whole of its blast radius.** The frame exceeds the
-limit and the call fails legibly, exactly as an oversized belief page does; nothing is
-sent, nothing is authorised, and the second clause above is what keeps the tempting
-alternative — silently dropping spans to fit — off the table. `parameters` is already
-in the same payload, so the confirmation was never going to be small for a large call;
-what is new is only that it can be large when the call was not.
+**What that refusal actually costs, stated properly, because an earlier draft called
+it the whole blast radius and round 6 adversarial review was right to refuse that.**
+The refusal lands on a `TurnOutcome` the engine measures **after** the runner has
+committed `AWAITING_APPROVAL` (`Engine._checked`, whose own commentary records that it
+"still runs after the work has committed"). So the caller does not receive the
+continuation token, and the parked step is real. Three facts bound it, and each is a
+property of the tree rather than a hope:
+
+- **Nothing is lost.** `_parked` is in-memory, but ADR-0052 §1's recovery rebuilds
+  from durable state: `Engine._pending_confirmations` reads the plan store and
+  `AuditTrail.pending_confirmation` and mints a fresh handle. The park survives the
+  refusal, the process and the restart.
+- **The lever exists and is an operator's.** `hub_max_frame_bytes` is a `Settings`
+  field with a 1024-byte floor (ADR-0085 §8d) and a 16 MiB default; raising it makes
+  the same read succeed with nothing re-ruled. That is ADR-0085 §8e's ratified stance
+  for the analogous unbounded case, applied rather than invented here.
+- **It does not stand open forever.** A `CONFIRM` carries `expires_at` (ADR-0059 §1),
+  so a park nobody can answer stops being answerable rather than accumulating.
+
+**And the read this lands on is already an unbounded product without this member,
+which is why the answer is a record and not a redesign.** `pending_confirmations`
+returns *every* answerable park in one payload and is measured whole
+(`checked=True`); each `Confirmation` already carries its `parameters`, and
+`max_outstanding_confirmations` defaults to 1024. So `parks × parameters` can exceed
+the limit today, with no `egress` member involved, and one oversized entry already
+makes the whole read raise. This member adds a second unbounded factor to a product
+that already had one. **#1381** holds the pre-existing hazard, with the three shapes
+that could close it; closing it means paging a Protocol method or relating two
+figures, which is `core/protocols.py` and is not this ADR's (§11).
 
 **ADR-0085 §8f's analysis stands and is not stretched to cover this.** §8f asks which
 *response* is largest and answers `beliefs()`, whose evidence payload is
@@ -733,7 +768,10 @@ Obligations, each traceable to a clause above:
   expansion rather than the absence of one: a binding whose argument key is long and
   whose array is many-element produces a confirmation payload larger than the request
   that produced it, and the over-limit case is a **refusal** — no span is dropped, no
-  locator is compacted and no identity is omitted to make it fit.
+  locator is compacted and no identity is omitted to make it fit. And a test that the
+  park survives that refusal: after an over-limit confirmation raises, the step is
+  still `AWAITING_APPROVAL`, its `CONFIRM` still unresolved, and the same park is
+  returned by `pending_confirmations` once the limit admits it.
 
 **The conformance suite is where the correspondence obligation belongs**, not a
 single unit test beside the model, because §3's clause binds any producer of a
@@ -788,6 +826,10 @@ way the real engine does, and that the suite says so.
   re-sourced. In particular `parameters` stays the driven step's own arguments,
   pre-binding, and §7's surviving sub-clauses are what keep a surface from calling
   them something else.
+- **`pending_confirmations`'s own unbounded product** (§9, #1381). It predates this
+  member — `parks × parameters` against one limit, with `max_outstanding_confirmations`
+  defaulting to 1024 — and closing it means paging a promoted method or relating two
+  figures, both `core/protocols.py` and neither this ADR's.
 - **A compact locator representation for the description** (§9, #1379). Fires on a
   measurement — a real egress call whose confirmation exceeds a reasonable
   `hub_max_frame_bytes` because its argument keys repeat once per span. Any such
@@ -944,8 +986,11 @@ because `EgressSpan.argument` repeats the key once per span, a long key naming a
 array expands. §9 works the arithmetic and states the consequence plainly: an accepted
 request can produce a confirmation that exceeds the frame limit. It is refused rather
 than truncated — a legible failure, and the direction §9's second clause chooses
-deliberately — and #1379 holds the compact-locator decision for the day a measurement
-says it binds.
+deliberately — and the park survives it: durable state holds it, `pending_confirmations`
+rebuilds it, `hub_max_frame_bytes` is the operator's lever and ADR-0059's lifetime
+retires it if nobody uses that lever. #1379 holds the compact-locator decision for the
+day a measurement says it binds, and #1381 holds the pre-existing unbounded product on
+the same read, which this member joins rather than creates.
 
 **Two new `core` types is the ongoing cost.** `ConfirmationEgress` and
 `ConfirmationDestination` are surface that must be kept in step with `EgressBinding`
