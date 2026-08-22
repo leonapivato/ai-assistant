@@ -25,12 +25,15 @@
   declared return annotation, so a version 9 client handed a version 10
   `Confirmation` fails on the new member and a confirmation it asked for arrives as
   a decode error.
-- **It partially supersedes two ADRs, and both records ride this change**
+- **It partially supersedes three ADRs, and every record rides this change**
   (ADR-0070 §1, ADR-0082 §1, ADR-0083 §15): **ADR-0177 §8's four-member rendering
   clause and its no-claim clause**, each only as it reaches a surface rendering a
-  `Confirmation` that carries the member §1 adds; and **ADR-0085 §4's Group A field
-  row for `Confirmation`**, which enumerates five fields where there are now six.
-  §12 shows the working for both.
+  `Confirmation` that carries the member §1 adds; **ADR-0085 §4's Group A field row
+  for `Confirmation`**, which enumerates five fields where there are now six; and
+  **ADR-0150 §3's member-type and account-member clauses**, only as they reach the
+  canonical destination set a `Confirmation` names — the one place ADR-0150 §3 and
+  ADR-0148 §8's fourth clause cannot both be obeyed, resolved in §8's favour at that
+  surface and nowhere else. §12 shows the working for all three.
 - **One amendment rides it and changes no decision**: a dated header note on
   ADR-0148 recording that §8's fourth clause now has a carrier. Not a supersession —
   §8's obligation is word-for-word what it was, and a reader acting on it acts
@@ -287,6 +290,20 @@ direction §8 asks for and in no other.
 > a materialised set would be sending a value that could disagree with the
 > occurrences it was computed from.
 
+> **Normative.** A `ConfirmationDestination` is a **rendering value and never an
+> authorising one**. No lane compares two of them to decide anything, matches one
+> against a grant, a standing grant, a policy rule or a recorded decision, passes one
+> to `PermissionDecision.authorises`, treats one as a `CanonicalDestination`, or
+> carries one on an `ActionRequest`, a `PermissionDecision`, an `EgressBinding`, a
+> grant record or an audit row. Its only consumer is a surface rendering the
+> `Confirmation` it arrived on.
+
+> **Normative.** This narrows ADR-0150 §3's account-member clause — "An account member
+> carries the account **whole** … No lane reduces an account member to its identity" —
+> **only** for the set a `Confirmation` names. `EgressBinding`'s own derived set is
+> untouched: its members stay `CanonicalDestination`, its account arm still carries the
+> whole `BoundAccount`, and its equality is still over both fields.
+
 **Derived rather than stored is the same decision `EgressBinding` took and for the
 same reason, and it also happens to be free on the wire.** A stored set is a second
 representation of one fact, and the two disagreeing is authoritative rather than
@@ -297,13 +314,40 @@ that the call does not send to, or hide one it does. And because a Python proper
 is not a pydantic field, nothing about it reaches the frame — the wire carries the
 occurrences once, and both ends compute the same set from them.
 
-**A third type rather than reusing `CanonicalDestination`, and the reason is §2's
-exclusion.** `CanonicalDestination`'s account arm carries a whole `BoundAccount`,
-which carries `reference`. Reusing it would smuggle back through the derived
-property precisely the value §2 refuses to carry as a field, and a "must not render"
-rule would be the only thing standing between the reference and a screen. Two shapes
-minus one field is a small type; a rule guarding a value that should not be there is
-not small.
+**A third type rather than reusing `CanonicalDestination`, and this is where two
+ratified clauses actually meet.** `CanonicalDestination`'s account arm carries a whole
+`BoundAccount`, which carries `reference` — and **ADR-0148 §8's fourth clause bars the
+connection reference from the confirmation in terms**, while **ADR-0150 §3 requires an
+account member to carry the account whole** and says in as many words that "No lane
+reduces an account member to its identity". Both are ratified, and at this one surface
+they cannot both hold: a confirmation naming ADR-0148 §2's set either carries a member
+with a reference in it or carries a reduced member. This decision resolves that in
+ADR-0148 §8's favour **at the confirmation and nowhere else**, and records the
+narrowing on ADR-0150 rather than leaving a reader to find it (§12).
+
+**Why the reduction is safe here and would be unsafe on the binding, which is what
+ADR-0150 §3's clause is actually about.** §3 gives its own reason for the whole
+account: "an identity alone is shared by two connection records the moment one account
+is connected twice, and a reference alone survives its own re-provisioning to a
+different account, so either alone is a destination that two different accounts can
+satisfy." That is a statement about **comparison** — `PermissionDecision.authorises`
+compares whole values (ADR-0150 §9), a standing grant covers what it compares, and an
+ambiguous member there would let one account's authorisation cover another's. A
+confirmation's set is compared by nobody: it is rendered, read by a person and
+discarded; the authorisation stays the binding's, and `resume` binds the answer to one
+parked decision by its token rather than by anything the surface saw. The clause above
+is what keeps that true by construction rather than by observation — a
+`ConfirmationDestination` is forbidden every comparison and every carrier that would
+make its ambiguity matter. **Nothing about `EgressBinding`'s set changes**, so the
+hazard §3 names stays closed exactly where §3 closed it.
+
+**And the reduction gives up less than it looks like.** `BoundAccount`'s own field
+description says the reference is "Never shown to the user", so the whole account was
+never renderable at this surface in the first place; what the reduced member drops is a
+value the surface was already forbidden to display. What it keeps is the fact ADR-0148
+§8's fourth clause names, and `BoundAccount.identity`'s description says why that is the
+renderable one: it is "Visible text because ADR-0148 §8's fourth clause shows it to the
+user at the moment they decide".
 
 **The account substitution is inherited whole, including its caveat.** Where the
 spans carry no destination the set is the account, which is ADR-0148 §2's third
@@ -729,6 +773,25 @@ differently, or read one of its clauses more widely than it now holds?
   model and an implementation generated from that row rejects a conforming hub's
   frame. ADR-0107's partial supersession of §4's rows for `Belief` and
   `BeliefSummary` is the precedent for treating a row this way, and this follows it.
+- **ADR-0150 §3's member-type clause and its account-member clause**, each only as
+  they reach the canonical destination set a `Confirmation` names. "A member of a
+  canonical destination set is a `CanonicalDestination`…" and "An account member
+  carries the account **whole** … No lane reduces an account member to its identity"
+  are both ratified, and at a confirmation they meet ADR-0148 §8's fourth clause, which
+  bars the connection reference from that surface in terms. A reader holding only §3
+  either carries the reference to an adapter — breaching ADR-0148 §8 and handing across
+  ADR-0042 §6's boundary a value §6 exists to keep behind it — or refuses to build the
+  set at all, leaving §8's fourth clause unmeetable. That is ADR-0070 §1's first limb,
+  and §3 above is the replacement: `ConfirmationDestination`, identity-only on its
+  account arm, forbidden every comparison and every carrier. **`EgressBinding`'s own
+  set is not touched** — its members stay `CanonicalDestination`, its account arm
+  carries the whole `BoundAccount`, and §3's stated hazard ("either alone is a
+  destination that two different accounts can satisfy") is a fact about comparison,
+  which is exactly what the replacement forbids. **Every other clause of ADR-0150 §3
+  stands**: the occurrence rule, the function-of-supplied-form refusal, the
+  no-canonicalisation-in-`core` rule, the two-shape refusal itself, the
+  derived-property rule, the never-empty rule, the total order, the field-wise
+  equality, ADR-0148 §8's third floor and the conditional account substitution.
 
 **One amendment is recorded and changes no decision**, in ADR-0070 §1's second limb —
 an ADR reconciled with a fact that postdates it, such that a reader acting on it acts
@@ -758,14 +821,14 @@ identically before and after. It rides this change as an appended dated header n
   a change, and §9's own closing clause — that compliance "is a review obligation on any
   change to `core/types.py`" — is what this ADR discharges in advance for its
   implementing lane. #891's mechanical check is unaffected and is not a precondition here.
-- **ADR-0150 §§1–13.** Used as given, and §10 is used most heavily: its first clause is
-  what §2 discharges by reuse, its second is why the description can be shown at all,
-  its third is what §7's occurrence clause meets, and its fourth is why §7 fixes no
-  rendering. §3's two shapes are copied into `ConfirmationDestination` rather than
-  narrowed, §4's span identity and structural invariants are unchanged, §5's carried
+- **ADR-0150 §§1–2, §§4–13.** Used as given, and §10 is used most heavily: its first
+  clause is what §2 discharges by reuse, its second is why the description can be shown
+  at all, its third is what §7's occurrence clause meets, and its fourth is why §7 fixes
+  no rendering. §4's span identity and structural invariants are unchanged, §5's carried
   provenance is transported and not re-derived, §7's exclusions are the reason §2
-  excludes the reference, and §11's deferrals to surface (b) are restated as standing
-  rather than discharged.
+  excludes the reference, §9's `authorises` conjunct and its deep-copy transcription are
+  untouched, and §11's deferrals to surface (b) are restated as standing rather than
+  discharged. §3 is the one section that moves, and it is recorded above.
 - **ADR-0042 §4 and §6.** §4's assembly rule is used exactly as written — the engine
   assembles because the adapter may not read the decision — and its enumeration of
   confirmation content was already exceeded for an egress call by ADR-0148 §8's fourth
@@ -868,6 +931,21 @@ ADR-0150 §1's fifteen partial states are the corpus's worked instance of.
 **Four flat members on `Confirmation` — identity, set, spans, and a flag.** Rejected in
 §1: fifteen partial states, of which fourteen name recipients and no account or an
 account and no description, against a clause ADR-0148 §8 makes a floor.
+
+**Leaving the derived set off the member entirely, and letting the surface work from
+the occurrences alone.** It is the shape that touches ADR-0150 §3 not at all, and it is
+the reason the supersession above was not taken lightly. Rejected on two grounds. The
+deduplication is *information* — a user shown `to: alice@example.com` and `cc:
+Alice@Example.com` cannot tell from the occurrences that those are one recipient, and
+ADR-0148 §8's fourth clause names the **set**, not the occurrences, precisely because
+"how many people is this going to" is the question a confirmation answers. And
+somebody must deduplicate: with no derived value in `core`, the rule moves into
+`interfaces/`, where two adapters would implement it separately and could disagree —
+business logic in an adapter (golden rule 3, ADR-0042 §6) and a second derivation of
+one fact (ADR-0150 §1). A variant that returned only the *recipient* members, with the
+account-only case signalled by an empty tuple, fails harder: it is a value that
+disagrees with `EgressBinding.canonical_destination_set`'s never-empty guarantee for
+the same binding, which is the disagreement §3 above exists to make impossible.
 
 **Storing the canonical destination set on the member.** Rejected in §3. It is a second
 representation of a fact the occurrences already carry, and here a disagreement between
