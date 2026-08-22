@@ -1426,10 +1426,12 @@ class Gateway:
         ADR-0177 §3 splits by listener, now that a loopback-dialling gateway no
         longer meets the hub's remote refusal (ADR-0174 §11).
 
-        **Every unary handler answers or raises** :class:`_Refused`, and this is
-        where the second becomes the first. A handler therefore reads as one engine
-        call with the arguments the browser supplied, which is the form ADR-0168 §1's
-        biconditional is checkable in.
+        **Every handler answers or raises** :class:`_Refused`, and this is where the
+        second becomes the first. A handler therefore reads as one engine call with
+        the arguments the browser supplied, which is the form ADR-0168 §1's
+        biconditional is checkable in — and the catch covers the streamed branch as
+        well as the unary one, so a mistyped argument is refused identically on every
+        shape the surface serves rather than on the ones a lane remembered.
 
         Args:
             request: The admitted request.
@@ -1442,19 +1444,19 @@ class Gateway:
             The response, or the stream to write.
         """
         shape = (request.method, request.path)
-        if shape not in _STREAMED_SHAPES:
-            try:
+        try:
+            if shape not in _STREAMED_SHAPES:
                 return await self._unary[request.path](request)
-            except _Refused as refused:
-                return refused.response
-        handle = None if header_half is None else self._sessions.handle(header_half)
-        if handle is None:  # pragma: no cover — admitted means a session verified it
-            return self._refuse(
-                RequestClass.ASSISTANT, RefusalCondition.NO_LIVE_SESSION, connection
-            )
-        if shape == ("POST", _ASK_STREAM_PATH):
-            return self._ask_streaming(request, handle)
-        return self._delivery_stream(handle)
+            handle = None if header_half is None else self._sessions.handle(header_half)
+            if handle is None:  # pragma: no cover — admitted means a session verified it
+                return self._refuse(
+                    RequestClass.ASSISTANT, RefusalCondition.NO_LIVE_SESSION, connection
+                )
+            if shape == ("POST", _ASK_STREAM_PATH):
+                return self._ask_streaming(request, handle)
+            return self._delivery_stream(handle)
+        except _Refused as refused:
+            return refused.response
 
     async def _relayed[T](self, call: Callable[[], Awaitable[T]]) -> T:
         """Make one call on the promoted surface, or refuse instead of making it.
@@ -1503,7 +1505,7 @@ class Gateway:
                 self._engine.converse,
                 _required_string(payload, "utterance"),
                 timeout=_TURN_BUDGET,
-                conversation_id=_string(payload, "conversation_id"),
+                conversation_id=_optional_string(payload, "conversation_id"),
             )
         )
         return _rendered({"outcome": _outcome_view(outcome)})
@@ -1529,10 +1531,8 @@ class Gateway:
             The stream, or a refusal decidable before the engine is reached.
         """
         payload = _payload(request)
-        utterance = _string(payload, "utterance")
-        conversation = _string(payload, "conversation_id")
-        if utterance is None:
-            return _fault(400, "Bad Request", "malformed-request")
+        utterance = _required_string(payload, "utterance")
+        conversation = _optional_string(payload, "conversation_id")
         if not self._take_hub_slot():
             return _ceiling()
         return _Streamed(
@@ -1925,7 +1925,7 @@ class Gateway:
         Returns:
             The proposals with their rulings, the counts kept apart, and the route.
         """
-        named = _string(_payload(request), "conversation_id")
+        named = _optional_string(_payload(request), "conversation_id")
         report = await self._relayed(partial(self._engine.observe, conversation_id=named))
         return _rendered({"observation": _observation_view(report)})
 
@@ -2031,6 +2031,37 @@ def _required_string(payload: Mapping[str, Any], name: str) -> str:
 #: refuse an out-of-range value at its own parse boundary**", and a browser is an
 #: adapter that lets a user supply both.
 _PAGE_CEILING: Final = 2**63
+
+
+def _optional_string(payload: Mapping[str, Any], name: str) -> str | None:
+    """One string member that may be absent, refusing one that is present and wrong.
+
+    **Absent is a selector and a wrong type is not.** ``conversation_id`` is "a
+    **selector** rather than a subject" (ADR-0085 §2) — this conversation, or the most
+    recently active — so omitting it asks a well-formed question. Reading a number as
+    an absence would answer a *different* well-formed question instead, which is the
+    gateway defaulting an argument ADR-0177 §1 makes the browser's own.
+
+    It matters most where the operation writes. ``observe`` proposes beliefs from the
+    batch it reads, so a mistyped selector silently accepted would put proposals on a
+    conversation nobody named.
+
+    ``null`` is accepted as the absence it is: JSON has a way of saying "no selector"
+    and a client using it is not getting the type wrong.
+
+    Args:
+        payload: The request's JSON object.
+        name: The member to read.
+
+    Returns:
+        The value, or ``None`` where the member is absent or null.
+
+    Raises:
+        _Refused: If the member is present and is neither a string nor null.
+    """
+    if name not in payload or payload[name] is None:
+        return None
+    return _required_string(payload, name)
 
 
 def _page(payload: Mapping[str, Any], name: str, fallback: int) -> int:
