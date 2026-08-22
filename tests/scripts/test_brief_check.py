@@ -60,6 +60,10 @@ class Engine:
     """The real thing."""
 
     # Widget is discussed here and defined nowhere.
+
+
+class \u0394Engine:
+    """A Unicode identifier, which Python permits and briefs may name."""
 '''
 
 _CONFIG = """PROTOCOL_VERSION = 9
@@ -287,3 +291,40 @@ def test_a_name_made_twice_is_reported_once(tmp_path: Path) -> None:
 
     _row(result.stdout, "ADR-0001 §1")  # asserts exactly one row
     _row(result.stdout, "Engine")
+
+
+def test_a_fence_longer_than_three_delimiters_is_still_a_fence(tmp_path: Path) -> None:
+    # A brief quoting backticked names inside a code block has to open with four,
+    # and that block's contents are illustrations like any other fence's.
+    _make_repo(tmp_path)
+
+    result = _run(tmp_path, "Example:\n\n````md\nSee ADR-0009 and `Nonexistent`.\n````\n")
+
+    assert "ADR-0009" not in result.stdout
+    assert "Nonexistent" not in result.stdout
+    assert result.returncode == 0
+
+
+def test_a_path_resolving_outside_the_checkout_is_not_checked(tmp_path: Path) -> None:
+    # A repository-relative prefix is not proof the path stays inside the
+    # checkout, and `exists()` above the root answers a question this check
+    # makes no claim over.
+    _make_repo(tmp_path)
+
+    result = _run(tmp_path, "Touch `src/../../elsewhere`.")
+
+    assert _section_of(result.stdout, _row(result.stdout, "elsewhere")).startswith("not checked")
+    assert result.returncode == 0
+
+
+def test_a_unicode_identifier_is_checked_rather_than_skipped(tmp_path: Path) -> None:
+    # Python permits it, so a brief may name it; skipping it silently would let a
+    # brief citing an absent one pass with exit 0.
+    _make_repo(tmp_path)
+
+    present = _run(tmp_path, "The class is `\u0394Engine`.")
+    absent = _run(tmp_path, "The class is `\u0394Widget`.")
+
+    assert "orchestration/engine.py" in _row(present.stdout, "\u0394Engine")
+    assert _section_of(absent.stdout, _row(absent.stdout, "\u0394Widget")).startswith("absent")
+    assert absent.returncode == 1
