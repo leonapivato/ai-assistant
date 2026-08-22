@@ -20,6 +20,7 @@ from typing import Final
 
 import pytest
 
+from ai_assistant.core.types import BeliefBand, GrantScope
 from ai_assistant.interfaces.gateway.server import packaged_bundle
 
 _ROOT = Path(__file__).resolve().parents[3] / "src" / "ai_assistant" / "interfaces" / "gateway"
@@ -391,20 +392,133 @@ def test_the_page_says_whether_it_is_watching_rather_than_retrying_unseen() -> N
     assert "setInterval" not in script
 
 
-def test_the_page_reaches_the_conversation_surface_and_nothing_beyond_it() -> None:
-    """§6's closed enumeration, at the only other place a path could be written down.
+def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> None:
+    """ADR-0177 §1's enumeration, at the only other place a path could be written down.
 
-    "Every other operation the promoted surface carries is unreached from a browser,
-    and no lane may add one without its own ratified decision" — so a path here that
-    the gateway does not serve would be a front end asking for milestone 15's surface
-    and getting ADR-0168 §6's residual fourth class.
+    A path here that the gateway does not serve would be a front end asking for a
+    later lane's surface and getting ADR-0168 §6's residual fourth class — and the
+    two halves ship in one distribution (ADR-0168 §10), so the disagreement would be
+    shipped rather than discovered.
+
+    The negative half is what is **not** this lane's: ``learn`` is admitted by
+    nothing (§1, §11), the CONFIRM pair's act is blocked until #1366's contract lands
+    (§8), and the notification review five and the connection five belong to lanes
+    that have not run.
     """
     script = _code("app.js")
 
-    for path in ('"/conversations"', '"/conversation"', '"/conversation/forget"'):
-        assert path in script, path
-    for milestone_fifteen in ('"/beliefs"', '"/grants"', '"/notifications"', '"/resume"'):
-        assert milestone_fifteen not in script, milestone_fifteen
+    for served in (
+        '"/conversations"',
+        '"/conversation"',
+        '"/conversation/forget"',
+        '"/sources"',
+        '"/grant"',
+        '"/revoke"',
+        '"/grants/recent"',
+        '"/grants/standing"',
+        '"/beliefs"',
+        '"/belief"',
+        '"/belief/forget"',
+        '"/questions"',
+        '"/questions/interrupted"',
+        '"/question/answer"',
+        '"/question/forget"',
+        '"/observe"',
+    ):
+        assert served in script, served
+    for later in ('"/learn"', '"/resume"', '"/pending_confirmations"', '"/notifications"'):
+        assert later not in script, later
+
+
+def test_the_page_offers_every_use_a_grant_may_authorise_and_no_proper_subset() -> None:
+    """ADR-0139 §3's second clause, restated at the browser by ADR-0177 §6.
+
+    "Wherever a surface offers, enumerates or explains the uses a user may choose
+    among, it carries **every** member of ``GrantScope``, named in words" — a user
+    cannot choose what they are not shown, and a page is where a two-of-three
+    checkbox group is the natural mistake.
+
+    Read off the shipped file against ``core``'s own vocabulary, so a fourth member
+    added to the enum fails here rather than reaching a user as a silently absent
+    option.
+    """
+    script = _code("app.js")
+
+    for use in GrantScope:
+        assert f'value: "{use.value}"' in script, use.value
+    # Named in words rather than by member name: the value is what goes on the wire,
+    # and the label beside it is what the person reads.
+    assert script.count("label:") == len(GrantScope)
+
+
+def test_the_page_never_renders_the_uses_a_grant_leaves_out() -> None:
+    """ADR-0177 §6's third clause, at the level of the widget it names.
+
+    "A rendering of an existing grant does not display the members the grant leaves
+    out, in any form — greyed, disabled, unchecked, struck through, or otherwise
+    present-but-negated", because "a control that shows all three states beside a
+    grant naming one is that presentation made out of a layout".
+
+    So the rendering path takes the grant's own ``scope`` and maps it, and there is
+    no styling for a negated member to wear.
+    """
+    script = _code("app.js")
+    rendering = _functions(script)["renderSource"]
+
+    # The grant branch maps the grant's own scope and reaches `USES` — the choice
+    # vocabulary — nowhere. `offerScope` is the *choice* context, which is the other
+    # half of ADR-0139 §3 and where all three belong.
+    assert "usePhrase(source.live.scope)" in rendering
+    assert "USES" not in rendering
+    assert "usePhrase(grant.scope)" in _functions(script)["renderStanding"]
+    # And no strike-through exists for a member to wear. The stronger half of the
+    # claim is the one above — a member the grant does not name is never put in the
+    # document at all, so there is nothing for a style to negate — but a rendering
+    # that struck one through would be the clause's own worked example, so the
+    # stylesheet is checked for it too.
+    assert "line-through" not in _asset("app.css")
+
+
+def test_the_page_keeps_the_two_grant_questions_apart() -> None:
+    """ADR-0139 §1 and §3's fourth clause, which a page is more exposed to than a
+    terminal is (ADR-0177 §6).
+
+    "No view presents a source's configuration state as part of a grant, and no view
+    presents a grant as a statement about whether a source is being read." A command
+    line answers one question per invocation; a page shows several at once, and the
+    obvious information architecture is the forbidden one.
+
+    Two panels, two reads, two headings — and the sources panel says in the document
+    that it is not answering the other question.
+    """
+    script = _code("app.js")
+    document = _asset("index.html")
+
+    assert '"/sources"' in script
+    assert '"/grants/standing"' in script
+    assert 'id="sources"' in document
+    assert 'id="standing"' in document
+    assert "It does not say whether anything is being read." in " ".join(document.split())
+
+
+def test_the_page_says_the_state_is_unread_rather_than_inferring_it() -> None:
+    """ADR-0177 §7's seventh clause and ADR-0139 §4's third.
+
+    "No surface infers the source's current grant state from either act's outcome, at
+    any point in the flow. In particular a refused ``grant`` is not a statement that
+    the source is ungranted, and a landed revocation is not one either."
+
+    So every act reports itself and then says what it did **not** establish, and the
+    state that follows comes from a ``standing_grants`` read or is called unread.
+    """
+    script = _code("app.js")
+
+    assert "Nothing above says what this source is granted for now." in script
+    for after in ("grantSource", "revokeSource", "amendSource"):
+        assert after in script, after
+    # Every act path says it, and every act path then *reads* rather than infers.
+    assert script.count("line(panel, STATE_UNREAD") == 4
+    assert script.count("await listStanding()") == 4
 
 
 def test_the_page_reads_a_conversation_before_it_forgets_one() -> None:
@@ -434,6 +548,30 @@ _FETCH_SITES: Final = {
     "watchDeliveries": "watchDeliveries",
     "relay": "listConversations",
 }
+
+#: The one ``fetch`` site that deliberately does **not** report a rejection as the
+#: gateway having gone (ADR-0177 §7's fourth clause). A rejected `fetch` on a
+#: mutating act is an outcome that is **not known** — the request was sent and no
+#: response was read, and the gateway may already have called — so reporting it as
+#: "the gateway did not answer" would assert the one thing ADR-0139 §4 spends five
+#: clauses refusing to let a surface assert.
+_ACT_SITE: Final = "act"
+
+#: Every entry point reaching ``relay``, each of which catches a rejected `fetch`
+#: itself. Enumerated rather than counted, for the reason issue #1332 records: a
+#: threshold satisfied by five of six guards leaves the sixth deletable in silence.
+_RELAY_ENTRIES: Final = (
+    "forgetConversation",
+    "listSources",
+    "listStanding",
+    "listGrantHistory",
+    "listBeliefs",
+    "forgetBelief",
+    "listQuestions",
+    "answerQuestion",
+    "forgetQuestion",
+    "observe",
+)
 
 
 def _functions(script: str) -> dict[str, str]:
@@ -466,10 +604,134 @@ def test_every_fetch_the_page_makes_is_guarded() -> None:
     functions = _functions(script)
 
     assert script.count("await fetch(") == script.count("fetch(")
-    assert {name for name, body in functions.items() if "fetch(" in body} == set(_FETCH_SITES)
+    assert {name for name, body in functions.items() if "fetch(" in body} == set(_FETCH_SITES) | {
+        _ACT_SITE
+    }
     for called, entry in _FETCH_SITES.items():
         guard = functions[entry]
         assert "} catch (" in guard, called
         assert "fault(GATEWAY_GONE)" in guard, called
-    # `forgetConversation` reaches `relay` too, and is its own entry point.
-    assert "fault(GATEWAY_GONE)" in functions["forgetConversation"]
+    # Every other entry point reaching `relay` is its own, and catches for itself.
+    for entry in _RELAY_ENTRIES:
+        assert "fault(GATEWAY_GONE)" in functions[entry], entry
+
+
+def test_a_lost_request_on_a_grant_act_is_reported_as_an_unknown_outcome() -> None:
+    """ADR-0177 §7's fourth clause, which is this surface's own addition to
+    ADR-0139 §4's three outcomes.
+
+    "A failure of the **browser's own** request to the gateway — the request was sent
+    and no response was read — is an outcome that is **not known**, whatever the
+    gateway did. It is a third producer of ADR-0139 §4's third outcome that no earlier
+    surface had, and no front end resolves it by assuming either of the other two."
+
+    `interfaces/cli.py` holds the socket to the hub itself and has two cases;
+    between this page and the store sit its own request, the gateway, and the
+    gateway's wire connection.
+    """
+    functions = _functions(_code("app.js"))
+    acting = functions[_ACT_SITE]
+
+    assert "} catch (" in acting
+    assert "GATEWAY_GONE" not in acting
+    assert "outcome: UNKNOWN" in acting
+
+
+def test_an_act_reads_its_outcome_from_the_gateways_own_distinction() -> None:
+    """ADR-0177 §7's third clause: which of the three an act gets is read from
+    ADR-0168 §9's distinction "and from nothing else".
+
+    "A request the hub received and declined is **known not to have landed**; a
+    transport failure between the gateway and the hub is **not known**." The gateway
+    already writes those two as separate conditions, and this is what that
+    distinction is for.
+    """
+    script = _code("app.js")
+
+    assert 'UNKNOWN_FAULTS = new Set(["hub-unreachable"])' in script
+    assert "UNKNOWN_FAULTS.has(body.fault) ? UNKNOWN : NOT_LANDED" in script
+
+
+def test_an_amendment_is_two_requests_and_sends_no_grant_after_an_unresolved_one() -> None:
+    """ADR-0177 §7's first and fifth clauses.
+
+    Amending is composed **client-side**, "as ADR-0139 §4's two acts in order —
+    ``revoke``, then ``grant`` — carried by two separate browser requests resolving to
+    two separate engine calls", and "where the revocation's outcome is not known, the
+    front end does **not** send the grant".
+
+    The decision about the new scope is taken before the revocation is sent (§7's
+    sixth clause): the scope arrives as an argument, so no path through this function
+    can revoke in order to ask.
+    """
+    amending = _functions(_code("app.js"))["amendSource"]
+
+    assert 'act(half, "/revoke", { source: source.source })' in amending
+    assert 'act(half, "/grant", { source: source.source, scope })' in amending
+    assert amending.index('"/revoke"') < amending.index('"/grant"')
+    assert "if (withdrawal.outcome !== LANDED)" in amending
+    assert "I sent no new grant." in amending
+
+
+def test_the_page_reads_the_belief_again_immediately_before_it_forgets_one() -> None:
+    """ADR-0177 §5's second clause, which is the browser-specific half of ADR-0073
+    §5's ceremony.
+
+    "The render that ceremony rests on is taken from a ``belief`` read issued
+    immediately before the confirmation is offered, and never from an entry of a
+    ``beliefs`` listing the page rendered earlier. A page holds its listing until it
+    is navigated away from […] and a browser is the first surface where the
+    difference is unbounded."
+
+    The band-appropriate warning and the statement of what the consent covers are
+    ADR-0073 §5's other two obligations, and they are in the same prompt.
+    """
+    forgetting = _functions(_code("app.js"))["forgetBelief"]
+
+    assert 'relay(half, "/belief", { record_id: id })' in forgetting
+    assert forgetting.index('"/belief"') < forgetting.index("window.confirm(")
+    assert forgetting.index("window.confirm(") < forgetting.index('"/belief/forget"')
+    assert "forgetWarning(belief.band)" in forgetting
+    assert "which may have changed since it was shown" in forgetting
+
+
+def test_the_forget_warning_is_band_appropriate_and_total_over_the_bands() -> None:
+    """ADR-0073 §5: the ceremony "is uniform in mechanism and asymmetric in message",
+    and "the surface must not represent a deletion as more final than it is, nor as
+    less final".
+
+    Destroying an assertion is permanent; destroying a derived or attested belief
+    removes the belief and not its origin. Read against ``core``'s own vocabulary, so
+    a band added to the enum fails here rather than falling through to a wrong
+    warning.
+    """
+    script = _code("app.js")
+    warning = _functions(script)["forgetWarning"]
+
+    for band in BeliefBand:
+        # `DERIVED` is the fall-through branch and is named in the prose rather than
+        # in a comparison, which is what makes the function total: a band added to
+        # the enum lands there and gets a wrong warning, so it is named here too.
+        assert f'"{band.value}"' in warning or band is BeliefBand.DERIVED, band.value
+    assert "Forgetting it is permanent" in warning
+    assert "destroys my copy but not the " in warning
+    assert "destroys the belief but not what I worked it " in warning
+
+
+def test_forgetting_a_question_sends_only_for_one_the_read_returned() -> None:
+    """ADR-0177 §5's fifth clause.
+
+    "The browser renders the question it is about to destroy, from a ``questions`` or
+    ``interrupted_questions`` read issued immediately before the confirmation, and
+    takes the user's answer before calling ``forget_question``. It sends
+    ``forget_question`` only for a question that read returned."
+
+    #495's third ground — that a ceremony needs a read the façade does not have — is
+    met without adding one: the two list reads return the question whole.
+    """
+    forgetting = _functions(_code("app.js"))["forgetQuestion"]
+
+    assert "relay(half, path, {})" in forgetting
+    assert "body.questions.find((one) => one.id === id)" in forgetting
+    assert "if (question === undefined)" in forgetting
+    assert forgetting.index("window.confirm(") < forgetting.index('"/question/forget"')

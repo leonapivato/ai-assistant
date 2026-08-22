@@ -206,3 +206,49 @@ button[disabled] {
   flex: 1 1 14rem;
   margin: 0;
 }
+
+/*
+ * The control surface (ADR-0177). Each row is one subject — a source, a standing
+ * grant, a history record, a belief, a question — stacked rather than laid out in
+ * a flex line, because these rows carry several sentences each and a person reads
+ * them rather than scans them.
+ *
+ * `.source-row` and `.belief-row` deliberately have no rule that could hide part of
+ * a row's content. ADR-0139 §3's third clause forbids presenting a partial scope as
+ * incomplete or provisional, and ADR-0177 §6 states that at the level of the widget:
+ * a use a grant leaves out is not on screen "greyed, disabled, unchecked, struck
+ * through, or otherwise present-but-negated". There is no `disabled` or `struck`
+ * class here for the same reason there is no markup that would use one.
+ */
+.source-row,
+.grant-row,
+.belief-row,
+.question-row {
+  border-top: 1px solid var(--line);
+  padding: 0.7rem 0;
+}
+
+.source-name {
+  margin: 0 0 0.2rem;
+  font-weight: 600;
+}
+
+/*
+ * The scope form: the whole vocabulary, every time it is offered (ADR-0139 §3's
+ * second clause). It is a normal block of choices with no pre-checked default,
+ * because a default scope would be this surface deciding what the user permitted.
+ */
+.scope-form {
+  border-left: 2px solid var(--line);
+  margin: 0.5rem 0;
+  padding: 0.2rem 0 0.2rem 0.8rem;
+}
+
+/*
+ * The act log. Two acts of an amendment write two lines here, and the panel is
+ * cleared at the start of each attempt so what is on screen is this amendment and
+ * never the last one (ADR-0139 §4).
+ */
+#act-log p {
+  margin: 0.3rem 0;
+}
