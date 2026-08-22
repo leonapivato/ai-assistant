@@ -133,7 +133,7 @@ out — the same shape ADR-0168 §3 describes for admission.
 
 We will supersede ADR-0168 §5's one-mint-per-process rule with a mint the owner
 performs at the gateway's own process, bound an unexchanged value with a named
-figure, make `gateway_max_sessions` binding at two doors, keep a session's power
+figure, make `gateway_max_sessions` binding at the act that raises the count, keep a session's power
 ended by the gateway process so ADR-0004's three exemptions keep their condition,
 and state the one rule under which the page may re-arm a connection of its own
 motion.
@@ -412,7 +412,7 @@ no way to see why. Adversarial review found it on the fourth round. Keying the c
 on the promotion makes the value's life begin when the owner can first read it, which
 is the only instant either of them can act from.
 
-### 4. `gateway_max_sessions` binds, and it refuses at two doors
+### 4. `gateway_max_sessions` binds, and the exchange is the one door it binds at
 
 > **Normative.** ADR-0168 §4's ceiling clause — the gateway "admits at most
 > `gateway_max_sessions` live sessions and **refuses** a mint beyond that ceiling
@@ -420,11 +420,23 @@ is the only instant either of them can act from.
 > rather than narrowed, and is now reachable. Its default of 8 (ADR-0168 §8) is
 > unchanged.
 
-> **Normative.** A bootstrap exchange that would take the live session count past
-> `gateway_max_sessions` is **refused**, and no session is minted. Nothing is
-> evicted, no live session is shortened, and the value the exchange carried is
-> consumed exactly as a spent value is, so a refused exchange is not a value the
-> caller may present again.
+> **Normative.** The **bootstrap exchange is the only place the ceiling is
+> enforced**, because it is the only act that raises the live session count. An
+> exchange that would take the count past `gateway_max_sessions` is **refused**, and
+> no session is minted. Nothing is evicted, no live session is shortened, and the
+> value the exchange carried is consumed exactly as a spent value is, so a refused
+> exchange is not a value the caller may present again.
+
+> **Normative.** The mint act (§1) makes **no decision that depends on the live
+> session count**. It is not refused at the ceiling, it mints and discloses exactly
+> as §1 requires whatever the count is, and no lane may add a second ceiling check
+> to it or to any other act.
+
+> **Normative.** Every disclosure carries the live session count and
+> `gateway_max_sessions` beside the value, as **information and not a refusal**, so
+> that an owner minting into a full table learns it where they are standing. Being
+> advisory is what makes it safe to state: it is a fact about the instant it was
+> written and no act of the gateway turns on it.
 
 > **Normative.** The browser learns only that the exchange failed. ADR-0168 §5's
 > disclosure rule governs the response, so a ceiling refusal is indistinguishable
@@ -433,40 +445,41 @@ is the only instant either of them can act from.
 > **Normative.** The refusal **is** recorded, and the record names the ceiling as
 > the condition it was refused on, under ADR-0168 §6's record clause and inside its
 > enumeration of permitted Tier 2 facts. That record is the owner's channel for the
-> fact the browser is not told.
+> fact the browser is not told, and it reaches the same standard output the
+> disclosure does.
 
-> **Normative.** The mint act (§1) is refused while the live session count is at
-> `gateway_max_sessions`, no value is minted, no outstanding value is replaced, and
-> the gateway reports the refusal and the ceiling on its own standard output. That
-> report is not a response to a request and reaches no browser, so ADR-0168 §5's
-> disclosure rule is not engaged by it.
+**One enforcement point, at the act that changes the count, and the two drafts
+before it are why the sentence is worth this much space.** The first draft refused
+at *both* doors — the mint act and the exchange — on the reasoning that "sessions
+expire, so the count at mint time is not the count at exchange time". That is true
+and points the wrong way: expiry only lowers the count, and a ceiling is breached by
+raising it. Architecture review found on the fourth round that the exchange branch
+was therefore unreachable, which is precisely #1320's defect reintroduced by the
+decision that closes it.
 
-> **Normative.** The early refusal above makes the exchange refusal **unreachable**
-> under §1 and §2 as they stand, and that is stated rather than left to be
-> discovered: only one value is outstanding, only its exchange creates a session, and
-> nothing between the two raises the live count. The exchange clause is owed
-> nonetheless — no lane may omit it, and no lane may cite this clause as licence
-> to. What no lane owes is a test that reaches it *through the mint act*: it is
-> pinned at the session table's own seam instead (§10).
+The second draft kept both and *stated* the unreachability. Adversarial review found
+on the fifth round that the statement was false, by an interleaving the two earlier
+rounds had created between them: §1 orders disclosure before promotion, so a mint act
+at seven of eight live sessions can pass its ceiling check, begin disclosing, and —
+if disclosure does not block request handling — have the still-outstanding old value
+exchanged underneath it, reaching eight. The candidate then either promotes past a
+ceiling that had refused it or is rejected after the owner has already read it. The
+available repairs were both bad: making the whole act atomic against the exchange
+means blocking the event loop on a write to a pipe that may be back-pressured, which
+is the stall round four's finding was about; re-checking at promotion means refusing
+a value already on the owner's screen, which is the same defect one step later.
 
-**One ceiling, two clauses, and only one of them is on an execution path — which
-is worth stating plainly, because the alternative is the defect this decision
-closes.** The mint act is where the owner is standing, so refusing there is the only
-place they can be told *why*: a value minted into a full table is a value that cannot
-be spent, and letting it be minted would produce a failure at a browser that ADR-0168
-§5 forbids explaining, with the explanation on the wrong side of the room. The
-exchange is where the live count actually changes, so it is where the invariant
-lives, and a module that owns a count does not delegate the count's bound to a check
-in another module. Architecture review found on the fourth round that an earlier draft
-of this section claimed both clauses were reachable, on the reasoning that "sessions
-expire, so the count at mint time is not the count at exchange time" — which is true
-and points the wrong way, because expiry only *lowers* the count and the ceiling is
-breached by raising it. The right account is the one above: the early refusal is the
-reachable one, the exchange refusal is the invariant at its own seam, and a later
-decision permitting a second outstanding value or a second path to a session would
-find the ceiling still held rather than silently gone. #1320's own remedy for a clause
-with no execution is "a sentence in the superseding ADR saying so", and this is that
-sentence written in advance rather than a round later.
+**So the count stops being an input to the mint act at all.** The exchange owns the
+invariant because the exchange owns the count, there is exactly one place to check
+and one place to test, and no ordering between minting and exchanging can produce a
+state the text does not describe — an old value exchanged while a candidate is being
+disclosed is simply an old value spent, which it was entitled to be. What the owner
+loses is a refusal at the terminal; what they get instead is the count printed beside
+every value, which tells them the same thing without deciding anything, plus a value
+that becomes spendable on its own if a session idles out inside its ten minutes. The
+general lesson is the one ADR-0168 §8 records for its connection ceilings: bound the
+thing the caller cannot fake, at the moment it changes, and do not spread one
+invariant over two moments.
 
 **The browser is told nothing and the owner is told everything, which is ADR-0168's
 existing split rather than a new one.** §5 requires a failed exchange to disclose
@@ -960,10 +973,10 @@ clause lands where is part of the decision.
 
 **What the gateway lane owes in tests, named because two of these are easy to omit.**
 That a value ceases on each of §2's four events and that a refused exchange discloses
-nothing distinguishing them; that the mint act refuses at the ceiling, which is the reachable
-refusal, and that the exchange refuses at the ceiling driven at the session table's
-own seam rather than through the mint act, since §4 says in terms that no execution
-reaches it that way;
+nothing distinguishing them; that the exchange refuses at the ceiling — the one place §4
+enforces it, reachable by the ordinary path — and that the mint act does **not**
+refuse there but discloses the advisory count instead, which is the pair a lane
+carrying the earlier draft in its head would get backwards;
 that a value the gateway could not disclose is not minted, that a previously
 outstanding value still admits after such a failure — the ordering §1 fixes, and the
 one an implementation is most likely to get backwards — and that the gateway keeps
@@ -994,8 +1007,8 @@ claiming a check it did not make.
   ADR-0168 §8's ten and ADR-0175 §8's one already were; it is not `core` Protocol or
   type surface, so golden rule 5 is not triggered and no triad is owed.
 - **#1320 and #1329 close with this decision's implementing lane.** The ceiling is
-  reachable and refuses at two doors; the unexchanged value has a clock, an origin
-  and a closed list of what ends it.
+  reachable and refuses at the exchange, the one act that raises the live count; the
+  unexchanged value has a clock, an origin and a closed list of what ends it.
 - **A notification now reaches every admitted browser at once**, because ADR-0175 §4
   already writes each delivery "to **every** delivery stream open at the moment it
   returned" and there can now be more than one browser holding one. That is the
@@ -1082,6 +1095,16 @@ claiming a check it did not make.
   can never bind. These bound different objects, both orders are coherent, and a check
   would assert a relationship neither figure claims — ADR-0175 §8's refusal of a
   cross-figure check, for the analogous reason.
+- **Refuse the mint act at the ceiling, or refuse at both doors.** The first two
+  drafts of §4, and the shape that reads as obviously right: tell the owner where they
+  are standing. *Rejected in §4.* Refusing at both leaves the exchange branch
+  unreachable, which is #1320's own defect reintroduced by the decision closing it;
+  refusing only at the mint act spreads one invariant across two moments and, once §1
+  orders disclosure before promotion, admits an interleaving in which the old value is
+  exchanged during the disclosure and the candidate promotes past a ceiling that
+  refused it. Repairing that needs either an event loop blocked on a write to a
+  back-pressured pipe or a refusal of a value already on the owner's screen. Printing
+  the count as advice costs neither.
 - **Tell the browser the ceiling was hit.** *Rejected in §4*: ADR-0168 §5 requires a
   failed exchange to disclose only that it failed, and a ceiling refusal that named
   itself would hand any local process a probe for how many browsers the owner has
