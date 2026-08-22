@@ -98,3 +98,51 @@ thoroughly as a bad one. ADR-0020 §2 records the evidence.
 Waiving a `blocker` or `major` is allowed; write the one-line rationale in the PR
 or the commit. `CONTRIBUTING.md` covers triaging a finding that is real but
 belongs in its own issue.
+
+## When a change owes both lenses
+
+Two shapes require both reviewers rather than adversarial alone: a change to the
+contract surface (`core/protocols.py`, `core/types.py`), and the ADR deciding
+that surface (ADR-0015 §1; `CONTRIBUTING.md` → "Stop when the required reviews
+are green" owns the test). On those, **run both lenses in the same round, from
+round 1** — `just review-codex-both` — and triage the union before editing
+anything.
+
+**The reason is that one lens can reverse the other, and running them in
+sequence decides that after the edits are paid for.** On PR #1377 (ADR-0178)
+architecture returned `APPROVE` with no findings at rounds 2–3 and did not run
+again while adversarial worked rounds 8–9: a blocker there called a browser
+rendering requirement unsatisfiable and directed a *cross-language derivation
+contract the browser may implement*, and the next round required that contract's
+full field schema. When architecture next ran, at rounds 10–11, it returned a
+blocker on exactly that result — recomputing the canonical destination set in the
+browser is "business logic in `interfaces/`, violating golden rule 3" — and
+directed the opposite: `core` derives the set, surfaces only render it. That
+reading is the one the ADR shipped with. Both lenses on round 8's tree would have
+put the contradiction in front of the author before the first edit, instead of
+after three rounds of them.
+
+**Terminal is both verdicts green on one tree**, which is what the rule above
+already says: the required *set* coming back green is the terminal state
+(ADR-0020 §2), not each lens in turn. Nothing about shipping changes — what
+changes is that the set is measured every round rather than once at the end.
+
+**When the two lenses contradict, take neither.** Complying with whichever
+arrived last is the failure this exists to prevent.
+
+1. **Resolve it against the texts.** The authority hierarchy above ranks them,
+   and a golden rule or a ratified ADR settles most such pairs outright — golden
+   rule 3 settled #1377's.
+2. **Record the reading in the PR**, as the grounds for the finding you are now
+   waiving. Both lenses are advisory; a waived finding with grounding on the
+   record is a normal outcome.
+3. **Where the texts do not settle it, that is a deadlock, not a finding** —
+   issue #1155's case. Nothing puts your counter-evidence in front of a lens, so
+   the moves are to waive with grounding, or to hand the loop over (ADR-0138).
+   Editing back and forth to satisfy each lens in turn is the one move that
+   cannot terminate.
+
+**A both-lens round is one round.** `scripts/codex-review.sh` counts distinct
+reviewed *trees* of the branch, so two personas on one tree print the same round
+number and ADR-0138 §2's per-lens counts each advance by one. Running both does
+not spend the handoff threshold twice as fast.
