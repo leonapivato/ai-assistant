@@ -1256,7 +1256,7 @@ function bandFilter() {
 async function listBeliefs() {
   runs.beliefs += 1;
   readSoFar.beliefs = 0;
-  await readBeliefs(false);
+  await readBeliefs(false, runs.beliefs);
 }
 
 // One page of beliefs, from the start or from where the last one stopped.
@@ -1264,14 +1264,16 @@ async function listBeliefs() {
 // The filter is captured **before** the read and travels with it, so the page that
 // arrives is rendered against the question it was asked — and the run check after the
 // await is what retires it if the owner has since asked a different one.
-async function readBeliefs(more) {
+async function readBeliefs(more, run) {
   fault(null);
+  if (run !== runs.beliefs) {
+    return;
+  }
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
-  const run = runs.beliefs;
   const bands = bandFilter();
   const asked = { limit: PAGE, offset: readSoFar.beliefs };
   if (bands !== null) {
@@ -1291,7 +1293,7 @@ async function readBeliefs(more) {
     }
     body.beliefs.forEach((one) => renderBelief(list, one));
     readSoFar.beliefs += body.beliefs.length;
-    offerMore(list, body.beliefs.length, () => readBeliefs(true));
+    offerMore(list, body.beliefs.length, () => readBeliefs(true, run));
     show("beliefs", true);
   } catch (_) {
     fault(GATEWAY_GONE);
@@ -1476,13 +1478,24 @@ async function forgetBelief(id) {
 
 // --- the deferred-question surface (ADR-0078 §8, §9) -------------------------
 
+// Start both question listings again.
+//
+// **One generation is taken for the whole invocation and carried into each read.**
+// Two listings means two awaits, and a run that is retired during the first one would
+// otherwise reach the second and snapshot whatever number is current *then* — so two
+// overlapping refreshes would both be accepted, both read offset zero, and both
+// advance the same counter, putting the next page past a whole page of questions
+// nobody can answer or destroy.
 async function listQuestions() {
+  const generation = {};
   Object.values(QUESTION_LISTS).forEach((listing) => {
     runs[listing.counter] += 1;
+    generation[listing.counter] = runs[listing.counter];
     readSoFar[listing.counter] = 0;
   });
-  await readQuestions("/questions", false);
-  await readQuestions("/questions/interrupted", false);
+  for (const path of Object.keys(QUESTION_LISTS)) {
+    await readQuestions(path, false, generation[QUESTION_LISTS[path].counter]);
+  }
 }
 
 //: Which listing is which, in one place: the path it is read from, the node it is
@@ -1504,15 +1517,17 @@ const QUESTION_LISTS = {
 // One page of one question listing. Paged for `readBeliefs`' reason one surface over:
 // a question past the first page would be one the owner can neither answer nor
 // destroy, and a rendered row is the only route to either.
-async function readQuestions(path, more) {
+async function readQuestions(path, more, run) {
   fault(null);
+  const listing = QUESTION_LISTS[path];
+  if (run !== runs[listing.counter]) {
+    return;
+  }
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
-  const listing = QUESTION_LISTS[path];
-  const run = runs[listing.counter];
   const offset = readSoFar[listing.counter];
   try {
     const body = await relay(half, path, { limit: PAGE, offset });
@@ -1532,7 +1547,7 @@ async function readQuestions(path, more) {
     // gone (ADR-0177 §5's fifth clause).
     body.questions.forEach((one) => renderQuestion(list, one, path, offset));
     readSoFar[listing.counter] += body.questions.length;
-    offerMore(list, body.questions.length, () => readQuestions(path, true));
+    offerMore(list, body.questions.length, () => readQuestions(path, true, run));
     show("questions", true);
   } catch (_) {
     fault(GATEWAY_GONE);
