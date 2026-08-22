@@ -75,6 +75,8 @@ _LARGEST_RANGE = 20
 # is close; what the bound buys is that a brief cannot hand this script a
 # traceback in place of a report.
 _LARGEST_LABEL = 9
+# How much of a label the report shows before shortening it.
+_LABEL_COLUMN = 24
 
 _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 
@@ -98,6 +100,22 @@ _FILE_SUFFIXES = frozenset(
 ABSENT = "absent"
 PRESENT = "present"
 UNCHECKED = "not checked"
+
+
+@dataclass(frozen=True)
+class _Reference:
+    """One section a brief cites, and whether it can be checked at all.
+
+    Attributes:
+        adr: The ADR number it binds to, or None where nothing binds it.
+        label: The section label (``9``, ``8a``), or the range text where
+            ``unchecked`` says the range was not expanded.
+        unchecked: Why this reference is reported rather than checked, or None.
+    """
+
+    adr: str | None
+    label: str
+    unchecked: str | None = None
 
 
 @dataclass(frozen=True)
@@ -197,16 +215,27 @@ def find_section(text: str, section: str) -> tuple[int, str] | None:
     return None
 
 
-def _expand(first: str, last: str | None) -> list[str]:
-    """Expand a section range to its members, or return just ``first``."""
-    if last is None or not first.isdigit() or not last.isdigit():
-        return [first]
-    if len(first) > _LARGEST_LABEL or len(last) > _LARGEST_LABEL:
-        return [first]
-    low, high = int(first), int(last)
-    if not 0 < high - low <= _LARGEST_RANGE:
-        return [first]
-    return [str(n) for n in range(low, high + 1)]
+def _references_for(adr: str | None, first: str, last: str | None) -> list[_Reference]:
+    """Turn one section reference into the sections it covers.
+
+    A range this function declines to expand — lettered, absurdly long, or wider
+    than :data:`_LARGEST_RANGE` — yields its first section *plus a reference
+    saying the rest was not expanded*. Returning the first section alone would
+    let ``§§1-40`` report clean while thirty-nine cited sections went unread,
+    which is the silent under-check this whole report exists to avoid.
+    """
+    if len(first) > _LARGEST_LABEL:
+        return [_Reference(adr, first, "a label too long to be a section number")]
+    if last is None:
+        return [_Reference(adr, first)]
+    if first.isdigit() and last.isdigit() and len(last) <= _LARGEST_LABEL:
+        low, high = int(first), int(last)
+        if 0 < high - low <= _LARGEST_RANGE:
+            return [_Reference(adr, str(n)) for n in range(low, high + 1)]
+    return [
+        _Reference(adr, first),
+        _Reference(adr, f"{first} to {last}", "a range this checker does not expand"),
+    ]
 
 
 def _binding_adr(text: str, match: re.Match[str], adrs: list[tuple[int, int, str]]) -> str | None:
@@ -234,16 +263,14 @@ def _binding_adr(text: str, match: re.Match[str], adrs: list[tuple[int, int, str
     return None
 
 
-def section_citations(text: str) -> list[tuple[str | None, str]]:
-    """Return ``(adr number or None, section label)`` for every section reference."""
+def section_references(text: str) -> list[_Reference]:
+    """Return one :class:`_Reference` per section the brief cites."""
     adrs = [(m.start(), m.end(), m.group(1)) for m in _ADR_RE.finditer(text)]
-    citations: list[tuple[str | None, str]] = []
+    references: list[_Reference] = []
     for match in _SECTION_RE.finditer(text):
-        number = _binding_adr(text, match, adrs)
-        citations.extend(
-            (number, section) for section in _expand(match.group("first"), match.group("last"))
-        )
-    return citations
+        adr = _binding_adr(text, match, adrs)
+        references.extend(_references_for(adr, match.group("first"), match.group("last")))
+    return references
 
 
 def classify(token: str) -> tuple[str, str] | None:
@@ -376,24 +403,33 @@ def _adr_findings(root: Path, text: str) -> tuple[list[Finding], dict[str, Path]
     return findings, files
 
 
+def _cited_as(reference: _Reference) -> str:
+    """Render a reference for the report, shortening a label nobody meant to write."""
+    label = reference.label
+    if len(label) > _LABEL_COLUMN:
+        label = f"{label[: _LABEL_COLUMN - 3]}..."
+    return f"ADR-{int(reference.adr):04d} §{label}" if reference.adr else f"§{label}"
+
+
 def _section_findings(text: str, files: dict[str, Path]) -> list[Finding]:
     """Check every section reference against the ADR it binds to."""
     findings: list[Finding] = []
     bodies: dict[str, str] = {}
-    for number, section in section_citations(text):
-        if number is None:
-            findings.append(Finding("section", f"§{section}", UNCHECKED, "no ADR named before it"))
-            continue
-        cited = f"ADR-{int(number):04d} §{section}"
-        if number not in files:
+    for reference in section_references(text):
+        cited = _cited_as(reference)
+        if reference.unchecked is not None:
+            findings.append(Finding("section", cited, UNCHECKED, reference.unchecked))
+        elif reference.adr is None:
+            findings.append(Finding("section", cited, UNCHECKED, "no ADR named before it"))
+        elif reference.adr not in files:
             findings.append(Finding("section", cited, UNCHECKED, "the ADR itself is absent"))
-            continue
-        body = bodies.setdefault(number, files[number].read_text(encoding="utf-8"))
-        hit = find_section(body, section)
-        if hit is None:
-            findings.append(Finding("section", cited, ABSENT, "no section with that number"))
         else:
-            findings.append(Finding("section", cited, PRESENT, f"line {hit[0]}: {hit[1]}"))
+            body = bodies.setdefault(
+                reference.adr, files[reference.adr].read_text(encoding="utf-8")
+            )
+            hit = find_section(body, reference.label)
+            detail = f"line {hit[0]}: {hit[1]}" if hit else "no section with that number"
+            findings.append(Finding("section", cited, PRESENT if hit else ABSENT, detail))
     return findings
 
 
