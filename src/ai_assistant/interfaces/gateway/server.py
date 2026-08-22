@@ -1279,8 +1279,16 @@ class Gateway:
                 if not await self._write_stream(writer, answer, closing=closing):
                     return
             else:
-                writer.write(render(replace(answer, close=closing), policy=_POLICY))
-                await writer.drain()
+                try:
+                    writer.write(render(replace(answer, close=closing), policy=_POLICY))
+                    await writer.drain()
+                except ConnectionError, OSError:
+                    # The same ordinary end, on the writing half. `_write_stream`
+                    # answers a peer that went away mid-stream with `False` and the
+                    # connection ends; a whole response owes the same answer, and
+                    # without it the one response shape that is not a stream still
+                    # raises out of `client_connected_cb` (issue #1370).
+                    return
             if closing:
                 return
 
@@ -1355,7 +1363,16 @@ class Gateway:
                 read_request(reader, max_bytes=self._settings.gateway_max_request_bytes),
                 timeout=timeout,
             )
-        except TimeoutError, IncompleteRequestError:
+        except TimeoutError, IncompleteRequestError, ConnectionError, OSError:
+            # **A peer that went away is the ordinary end of a connection, not a
+            # fault to raise out of it** — the reading `_write_stream` already
+            # takes one response shape over, applied to the read that precedes
+            # every response. `_handle` is asyncio's `client_connected_cb`, so an
+            # `OSError` escaping here is reported as an unhandled exception with a
+            # traceback an operator reads as a defect; issue #1370 is that
+            # traceback, once per connection the phone reset. There is nothing to
+            # answer either way: the deadline, an early end of stream and a reset
+            # all leave this door without a request.
             return None
         except RequestTooLargeError:
             return _fault(
@@ -3658,7 +3675,17 @@ def _proposal_view(proposal: ObservedProposal) -> dict[str, Any]:
 
 
 async def _close(writer: asyncio.StreamWriter) -> None:
-    """Close one connection, tolerating a peer that closed first."""
+    """Close one connection, tolerating a peer that closed first.
+
+    **The suppression here is not what stops a reset escaping `_handle`, and issue
+    #1370 is the evidence.** `connection_lost` hands the *same* exception object to
+    the reader and to the close waiter, so a reset noticed first by a read raises
+    once out of :meth:`Gateway._next`, and then again out of ``wait_closed`` below
+    — where it is caught, but not before the interpreter has prepended this frame
+    to the traceback the first raise is still carrying. What an operator then reads
+    names this function for an exception this function swallowed. The read and the
+    response write are where it is actually answered.
+    """
     writer.close()
     with contextlib.suppress(ConnectionError, OSError):
         await writer.wait_closed()

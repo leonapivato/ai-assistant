@@ -16,6 +16,7 @@ import asyncio
 import contextlib
 import json
 import socket
+import struct
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
@@ -903,6 +904,45 @@ async def test_an_unadmitted_connection_that_sends_nothing_is_closed_on_the_dead
 
         assert await asyncio.wait_for(reader.read(1), timeout=5) == b""
         writer.close()
+
+
+# --- The remote door under a peer that is not speaking HTTP (#1369, #1370) ---
+
+
+async def test_a_peer_that_resets_mid_request_raises_nothing_out_of_the_handler() -> None:
+    """Issue #1370: once per connection the phone reset, the gateway's stderr
+    carried ``Unhandled exception in client_connected_cb`` and a traceback an
+    operator reads as a fault.
+
+    **The traceback named ``_close``, and ``_close`` was never the escape.**
+    `connection_lost` hands the *same* exception object to the reader and to the
+    close waiter, so a reset noticed by the read raises out of `_next`, and raises
+    again inside `_close` — where it is suppressed, but only after that frame has
+    been prepended to the traceback the first raise still carries. What answers it
+    is the read treating a peer that went away as the ordinary end of a connection,
+    which is the reading `_write_stream` already takes one response shape over.
+
+    Driven on a raw socket with a zero linger, because a reset is what has to
+    arrive: an orderly close is an end of stream, which this door already handled.
+    """
+    loop = asyncio.get_running_loop()
+    unhandled: list[dict[str, Any]] = []
+    loop.set_exception_handler(lambda _loop, context: unhandled.append(context))
+    try:
+        async with _harness() as harness:
+            peer = socket.create_connection(("127.0.0.1", harness.settings.gateway_port))
+            peer.sendall(b"GET / HTTP/1.1\r\n")
+            await asyncio.sleep(0.05)
+            peer.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            peer.close()
+            await asyncio.sleep(0.2)
+            # A round trip after the reset, so the loop has certainly run the
+            # handler task to completion and its done callback with it.
+            assert (await harness.send("GET /app.js HTTP/1.1\nHost: {host}")).status == 200
+    finally:
+        loop.set_exception_handler(None)
+
+    assert unhandled == [], unhandled
 
 
 # --- What the browser is handed, and what it is not ---
