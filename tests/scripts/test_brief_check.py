@@ -381,7 +381,7 @@ def test_an_absurd_section_range_reports_rather_than_crashing(tmp_path: Path) ->
 
     assert "Traceback" not in result.stderr
     assert result.returncode in (0, 1)
-    assert _section_of(result.stdout, _row(result.stdout, "...")).startswith("not checked")
+    assert _section_of(result.stdout, _row(result.stdout, "too long")).startswith("not checked")
 
 
 def test_a_range_too_wide_to_expand_is_reported_rather_than_dropped(tmp_path: Path) -> None:
