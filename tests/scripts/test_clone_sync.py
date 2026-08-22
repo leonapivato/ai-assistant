@@ -135,6 +135,43 @@ def test_a_tracked_path_in_the_target_is_never_overwritten(tmp_path: Path) -> No
     assert (sibling / ".env").read_text() == "checked in\n"
 
 
+def test_a_symlink_at_the_target_path_is_never_written_through(tmp_path: Path) -> None:
+    # `is_tracked` guards a checked-in file, and everything on the list is ignored
+    # by definition — so it says nothing about an ignored symlink pointing out of
+    # the clone. `shutil.copy2` would follow it and write to the far end.
+    source, (sibling,) = _clones(tmp_path, 2)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not yours\n")
+    (sibling / ".env").symlink_to(outside)
+    listing = _list_file(tmp_path, ".env")
+
+    status, _, err = _sync(source, listing)
+
+    assert status == 1
+    assert "is a symlink" in err
+    assert outside.read_text() == "not yours\n"
+
+
+def test_a_symlinked_ancestor_is_refused_too(tmp_path: Path) -> None:
+    source, (sibling,) = _clones(tmp_path, 2)
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    # Ignored, so the clone still reads as clean and the escape check is what
+    # has to stop this rather than the freshness test.
+    (sibling / ".gitignore").write_text(".review/\nconf\n")
+    git(sibling, "commit", "-aqm", "ignore conf")
+    (sibling / "conf").symlink_to(outside, target_is_directory=True)
+    listing = _list_file(tmp_path, "conf/.env")
+    (source / "conf").mkdir()
+    (source / "conf" / ".env").write_text("x\n")
+
+    status, _, err = _sync(source, listing)
+
+    assert status == 1
+    assert "outside the clone" in err
+    assert not (outside / ".env").exists()
+
+
 def test_dry_run_writes_nothing(tmp_path: Path) -> None:
     source, (sibling,) = _clones(tmp_path, 2)
     listing = _list_file(tmp_path, ".env")

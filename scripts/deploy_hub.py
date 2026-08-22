@@ -28,8 +28,17 @@ in front of the operator either way.
 **Verification is the point, not a postscript.** A restart that silently fails
 leaves the old code running and the box reachable, which is the failure this
 recipe exists to make loud. So the run ends by asserting the unit is active,
-waiting a bounded time for ``hub_ready`` in that unit's journal *since the
-restart*, and printing the installed version and marker before and after.
+waiting a bounded time for ``hub_ready`` in the journal of **this start of the
+unit** — matched on the ``InvocationID`` systemd assigns each start, not on a
+timestamp, because any timestamp window is captured before the restart is issued
+and so can contain the *previous* process's readiness line — and printing the
+installed version and marker before and after.
+
+**The wheel is whatever the build produced.** It is built into a fresh temporary
+directory and read back from there, never located by a name predicted from
+``pyproject.toml``: a predicted name can miss the build's real output, or match a
+stale wheel left in ``dist/`` by an earlier version and ship it under today's
+commit. ``--wheel`` deploys an already-built file instead of building at all.
 
 ``--dry-run`` prints the exact commands the run would issue and contacts nothing.
 It is what the tests drive, because the remote half cannot be exercised from a
@@ -44,6 +53,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import tomllib
 from pathlib import Path
@@ -320,7 +330,45 @@ class Plan:
         """
         self.args = args
         self.wheel = wheel
-        self.staged = f"{args.stage_dir.rstrip('/')}/{wheel}"
+        #: The wheel on THIS machine. `None` until a real run has one — a dry run
+        #: never resolves it, because a dry run never builds.
+        self._local: Path | None = None
+
+    @property
+    def local(self) -> Path:
+        """The wheel to copy.
+
+        Returns:
+            The local path.
+
+        Raises:
+            DeployError: If no wheel has been resolved yet.
+        """
+        if self._local is None:
+            raise DeployError("no wheel has been built or supplied yet")
+        return self._local
+
+    def use(self, wheel: Path) -> None:
+        """Adopt the wheel a build produced, or the one the operator supplied.
+
+        Args:
+            wheel: The local wheel.
+        """
+        self._local = wheel
+        self.wheel = wheel.name
+
+    @property
+    def staged(self) -> str:
+        """Where the wheel lands on the box.
+
+        Derived rather than stored, because the name is only *predicted* until
+        the build has run: a real deploy replaces :attr:`wheel` with the file the
+        build actually produced, and every command below must follow it.
+
+        Returns:
+            The staged path.
+        """
+        return f"{self.args.stage_dir.rstrip('/')}/{self.wheel}"
 
     def read_marker(self) -> str:
         """Return the command that reads the deployed-commit marker.
@@ -347,9 +395,7 @@ class Plan:
         Returns:
             The local argv.
         """
-        return scp_command(
-            self.args.host, self.args.ssh_user, Path(self.args.wheel_path), self.staged
-        )
+        return scp_command(self.args.host, self.args.ssh_user, self.local, self.staged)
 
     def make_readable(self) -> str:
         """Return the command that makes the staged wheel readable by the service user.
@@ -395,16 +441,31 @@ class Plan:
         return as_service_user(inner, self.args.user)
 
     def restart(self) -> str:
-        """Return the restart command, which also prints the epoch it restarted at.
+        """Return the restart command, which also prints the new invocation id.
 
-        The epoch comes from the **box**, so the journal window below is immune to
-        clock skew between here and there.
+        A timestamp cannot bound the readiness check correctly. ``date +%s`` has
+        one-second granularity, and whatever instant is captured, the restart is
+        issued *after* it — so a ``hub_ready`` logged by the **old** process in
+        between falls inside the window, and a replacement that starts but never
+        becomes ready would then be verified by the log line of the process it
+        replaced. systemd already answers the question exactly: every start of a
+        unit gets its own ``InvocationID``, and the journal is filterable by it.
+
+        The ``&&`` is load-bearing. On a failed restart the id would still be
+        readable — it would just be the *previous* invocation's, whose journal
+        does contain ``hub_ready`` — so the id is printed only when the restart
+        succeeded, and a run with no id refuses rather than verifying the old one.
 
         Returns:
             The remote command line.
         """
-        inner = with_user_bus(f"systemctl --user restart {shlex.quote(self.args.unit)}")
-        return as_service_user(f"echo RESTART_EPOCH=$(date +%s); {inner}", self.args.user)
+        unit = shlex.quote(self.args.unit)
+        inner = (
+            "export XDG_RUNTIME_DIR=/run/user/$(id -u); "
+            f"systemctl --user restart {unit} && "
+            f"echo INVOCATION_ID=$(systemctl --user show -p InvocationID --value {unit})"
+        )
+        return as_service_user(inner, self.args.user)
 
     def is_active(self) -> str:
         """Return the command that asks whether the unit is active.
@@ -415,18 +476,18 @@ class Plan:
         inner = with_user_bus(f"systemctl --user is-active {shlex.quote(self.args.unit)}")
         return as_service_user(inner, self.args.user)
 
-    def journal_since(self, epoch: str) -> str:
-        """Return the command that reads the unit's journal since ``epoch``.
+    def journal_for(self, invocation: str) -> str:
+        """Return the command that reads the journal of one unit *start*.
 
         Args:
-            epoch: Seconds since the epoch, as read from the box.
+            invocation: The unit's ``InvocationID`` for the start being verified.
 
         Returns:
             The remote command line.
         """
-        since = shlex.quote(f"@{epoch}")
+        match = shlex.quote(f"_SYSTEMD_INVOCATION_ID={invocation}")
         inner = with_user_bus(
-            f"journalctl --user -u {shlex.quote(self.args.unit)} --since {since} --no-pager"
+            f"journalctl --user -u {shlex.quote(self.args.unit)} {match} --no-pager"
         )
         return as_service_user(inner, self.args.user)
 
@@ -447,16 +508,21 @@ def render(plan: Plan, commit: str) -> list[str]:
     """
     args = plan.args
     ssh_prefix = f"ssh {args.ssh_user}@{args.host}"
+    if args.wheel:
+        build = f"(none — deploying the supplied wheel {args.wheel})"
+    else:
+        build = "uv build --wheel --out-dir <a fresh temp dir>"
     lines = [
         f"# deploying {commit} to {args.ssh_user}@{args.host} as service user {args.user}",
-        f"build   : {shlex.join(['uv', 'build', '--wheel'])}",
+        f"build   : {build}",
     ]
     steps: list[tuple[str, str]] = [
         ("marker  ", plan.read_marker()),
         ("version ", plan.read_version()),
     ]
     lines.extend(_step_lines(ssh_prefix, steps))
-    lines.append(f"stage   : {shlex.join(plan.stage())}")
+    staged = f"{args.ssh_user}@{args.host}:{plan.staged}"
+    lines.append(f"stage   : scp <the wheel above> {staged}")
     lines.extend(
         _step_lines(
             ssh_prefix,
@@ -466,7 +532,7 @@ def render(plan: Plan, commit: str) -> list[str]:
                 ("marker! ", plan.write_marker(commit, "<sha256 of the built wheel>")),
                 ("restart ", plan.restart()),
                 ("active? ", plan.is_active()),
-                ("ready?  ", plan.journal_since("<restart epoch>")),
+                ("ready?  ", plan.journal_for("<the id the restart printed>")),
             ],
         )
     )
@@ -565,18 +631,19 @@ def _check_drift(plan: Plan, repo: Path) -> str:
     return marker
 
 
-def _wait_for_ready(plan: Plan, epoch: str) -> None:
-    """Poll the unit's journal until ``hub_ready`` appears or the bound expires.
+def _wait_for_ready(plan: Plan, invocation: str) -> None:
+    """Poll this unit start's journal until ``hub_ready`` appears, or time out.
 
     Args:
         plan: The plan.
-        epoch: The restart epoch, as read from the box.
+        invocation: The ``InvocationID`` of the start being verified, so a
+            ``hub_ready`` from any earlier start of the unit cannot satisfy it.
 
     Raises:
         DeployError: If ``hub_ready`` does not appear within the bound.
     """
     deadline = time.monotonic() + plan.args.ready_timeout
-    command = ssh_command(plan.args.host, plan.args.ssh_user, plan.journal_since(epoch))
+    command = ssh_command(plan.args.host, plan.args.ssh_user, plan.journal_for(invocation))
     while True:
         if "hub_ready" in _run_local(command, check=False):
             return
@@ -589,22 +656,34 @@ def _wait_for_ready(plan: Plan, epoch: str) -> None:
         time.sleep(_POLL_INTERVAL)
 
 
-def _restart_epoch(output: str) -> str:
-    """Extract the restart epoch the restart command printed.
+def invocation_id(output: str) -> str:
+    """Extract the ``InvocationID`` the restart command printed.
 
     Args:
         output: The restart command's stdout.
 
     Returns:
-        The epoch as a string.
+        The id.
 
     Raises:
-        DeployError: If the marker line is absent.
+        DeployError: If it is absent or empty. It is absent when the restart
+            itself failed, and empty on a systemd too old to report one — and in
+            both cases the alternative is verifying against a journal window that
+            can contain an *earlier* start of the unit, which is the failure this
+            replaced. Refusing leaves a deploy that has installed and restarted
+            and only lacks its readiness proof, so the message says exactly that.
     """
     for line in output.splitlines():
-        if line.startswith("RESTART_EPOCH="):
-            return line.removeprefix("RESTART_EPOCH=").strip()
-    raise DeployError("the restart command printed no RESTART_EPOCH; cannot bound the journal read")
+        if line.startswith("INVOCATION_ID="):
+            invocation = line.removeprefix("INVOCATION_ID=").strip()
+            if invocation:
+                return invocation
+    raise DeployError(
+        "the restart printed no unit InvocationID, so the readiness check cannot be\n"
+        "bound to THIS start of the unit and would accept an earlier one's hub_ready.\n"
+        "The wheel is installed and the restart was issued; verify by hand with\n"
+        "  systemctl --user status <unit>  and  journalctl --user -u <unit> -n 50"
+    )
 
 
 def _deploy(plan: Plan, repo: Path, commit: str) -> None:
@@ -626,22 +705,72 @@ def _deploy(plan: Plan, repo: Path, commit: str) -> None:
     before_marker = _check_drift(plan, repo)
     before_version = _run_local(ssh(plan.read_version())).strip()
 
-    _run_local(["uv", "build", "--wheel"], cwd=repo)
-    wheel_path = Path(args.wheel_path)
-    if not wheel_path.is_file():
-        raise DeployError(f"uv build --wheel produced no {wheel_path}")
-    digest = hashlib.sha256(wheel_path.read_bytes()).hexdigest()
+    if args.wheel:
+        supplied = Path(args.wheel).resolve()
+        if not supplied.is_file():
+            raise DeployError(f"--wheel {supplied} is not a file")
+        plan.use(supplied)
+        _install_and_verify(plan, commit, before_marker, before_version)
+        return
+    # Built into a FRESH directory, and the wheel is then whatever that directory
+    # holds — never a name predicted beforehand. A predicted name can miss the
+    # build's real output (so the deploy fails) or, worse, match a stale wheel
+    # left in `dist/` by an earlier version, which would be shipped and recorded
+    # under today's commit. An empty directory cannot do either.
+    with tempfile.TemporaryDirectory(prefix="deploy-hub-") as out:
+        plan.use(build_wheel(repo, Path(out)))
+        _install_and_verify(plan, commit, before_marker, before_version)
 
+
+def build_wheel(repo: Path, out: Path) -> Path:
+    """Build the wheel into ``out`` and return the file it produced.
+
+    Args:
+        repo: The repository root.
+        out: An empty directory to build into.
+
+    Returns:
+        The wheel.
+
+    Raises:
+        DeployError: If the build produced anything other than exactly one wheel.
+    """
+    _run_local(["uv", "build", "--wheel", "--out-dir", str(out)], cwd=repo)
+    wheels = sorted(out.glob("*.whl"))
+    if len(wheels) != 1:
+        names = ", ".join(w.name for w in wheels) or "nothing"
+        raise DeployError(f"uv build --wheel produced {names}, not exactly one wheel")
+    return wheels[0]
+
+
+def _install_and_verify(plan: Plan, commit: str, before_marker: str, before_version: str) -> None:
+    """Stage, install, restart and verify, then print before and after.
+
+    Args:
+        plan: The plan, carrying the wheel to deploy.
+        commit: The commit being deployed.
+        before_marker: The marker as it stood before this deploy.
+        before_version: The installed version before this deploy.
+
+    Raises:
+        DeployError: If any step fails, or verification does not pass.
+    """
+    args = plan.args
+
+    def ssh(remote: str) -> list[str]:
+        return ssh_command(args.host, args.ssh_user, remote)
+
+    digest = hashlib.sha256(plan.local.read_bytes()).hexdigest()
     _run_local(plan.stage())
     _run_local(ssh(plan.make_readable()))
     _run_local(ssh(plan.install()))
     _run_local(ssh(plan.write_marker(commit, digest)))
 
-    epoch = _restart_epoch(_run_local(ssh(plan.restart())))
+    invocation = invocation_id(_run_local(ssh(plan.restart())))
     active = _run_local(ssh(plan.is_active()), check=False).strip()
     if active != "active":
         raise DeployError(f"the unit is {active or '(no answer)'} after the restart, not active")
-    _wait_for_ready(plan, epoch)
+    _wait_for_ready(plan, invocation)
 
     after_marker = _run_local(ssh(plan.read_marker()))
     after_version = _run_local(ssh(plan.read_version())).strip()
@@ -676,7 +805,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--uv", default=DEFAULT_UV, help="the service user's uv binary")
     parser.add_argument("--marker", default=DEFAULT_MARKER, help="the deployed-commit marker")
     parser.add_argument("--stage-dir", default=DEFAULT_STAGE_DIR, help="where to stage the wheel")
-    parser.add_argument("--wheel", help="the wheel filename (default: derived from pyproject.toml)")
+    parser.add_argument(
+        "--wheel", help="deploy this already-built wheel instead of running uv build"
+    )
     parser.add_argument("--repo", default=".", help="the repository root to build from")
     parser.add_argument(
         "--ready-timeout",
@@ -708,8 +839,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         repo = Path(args.repo).resolve()
-        wheel = args.wheel or wheel_name(repo)
-        args.wheel_path = repo / "dist" / wheel
+        # Only ever a *prediction*, used to render the plan and to name the file
+        # on the box. A real run replaces it with the build's actual output.
+        wheel = Path(args.wheel).name if args.wheel else wheel_name(repo)
         commit = head_commit(repo, allow_dirty=args.allow_dirty)
         plan = Plan(args, wheel)
         if args.dry_run:
