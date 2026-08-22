@@ -12,7 +12,7 @@ import asyncio
 import re
 import shlex
 from datetime import UTC, datetime, timedelta
-from inspect import unwrap
+from inspect import getsource, unwrap
 from io import StringIO
 from itertools import count, product
 from typing import TYPE_CHECKING
@@ -42,11 +42,16 @@ from ai_assistant.core.types import (
     BeliefSummary,
     ClassReach,
     Confirmation,
+    ConfirmationEgress,
     ContinuationToken,
     CostBasis,
     CurrentContext,
     DataTier,
+    DestinationProtocol,
+    DiscloserProvenance,
     Disposition,
+    EgressDestination,
+    EgressSpan,
     Evidence,
     ExecutionState,
     FeedbackEvent,
@@ -365,6 +370,227 @@ def test_confirmation_render_neutralises_control_sequences_and_markup(output: St
     assert "\x1b" not in rendered  # no escape byte at all
     assert "[red]" in rendered  # markup is shown literally, not interpreted as colour
     assert "this discloses data off-device" in rendered  # the ruling reason is surfaced
+
+
+# --- ADR-0178 §7: the floor an egress confirmation's rendering owes ----------
+# One block, kept together so a rebase across another lane's fixture edits in
+# this module moves it whole rather than through it.
+
+_EGRESS_IDENTITY = "work@example.com"
+
+
+def _egress_span(  # noqa: PLR0913 — one keyword per field of the span being built
+    argument: str,
+    *,
+    index: int | None = None,
+    extent: int = 5,
+    canonical: str | None = None,
+    supplied: str | None = None,
+    tier: DataTier | None = None,
+    provenance: DiscloserProvenance = DiscloserProvenance.SYSTEM_SELECTED,
+) -> EgressSpan:
+    """One span, with a destination exactly where ``canonical`` is given."""
+    destination = (
+        None
+        if canonical is None
+        else EgressDestination(
+            protocol=DestinationProtocol.SMTP,
+            supplied=supplied if supplied is not None else canonical,
+            canonical=canonical,
+        )
+    )
+    return EgressSpan(
+        argument=argument,
+        index=index,
+        provenance=provenance,
+        extent=extent,
+        tier=tier,
+        destination=destination,
+    )
+
+
+def _egress_confirmation(*spans: EgressSpan, identity: str = _EGRESS_IDENTITY) -> Confirmation:
+    """A parked egress confirmation carrying ``spans``."""
+    return Confirmation(
+        tool_id="smtp",
+        tool_description="Send an email.",
+        parameters={"to": "Alice@Example.ORG", "body": "hello"},
+        reason="this discloses data off-device",
+        token=ContinuationToken(handle="tok"),
+        egress=ConfirmationEgress(account_identity=identity, spans=spans),
+    )
+
+
+def test_an_egress_confirmation_names_the_account_the_set_and_every_occurrence(
+    output: StringIO,
+) -> None:
+    """ADR-0178 §7: the floor, before the user's answer is collected.
+
+    ADR-0148 §8's fourth clause in full — the connected account's identity, the
+    canonical destination set in both forms, and the payload description — over
+    the mixed binding the clause is hardest on: ``to`` bearing a destination and
+    ``body`` not, tested as one case rather than assumed away.
+    """
+    cli._render_confirmation(
+        _egress_confirmation(
+            _egress_span("body", extent=5),
+            _egress_span(
+                "to", canonical="alice@example.org", supplied="Alice@Example.ORG", extent=17
+            ),
+        )
+    )
+    rendered = _flowed(output.getvalue())
+
+    assert _EGRESS_IDENTITY in rendered  # the connected account (§8's first noun)
+    assert "alice@example.org" in rendered  # the canonical form (§2's second)
+    assert "Alice@Example.ORG" in rendered  # the supplied form (§2's first)
+    assert "smtp" in rendered  # the protocol the equivalence was computed under
+    assert "to" in rendered  # every occurrence, by the argument it was selected by
+    assert "body" in rendered
+    assert "this discloses data off-device" in rendered  # the ruling's own reason
+
+
+def test_a_destination_less_occurrence_is_rendered_and_names_no_recipient(
+    output: StringIO,
+) -> None:
+    """ADR-0178 §7: both forms for the occurrences that carry a destination, and those only.
+
+    A span with no destination is still rendered — by its argument, its
+    provenance, its extent and its tier — and names no recipient. Dropping it, or
+    rendering it as though it named one, would fail the whole-rendering clause in
+    the two opposite directions.
+    """
+    cli._render_confirmation(
+        _egress_confirmation(
+            _egress_span(
+                "body",
+                extent=11,
+                tier=DataTier.PERSONAL,
+                provenance=DiscloserProvenance.USER_AUTHORED,
+            )
+        )
+    )
+    rendered = _flowed(output.getvalue())
+
+    assert "body" in rendered
+    assert "11 code points" in rendered
+    assert "personal" in rendered  # the tier it states
+    assert "you composed it" in rendered  # ADR-0146 §1's discloser, not a claim about content
+    assert "no destination" in rendered
+
+
+def test_an_account_only_set_names_the_account_as_the_destination(output: StringIO) -> None:
+    """ADR-0178 §7: not "no recipients" — ADR-0148 §2's third clause is the account."""
+    cli._render_confirmation(_egress_confirmation(_egress_span("body", extent=5)))
+    rendered = _flowed(output.getvalue())
+
+    assert "the connected account" in rendered
+    assert rendered.count(_EGRESS_IDENTITY) >= 2  # named as the account and as the destination
+
+
+def test_one_recipient_named_twice_is_one_set_member_and_two_disclosures(
+    output: StringIO,
+) -> None:
+    """ADR-0150 §10's third clause, which is why the occurrences travel at all.
+
+    A confirmation naming one argument for a member reached by two has understated
+    the call, and one showing only the occurrences leaves the user to deduplicate
+    in their head. Both are rendered, and the arithmetic is `core`'s.
+    """
+    confirmation = _egress_confirmation(
+        _egress_span("cc", canonical="alice@example.org", supplied="Alice@Example.ORG", extent=17),
+        _egress_span("to", canonical="alice@example.org", supplied="alice@example.org", extent=17),
+    )
+    assert confirmation.egress is not None
+    assert len(confirmation.egress.canonical_destination_set) == 1
+    cli._render_confirmation(confirmation)
+    rendered = _flowed(output.getvalue())
+
+    assert "cc" in rendered
+    assert "to" in rendered
+    assert "Alice@Example.ORG" in rendered  # the two supplied forms are both shown
+    assert "alice@example.org" in rendered
+
+
+def test_every_occurrence_is_rendered_none_omitted(output: StringIO) -> None:
+    """ADR-0178 §7: occurrences are rendered whole, none truncated or hidden."""
+    spans = tuple(
+        _egress_span("to", index=index, canonical=f"user{index}@example.org", extent=18)
+        for index in range(12)
+    )
+    cli._render_confirmation(_egress_confirmation(*spans))
+    rendered = _flowed(output.getvalue())
+
+    for index in range(12):
+        assert f"user{index}@example.org" in rendered
+        assert f"to[{index}]" in rendered
+
+
+def test_a_non_egress_confirmation_renders_as_it_did_and_claims_nothing(
+    output: StringIO,
+) -> None:
+    """ADR-0178 §7's last clause: it owes none of the floor and asserts none of it.
+
+    In particular it makes no claim about recipients — neither that there are
+    none, nor that the call transmits nothing. ``egress is None`` states that the
+    ruling was taken over no egress binding, and nothing more (§4).
+    """
+    cli._render_confirmation(
+        Confirmation(
+            tool_id="notes",
+            tool_description="Write a note.",
+            parameters={"body": "hello"},
+            reason="an unknown cost",
+            token=ContinuationToken(handle="tok"),
+            egress=None,
+        )
+    )
+    rendered = _flowed(output.getvalue())
+
+    assert "Write a note." in rendered
+    assert "an unknown cost" in rendered
+    for absent in ("Account:", "Goes to", "Describing", "the connected account", "no destination"):
+        assert absent not in rendered
+
+
+def test_the_new_members_are_neutralised_on_the_way_out(output: StringIO) -> None:
+    """ADR-0178 §7: inserted as data, neutralised for this target, like the rest.
+
+    Being derived from a binding relaxes nothing: ``argument`` is a
+    caller-influenced key (ADR-0150 §13) and a ``supplied`` form is a string a
+    model produced, so both reach the terminal through :func:`cli._safe` exactly
+    as ``parameters`` already does.
+    """
+    cli._render_confirmation(
+        _egress_confirmation(
+            _egress_span(
+                "wipe\x1b[2Jscreen",
+                canonical="alice@example.org",
+                supplied="[red]shout[/red]",
+                extent=17,
+            ),
+            identity="acct\x1b[2Jname",
+        )
+    )
+    rendered = output.getvalue()
+
+    assert "\x1b" not in rendered  # no escape byte reaches the terminal at all
+    assert "[red]" in rendered  # markup is shown literally, not interpreted as colour
+
+
+def test_the_cli_reads_no_permission_decision_and_no_binding(output: StringIO) -> None:
+    """ADR-0178 §5's third clause, and ADR-0042 §6 word for word.
+
+    ``lint-imports`` already keeps ``interfaces`` from importing a subsystem's
+    concrete module; what it cannot see is this adapter acquiring a *read* of a
+    ``PermissionDecision``, a ``ToolCall``, an ``ActionRequest`` or an
+    ``EgressBinding``. The whole point of ADR-0178 §1 is that the facts reach the
+    surface as a member of ``Confirmation`` instead, so naming any of those four
+    here would be the route around §6 the decision exists to close.
+    """
+    source = getsource(cli)
+    for forbidden in ("PermissionDecision", "ActionRequest", "EgressBinding", "ToolCall"):
+        assert forbidden not in source, f"interfaces/cli.py names {forbidden}"
 
 
 def test_disposition_render_names_the_executed_tool(output: StringIO) -> None:

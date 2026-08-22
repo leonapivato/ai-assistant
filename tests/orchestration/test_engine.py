@@ -94,6 +94,7 @@ from ai_assistant.orchestration import (
     WriteOutcome,
     belief_from_record,
     belief_summary_from_record,
+    canonical_payload,
     learn_outcome,
     presented_confidence,
 )
@@ -109,6 +110,7 @@ from ai_assistant.testing import (
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
+    FakeEgressBinder,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -131,10 +133,12 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
+    from ai_assistant.core.protocols import EgressBinder
     from ai_assistant.core.types import (
         Conversation,
         CurrentContext,
         EvaluationTrace,
+        FrozenJson,
         Goal,
         MemoryRecord,
         MemorySearchResult,
@@ -212,6 +216,27 @@ OBSERVER_ROUTE = "anthropic:claude-opus-4-8"
 CAPABILITY = "send_email"
 PARAMETERS = {"to": "someone@example.com"}
 
+#: The connected account an egress park in this module is bound to.
+EGRESS_REFERENCE = "conn-0001"
+EGRESS_IDENTITY = "work@example.com"
+EGRESS_ENDPOINT = "test://endpoint/one"
+
+#: A schema declaring ``to`` a destination-bearing argument, in ADR-0152 §3's two
+#: keywords. It is what makes ``FakeEgressBinder`` derive a real binding for
+#: :data:`PARAMETERS` rather than answer ``None``, so an egress park here is the
+#: seam's own output and not a fixture's idea of one.
+EGRESS_SCHEMA: Mapping[str, FrozenJson] = {
+    "type": "object",
+    "properties": {
+        "to": {
+            "type": "string",
+            "x-egress-destination": "smtp",
+            "x-egress-tier": "personal",
+        }
+    },
+    "additionalProperties": False,
+}
+
 
 def tool(tool_id: str = "smtp", **overrides: object) -> ToolDefinition:
     """A declaration ``FakeActionPolicy`` allows outright (mirrors test_runner)."""
@@ -237,6 +262,28 @@ def confirmable(tool_id: str = "smtp") -> ToolDefinition:
     return tool(tool_id, discloses=(DataTier.PERSONAL,))
 
 
+def egress_confirmable(tool_id: str = "smtp") -> ToolDefinition:
+    """A confirmable declaration whose ``to`` argument names a recipient.
+
+    The same tool the fake policy confirms, plus ADR-0152 §3's schema keywords, so
+    a runner holding a :class:`FakeEgressBinder` binds the call and the recorded
+    ``CONFIRM`` carries an ``egress_binding``.
+    """
+    return tool(tool_id, discloses=(DataTier.PERSONAL,), parameters_schema=EGRESS_SCHEMA)
+
+
+def bound_binder(tool_definition: ToolDefinition) -> FakeEgressBinder:
+    """A binder holding ``tool_definition`` against one active connected account."""
+    binder = FakeEgressBinder()
+    binder.register_egress(
+        tool_definition,
+        reference=EGRESS_REFERENCE,
+        identity=EGRESS_IDENTITY,
+        transport_endpoint=EGRESS_ENDPOINT,
+    )
+    return binder
+
+
 class OneStepPlanner:
     """A ``Planner`` that plans exactly one step **for the goal it is given**.
 
@@ -245,8 +292,17 @@ class OneStepPlanner:
     implements :class:`~ai_assistant.core.protocols.Planner`.
     """
 
-    def __init__(self, *, capability: str = CAPABILITY) -> None:
+    def __init__(
+        self,
+        *,
+        capability: str = CAPABILITY,
+        parameters: Mapping[str, object] | None = None,
+    ) -> None:
         self._capability = capability
+        # Overridable so a case can drive a *shape* of arguments — a long
+        # destination-bearing key naming a many-element array, for ADR-0178 §9's
+        # expansion — without a second planner class.
+        self._parameters = PARAMETERS if parameters is None else parameters
 
     async def plan(
         self,
@@ -256,7 +312,10 @@ class OneStepPlanner:
         memories: Sequence[MemoryRecord] = (),
     ) -> ActionPlan:
         step = PlanStep(
-            id="step-1", intent="send the note", capability=self._capability, parameters=PARAMETERS
+            id="step-1",
+            intent="send the note",
+            capability=self._capability,
+            parameters=self._parameters,  # type: ignore[arg-type]  # heterogeneous test arguments
         )
         return ActionPlan(id=f"{goal.id}-plan", goal_id=goal.id, steps=(step,), created_at=AT)
 
@@ -337,6 +396,7 @@ class Harness:
         traces: FakeTraceRetention | None = None,
         trace_sink: FakeTraceSink | None = None,
         trace_retention: timedelta | None = TRACE_RETENTION,
+        binder: EgressBinder | None = None,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT)
         self.trail = FakeAuditTrail()
@@ -444,6 +504,11 @@ class Harness:
             ),
             now=lambda: AT,
             id_factory=lambda: next(self.ids),
+            # The egress binding seam (ADR-0152 §1), wired only where a case needs
+            # a *bound* call: without one ``bind`` answers ``None`` and every
+            # request carries ``egress_binding=None``, which is the ordinary
+            # non-egress shape almost every case here is about.
+            binder=binder,
         )
         # The trace store's *deletion* seam, and only that: ADR-0119 §7 gives the
         # engine the purge and withholds the walk, so the harness hands it a
@@ -594,6 +659,231 @@ async def test_a_parked_step_returns_engine_assembled_confirmation_content() -> 
     assert recorded is not None
     assert confirmation.reason == recorded.ruling.reason
     assert isinstance(confirmation.token, ContinuationToken)
+
+
+# --- ADR-0178 §4, §5, §9: the egress a confirmation is about ----------------
+# Kept in one block so a rebase across another lane's edits to this module moves
+# it whole rather than through it.
+
+
+def _egress_harness() -> Harness:
+    """A harness whose one confirmable tool is bound to a connected account."""
+    definition = egress_confirmable()
+    return Harness(tools=(definition,), binder=bound_binder(definition))
+
+
+async def test_a_parked_egress_confirmation_carries_the_recorded_decisions_binding() -> None:
+    """ADR-0178 §5: the live site, from the **recorded** decision and nothing else.
+
+    The binding a confirmation shows is the one the ruling was taken over
+    (ADR-0148 §1), so the assertion is against what the trail holds rather than
+    against what the fixture arranged — reading it from anything the runner still
+    held would be a second source that could differ from the authorised one.
+    """
+    harness = _egress_harness()
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+    assert outcome.step is not None
+    assert outcome.step.disposition is Disposition.AWAITING_CONFIRMATION
+    confirmation = outcome.step.confirmation
+    assert confirmation is not None
+
+    recorded = await harness.trail.get("d-1")
+    assert recorded is not None
+    binding = recorded.egress_binding
+    assert binding is not None
+    assert confirmation.egress is not None
+    assert confirmation.egress.account_identity == binding.account.identity
+    assert confirmation.egress.spans == binding.spans
+
+
+async def test_a_parked_egress_confirmation_carries_neither_barred_value() -> None:
+    """ADR-0178 §2: the reference and the endpoint stay on the engine's side.
+
+    ADR-0148 §8's fourth clause bars the connection reference from the
+    confirmation in terms, and handing it to an adapter would carry across
+    ADR-0042 §6's boundary a value §6 exists to keep behind it. Asserted over the
+    serialised member, because that is what actually reaches a client.
+    """
+    harness = _egress_harness()
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+    assert outcome.step is not None
+    confirmation = outcome.step.confirmation
+    assert confirmation is not None
+    assert confirmation.egress is not None
+    rendered = confirmation.egress.model_dump_json()
+    assert EGRESS_IDENTITY in rendered
+    assert EGRESS_REFERENCE not in rendered
+    assert EGRESS_ENDPOINT not in rendered
+
+
+async def test_a_recovered_egress_confirmation_equals_the_live_one() -> None:
+    """ADR-0178 §5's fourth clause: no reduced, digested or partial recovered form.
+
+    ``PermissionDecision.egress_binding`` is a stored field the trail round-trips
+    whole (ADR-0150 §9), so the recovery path carries exactly the egress content
+    the live path carries — which is the thing #1366 was least sure of and the one
+    a later change is most likely to break. Asserted by **equality** against the
+    live member rather than field by field, so a member added later is covered
+    without this case being edited.
+    """
+    harness = _egress_harness()
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    live = parked.step.confirmation
+    assert live is not None
+    assert live.egress is not None
+
+    fresh = _fresh_facade(harness)
+    assert fresh._parked == {}
+    pending = await fresh.pending_confirmations()
+    assert len(pending) == 1
+    assert pending[0].egress == live.egress
+
+
+async def test_a_non_egress_park_carries_no_egress_member_on_either_path() -> None:
+    """ADR-0178 §4: absent, not an empty-looking value — on the engine's own output.
+
+    Asserted on the ``Confirmation`` the engine builds rather than only on the
+    type, and on both paths, because an implementation that never wired the
+    binding through would produce exactly this for an *egress* call too.
+    """
+    harness = Harness(tools=(confirmable(),))
+    parked = await harness.engine.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.confirmation is not None
+    assert parked.step.confirmation.egress is None
+
+    pending = await _fresh_facade(harness).pending_confirmations()
+    assert len(pending) == 1
+    assert pending[0].egress is None
+
+
+async def test_no_engine_path_builds_an_egress_member_for_a_non_egress_call() -> None:
+    """ADR-0178 §4: ``None`` is the only shape the engine answers without a binding.
+
+    The reachable statement of "no code path constructs a ``ConfirmationEgress``
+    with an empty span tuple standing for a non-egress call". Two halves, and both
+    are needed: the member is assembled in exactly **one** place, so the two
+    assembly sites cannot drift apart; and that one place answers ``None`` on a
+    real recorded decision carrying no binding, rather than an empty-looking
+    value. The decisions are the ones the trail actually holds, not fixtures.
+    """
+    built = [
+        node
+        for node in ast.walk(ast.parse(inspect.getsource(engine_module)))
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "ConfirmationEgress"
+    ]
+    assert len(built) == 1, "the member is assembled in one place, so it cannot drift"
+
+    plain = Harness(tools=(confirmable(),))
+    await plain.engine.converse("send it", timeout=PATIENT)
+    without = await plain.trail.get("d-1")
+    assert without is not None
+    assert without.egress_binding is None
+    assert engine_module._confirmation_egress(without) is None
+
+    bound = _egress_harness()
+    await bound.engine.converse("send it", timeout=PATIENT)
+    with_binding = await bound.trail.get("d-1")
+    assert with_binding is not None
+    reduced = engine_module._confirmation_egress(with_binding)
+    assert reduced is not None
+    assert reduced.spans, "an egress call's description is not empty here"
+
+
+# ADR-0178 §9: the expansion, the refusal it can cause, and the park surviving it.
+
+#: A destination-bearing key long enough that repeating it once per span is the
+#: whole cost, which is ADR-0178 §9's product term stated as a fixture rather than
+#: as a figure: the request pays ``key_length + n`` and the description pays
+#: roughly ``key_length * n``.
+_LONG_KEY = "recipients" + ("_" * 500)
+_MANY = tuple(f"user{index}@example.org" for index in range(24))
+_ARRAY_SCHEMA: Mapping[str, FrozenJson] = {
+    "type": "object",
+    "properties": {
+        _LONG_KEY: {
+            "type": "array",
+            "items": {"type": "string"},
+            "x-egress-destination": "smtp",
+            "x-egress-tier": "personal",
+        }
+    },
+    "additionalProperties": False,
+}
+
+
+def _expanding_harness() -> Harness:
+    """A harness whose one call has a long key naming a many-element array."""
+    definition = tool("smtp", discloses=(DataTier.PERSONAL,), parameters_schema=_ARRAY_SCHEMA)
+    return Harness(
+        tools=(definition,),
+        binder=bound_binder(definition),
+        planner=OneStepPlanner(parameters={_LONG_KEY: list(_MANY)}),
+    )
+
+
+async def test_an_egress_confirmations_payload_expands_by_a_factor_not_a_term() -> None:
+    """ADR-0178 §9: the addition is a product, and saying otherwise would be false.
+
+    ``EgressSpan.argument`` carries the top-level key **once per span** (ADR-0150
+    §4) and an array-valued argument of ``n`` elements yields ``n`` spans, so a
+    long key naming a large array expands. This pins the expansion rather than the
+    absence of one — a linear bound would pass a confirmation that is in fact
+    quadratic in the key.
+    """
+    harness = _expanding_harness()
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+    assert outcome.step is not None
+    confirmation = outcome.step.confirmation
+    assert confirmation is not None
+    assert confirmation.egress is not None
+    assert len(confirmation.egress.spans) == len(_MANY)
+
+    arguments = len(canonical_payload(confirmation.parameters))
+    whole = len(canonical_payload(confirmation))
+    assert whole > len(_MANY) * len(_LONG_KEY)
+    assert whole > 4 * arguments
+
+
+async def test_an_over_limit_egress_confirmation_is_refused_whole_and_the_park_survives() -> None:
+    """ADR-0178 §9: refused rather than truncated, and undeliverable is not lost.
+
+    No span is dropped, no locator compacted and no identity omitted to make it
+    fit: the payload is refused as any other over-limit payload is. The refusal
+    lands on a ``TurnOutcome`` the engine measures **after** the runner committed
+    ``AWAITING_APPROVAL``, so the park is real — it stays durably
+    ``AWAITING_APPROVAL`` with its ``CONFIRM`` unresolved, and
+    ``pending_confirmations`` rebuilds it from that durable state once the limit
+    admits it. Raising the limit restores **delivery**, not time (#1382).
+    """
+    harness = _expanding_harness()
+    harness.engine._max_payload_bytes = 2048
+
+    with pytest.raises(OversizedValueError) as caught:
+        await harness.engine.converse("send it", timeout=PATIENT)
+    # ADR-0085 §9's attribution rule is unchanged: the member named is the
+    # *top-level* one containing the oversized value, never a nested path (#1384).
+    assert caught.value.field in {"step", "turn"}
+    assert "." not in (caught.value.field or "")
+
+    executions = await harness.plans.active_executions()
+    assert len(executions) == 1
+    step = executions[0].step("step-1")
+    assert step is not None
+    assert step.status is StepStatus.AWAITING_APPROVAL
+    assert (
+        await harness.trail.pending_confirmation(execution_id=executions[0].id, step_id="step-1")
+        is not None
+    )
+
+    admitted = _fresh_facade(harness)
+    pending = await admitted.pending_confirmations()
+    assert len(pending) == 1
+    assert pending[0].egress is not None
+    assert len(pending[0].egress.spans) == len(_MANY)
 
 
 async def test_resume_approved_executes_the_parked_step() -> None:

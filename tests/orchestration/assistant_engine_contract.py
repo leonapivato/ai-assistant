@@ -92,8 +92,10 @@ from ai_assistant.core.types import (
     AnswerKind,
     BeliefBand,
     BeliefSummary,
+    BoundAccount,
     ContinuationToken,
     Disposition,
+    EgressBinding,
     FeedbackEvent,
     FeedbackKind,
     GrantScope,
@@ -386,7 +388,7 @@ class AssistantEngineContract(ABC):
     @pytest.fixture
     @abstractmethod
     def parked_engine(self) -> AssistantEngine:
-        """A subject holding **exactly one** answerable parked confirmation.
+        """A subject holding **exactly one** answerable parked confirmation, on an egress call.
 
         The resume path cannot be reached by calling the surface: parking is the
         *policy's* ruling, reached inside a turn, so an implementation has to be
@@ -395,6 +397,15 @@ class AssistantEngineContract(ABC):
         park/render/relay sequence depends on, so a suite that skipped it would
         leave a client with no shared account of the one interaction a human is in
         the middle of.
+
+        **The park is on an *egress* call** (ADR-0178 §3, §5). The clause below
+        binds every producer of a
+        :class:`~ai_assistant.core.types.ConfirmationEgress`, and a fixture that
+        parked a non-egress call would leave it vacuous for that subject — which is
+        exactly how a canonical fake comes to assemble the member some other way
+        and still pass a suite. What the confirmation carries is otherwise
+        unconstrained: which account, which arguments and how many occurrences are
+        each implementation's own.
         """
 
     # --- the shape of the surface -----------------------------------------
@@ -876,6 +887,68 @@ class AssistantEngineContract(ABC):
             )
 
     # --- ADR-0042 §4 and ADR-0052 §1: park, render, relay --------------------
+
+    async def test_a_parked_egress_confirmation_carries_what_the_ruling_was_taken_over(
+        self, parked_engine: AssistantEngine
+    ) -> None:
+        """ADR-0178 §1, §2: the content ADR-0148 §8's fourth clause requires.
+
+        The connected account's identity and the binding's payload description,
+        reaching the adapter as one member rather than four — a value that is
+        either whole or absent, so a surface can never hold recipients and no
+        account, or an account and no description.
+
+        **Whole, not merely present.** The identity renders as something, the
+        derived set is non-empty, and the excluded values are absent by
+        construction: :class:`ConfirmationEgress` declares two fields and neither
+        is a connection reference, a transport endpoint or a whole
+        ``BoundAccount``.
+        """
+        pending = await parked_engine.pending_confirmations()
+        assert len(pending) == 1
+        egress = pending[0].egress
+        assert egress is not None, "the fixture parks an egress call (ADR-0178 §3)"
+        assert egress.account_identity.strip()
+        assert egress.canonical_destination_set
+
+    async def test_a_parked_confirmations_destination_set_is_the_bindings_own(
+        self, parked_engine: AssistantEngine
+    ) -> None:
+        """ADR-0178 §3's correspondence, over any producer of the member.
+
+        Two computations of one rule and no second rule: the set a confirmation
+        derives corresponds member for member and **in the same order** to the set
+        :attr:`~ai_assistant.core.types.EgressBinding.canonical_destination_set`
+        derives from the same spans and account, the two differing only in that the
+        account member carries the identity here and the whole ``BoundAccount``
+        there.
+
+        The binding is rebuilt here from the confirmation's *own* occurrences and
+        identity, which is what makes the clause checkable from the surface at all:
+        an adapter may not read a ``PermissionDecision`` (ADR-0042 §6), so the
+        binding itself never crosses. The rebuilt account's ``reference`` is
+        arbitrary and cannot affect the comparison — the account arm is a member
+        only where the spans carry no destination, in which case it is the whole
+        set.
+        """
+        pending = await parked_engine.pending_confirmations()
+        egress = pending[0].egress
+        assert egress is not None
+        rebuilt = EgressBinding(
+            spans=egress.spans,
+            account=BoundAccount(identity=egress.account_identity, reference="conn-rebuilt"),
+            transport_endpoint="test://rebuilt",
+        )
+
+        ours = egress.canonical_destination_set
+        theirs = rebuilt.canonical_destination_set
+        assert len(ours) == len(theirs)
+        for mine, other in zip(ours, theirs, strict=True):
+            assert mine.protocol == other.protocol
+            assert mine.canonical == other.canonical
+            assert mine.account_identity == (
+                None if other.account is None else other.account.identity
+            )
 
     async def test_a_park_is_recovered_with_a_token_that_resolves(
         self, parked_engine: AssistantEngine

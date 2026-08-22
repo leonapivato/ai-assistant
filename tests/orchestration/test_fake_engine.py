@@ -38,8 +38,14 @@ from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     BeliefBand,
     BeliefSummary,
+    BoundAccount,
     ContinuationToken,
     ConversationSummary,
+    DestinationProtocol,
+    DiscloserProvenance,
+    EgressBinding,
+    EgressDestination,
+    EgressSpan,
     GrantScope,
     MemoryKind,
     QuestionState,
@@ -52,6 +58,37 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import AssistantEngine
     from ai_assistant.core.types import Belief, Identifier
+
+
+def _binding() -> EgressBinding:
+    """One whole egress binding, for a park the shared suite's ADR-0178 clauses reach.
+
+    A destination-bearing occurrence and a description-only one, so the derived
+    set has a recipient member rather than falling back to the account: an
+    account-only set would satisfy the correspondence clause while exercising the
+    arm that is the same on both sides.
+    """
+    return EgressBinding(
+        spans=(
+            EgressSpan(
+                argument="body",
+                provenance=DiscloserProvenance.USER_AUTHORED,
+                extent=5,
+            ),
+            EgressSpan(
+                argument="to",
+                provenance=DiscloserProvenance.SYSTEM_SELECTED,
+                extent=17,
+                destination=EgressDestination(
+                    protocol=DestinationProtocol.SMTP,
+                    supplied="Alice@Example.ORG",
+                    canonical="alice@example.org",
+                ),
+            ),
+        ),
+        account=BoundAccount(identity="work@example.com", reference="conn-0001"),
+        transport_endpoint="test://endpoint/one",
+    )
 
 
 class TestFakeAssistantEngineContract(AssistantEngineContract):
@@ -132,9 +169,14 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
 
     @pytest.fixture
     def parked_engine(self) -> AssistantEngine:
-        """One fake engine holding a single answerable park."""
+        """One fake engine holding a single answerable park, on an egress call.
+
+        The binding is handed to ``park`` whole and reduced there by the rule the
+        real engine uses (ADR-0178 §5), so what the suite's correspondence clause
+        holds this fake to is the *reduction* rather than a pre-built member.
+        """
         engine = FakeAssistantEngine()
-        engine.park("h-1")
+        engine.park("h-1", egress=_binding())
         return engine
 
 
