@@ -1,0 +1,22 @@
+# Per-clone files `just clone-sync` mirrors from the primary clone into the
+# siblings (issue #1390). One repository-relative path per line; `#` comments and
+# blank lines are ignored.
+#
+# NOTHING IN THIS LIST IS COMMITTED, and that is the property the recipe relies
+# on: it refuses to overwrite a path git tracks, so a name that later becomes a
+# tracked file fails loudly here instead of silently clobbering the checkout.
+# These are local configuration and credentials that only the clone they sit in
+# can see — `.gitignore` covers them, and the sync is what keeps four clones from
+# disagreeing about them.
+#
+# Add a path here when a lane discovers a tool or setting present in one clone
+# and absent in another. Removing a path stops it syncing; it does not delete
+# anything already copied.
+
+# Gateway / remote-listener settings and any local credentials (ADR-0003:
+# "Secrets come from the environment via Settings; .env is never committed").
+.env
+
+# Playwright MCP server registration, so a lane dispatched into any clone has the
+# browser arm available (issue #1380).
+.mcp.json

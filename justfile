@@ -212,6 +212,74 @@ ship:
 drill:
     scripts/ship.sh --drill
 
+# `.review/` accumulates for the life of a clone, and two mechanisms read it by
+# glob: `ship` selects the artifact covering the PR head's content, and
+# `codex-review` derives ADR-0138's round number and churn ratio from the
+# distinct reviewed trees recorded **for this branch name**. Branch slugs repeat
+# across batches, so a merged lane's leftovers inflate the next lane's round
+# count — which is the reason this sweeps by refs rather than by age, and the
+# reason it never touches an artifact a live branch could still use.
+#
+# Merged or orphaned artifacts move to `.review/archive/` by default; `--delete`
+# removes them. Neither contradicts an ADR: ADR-0015 §1, ADR-0020 §3 and
+# ADR-0027 §2 all treat an artifact as evidence for the local `ship` step, and the
+# durable record of a review is the comment `ship` posts to the PR. Archive is
+# still the default, because a local move is recoverable and a misclassification
+# then costs nothing. `.review/*.md` is not recursive, so an archived artifact is
+# as invisible to both mechanisms as a deleted one.
+#
+# Run it after releasing a clone (the dispatch skill's §5 deletes the merged
+# branch), not before: while the branch still exists its artifacts are correctly
+# read as live and nothing is swept. `--dry-run` prints the classification and
+# changes nothing.
+#
+# Last line, because `just --list` shows only that one: what this recipe retires.
+# Retire the .review/ artifacts no live branch can still use (issue #1391)
+review-sweep *args:
+    uv run python scripts/review_sweep.py "$@"
+
+
+# The hub redeploy, with the two details that cost two failed attempts on
+# 2026-08-22 encoded rather than remembered (issue #1389): the service venv is
+# uv-managed and has no `pip`, and `sudo -u` leaks root's HOME so uv reads
+# /root/uv.toml — hence `su - <user> -c` and a login shell throughout.
+#
+# It refuses a `--no-deps` install when `uv.lock` moved since the commit the box
+# records in its marker file, because that is the install this recipe otherwise
+# does and it would leave the venv on the old dependency set. An absent marker is
+# UNKNOWN rather than clean: it warns and proceeds, since refusing would make the
+# first deploy to a fresh box impossible.
+#
+# Nothing is hard-coded to one box — host, service user, unit, venv, uv path,
+# wheel name and marker are all arguments, and the defaults describe the box that
+# exists rather than a requirement. `--dry-run` prints every command and contacts
+# nothing; the remote half is exercised by hand, so that rendering is what the
+# tests cover.
+#
+# Last line, because `just --list` shows only that one: what this recipe does.
+# Build, install, restart and verify the hub on a box (issue #1389)
+deploy-hub host *args:
+    uv run python scripts/deploy_hub.py "$@"
+
+# One agent per clone (ADR-0015 §2), and each clone carries untracked local state
+# no merge ever moves between them. This mirrors the documented list —
+# `scripts/clone_sync_files.txt`, which is data and carries its own note that
+# nothing in it is committed — from the clone it runs in into the siblings.
+# Run it in the primary clone as part of dispatch preflight (issue #1390).
+#
+# It applies the dispatch skill's freshness test: a clone not on `main` and clean
+# is skipped, with the synced files themselves excluded from the cleanliness
+# check since they are exactly what is expected to differ. A clone named
+# explicitly fails the run when it is not free; one merely found by the default
+# scan is reported and skipped, because a busy clone is the ordinary state of a
+# batch. A path git *tracks* in the target is never overwritten — that is an
+# error, not a skip.
+#
+# Last line, because `just --list` shows only that one: what this recipe copies.
+# Mirror the documented untracked per-clone files into siblings (issue #1390)
+clone-sync *args:
+    uv run python scripts/clone_sync.py "$@"
+
 # First-time developer setup
 setup:
     uv sync
