@@ -60,6 +60,19 @@
           the session's own key family and survives a reload.
         -->
         <p class="hint" id="conversation"></p>
+        <!--
+          The way out of a thread, and the only one there was not (#1429, adversarial
+          review round 3). Until this page kept a conversation across a reload, a
+          reload *was* the way to start a fresh one; now the selection comes back, so
+          a thread the hub will no longer accept — destroyed from a terminal, expired
+          — would be re-sent on every question with no control on screen to clear it.
+          The conversations listing cannot offer one: it can only "Continue" a
+          conversation it is showing, and this is about one it is not.
+
+          It is shown only while a conversation is selected, because with none it
+          would be a control that does nothing.
+        -->
+        <button type="button" id="new-conversation" hidden>Start a new conversation</button>
         <button type="button" id="conversations-button">Conversations</button>
         <button type="button" id="confirmations-button">What is waiting for your answer</button>
       </section>
