@@ -595,13 +595,12 @@ def _for_checks_no_item_claimed(
     a name that matches only one), and then a decision with no item is the ordinary
     case rather than a fault.
 
-    A parametrized item claims its function, so this reports nothing about one.
-    Its cases carry the function's name with a ``[…]`` suffix, and the decision
-    *is* named by an item -- one ``_outcome_for`` already fails, saying exactly
-    why. Matching on the bare nodeid would leave the function unclaimed and add a
-    second failure blaming the handover for a shape that in fact arrived intact.
+    Only items the controller can actually decide claim anything, since only they
+    name an evaluator key. An item of any other shape is already failing under
+    ``_outcome_for`` with the reason; it neither covers a check nor earns a second
+    report here blaming the handover for a name that in fact arrived intact.
     """
-    claimed = {nodeid.rpartition("::")[2].partition("[")[0] for nodeid in handed_over}
+    claimed = {name for nodeid in handed_over if (name := _check_name(nodeid)) is not None}
     return [
         (
             _ItemPayload(nodeid=f"{_TRIAD_CHECK}::{name}", path=_TRIAD_CHECK, lineno=0, domain=""),
@@ -615,6 +614,42 @@ def _for_checks_no_item_claimed(
         )
         for name in sorted(set(outcomes) - claimed)
     ]
+
+
+#: Said to whoever writes an evidence-dependent check the controller cannot
+#: decide. Kept whole here because the guard in ``test_protocol_triad`` says the
+#: same thing at authoring time, and the two must not drift.
+_NOT_DECIDABLE = (
+    "{nodeid} requests the merged record, but an evidence-dependent check must be a "
+    "plain module-level function of " + _TRIAD_CHECK + ", not parametrized. "
+    "`evaluate_for_controller` is keyed by bare function name, so any other shape "
+    "either has no key or -- worse -- collides with another check's, and this item "
+    "would be reported with a verdict computed for something else while its own body "
+    "never ran. Write it as a module-level check; for several cases, write several "
+    "checks or read the cases out of the record (ADR-0179 §2)."
+)
+
+
+def _check_name(nodeid: str) -> str | None:
+    """The evaluator key an item stands for, or ``None`` if nothing can decide it.
+
+    The seam's whole shape contract, in one place because two callers need the
+    same answer: an evidence-dependent check is a module-level, unparametrized
+    function of ``_TRIAD_CHECK``. Everything else is refused rather than reduced.
+
+    Refused rather than supported, deliberately. ``evaluate_for_controller`` is
+    keyed by bare function ``__name__``, and reducing a richer nodeid to its last
+    component is ambiguous exactly where it is most dangerous:
+    ``…::TestExtra::test_no_exemption_is_stale`` reduces onto the *existing*
+    check's key, so the controller would report that check's verdict under this
+    item and the new method's body would never run -- a green distributed gate on
+    a check nobody evaluated, which is the one outcome ADR-0179 §2 exists to make
+    impossible. A parametrized case is the same fault in a milder form.
+    """
+    path, sep, name = nodeid.partition("::")
+    if not sep or path != _TRIAD_CHECK or "::" in name or "[" in name:
+        return None
+    return name
 
 
 def _outcome_for(item: _ItemPayload, outcomes: dict[str, CheckOutcome]) -> CheckOutcome:
@@ -634,18 +669,9 @@ def _outcome_for(item: _ItemPayload, outcomes: dict[str, CheckOutcome]) -> Check
             f"handing over their half ({', '.join(sorted(_WORKERS_LOST))}), so an "
             f"absent binding class proves nothing here either",
         )
-    name = item["nodeid"].rpartition("::")[2]
-    function, bracket, _cases = name.partition("[")
-    if bracket:
-        return (
-            "failed",
-            f"{item['nodeid']} is parametrized, and `evaluate_for_controller` decides "
-            f"one outcome per test *function* ({function!r}) rather than one per case "
-            f"-- so nothing here can decide this item without reporting a verdict it "
-            f"did not compute for these arguments. An evidence-dependent check must be "
-            f"unparametrized; give each case its own check, or have one check read the "
-            f"cases from the merged record itself (ADR-0179 §2).",
-        )
+    name = _check_name(item["nodeid"])
+    if name is None:
+        return ("failed", _NOT_DECIDABLE.format(nodeid=item["nodeid"]))
     unclaimed: CheckOutcome = (
         "failed",
         f"{item['nodeid']} was handed to the controller, but "

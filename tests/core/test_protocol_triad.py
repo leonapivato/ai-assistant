@@ -1070,8 +1070,10 @@ def _evidence_items() -> list[str]:
     process, rather than introspected out of this module's globals. That is the
     whole point: the seam selects on the fixture an *item* requests, so a check
     written as a method on a `Test…` class, or parametrized by a `pytestmark` on
-    its module or class, is eligible -- and a guard reading module-level function
-    objects and their own markers would not see either. Same rule, one source.
+    its module or class, is *selected by the seam* -- and a guard reading
+    module-level function objects and their own markers would not see either.
+    Neither shape is decidable, which is the next test's business; the point here
+    is that both are visible. Same rule, one source.
 
     An empty list is a failure on an unfiltered run: the rule matching nothing
     means nothing is handed over, nothing is decided on the controller, and the
@@ -1096,37 +1098,54 @@ def test_every_check_that_reads_the_evidence_is_decided_on_the_controller() -> N
     and decided by nobody -- so the controller calls an unclaimed nodeid a
     failure, and this test says so before it can happen.
 
-    Keyed by the function part of each nodeid, because that is what
-    `evaluate_for_controller` is keyed by; whether a case suffix should be there
-    at all is the next test's question, not this one's.
+    Reduced through `_check_name`, the controller's own reduction, so an item that
+    reduces to nothing is the next test's business rather than something quietly
+    counted as covered here.
     """
     empty = TriadEvidence(honoured={}, opted_out={}, candidacy={}, unfiltered=False)
-    functions = {nodeid.rpartition("::")[2].partition("[")[0] for nodeid in _evidence_items()}
+    keys = {conftest._check_name(nodeid) for nodeid in _evidence_items()} - {None}
 
-    assert functions <= set(evaluate_for_controller(empty))
+    assert keys <= set(evaluate_for_controller(empty))
 
 
-def test_no_check_that_reads_the_evidence_is_parametrized() -> None:
+def test_every_check_that_reads_the_evidence_is_one_the_controller_can_decide() -> None:
     """The other half of the extension contract — and the half a serial run hides.
 
-    `evaluate_for_controller` decides one outcome per test *function*, so a
-    parametrized check cannot be decided on the controller: it would be refused
-    there (ADR-0179 §2) while passing perfectly well under `uv run pytest`, which
-    is the worst way to learn it. The test above pins that every such check has an
-    evaluator; this pins that every such check is a shape the evaluator can
-    answer. Both read the collected items, so neither can be sidestepped by where
-    the check is written or by where its marks come from.
+    A check the controller cannot decide passes perfectly well under
+    `uv run pytest` and is refused under `-n auto`, which is the worst way round
+    to learn it. So the shape is asserted here, at authoring time, in either mode.
+
+    The test above pins that every decidable check has an evaluator; this pins
+    that every check is decidable. Both read the collected items through
+    `_check_name`, so neither can be sidestepped by where the check is written or
+    by where its marks come from.
     """
-    parametrized = sorted(
-        nodeid for nodeid in _evidence_items() if "[" in nodeid.rpartition("::")[2]
+    undecidable = sorted(
+        nodeid for nodeid in _evidence_items() if conftest._check_name(nodeid) is None
     )
 
-    assert not parametrized, (
-        f"{', '.join(parametrized)} reads the merged record and is parametrized. The "
-        f"controller decides one outcome per function, so each case would be refused "
-        f"under a distributed run and pass under a serial one. Give each case its own "
-        f"check, or have one check read the cases out of the record itself."
+    assert not undecidable, "\n".join(
+        conftest._NOT_DECIDABLE.format(nodeid=nodeid) for nodeid in undecidable
     )
+
+
+def test_a_class_method_colliding_with_an_existing_check_is_not_decidable() -> None:
+    """The collision that would be reported green, which is why the rule is a rule.
+
+    `…::TestExtra::test_no_exemption_is_stale` reduces, on a last-component
+    reading, onto the *existing* check's evaluator key. The controller would then
+    report that check's verdict under this item while this item's body never ran
+    -- a green distributed gate on a check nobody evaluated. Refusing every shape
+    but the plain module-level one is what makes that unreachable, so the
+    collision is pinned rather than left to the general rule.
+    """
+    existing = test_no_exemption_is_stale.__name__
+    collision = f"{conftest._TRIAD_CHECK}::TestExtra::{existing}"
+
+    assert conftest._check_name(collision) is None
+    assert conftest._check_name(f"{conftest._TRIAD_CHECK}::{existing}") == existing
+    assert conftest._check_name(f"{conftest._TRIAD_CHECK}::{existing}[one]") is None
+    assert conftest._check_name(f"tests/other.py::{existing}") is None
 
 
 def test_a_narrowed_distributed_run_decides_nothing_and_says_so() -> None:
@@ -1362,21 +1381,25 @@ def test_a_verdict_whose_item_went_missing_is_reported_as_a_failure(
     assert controller.exitstatus == pytest.ExitCode.TESTS_FAILED
 
 
-def test_a_parametrized_evidence_check_is_refused_once_and_for_the_real_reason(
+def test_an_undecidable_item_is_refused_by_shape_and_claims_nothing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A case cannot be decided by an evaluator that decides per function.
+    """The controller decides by name, so an item without one decides nothing.
 
-    Nothing declares a parametrized evidence-dependent check today, and the
-    correspondence test above would not notice one: it matches on ``__name__``,
-    which a parametrized check still has. Under xdist its cases would arrive as
-    ``…::test_x[one]`` and match no evaluator key -- so the controller must not
-    quietly report the function's verdict under a case it never computed.
+    A parametrized case arrives as ``…::test_x[one]`` and matches no evaluator
+    key. The controller must not quietly report the function's verdict under a
+    case it never computed -- so the item is refused, saying what shape a check
+    has to be.
 
-    It is refused, and refused *once*: the case claims its function, so the
-    evaluator's own verdict is not additionally reported as itemless. That second
-    failure would blame the handover for losing a name, when the name arrived
-    intact and the real fault is the shape of the check.
+    And it claims nothing. Only an item the controller can decide covers a check,
+    so both verdicts are additionally reported as having no item to land under.
+    That is three failures for one authoring mistake, and it is the honest count:
+    an undecidable item really did leave both verdicts homeless. The alternative
+    -- letting it claim the name it reduces to -- is what makes a *colliding*
+    class method able to suppress a real check's missing-item failure, which is
+    the hole this shape rule exists to close. Nobody meets this noise in practice:
+    the authoring guard above fails first, in serial runs as well as distributed
+    ones.
     """
     _isolated(monkeypatch, conftest._RunRecord(unfiltered=True))
     case = conftest._ItemPayload(
@@ -1391,15 +1414,15 @@ def test_a_parametrized_evidence_check_is_refused_once_and_for_the_real_reason(
     controller = _Session(_Config(numprocesses=2))
     reported = _finish(controller)
 
-    itemless = f"{conftest._TRIAD_CHECK}::{test_no_exemption_is_stale.__name__}"
-    assert set(reported) == {case["nodeid"], itemless}, (
-        "the case claims its own function, so the only other report is the check "
-        "that genuinely had no item handed over"
+    stale = f"{conftest._TRIAD_CHECK}::{test_no_exemption_is_stale.__name__}"
+    assert set(reported) == {case["nodeid"], _HANDED_ITEM["nodeid"], stale}, (
+        "the case claims neither check, so both verdicts are reported itemless "
+        "beside the refusal of the item itself"
     )
     outcome, message = reported[case["nodeid"]]
     assert outcome == "failed"
-    assert "is parametrized" in message
-    assert "one outcome per test *function*" in message
+    assert "must be a plain module-level function" in message
+    assert "not parametrized" in message
     assert controller.exitstatus == pytest.ExitCode.TESTS_FAILED
 
 

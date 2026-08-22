@@ -124,18 +124,28 @@ satisfactory on another.
 > without handing its half of the record over, a failure is reported. None of them
 > may be reported as passed or silently omitted.
 
-> **Normative.** An evidence-dependent check is **unparametrized**, and that is
-> part of the seam rather than an accident of it. The controller decides one
-> outcome per test *function*, so a parametrized item requesting the evidence is
-> refused under the clause above as an item nothing can decide — never reported
-> under one of its cases, which would claim a verdict that was not computed for
-> those arguments. `tests/core/test_protocol_triad.py` pins this, and the
-> evaluator-coverage rule beside it, against **the collected items the seam
-> itself selects** rather than against this module's function definitions — so
-> both hold for a check written as a method on a `Test…` class, and for one
-> parametrized by a `pytestmark` on its module or class, which are eligible here
-> and invisible to a name-based guard. Caught where the check is written, in
-> either run mode, rather than only where it is run.
+> **Normative.** An evidence-dependent check is a **plain module-level function
+> of `tests/core/test_protocol_triad.py`, not parametrized**, and that is part of
+> the seam rather than an accident of it. `evaluate_for_controller` is keyed by
+> bare function name, so any richer item — a method on a `Test…` class, a
+> parametrized case — is refused under the clause above as an item nothing can
+> decide. It is never reduced to its last component and decided anyway.
+> `tests/core/test_protocol_triad.py` pins this, and the evaluator-coverage rule
+> beside it, against **the collected items the seam itself selects** rather than
+> against this module's function definitions, so a shape that a name-based guard
+> would not see is still caught — where the check is written, in either run mode,
+> rather than only where it is run.
+
+Refused rather than supported, and the reason is worth stating because the
+opposite reading is the tempting one. Reducing a nodeid to its last component
+would make richer shapes "work", and it is ambiguous precisely where that is most
+dangerous: `…::TestExtra::test_no_exemption_is_stale` reduces onto the *existing*
+check's key, so the controller would report the existing check's verdict under
+the new item while the new body never ran — a green distributed gate on a check
+nobody evaluated, which is the one outcome this section exists to make
+impossible. A parametrized case is the same fault in a milder form. One narrow
+admissible shape, refusing everything else, is what keeps that unreachable
+instead of merely unlikely.
 
 This is the one place the arrangement can rot quietly. The items handed over are
 identified by the fixture they request rather than by a list of test names, so a
@@ -147,14 +157,18 @@ correspondence directly, so the failure is caught before a distributed run.
 **Automatically, but not unconditionally**, which is why the restriction above is
 stated where the promise is. Inheriting the arrangement by asking for the evidence
 is what stops a new check going undecided; it is not a claim that every shape of
-check fits through the seam. One does not: a parametrized check reaches the
-controller as `…::test_x[one]`, and the merged record carries no per-case evidence
-to decide it with. Making the evaluator address cases was considered and rejected —
-it buys a shape nothing declares today, at the price of a case-aware payload on a
-channel whose whole virtue is that it carries names. Refusing it, and saying so
-where the check is authored, keeps the contract legible at the cost the seam is
-already paying: an evidence-dependent check is a whole-suite verdict, and a
-whole-suite verdict has one case.
+check fits through the seam. Selection and decidability are separate questions,
+and separating them is the point: the seam selects on the fixture, so every shape
+is *seen*, and the clause above then refuses the ones that cannot be decided.
+Nothing slips through by being unseen, and nothing is decided by being guessed at.
+
+Making the evaluator address richer identities was considered and rejected. It
+buys shapes nothing declares today — a case-aware payload on a channel whose whole
+virtue is that it carries names, or a registry keyed by nodeid that the evaluator
+cannot know. Refusing them, and saying so where the check is authored, keeps the
+contract legible at the cost the seam is already paying: an evidence-dependent
+check is a whole-suite verdict, and a whole-suite verdict has one case and one
+name.
 
 The lost-worker clause is the same reasoning applied to an incomplete union: a
 record missing a worker's share is not the suite's record, so an absent binding
