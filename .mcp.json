@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "-c",
+        "exec \"$(git rev-parse --show-toplevel)/scripts/playwright-mcp.sh\" \"$@\"",
+        "--"
+      ],
+      "env": {}
+    }
+  }
+}
