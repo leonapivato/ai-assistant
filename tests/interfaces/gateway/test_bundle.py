@@ -841,6 +841,31 @@ def test_an_offset_is_only_spent_against_the_question_that_produced_it() -> None
 
     assert 'el(box).addEventListener("change", listBeliefs);' in script
     assert "runs.beliefs += 1;" in functions["listBeliefs"]
-    assert "const run = runs.beliefs;" in functions["readBeliefs"]
     assert "run !== runs.beliefs" in functions["readBeliefs"]
     assert "run !== runs[listing.counter]" in functions["readQuestions"]
+
+
+def test_one_generation_is_taken_for_a_whole_listing_and_carried_into_each_read() -> None:
+    """The gap between "check the run" and "check the *right* run".
+
+    ``listQuestions`` starts two listings, so it has two awaits — and a run retired
+    during the first would otherwise reach the second and snapshot whatever number is
+    current *then*. Two overlapping refreshes would both be accepted, both read offset
+    zero, and both advance the same counter, putting the next page past a whole page of
+    questions nobody can answer or destroy.
+
+    So the generation is taken once, before any await, and travels into every read and
+    into the "Show more" each read offers — never re-read from the shared counter
+    inside a function that has already suspended.
+    """
+    functions = _functions(_code("app.js"))
+
+    assert "generation[listing.counter] = runs[listing.counter];" in functions["listQuestions"]
+    assert (
+        "readQuestions(path, false, generation[QUESTION_LISTS[path].counter])"
+        in functions["listQuestions"]
+    )
+    assert "async function readQuestions(path, more, run)" in functions["readQuestions"]
+    assert "readQuestions(path, true, run)" in functions["readQuestions"]
+    assert "readBeliefs(false, runs.beliefs)" in functions["listBeliefs"]
+    assert "readBeliefs(true, run)" in functions["readBeliefs"]
