@@ -82,7 +82,7 @@ import contextlib
 import errno
 import hmac
 import json
-import math
+import re
 import socket
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -2182,6 +2182,18 @@ def _required_string(payload: Mapping[str, Any], name: str) -> str:
     return value
 
 
+#: One decimal integer, bounded in length. Twenty digits covers every member the
+#: surface spells this way — ``interruption_budget`` stops below ``2**63`` (nineteen)
+#: and the largest ``timedelta`` is twenty digits of microseconds — and the bound is
+#: on the *string* rather than on the value it names, because converting a very long
+#: run of digits to an ``int`` is quadratic work a request body should not be able to
+#: ask for.
+_DECIMAL: Final = re.compile(r"[0-9]{1,20}")
+
+#: The unit :func:`_preferences_view` spells a duration in, named once so the view and
+#: :func:`_microseconds` cannot disagree about it.
+_MICROSECOND: Final = timedelta(microseconds=1)
+
 #: The bound ADR-0085 §9 declares for every page argument on the promoted surface,
 #: and ADR-0073 §2 refuses rather than clamps. Written here because the surface
 #: contract asks for it here: "an adapter that lets a user supply either **should
@@ -2398,11 +2410,12 @@ def _member[T: StrEnum](row: Mapping[str, Any], name: str, vocabulary: type[T]) 
 
 
 def _count(payload: Mapping[str, Any], name: str) -> int:
-    """One required count, in the range the surface declares for it.
+    """One required count, as an ordinary JSON number.
 
-    ``[0, 2**63)`` is ``interruption_budget``'s own bound and zero is a member of it:
-    ADR-0130 §6 makes zero "a legible 'never interrupt' rather than a defect", so a
-    reader that treated it as absent would refuse the one setting a user most needs.
+    A quiet window's endpoints are what this reads, and ``[0, 1440)`` is a range every
+    reader holds exactly — which is why they are numbers where the two members
+    :func:`_decimal` reads are strings. Zero is a member of the range and is refused
+    by nothing here: midnight is an hour like any other.
 
     Args:
         payload: The request's JSON object.
@@ -2419,24 +2432,45 @@ def _count(payload: Mapping[str, Any], name: str) -> int:
     return _page(payload, name, 0)
 
 
-def _seconds(payload: Mapping[str, Any], name: str) -> timedelta:
-    """One required duration, spelled as a number of seconds.
+def _decimal(payload: Mapping[str, Any], name: str) -> int:
+    """One required non-negative integer, spelled as a decimal string.
 
-    JSON carries no duration, and this is the member a browser reads and hands back
-    unchanged rather than one it edits — so the spelling only has to round-trip.
+    The counterpart of :func:`_preferences_view`'s spelling, and it exists for the
+    same reason: a JSON number reaches a browser as an IEEE-754 double, so a value
+    above ``2**53`` would not survive being read and handed back. Nothing here is
+    coerced from a number — a member that arrives as one is refused, because
+    accepting it would accept exactly the rounded value the spelling exists to
+    prevent, and a client that ships in this distribution knows the shape (ADR-0168
+    §10).
 
-    **``NaN`` and the infinities are refused explicitly**, because Python's JSON
-    reader accepts all three by default: ``timedelta(seconds=float("nan"))`` raises,
-    and an infinity would arrive as an ``OverflowError`` from a member that passed
-    every type check.
+    **The length is bounded before the conversion**, which is not fussiness: turning a
+    megabyte of digits into an ``int`` is quadratic work a request body can ask for
+    free, and no member this reads is more than twenty digits.
 
-    **The finiteness test is inside the guard and not before it**, which is the half
-    an earlier version of this got wrong. ``math.isfinite`` converts its argument to
-    a ``float`` first, so a JSON *integer* of four hundred digits — well-formed, and a
-    value Python holds exactly — raises ``OverflowError`` from the check meant to
-    catch the infinities rather than being refused by it. A duration no ``float`` can
-    hold is one ``timedelta`` cannot hold either, so both are refused here together
-    and an oversized integer is an answer rather than a fault of the process.
+    Args:
+        payload: The request's JSON object.
+        name: The member to read.
+
+    Returns:
+        The value.
+
+    Raises:
+        _Refused: If the member is absent, is not a string, or is not a bounded run of
+            decimal digits.
+    """
+    value = payload.get(name)
+    if not isinstance(value, str) or _DECIMAL.fullmatch(value) is None:
+        raise _malformed()
+    return int(value)
+
+
+def _microseconds(payload: Mapping[str, Any], name: str) -> timedelta:
+    """One required duration, spelled as a whole number of microseconds.
+
+    Microseconds because that is ``timedelta``'s own resolution: the integer is exact
+    in both directions, and a browser holding it as a string hands back the duration
+    it was given rather than one rounded on the way through. This is the member the
+    page carries and never edits, so the spelling only has to round-trip.
 
     Args:
         payload: The request's JSON object.
@@ -2446,17 +2480,12 @@ def _seconds(payload: Mapping[str, Any], name: str) -> timedelta:
         The duration.
 
     Raises:
-        _Refused: If the member is absent, is not a finite number above zero, or names
-            a duration ``timedelta`` cannot hold.
+        _Refused: If the member is absent, is not a decimal string, or names a
+            duration ``timedelta`` cannot hold.
     """
-    value = payload.get(name)
-    if isinstance(value, bool) or not isinstance(value, int | float):
-        raise _malformed()
     try:
-        if not math.isfinite(value) or value <= 0:
-            raise _malformed()
-        return timedelta(seconds=value)
-    except (OverflowError, ValueError) as exc:
+        return timedelta(microseconds=_decimal(payload, name))
+    except OverflowError as exc:
         raise _malformed() from exc
 
 
@@ -2499,8 +2528,8 @@ def _preferences(payload: Mapping[str, Any]) -> NotificationPreferences:
                 QuietWindow(start=_count(row, "start"), end=_count(row, "end"))
                 for row in _rows(payload, "quiet_windows")
             ),
-            interruption_budget=_count(payload, "interruption_budget"),
-            budget_window=_seconds(payload, "budget_window_seconds"),
+            interruption_budget=_decimal(payload, "interruption_budget"),
+            budget_window=_microseconds(payload, "budget_window_microseconds"),
         )
     except ValueError as exc:
         raise _malformed() from exc
@@ -3009,8 +3038,23 @@ def _preferences_view(preferences: NotificationPreferences) -> dict[str, Any]:
 
     The window's endpoints are the type's own spelling — minutes since local midnight,
     carrying no zone and unable to smuggle one in — and are rendered rather than
-    converted here. The duration is seconds, because JSON has no duration and the
-    number is what a browser can hold unchanged and hand back.
+    converted here. They are ordinary JSON numbers because ``[0, 1440)`` is a range
+    every reader holds exactly.
+
+    **The other two travel as decimal strings, and that is a losslessness decision
+    rather than a stylistic one.** A JSON number is read into an IEEE-754 double by
+    the one reader that matters here, so an integer above ``2**53`` does not survive
+    the trip: ``interruption_budget`` is bounded at ``2**63`` and
+    ``NotificationPreferences.budget_window`` is a ``timedelta`` whose resolution is a
+    microsecond, and both would be silently rounded on their way to a browser that is
+    only carrying them so it can hand them back. §10's fourth clause makes that a
+    defect and not a rounding: a browser changing a reach would overwrite a budget
+    nobody touched. A decimal string crosses exactly, and the page never converts one
+    it did not ask the user for.
+
+    **The duration is spelled in microseconds** because that is ``timedelta``'s own
+    resolution, so the integer is exact in both directions and no fraction has to be
+    parsed anywhere.
     """
     return {
         "reaches": [
@@ -3020,8 +3064,8 @@ def _preferences_view(preferences: NotificationPreferences) -> dict[str, Any]:
         "quiet_windows": [
             {"start": window.start, "end": window.end} for window in preferences.quiet_windows
         ],
-        "interruption_budget": preferences.interruption_budget,
-        "budget_window_seconds": preferences.budget_window.total_seconds(),
+        "interruption_budget": str(preferences.interruption_budget),
+        "budget_window_microseconds": str(preferences.budget_window // _MICROSECOND),
     }
 
 

@@ -1029,7 +1029,31 @@ def test_every_edit_of_the_settings_carries_the_members_it_does_not_change() -> 
 
     for edit in ("withReach", "renderQuietWindows", "quietWindowForm", "renderBudget"):
         assert "...held," in functions[edit], edit
-    assert "budget_window_seconds" not in functions["withReach"]
+    assert "budget_window_microseconds" not in functions["withReach"]
+
+
+def test_the_page_never_turns_a_setting_it_is_only_carrying_into_a_number() -> None:
+    """The same clause where a JSON number stops being exact.
+
+    ``interruption_budget`` is bounded at ``2**63`` and ``budget_window`` has
+    microsecond resolution, so both are above what an IEEE-754 double holds — and both
+    are members this page mostly just hands back. The gateway spells them as decimal
+    strings for that reason, and a page that read one through ``Number`` would undo it
+    at the first edit of something else.
+
+    The budget's own field is checked as characters and sent as characters. The one
+    ``Number`` in the whole surface builds the sentence that says how long the rolling
+    window is, which is a rendering and never travels — asserted by name so that a
+    second one cannot appear unnoticed.
+    """
+    functions = _functions(_code("app.js"))
+    budget = functions["renderBudget"]
+
+    assert "count.value = preferences.interruption_budget;" in budget
+    assert "const asked = count.value.trim();" in budget
+    assert "interruption_budget: asked" in budget
+    assert budget.count("Number(") == 1
+    assert "Number(preferences.budget_window_microseconds) / 3.6e9" in budget
 
 
 def test_the_page_reads_the_notification_again_immediately_before_destroying_it() -> None:

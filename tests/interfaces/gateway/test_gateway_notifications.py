@@ -67,8 +67,8 @@ _ADDED: dict[str, str] = {
 _DEFAULTS: dict[str, Any] = {
     "reaches": [],
     "quiet_windows": [],
-    "interruption_budget": 3,
-    "budget_window_seconds": 86400.0,
+    "interruption_budget": "3",
+    "budget_window_microseconds": "86400000000",
 }
 
 #: One well-formed body per path, so a case can drive any of them without inventing
@@ -456,8 +456,8 @@ async def test_the_whole_value_crosses_so_a_browser_can_write_it_back() -> None:
         assert body["preferences"] == {
             "reaches": [{"notification_class": "upcoming_event", "reach": "interrupt"}],
             "quiet_windows": [{"start": 1320, "end": 420}],
-            "interruption_budget": 5,
-            "budget_window_seconds": 43200.0,
+            "interruption_budget": "5",
+            "budget_window_microseconds": "43200000000",
         }
 
 
@@ -473,8 +473,8 @@ async def test_a_write_relays_the_whole_value_and_renders_what_came_back() -> No
     asked = {
         "reaches": [{"notification_class": "upcoming_event", "reach": "interrupt"}],
         "quiet_windows": [{"start": 0, "end": 360}],
-        "interruption_budget": 0,
-        "budget_window_seconds": 3600.0,
+        "interruption_budget": "0",
+        "budget_window_microseconds": "3600000000",
     }
     async with _harness(engine) as one:
         status, body = await one.whole("POST", "/notification/preferences/set", asked)
@@ -499,10 +499,10 @@ async def test_a_budget_of_zero_is_written_rather_than_read_as_absent() -> None:
     engine = _engine()
     async with _harness(engine) as one:
         _, body = await one.whole(
-            "POST", "/notification/preferences/set", _DEFAULTS | {"interruption_budget": 0}
+            "POST", "/notification/preferences/set", _DEFAULTS | {"interruption_budget": "0"}
         )
 
-        assert body["preferences"]["interruption_budget"] == 0
+        assert body["preferences"]["interruption_budget"] == "0"
 
 
 @pytest.mark.parametrize("dropped", sorted(_DEFAULTS))
@@ -544,15 +544,16 @@ async def test_a_member_left_out_of_a_write_is_refused_rather_than_defaulted(
         pytest.param({"quiet_windows": [{"start": 60, "end": 60}]}, id="no-extent"),
         pytest.param({"quiet_windows": [{"start": 60, "end": 1440}]}, id="past-midnight"),
         pytest.param({"quiet_windows": [{"start": 60}]}, id="half-a-window"),
-        pytest.param({"interruption_budget": -1}, id="negative-budget"),
-        pytest.param({"interruption_budget": True}, id="boolean-budget"),
-        pytest.param({"budget_window_seconds": 0}, id="empty-window"),
-        pytest.param({"budget_window_seconds": -60}, id="negative-window"),
-        pytest.param({"budget_window_seconds": "PT1H"}, id="spelled-window"),
-        pytest.param({"budget_window_seconds": float("inf")}, id="infinite-window"),
-        pytest.param({"budget_window_seconds": float("nan")}, id="unreadable-window"),
-        pytest.param({"budget_window_seconds": 1e30}, id="unholdable-window"),
-        pytest.param({"budget_window_seconds": 10**310}, id="unfloatable-window"),
+        pytest.param({"interruption_budget": "-1"}, id="negative-budget"),
+        pytest.param({"interruption_budget": 3}, id="numeric-budget"),
+        pytest.param({"interruption_budget": str(2**63)}, id="budget-past-the-bound"),
+        pytest.param({"interruption_budget": " 3"}, id="padded-budget"),
+        pytest.param({"budget_window_microseconds": "0"}, id="empty-window"),
+        pytest.param({"budget_window_microseconds": "-60"}, id="negative-window"),
+        pytest.param({"budget_window_microseconds": "PT1H"}, id="spelled-window"),
+        pytest.param({"budget_window_microseconds": 86400.0}, id="numeric-window"),
+        pytest.param({"budget_window_microseconds": "9" * 20}, id="unholdable-window"),
+        pytest.param({"budget_window_microseconds": "9" * 21}, id="past-the-digit-bound"),
     ],
 )
 async def test_a_value_that_will_not_construct_is_the_gateways_own_refusal(
@@ -570,11 +571,13 @@ async def test_a_value_that_will_not_construct_is_the_gateways_own_refusal(
     class's ``off`` silently ambiguous, and a window whose endpoints are the same
     minute is unreadable as either "nothing" or "everything". Both are refused by the
     core type in every client (ADR-0085 §9), so the gateway could not relay one.
-    ``float('nan')`` and the infinities are here because Python's JSON reader accepts
-    all three, and the four-hundred-digit integer is here because the check that
-    catches them converts to ``float`` first: it is well-formed JSON, a value Python
-    holds exactly, and it must arrive as this refusal rather than as an
-    ``OverflowError`` nothing catches.
+    The two members spelled as decimal strings refuse a **number** rather than
+    coercing one, which is the losslessness rule holding at the door: accepting
+    ``3`` for ``"3"`` would accept exactly the rounded value the spelling exists to
+    prevent. The twenty-one-digit case is the length bound, which stops a request
+    body asking for quadratic work, and the twenty-nine of nines is a duration
+    ``timedelta`` cannot hold — an ``OverflowError`` that has to arrive as this
+    refusal rather than as a fault of the process.
     """
     async with _harness(_engine()) as one:
         status, answered = await one.whole(
@@ -584,6 +587,44 @@ async def test_a_value_that_will_not_construct_is_the_gateways_own_refusal(
         assert status == 400
         assert answered["fault"] == "malformed-request"
         assert one.engine.calls == []
+
+
+@pytest.mark.parametrize(
+    ("budget", "window"),
+    [
+        pytest.param(2**53 + 1, timedelta(days=1), id="past-the-double"),
+        pytest.param(2**63 - 1, timedelta(days=1), id="the-largest-budget"),
+        pytest.param(3, timedelta(days=999_999_999, microseconds=1), id="the-longest-window"),
+        pytest.param(3, timedelta(microseconds=1), id="the-shortest-window"),
+    ],
+)
+async def test_a_value_no_double_holds_survives_being_read_and_written_back(
+    budget: int, window: timedelta
+) -> None:
+    """ADR-0177 §10's fourth clause, at the values where a JSON number stops being
+    exact.
+
+    A browser reads a JSON number into an IEEE-754 double, so ``2**53 + 1`` comes back
+    as ``2**53`` and a ``timedelta`` of a billion days loses its microsecond. Both are
+    inside what ``NotificationPreferences`` admits, and both are members the page only
+    holds so that it can hand them back — so a rounding here is a browser changing a
+    setting on an edit that never named it. Spelled as decimal strings, they cross
+    exactly, which is what this asserts in both directions.
+    """
+    engine = _engine()
+    await engine.notification_store.set_preferences(
+        NotificationPreferences(interruption_budget=budget, budget_window=window)
+    )
+    async with _harness(engine) as one:
+        _, read = await one.whole("POST", "/notification/preferences", {})
+        _, written = await one.whole("POST", "/notification/preferences/set", read["preferences"])
+
+        assert read["preferences"]["interruption_budget"] == str(budget)
+        assert written["preferences"] == read["preferences"]
+        sent = engine.calls[-1][1]["preferences"]
+        assert isinstance(sent, NotificationPreferences)
+        assert sent.interruption_budget == budget
+        assert sent.budget_window == window
 
 
 async def test_a_window_that_crosses_midnight_is_expressed_directly() -> None:
