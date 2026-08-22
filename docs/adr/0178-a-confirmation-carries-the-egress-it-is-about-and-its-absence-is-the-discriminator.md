@@ -287,6 +287,17 @@ direction §8 asks for and in no other.
 > identity; or *the connected account*, carrying an account identity and neither of
 > the other two. Every other combination is refused at construction.
 
+> **Normative.** `ConfirmationDestination` is **not a wire type and appears in no
+> frame.** It is the member type of a derived property, and the clause below forbids
+> storing or transmitting that property's value — so nothing this model declares is
+> serialised, no peer ever receives one, and `PROTOCOL_VERSION` 10 does not describe
+> it. Its field declaration is therefore an implementation matter for the lane that
+> writes `core/types.py`, constrained by the two shapes above and by the correspondence
+> clause below, and **not** an interoperability surface: two conforming peers exchange
+> `spans` and `account_identity` and each derives its own set, so they cannot disagree
+> about a model neither of them sends. §6 moves the version for `Confirmation.egress`,
+> whose serialised members are named in §2, and for nothing here.
+
 > **Normative.** For every `EgressBinding`, the set this property derives corresponds
 > **member for member and in the same order** to the set
 > `EgressBinding.canonical_destination_set` derives from the same spans and account —
@@ -346,11 +357,19 @@ rather than pointing at the property. The alternative rejected below is a differ
 one: leaving the set *undefined in `core`*, so that each adapter invents its own
 deduplication and there is no authority to disagree with. Here `core` holds the single
 authority, this section states it reproducibly, and §3's correspondence clause is what
-a second implementation is tested against. **The browser lane owes that test** — its
-derived set, for a binding with aliased recipients, equal member for member and in the
-same order to the one `core` derives from the same spans. That obligation travels with
-ADR-0177 §8's lane rather than with §10's, because the browser is not §10's lane; it is
-named here so it is inherited rather than rediscovered.
+a second implementation is tested against. **The browser lane owes that test**, and it
+owes it over the branches that can diverge rather than over one case: a binding with
+aliased recipients; a binding whose spans carry **no** destination, where the set is
+the account and an implementation that simply filtered and returned what was left would
+produce an empty one; a **mixed** binding, where filtering must not swallow the
+destination-less spans; and an **ordering boundary that crosses out of the BMP**. That
+last one is not pedantry — JavaScript compares strings by UTF-16 code unit, so a
+default sort puts `U+10000` before `U+E000` while the code-point order stated above puts
+`U+E000` first, and a test built only from aliased ASCII recipients cannot see it. Each
+case is compared member for member and in order against the set `core` derives from the
+same spans. The obligation travels with ADR-0177 §8's lane rather than with §10's,
+because the browser is not §10's lane; it is named here so it is inherited rather than
+rediscovered.
 
 **A third type rather than reusing `CanonicalDestination`, and this is where two
 ratified clauses actually meet.** (§12 records all three §3 clauses this narrows; the
