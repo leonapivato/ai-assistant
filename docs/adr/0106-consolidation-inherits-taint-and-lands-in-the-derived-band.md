@@ -2,6 +2,20 @@
 
 - Status: Accepted
 - Date: 2026-08-05
+- **Note (2026-08-23): §12's third deferral is answered by ADR-0181, and no clause
+  of this ADR changes.** That bullet — "Whether a tainted belief may parameterise an
+  egress or actuation … **Fires with the first actuator**, in that lane's ADR" — had
+  fired: `tools/send_email.py` is on `main` and the seam is designated (ADR-0154 §1),
+  but ADR-0154 shipped without answering it. ADR-0181 answers it, and answers it in
+  the shape this ADR's §3 fixed: the fact is computed by the component that selected
+  the material, never read from a producer, and is a property of the **call** rather
+  than of a span. **Nothing here is superseded, amended or read more widely.** §1's
+  predicate, §2's field and function, §4's monotonicity, §6's ceiling and §7's
+  no-validator clause are used exactly as they stand; §8's second clause (no
+  retrieval-side role) is untouched; and §8's `#301` paragraph — "it says nothing
+  about a taint that survives a planning step" — stays true of this ADR and is not
+  made true of it by ADR-0181, which §2 there states explicitly. This note records
+  where the deferral was answered and changes no decision.
 - **Note (2026-08-05): ratified.** `Proposed` → `Accepted`, in the separate lane
   #633 requires, after **both** required reviews came back green on the content
   this ADR merged with: adversarial **APPROVE with no findings** and architecture

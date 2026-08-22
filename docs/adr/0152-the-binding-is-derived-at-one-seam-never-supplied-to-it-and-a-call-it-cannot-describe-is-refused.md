@@ -2,6 +2,18 @@
 
 - Status: Partially superseded by ADR-0157 (§4's flat-declaration clause, and §6's unshaped-destination refusal in its declaration limb alone)
 - Date: 2026-08-14
+- **Note (2026-08-23): §5's provenance residue is closed in one direction by
+  ADR-0181 and left open in the other, and no clause of this ADR changes.** The
+  residue reads "Nothing in the tree records a span's origin, so every caller passes
+  an empty mapping … The lane that first records an origin is the lane that closes
+  it." ADR-0181 is that lane for the **call-level** fact: `CarriedProvenance` gains a
+  required `planned_with_external_content` and stops being a value the tree can only
+  construct empty. **It records no span-level origin.** No span becomes
+  `USER_AUTHORED` by anything ADR-0181 decides, so the residue's second half — that
+  "a user's own words are described as the system's until the origin path lands" —
+  stands, and ADR-0154's condition-13 limit (b) stands exactly as attested. §5's two
+  marked clauses, §7's transcription of the approved provenance, and §12's clause
+  that the path to the caller is not decided in this ADR are all unchanged.
 - Partially superseded: 2026-08-15 by ADR-0157 — **one enumeration, one limb, and
   the value set is unchanged.** §4's first normative clause fixed the shapes a
   destination-bearing argument's subschema may take at "exactly one of two forms
