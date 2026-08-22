@@ -63,7 +63,9 @@ your discretion:** immediately before the **first review invocation** on that
 branch, and on the **tree of the final push**, passing before `just ready`
 (ADR-0180 §1). The closing anchor binds that tree rather than an ordering against
 the push, so you may push first and run it while CI runs — provided the tree is
-byte for byte the pushed head's and you do not modify it while the run is out.
+byte for byte the pushed head's, you do not modify it while the run is out, and
+you take the format step in `just check`'s non-rewriting form so the gate cannot
+move the tree off the pushed head itself.
 Each anchor is a run on the tree it names, so a green run on an earlier tree does
 not discharge it, and an anchor admits no docs-only exemption.
 
