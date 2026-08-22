@@ -144,13 +144,19 @@ def test_the_five_connection_operations_are_in_the_enumeration() -> None:
     assert all(("POST", path) in _ASSISTANT_PATHS for path in _ADDED)
 
 
-def test_no_lane_of_this_surface_reaches_learn_or_the_confirmation_pair() -> None:
-    """§1 and §11: ``learn`` is admitted by nothing, and §8 blocks the confirmation
-    surface until ADR-0148 §8's content can be met — so neither is reachable here."""
+def test_no_lane_of_this_surface_reaches_learn() -> None:
+    """§1 and §11: ``learn`` is admitted by nothing — it is "the one operation of the
+    promoted surface that is neither in the enumeration above nor the gateway's own",
+    and no lane adds it without its own ratified decision.
+
+    The CONFIRM pair used to be asserted absent beside it and no longer is: ADR-0178's
+    merge discharged ADR-0177 §8's precondition, so ``pending_confirmations`` and
+    ``resume`` are served (#1404). ``learn`` is what is left, and it is left out for a
+    different reason — a missing *surface* decision rather than a missing content one.
+    """
     reached = set(_ASSISTANT_PATHS.values())
 
     assert "learn" not in reached
-    assert {"resume", "pending_confirmations"} & reached == set()
 
 
 @pytest.mark.parametrize("path", list(_ADDED))

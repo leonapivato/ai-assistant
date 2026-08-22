@@ -855,18 +855,17 @@ async def test_an_operation_this_gateway_does_not_serve_reaches_nothing(
     request for ``/nonsense`` is" (ADR-0175 §12), so it lands in ADR-0168 §6's residual
     fourth class and the engine is not reached.
 
-    **Three different reasons are asserted by one test and they are worth telling
+    **Two different reasons are asserted by one test and they are worth telling
     apart.** ``learn`` is admitted by *nothing*: ADR-0177 §1 leaves it out by name and
     §11 gives it a trigger, so a shape for it here would be the lane inventing an
-    operation. ``resume`` and ``pending_confirmations`` are in §1's enumeration of
-    thirty and are **not served by this gateway yet** — §8 blocks their surface until
-    ADR-0148 §8's content can be met. And ``/dismiss_notification`` and
-    ``/connected_accounts`` name operations this gateway now *does* serve, at
-    different paths: a shape is a method and a path together (ADR-0168 §6), so a path
-    that merely names a served operation is no more admitted than ``/nonsense``.
-    Either way the answer is §6's fourth class, which is the property that makes an
-    enumeration checkable: a path nothing serves behaves identically to a path
-    nothing has heard of.
+    operation. Every other path below names an operation this gateway *does* serve, at
+    a different path: a shape is a method and a path together (ADR-0168 §6), so a path
+    that merely names a served operation is no more admitted than ``/nonsense``. That
+    is now the whole reason ``/resume`` and ``/pending_confirmations`` are here —
+    ADR-0178's merge discharged ADR-0177 §8's precondition and the pair is served, at
+    ``/confirmation/resume`` and ``/confirmations``. Either way the answer is §6's
+    fourth class, which is the property that makes an enumeration checkable: a path
+    nothing serves behaves identically to a path nothing has heard of.
     """
     status, body = await harness.whole("POST", path, {})
 
@@ -878,11 +877,13 @@ async def test_an_operation_this_gateway_does_not_serve_reaches_nothing(
 def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() -> None:
     """ADR-0177 §1's enumeration, read off the router.
 
-    Twenty-eight of the thirty operations §1 admits are served here, and
-    ``next_notification`` — the gateway's **own** poll — is none of them "because no
-    browser request resolves to it: the gateway's own poll originates it under
-    ADR-0175 §4, no browser request names it, and no browser argument reaches it"
-    (§1's second clause, bound unchanged).
+    All thirty operations §1 admits are served here — the CONFIRM pair joined them
+    once ADR-0178's merge discharged §8's precondition — and ``next_notification`` —
+    the gateway's **own** poll — is none of them "because no browser request resolves
+    to it: the gateway's own poll originates it under ADR-0175 §4, no browser request
+    names it, and no browser argument reaches it" (§1's second clause, bound
+    unchanged). ``learn`` is the one method of the promoted surface on neither side of
+    that, left out by name with a trigger of its own (§11).
 
     Asserted as a set equality rather than a subset, which is the whole point of an
     enumeration: a lane that adds a route without a ratified decision fails here, and
@@ -917,6 +918,8 @@ def test_the_surface_resolves_onto_what_it_serves_and_the_gateways_own_poll() ->
         "disconnect_account",
         "connected_accounts",
         "recent_connection_acts",
+        "pending_confirmations",
+        "resume",
         "delivery-stream",
     }
 

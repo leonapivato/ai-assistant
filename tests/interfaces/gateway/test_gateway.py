@@ -647,7 +647,11 @@ async def test_a_turn_that_owed_no_answer_carries_none_and_the_account_alone(
     outcome = answer.payload["outcome"]
     assert outcome["reply"] is None
     assert outcome["reply_degraded"] is False
-    assert outcome["step"]["awaiting_confirmation"] is True
+    # The park crosses as the confirmation itself rather than as a flag (#1404), and
+    # `test_gateway_confirmations.py` is where its content is checked. What this case
+    # is about is the *answer*: a parked turn owes none, and the confirmation being
+    # present is what makes the `None` above the right shape rather than a gap.
+    assert outcome["step"]["confirmation"]["tool_id"] == "t-1"
     assert outcome["steps"] == [{"intent": "send the note", "capability": "send_email"}]
 
 
