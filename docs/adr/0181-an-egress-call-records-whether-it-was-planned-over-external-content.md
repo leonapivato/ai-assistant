@@ -18,7 +18,7 @@
   first establishes a **recorded origin** the authoriser evaluates at the moment it
   rules — a fact the request carries, never an inference about how a model produced
   it (ADR-0098 §5, §12) — and states its rule over that fact." This ADR establishes
-  that fact. **It does not rest on it to permit anything**: §5's sixth clause
+  that fact. **It does not rest on it to permit anything**: §5's closing clause
   leaves ADR-0154's floor standing exactly as written, and §5's second clause is a
   floor beneath any ADR that would later lift it.
 - **Refs:** #1427 (track:world, milestone 23), #641 (reader-side threat model,
@@ -214,7 +214,7 @@ them, not by what would be convenient to record. §2 is that finding.
 - **It may not re-decide ADR-0106 §6.** The memory ruling point has its ceiling and
   its enforcement point. §5's first clause cites it and adds nothing.
 - **It may not lift ADR-0154 §4's standing-authorisation floor.** Establishing the
-  fact that clause names as a precondition is not resting on it. §5's sixth clause
+  fact that clause names as a precondition is not resting on it. §5's closing clause
   says so, and its second clause is the floor beneath any later ADR that would.
 - **It may not claim influence.** ADR-0106 §1's second clause and ADR-0098 §5's
   marked clause both forbid stating that a marker detects external content embedded
@@ -422,26 +422,40 @@ watch the fact clear. A warrant is never un-received, and neither is a selection
 > request. No standing user policy and no standing grant covers such a call, whatever
 > a later ADR permits for calls that do not carry it.
 
-> **Normative.** The clause above binds `decide` and `resolve` **separately**,
-> because the two members hold different inputs and only one of them can see an
-> approval. On `decide`, which receives an `ActionRequest` and holds no
-> `AuditTrail`, route (a) is unavailable by construction — no resolution exists yet —
-> so the obligation is discharged by not returning `ALLOW` at all, and no
-> implementation acquires a trail read in order to look for one. On `resolve`, which
-> receives the recorded `PermissionDecision` the user answered and the answer itself,
-> route (a) is available exactly when `approved` is true and that decision's binding
-> `authorises` the request being resumed — which is ADR-0148 §1's fourth clause and
-> §3's first clause used as they stand, not a second comparison minted here.
+> **Normative.** The clause above binds `decide` and `resolve` **separately**, and
+> each over the facts its own member receives. `decide(request)` holds an
+> `ActionRequest` and no `AuditTrail`, so route (a) is unavailable to it by
+> construction — no resolution about that request exists yet — and the obligation is
+> discharged by returning no `ALLOW` at all. No implementation acquires a trail read,
+> a store handle or a grant seam in order to look for one; ADR-0097 §7 forbids the
+> last of those outright.
 
-> **Normative.** No lane discharges the clause on one member and not the other, and
-> no lane reads `decide`'s unavailability of route (a) as licence to relax the rule on
-> `resolve`. §10 states a test for each member.
+> **Normative.** `resolve(confirmed, *, approved)` holds the recorded
+> `PermissionDecision` and the user's answer, and **no request**. Its obligation is
+> stated over exactly those two: where `confirmed.egress_binding` carries
+> `planned_with_external_content`, an `ALLOW` requires `approved` to be true, and
+> `approved` being false yields `DENY` as ADR-0021 already requires. No clause here
+> obliges `resolve` to compare a binding against a request, and no lane widens
+> `ActionPolicy` to let it — that comparison exists, one seam out, and §3's fourth
+> clause is where this ADR states it.
 
-> **Normative.** The three clauses above are obligations of the `ActionPolicy`
-> contract: they are stated on the Protocol and asserted in the shared
-> `ActionPolicyContract` suite, beside the existing floors and by the same predicate.
-> No method is added to `ActionPolicy`, no argument is widened, and no return
-> annotation changes.
+> **Normative.** The request-to-decision comparison stays
+> `PermissionDecision.authorises`'s, invoked on the resuming path before `resolve` is
+> reached (ADR-0148 §1, ADR-0152 §7). No lane moves it into `permissions/`, duplicates
+> it there, or reads this ADR as having asked for either. `planned_with_external_content`
+> is compared there because it is a member of the binding, and for no reason special
+> to it.
+
+> **Normative.** No lane discharges the obligation on one member and not the other,
+> and no lane reads `decide`'s unavailability of route (a) as licence to relax the
+> rule on `resolve`. §10 states a test for each.
+
+> **Normative.** The clauses above are obligations of the `ActionPolicy` contract:
+> they are stated on the Protocol and asserted in the shared `ActionPolicyContract`
+> suite, beside the existing floors and by the same predicate. **No method is added
+> to `ActionPolicy`, no argument is widened, no member gains a request it does not
+> receive today, and no return annotation changes.** An obligation this ADR could
+> state only by widening the Protocol is one this ADR does not state.
 
 > **Normative.** ADR-0154 §4's standing-authorisation floor — that **no** standing
 > authorisation covers **any** egress call through the designated seam — is unchanged
@@ -746,12 +760,12 @@ only in a list item obliges nobody.
 > every other clause of this section and fails this one, which is the whole reason it
 > is stated separately.
 
-> **Normative.** The same lane ships a test for **each** member the §5 obligation
-> binds: that `decide` returns no `ALLOW` on a request carrying the marker, and that
-> `resolve` returns `ALLOW` on it only where `approved` is true and the recorded
-> decision `authorises` the resumed request. A suite case exercising `decide` alone
-> passes an implementation that relaxed the rule on the path where an approval
-> exists.
+> **Normative.** The same lane ships a suite case for **each** member the §5
+> obligation binds, and each over the facts that member receives: that `decide`
+> returns no `ALLOW` on a request whose binding carries the marker; and that
+> `resolve` returns no `ALLOW` on a `confirmed` whose `egress_binding` carries it
+> with `approved` false. A suite case exercising `decide` alone passes an
+> implementation that relaxed the rule on the path where an approval exists.
 
 > **Normative.** The lane implementing §6 for a surface ships a test that a
 > confirmation carrying `True` renders the fact **and** every occurrence
@@ -930,7 +944,7 @@ into the regime by it.
   milestone 23. Until then the honest per-span facts are the ones `EgressSpan`
   already carries.
 - **Whether a standing authorisation may cover an egress call**, now that the
-  recorded origin ADR-0154 §4 asks for exists. §5's sixth clause leaves that floor
+  recorded origin ADR-0154 §4 asks for exists. §5's closing clause leaves that floor
   standing and its second clause fixes what such an ADR may not do. **Fires with the
   ADR that establishes standing grants for egress recipients** — ADR-0148 §3's fifth
   clause names the three questions it must answer, and this ADR adds none.
