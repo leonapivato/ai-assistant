@@ -1142,12 +1142,28 @@ class _Session:
         self.exitstatus: object = pytest.ExitCode.OK
 
 
-def _isolated(monkeypatch: pytest.MonkeyPatch, record: conftest._RunRecord) -> None:
-    """Point the conftest's module-level state at this test's own record."""
+def _isolated(
+    monkeypatch: pytest.MonkeyPatch,
+    record: conftest._RunRecord,
+    *,
+    collected: bool = True,
+) -> None:
+    """Point the conftest's module-level state at this test's own record.
+
+    ``collected`` is whether this session collected the evidence-dependent checks
+    at all, which is what a worker hands over the names of. The controller reads
+    "should it have?" from its own options through ``_is_unfiltered``; here that
+    question is answered by the record, so the fake config can stay this small.
+    """
+
+    def unfiltered(_config: object) -> bool:
+        return record.unfiltered
+
     monkeypatch.setattr(conftest, "_RECORD", record)
-    monkeypatch.setattr(conftest, "_HANDED_OVER", [_HANDED_ITEM])
+    monkeypatch.setattr(conftest, "_HANDED_OVER", [_HANDED_ITEM] if collected else [])
     monkeypatch.setattr(conftest, "_WORKER_HALVES", [])
     monkeypatch.setattr(conftest, "_WORKERS_LOST", [])
+    monkeypatch.setattr(conftest, "_is_unfiltered", unfiltered)
 
 
 _HANDED_ITEM = conftest._ItemPayload(
@@ -1255,6 +1271,47 @@ def test_a_distributed_run_where_no_half_arrives_at_all_fails_loudly(
     assert nodeid.endswith("the_workers_record_reached_the_controller")
     assert reported[nodeid][0] == "failed"
     assert controller.exitstatus == pytest.ExitCode.TESTS_FAILED
+
+
+def test_halves_that_arrive_carrying_no_item_names_fail_the_same_way(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The other route to the same silence, and the one that looks healthiest.
+
+    A half whose ``classes`` survive but whose ``items`` do not is a full record
+    with nothing to report it under -- so the checks vanish from a run in which
+    the record itself arrived intact.
+    """
+    _isolated(monkeypatch, conftest._RunRecord(unfiltered=True), collected=False)
+    worker = _Session(_Config(worker=True))
+
+    _hand_over(worker)
+    controller = _Session(_Config(numprocesses=2))
+    reported = _finish(controller)
+
+    (nodeid,) = reported
+    assert nodeid.endswith("the_workers_record_reached_the_controller")
+    assert reported[nodeid][0] == "failed"
+    assert "1 half/halves arrived" in reported[nodeid][1]
+    assert controller.exitstatus == pytest.ExitCode.TESTS_FAILED
+
+
+def test_a_narrowed_run_that_collected_no_check_reports_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Which is the whole reason the silence is judged against the options.
+
+    A narrowed run legitimately collects neither check -- ``--deselect`` and every
+    other way of not collecting them is itself a filtering option -- so there is
+    nothing to decide and nothing to complain about.
+    """
+    _isolated(monkeypatch, conftest._RunRecord(unfiltered=False), collected=False)
+
+    _hand_over(_Session(_Config(worker=True)))
+    controller = _Session(_Config(numprocesses=2))
+
+    assert _finish(controller) == {}
+    assert controller.exitstatus == pytest.ExitCode.OK
 
 
 def test_a_serial_run_reports_nothing_from_the_controller(

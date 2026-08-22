@@ -77,13 +77,23 @@ test *args:
 # on this machine, and /tmp is a tmpfs. Six of them fill it, and what that looks
 # like from inside a clone is not "no space" but ~1700 failures in
 # `tests/memory/test_sqlite_*`, every one of which passes in isolation (issue
-# #1419). So the recipe reaps on entry, and a candidate has to answer all three
+# #1419). So the recipe reaps on entry, and a candidate has to answer all four
 # of: it is named the way `mktemp -d /tmp/pt-XXXXXX` below names one, it holds
-# xdist's own `popen-gw*` directories, and nothing anywhere inside it has been
-# written within the window. Together those say "a kept tree from a finished run
-# of this recipe" rather than "an old directory whose name starts `pt-`", which
-# is all a glob and an age can say. It also reports when /tmp is low, so the
-# 1700-failure run is diagnosed before it happens rather than after.
+# xdist's own `popen-gw*` directories, its lease is free, and nothing anywhere
+# inside it has been written within the window. Together those say "a kept tree
+# from a finished run of this recipe" rather than "an old directory whose name
+# starts `pt-`", which is all a glob and an age can say.
+#
+# The LEASE is what actually answers "is anyone in there", because no mtime can:
+# a run wedged in one test writes nothing below its own temp tree, and would look
+# idle from outside however long it stood. So each run holds an exclusive `flock`
+# on its own tree for its whole life, and the reaper skips any tree whose lock it
+# cannot take. The kernel drops the lock when the holding process dies, so a run
+# that was killed leaves a reapable tree rather than an immortal one — which a
+# marker file would not, and #1419 is a bug about trees that never go away.
+#
+# It also reports when /tmp is low, so the 1700-failure run is diagnosed before it
+# happens rather than after.
 #
 # Only a run that COLLECTED THE WHOLE SUITE AND EXECUTED IT discharges an anchor:
 # the `*args` below reach pytest, as does a `PYTEST_ADDOPTS` in the environment
@@ -108,10 +118,18 @@ test-fast *args:
         # is therefore never reaped -- a leak rather than a wrong deletion, which
         # is the direction to fail in.
         [ -n "$(find "$candidate" -maxdepth 1 -name 'popen-gw*' -print -quit)" ] || continue
-        # And the age has to come from the CONTENTS. A basetemp's own mtime stops
-        # moving once the worker directories exist, so a long or wedged run still
-        # writing inside one looks idle from outside; nothing written anywhere
-        # within the window is what actually says nobody is in there.
+        # Its lease has to be free. This is the one that can say a live run is
+        # live; everything else here can only say a dead one looks dead. An
+        # absent lease file means a tree from a run that predates this, which the
+        # weaker net below is for -- and never creating one here keeps the reaper
+        # from leaving a file behind in a tree it decided not to take.
+        if [ -e "$candidate.lease" ]; then
+            flock -n "$candidate.lease" true 2>/dev/null || continue
+        fi
+        # And a second, weaker net for a tree left by a run that predates the
+        # lease: nothing written anywhere inside it within the window. The
+        # basetemp's own mtime stops moving once the worker directories exist,
+        # so the directory alone cannot answer this.
         [ -z "$(find "$candidate" -mmin -"$stale_after" -print -quit)" ] || continue
         stale="${stale}${candidate}"$'\n'
     done < <(find /tmp -maxdepth 1 -type d -name 'pt-??????' -user "$(id -un)" \
@@ -119,7 +137,7 @@ test-fast *args:
     if [ -n "$stale" ]; then
         echo "just test-fast: reaping kept temp trees older than ${stale_after}m (#1419):" >&2
         printf '%s' "$stale" | sed 's/^/  /' >&2
-        printf '%s' "$stale" | while IFS= read -r old; do rm -rf "$old"; done
+        printf '%s' "$stale" | while IFS= read -r old; do rm -rf "$old" "$old.lease"; done
     fi
     free_kb="$(df -Pk /tmp | awk 'NR == 2 { print $4 }')"
     if [ "${free_kb:-0}" -lt 3145728 ]; then
@@ -128,14 +146,27 @@ test-fast *args:
         ls -ldrt /tmp/pt-* >&2 2>/dev/null || true
     fi
     tmp="$(mktemp -d /tmp/pt-XXXXXX)"
+    # Take this tree's lease and hold it on an open descriptor for the rest of the
+    # recipe, so another clone's reaper cannot take this run's tree out from under
+    # it however long a test blocks. It is released by the kernel when this shell
+    # exits, killed or not.
+    #
+    # BESIDE the tree, never inside it: pytest deletes and recreates a `--basetemp`
+    # it is given, so a lease file in there would be unlinked on the way in. The
+    # lock would survive on the descriptor and the reaper would then find a fresh
+    # file at that path and take it, which is the whole failure this prevents.
+    exec {lease}>"$tmp.lease"
+    flock -n "$lease"
     # `--basetemp` goes *after* "$@" so a forwarded one cannot displace it: pytest
     # takes the last occurrence, and a run that emptied some other directory while
     # the cleanup below removed this one would be the hazard this recipe exists to
     # avoid, silently. `-n auto` leads instead, so `just test-fast -n 4` still works.
     if uv run pytest -n auto "$@" --basetemp="$tmp"; then
-        rm -rf "$tmp"
+        rm -rf "$tmp" "$tmp.lease"
     else
         status=$?
+        # The lease file stays with the tree it describes, so that the reaper can
+        # find it later and take both. It is unlocked the moment this shell exits.
         echo "just test-fast: temp tree kept for inspection at $tmp" >&2
         exit "$status"
     fi
