@@ -1683,12 +1683,37 @@ def test_one_answer_per_park_and_a_second_click_submits_nothing() -> None:
     assert functions["offerApproval"].count("disabled = true") == 2
     assert functions["offerApproval"].count("disabled = false") == 2
     assert "} finally {" in functions["offerApproval"]
-    # **And the guarantee is page-wide rather than per row**, because one park is on
+    # **And the guarantee is per park rather than per row**, because one park is on
     # screen twice: a turn that parks renders its confirmation with the answer, and the
     # recovery listing renders the same park again — carrying the *same* token, since
     # ``pending_confirmations`` "reuses that entry's token rather than minting a second"
     # for a binding the engine already holds. Two rows, one park, and a per-row lock
     # would let the second one submit while the first was in flight.
-    assert "if (answering) {" in functions["answerConfirmation"]
-    assert "answering = true;" in functions["answerConfirmation"]
-    assert "answering = false;" in functions["answerConfirmation"]
+    answering = functions["answerConfirmation"]
+    assert "if (spent.has(token)) {" in answering
+    assert "spent.add(token);" in answering
+    # Given back on both refusal paths, because neither resolved the park: a row the
+    # gateway could not answer stays answerable.
+    assert answering.count("spent.delete(token);") == 2
+
+
+def test_a_stalled_tidy_up_cannot_silently_refuse_another_parks_answer() -> None:
+    """``fetch`` carries no deadline of its own, so anything a page holds across a
+    request it cannot bound is held for as long as that request hangs.
+
+    A page-wide answer lock held across the post-answer listing read would therefore
+    make one stalled read swallow the owner's answer to every *other* park — with no
+    request sent and nothing said, which is the one failure a confirmation surface
+    cannot have. The guard is claimed per token, and the read that tidies up what is
+    left on screen happens after it and is waited on by nothing else.
+    """
+    script = _code("app.js")
+    body = _functions(script)["answerConfirmation"]
+
+    assert "let answering" not in script
+    # No `finally` here, which is the shape a page-wide lock takes: the guard is given
+    # back on the two named refusal paths and on neither of them is the tidy-up waited
+    # on first.
+    assert "} finally {" not in body
+    assert body.index("spent.add(token);") < body.index("await readPending(true);")
+    assert body.index('relay(half, "/confirmation/resume"') < body.index("await readPending(true);")

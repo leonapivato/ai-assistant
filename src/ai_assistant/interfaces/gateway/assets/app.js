@@ -600,19 +600,27 @@ async function readPending(quiet) {
   }
 }
 
-// Whether an answer is outstanding. **One at a time, page-wide**, and the reason it
-// cannot be per row is that one park is on screen twice: a turn that parks renders its
+// The continuations this page has spent, or is spending now.
+//
+// **Per park, because one park is on screen twice.** A turn that parks renders its
 // confirmation with the answer, and the recovery listing renders the same park again —
 // with the *same* token, because the engine "reuses that entry's token rather than
 // minting a second" for a binding it already holds. Two rows, one park; answering both
-// at once resolves it with one request and gets the other refused as an unknown
-// continuation, which ADR-0084 §7 makes emphatically not a denial and this page would
-// report as one. Disabling a row's own pair is the visible half and is not the
-// guarantee.
+// resolves it with one request and gets the other refused as an unknown continuation,
+// which ADR-0084 §7 makes emphatically not a denial and this page would report as one.
+// Disabling a row's own pair is the visible half and is not the guarantee.
 //
-// Sequential answering needs no guard: the first answer replaces the outcome panel and
-// re-reads the listing, so the second row is gone before it can be clicked.
-let answering = false;
+// **Per park rather than one flag for the page**, which a stalled request is what
+// distinguishes: `fetch` has no deadline of its own, so a page-wide lock held across a
+// hung request would silently refuse the owner's answer to every *other* park, and a
+// silent refusal is the one thing this surface cannot do. A token is guarded on its
+// own and nothing else waits on it.
+//
+// It is held in page state and in no browser storage (ADR-0177 §8), the token is
+// compared and never read, and the set is bounded by the parks answered in one page's
+// life — a reload starts it empty, which is correct: the engine has evicted every entry
+// it resolved, so a spent token is one the listing will never hand back.
+const spent = new Set();
 
 // One answer, relayed. The page conveys consent and rules on nothing (ADR-0042 §6):
 // a refusal comes back as an ordinary outcome whose step was denied, not as a fault,
@@ -622,7 +630,7 @@ let answering = false;
 // only thing that changes what is waiting — and re-reading is also how the page gets
 // fresh tokens for whatever is left rather than keeping the ones it has.
 async function answerConfirmation(token, approved) {
-  if (answering) {
+  if (spent.has(token)) {
     return;
   }
   fault(null);
@@ -631,19 +639,30 @@ async function answerConfirmation(token, approved) {
     showBootstrap();
     return;
   }
-  answering = true;
+  // Claimed before the first `await`, so two clicks in one turn of the event loop —
+  // the two rows of one park, or one row twice — cannot both get past the guard.
+  spent.add(token);
+  let body = null;
   try {
-    const body = await relay(half, "/confirmation/resume", { token, approved });
-    if (body === null) {
-      return;
-    }
-    renderOutcome(body.outcome);
-    await readPending(true);
+    body = await relay(half, "/confirmation/resume", { token, approved });
   } catch (_) {
+    // The gateway is gone. Nothing was answered as far as this page can tell, so the
+    // continuation is given back and the row stays answerable.
+    spent.delete(token);
     fault(GATEWAY_GONE);
-  } finally {
-    answering = false;
+    return;
   }
+  if (body === null) {
+    // A refusal the gateway named and `relay` already displayed — a full hub, a
+    // declined request. It is not a resolution, so the token is given back too.
+    spent.delete(token);
+    return;
+  }
+  renderOutcome(body.outcome);
+  // Read again, and **after** the guard on this token has done its work rather than
+  // inside it: this is the best-effort tidy-up of what is left on screen, and no other
+  // park's answer waits on it.
+  await readPending(true);
 }
 
 async function startSession(event) {
