@@ -113,8 +113,8 @@ uv run pytest           # tests
 All five pass, or the change is not done — `just check` runs the same five, with
 the formatting checked rather than rewritten. **When you owe all five is ADR-0136:**
 the full gate runs and passes at two anchors on a branch — immediately before the
-**first review invocation**, and immediately before the **final push preceding
-`gh pr ready`** — each on the tree as it then stands, neither at your discretion
+**first review invocation**, and on the **tree of the final push**, passing before
+`just ready` (ADR-0180) — each on the tree it names, neither at your discretion
 and neither admitting a docs-only exemption. A rebase that moves your base re-opens
 the obligation.
 
