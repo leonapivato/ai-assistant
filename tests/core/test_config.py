@@ -26,6 +26,12 @@ if TYPE_CHECKING:
     from typing import SupportsIndex
 
 
+#: ``Settings`` reads every field a construction here does not name from the
+#: environment, so an ambient ``ASSISTANT_*`` is what a default assertion in this
+#: module actually measures — and it is the shell's, not the suite's (#1368).
+pytestmark = pytest.mark.usefixtures("hermetic_assistant_env")
+
+
 def test_defaults_are_valid() -> None:
     settings = Settings()
     assert settings.timezone == "UTC"

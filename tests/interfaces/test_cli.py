@@ -138,6 +138,14 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.types import MemoryRecord, SourceGrant
 
+
+#: The adapter reads its transport and its socket off ``Settings``, and the
+#: constructions below name a data directory and little else — so without this the
+#: rendering asserted here is the rendering the developer's own shell selects
+#: (#1368). ``ASSISTANT_REMOTE_HUB_ADDRESS`` is the one that has actually bitten;
+#: the fixture sweeps the prefix rather than that name.
+pytestmark = pytest.mark.usefixtures("hermetic_assistant_env")
+
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
 
 
