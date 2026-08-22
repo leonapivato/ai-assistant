@@ -822,3 +822,25 @@ def test_a_listing_offers_the_next_page_rather_than_stopping_at_a_full_one() -> 
     for paged in ("readBeliefs", "readQuestions"):
         assert "offerMore(list, body." in _functions(script)[paged], paged
         assert "limit: PAGE" in _functions(script)[paged], paged
+
+
+def test_an_offset_is_only_spent_against_the_question_that_produced_it() -> None:
+    """An offset counted against one filter means nothing against another.
+
+    Unchecking a band between two pages would otherwise skip the beliefs the narrower
+    question puts first — and a belief with no rendered row has no ``Forget`` control,
+    so the failure costs the owner a control rather than a little tidiness.
+
+    Two mechanisms, because there are two ways to get there. A band change **starts
+    the listing again**, which is what makes the offset meaningful; and a page still in
+    flight when that happens is **retired**, so a stale answer neither appends rows the
+    current filter did not ask for nor moves the offset the next page is read at.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert 'el(box).addEventListener("change", listBeliefs);' in script
+    assert "runs.beliefs += 1;" in functions["listBeliefs"]
+    assert "const run = runs.beliefs;" in functions["readBeliefs"]
+    assert "run !== runs.beliefs" in functions["readBeliefs"]
+    assert "run !== runs[listing.counter]" in functions["readQuestions"]
