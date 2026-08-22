@@ -74,8 +74,9 @@ def test_install_targets_the_venv_python_with_no_deps_and_force_reinstall(tmp_pa
 def test_restart_and_journal_carry_the_user_session_bus(tmp_path: Path) -> None:
     plan = _dry_run(_repo(tmp_path))
 
-    assert "XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user restart ai-assistant-hub" in plan
+    assert "export XDG_RUNTIME_DIR=/run/user/$(id -u); systemctl --user restart" in plan
     assert "XDG_RUNTIME_DIR=/run/user/$(id -u) journalctl --user -u ai-assistant-hub" in plan
+    assert "XDG_RUNTIME_DIR=/run/user/$(id -u) systemctl --user is-active" in plan
 
 
 def test_the_runtime_dir_is_assigned_inside_the_login_shell_not_before_su(tmp_path: Path) -> None:
@@ -87,14 +88,39 @@ def test_the_runtime_dir_is_assigned_inside_the_login_shell_not_before_su(tmp_pa
     assert "su - assistant -c 'XDG_RUNTIME_DIR=" in plan
 
 
-def test_journal_window_is_bounded_by_the_boxs_own_clock(tmp_path: Path) -> None:
+def test_readiness_is_bound_to_this_start_of_the_unit(tmp_path: Path) -> None:
+    # A timestamp window is captured before the restart is issued, so it can
+    # contain the *previous* process's hub_ready and verify a replacement that
+    # never became ready. The InvocationID names one start and only that one.
     plan = _dry_run(_repo(tmp_path))
 
-    # The epoch is read on the box and fed straight back to `--since`, so a clock
-    # skew between here and there cannot narrow the window past the restart.
-    assert "echo RESTART_EPOCH=$(date +%s);" in plan
-    assert "--since" in plan
-    assert "@<restart epoch>" in plan
+    assert "systemctl --user show -p InvocationID --value ai-assistant-hub" in plan
+    assert "journalctl --user -u ai-assistant-hub" in plan
+    assert "_SYSTEMD_INVOCATION_ID=" in plan
+    assert "--since" not in plan
+    assert "date +%s" not in plan
+
+
+def test_the_invocation_id_is_printed_only_when_the_restart_succeeded(tmp_path: Path) -> None:
+    # With `;` a failed restart would still report an id — the OLD invocation's,
+    # whose journal does contain hub_ready.
+    plan = _dry_run(_repo(tmp_path))
+
+    assert "systemctl --user restart ai-assistant-hub && echo INVOCATION_ID=" in plan
+
+
+def test_a_restart_that_reports_no_invocation_id_refuses(tmp_path: Path) -> None:
+    with pytest.raises(_MODULE.DeployError, match="no unit InvocationID"):
+        _MODULE.invocation_id("some other output\n")
+
+
+def test_an_empty_invocation_id_refuses_rather_than_matching_everything(tmp_path: Path) -> None:
+    with pytest.raises(_MODULE.DeployError, match="no unit InvocationID"):
+        _MODULE.invocation_id("INVOCATION_ID=\n")
+
+
+def test_an_invocation_id_is_read_back(tmp_path: Path) -> None:
+    assert _MODULE.invocation_id("noise\nINVOCATION_ID=abc123\n") == "abc123"
 
 
 def test_verification_asserts_the_unit_is_active(tmp_path: Path) -> None:
@@ -140,7 +166,7 @@ def test_no_box_specific_value_is_hardcoded(tmp_path: Path) -> None:
         "--marker",
         "/var/lib/DEPLOYED",
         "--wheel",
-        "custom-9.9.whl",
+        "/elsewhere/custom-9.9.whl",
         "--stage-dir",
         "/srv/stage",
     )
@@ -196,6 +222,48 @@ def test_dry_run_contacts_nothing(tmp_path: Path) -> None:
 # --------------------------------------------------------------------------- #
 # The wheel name, and the tree it is built from                                #
 # --------------------------------------------------------------------------- #
+
+
+def test_a_supplied_wheel_skips_the_build_entirely(tmp_path: Path) -> None:
+    # The alternative — building, then looking for a *predicted* name in `dist/` —
+    # ships whatever stale wheel happens to carry that name, recorded under
+    # today's commit.
+    plan = _dry_run(_repo(tmp_path), "--wheel", "/elsewhere/custom-9.9.whl")
+
+    assert "deploying the supplied wheel /elsewhere/custom-9.9.whl" in plan
+    assert "uv build" not in plan
+
+
+def test_without_a_supplied_wheel_the_build_goes_to_a_fresh_directory(tmp_path: Path) -> None:
+    plan = _dry_run(_repo(tmp_path))
+
+    assert "uv build --wheel --out-dir" in plan
+    assert "dist/" not in plan
+
+
+@pytest.mark.parametrize("produced", [(), ("one.whl", "two.whl")])
+def test_the_build_must_produce_exactly_one_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, produced: tuple[str, ...]
+) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    for name in produced:
+        (out / name).write_bytes(b"x")
+    monkeypatch.setattr(_MODULE, "_run_local", lambda *_a, **_k: "")
+
+    with pytest.raises(_MODULE.DeployError, match="not exactly one wheel"):
+        _MODULE.build_wheel(tmp_path, out)
+
+
+def test_the_build_adopts_the_single_wheel_it_produced(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "whatever_the_build_named_it.whl").write_bytes(b"x")
+    monkeypatch.setattr(_MODULE, "_run_local", lambda *_a, **_k: "")
+
+    assert _MODULE.build_wheel(tmp_path, out).name == "whatever_the_build_named_it.whl"
 
 
 def test_wheel_name_is_derived_from_pyproject(tmp_path: Path) -> None:

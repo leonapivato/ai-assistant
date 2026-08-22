@@ -227,6 +227,24 @@ def test_a_missing_review_directory_is_a_refusal_not_a_crash(tmp_path: Path) -> 
     assert "nothing to sweep" in err
 
 
+def test_a_target_outside_a_work_tree_refuses_rather_than_sweeping_the_lot(
+    tmp_path: Path,
+) -> None:
+    # With no refs to read, "every branch is gone" and "this is not a repository"
+    # are the same answer — so an unverified --repo would archive everything it
+    # could parse. The check runs before a single artifact is classified.
+    plain = tmp_path / "plain"
+    (plain / ".review").mkdir(parents=True)
+    artifact = plain / ".review" / "a.md"
+    artifact.write_text(_provenance(persona="adversarial", branch="x/y", sha="0" * 40, tree="t1"))
+
+    status, _, err = _sweep(plain)
+
+    assert status == 1
+    assert "not inside a git work tree" in err
+    assert artifact.exists()
+
+
 # --------------------------------------------------------------------------- #
 # Disposition snapshots (ADR-0025 §4)                                          #
 # --------------------------------------------------------------------------- #

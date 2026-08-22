@@ -221,6 +221,40 @@ def find_siblings(source: Path, numbers: Sequence[str]) -> list[Path]:
     return sorted({path.resolve() for path in candidates} - {source.resolve()})
 
 
+def _refuse_to_escape(target: Path, relative: str) -> None:
+    """Refuse a destination that would be written outside the target clone.
+
+    ``is_tracked`` guards a *checked-in* file, and everything on the list is by
+    definition ignored — so it says nothing about an ignored **symlink** sitting
+    at one of these paths. ``shutil.copy2`` follows a symlink and writes through
+    it, so an ignored ``.env -> /etc/somewhere`` in a clone would let a sync
+    overwrite a file the sync has no business touching. The same goes for a
+    symlinked ancestor directory, which is why the resolved parent is checked and
+    not only the leaf.
+
+    Args:
+        target: The clone being copied into.
+        relative: The repository-relative path.
+
+    Raises:
+        SyncError: If the leaf is a symlink, or the destination resolves outside
+            ``target``.
+    """
+    destination = target / relative
+    if destination.is_symlink():
+        raise SyncError(
+            f"{target}: {relative} is a symlink, and copying would write through it\n"
+            f"to {destination.resolve(strict=False)}. Remove it, or drop the path from the list."
+        )
+    root = target.resolve(strict=False)
+    parent = destination.parent.resolve(strict=False)
+    if parent != root and not parent.is_relative_to(root):
+        raise SyncError(
+            f"{target}: {relative} resolves to {parent}, outside the clone.\n"
+            f"Refusing to write there."
+        )
+
+
 def copy_into(source: Path, target: Path, synced: Sequence[str], *, dry_run: bool) -> list[str]:
     """Copy the listed files from ``source`` into ``target``.
 
@@ -234,7 +268,8 @@ def copy_into(source: Path, target: Path, synced: Sequence[str], *, dry_run: boo
         One report line per path considered.
 
     Raises:
-        SyncError: If a path is tracked in the target.
+        SyncError: If a path is tracked in the target, or the destination would
+            resolve outside it.
     """
     lines: list[str] = []
     for relative in synced:
@@ -248,6 +283,7 @@ def copy_into(source: Path, target: Path, synced: Sequence[str], *, dry_run: boo
                 f"{target}: git tracks {relative}, so the sync would overwrite a\n"
                 f"checked-in file. Remove it from the list — nothing in the list is committed."
             )
+        _refuse_to_escape(target, relative)
         if dst.is_file() and dst.read_bytes() == src.read_bytes():
             lines.append(f"  same {relative}")
             continue

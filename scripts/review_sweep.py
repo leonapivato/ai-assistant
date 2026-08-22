@@ -131,18 +131,23 @@ def provenance_field(name: str, line: str) -> str:
     return match.group(1) if match else ""
 
 
-def _git(*args: str, repo: Path) -> str:
+def _git(*args: str, repo: Path, check: bool = False) -> str:
     """Run git in ``repo`` and return its stdout.
 
     Args:
         *args: The git arguments.
         repo: The repository root.
+        check: Raise on a non-zero status instead of returning the empty string.
+            Set it wherever "git said nothing" and "git could not answer" must not
+            be the same result — a ref listing that silently reads as *no refs*
+            makes every artifact look stale, which is the one direction this
+            script must never fail in.
 
     Returns:
         Standard output, with the trailing newline removed.
 
     Raises:
-        SweepError: If git is missing.
+        SweepError: If git is missing, or it failed and ``check`` is set.
     """
     binary = shutil.which("git")
     if binary is None:
@@ -154,7 +159,11 @@ def _git(*args: str, repo: Path) -> str:
         text=True,
         check=False,
     )
-    return completed.stdout.rstrip("\n") if completed.returncode == 0 else ""
+    if completed.returncode != 0:
+        if check:
+            raise SweepError(f"git {' '.join(args)} in {repo} failed: {completed.stderr.strip()}")
+        return ""
+    return completed.stdout.rstrip("\n")
 
 
 def _git_ok(*args: str, repo: Path) -> bool:
@@ -190,9 +199,15 @@ class Refs:
         """
         self.repo = repo
         self.branches: set[str] = set()
-        for line in _git(
-            "for-each-ref", "--format=%(refname)", "refs/heads", "refs/remotes", repo=repo
-        ).splitlines():
+        listing = _git(
+            "for-each-ref",
+            "--format=%(refname)",
+            "refs/heads",
+            "refs/remotes",
+            repo=repo,
+            check=True,
+        )
+        for line in listing.splitlines():
             if line.startswith("refs/heads/"):
                 self.branches.add(line.removeprefix("refs/heads/"))
             elif line.startswith("refs/remotes/"):
@@ -389,6 +404,16 @@ def _sweep(args: argparse.Namespace) -> int:
         SweepError: If there is no review directory, or a file cannot be swept.
     """
     repo = Path(args.repo).resolve()
+    # Checked BEFORE anything is classified. Outside a work tree there are no
+    # refs to read, and "no refs" is indistinguishable from "every branch is
+    # gone" — so an unverified `--repo` would sweep every artifact it could
+    # parse. The classifier is only fail-closed if it is asked about a repository.
+    if _git("rev-parse", "--is-inside-work-tree", repo=repo) != "true":
+        raise SweepError(
+            f"{repo} is not inside a git work tree. This classifies artifacts by\n"
+            f"what the refs still hold, so with no refs to read every artifact would\n"
+            f"look stale — refusing rather than sweeping the lot."
+        )
     review = repo / REVIEW_DIR
     if not review.is_dir():
         raise SweepError(f"no {REVIEW_DIR}/ in {repo}; nothing to sweep")
