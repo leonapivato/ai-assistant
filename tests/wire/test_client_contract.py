@@ -63,7 +63,15 @@ from assistant_engine_contract import (
     backwards_clock,
 )
 
-from ai_assistant.core.types import GrantScope
+from ai_assistant.core.types import (
+    BoundAccount,
+    DestinationProtocol,
+    DiscloserProvenance,
+    EgressBinding,
+    EgressDestination,
+    EgressSpan,
+    GrantScope,
+)
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire import (
     ENVELOPE_RESERVE_BYTES,
@@ -134,6 +142,37 @@ async def serving(
         yield await hub.start()
     finally:
         await hub.aclose()
+
+
+def _binding() -> EgressBinding:
+    """One whole egress binding, for a park the shared suite's ADR-0178 clauses reach.
+
+    A destination-bearing occurrence and a description-only one, so the derived set
+    has a recipient member rather than falling back to the account. Built here
+    rather than shared with the in-process suite's copy: this one has to survive
+    the *frame* as well as the reduction, which is the thing this subject adds.
+    """
+    return EgressBinding(
+        spans=(
+            EgressSpan(
+                argument="body",
+                provenance=DiscloserProvenance.USER_AUTHORED,
+                extent=5,
+            ),
+            EgressSpan(
+                argument="to",
+                provenance=DiscloserProvenance.SYSTEM_SELECTED,
+                extent=17,
+                destination=EgressDestination(
+                    protocol=DestinationProtocol.SMTP,
+                    supplied="Alice@Example.ORG",
+                    canonical="alice@example.org",
+                ),
+            ),
+        ),
+        account=BoundAccount(identity="work@example.com", reference="conn-0001"),
+        transport_endpoint="test://endpoint/one",
+    )
 
 
 class TestHubEngineClientContract(AssistantEngineContract):
@@ -288,6 +327,6 @@ class TestHubEngineClientContract(AssistantEngineContract):
         just handed it over a connection that has since closed.
         """
         backing = FakeAssistantEngine()
-        backing.park("h-1")
+        backing.park("h-1", egress=_binding())
         async with serving(backing, tmp_path / "hub.sock") as client:
             yield client

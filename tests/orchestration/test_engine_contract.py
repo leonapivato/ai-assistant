@@ -73,6 +73,7 @@ from ai_assistant.testing import (
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
+    FakeEgressBinder,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -89,10 +90,16 @@ from ai_assistant.testing import (
 from ai_assistant.testing.grants import source_grant
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Sequence
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
     from ai_assistant.core.protocols import AssistantEngine
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord, SourceGrant
+    from ai_assistant.core.types import (
+        CurrentContext,
+        FrozenJson,
+        Goal,
+        MemoryRecord,
+        SourceGrant,
+    )
 
 AT = datetime(2026, 7, 23, 9, 0, tzinfo=UTC)
 RETENTION = timedelta(days=30)
@@ -121,6 +128,24 @@ def _composing() -> ComposingStage:
     return ComposingStage(model=FakeModelProvider(), streaming=FakeStreamingCompleter())
 
 
+#: A schema declaring ``to`` a destination-bearing argument, in ADR-0152 §3's two
+#: keywords. It is what makes :class:`FakeEgressBinder` derive a real binding for
+#: :data:`PARAMETERS` rather than answer ``None``, so the parked confirmation the
+#: suite reads is the seam's own output — which is what ADR-0178 §3's clause needs
+#: this subject to be in a position to answer.
+_EGRESS_SCHEMA: Mapping[str, FrozenJson] = {
+    "type": "object",
+    "properties": {
+        "to": {
+            "type": "string",
+            "x-egress-destination": "smtp",
+            "x-egress-tier": "personal",
+        }
+    },
+    "additionalProperties": False,
+}
+
+
 def _confirmable() -> ToolDefinition:
     """A declaration ``FakeActionPolicy`` rules ``CONFIRM`` on.
 
@@ -141,6 +166,7 @@ def _confirmable() -> ToolDefinition:
         discloses=(DataTier.PERSONAL,),
         cost=ToolCost(basis=CostBasis.FREE),
         idempotency=Idempotency.NATURAL,
+        parameters_schema=_EGRESS_SCHEMA,
     )
 
 
@@ -228,7 +254,19 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     conversation_clock = lambda: AT + timedelta(seconds=next(ticks))  # noqa: E731
     plans = FakePlanStore(now=lambda: AT)
     trail = FakeAuditTrail()
-    invoker = FakeToolInvoker([(_confirmable(), _succeeds)] if parks else [])
+    confirmable = _confirmable()
+    invoker = FakeToolInvoker([(confirmable, _succeeds)] if parks else [])
+    # The egress binding seam, wired only where the suite needs a park: ADR-0178
+    # §3's clause binds every producer of a ``ConfirmationEgress``, and a subject
+    # parking a non-egress call would leave it vacuous here.
+    binder = FakeEgressBinder() if parks else None
+    if binder is not None:
+        binder.register_egress(
+            confirmable,
+            reference="conn-0001",
+            identity="work@example.com",
+            transport_endpoint="test://endpoint/one",
+        )
     memory = FakeMemoryStore(now=lambda: AT)
     conversation_store = FakeConversationStore(now=conversation_clock)
     conversations = ConversationLifecycle(
@@ -266,6 +304,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         executor=StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=lambda: AT),
         now=lambda: AT,
         id_factory=_counter("d"),
+        binder=binder,
     )
     return Engine(
         composing=_composing(),

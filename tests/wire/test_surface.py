@@ -12,9 +12,27 @@ exclusive.
 
 from __future__ import annotations
 
+import json
+from datetime import UTC, datetime
+
 import pytest
 
-from ai_assistant.core.types import ReplyChunk, TurnOutcome
+from ai_assistant.core.types import (
+    Confirmation,
+    ConfirmationEgress,
+    ContinuationToken,
+    DataTier,
+    DestinationProtocol,
+    DiscloserProvenance,
+    Disposition,
+    EgressDestination,
+    EgressSpan,
+    ExecutionState,
+    ReplyChunk,
+    StepOutcome,
+    TurnOutcome,
+)
+from ai_assistant.wire.codec import canonical_payload, project
 from ai_assistant.wire.surface import (
     METHODS,
     STREAMING_METHODS,
@@ -24,6 +42,8 @@ from ai_assistant.wire.surface import (
     return_adapter,
     terminal_adapter,
 )
+
+_AT = datetime(2026, 8, 22, 9, 0, tzinfo=UTC)
 
 
 def test_the_streaming_set_is_read_off_the_protocol() -> None:
@@ -87,3 +107,101 @@ def test_an_unknown_method_is_refused_by_every_adapter() -> None:
     for accessor in (return_adapter, chunk_adapter, terminal_adapter, chunk_type):
         with pytest.raises(KeyError):
             accessor("no_such_method")
+
+
+# --- ADR-0178 §6: an egress confirmation crosses with every member intact ----
+
+
+def test_an_egress_confirmation_survives_the_round_trip_a_client_actually_makes() -> None:
+    """ADR-0178 §6: ``project`` -> canonical JSON -> ``return_adapter`` validation.
+
+    The route a confirmation really takes to a client: the hub renders the result
+    through :func:`~ai_assistant.wire.codec.project` and the canonical encoding,
+    and the client validates the decoded payload against the method's **own
+    declared return annotation** (ADR-0085 §10) — which is why the new member
+    crosses without a second declaration and nothing under ``wire/`` transcribes
+    it into a schema.
+
+    ``tier`` of ``None`` and ``index`` of ``None`` are in the vector deliberately:
+    both are optional on :class:`~ai_assistant.core.types.EgressSpan`, and an
+    encoder that dropped an absent member rather than emitting ``null`` would
+    round-trip them by accident here and lose the discrimination elsewhere.
+
+    The derived canonical destination set is **not** in the frame, and this is
+    where that is visible: ``ConfirmationDestination`` is the member type of a
+    property, so no peer receives one and ``PROTOCOL_VERSION`` 10 does not
+    describe it. The far side derives its own set from the occurrences it decoded,
+    and the two cannot disagree because there is only one rule.
+    """
+    confirmation = Confirmation(
+        tool_id="smtp",
+        tool_description="Send an email.",
+        parameters={"to": "Alice@Example.ORG", "body": "hello"},
+        reason="this discloses data off-device",
+        token=ContinuationToken(handle="tok"),
+        egress=ConfirmationEgress(
+            account_identity="work@example.com",
+            spans=(
+                EgressSpan(
+                    argument="body",
+                    provenance=DiscloserProvenance.USER_AUTHORED,
+                    extent=5,
+                    tier=None,
+                    destination=None,
+                ),
+                EgressSpan(
+                    argument="to",
+                    index=None,
+                    provenance=DiscloserProvenance.SYSTEM_SELECTED,
+                    extent=17,
+                    tier=DataTier.PERSONAL,
+                    destination=EgressDestination(
+                        protocol=DestinationProtocol.SMTP,
+                        supplied="Alice@Example.ORG",
+                        canonical="alice@example.org",
+                    ),
+                ),
+            ),
+        ),
+    )
+    outcome = TurnOutcome(
+        turn=None,
+        step=StepOutcome(
+            disposition=Disposition.AWAITING_CONFIRMATION,
+            state=ExecutionState(id="e-1", plan_id="p-1", steps=(), updated_at=_AT),
+            step_id="step-1",
+            tool_id="smtp",
+            confirmation=confirmation,
+        ),
+    )
+
+    payload = json.loads(canonical_payload(project(outcome)))
+    decoded = return_adapter("converse").validate_python(payload)
+
+    assert decoded == outcome
+    assert decoded.step is not None
+    assert decoded.step.confirmation == confirmation
+    # Present as ``null`` rather than omitted, which is what makes the bump bite:
+    # a version 9 client fails ``extra_forbidden`` on this member.
+    assert "egress" in payload["step"]["confirmation"]
+    assert "canonical_destination_set" not in payload["step"]["confirmation"]["egress"]
+
+
+def test_a_non_egress_confirmation_crosses_as_an_explicit_null() -> None:
+    """ADR-0178 §6: ``project`` renders a model by ``model_dump()``, which keeps ``None``.
+
+    So a version 10 hub emits ``"egress": null`` on **every** confirmation, egress
+    or not — which is why ADR-0124 §9's second limb bites here rather than merely
+    applying, and why no compatibility shim is offered for it.
+    """
+    confirmation = Confirmation(
+        tool_id="notes",
+        tool_description="Write a note.",
+        parameters={},
+        reason="an unknown cost",
+        token=ContinuationToken(handle="tok"),
+        egress=None,
+    )
+    payload = json.loads(canonical_payload(project(confirmation)))
+    assert payload["egress"] is None
+    assert return_adapter("pending_confirmations").validate_python([payload]) == (confirmation,)
