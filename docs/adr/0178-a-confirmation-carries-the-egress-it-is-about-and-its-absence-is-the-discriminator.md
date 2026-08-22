@@ -769,7 +769,8 @@ ADR-0082 §1 requires the judgement to be made in this text, naming the clause a
 applying ADR-0070 §1's test: would a reader holding only the earlier text now act
 differently, or read one of its clauses more widely than it now holds?
 
-**Two clauses are superseded and this change writes both records** — each ADR's
+**Six clauses across three ADRs are superseded and this change writes every
+record** — each ADR's
 `Status` line and an appended dated note, in the scope the line names.
 
 - **ADR-0177 §8's rendering clause**, in the words §8 above quotes, and **ADR-0177
