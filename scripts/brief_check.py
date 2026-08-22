@@ -62,9 +62,11 @@ _ADR_RE = re.compile(r"\bADR-(\d{3,4})\b")
 # dash or an em dash. A range is expanded only between plain numbers, so a
 # lettered range binds its first section and leaves the rest, which
 # is the conservative direction for a checker that must not invent citations.
+# The digit run is unbounded: a capped one truncates a longer label silently
+# and then reports a section nobody cited as absent.
 _SECTION_RE = re.compile(
-    r"(?:§§?\s*|\bsections?\s+)(?P<first>\d{1,3}[a-z]?)"
-    r"(?:\s*(?:[-\u2013\u2014]|to)\s*(?P<last>\d{1,3}[a-z]?))?",
+    r"(?:§§?\s*|\bsections?\s+)(?P<first>\d+[a-z]?)"
+    r"(?:\s*(?:[-\u2013\u2014]|to)\s*(?P<last>\d+[a-z]?))?",
     re.IGNORECASE,
 )
 _LARGEST_RANGE = 20
