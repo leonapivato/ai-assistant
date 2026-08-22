@@ -2,6 +2,50 @@
 
 - Status: Accepted
 - Date: 2026-08-21
+- Note: 2026-08-23 — **the revisit §9 said this was not has landed, and it chose
+  process-bound.** §9 ruled "this is not ADR-0168 §5's revisit… Milestone 16 is,
+  on ADR-0168 §12's own trigger, and both issues hold together until then", and
+  §11's fifth deferral held a second live session, a durable session and a durable
+  browser credential to the same milestone. ADR-0182 (`track:web-client` milestone
+  16, #1230, #1429) is that decision.
+
+  **What it chose.** A gateway mints a further bootstrap value whenever the owner
+  performs a mint act at the machine that runs it — the delivery of `SIGUSR1`, so
+  the act is not a request and is reachable from neither listener — and at most one
+  unexchanged value stands at a time. An unexchanged value gains a clock,
+  `gateway_bootstrap_ttl`, defaulting to ten minutes and running from the mint, so
+  **#1329 is answered**. `gateway_max_sessions` becomes reachable and refuses at two
+  doors, so **#1320 is answered**; both close with that decision's implementing lane.
+  A session's power still ends with the gateway process, so the durable session is
+  **refused** rather than granted, and ADR-0172 §2's replacement (d) — the condition
+  three ADR-0004 exemptions hang on — is kept.
+
+  **This note changes no decision of this ADR, which is why it is a note and not a
+  supersession** (ADR-0070 §1). Every clause of §9 stays true of ADR-0174: it did not
+  relax ADR-0168 §5, it authorised no second bootstrap value and no durable session,
+  and it left #1320 and #1329 open. §9's second clause — that ADR-0172 §2's
+  replacement (d) is satisfied unchanged here — is likewise still true, and ADR-0182
+  §5 keeps it true one milestone further on. What has moved is the world §9 pointed
+  at, and a reader arriving at §9 is entitled to learn that the revisit landed and
+  what it chose.
+
+  **Two other things ADR-0182 leaves exactly as this ADR wrote them.** §7's held
+  secure context keeps its trigger untouched — nothing in milestone 16 needs one,
+  and #1230's far-future public door is neither designed for nor foreclosed. And
+  §8's rule that the gateway's ceilings are the gateway's, not each listener's, is
+  the clause ADR-0182 §4 makes reachable: a session minted through either listener
+  counts against the same `gateway_max_sessions`, taken exactly as written.
+
+  **One paragraph of §9 is overtaken and it binds nothing.** Its prose that a figure
+  for the unexchanged value "would be an eleventh `Settings` field and a change to
+  ADR-0168 §8's table and to its Consequences' field count" is unmarked text in a
+  marked ADR, so it supplies no obligation (ADR-0089 §3). ADR-0182 §9 applies
+  ADR-0070 §1's test to §8's table and finds no record owed — the table is not an
+  exclusive enumeration — and follows the corpus's own practice: §8 of this ADR added
+  three gateway `Settings` fields and ADR-0175 §8 added one, and neither wrote a
+  record there. The ordinal was already overtaken by this ADR's own three when it was
+  written.
+
 
 - **This is `track:web-client` milestone 14's boundary decision** (#1230). Its
   exit test is *a conversation and a pushed notification, end to end, on a

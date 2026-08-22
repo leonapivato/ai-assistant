@@ -1,7 +1,50 @@
 # 172. A browser holds its web session outside the keyring, and its admission is recorded in place of a gate
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0182 (§1's third class member, only in cardinality — each bootstrap value a gateway process mints, rather than the one ADR-0168 §5 permitted)
 - Date: 2026-08-21
+- Partially superseded: 2026-08-23 by ADR-0182 — **one enumerated member, one
+  scope word, and the bound this ADR hangs three exemptions on is kept rather
+  than lifted.** ADR-0182 is `track:web-client` milestone 16's sessions decision
+  (#1230, #1429), the revisit ADR-0168 §12 defers to and §7 below names ("A
+  durable browser credential and a session that survives a restart. ADR-0168 §5
+  and §12 defer it to milestone 16").
+
+  **Replaced — §1's first clause, third member, only in cardinality.** "the
+  **bootstrap value** a gateway process mints and discloses once (ADR-0168 §5)"
+  becomes each bootstrap value a gateway process mints and discloses, because
+  ADR-0182 §1 supersedes ADR-0168 §5's one-per-process rule and has the gateway
+  mint a further value whenever the owner performs its mint act. A reader holding
+  only §1 places a gateway's second bootstrap value **outside** the web-session
+  credential class, and therefore outside the ADR-0004 §3 exemption §2 grants —
+  in breach of a clause it obeys in every substantive respect. That is ADR-0070
+  §1's first limb arriving on a scope word.
+
+  **Nothing else of §1 moves.** No kind of value joins the class, which stays
+  closed at three; the device credential and the enrolled hub identity are still
+  outside it; a verifier is still neither in it nor Tier 0; and §1's prohibition
+  on widening the class by resemblance is applied rather than narrowed. ADR-0182
+  §5 states the widening as cardinality and nothing else, in terms.
+
+  **The rest of this ADR is used as given, and the condition it exists to protect
+  is kept.** ADR-0182 §5 rules a web session's power still ends with its gateway
+  process, so §2's replacement (d) is satisfied — more strictly than before, since
+  a bootstrap value now additionally ceases on `gateway_bootstrap_ttl` and on
+  replacement by a fresh mint as well as on its single use. §6's conditionality is
+  applied rather than moved: the exemption is tested against the replacements and
+  passes. §3's admission-record replacement is applied, ADR-0182 §4 recording a
+  session-ceiling refusal under ADR-0168 §6 exactly as §3's third replacement
+  names. §4's ruling that the act which removes the class is stopping the gateway
+  process is as true afterwards as before, reaching more values without changing.
+  And §5's no-record-on-a-successful-read ruling keeps the scope it names, because
+  ADR-0182 keeps the process bound that scope turns on — it is not the design §5's
+  third clause says "reopens it and may not inherit it".
+
+  **The durable session §2 and §7 hold at arm's length is refused rather than
+  granted.** ADR-0182 §5 declines it for milestone 16 on its merits and records
+  that a later decision wanting it owes its own ratified ADR reopening ADR-0004
+  §3, §6 and §7 through this ADR's §2 — which is the sequence §2's last clause
+  requires.
+
 
 - **This is the prerequisite ADR-0168 §6 names**, for `track:web-client`
   milestone 13 (#1230). ADR-0168 ruled the gateway seat and the web session, found

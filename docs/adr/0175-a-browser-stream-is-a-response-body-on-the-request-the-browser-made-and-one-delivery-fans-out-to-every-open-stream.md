@@ -16,6 +16,44 @@
   (no principal, no grant, no per-browser scope) are used as given. §§1–5 and
   §7–§10 are untouched, and ADR-0177 §12 shows the working clause by clause.
 
+- Note: 2026-08-23 — **§10's seventh deferral is discharged, in both of its
+  directions.** That deferral held "a second live session, a durable session, and
+  several browsers admitted at once" to milestone 16, recording that "ADR-0172 §2's
+  replacement (d) makes the process-lifetime bound a condition of three ADR-0004
+  exemptions, and ADR-0174 §9 rules that milestone 14 is not that revisit. #1320 and
+  #1329 hold until then". ADR-0182 (`track:web-client` milestone 16, #1230, #1429) is
+  that revisit: **several browsers admitted at once — granted**, by a bootstrap value
+  minted on demand at the gateway's own process; **a durable session — refused**, so
+  every value's power still ends with the gateway process and ADR-0172 §2's condition
+  is kept. #1320 and #1329 are answered and close with that decision's implementing
+  lane.
+
+  **This note changes no decision of this ADR** (ADR-0070 §1), and nothing in it is
+  falsified by the second session arriving. §4's fan-out already writes each delivery
+  "to **every** delivery stream open at the moment it returned", so several admitted
+  browsers is the arrangement it was written for rather than a new case; §4's
+  poll-on-demand rule is unchanged and is what makes a re-armed stream cost nothing;
+  §5's acknowledgement rule, §7's response-keyed deadline and its "a stream ends no
+  later than the session that admitted it" bind unchanged with more than one session
+  in the table; §7's "an open stream is not use of the session that admitted it"
+  matters more and reads identically; and §8's figure is untouched.
+
+  **One thing ADR-0182 adds that this ADR's §4 grounds.** ADR-0182 §7 rules what the
+  **page** may re-establish of its own motion — a delivery stream, on
+  `visibilitychange` or `online`, announced in the page, never on a timer and never
+  an assistant request — and takes its ground from §4's own sentence, that abandoning
+  a stalled stream "costs the abandoned browser a reconnect — which is free, because
+  a session outlives its connections". That is an obligation on the page; ADR-0182 §7
+  states in terms that it adds none to the gateway, so §4's "polls again only when a
+  browser establishes a delivery stream afresh, and retries no poll of its own
+  motion" is applied rather than narrowed, as is ADR-0168 §9.
+
+  **§10's resumption deferral is untouched.** ADR-0182 §7 has a cut answer stream
+  re-asked rather than resumed and supplies nothing durable, so ADR-0173 §13's
+  decline and its trigger (#1314 landing, plus a measured drop rate) stand exactly as
+  this ADR inherited them.
+
+
 - **This is `track:web-client` milestone 14's surface decision** (#1230). Its
   exit test is *a conversation and a pushed notification, end to end, on a
   phone*, and three ratified deferrals converge on it: ADR-0168 §12's
