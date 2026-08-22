@@ -137,11 +137,41 @@ button[disabled] {
   color: var(--alarm);
 }
 
+/*
+ * A fault, in the panel whose act raised it (#1429). The page foot keeps one slot for
+ * the faults no panel owns and every panel builds its own, so the rule is written for
+ * the class rather than for either place.
+ *
+ * The slot sits under the panel's heading and above whatever that panel last rendered,
+ * which is deliberate: a read that failed leaves the previous answer on screen, and a
+ * condition placed *below* it would be read as an annotation on that answer rather
+ * than as the reason there is no newer one.
+ */
 .fault {
   border: 1px solid var(--alarm);
   border-radius: 10px;
   padding: 0.8rem 1rem;
   color: var(--alarm);
+}
+
+.panel > .fault {
+  margin: 0 0 0.9rem;
+}
+
+.fault-text {
+  margin: 0;
+}
+
+/*
+ * Dismiss is quieter than an ordinary button because it is not the act on offer: the
+ * act is whatever the panel already carries, and this only takes a condition off the
+ * screen. It is outlined rather than filled for that reason and for no other.
+ */
+.fault-dismiss {
+  margin-top: 0.6rem;
+  background: transparent;
+  color: var(--alarm);
+  border: 1px solid var(--alarm);
 }
 
 /*

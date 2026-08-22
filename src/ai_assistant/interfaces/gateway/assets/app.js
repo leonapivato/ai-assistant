@@ -27,10 +27,27 @@
 // request that opens it, so on either one the header half above has nowhere to go
 // that ADR-0168 §6 admits — and a request carrying the cookie half alone is refused
 // exactly as one carrying neither is.
+//
+// **A fault is written beside the act that raised it** (#1429). One slot at the foot
+// of a thirteen-panel page is a condition the owner has to go and find, which is
+// ADR-0083's ruling 4 losing at the last hop: the difference between a transport
+// failure and a refusal survives the whole system and then arrives off-screen. Each
+// panel carries its own slot and its own dismiss control, and the foot slot is kept
+// for the faults no panel owns — the page's own load, and the session.
+//
+// **Nothing here retries on a timer and nothing re-arms in silence.** ADR-0168 §9
+// forbids the gateway retrying silently, and a page spinning against an unreachable
+// hub would be that failure in the front end's clothes — so what is forbidden is the
+// silence, not the reconnect. This file re-establishes the delivery stream when the
+// owner brings the page back to the foreground or the device's network returns, and
+// **says in the page that it did and why**. That costs nothing: an abandoned delivery
+// stream costs the browser "a reconnect — which is free, because a session outlives
+// its connections" (ADR-0175 §4). There is no `setTimeout` and no `setInterval` here.
 
 "use strict";
 
 const STORAGE_KEY = "assistant.session.header-half";
+const CONVERSATION_KEY = "assistant.session.conversation-id";
 const SESSION_HEADER = "X-Assistant-Session";
 
 // Which stream values end a stream (ADR-0175 §2). A reader that reached one has the
@@ -39,12 +56,26 @@ const SESSION_HEADER = "X-Assistant-Session";
 // browser, on a carrier whose status code was written before anything went wrong.
 const TERMINAL_KINDS = new Set(["outcome", "fault"]);
 
-// The conversation the last turn ran under, kept in page state alone. The hub
-// owns the conversation; this is the id it handed back, held so the next question
-// continues the same one rather than starting a fresh one the owner never asked
-// for — the same thing `assistant ask --conversation` does at the terminal. It is
-// not persisted: a reload is a new page, and the id is the hub's to hand back.
-let conversationId = null;
+// The conversation the last turn ran under. The hub owns the conversation; this is
+// the id it handed back, held so the next question continues the same one rather than
+// starting a fresh one the owner never asked for — the same thing
+// `assistant ask --conversation` does at the terminal.
+//
+// **It is persisted, in the session's own key family and under the session's own
+// scoping argument** (ADR-0168 §6, #1429). Web storage is scoped to scheme, host and
+// port, which is exactly the property that makes it fit to hold the header half: the
+// id at `127.0.0.1:8422` is unreadable from `127.0.0.1:9000`. An earlier draft of this
+// file kept it in page state alone, and the milestone-14 phone QA found what that
+// costs — a reload silently started a conversation the owner never asked for, and the
+// page could not say which one the next question would land in (#1371's first clause).
+//
+// **It is an id and not a capability.** It admits nothing on its own: every request
+// carrying it is admitted by ADR-0168 §6's two values and by nothing else, so a
+// conversation id read out of storage without them reaches no conversation. It is
+// destroyed with the half it sits beside — `forgetHeaderHalf` clears both, so a
+// session that was lost or replaced never carries a stale thread into a new one — and
+// by forgetting the conversation itself.
+let conversationId = storedConversation();
 
 // Whether a delivery stream is open. One at a time: a second would be a second poll
 // the hub would close under ADR-0131 §2, and the gateway holds one poll however
@@ -79,16 +110,114 @@ function forgetHeaderHalf() {
   } catch (_) {
     // Nothing to do: a browser that will not store will not have stored.
   }
+  // The conversation goes with the session, in one place rather than at each of the
+  // callers: a thread carried into a session the owner started afresh would be this
+  // page continuing something the hub was never asked to continue.
+  setConversation(null);
+}
+
+function storedConversation() {
+  try {
+    return window.localStorage.getItem(CONVERSATION_KEY);
+  } catch (_) {
+    return null;
+  }
+}
+
+// Which conversation the next question lands in, held and said (#1371's first clause).
+//
+// **"None yet" is said rather than left blank.** The hint used to be empty until a
+// turn came back, and an empty line is what left the owner unable to tell a fresh
+// thread from a continued one on the phone.
+function setConversation(id) {
+  conversationId = id;
+  try {
+    if (id === null) {
+      window.localStorage.removeItem(CONVERSATION_KEY);
+    } else {
+      window.localStorage.setItem(CONVERSATION_KEY, id);
+    }
+  } catch (_) {
+    // A browser that will not store still holds the id for this page's life. What it
+    // loses is the thread surviving a reload, and nothing else.
+  }
+  el("conversation").textContent =
+    id === null
+      ? "No conversation yet. Your next question starts one."
+      : `Conversation ${id}. Your next question continues it.`;
 }
 
 function show(id, visible) {
   el(id).hidden = !visible;
 }
 
-function fault(message) {
-  const node = el("fault");
-  node.textContent = message;
-  show("fault", message !== null);
+// --- where a fault is written (#1429) ----------------------------------------
+//
+// **Beside the act that raised it.** A panel's slot is built here rather than written
+// out thirteen times in `index.html`: it is the page's own furniture, no hub value
+// reaches it as anything but `textContent`, and a fragment repeated once per panel is
+// thirteen places for one of them to drift. The slot sits immediately under the
+// panel's heading, above whatever the panel last managed to render.
+//
+// **`null` names the page foot**, which keeps its slot for the faults no panel owns:
+// the page's own load, and the session. That slot is in the document, because it has
+// to exist before anything has been built.
+const faultSlots = new Map();
+
+function faultSlot(panelId) {
+  if (panelId === null) {
+    return el("fault");
+  }
+  const held = faultSlots.get(panelId);
+  if (held !== undefined) {
+    return held;
+  }
+  const node = document.createElement("div");
+  node.className = "fault";
+  node.hidden = true;
+  const text = document.createElement("p");
+  text.className = "fault-text";
+  node.appendChild(text);
+  node.appendChild(offerDismiss(panelId));
+  const panel = el(panelId);
+  panel.insertBefore(node, panel.firstElementChild.nextSibling);
+  faultSlots.set(panelId, node);
+  return node;
+}
+
+// **Dismissing takes the condition off the screen and does nothing else.** It retries
+// nothing, sends nothing, and asserts nothing about whether the condition still holds
+// — a control that quietly re-ran the act would be exactly the silent retry ADR-0168
+// §9 forbids, wearing a button's clothes.
+function offerDismiss(panelId) {
+  const dismiss = document.createElement("button");
+  dismiss.type = "button";
+  dismiss.className = "fault-dismiss";
+  dismiss.textContent = "Dismiss";
+  dismiss.addEventListener("click", () => fault(null, panelId));
+  return dismiss;
+}
+
+function fault(message, panelId) {
+  const where = panelId === undefined ? null : panelId;
+  const node = faultSlot(where);
+  node.firstElementChild.textContent = message === null ? "" : message;
+  node.hidden = message === null;
+  if (message !== null && where !== null) {
+    // A read that failed before its panel was ever shown would otherwise write the
+    // reason into a panel nobody can see, which is the flattening ADR-0168 §9 forbids
+    // arriving as silence. A panel carrying a fault is still a panel showing an
+    // answer: the answer is that the read did not happen.
+    show(where, true);
+  }
+}
+
+// Every slot at once, for the two moments the page changes what it is — a session
+// starting and a session ending. Nothing else clears a panel it is not acting in: a
+// fault about the connection surface is still true while the owner reads beliefs.
+function clearFaults() {
+  fault(null);
+  faultSlots.forEach((_, panelId) => fault(null, panelId));
 }
 
 function clearNode(node) {
@@ -205,12 +334,46 @@ const FAULTS = {
 // A stream whose body ended without a terminal value (ADR-0175 §2). Not a fault the
 // gateway named — it is the connection itself going away, which is exactly what §2
 // makes the front end report as a transport failure.
-const STREAM_CUT =
-  "The connection carrying that answer ended before the gateway finished it. " +
-  "Nothing here is the whole answer; ask again.";
+//
+// **Two of them, because they end two different things.** One message served both
+// while the delivery stream was the second reader of one wording, and it told an owner
+// whose notifications had stopped that "the connection carrying that answer" had gone.
+// The condition is the same; what was cut is not.
+const ANSWER_STREAM_CUT =
+  "The connection carrying that answer ended before the gateway finished it. What had " +
+  "been written is not the answer and was not kept, so it has been cleared rather " +
+  "than left on screen looking like one. A cut stream is asked again, not resumed.";
 
+const DELIVERY_STREAM_CUT =
+  "The connection carrying notifications ended before the gateway finished it, so " +
+  "this browser has stopped watching. Nothing the hub still holds was lost: it is " +
+  "polled only while a browser is watching, so nothing was taken out of its outbox " +
+  "while nothing here was listening. Start watching again.";
+
+// **The gateway is where a session lives, so the gateway stopping is where it ends**
+// (ADR-0168 §4: minted at the gateway, held in memory, and dies with the process).
+// This is the sentence for the surprise rather than a restatement of the mechanism:
+// nothing is wrong with the browser, nothing is recoverable, and the way back is a
+// fresh bootstrap value.
 const GATEWAY_GONE =
-  "The gateway did not answer. It may have stopped; every session ends when it does.";
+  "The gateway did not answer, so it may have stopped. " +
+  "Every session ends with the gateway: a session is held in that process's memory " +
+  "and written down nowhere, so a gateway that starts again has no memory of this one. " +
+  "Start the gateway, then start a session with the value it prints.";
+
+// Why a delivery stream can end in `no-live-session` when nothing was refused and the
+// owner did nothing — the one condition on this page that nobody guesses right.
+//
+// An open stream is **not** use of the session that admitted it:
+// `gateway_session_idle_timeout` "is refreshed by a request the gateway admits and by
+// nothing else — not by a stream's continued existence, not by a value the gateway
+// writes on one, and not by a delivery poll" (ADR-0175 §7). So a page left open and
+// watching, asked nothing for an hour, expires exactly on time, and the stream ends
+// with the session that held it (§7's fourth clause).
+const IDLE_WHILE_WATCHING =
+  "Watching does not keep a session alive. A session ends an hour after the last " +
+  "thing you asked (gateway_session_idle_timeout), and a stream carries no request, " +
+  "so a page left watching and asked nothing expires on time.";
 
 function describe(body, status) {
   const known = FAULTS[body.fault];
@@ -219,6 +382,31 @@ function describe(body, status) {
     return known + detail;
   }
   return `The gateway refused that request (HTTP ${status}).`;
+}
+
+// The same, for a value that ended a **delivery** stream. The extra sentence is on
+// this ending alone and deliberately: an answer stream's own request refreshed the
+// idle timeout on its way in, so `no-live-session` there is not the hour passing and
+// saying it was would be a wrong explanation rather than a missing one.
+function describeDeliveryEnd(value, status) {
+  const said = describe(value, status);
+  return value.fault === "no-live-session" ? `${said} ${IDLE_WHILE_WATCHING}` : said;
+}
+
+// One condition, reported where the act that raised it is.
+//
+// **A condition that ended the session is reported in the bootstrap panel instead**,
+// because `sessionLost` has just hidden every other one. Writing it into the panel the
+// act belonged to would put the reason behind `hidden` and leave the owner looking at
+// a bootstrap form that appeared for no stated reason — ADR-0168 §9's distinction
+// arriving as silence at the last hop.
+function report(panelId, body, message) {
+  const lost = sessionLost(body);
+  fault(message, lost ? "bootstrap" : panelId);
+}
+
+function refused(panelId, body, status) {
+  report(panelId, body, describe(body, status));
 }
 
 // Read one `application/x-ndjson` body: one JSON object per line, each carrying the
@@ -286,9 +474,8 @@ function renderOutcome(outcome) {
   // hub decides which conversation a turn ran under, and forgetting one on an
   // answer that names none would silently start a new one on the next question.
   if (outcome.conversation_id) {
-    conversationId = outcome.conversation_id;
+    setConversation(outcome.conversation_id);
   }
-  el("conversation").textContent = conversationId ? `Conversation ${conversationId}` : "";
   show("answer", true);
 }
 
@@ -571,7 +758,7 @@ let pendingRun = 0;
 // panel that says nothing, so it stays closed, and an empty answer to the button is
 // the answer and is shown.
 async function readPending(quiet) {
-  fault(null);
+  fault(null, "confirmations");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -580,7 +767,7 @@ async function readPending(quiet) {
   pendingRun += 1;
   const run = pendingRun;
   try {
-    const body = await relay(half, "/confirmations", {});
+    const body = await relay(half, "/confirmations", {}, "confirmations");
     if (body === null || run !== pendingRun) {
       return;
     }
@@ -596,7 +783,7 @@ async function readPending(quiet) {
     body.confirmations.forEach((one) => renderConfirmation(list, one));
     show("confirmations", true);
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "confirmations");
   }
 }
 
@@ -633,7 +820,7 @@ async function answerConfirmation(token, approved) {
   if (spent.has(token)) {
     return;
   }
-  fault(null);
+  fault(null, "confirmations");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -644,12 +831,12 @@ async function answerConfirmation(token, approved) {
   spent.add(token);
   let body = null;
   try {
-    body = await relay(half, "/confirmation/resume", { token, approved });
+    body = await relay(half, "/confirmation/resume", { token, approved }, "confirmations");
   } catch (_) {
     // The gateway is gone. Nothing was answered as far as this page can tell, so the
     // continuation is given back and the row stays answerable.
     spent.delete(token);
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "confirmations");
     return;
   }
   if (body === null) {
@@ -667,7 +854,7 @@ async function answerConfirmation(token, approved) {
 
 async function startSession(event) {
   event.preventDefault();
-  fault(null);
+  fault(null, "bootstrap");
   const value = el("bootstrap-value").value.trim();
   let response;
   let body;
@@ -679,17 +866,17 @@ async function startSession(event) {
     });
     body = await readBody(response);
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "bootstrap");
     return;
   }
   if (!response.ok) {
-    fault(describe(body, response.status));
+    fault(describe(body, response.status), "bootstrap");
     return;
   }
   el("bootstrap-value").value = "";
-  conversationId = null;
+  setConversation(null);
   if (!rememberHeaderHalf(body.header_half)) {
-    fault("This browser will not store the session, so it cannot hold one.");
+    fault("This browser will not store the session, so it cannot hold one.", "bootstrap");
     return;
   }
   showConsole();
@@ -721,7 +908,7 @@ function sessionLost(body) {
 
 async function ask(event) {
   event.preventDefault();
-  fault(null);
+  fault(null, "console");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -752,7 +939,7 @@ async function ask(event) {
     // `fetch` rejects when the connection itself failed — the gateway is gone,
     // which is a different fault from the hub being gone and is said as one.
     show("answer", false);
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "console");
   } finally {
     button.disabled = false;
   }
@@ -770,8 +957,7 @@ async function askWhole(half, asked) {
     return;
   }
   show("answer", false);
-  fault(describe(body, response.status));
-  sessionLost(body);
+  refused("console", body, response.status);
 }
 
 // One streamed turn (ADR-0175 §3): zero or more chunk values, then one terminal
@@ -792,8 +978,7 @@ async function askStreaming(half, asked) {
   if (!response.ok) {
     const body = await readBody(response);
     show("answer", false);
-    fault(describe(body, response.status));
-    sessionLost(body);
+    refused("console", body, response.status);
     return;
   }
   const panel = el("answer-body");
@@ -813,13 +998,29 @@ async function askStreaming(half, asked) {
     // means the two halves of one distribution disagree (ADR-0168 §10).
   }
   if (terminal === null) {
-    fault(STREAM_CUT);
+    // **The partial text is cleared rather than left under the fault.** A body that
+    // ended without a terminal value is a transport failure and not an answer
+    // (ADR-0175 §2), and ADR-0173 §3 makes the terminal outcome's `reply` the answer
+    // — "no front end treats an accumulated chunk sequence as the record of what the
+    // assistant said". Leaving the chunks on screen renders a non-answer exactly as
+    // ADR-0173 §6's fourth shape is rendered: an answer owed and *partly* produced,
+    // which arrives as a terminal outcome carrying `reply_degraded` and is said to be
+    // incomplete in the same breath. Losing that distinction is what this renderer
+    // spends its `renderReply` branch preventing, and a cut stream is not that shape.
+    //
+    // The alternative — label the text unmistakably as partial — was declined for the
+    // same reason: it would give a transport failure the wording of an answer the
+    // assistant did produce, and there is nothing to be done with the text either way.
+    // ADR-0175 §10 declines resuming an interrupted stream (#1314), so the whole of
+    // the recovery is asking again.
+    clearNode(panel);
+    show("answer", false);
+    fault(ANSWER_STREAM_CUT, "console");
     return;
   }
   if (terminal.kind === "fault") {
     show("answer", false);
-    fault(describe(terminal, response.status));
-    sessionLost(terminal);
+    refused("console", terminal, response.status);
     return;
   }
   renderOutcome(terminal.outcome);
@@ -836,6 +1037,49 @@ async function askStreaming(half, asked) {
 function deliveryState(text) {
   el("delivery-state").textContent = text;
   el("watch-button").hidden = watching;
+}
+
+// --- coming back, and saying so (#1429, ADR-0175 §4) -------------------------
+//
+// ADR-0168 §9 rules out the gateway retrying *silently*, and #1429 states the same
+// rule for this page: re-arming the delivery stream when the owner brings the page
+// back, or when the device's network returns, is permitted when it is announced in
+// the page and never when it is silent. ADR-0175 §4 is why it costs nothing — an
+// abandoned delivery stream costs the browser "a reconnect — which is free, because a
+// session outlives its connections".
+//
+// **This is the failure the phone kept hitting.** A backgrounded page has its stream
+// abandoned by the gateway the moment a write to it does not complete (§4's last
+// clause), and the panel went on reading "Watching for notifications" until the owner
+// noticed and pressed the button. Two events replace that, and no timer does.
+//
+// **What is not claimed.** `watching` is this page's own record of whether a stream is
+// open, and a socket that has died without the `fetch` settling still reads as open —
+// so a re-arm on such a page does nothing, and when the request finally settles the
+// panel says so and the button comes back. Forcing a second stream to find out would
+// hold two connections against `gateway_max_browser_connections` for one browser.
+const CAME_BACK =
+  "This page came back to the foreground with nothing listening, so it started " +
+  "watching again — announced here rather than done quietly.";
+
+const NETWORK_BACK =
+  "This device's network came back with nothing listening, so it started watching " +
+  "again — announced here rather than done quietly.";
+
+// What a re-arm does **not** promise. The gateway holds a poll only while a stream is
+// open, so nothing was taken out of the hub's durable outbox while this page was not
+// watching (ADR-0175 §4) — but a delivery returned in the moment the last stream ended
+// "is written nowhere" and is not replayed, and a page claiming otherwise would be
+// promising a guarantee the gateway declines to make.
+const NOTHING_REPLAYED =
+  "Nothing waiting at the hub was lost: it is polled only while a browser is watching. " +
+  "A notification written in the moment the last stream ended is not repeated.";
+
+function rearm(because) {
+  if (headerHalf() === null || watching) {
+    return;
+  }
+  watchDeliveries(`${because} ${NOTHING_REPLAYED}`);
 }
 
 function stopWatching() {
@@ -873,24 +1117,28 @@ function renderNotification(value) {
 // quiet for longer than that cadence is one something has happened to, which is
 // what the keep-alive exists to make observable at either end.
 //
-// **It is not restarted automatically.** A stream that ends says so and offers the
-// owner a button, rather than reconnecting on a timer nobody can see: ADR-0168 §9's
+// **It is never restarted on a timer, and never restarted in silence.** A stream that
+// ends says so and offers the owner a button; a stream re-armed by `rearm` above says
+// that it was and why, in this panel, before anything arrives on it. ADR-0168 §9's
 // rule against silent retrying is the gateway's, and a page that spun against an
-// unreachable hub would be the same failure wearing the front end's clothes.
-async function watchDeliveries() {
+// unreachable hub would be the same failure wearing the front end's clothes — so
+// `because` is not decoration, it is the condition on which re-arming is permitted at
+// all, and a caller with nothing to say is the owner's own click.
+async function watchDeliveries(because) {
   const half = headerHalf();
   if (half === null || watching) {
     return;
   }
   watching = true;
-  deliveryState("Watching for notifications.");
+  deliveryState(
+    because ? `Watching for notifications. ${because}` : "Watching for notifications."
+  );
   try {
     const response = await fetch("/deliveries", { headers: admitted(half, false) });
     if (!response.ok) {
       const body = await readBody(response);
       stopWatching();
-      fault(describe(body, response.status));
-      sessionLost(body);
+      refused("notifications", body, response.status);
       return;
     }
     let terminal = null;
@@ -906,19 +1154,20 @@ async function watchDeliveries() {
       // the absence of an ending already says.
     }
     stopWatching();
-    fault(terminal === null ? STREAM_CUT : describe(terminal, response.status));
-    if (terminal !== null) {
-      sessionLost(terminal);
+    if (terminal === null) {
+      fault(DELIVERY_STREAM_CUT, "notifications");
+    } else {
+      report("notifications", terminal, describeDeliveryEnd(terminal, response.status));
     }
   } catch (_) {
     stopWatching();
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "notifications");
   }
 }
 
 // --- the conversation surface (ADR-0175 §6) ----------------------------------
 
-async function relay(half, path, payload) {
+async function relay(half, path, payload, panelId) {
   const response = await fetch(path, {
     method: "POST",
     headers: admitted(half, true),
@@ -928,20 +1177,19 @@ async function relay(half, path, payload) {
   if (response.ok) {
     return body;
   }
-  fault(describe(body, response.status));
-  sessionLost(body);
+  refused(panelId, body, response.status);
   return null;
 }
 
 async function listConversations() {
-  fault(null);
+  fault(null, "conversations");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
   try {
-    const body = await relay(half, "/conversations", {});
+    const body = await relay(half, "/conversations", {}, "conversations");
     if (body === null) {
       return;
     }
@@ -953,7 +1201,7 @@ async function listConversations() {
     body.conversations.forEach((one) => renderConversation(list, one));
     show("conversations", true);
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "conversations");
   }
 }
 
@@ -976,8 +1224,7 @@ function renderConversation(list, summary) {
   resume.type = "button";
   resume.textContent = "Continue";
   resume.addEventListener("click", () => {
-    conversationId = summary.id;
-    el("conversation").textContent = `Conversation ${conversationId}`;
+    setConversation(summary.id);
     el("utterance").focus();
   });
   const forget = document.createElement("button");
@@ -996,14 +1243,14 @@ function renderConversation(list, summary) {
 // both session halves. Showing the count and the span before destroying is
 // ADR-0073 §5's show-then-confirm for the owner's benefit, not a defence.
 async function forgetConversation(id) {
-  fault(null);
+  fault(null, "conversations");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
   try {
-    const digest = await relay(half, "/conversation", { conversation_id: id });
+    const digest = await relay(half, "/conversation", { conversation_id: id }, "conversations");
     if (digest === null) {
       return;
     }
@@ -1016,17 +1263,16 @@ async function forgetConversation(id) {
     if (!asked) {
       return;
     }
-    const done = await relay(half, "/conversation/forget", { conversation_id: id });
+    const done = await relay(half, "/conversation/forget", { conversation_id: id }, "conversations");
     if (done === null) {
       return;
     }
     if (conversationId === id) {
-      conversationId = null;
-      el("conversation").textContent = "";
+      setConversation(null);
     }
     await listConversations();
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "conversations");
   }
 }
 
@@ -1122,7 +1368,12 @@ async function act(half, path, payload) {
     // is reported as one of exactly three, "and never as either of the other two".
     return { outcome: LANDED, body };
   }
-  sessionLost(body);
+  if (sessionLost(body)) {
+    // The act log has just been hidden with the rest of the console, so the condition
+    // is restated beside the only act left to take. `reportAct` still writes its own
+    // line below, and it is about what the act did rather than about the session.
+    fault(describe(body, response.status), "bootstrap");
+  }
   // A refusal whose condition this page cannot read is a refusal it cannot classify,
   // and ADR-0139 §4's third outcome is what an unclassifiable one is. The reachable
   // case is a response cut after its headers: the status may be the `502` the gateway
@@ -1169,7 +1420,7 @@ function reportAct(panel, what, result) {
 
 // Open the act log fresh, so what is on screen is this act and never the last one.
 function beginActs(heading) {
-  fault(null);
+  fault(null, "acts");
   const panel = el("act-log");
   clearNode(panel);
   line(panel, heading, "hint");
@@ -1178,14 +1429,14 @@ function beginActs(heading) {
 }
 
 async function listSources() {
-  fault(null);
+  fault(null, "sources");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
   try {
-    const body = await relay(half, "/sources", {});
+    const body = await relay(half, "/sources", {}, "sources");
     if (body === null) {
       return;
     }
@@ -1203,7 +1454,7 @@ async function listSources() {
     body.sources.forEach((one) => renderSource(list, one));
     show("sources", true);
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "sources");
   }
 }
 
@@ -1289,7 +1540,8 @@ function offerScope(item, source, label, live) {
     if (scope.length === 0) {
       fault(
         "Choose at least one thing I may do with it. A grant authorising nothing " +
-          "is not a grant, and the hub refuses one."
+          "is not a grant, and the hub refuses one.",
+        "sources"
       );
       return;
     }
@@ -1321,7 +1573,7 @@ async function grantSource(source, scope) {
     await listStanding();
     await listSources();
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "acts");
   }
 }
 
@@ -1350,7 +1602,7 @@ async function revokeSource(source) {
     await listStanding();
     await listSources();
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "acts");
   }
 }
 
@@ -1401,7 +1653,7 @@ async function amendSource(source, scope) {
     await listStanding();
     await listSources();
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "acts");
   }
 }
 
@@ -1422,7 +1674,7 @@ async function listStanding() {
   el("standing-state").textContent = "";
   show("standing", true);
   try {
-    const body = await relay(half, "/grants/standing", {});
+    const body = await relay(half, "/grants/standing", {}, "standing");
     const list = el("standing-list");
     clearNode(list);
     if (body === null) {
@@ -1439,7 +1691,7 @@ async function listStanding() {
   } catch (_) {
     el("standing-state").textContent =
       "I could not read what you currently authorise, so it is unread.";
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "standing");
   }
 }
 
@@ -1465,14 +1717,14 @@ function renderStanding(list, grant) {
 // record on a different page from the grant it revokes. So a row says which kind of
 // record it is and stops there.
 async function listGrantHistory() {
-  fault(null);
+  fault(null, "history");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
   try {
-    const body = await relay(half, "/grants/recent", {});
+    const body = await relay(half, "/grants/recent", {}, "history");
     if (body === null) {
       return;
     }
@@ -1484,7 +1736,7 @@ async function listGrantHistory() {
     body.grants.forEach((one) => renderHistory(list, one));
     show("history", true);
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "history");
   }
 }
 
@@ -1585,7 +1837,7 @@ async function listBeliefs() {
 // arrives is rendered against the question it was asked — and the run check after the
 // await is what retires it if the owner has since asked a different one.
 async function readBeliefs(more, run) {
-  fault(null);
+  fault(null, "beliefs");
   if (run !== runs.beliefs) {
     return;
   }
@@ -1600,7 +1852,7 @@ async function readBeliefs(more, run) {
     asked.bands = bands;
   }
   try {
-    const body = await relay(half, "/beliefs", asked);
+    const body = await relay(half, "/beliefs", asked, "beliefs");
     if (body === null || run !== runs.beliefs) {
       return;
     }
@@ -1616,7 +1868,7 @@ async function readBeliefs(more, run) {
     offerMore(list, body.beliefs.length, () => readBeliefs(true, run));
     show("beliefs", true);
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "beliefs");
   }
 }
 
@@ -1752,14 +2004,14 @@ function forgetWarning(band) {
 // forget the belief that id names, not a guarantee that the bytes destroyed are the
 // bytes rendered.
 async function forgetBelief(id) {
-  fault(null);
+  fault(null, "beliefs");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
   try {
-    const held = await relay(half, "/belief", { record_id: id });
+    const held = await relay(half, "/belief", { record_id: id }, "beliefs");
     if (held === null) {
       return;
     }
@@ -1783,16 +2035,16 @@ async function forgetBelief(id) {
     if (!asked) {
       return;
     }
-    const done = await relay(half, "/belief/forget", { record_id: id });
+    const done = await relay(half, "/belief/forget", { record_id: id }, "beliefs");
     if (done === null) {
       return;
     }
     if (!done.destroyed) {
-      fault("There was nothing live by that id to destroy.");
+      fault("There was nothing live by that id to destroy.", "beliefs");
     }
     await listBeliefs();
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "beliefs");
   }
 }
 
@@ -1838,7 +2090,7 @@ const QUESTION_LISTS = {
 // a question past the first page would be one the owner can neither answer nor
 // destroy, and a rendered row is the only route to either.
 async function readQuestions(path, more, run) {
-  fault(null);
+  fault(null, "questions");
   const listing = QUESTION_LISTS[path];
   if (run !== runs[listing.counter]) {
     return;
@@ -1850,7 +2102,7 @@ async function readQuestions(path, more, run) {
   }
   const offset = readSoFar[listing.counter];
   try {
-    const body = await relay(half, path, { limit: PAGE, offset });
+    const body = await relay(half, path, { limit: PAGE, offset }, "questions");
     if (body === null || run !== runs[listing.counter]) {
       return;
     }
@@ -1870,7 +2122,7 @@ async function readQuestions(path, more, run) {
     offerMore(list, body.questions.length, () => readQuestions(path, true, run));
     show("questions", true);
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "questions");
   }
 }
 
@@ -1984,7 +2236,7 @@ function offerAnswer(item, question) {
 }
 
 async function answerQuestion(id, accept) {
-  fault(null);
+  fault(null, "questions");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -1992,14 +2244,14 @@ async function answerQuestion(id, accept) {
   }
   const panel = beginActs("Answering.");
   try {
-    const body = await relay(half, "/question/answer", { question_id: id, accept });
+    const body = await relay(half, "/question/answer", { question_id: id, accept }, "questions");
     if (body === null) {
       return;
     }
     renderAnswer(panel, body.answered);
     await listQuestions();
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "questions");
   }
 }
 
@@ -2065,20 +2317,20 @@ function renderAnswer(panel, outcome) {
 // and not absorbed): the two listings ADR-0078 §8 already gives return the question
 // whole, and re-reading one is a call this page already makes.
 async function forgetQuestion(id, path, offset) {
-  fault(null);
+  fault(null, "questions");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
   try {
-    const body = await relay(half, path, { limit: PAGE, offset });
+    const body = await relay(half, path, { limit: PAGE, offset }, "questions");
     if (body === null) {
       return;
     }
     const question = body.questions.find((one) => one.id === id);
     if (question === undefined) {
-      fault(QUESTION_GONE);
+      fault(QUESTION_GONE, "questions");
       await listQuestions();
       return;
     }
@@ -2092,13 +2344,13 @@ async function forgetQuestion(id, path, offset) {
     if (!asked) {
       return;
     }
-    const done = await relay(half, "/question/forget", { question_id: id });
+    const done = await relay(half, "/question/forget", { question_id: id }, "questions");
     if (done === null) {
       return;
     }
     await listQuestions();
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "questions");
   }
 }
 
@@ -2171,7 +2423,7 @@ async function listNotifications() {
 // would hide a record the owner can still destroy — and destroying it is the only
 // way its subject can be raised afresh.
 async function readNotifications(more, run) {
-  fault(null);
+  fault(null, "review");
   if (run !== runs.notifications) {
     return;
   }
@@ -2182,7 +2434,7 @@ async function readNotifications(more, run) {
   }
   const offset = readSoFar.notifications;
   try {
-    const body = await relay(half, "/notifications", { limit: PAGE, offset });
+    const body = await relay(half, "/notifications", { limit: PAGE, offset }, "review");
     if (body === null || run !== runs.notifications) {
       return;
     }
@@ -2203,7 +2455,7 @@ async function readNotifications(more, run) {
     offerMore(list, body.notifications.length, () => readNotifications(true, run));
     show("review", true);
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "review");
   }
 }
 
@@ -2315,26 +2567,27 @@ function offerNotificationActs(item, record, offset) {
 // stays readable and stays in the export, and whether it ever reached a device is a
 // different question about a different object.
 async function dismissNotification(id) {
-  fault(null);
+  fault(null, "review");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
   try {
-    const done = await relay(half, "/notification/dismiss", { notification_id: id });
+    const done = await relay(half, "/notification/dismiss", { notification_id: id }, "review");
     if (done === null) {
       return;
     }
     if (!done.dismissed) {
       fault(
         "There was nothing actionable by that id to dismiss — it may have been " +
-          "dismissed, ruled out or expired already."
+          "dismissed, ruled out or expired already.",
+        "review"
       );
     }
     await listNotifications();
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "review");
   }
 }
 
@@ -2347,20 +2600,20 @@ async function dismissNotification(id) {
 // over a record re-read immediately before it is offered so that what is destroyed is
 // something the page has just seen rather than something it last saw minutes ago.
 async function forgetNotification(id, offset) {
-  fault(null);
+  fault(null, "review");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
   try {
-    const body = await relay(half, "/notifications", { limit: PAGE, offset });
+    const body = await relay(half, "/notifications", { limit: PAGE, offset }, "review");
     if (body === null) {
       return;
     }
     const record = body.notifications.find((one) => one.id === id);
     if (record === undefined) {
-      fault(NOTIFICATION_GONE);
+      fault(NOTIFICATION_GONE, "review");
       await listNotifications();
       return;
     }
@@ -2375,13 +2628,13 @@ async function forgetNotification(id, offset) {
     if (!asked) {
       return;
     }
-    const done = await relay(half, "/notification/forget", { notification_id: id });
+    const done = await relay(half, "/notification/forget", { notification_id: id }, "review");
     if (done === null) {
       return;
     }
     await listNotifications();
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "review");
   }
 }
 
@@ -2395,35 +2648,35 @@ async function forgetNotification(id, offset) {
 // a fact about that act, where what stands is a fact only the hub can state.
 
 async function listTuning() {
-  fault(null);
+  fault(null, "tuning");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
   try {
-    const body = await relay(half, "/notification/preferences", {});
+    const body = await relay(half, "/notification/preferences", {}, "tuning");
     if (body === null) {
       return;
     }
     renderTuning(body.preferences);
     show("tuning", true);
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "tuning");
   }
 }
 
 // One act on the standing settings: read it whole, change the one thing named, write
 // it whole, and render what came back.
 async function writePreferences(change) {
-  fault(null);
+  fault(null, "tuning");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
   try {
-    const read = await relay(half, "/notification/preferences", {});
+    const read = await relay(half, "/notification/preferences", {}, "tuning");
     if (read === null) {
       return;
     }
@@ -2438,7 +2691,7 @@ async function writePreferences(change) {
     renderTuning(written.preferences);
     show("tuning", true);
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "tuning");
   }
 }
 
@@ -2556,7 +2809,7 @@ function renderReaches(body, preferences) {
   save.textContent = "Set";
   save.addEventListener("click", () => {
     if (named.value.trim() === "") {
-      fault("Name the class to set. Every notification above prints its own.");
+      fault("Name the class to set. Every notification above prints its own.", "tuning");
       return;
     }
     writePreferences((held) => withReach(held, named.value, chooser.value));
@@ -2620,7 +2873,7 @@ function quietWindowForm() {
     const start = minuteOfDay(from.value);
     const end = minuteOfDay(to.value);
     if (start === null || end === null) {
-      fault("Give both an hour to start and an hour to end.");
+      fault("Give both an hour to start and an hour to end.", "tuning");
       return;
     }
     // Refused here rather than sent, because the refusal is about what was typed and
@@ -2628,7 +2881,7 @@ function quietWindowForm() {
     // unreadable as either "nothing" or "everything", and a setting whose meaning a
     // reader has to guess at silently stops every interruption.
     if (start === end) {
-      fault("A quiet window has to start and end at different times.");
+      fault("A quiet window has to start and end at different times.", "tuning");
       return;
     }
     writePreferences((held) => ({
@@ -2684,7 +2937,7 @@ function renderBudget(body, preferences) {
     // not travel as a number.
     const asked = count.value.trim();
     if (!/^[0-9]{1,20}$/.test(asked)) {
-      fault("Give a whole number of interruptions, zero or more.");
+      fault("Give a whole number of interruptions, zero or more.", "tuning");
       return;
     }
     writePreferences((held) => ({ ...held, interruption_budget: asked }));
@@ -2874,7 +3127,7 @@ function stateWords(state) {
 }
 
 async function listConnections() {
-  fault(null);
+  fault(null, "connections");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -2888,7 +3141,7 @@ async function listConnections() {
     // listener — must not leave a credential field standing from the last time it did
     // not (ADR-0177 §4's fourth clause).
     clearNode(form);
-    const held = await relay(half, "/connections", {});
+    const held = await relay(half, "/connections", {}, "connections");
     if (held === null) {
       show("connections", true);
       clearNode(panel);
@@ -2902,7 +3155,7 @@ async function listConnections() {
     held.accounts.forEach((account) => renderAccount(panel, account));
     offerConnect(form);
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "connections");
   }
 }
 
@@ -3010,10 +3263,10 @@ function offerConnect(holder, account) {
 // Step two: show what was typed, and take the answer. Nothing has been asked for yet.
 function confirmIdentity(holder, identity, account) {
   if (identity === "") {
-    fault("An account name is needed before a credential is asked for.");
+    fault("An account name is needed before a credential is asked for.", "connections");
     return;
   }
-  fault(null);
+  fault(null, "connections");
   clearNode(holder);
   line(holder, "About to connect this account:", "hint");
   // Rendered on its own line and as text, so a name with markup in it, or one that is
@@ -3255,7 +3508,7 @@ function offerRemedies(panel, handle, prescribed) {
 async function stateAfterAct(panel, half, reference) {
   let held = null;
   try {
-    held = await relay(half, "/connections", {});
+    held = await relay(half, "/connections", {}, "connections");
   } catch (_) {
     held = null;
   }
@@ -3275,14 +3528,14 @@ async function stateAfterAct(panel, half, reference) {
 }
 
 async function listConnectionLog() {
-  fault(null);
+  fault(null, "connection-log");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
     return;
   }
   try {
-    const held = await relay(half, "/connections/recent", { limit: PAGE });
+    const held = await relay(half, "/connections/recent", { limit: PAGE }, "connection-log");
     if (held === null) {
       return;
     }
@@ -3294,7 +3547,7 @@ async function listConnectionLog() {
     }
     held.acts.forEach((one) => renderConnectionAct(list, one));
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "connection-log");
   }
 }
 
@@ -3328,7 +3581,7 @@ function renderConnectionAct(list, one) {
 // recently active — so the page sends the one it is working in and nothing when it
 // holds none.
 async function observe() {
-  fault(null);
+  fault(null, "observation");
   const half = headerHalf();
   if (half === null) {
     showBootstrap();
@@ -3336,14 +3589,14 @@ async function observe() {
   }
   const asked = conversationId === null ? {} : { conversation_id: conversationId };
   try {
-    const body = await relay(half, "/observe", asked);
+    const body = await relay(half, "/observe", asked, "observation");
     if (body === null) {
       return;
     }
     renderObservation(body.observation);
     show("observation", true);
   } catch (_) {
-    fault(GATEWAY_GONE);
+    fault(GATEWAY_GONE, "observation");
   }
 }
 
@@ -3413,6 +3666,7 @@ const CONTROL_PANELS = [
 ];
 
 function showBootstrap() {
+  clearFaults();
   show("bootstrap", true);
   show("console", false);
   show("conversations", false);
@@ -3421,8 +3675,13 @@ function showBootstrap() {
 }
 
 function showConsole() {
+  clearFaults();
   show("bootstrap", false);
   show("console", true);
+  // Which conversation the next question lands in, said before the first one is asked
+  // — including after a reload, which now keeps the thread rather than starting one
+  // the owner never asked for (#1371's first clause).
+  setConversation(conversationId);
   // The notification panel is shown before anything has arrived, because what it
   // mostly says is whether this browser is watching at all — and a panel that
   // appeared only on the first delivery would leave the owner unable to tell "no
@@ -3443,7 +3702,10 @@ function showConsole() {
 
 el("bootstrap-form").addEventListener("submit", startSession);
 el("ask-form").addEventListener("submit", ask);
-el("watch-button").addEventListener("click", watchDeliveries);
+// Wrapped rather than passed, because the listener's argument is a `MouseEvent` and
+// `watchDeliveries` reads its first argument as the sentence to announce.
+el("watch-button").addEventListener("click", () => watchDeliveries());
+el("fault-dismiss").addEventListener("click", () => fault(null));
 el("conversations-button").addEventListener("click", listConversations);
 el("confirmations-button").addEventListener("click", listPending);
 el("sources-button").addEventListener("click", listSources);
@@ -3462,6 +3724,16 @@ el("review-button").addEventListener("click", listNotifications);
 el("tuning-button").addEventListener("click", listTuning);
 el("connections-button").addEventListener("click", listConnections);
 el("connection-log-button").addEventListener("click", listConnectionLog);
+
+// Two events, no timer (#1429). Both go through `rearm`, which does nothing at all
+// unless a stream is actually shut and this browser still holds a session half — so a
+// tab switch on a healthy page costs one comparison and says nothing.
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "visible") {
+    rearm(CAME_BACK);
+  }
+});
+window.addEventListener("online", () => rearm(NETWORK_BACK));
 
 stopWatching();
 if (headerHalf() === null) {

@@ -54,6 +54,11 @@
           </p>
           <button type="submit" id="ask-button">Ask</button>
         </form>
+        <!--
+          Which conversation the next question lands in (#1371's first clause). Filled
+          by `app.js` on load as well as after a turn, because the id is now kept in
+          the session's own key family and survives a reload.
+        -->
         <p class="hint" id="conversation"></p>
         <button type="button" id="conversations-button">Conversations</button>
         <button type="button" id="confirmations-button">What is waiting for your answer</button>
@@ -264,7 +269,20 @@
         <div id="observation-body"></div>
       </section>
 
-      <p id="fault" class="fault" hidden></p>
+      <!--
+        The slot for a fault no panel owns: the page's own load, and the session
+        (#1429). Every other fault is written into the panel whose act raised it, in a
+        slot `app.js` builds there — one slot at the foot of a page of thirteen panels
+        is a condition the owner has to scroll to find, which is ADR-0083's ruling 4
+        losing at the last hop it has to survive.
+
+        This one is in the document because it has to exist before anything has been
+        built, and it carries the same dismiss control every built slot does.
+      -->
+      <div id="fault" class="fault" hidden>
+        <p class="fault-text"></p>
+        <button type="button" id="fault-dismiss" class="fault-dismiss">Dismiss</button>
+      </div>
     </main>
 
     <script src="/app.js"></script>
