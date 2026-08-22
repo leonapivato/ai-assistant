@@ -34,6 +34,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -329,9 +330,21 @@ def _replace_atomically(src: Path, dst: Path) -> None:
         src: The file to copy.
         dst: Where it goes.
     """
-    temporary = dst.with_name(f".{dst.name}.clone-sync.{os.getpid()}")
+    # `mkstemp`, not a name composed from the destination: a predictable one can
+    # be pre-created as a symlink, and copying *to* it would follow the link and
+    # write outside the clone — reintroducing, one step later, exactly what
+    # `_refuse_to_escape` stops at the destination. `mkstemp` opens with
+    # O_CREAT|O_EXCL at mode 0600, so the file this writes is one it created.
+    handle, name = tempfile.mkstemp(dir=dst.parent, prefix=f".{dst.name}.", suffix=".clone-sync")
+    temporary = Path(name)
     try:
-        shutil.copy2(src, temporary)
+        with os.fdopen(handle, "wb") as sink:
+            sink.write(src.read_bytes())
+        # `copy2`'s other half: mkstemp's 0600 is not the mode the file should
+        # land with, and the modification time is worth carrying over too.
+        shutil.copystat(src, temporary)
+        # Replaces the destination *entry*, so a symlink that appeared there
+        # since the preflight is replaced rather than written through.
         temporary.replace(dst)
     finally:
         temporary.unlink(missing_ok=True)

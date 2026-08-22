@@ -13,6 +13,7 @@ quietly turn "clean" into "clean enough", so it is pinned from both sides.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -213,6 +214,40 @@ def test_a_copy_leaves_no_temporary_behind_and_replaces_atomically(tmp_path: Pat
     assert status == 0, out
     assert (sibling / ".env").read_text() == "ASSISTANT_X=1\n"
     assert [p.name for p in sibling.iterdir() if "clone-sync" in p.name] == []
+
+
+def test_the_temporary_file_is_created_by_the_sync_and_not_claimed(tmp_path: Path) -> None:
+    # A temporary named from the destination is predictable, so it can be
+    # pre-created as a symlink out of the clone — reintroducing one step later
+    # exactly what the destination check stops. The name is unguessable and the
+    # file is opened O_EXCL, so a squatted name cannot be the one written to.
+    source, (sibling,) = _clones(tmp_path, 2)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("not yours\n")
+    # Ignored, so the squatted names do not simply make the clone read as dirty —
+    # the temporary's own construction is what has to stop this.
+    (sibling / ".gitignore").write_text(".review/\n.env.clone-sync*\n")
+    git(sibling, "commit", "-aqm", "ignore the squat")
+    for guess in (f".env.clone-sync.{os.getpid()}", ".env.clone-sync"):
+        (sibling / guess).symlink_to(outside)
+    listing = _list_file(tmp_path, ".env")
+
+    status, out, _ = _sync(source, listing)
+
+    assert status == 0, out
+    assert outside.read_text() == "not yours\n"
+    assert (sibling / ".env").read_text() == "ASSISTANT_X=1\n"
+
+
+def test_a_copied_file_keeps_the_sources_mode(tmp_path: Path) -> None:
+    # mkstemp creates at 0600, which is not the mode the file should land with.
+    source, (sibling,) = _clones(tmp_path, 2)
+    (source / ".env").chmod(0o640)
+    listing = _list_file(tmp_path, ".env")
+
+    _sync(source, listing)
+
+    assert (sibling / ".env").stat().st_mode & 0o777 == 0o640
 
 
 def test_an_unchanged_file_is_reported_and_not_recopied(tmp_path: Path) -> None:

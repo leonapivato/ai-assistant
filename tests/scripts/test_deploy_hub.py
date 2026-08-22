@@ -425,6 +425,38 @@ def test_a_dirty_tree_refuses_because_the_marker_would_lie(tmp_path: Path) -> No
     assert "uncommitted changes" in result.stderr
 
 
+def test_a_failed_journal_poll_is_reported_as_itself(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # journalctl exits 0 when a match selects nothing, so a non-zero status is ssh
+    # or su or journalctl failing. Swallowing it spends the whole timeout and then
+    # reports the one thing that is not wrong: that the unit never logged
+    # hub_ready.
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (255, "", "ssh: connect: refused"))
+    plan = _plan(_repo(tmp_path))
+
+    with pytest.raises(_MODULE.DeployError, match="could not read the unit's journal"):
+        _MODULE._wait_for_ready(plan, "abc123")
+
+
+def test_a_successful_but_silent_journal_still_times_out(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, "-- No entries --\n", ""))
+    plan = _plan(_repo(tmp_path), "--ready-timeout", "0")
+
+    with pytest.raises(_MODULE.DeployError, match="did not log hub_ready"):
+        _MODULE._wait_for_ready(plan, "abc123")
+
+
+def test_hub_ready_in_this_invocations_journal_passes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, "hub_ready jobs=[]\n", ""))
+
+    _MODULE._wait_for_ready(_plan(_repo(tmp_path), "--ready-timeout", "0"), "abc123")
+
+
 def _plan(repo: Path, *args: str) -> object:
     """A plan built from parsed arguments, for the checks that run before any ssh."""
     parsed = _MODULE._parser().parse_args(["hub.example", "--repo", str(repo), *args])

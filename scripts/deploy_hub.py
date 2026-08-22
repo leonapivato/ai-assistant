@@ -687,6 +687,24 @@ def _run_local(argv: list[str], *, check: bool = True, cwd: Path | None = None) 
     return completed.stdout
 
 
+def _probe(argv: list[str]) -> tuple[int, str, str]:
+    """Run a command and return its status alongside its output.
+
+    Args:
+        argv: The argv to run.
+
+    Returns:
+        The exit status, standard output and standard error.
+
+    Raises:
+        DeployError: If the executable is not on PATH.
+    """
+    completed = subprocess.run(  # noqa: S603  # fixed argv, no shell, resolved binary
+        [_binary(argv[0]), *argv[1:]], capture_output=True, text=True, check=False
+    )
+    return completed.returncode, completed.stdout, completed.stderr
+
+
 def _check_drift(plan: Plan, repo: Path, commit: str) -> str:
     """Read the box's marker and rule on dependency drift.
 
@@ -756,7 +774,20 @@ def _wait_for_ready(plan: Plan, invocation: str) -> None:
     deadline = time.monotonic() + plan.args.ready_timeout
     command = ssh_command(plan.args.host, plan.args.ssh_user, plan.journal_for(invocation))
     while True:
-        if "hub_ready" in _run_local(command, check=False):
+        # A failed poll is NOT an empty journal. `journalctl` exits 0 when a match
+        # selects nothing — "-- No entries --" is success — so a non-zero status
+        # here is ssh, su or journalctl failing, and swallowing it would spend the
+        # whole timeout and then report the one thing that is not wrong: that the
+        # unit never logged hub_ready.
+        status, out, err = _probe(command)
+        if status != 0:
+            raise DeployError(
+                f"could not read the unit's journal (exit {status}):\n"
+                f"{(err or out).strip()}\n"
+                f"The wheel is installed and the restart was issued; the readiness\n"
+                f"check is what could not run. Retry:\n  {shlex.join(command)}"
+            )
+        if "hub_ready" in out:
             return
         if time.monotonic() >= deadline:
             raise DeployError(
