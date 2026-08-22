@@ -124,12 +124,33 @@ satisfactory on another.
 > without handing its half of the record over, a failure is reported. None of them
 > may be reported as passed or silently omitted.
 
+> **Normative.** An evidence-dependent check is **unparametrized**, and that is
+> part of the seam rather than an accident of it. The controller decides one
+> outcome per test *function*, so a parametrized item requesting the evidence is
+> refused under the clause above as an item nothing can decide — never reported
+> under one of its cases, which would claim a verdict that was not computed for
+> those arguments. `tests/core/test_protocol_triad.py` pins the restriction
+> directly, so it is caught where the check is written rather than only where it
+> is run.
+
 This is the one place the arrangement can rot quietly. The items handed over are
 identified by the fixture they request rather than by a list of test names, so a
 check added later is handed over automatically — and would then be collected,
 deselected on every worker, and decided by nobody. Failing loudly is the only
 outcome that surfaces it; `tests/core/test_protocol_triad.py` also pins the
 correspondence directly, so the failure is caught before a distributed run.
+
+**Automatically, but not unconditionally**, which is why the restriction above is
+stated where the promise is. Inheriting the arrangement by asking for the evidence
+is what stops a new check going undecided; it is not a claim that every shape of
+check fits through the seam. One does not: a parametrized check reaches the
+controller as `…::test_x[one]`, and the merged record carries no per-case evidence
+to decide it with. Making the evaluator address cases was considered and rejected —
+it buys a shape nothing declares today, at the price of a case-aware payload on a
+channel whose whole virtue is that it carries names. Refusing it, and saying so
+where the check is authored, keeps the contract legible at the cost the seam is
+already paying: an evidence-dependent check is a whole-suite verdict, and a
+whole-suite verdict has one case.
 
 The lost-worker clause is the same reasoning applied to an incomplete union: a
 record missing a worker's share is not the suite's record, so an absent binding
@@ -349,6 +370,16 @@ and revised as `Proposed`, flipped only once the required reviews returned clean
   worker's result through, so it reads as an ordinary test outcome — but a reader
   debugging the harness itself should know it was not produced by running the
   test function.
+- **Two lines on a distributed run disagree by exactly two, and the summary line
+  is the one that is whole.** xdist's header reports what it *scheduled* to
+  workers, and the two controller-answered items are deselected there by
+  construction, so it reads `8 workers [19543 items]` where the serial run reads
+  `collected 19545 items`. The summary line is unaffected: both modes finish
+  `19509 passed, 36 skipped`, accounting for all 19,545. So a distributed run
+  reports *more* outcomes than the header scheduled rather than fewer, which is
+  the safe direction — a check going missing would show up as a count that fell,
+  and nothing here can make one fall silently (§2). The summary line stays the
+  contract, exactly as `CONTRIBUTING.md` → "Read your own summary line" says.
 
 **Follow-on.** `.claude/agents/worker.md` carries its own copy of ADR-0166 §2's
 "prefer the serial run when your diff touches a Protocol or a canonical fake",

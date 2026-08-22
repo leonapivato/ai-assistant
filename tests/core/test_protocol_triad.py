@@ -1085,6 +1085,39 @@ def test_every_check_that_reads_the_evidence_is_decided_on_the_controller() -> N
     assert reads_the_evidence <= set(evaluate_for_controller(empty))
 
 
+def test_no_check_that_reads_the_evidence_is_parametrized() -> None:
+    """The other half of the extension contract — and the half a serial run hides.
+
+    `evaluate_for_controller` decides one outcome per test *function*, so a
+    parametrized check cannot be decided on the controller: it would be refused
+    there (ADR-0179 §2) while passing perfectly well under `uv run pytest`, which
+    is the worst way to learn it. The test above pins that every such check has an
+    evaluator; this pins that every such check is a shape the evaluator can
+    answer. Both are read off the fixture, so neither can be sidestepped by
+    naming.
+    """
+    reads_the_evidence = {
+        name: obj
+        for name, obj in globals().items()
+        if name.startswith("test_")
+        and isinstance(obj, FunctionType)
+        and conftest._EVIDENCE_FIXTURE in inspect.signature(obj).parameters
+    }
+    parametrized = sorted(
+        name
+        for name, obj in reads_the_evidence.items()
+        if any(mark.name == "parametrize" for mark in getattr(obj, "pytestmark", ()))
+    )
+
+    assert reads_the_evidence, "the check that reads the run record has gone missing"
+    assert not parametrized, (
+        f"{', '.join(parametrized)} reads the merged record and is parametrized. The "
+        f"controller decides one outcome per function, so each case would be refused "
+        f"under a distributed run and pass under a serial one. Give each case its own "
+        f"check, or have one check read the cases out of the record itself."
+    )
+
+
 def test_a_narrowed_distributed_run_decides_nothing_and_says_so() -> None:
     """Narrowing has to mean the same thing from the controller as from a test."""
     empty = TriadEvidence(honoured={}, opted_out={}, candidacy={}, unfiltered=False)
