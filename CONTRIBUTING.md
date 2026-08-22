@@ -101,18 +101,16 @@ which narrows `just check` exactly as readily (issue #1243). `-n 4` and `-q`
 change nothing that matters. **Read your own summary line** — the counts are the
 check. What ADR-0166 bought is a second *complete* run, not a licence to select.
 
-**What you give up by choosing it, and when not to.** `just test-fast` deselects
-`tests/core/test_protocol_triad.py` — 31 tests, and the mechanical enforcement of
-the Protocol triad rule ("Adding a Protocol", below). The check reads pytest's own
-record of what the session ran, and under `-n auto` no worker sees the whole
-session, so the deselection is a property of its design rather than a flake.
-Nothing else is skipped. CI runs the full serial gate on every push to an open PR
-(ADR-0010), so a triad gap is caught there every time — the cost is that you learn
-after the review rather than before it, which is a fix commit and the round it
-buys. **Choose the serial run when your diff adds or changes a Protocol in
-`core/protocols.py` or a canonical fake in `ai_assistant.testing`**, and when the
-change is order-dependent, shares state through a fixture, or is timing-sensitive.
-That is guidance, not a rule: the discretion in the paragraph above is flat.
+**What you give up by choosing it, and when not to.** Nothing is deselected. It
+used to leave out `tests/core/test_protocol_triad.py` — 31 tests, and the
+mechanical enforcement of the Protocol triad rule ("Adding a Protocol", below) —
+because that check reads pytest's own record of what the session ran and under
+`-n auto` no worker sees the whole session; since ADR-0179 the workers' records
+are merged on the controller, so the check runs here exactly as it does serially,
+and CI's `pytest` step is distributed on the same ground (ADR-0010, amended
+2026-08-22). **Choose the serial run when the change is order-dependent, shares
+state through a fixture, or is timing-sensitive.** That is guidance, not a rule:
+the discretion in the paragraph above is flat.
 
 **A red push between the anchors is acceptable.** The draft PR is opened early so
 that CI gates every push, and a rule that no push may ever be red is in tension
