@@ -578,8 +578,14 @@ def _for_checks_no_item_claimed(
     narrowed one may legitimately collect one of them and not the other (``-k`` on
     a name that matches only one), and then a decision with no item is the ordinary
     case rather than a fault.
+
+    A parametrized item claims its function, so this reports nothing about one.
+    Its cases carry the function's name with a ``[…]`` suffix, and the decision
+    *is* named by an item -- one ``_outcome_for`` already fails, saying exactly
+    why. Matching on the bare nodeid would leave the function unclaimed and add a
+    second failure blaming the handover for a shape that in fact arrived intact.
     """
-    claimed = {nodeid.rpartition("::")[2] for nodeid in handed_over}
+    claimed = {nodeid.rpartition("::")[2].partition("[")[0] for nodeid in handed_over}
     return [
         (
             _ItemPayload(nodeid=f"{_TRIAD_CHECK}::{name}", path=_TRIAD_CHECK, lineno=0, domain=""),
@@ -613,6 +619,17 @@ def _outcome_for(item: _ItemPayload, outcomes: dict[str, CheckOutcome]) -> Check
             f"absent binding class proves nothing here either",
         )
     name = item["nodeid"].rpartition("::")[2]
+    function, bracket, _cases = name.partition("[")
+    if bracket:
+        return (
+            "failed",
+            f"{item['nodeid']} is parametrized, and `evaluate_for_controller` decides "
+            f"one outcome per test *function* ({function!r}) rather than one per case "
+            f"-- so nothing here can decide this item without reporting a verdict it "
+            f"did not compute for these arguments. An evidence-dependent check must be "
+            f"unparametrized; give each case its own check, or have one check read the "
+            f"cases from the merged record itself (ADR-0179 §2).",
+        )
     unclaimed: CheckOutcome = (
         "failed",
         f"{item['nodeid']} was handed to the controller, but "
