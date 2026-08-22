@@ -356,6 +356,7 @@ def test_confirmation_render_neutralises_control_sequences_and_markup(output: St
         parameters={"body": "wipe\x1b[2Jscreen and [red]shout[/red]"},
         reason="this discloses data off-device",
         token=ContinuationToken(handle="tok"),
+        egress=None,
     )
     cli._render_confirmation(confirmation)
     rendered = output.getvalue()

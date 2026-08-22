@@ -6305,6 +6305,97 @@ class CanonicalDestination(BaseModel):
         raise ValueError(msg)
 
 
+class ConfirmationDestination(BaseModel):
+    """One member of the canonical destination set a confirmation names (ADR-0178 §3).
+
+    :class:`CanonicalDestination`'s declaration with **one field substituted**: the
+    account arm carries the connected account's *identity* rather than the whole
+    :class:`BoundAccount`. ADR-0148 §8's fourth clause bars the connection
+    reference from a confirmation in terms, and :attr:`BoundAccount.reference` is
+    part of a whole account, so at this one surface ADR-0150 §3's
+    "no lane reduces an account member to its identity" and ADR-0148 §8 cannot both
+    hold. ADR-0178 §3 resolves that in ADR-0148 §8's favour **here and nowhere
+    else**: ``EgressBinding``'s own derived set is untouched, its members stay
+    :class:`CanonicalDestination`, and its account arm still carries the account
+    whole.
+
+    **The reduction is safe here because nothing compares these.** ADR-0150 §3's
+    stated hazard — "either alone is a destination that two different accounts can
+    satisfy" — is a fact about *comparison*, and
+    :meth:`PermissionDecision.authorises` is where comparison happens. A member of
+    this type is a **rendering value and never an authorising one** (ADR-0178 §3):
+    no lane compares two of them to decide anything, matches one against a grant, a
+    policy rule or a recorded decision, passes one to ``authorises``, treats one as
+    a :class:`CanonicalDestination`, or carries one on an :class:`ActionRequest`, a
+    :class:`PermissionDecision`, an :class:`EgressBinding`, a grant record or an
+    audit row. Its only consumer is a surface rendering the :class:`Confirmation`
+    it arrived on, which reads it, shows it to a person and discards it.
+
+    **Not a wire type, and it appears in no frame.** It is the member type of a
+    derived property (:attr:`ConfirmationEgress.canonical_destination_set`), and
+    that property is never stored and never transmitted — a pydantic property is
+    not a field, so ``model_dump`` does not reach it and no peer ever receives one.
+    ``PROTOCOL_VERSION`` 10 does not describe this model. The declaration is
+    binding as a `core` → `interfaces` **consumer contract** — the names
+    ``interfaces/cli.py`` reads — and is not an interoperability surface: two
+    conforming peers exchange spans and an account identity and each derives its
+    own set, so they cannot disagree about a model neither of them sends.
+
+    **Exactly two well-formed shapes**, as on :class:`CanonicalDestination` and
+    refused at construction in the same form: a *selected recipient*, carrying a
+    protocol and a canonical form and no account identity; or *the connected
+    account*, carrying an account identity and neither of the other two. Equality
+    is over every field, so an account member never equals a selected recipient.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    protocol: DestinationProtocol | None = Field(
+        default=None, description="Set on a selected recipient; absent on the account."
+    )
+    canonical: _VisibleUnchangedText | None = Field(
+        default=None, description="Set on a selected recipient; absent on the account."
+    )
+    account_identity: _VisibleUnchangedText | None = Field(
+        default=None,
+        description=(
+            "The connected account's identity, set on the account member and absent "
+            "on a recipient. The substituted field: ADR-0148 §8's fourth clause bars "
+            "the connection reference from a confirmation, so the account arm carries "
+            "the one fact §8 requires a surface to show."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _is_one_of_the_two_shapes(self) -> ConfirmationDestination:
+        """Refuse every combination but ADR-0178 §3's two shapes.
+
+        :meth:`CanonicalDestination._is_one_of_the_two_shapes` in the same form and
+        for the same reason: a bag of optional fields would admit eight
+        combinations of which six are meaningless, and a validator makes every one
+        of them unconstructable rather than merely undocumented.
+
+        **The message names no value**, per ADR-0150 §8: which fields are present is
+        what names the defect, and the strings are recipient addresses and an
+        account identity.
+
+        Raises:
+            ValueError: If the member is neither a selected recipient nor the
+                connected account.
+        """
+        recipient = self.protocol is not None and self.canonical is not None
+        if recipient and self.account_identity is None:
+            return self
+        if self.account_identity is not None and self.protocol is None and self.canonical is None:
+            return self
+        msg = (
+            "a confirmation destination is either a selected recipient (a protocol and a "
+            "canonical form, no account identity) or the connected account (an account "
+            "identity, neither of the other two)"
+        )
+        raise ValueError(msg)
+
+
 class EgressSpan(BaseModel):
     """One described span of an outbound payload (ADR-0150 §4, §5, §6).
 
@@ -6593,6 +6684,161 @@ class EgressBinding(BaseModel):
         return self
 
 
+class ConfirmationEgress(BaseModel):
+    """The egress facts a :class:`Confirmation` puts to the user (ADR-0178 §1, §2).
+
+    ADR-0148 §8's fourth clause requires what is put to the user for a ``CONFIRM``
+    on an egress call to name the connected account's **identity**, the canonical
+    destination set **in both forms**, and the **payload description**. None of
+    the three is reachable from ``Confirmation``'s other five members, and the
+    values live on :class:`EgressBinding`, which hangs off a
+    :class:`PermissionDecision` an adapter may not read (ADR-0042 §6). This is the
+    carrier.
+
+    **One nested value rather than four flat members on ``Confirmation``**, for
+    :class:`EgressBinding`'s own reason one level up: four independent optional
+    members admit fifteen partial states, of which fourteen name recipients and no
+    account or an account and no description, against a clause ADR-0148 §8 makes a
+    *floor*. One value is either whole or absent, and the absent case is a fact
+    about the call rather than a state to reason about (:attr:`Confirmation.egress`).
+
+    **``spans`` is the binding's own value and not a second description derived
+    beside it.** No lane builds a parallel span type for a confirmation, re-derives
+    a description from ``parameters``, filters, reorders, truncates or summarises
+    the tuple, or omits a span: ADR-0150 §10's "no lane binds one artifact and
+    shows another" is discharged by *reuse*, and a confirmation-side span type
+    would be the second shape of one fact ADR-0150 is named after.
+
+    **Three things it does not carry, and no field is added through which one could
+    travel**: no connection reference, no credential slot, no
+    :class:`~ai_assistant.core.types.SecretName` and no string identifying a keyring
+    entry; no ``transport_endpoint``; and no :class:`BoundAccount` — no lane
+    substitutes one for :attr:`account_identity` on the ground that the type already
+    exists. :attr:`BoundAccount.reference` is barred from a confirmation by
+    ADR-0148 §8's fourth clause in terms, and carrying it here would hand across
+    ADR-0042 §6's boundary a value §6 exists to keep behind it; the endpoint is
+    excluded because ADR-0150 §7 constrains its scheme, host, port and path not at
+    all, so it is a value no surface can say anything true about, and §8's fourth
+    clause does not ask for it.
+
+    **The span tuple's structure is the binding's invariant and is not re-checked
+    here.** :meth:`EgressBinding._spans_describe_one_decomposition` and
+    :meth:`EgressBinding._one_supplied_form_canonicalises_one_way` refuse a
+    malformed description at the value that *owns* it, and the engine transcribes
+    an already-validated tuple (ADR-0178 §5). A copy of those rules here would be a
+    second statement of one invariant that could come to disagree with the first —
+    the failure this type reuses ``EgressSpan`` to avoid.
+
+    **The payload this member joins can exceed the frame limit for a request that
+    did not, and ADR-0178 §9 states the arithmetic rather than denying it.**
+    ``EgressSpan.argument`` carries the top-level key **once per span**, and an
+    array-valued argument of ``n`` elements yields ``n`` spans, so the description
+    costs roughly ``key_length * n`` where the request paid ``key_length + n``.
+    Against ``hub_max_frame_bytes``'s 16 MiB default: a request of
+    ``{"<16 KiB key>": ["a", …, "a"]}`` with 1,024 one-character elements is about
+    18 KiB and is accepted, while its description repeats the 16 KiB key 1,024
+    times and is about 16 MiB, which is refused. ADR-0085 §8's figures do not move
+    for it: no second limit, no per-member bound, and **no truncation rule** — an
+    over-limit confirmation is refused whole rather than resolved by omitting
+    spans, abbreviating a canonical form, compacting a locator or dropping the
+    account identity. Nor is it *lost*: the park stays durably
+    ``AWAITING_APPROVAL``, its recorded ``CONFIRM`` stays unresolved, and
+    ``pending_confirmations`` rebuilds the confirmation from that durable state on
+    every call, so raising ``hub_max_frame_bytes`` makes the same park
+    **deliverable** again with nothing re-derived and nothing re-ruled. Deliverable
+    is not answerable: whether a rebuilt confirmation can still be *answered* is
+    ``StepRunner._check_fresh``'s separate question against the record's own
+    ``expires_at``, which the frame limit does not touch (#1382). ADR-0085 §8f's
+    belief-page analysis is about ``beliefs()`` and does not cover this; #1379
+    holds the compact locator that would remove the factor, and #1381 the
+    pre-existing ``parks * parameters`` product this joins rather than creates.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
+
+    account_identity: _VisibleUnchangedText = Field(
+        description=(
+            "The connected account's identity, as the ruling fixed it and byte for "
+            "byte as :attr:`BoundAccount.identity` supplied it. Nothing normalises, "
+            "trims, truncates or case-folds it between the ruling and the surface. "
+            "**Required with no default**: ADR-0178 §1's reason for the member "
+            "above applies to each of its fields, and an identity that rendered as "
+            "nothing would leave the confirmation with nothing to say about whose "
+            "account this is."
+        )
+    )
+    spans: tuple[EgressSpan, ...] = Field(
+        description=(
+            "The binding's payload description, member for member and in the "
+            "binding's own order (ADR-0150 §4). **Required with no default**, like "
+            ":attr:`EgressBinding.spans` and for the same reason: a defaulted "
+            "description would let a producer omit the field and get an empty "
+            "payload description rather than having to state one."
+        )
+    )
+
+    @property
+    def canonical_destination_set(self) -> tuple[ConfirmationDestination, ...]:
+        """ADR-0148 §2's canonical destination set, **derived** and never stored.
+
+        The rule is :attr:`EgressBinding.canonical_destination_set`'s, computed
+        over this value's own fields: one member per distinct destination the spans
+        carry, deduplicated; and where the spans carry **none**, exactly one member
+        — the connected account, here reduced to its identity (ADR-0178 §3). It is
+        therefore **never empty**.
+
+        **Two computations of one rule, and no second rule.** For every
+        :class:`EgressBinding`, the set this derives corresponds member for member
+        and in the same order to the set that binding derives from the same spans
+        and account, the two differing only in that the account member carries the
+        identity here and the whole :class:`BoundAccount` there.
+        ``tests/core/test_types.py``'s correspondence cases are what keep the drift
+        detectable rather than silent.
+
+        **Derived rather than stored, and never accepted from a caller.** A stored
+        set is a second representation of one fact, and here a disagreement between
+        the two would be worse than on the binding: the binding is compared by
+        ``authorises`` and this is read by a *person*, so a set that disagreed with
+        the occurrences beside it would put a recipient on screen the call does not
+        send to, or hide one it does. Because a Python property is not a pydantic
+        field, nothing about it reaches a frame either — the wire carries the
+        occurrences once and the process that renders them derives the set from the
+        value it holds.
+
+        **`core` derives it and no adapter re-derives it.** Every surface rendering
+        a :class:`Confirmation` holds the value in a Python process and reads this
+        property; no lane reimplements the deduplication, the account substitution
+        or the order in another language, in ``interfaces/``, or in a page's script
+        (ADR-0178 §3, golden rule 3).
+
+        **The account substitution is inherited whole, including its caveat.**
+        ADR-0150 §11 routes to surface (b) the check that every destination-bearing
+        argument really yielded its occurrences, and `core` cannot perform it — so
+        **no lane reads an account-only set as evidence that the call selected no
+        recipient**, exactly as no lane may read it that way on the binding.
+
+        **Total, never raising** (ADR-0150 §8): every occurrence's ``protocol`` is
+        required and its ``canonical`` form is already visible text, and
+        :attr:`account_identity` is visible text too, so every member this builds is
+        well-formed by construction.
+
+        Returns:
+            The deduplicated, totally ordered set: account members first, then
+            selected recipients by protocol and then by canonical form, each string
+            compared by Unicode code point.
+        """
+        members = {
+            ConfirmationDestination(
+                protocol=span.destination.protocol, canonical=span.destination.canonical
+            )
+            for span in self.spans
+            if span.destination is not None
+        }
+        if not members:
+            return (ConfirmationDestination(account_identity=self.account_identity),)
+        return tuple(sorted(members, key=_confirmation_destination_order))
+
+
 def _destination_order(member: CanonicalDestination) -> tuple[int, str, str]:
     """Order the derived set: account members first, then by protocol and form.
 
@@ -6603,6 +6849,23 @@ def _destination_order(member: CanonicalDestination) -> tuple[int, str, str]:
     """
     if member.account is not None:
         return (0, member.account.reference, member.account.identity)
+    protocol = member.protocol.value if member.protocol is not None else ""
+    return (1, protocol, member.canonical or "")
+
+
+def _confirmation_destination_order(member: ConfirmationDestination) -> tuple[int, str, str]:
+    """Order a confirmation's derived set, by :func:`_destination_order`'s rule.
+
+    The same order stated over the reduced account arm (ADR-0178 §3): account
+    members first, then selected recipients by ``protocol`` and then by
+    ``canonical`` form, every string compared by Unicode code point. The account
+    key differs from :func:`_destination_order`'s only in what it can read — there
+    is no connection reference here — and that cannot make the two sets disagree,
+    because the account substitution yields a set of exactly one member and the
+    recipient arm's key is identical.
+    """
+    if member.account_identity is not None:
+        return (0, member.account_identity, "")
     protocol = member.protocol.value if member.protocol is not None else ""
     return (1, protocol, member.canonical or "")
 
@@ -8040,6 +8303,23 @@ class Confirmation(BaseModel):
             moment they decide", so a prompt omitting it would drop what the user
             most needs.
         token: The opaque continuation to relay back on ``resume``.
+        egress: What ADR-0148 §8's fourth clause requires a ``CONFIRM`` on an
+            egress call to name — the connected account's identity and the
+            binding's payload description, from which the canonical destination
+            set derives (:class:`ConfirmationEgress`). **Absent**, not empty, on a
+            ``CONFIRM`` whose recorded decision carries no ``egress_binding``, and
+            that absence is the discriminator ADR-0177 §8's second limb asked for:
+            a surface may branch on it, and one that cannot render an egress
+            confirmation may refuse *that* confirmation rather than every
+            confirmation. What the discriminator states is that **the ruling was
+            taken over an egress binding**, and nothing more — no lane reads
+            ``egress is None`` as a warrant that the call transmits nothing,
+            discloses nothing, or reaches no recipient (ADR-0178 §4). **Required
+            with no default**: ``Confirmation`` is built at two engine sites, in
+            the canonical fake and in every test that builds one, and a default
+            here is what a lane forgets — an implementation that never wired the
+            binding through would get a well-formed non-egress confirmation for
+            free and its egress prompts would look correct.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -8055,6 +8335,12 @@ class Confirmation(BaseModel):
         description="The policy's stated reason confirmation is required."
     )
     token: ContinuationToken = Field(description="The opaque continuation to relay back.")
+    egress: ConfirmationEgress | None = Field(
+        description=(
+            "The egress facts this confirmation is about, or absent where the "
+            "recorded CONFIRM carries no egress binding (ADR-0178 §1, §4)."
+        )
+    )
 
 
 class Disposition(StrEnum):

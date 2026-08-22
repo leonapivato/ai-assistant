@@ -166,6 +166,7 @@ from ai_assistant.core.types import (
     AnswerKind,
     BeliefBand,
     ClassReach,
+    DiscloserProvenance,
     Disposition,
     FeedbackEvent,
     FeedbackKind,
@@ -212,10 +213,13 @@ if TYPE_CHECKING:
         Belief,
         BeliefSummary,
         Confirmation,
+        ConfirmationDestination,
+        ConfirmationEgress,
         ConnectedAccount,
         ConnectionAct,
         ConversationDigest,
         ConversationSummary,
+        EgressSpan,
         GrantableSource,
         HeldNotification,
         IngestSummary,
@@ -6352,14 +6356,144 @@ def _confirm_forget(_belief: Belief) -> bool:
     return typer.confirm("Forget it?", default=False)
 
 
+def _egress_disclosure_phrase(provenance: DiscloserProvenance) -> str:
+    """Say who disclosed one span, in words (ADR-0146 §1).
+
+    **It says who, and nothing about what the value contains** — ADR-0178 §7's
+    fifth clause forbids a surface presenting a ``SYSTEM_SELECTED`` marker as an
+    assertion about what the text says, and ADR-0146 §2 makes provenance carried
+    rather than derived. So the phrasing is the enum's own meaning restated: the
+    user composed this span into the exchange, or this system put it there.
+
+    Total over the enum through :func:`~typing.assert_never`, so a third member
+    would fail the type check rather than render as an empty string.
+    """
+    match provenance:
+        case DiscloserProvenance.USER_AUTHORED:
+            return "you composed it"
+        case DiscloserProvenance.SYSTEM_SELECTED:
+            return "this system selected it"
+    assert_never(provenance)
+
+
+def _egress_destination_line(member: ConfirmationDestination) -> str:
+    """One member of the canonical destination set, as `core` derived it (ADR-0178 §7).
+
+    The set is read from
+    :attr:`~ai_assistant.core.types.ConfirmationEgress.canonical_destination_set`
+    and rendered; this adapter deduplicates nothing, orders nothing and infers
+    nothing, because a second derivation of one fact is business logic in an
+    adapter (golden rule 3) and would put a recipient on screen the ruling was not
+    taken over.
+
+    **The account arm is named as a destination rather than as an absence.** Where
+    the spans carry no destination the set is the connected account (ADR-0148 §2's
+    third clause), and §7 requires the surface to name it rather than showing no
+    recipients.
+    """
+    if member.account_identity is not None:
+        return f"the connected account {_safe(member.account_identity)}"
+    protocol = "" if member.protocol is None else member.protocol.value
+    return f"{_safe(member.canonical or '')} [dim]({_safe(protocol)})[/]"
+
+
+def _egress_span_line(span: EgressSpan) -> str:
+    """One occurrence of the payload description, whole (ADR-0178 §7).
+
+    **A description, never the payload.** A span states an argument, a position, a
+    provenance, an extent and sometimes a tier; it holds no content (ADR-0150 §10),
+    so nothing here presents an extent as the text or a marker as an assertion
+    about it.
+
+    **Both forms where the occurrence carries a destination, and neither invented
+    where it does not.** :attr:`~ai_assistant.core.types.EgressSpan.destination` is
+    optional, so a destination-less span is rendered as the payload-description
+    span it is — by its argument and position, its provenance and its extent, and
+    its tier where it states one — and names no recipient. Where a destination is
+    present both forms are shown and each is labelled: nothing reconstructs a
+    supplied form from a canonical one, and nothing presents a canonical form as
+    the form the user or the model wrote (ADR-0148 §14).
+    """
+    where = _safe(span.argument) if span.index is None else f"{_safe(span.argument)}[{span.index}]"
+    facts = [_egress_disclosure_phrase(span.provenance), f"{span.extent} code points"]
+    if span.tier is not None:
+        facts.append(f"tier {_safe(span.tier.value)}")
+    occurrence = span.destination
+    if occurrence is None:
+        head = "names no destination"
+    else:
+        head = (
+            f"to {_safe(occurrence.canonical)} [dim]({_safe(occurrence.protocol.value)})[/], "
+            f"as supplied: {_safe(occurrence.supplied)}"
+        )
+    return f"{where} — {head}; " + "; ".join(facts)
+
+
+def _render_confirmation_egress(egress: ConfirmationEgress) -> None:
+    """What ADR-0148 §8's fourth clause requires, before the answer is collected.
+
+    Three things, and a confirmation naming the tool and not the recipients is not
+    a confirmation of an egress call: the connected account's **identity**, the
+    canonical destination set **in both forms**, and the **payload description**.
+
+    **The set and the occurrences are both rendered, and that is not redundancy**
+    (ADR-0178 §7). They answer different questions: the set is what the policy
+    ruled over and is deduplicated, so it answers "how many people is this going
+    to"; the occurrences answer ADR-0150 §10's third clause, so one recipient named
+    by ``to`` and again by ``bcc`` is one member of the set and **two** disclosures
+    here. A surface showing only the set has hidden a disclosure; one showing only
+    the occurrences has shown a list the user must deduplicate in their head.
+
+    **Every span, none omitted and none reordered.** The tuple is rendered in the
+    binding's own order, which is the artifact the ruling was taken over.
+    """
+    console.print(f"  [bold]Account:[/] {_safe(egress.account_identity)}")
+    console.print("  Goes to:")
+    for member in egress.canonical_destination_set:
+        console.print(f"    {_egress_destination_line(member)}")
+    console.print("  Describing:")
+    if not egress.spans:
+        console.print("    [dim](the payload description names no span)[/]")
+    for span in egress.spans:
+        console.print(f"    {_egress_span_line(span)}")
+
+
 def _render_confirmation(confirmation: Confirmation) -> None:
-    """Render a parked action so a person can judge it (ADR-0042 §4)."""
+    """Render a parked action so a person can judge it (ADR-0042 §4, ADR-0178 §7).
+
+    **An egress confirmation owes more than the four content members**, and until
+    ADR-0178 landed no surface in this tree could pay it: ADR-0148 §8's fourth
+    clause has required the connected account's identity, the canonical
+    destination set in both forms and the payload description since 2026-08-13,
+    and none of the three was reachable from ``Confirmation``. It is now
+    :attr:`~ai_assistant.core.types.Confirmation.egress`, and
+    :func:`_render_confirmation_egress` is the floor.
+
+    **A confirmation whose ``egress`` is ``None`` renders exactly as it did**, and
+    asserts none of it (ADR-0178 §7's last clause). What the absence states is that
+    the ruling was taken over no egress binding and nothing more, so this makes no
+    claim that the call transmits nothing or reaches no recipient — it simply says
+    nothing about recipients, which is what it is entitled to say.
+
+    **``parameters`` is still the driven step's own arguments, pre-binding**, and
+    ADR-0177 §8's surviving sub-clauses are why it keeps a heading of its own: the
+    rendered arguments are not the canonical destination set, and a flat
+    destination appearing among them is not a canonical one. The set now arrives
+    *beside* them rather than instead of them, which makes that confusion easier to
+    make and the separation more load-bearing, not less.
+
+    Every value is neutralised for this terminal on the way out (:func:`_safe`),
+    the new members included: ``argument`` is a caller-influenced key (ADR-0150
+    §13) and a ``supplied`` form is a string a model produced.
+    """
     console.print("\n[bold yellow]Confirmation required[/]")
     console.print(f"  Tool: {_safe(confirmation.tool_id)} — {_safe(confirmation.tool_description)}")
     if confirmation.parameters:
         console.print("  With:")
         for key, raw in confirmation.parameters.items():
             console.print(f"    {_safe(str(key))} = {_safe(str(raw))}")
+    if confirmation.egress is not None:
+        _render_confirmation_egress(confirmation.egress)
     console.print(f"  Why: {_safe(confirmation.reason)}")
 
 

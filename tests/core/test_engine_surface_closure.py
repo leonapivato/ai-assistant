@@ -401,6 +401,17 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     version goes to 9, and a lane that moved only one of these two numbers would
     still be made to read ADR-0124 §9 by this pin.
 
+    **ADR-0178 §6 is under the second limb alone**, and it moves only the version.
+    ``Confirmation`` gains ``egress`` — the account identity and payload description
+    ADR-0148 §8's fourth clause requires a ``CONFIRM`` on an egress call to name.
+    ``Confirmation`` is ``extra="forbid"``, ``return_adapter`` validates every result
+    against the declared return annotation, and ``wire.codec``'s ``project`` renders a
+    model by ``model_dump()``, which includes a ``None`` member rather than omitting it
+    — so a version 10 hub emits ``"egress": null`` on **every** confirmation and a
+    version 9 client fails ``extra_forbidden`` on it. The promoted method set does not
+    move, so the version goes to 10 against thirty-two methods, and ADR-0178 §6 states
+    the bump in the deciding ADR rather than leaving a lane to discover it here.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -409,7 +420,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (32, 9), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (32, 10), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

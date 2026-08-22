@@ -533,9 +533,10 @@ def test_a_confirmation_sorts_its_parameters_however_it_was_built(
         parameters={name: values[name] for name in order},
         reason="external",
         token=ContinuationToken(handle="h-1"),
+        egress=None,
     )
     expected = (
-        b'{"parameters":{"Z":1,"body":"hi","to":"a@b"},"reason":"external",'
+        b'{"egress":null,"parameters":{"Z":1,"body":"hi","to":"a@b"},"reason":"external",'
         b'"token":{"handle":"h-1"},"tool_description":"send","tool_id":"t-1"}'
     )
     assert _both(confirmation) == expected
@@ -561,6 +562,7 @@ def test_the_vectors_reject_every_near_miss_measured_while_writing_the_adr() -> 
         parameters={"to": "a@b", "Z": 1},
         reason="external",
         token=ContinuationToken(handle="h-1"),
+        egress=None,
     ).model_dump_json().encode() != canonical_payload(
         Confirmation(
             tool_id="t-1",
@@ -568,6 +570,7 @@ def test_the_vectors_reject_every_near_miss_measured_while_writing_the_adr() -> 
             parameters={"to": "a@b", "Z": 1},
             reason="external",
             token=ContinuationToken(handle="h-1"),
+            egress=None,
         )
     )
     # 2. `json.dumps` without `sort_keys`.

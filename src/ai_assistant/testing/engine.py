@@ -53,6 +53,7 @@ from ai_assistant.core.types import (
     BeliefBand,
     BeliefSummary,
     Confirmation,
+    ConfirmationEgress,
     ContinuationToken,
     ConversationDigest,
     ConversationSummary,
@@ -107,6 +108,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.types import (
         ConnectedAccount,
         ConnectionAct,
+        EgressBinding,
         EncodableText,
         FeedbackEvent,
         HeldNotification,
@@ -1112,14 +1114,42 @@ class FakeAssistantEngine:
         self.grants_recorded.append(record)
         return record
 
-    def park(self, handle: str, *, tool_id: str = "t-1") -> Confirmation:
-        """Park one confirmation this engine will resolve, and return it."""
+    def park(
+        self, handle: str, *, tool_id: str = "t-1", egress: EgressBinding | None = None
+    ) -> Confirmation:
+        """Park one confirmation this engine will resolve, and return it.
+
+        **The egress member is reduced from the binding by the same rule the real
+        engine uses** (ADR-0178 §5): ``account_identity`` from
+        ``egress.account.identity`` and ``spans`` from ``egress.spans``, and
+        ``None`` where no binding is given. That identity is what makes this fake a
+        producer the shared contract's ADR-0178 §3 clause can be held to — a fake
+        assembling the member some other way would pass a suite written against
+        itself.
+
+        Args:
+            handle: The continuation handle this park is answered by.
+            tool_id: The parked call's tool.
+            egress: The binding the ruling was taken over, or ``None`` for a
+                non-egress ``CONFIRM``. Reduced here rather than accepted
+                pre-reduced, so the reduction is the thing under test.
+
+        Returns:
+            The parked confirmation.
+        """
         confirmation = Confirmation(
             tool_id=tool_id,
             tool_description="a tool the fake engine parked",
             parameters={},
             reason="the policy wants a human answer",
             token=ContinuationToken(handle=handle),
+            egress=(
+                None
+                if egress is None
+                else ConfirmationEgress(
+                    account_identity=egress.account.identity, spans=egress.spans
+                )
+            ),
         )
         self.parked[handle] = confirmation
         return confirmation
