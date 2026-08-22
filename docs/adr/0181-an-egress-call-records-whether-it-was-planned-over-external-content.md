@@ -439,12 +439,24 @@ watch the fact clear. A warrant is never un-received, and neither is a selection
 > `ActionPolicy` to let it — that comparison exists, one seam out, and §3's fourth
 > clause is where this ADR states it.
 
-> **Normative.** The request-to-decision comparison stays
-> `PermissionDecision.authorises`'s, invoked on the resuming path before `resolve` is
-> reached (ADR-0148 §1, ADR-0152 §7). No lane moves it into `permissions/`, duplicates
-> it there, or reads this ADR as having asked for either. `planned_with_external_content`
-> is compared there because it is a member of the binding, and for no reason special
-> to it.
+> **Normative.** Two comparisons already carry the binding on the resuming path and
+> this ADR moves neither. **Before `resolve`**, `EgressBinder.rebind` re-derives the
+> binding and refuses unless it equals the one the parked confirmation carries
+> (ADR-0152 §7). **After `resolve` has produced and the trail has recorded an
+> `ALLOW`**, `PermissionDecision.authorises` compares that recorded decision against
+> the request at the seam that runs the tool. `planned_with_external_content` is
+> carried through both because it is a member of the binding, and for no reason
+> special to it.
+
+> **Normative.** No lane reads `PermissionDecision.authorises` as the pre-`resolve`
+> check. Its first conjunct is that the decision's own ruling is `ALLOW`, and the
+> decision available before `resolve` is the recorded `CONFIRM`, so invoking it there
+> answers `False` for every resumed egress call. A lane that stated the rule that way
+> would refuse every approved resume, or would be answered by removing the
+> comparison — which is the worse of the two repairs.
+
+> **Normative.** No lane moves either comparison into `permissions/`, duplicates one
+> there, or reads this ADR as having asked for either.
 
 > **Normative.** No lane discharges the obligation on one member and not the other,
 > and no lane reads `decide`'s unavailability of route (a) as licence to relax the
