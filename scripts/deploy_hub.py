@@ -760,6 +760,35 @@ def _check_drift(plan: Plan, repo: Path, commit: str) -> str:
     return marker
 
 
+def _assert_active(plan: Plan) -> None:
+    """Confirm the unit came back up.
+
+    ``systemctl is-active`` exits non-zero *because* the unit is not active, so
+    unlike the journal poll a status alone cannot separate that answer from a
+    dropped connection. The ANSWER can: an empty stdout means systemctl never
+    spoke, and reporting that as "the unit is (no answer), not active" would send
+    an operator to look at the unit instead of at the link.
+
+    Args:
+        plan: The plan.
+
+    Raises:
+        DeployError: If the check could not run, or the unit is not active.
+    """
+    command = ssh_command(plan.args.host, plan.args.ssh_user, plan.is_active())
+    status, active, error = _probe(command)
+    active = active.strip()
+    if not active:
+        raise DeployError(
+            f"could not ask whether the unit is active (exit {status}):\n"
+            f"{error.strip() or '(no output)'}\n"
+            "The wheel is installed and the restart was issued; the check is what\n"
+            "could not run."
+        )
+    if active != "active":
+        raise DeployError(f"the unit is {active} after the restart, not active")
+
+
 def _wait_for_ready(plan: Plan, invocation: str) -> None:
     """Poll this unit start's journal until ``hub_ready`` appears, or time out.
 
@@ -910,9 +939,7 @@ def _install_and_verify(plan: Plan, commit: str, before_marker: str, before_vers
     _run_local(ssh(plan.write_marker(commit, digest)))
 
     invocation = invocation_id(_run_local(ssh(plan.restart())))
-    active = _run_local(ssh(plan.is_active()), check=False).strip()
-    if active != "active":
-        raise DeployError(f"the unit is {active or '(no answer)'} after the restart, not active")
+    _assert_active(plan)
     _wait_for_ready(plan, invocation)
 
     after_marker = _run_local(ssh(plan.read_marker()))
