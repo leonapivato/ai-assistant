@@ -61,13 +61,28 @@ const TERMINAL_KINDS = new Set(["outcome", "fault"]);
 // starting a fresh one the owner never asked for — the same thing
 // `assistant ask --conversation` does at the terminal.
 //
-// **It is persisted, in the session's own key family and under the session's own
-// scoping argument** (ADR-0168 §6, #1429). Web storage is scoped to scheme, host and
-// port, which is exactly the property that makes it fit to hold the header half: the
-// id at `127.0.0.1:8422` is unreadable from `127.0.0.1:9000`. An earlier draft of this
-// file kept it in page state alone, and the milestone-14 phone QA found what that
-// costs — a reload silently started a conversation the owner never asked for, and the
-// page could not say which one the next question would land in (#1371's first clause).
+// **It is persisted, under the session's own scoping argument** (ADR-0168 §6, #1429).
+// Web storage is scoped to scheme, host and port, which is exactly the property that
+// makes it fit to hold the header half: the id at `127.0.0.1:8422` is unreadable from
+// `127.0.0.1:9000`. An earlier draft of this file kept it in page state alone, and the
+// milestone-14 phone QA found what that costs — a reload silently started a
+// conversation the owner never asked for, and the page could not say which one the
+// next question would land in (#1371's first clause).
+//
+// **In `sessionStorage`, which is the tab's, and deliberately not beside the header
+// half.** The two values want opposite scopes, and §6 names the difference: the header
+// half is "shared across that origin's tabs", because it admits the browser. Which
+// conversation you are reading is not — it is what *this view* is looking at, and two
+// tabs are two views. Put in `localStorage` it would be one selection for the origin,
+// so a second tab choosing a thread would silently retarget the first one's next
+// question at its own reload; adversarial review raised that on round 1 and it is
+// right. The tab's own storage survives a reload, which is the whole of what was
+// asked, and stops there.
+//
+// The lifetime is also the closer match. The cookie half is a session cookie, so
+// closing the browser generally strands the session anyway (ADR-0168 §6's own note on
+// what a restoring browser does) — a thread outliving the tab would point into a
+// session that is gone.
 //
 // **It is an id and not a capability.** It admits nothing on its own: every request
 // carrying it is admitted by ADR-0168 §6's two values and by nothing else, so a
@@ -118,7 +133,7 @@ function forgetHeaderHalf() {
 
 function storedConversation() {
   try {
-    return window.localStorage.getItem(CONVERSATION_KEY);
+    return window.sessionStorage.getItem(CONVERSATION_KEY);
   } catch (_) {
     return null;
   }
@@ -133,9 +148,9 @@ function setConversation(id) {
   conversationId = id;
   try {
     if (id === null) {
-      window.localStorage.removeItem(CONVERSATION_KEY);
+      window.sessionStorage.removeItem(CONVERSATION_KEY);
     } else {
-      window.localStorage.setItem(CONVERSATION_KEY, id);
+      window.sessionStorage.setItem(CONVERSATION_KEY, id);
     }
   } catch (_) {
     // A browser that will not store still holds the id for this page's life. What it
@@ -1053,11 +1068,22 @@ function deliveryState(text) {
 // clause), and the panel went on reading "Watching for notifications" until the owner
 // noticed and pressed the button. Two events replace that, and no timer does.
 //
-// **What is not claimed.** `watching` is this page's own record of whether a stream is
-// open, and a socket that has died without the `fetch` settling still reads as open —
-// so a re-arm on such a page does nothing, and when the request finally settles the
-// panel says so and the button comes back. Forcing a second stream to find out would
-// hold two connections against `gateway_max_browser_connections` for one browser.
+// **An event that arrives while the last stream is still pending is held, not thrown
+// away.** `watching` is this page's own record of whether a stream is open, and a
+// socket that died without its `fetch` settling still reads as open — which is exactly
+// the phone's own case, because the stream is abandoned while the page is in the
+// background and the rejection lands whenever the browser next runs it. Dropping the
+// event there would leave the owner pressing the button after all, one ordering over
+// (adversarial review, round 1). So the reason is kept and spent when the truth
+// arrives, and a second stream is never forced to find out — that would hold two of
+// one browser's `gateway_max_browser_connections` for one delivery slot.
+//
+// **One request, and it is not a queue.** It holds the reason to announce, it is
+// consumed once, and nothing but a fresh foreground or network event sets it again —
+// so a re-armed stream that fails at once re-arms nothing. That is the difference
+// between honouring an event the owner caused and retrying on a timer, which is what
+// ADR-0168 §9 forbids.
+let asked = null;
 const CAME_BACK =
   "This page came back to the foreground with nothing listening, so it started " +
   "watching again — announced here rather than done quietly.";
@@ -1076,7 +1102,11 @@ const NOTHING_REPLAYED =
   "A notification written in the moment the last stream ended is not repeated.";
 
 function rearm(because) {
-  if (headerHalf() === null || watching) {
+  if (headerHalf() === null) {
+    return;
+  }
+  if (watching) {
+    asked = because;
     return;
   }
   watchDeliveries(`${because} ${NOTHING_REPLAYED}`);
@@ -1139,6 +1169,25 @@ async function watchDeliveries(because) {
   deliveryState(
     because ? `Watching for notifications. ${because}` : "Watching for notifications."
   );
+  try {
+    await readDeliveries(half);
+  } finally {
+    // The stream has ended and this page knows it now, so an event held while it was
+    // still pending is spent here — **after** the ending has been reported, which is
+    // why this is not in `stopWatching`: re-arming from there would announce the new
+    // stream and then write the old one's condition over the top of it.
+    const held = asked;
+    asked = null;
+    if (held !== null) {
+      rearm(held);
+    }
+  }
+}
+
+// The read itself, split out so that the `finally` above wraps the whole of a
+// stream's life — its opening, its ending, and the reporting of that ending — rather
+// than one `try` inside another. Nothing else calls it.
+async function readDeliveries(half) {
   try {
     const response = await fetch("/deliveries", { headers: admitted(half, false) });
     if (!response.ok) {

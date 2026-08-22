@@ -196,7 +196,12 @@ def test_the_header_half_is_held_in_origin_scoped_storage_shared_across_tabs() -
     script = _code("app.js")
 
     assert "localStorage" in script
-    assert "sessionStorage" not in script
+    assert "window.localStorage.setItem(STORAGE_KEY, value)" in script
+    # The page now stores one other thing, and it is **not** a session half: which
+    # conversation this view is reading, which is the tab's rather than the origin's.
+    # So the clause is asserted where it is about — no half of a session is ever in
+    # tab-scoped storage — and the one key that is, is named.
+    assert set(re.findall(r"window\.sessionStorage\.\w+\((\w+)", script)) == {"CONVERSATION_KEY"}
 
 
 def test_the_front_end_never_reads_the_cookie_half() -> None:
@@ -239,6 +244,24 @@ def test_the_front_end_continues_the_conversation_the_hub_named() -> None:
     assert "let conversationId = storedConversation();" in script
 
 
+def test_the_conversation_a_view_is_reading_is_the_tabs_and_not_the_origins() -> None:
+    """ADR-0168 §6 names the difference the two values want. The header half is "shared
+    across that origin's tabs" because it admits the browser; which conversation you are
+    reading is not — it is what *this view* is looking at, and two tabs are two views.
+
+    In `localStorage` it would be one selection for the whole origin, so a second tab
+    choosing a thread would retarget the first tab's next question at its own reload.
+    Adversarial review raised that on round 1 and it is right; the tab's own storage
+    survives a reload, which is all that was asked, and stops there.
+    """
+    script = _code("app.js")
+
+    assert "window.sessionStorage.getItem(CONVERSATION_KEY)" in script
+    assert "window.sessionStorage.setItem(CONVERSATION_KEY, id)" in script
+    assert "localStorage" not in _functions(script)["setConversation"]
+    assert "localStorage" not in _functions(script)["storedConversation"]
+
+
 def test_the_conversation_is_destroyed_with_the_session_it_sits_beside() -> None:
     """A thread carried into a session the owner started afresh would be this page
     continuing something the hub was never asked to continue.
@@ -252,7 +275,7 @@ def test_the_conversation_is_destroyed_with_the_session_it_sits_beside() -> None
     assert "setConversation(null);" in functions["forgetHeaderHalf"]
     assert "setConversation(null);" in functions["startSession"]
     assert "setConversation(null);" in functions["forgetConversation"]
-    assert "window.localStorage.removeItem(CONVERSATION_KEY);" in functions["setConversation"]
+    assert "window.sessionStorage.removeItem(CONVERSATION_KEY);" in functions["setConversation"]
 
 
 def test_the_page_says_which_conversation_the_next_question_lands_in() -> None:
@@ -447,7 +470,7 @@ def test_the_two_stream_endings_are_not_one_message() -> None:
     assert "this browser has stopped watching" in script
     assert "Start watching again." in script
     assert "ANSWER_STREAM_CUT" in _functions(script)["askStreaming"]
-    assert "DELIVERY_STREAM_CUT" in _functions(script)["watchDeliveries"]
+    assert "DELIVERY_STREAM_CUT" in _functions(script)["readDeliveries"]
 
 
 def test_the_page_renders_the_terminal_reply_over_what_it_accumulated() -> None:
@@ -613,8 +636,11 @@ def test_a_re_arm_happens_only_where_there_is_a_session_and_no_open_stream() -> 
     """
     rearm = _functions(_code("app.js"))["rearm"]
 
-    assert "if (headerHalf() === null || watching) {" in rearm
-    assert rearm.index("return;") < rearm.index("watchDeliveries(")
+    assert "if (headerHalf() === null) {" in rearm
+    # No session half is nothing to re-arm and nothing to remember either: the request
+    # is held only where there is a stream that will settle and report.
+    assert rearm.index("return;") < rearm.index("asked = because;")
+    assert rearm.index("asked = because;") < rearm.index("watchDeliveries(")
 
 
 def test_a_re_arm_says_that_it_happened_why_and_what_it_does_not_promise() -> None:
@@ -658,6 +684,34 @@ def test_a_stream_that_opens_clears_what_ended_the_last_one() -> None:
     assert watch.index('fault(null, "notifications");') < watch.index("deliveryState(")
 
 
+def test_an_event_arriving_while_the_last_stream_is_pending_is_not_thrown_away() -> None:
+    """The phone's own ordering, and the one round 1 caught.
+
+    A backgrounded page has its stream abandoned by the gateway (ADR-0175 §4's last
+    clause) and the rejection lands whenever the browser next runs it — which can be
+    *after* the owner has brought the page back. ``watching`` still reads true at that
+    moment, so a re-arm that simply returned would leave the owner pressing the button
+    after all: the failure this section exists to end, one ordering over.
+
+    **One request, not a queue.** It holds the reason to announce, is consumed once,
+    and nothing but a fresh foreground or network event sets it again — so a re-armed
+    stream that fails at once re-arms nothing. That is what separates honouring an
+    event the owner caused from retrying on a timer.
+    """
+    functions = _functions(_code("app.js"))
+    rearm, watch = functions["rearm"], functions["watchDeliveries"]
+
+    assert "asked = because;" in rearm
+    assert rearm.index("headerHalf() === null") < rearm.index("if (watching) {")
+    # Spent after the ending has been reported, which is why it is not in
+    # `stopWatching`: from there it would announce the new stream and then write the
+    # old one's condition over the top of it.
+    assert "} finally {" in watch
+    assert "const held = asked;" in watch
+    assert "asked = null;" in watch
+    assert watch.index("asked = null;") < watch.index("rearm(held);")
+
+
 def test_the_page_says_why_a_session_ended_while_it_was_only_watching() -> None:
     """ADR-0175 §7: an open stream is **not** use of the session that admitted it.
     ``gateway_session_idle_timeout`` "is refreshed by a request the gateway admits and
@@ -679,7 +733,7 @@ def test_the_page_says_why_a_session_ended_while_it_was_only_watching() -> None:
     assert "gateway_session_idle_timeout" in script
     assert "Watching does not keep a session alive." in script
     assert 'value.fault === "no-live-session"' in _functions(script)["describeDeliveryEnd"]
-    assert "describeDeliveryEnd" in _functions(script)["watchDeliveries"]
+    assert "describeDeliveryEnd" in _functions(script)["readDeliveries"]
     assert "describeDeliveryEnd" not in _functions(script)["askStreaming"]
 
 
@@ -872,7 +926,7 @@ _FETCH_SITES: Final = {
     "startSession": "startSession",
     "askWhole": "ask",
     "askStreaming": "ask",
-    "watchDeliveries": "watchDeliveries",
+    "readDeliveries": "readDeliveries",
     "relay": "listConversations",
 }
 
