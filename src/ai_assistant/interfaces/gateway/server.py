@@ -132,12 +132,18 @@ from ai_assistant.core.types import (
     BeliefBand,
     BeliefSummary,
     ClassReach,
+    Confirmation,
+    ConfirmationDestination,
+    ConfirmationEgress,
     ConnectedAccount,
     ConnectionAct,
+    ContinuationToken,
     ConversationDigest,
     ConversationSummary,
     Disposition,
+    EgressSpan,
     Evidence,
+    FrozenJson,
     GrantableSource,
     GrantScope,
     HeldNotification,
@@ -289,6 +295,25 @@ _FORGET_QUESTION_PATH: Final = "/question/forget"
 #: it but a caller", and here the caller is the owner pressing a button.
 _OBSERVE_PATH: Final = "/observe"
 
+#: ADR-0177 §8's CONFIRM pair, unblocked by ADR-0178's merge and no sooner: §8's
+#: precondition is "discharged rather than replaced, on its own stated firing
+#: condition" (ADR-0178 §8), and what the surface owes once it is unblocked is §8's
+#: other clauses plus ADR-0178 §7's floor.
+#:
+#: **Two paths, and the listing is a path of its own rather than an empty answer of
+#: the other**, for the reason the question surface states one panel over: a recovery
+#: read and an act on one recovered park answer different questions, and a door that
+#: classifies "from its method and path alone" (ADR-0168 §6) must not have a body that
+#: failed to parse read as a listing.
+#:
+#: **``/confirmation/resume`` rather than ``/resume``**, because "resume" is already
+#: ambiguous at this surface and the path is where the ambiguity would land:
+#: :data:`_CONVERSATIONS_PATH` records that resuming a *conversation* is a read plus a
+#: turn, while ``AssistantEngine.resume`` resumes a parked **turn**. The path names the
+#: thing resumed, so neither can be reached by guessing the other.
+_CONFIRMATIONS_PATH: Final = "/confirmations"
+_RESUME_PATH: Final = "/confirmation/resume"
+
 #: ADR-0177 §10's notification review surface. Five paths for five operations, and
 #: **none of them is** :data:`_DELIVERIES_PATH`: what these operate on is the
 #: notification *record* (ADR-0130), where a delivery is what the gateway's own poll
@@ -351,6 +376,8 @@ _ASSISTANT_PATHS: Final[Mapping[tuple[str, str], str]] = {
     ("POST", _ANSWER_PATH): "answer",
     ("POST", _FORGET_QUESTION_PATH): "forget_question",
     ("POST", _OBSERVE_PATH): "observe",
+    ("POST", _CONFIRMATIONS_PATH): "pending_confirmations",
+    ("POST", _RESUME_PATH): "resume",
     ("POST", _NOTIFICATIONS_PATH): "notifications",
     ("POST", _DISMISS_NOTIFICATION_PATH): "dismiss_notification",
     ("POST", _FORGET_NOTIFICATION_PATH): "forget_notification",
@@ -865,6 +892,8 @@ class Gateway:
             _ANSWER_PATH: self._answer,
             _FORGET_QUESTION_PATH: self._forget_question,
             _OBSERVE_PATH: self._observe,
+            _CONFIRMATIONS_PATH: self._pending_confirmations,
+            _RESUME_PATH: self._resume,
             _NOTIFICATIONS_PATH: self._notifications,
             _DISMISS_NOTIFICATION_PATH: self._dismiss_notification,
             _FORGET_NOTIFICATION_PATH: self._forget_notification,
@@ -2180,6 +2209,68 @@ class Gateway:
         report = await self._relayed(partial(self._engine.observe, conversation_id=named))
         return _rendered({"observation": _observation_view(report)})
 
+    # --- ADR-0177 §8, ADR-0178 §7: the CONFIRM prompt ---------------------
+    #
+    # ADR-0177 §8 blocked this surface "before a ratified decision supplies what
+    # ADR-0148 §8's fourth clause requires", and ADR-0178 §8 discharges that
+    # precondition "by this ADR's ratification and merge and not before". So the two
+    # handlers below carry §8's surviving clauses — the token relayed opaquely,
+    # ``resume`` answered with ``approved`` and nothing else, and
+    # ``pending_confirmations`` as the one recovery route — and the view they render
+    # through carries ADR-0178 §7's floor.
+    #
+    # **Neither handler rules on anything.** ADR-0042 §6 makes the adapter a conveyor
+    # of consent: the browser's answer arrives as ``approved``, the engine decides what
+    # it means, and a denial comes back as a result rather than as an exception.
+
+    async def _pending_confirmations(
+        self,
+        request: Request,  # noqa: ARG002 — one signature per entry in `_unary`
+    ) -> Response:
+        """List every park still answerable, each with a freshly minted token.
+
+        ADR-0177 §8's recovery clause: "A browser that has been closed and reopened,
+        and a gateway that has been restarted, both recover through this read and
+        through no other route." The tokens are the engine's own and are re-minted per
+        call (ADR-0052 §1), which is why nothing here or in the page caches one — a
+        cached token names an entry in a handle table a restart emptied.
+
+        Returns:
+            One rendered confirmation per answerable park, each carrying ADR-0178 §7's
+            floor where the ruling was taken over an egress binding.
+        """
+        pending = await self._relayed(self._engine.pending_confirmations)
+        return _rendered({"confirmations": [_confirmation_view(one) for one in pending]})
+
+    async def _resume(self, request: Request) -> Response:
+        """Answer one parked confirmation and continue the step it belongs to.
+
+        **``approved`` and nothing else** (ADR-0177 §8): the browser supplies the
+        human's answer, and ``timeout`` is the caller-owned deadline §1 and §9 place
+        with the gateway — ``resume`` "is given the same budget a turn is given at this
+        surface", which is :data:`_TURN_BUDGET` and no second figure.
+
+        **The token is relayed, not interpreted** (ADR-0042 §4): :func:`_token` wraps
+        the bytes the browser sent in the carrier the surface declares and changes none
+        of them, and this gateway mints none, rewrites none and substitutes none.
+
+        Args:
+            request: The admitted request, carrying ``token`` and ``approved``.
+
+        Returns:
+            What the resumption produced, rendered as any other turn is.
+        """
+        payload = _payload(request)
+        outcome = await self._relayed(
+            partial(
+                self._engine.resume,
+                _token(payload),
+                approved=_flag(payload, "approved"),
+                timeout=_TURN_BUDGET,
+            )
+        )
+        return _rendered({"outcome": _outcome_view(outcome)})
+
     # --- ADR-0177 §10: the notification review surface --------------------
     #
     # Five operations on the notification **record** (ADR-0130 §7, §9) and none on a
@@ -2953,6 +3044,38 @@ def _credential(payload: Mapping[str, Any]) -> SecretStr:
         ) from exc
 
 
+def _token(payload: Mapping[str, Any]) -> ContinuationToken:
+    """One continuation, relayed opaquely (ADR-0042 §4, ADR-0177 §8).
+
+    **Wrapped, never read.** The bytes the browser sent are put back into the carrier
+    the promoted surface declares and nothing here parses them, branches on them,
+    derives anything from them or substitutes one for another — an adapter that
+    branched on a token to decide allow/deny would be authoring a permission outcome
+    in ``interfaces/``, which is the failure :class:`ContinuationToken` names.
+
+    **A blank handle is ``malformed-request`` rather than a condition of its own.**
+    Every token this surface can carry was minted by the engine and disclosed by
+    :func:`_confirmation_view`, so a value that cannot be a handle means the page and
+    the gateway disagree about the shape, which is exactly what :func:`_malformed`
+    reports — unlike :func:`_credential`, where the unusable value was typed by a
+    person who can fix it.
+
+    Args:
+        payload: The request's JSON object.
+
+    Returns:
+        The continuation, ready to relay.
+
+    Raises:
+        _Refused: If the member is absent, is not a string, or names nothing.
+    """
+    handle = _required_string(payload, "token")
+    try:
+        return ContinuationToken(handle=handle)
+    except ValueError as exc:
+        raise _malformed() from exc
+
+
 def _payload(request: Request) -> Mapping[str, Any]:
     """The request's JSON object, or an empty mapping where there is not one.
 
@@ -3254,7 +3377,14 @@ def _step_view(step: StepOutcome | None) -> dict[str, Any] | None:
     view: dict[str, Any] = {
         "disposition": step.disposition.value,
         "tool_id": step.tool_id,
-        "awaiting_confirmation": step.confirmation is not None,
+        # **The confirmation whole, never a boolean** (#1404, ADR-0178 §10). This view
+        # is an explicit enumeration, so nothing about it carrying ADR-0178 §7's
+        # content is automatic: "a gateway that shipped the approval control while
+        # enumerating none of it would satisfy every test above". What the page needs
+        # in order to *put* ADR-0148 §8's question is here or it is nowhere.
+        "confirmation": (
+            None if step.confirmation is None else _confirmation_view(step.confirmation)
+        ),
         "status": None,
         "failure": None,
     }
@@ -3271,6 +3401,156 @@ def _step_view(step: StepOutcome | None) -> dict[str, Any] | None:
             "kind": None if execution.failure.kind is None else execution.failure.kind.value,
         }
     return view
+
+
+def _confirmation_view(confirmation: Confirmation) -> dict[str, Any]:
+    """One parked action, as the page must be able to put it (ADR-0178 §7).
+
+    An enumeration for :func:`_outcome_view`'s reason, and here the reason is
+    ADR-0178 §10's in terms: ``_step_view`` reduced a whole confirmation to one
+    boolean, so a browser could show an approval control having rendered none of what
+    ADR-0148 §8's fourth clause requires. **All five content members cross**, and the
+    fifth is ``egress``.
+
+    **Absence is carried as absence** (ADR-0178 §4). A ``CONFIRM`` whose recorded
+    decision carries no egress binding crosses with ``egress`` ``null`` and nothing
+    stands in for it — no empty span list, no placeholder identity. What that states is
+    that the ruling was taken over no egress binding and nothing more, so neither this
+    view nor the page reads it as a warrant that the call transmits nothing.
+
+    **The token crosses because the page has to relay it back and for no other
+    reason** (ADR-0177 §8). It is disclosed as the opaque handle it is; the page parses
+    no part of it, renders it nowhere and stores it in no browser storage, and this
+    gateway mints none, rewrites none and substitutes none.
+
+    Every value crosses as **data** and is neutralised on the page by being inserted
+    through a text node (ADR-0042 §4, ADR-0175 §9) — the new members included, because
+    ``argument`` is a caller-influenced key (ADR-0150 §13) and a ``supplied`` form is a
+    string a model produced.
+    """
+    return {
+        "token": confirmation.token.handle,
+        "tool_id": confirmation.tool_id,
+        "tool_description": confirmation.tool_description,
+        "parameters": [
+            {"key": key, "value": _parameter_text(value)}
+            for key, value in confirmation.parameters.items()
+        ],
+        "reason": confirmation.reason,
+        "egress": None if confirmation.egress is None else _egress_view(confirmation.egress),
+    }
+
+
+def _parameter_text(value: FrozenJson) -> str:
+    """One argument's value, spelled here rather than by the page.
+
+    **Rendered whole and losslessly, which is why it is text and not the JSON value.**
+    ADR-0177 §8 requires ``parameters`` rendered "every key and every value the mapping
+    carries", and a JSON number crossing to a browser is read by ``JSON.parse`` into a
+    double: an integer argument above 2**53 would reach the person *changed*, and a
+    confirmation showing a value the call would not run with is worse than one showing
+    none. This is :func:`_preferences_view`'s losslessness rule and :func:`_decimal`'s,
+    reaching the one member of this surface whose contents nothing constrains.
+
+    A string crosses as itself, so the common case reads as the person wrote it; every
+    other JSON value is spelled in JSON, which is the notation it arrived in. Nothing
+    here truncates, abbreviates or summarises.
+
+    Args:
+        value: The argument's value, as the tool would receive it.
+
+    Returns:
+        The text the page displays beside the key.
+    """
+    if isinstance(value, str):
+        return value
+    # ``default=dict`` is what carries a ``FrozenDict``: it is a ``Mapping`` and not a
+    # ``dict``, so the encoder reaches for it exactly where one is nested, and a tuple
+    # (which is what a frozen JSON array is) already encodes as an array.
+    return json.dumps(value, ensure_ascii=False, default=dict)
+
+
+def _egress_view(egress: ConfirmationEgress) -> dict[str, Any]:
+    """ADR-0148 §8's fourth clause, as the page receives it (ADR-0178 §7).
+
+    Three things, and a confirmation naming the tool and not the recipients is not a
+    confirmation of an egress call: the connected account's **identity**, the canonical
+    destination set **in both forms**, and the **payload description**.
+
+    **The set is read from** :attr:`ConfirmationEgress.canonical_destination_set`
+    **in this process** and crosses as `core` derived it. ADR-0178 §3 forbids a second
+    derivation of one fact in another language: a deduplication, an account
+    substitution and a code-point order reimplemented in a page's script are business
+    logic in an adapter (golden rule 3), and a page that got any of the three wrong
+    would show a recipient set the ruling was not taken over. So the arithmetic
+    happens here, once, and the page renders what it was handed.
+
+    **The set and the occurrences both cross, and that is not redundancy.** They answer
+    different questions: the set is what the policy ruled over and is deduplicated, so
+    it answers "how many people is this going to"; the occurrences are ADR-0150 §10's
+    third clause, so one recipient named by ``to`` and again by ``bcc`` is one member
+    of the set and **two** disclosures. A surface showing only the set has hidden a
+    disclosure; one showing only the occurrences has shown a list the user must
+    deduplicate in their head.
+    """
+    return {
+        "account_identity": egress.account_identity,
+        "destinations": [_destination_view(one) for one in egress.canonical_destination_set],
+        "spans": [_span_view(one) for one in egress.spans],
+    }
+
+
+def _destination_view(member: ConfirmationDestination) -> dict[str, Any]:
+    """One member of the derived set, in the two shapes and no third (ADR-0178 §3).
+
+    A *selected recipient* carries a protocol and a canonical form; *the connected
+    account* carries an account identity. The view keeps all three keys on both shapes
+    with ``null`` where the member holds nothing, so the page branches on the same
+    absence the model does rather than on a tag this adapter invented.
+
+    Nothing here orders, deduplicates or substitutes: the order is
+    ``canonical_destination_set``'s own — account members first, then selected
+    recipients by protocol and then by canonical form — and it arrives that way.
+    """
+    return {
+        "account_identity": member.account_identity,
+        "protocol": None if member.protocol is None else member.protocol.value,
+        "canonical": member.canonical,
+    }
+
+
+def _span_view(span: EgressSpan) -> dict[str, Any]:
+    """One occurrence of the payload description, whole (ADR-0150 §4, ADR-0178 §7).
+
+    **A description, never the payload.** A span states an argument, a position, a
+    provenance, an extent and sometimes a tier; it holds no content, so nothing that
+    crosses here is the text and nothing the page can build from it is a claim about
+    what the text says.
+
+    **Both forms where the occurrence carries a destination, and neither invented where
+    it does not.** :attr:`EgressSpan.destination` is optional, and where it is absent
+    this carries ``null`` rather than a fabricated recipient — the page renders such a
+    span as the payload-description span it is. Where it is present both ``supplied``
+    and ``canonical`` cross, because ADR-0148 §14 names reconstruction of one from the
+    other as a failure in terms and the binding carries both so neither is guessed.
+    """
+    destination = span.destination
+    return {
+        "argument": span.argument,
+        "index": span.index,
+        "provenance": span.provenance.value,
+        "extent": span.extent,
+        "tier": None if span.tier is None else span.tier.value,
+        "destination": (
+            None
+            if destination is None
+            else {
+                "protocol": destination.protocol.value,
+                "supplied": destination.supplied,
+                "canonical": destination.canonical,
+            }
+        ),
+    }
 
 
 def _summary_view(summary: ConversationSummary) -> dict[str, Any]:

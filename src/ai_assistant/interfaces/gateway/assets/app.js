@@ -344,13 +344,14 @@ function renderStep(body, step) {
   if (step === null) {
     return;
   }
-  if (step.awaiting_confirmation) {
-    line(
-      body,
-      "The assistant parked this step for confirmation. The gateway authors no " +
-        "permission ruling, so answer it with 'assistant resume' at a terminal.",
-      "notice"
-    );
+  // A park is rendered as the parked action, never as a boolean saying one happened
+  // (#1404). ADR-0177 §8 makes this page a place a confirmation can be **answered**,
+  // and ADR-0178 §7 states what has to be on screen before the answer is collected —
+  // so what used to be a line telling the owner to go and find a terminal is now the
+  // question itself, put here.
+  if (step.confirmation !== null) {
+    line(body, "This step is parked until you answer it.", "notice");
+    renderConfirmation(body, step.confirmation);
     return;
   }
   const tool = step.tool_id || "the selected tool";
@@ -369,6 +370,223 @@ function renderStep(body, step) {
   const because = step.failure ? ` ${step.failure.message}` : "";
   const kind = step.failure && step.failure.kind ? ` (${step.failure.kind})` : "";
   line(body, `${tool} is '${step.status}'.${because}${kind}`, "failed");
+}
+
+// --- the CONFIRM prompt (ADR-0177 §8, ADR-0178 §7) ---------------------------
+//
+// **Everything below renders; nothing below derives.** The canonical destination set
+// is the one `core` computed, read from the view the gateway built in its own Python
+// process (ADR-0178 §3) — this file never deduplicates destinations, never orders
+// them, never substitutes the account for an empty set, and never builds a set out of
+// the occurrences beside it. A deduplication, an account substitution and a
+// code-point order reimplemented here would be business logic in an adapter (golden
+// rule 3) and a second derivation of one fact, and a page that got any of the three
+// wrong would show a recipient set the ruling was not taken over.
+//
+// **The approval control is built last, after the whole floor is on screen**, which
+// is §7's "before it collects the user's answer" read as an ordering obligation on
+// this renderer and not only as a wording one.
+//
+// **The token is relayed and never rendered** (ADR-0177 §8). It reaches
+// `answerConfirmation` through a closure, so it is in no text node, no attribute and
+// no browser storage; this page parses no part of it and derives nothing from it.
+
+function renderConfirmation(parent, confirmation) {
+  const item = document.createElement("div");
+  item.className = "confirmation-row";
+  line(item, `${confirmation.tool_id} — ${confirmation.tool_description}`, "reply");
+  renderParameters(item, confirmation.parameters);
+  // `egress` absent is ADR-0178 §4's discriminator, and all it states is that the
+  // ruling was taken over no egress binding. So this branch renders the four other
+  // members and says **nothing** about recipients — not that there are none, and not
+  // that the call transmits nothing. Neither is a fact this page was given.
+  if (confirmation.egress !== null) {
+    renderEgress(item, confirmation.egress);
+  }
+  line(item, `Why you are being asked: ${confirmation.reason}`, "notice");
+  offerApproval(item, confirmation.token);
+  parent.appendChild(item);
+}
+
+// Every argument the call would run with — every key and every value, none omitted
+// and none truncated (ADR-0177 §8).
+//
+// **These are the arguments and they are not the canonical destination set** (§8's
+// surviving sub-clauses). A flat `to` among them is what the model produced before
+// binding, so it is presented under a heading that says so; the bound set, where
+// there is one, is rendered separately below by `renderEgress` and is the only thing
+// on this page called a destination.
+//
+// The values arrive already spelled as text by the gateway, losslessly — a JSON
+// number read by `JSON.parse` would be a double, and an integer argument above 2**53
+// would reach the owner changed.
+function renderParameters(item, parameters) {
+  if (parameters.length === 0) {
+    line(item, "It would run with no arguments.", "hint");
+    return;
+  }
+  line(item, "It would run with these arguments, as the assistant wrote them:", "hint");
+  parameters.forEach((one) => line(item, `${one.key} = ${one.value}`, "hint"));
+}
+
+// ADR-0148 §8's fourth clause, before the answer is collected: the connected
+// account's identity, the canonical destination set in both forms, and the payload
+// description.
+//
+// The set **and** the occurrences are both shown, which is not redundancy: the set is
+// what the policy ruled over and is deduplicated, so it says how many people this is
+// going to; the occurrences are ADR-0150 §10's third clause, so one recipient named by
+// `to` and again by `bcc` is one member of the set and two disclosures here.
+function renderEgress(item, egress) {
+  line(item, `From the connected account: ${egress.account_identity}`, "hint");
+  line(item, "It would reach:", "hint");
+  egress.destinations.forEach((one) => line(item, destinationWords(one), "hint"));
+  line(item, "What it describes sending:", "hint");
+  if (egress.spans.length === 0) {
+    line(item, "the payload description names no span", "hint");
+  }
+  egress.spans.forEach((one) => line(item, spanWords(one), "hint"));
+}
+
+// One member of the set `core` derived, in the two shapes it has and no third.
+//
+// **The account arm is named as a destination rather than as an absence** (ADR-0178
+// §7): where the spans carry no destination the set is the connected account, which is
+// ADR-0148 §2's third clause, and a page showing "no recipients" there would be
+// telling the owner the opposite of what the ruling was taken over.
+function destinationWords(member) {
+  if (member.account_identity !== null) {
+    return `the connected account ${member.account_identity}`;
+  }
+  return `${member.canonical} (${member.protocol})`;
+}
+
+// One occurrence of the payload description, whole.
+//
+// **A description, never the payload.** A span states an argument, a position, a
+// provenance, an extent and sometimes a tier; it holds no content, so nothing here
+// presents an extent as the text or a provenance as an assertion about what the text
+// says.
+//
+// **Both forms where the occurrence carries a destination, and neither invented where
+// it does not.** A destination-less span is rendered as the payload-description span
+// it is and names no recipient; dropping it, or rendering it as though it named one,
+// would fail the whole-rendering clause in the two opposite directions.
+function spanWords(span) {
+  const where = span.index === null ? span.argument : `${span.argument}[${span.index}]`;
+  const facts = [disclosureWords(span.provenance), `${span.extent} code points`];
+  if (span.tier !== null) {
+    facts.push(`tier ${span.tier}`);
+  }
+  const head =
+    span.destination === null
+      ? "names no destination"
+      : `to ${span.destination.canonical} (${span.destination.protocol}), ` +
+        `as supplied: ${span.destination.supplied}`;
+  return `${where} — ${head}; ${facts.join("; ")}`;
+}
+
+// Who disclosed one span, in words (ADR-0146 §1). It says **who**, and nothing about
+// what the value holds: ADR-0178 §7 forbids presenting a `system_selected` marker as
+// an assertion about what the text says, and ADR-0146 §2 makes provenance carried
+// rather than derived. A member this page has no words for is shown as the value it
+// is, which is `bandWords`' own arrangement one surface over.
+function disclosureWords(provenance) {
+  if (provenance === "user_authored") {
+    return "you composed it";
+  }
+  if (provenance === "system_selected") {
+    return "this system selected it";
+  }
+  return provenance;
+}
+
+// The answer, offered only once everything above it is on screen.
+//
+// Two buttons rather than a checkbox and a submit, because each is one act and the
+// page never holds a half-made answer. `resume` is answered with `approved` and
+// nothing else — the deadline is the gateway's (ADR-0177 §9) and no value from here
+// reaches it.
+function offerApproval(item, token) {
+  const approve = document.createElement("button");
+  approve.type = "button";
+  approve.textContent = "Yes, do it";
+  approve.addEventListener("click", () => answerConfirmation(token, true));
+  const decline = document.createElement("button");
+  decline.type = "button";
+  decline.textContent = "No";
+  decline.addEventListener("click", () => answerConfirmation(token, false));
+  item.appendChild(approve);
+  item.appendChild(decline);
+}
+
+// The one recovery route (ADR-0177 §8). A browser that has been closed and reopened,
+// and a gateway that has been restarted, both get back to a park through this read and
+// through no other — which is why the page holds no confirmation of its own between
+// loads and caches no token: `pending_confirmations` mints a fresh one per call, and a
+// remembered one names an entry in a handle table a restart emptied (ADR-0052 §1).
+async function listPending() {
+  await readPending(false);
+}
+
+// Read it, and say so or not.
+//
+// `quiet` is the difference between the owner asking what is waiting and the page
+// looking on its own as it loads: an empty answer to a question nobody asked is a
+// panel that says nothing, so it stays closed, and an empty answer to the button is
+// the answer and is shown.
+async function readPending(quiet) {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const body = await relay(half, "/confirmations", {});
+    if (body === null) {
+      return;
+    }
+    const list = el("confirmation-list");
+    clearNode(list);
+    if (body.confirmations.length === 0) {
+      if (quiet) {
+        show("confirmations", false);
+        return;
+      }
+      line(list, "Nothing is waiting for your answer.", "hint");
+    }
+    body.confirmations.forEach((one) => renderConfirmation(list, one));
+    show("confirmations", true);
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
+}
+
+// One answer, relayed. The page conveys consent and rules on nothing (ADR-0042 §6):
+// a refusal comes back as an ordinary outcome whose step was denied, not as a fault,
+// and it is rendered where every other turn's result is rendered.
+//
+// The listing is read again afterwards, quietly, because answering one park is the
+// only thing that changes what is waiting — and re-reading is also how the page gets
+// fresh tokens for whatever is left rather than keeping the ones it has.
+async function answerConfirmation(token, approved) {
+  fault(null);
+  const half = headerHalf();
+  if (half === null) {
+    showBootstrap();
+    return;
+  }
+  try {
+    const body = await relay(half, "/confirmation/resume", { token, approved });
+    if (body === null) {
+      return;
+    }
+    renderOutcome(body.outcome);
+    await readPending(true);
+  } catch (_) {
+    fault(GATEWAY_GONE);
+  }
 }
 
 async function startSession(event) {
@@ -3103,6 +3321,7 @@ function renderProposal(body, proposal) {
 }
 
 const CONTROL_PANELS = [
+  "confirmations",
   "control",
   "sources",
   "standing",
@@ -3140,12 +3359,17 @@ function showConsole() {
   show("control", true);
   el("utterance").focus();
   watchDeliveries();
+  // A park outlives the page that raised it, so a browser opening onto one has to be
+  // told without being asked (ADR-0177 §8). Quiet, because a load that finds nothing
+  // waiting has nothing to say.
+  readPending(true);
 }
 
 el("bootstrap-form").addEventListener("submit", startSession);
 el("ask-form").addEventListener("submit", ask);
 el("watch-button").addEventListener("click", watchDeliveries);
 el("conversations-button").addEventListener("click", listConversations);
+el("confirmations-button").addEventListener("click", listPending);
 el("sources-button").addEventListener("click", listSources);
 el("standing-button").addEventListener("click", listStanding);
 el("history-button").addEventListener("click", listGrantHistory);
