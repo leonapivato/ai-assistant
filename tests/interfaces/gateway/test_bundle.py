@@ -649,7 +649,29 @@ def test_an_act_reads_its_outcome_from_the_gateways_own_distinction() -> None:
     script = _code("app.js")
 
     assert 'UNKNOWN_FAULTS = new Set(["hub-unreachable"])' in script
-    assert "UNKNOWN_FAULTS.has(body.fault) ? UNKNOWN : NOT_LANDED" in script
+    assert "!named || UNKNOWN_FAULTS.has(body.fault) ? UNKNOWN : NOT_LANDED" in script
+
+
+def test_a_refusal_this_page_cannot_classify_is_an_unknown_outcome() -> None:
+    """The gap between "read a fault" and "read the *right* fault".
+
+    A response cut after its headers leaves ``readBody`` with nothing, so no condition
+    is named — and the status may be the ``502`` the gateway writes for a hub it could
+    not reach, which ADR-0177 §7's third clause makes **not known**. Treating a missing
+    ``fault`` as "not one of the unknown conditions" would report exactly that as known
+    not to have landed, which is the assertion ADR-0139 §4 exists to prevent.
+
+    The success branch is deliberately *not* symmetric, and the asymmetry is a fact
+    about the gateway rather than a convenience: it writes a success status only after
+    the promoted call has returned, so a ``200`` cannot precede the hub's answer. What
+    an unreadable body costs there is the detail beside the outcome, and reporting a
+    landed act as unknown is forbidden by the same clause that forbids the reverse.
+    """
+    acting = _functions(_code("app.js"))[_ACT_SITE]
+
+    assert 'const named = typeof body.fault === "string";' in acting
+    assert acting.index("if (response.ok)") < acting.index("const named")
+    assert "outcome: LANDED" in acting
 
 
 def test_an_amendment_is_two_requests_and_sends_no_grant_after_an_unresolved_one() -> None:

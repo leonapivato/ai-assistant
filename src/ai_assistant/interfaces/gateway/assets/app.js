@@ -779,11 +779,25 @@ async function act(half, path, payload) {
   }
   const body = await readBody(response);
   if (response.ok) {
+    // **The status line is itself the statement that the act landed**, and that is
+    // why a body this page then cannot read does not move the outcome. The gateway
+    // relays one call and writes a success status only after that call has returned,
+    // so a `200` cannot precede the hub's answer. What an unreadable body costs is
+    // the detail beside the outcome, not the outcome — and reporting a landed act as
+    // "not known" is forbidden by the same clause that forbids the reverse: each act
+    // is reported as one of exactly three, "and never as either of the other two".
     return { outcome: LANDED, body };
   }
   sessionLost(body);
+  // A refusal whose condition this page cannot read is a refusal it cannot classify,
+  // and ADR-0139 §4's third outcome is what an unclassifiable one is. The reachable
+  // case is a response cut after its headers: the status may be the `502` the gateway
+  // writes for a hub it could not reach, which is *not known*, and reading a missing
+  // `fault` as "not one of the unknown conditions" would report exactly that as known
+  // not to have landed.
+  const named = typeof body.fault === "string";
   return {
-    outcome: UNKNOWN_FAULTS.has(body.fault) ? UNKNOWN : NOT_LANDED,
+    outcome: !named || UNKNOWN_FAULTS.has(body.fault) ? UNKNOWN : NOT_LANDED,
     body,
   };
 }
