@@ -1,6 +1,6 @@
 # 179. The Protocol-triad check reads a distributed run's merged record, so both gates run across cores
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-22
 
 ## Context
