@@ -1287,3 +1287,21 @@ def test_the_log_renders_no_time_and_no_claim_about_what_is_connected() -> None:
     assert "Disconnected" in row
     for timing in ("noticed_at", "expires", "Instant"):
         assert timing not in row, timing
+
+
+def test_a_record_an_act_returned_is_not_rendered_as_a_row_of_the_listing() -> None:
+    """ADR-0151 §8: what a disconnection returns is "the live record removed, **as it
+    stood immediately before the removal entry was appended**".
+
+    So it is not a statement about the store now, and a row offering `Disconnect` on
+    it would offer an act on something that no longer exists. The caption is what
+    tells the two renderings apart, and only the listing's carries the acts.
+    """
+    functions = _functions(_code("app.js"))
+
+    assert "offerConnectionActs" in functions["renderAccount"]
+    assert "offerConnectionActs" not in functions["renderActRecord"]
+    assert "offerConnectionActs" not in functions["renderRecordFields"]
+    assert "immediately before it was removed" in functions["reportConnectionAct"]
+    assert "renderActRecord" in functions["reportConnectionAct"]
+    assert "renderAccount(" not in functions["reportConnectionAct"]
