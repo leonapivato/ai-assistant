@@ -113,6 +113,10 @@ test-fast *args:
     # Four hours: two orders of magnitude longer than a run of this suite, and
     # short enough that a day of failures across five clones cannot accumulate.
     stale_after=240
+    # Written into every lease this recipe takes, and required of every lease it
+    # reaps: it is what tells our tree from one that merely shares the shape.
+    # Defined once, so the writer and the reader below cannot drift apart.
+    lease_token='just test-fast lease (ai-assistant, issue #1419)'
     stale=""
     # `pt-??????` is exactly and only what the `mktemp` below produces, so a
     # directory that merely begins `pt-` is not a candidate however old it is.
@@ -122,19 +126,22 @@ test-fast *args:
         # is therefore never reaped -- a leak rather than a wrong deletion, which
         # is the direction to fail in.
         [ -n "$(find "$candidate" -maxdepth 1 -name 'popen-gw*' -print -quit)" ] || continue
-        # It must carry a lease file, and that lease must be free. The lease is
-        # what makes the tree THIS recipe's rather than merely tree-shaped: a
+        # It must carry THIS RECIPE's lease, and that lease must be free. The
+        # lease is what makes the tree ours rather than merely tree-shaped: a
         # six-character `pt-` name and `popen-gw*` children describe a shape, and
-        # any process on this machine could produce one. It is also the only
-        # thing that can say a live run is live -- a run wedged in one test writes
-        # nothing below its own tree and looks idle from outside however long it
-        # stands, so no mtime answers this.
+        # any process on this machine could produce one -- so the lease is READ,
+        # not merely counted, and one that does not name this recipe is somebody
+        # else's and is left alone. The lease is also the only thing that can say
+        # a live run is live -- a run wedged in one test writes nothing below its
+        # own tree and looks idle from outside however long it stands, so no mtime
+        # answers this.
         #
-        # A tree with no lease beside it is therefore never reaped, whoever made
-        # it. That leaks the trees left by runs from before this recipe leased
-        # them; the low-space report below names those, to be removed by hand
+        # A tree with no lease of ours beside it is therefore never reaped,
+        # whoever made it. That leaks the trees left by runs from before this
+        # recipe leased them, and any left by another tool that happens to share
+        # the shape; the low-space report below names those, to be removed by hand
         # once. Leaking is the direction to fail in.
-        [ -e "$candidate.lease" ] || continue
+        grep -q "^${lease_token}$" "$candidate.lease" 2>/dev/null || continue
         flock -n "$candidate.lease" true 2>/dev/null || continue
         stale="${stale}${candidate}"$'\n'
     done < <(find /tmp -maxdepth 1 -type d -name 'pt-??????' -user "$(id -un)" \
@@ -148,7 +155,7 @@ test-fast *args:
     if [ "${free_kb:-0}" -lt 3145728 ]; then
         echo "just test-fast: /tmp has $((free_kb / 1024))M free and one run wants" \
              "~1.3G — these kept trees are why, and none of them was reapable" \
-             "(too new, still leased, or with no lease to prove it is ours). If" \
+             "(too new, still leased, or carrying no lease of ours). If" \
              "you know one is dead, remove it by hand:" >&2
         ls -ldrt /tmp/pt-* >&2 2>/dev/null || true
     fi
@@ -164,6 +171,11 @@ test-fast *args:
     # file at that path and take it, which is the whole failure this prevents.
     exec {lease}>"$tmp.lease"
     flock -n "$lease"
+    # Say whose lease this is, now that it is held -- and after the `exec`, which
+    # truncates. The reaper above reads this line and reaps nothing without it, so
+    # a tree of this shape made by anything else survives; without the line, that
+    # check would have only presence to go on, which any file answers.
+    printf '%s\n' "$lease_token" >&"$lease"
     # `--basetemp` goes *after* "$@" so a forwarded one cannot displace it: pytest
     # takes the last occurrence, and a run that emptied some other directory while
     # the cleanup below removed this one would be the hazard this recipe exists to
