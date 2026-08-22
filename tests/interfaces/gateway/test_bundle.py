@@ -20,7 +20,13 @@ from typing import Final
 
 import pytest
 
-from ai_assistant.core.types import BeliefBand, GrantScope
+from ai_assistant.core.types import (
+    DEFAULT_NOTIFICATION_REACH,
+    BeliefBand,
+    GrantScope,
+    NotificationCondition,
+    NotificationReach,
+)
 from ai_assistant.interfaces.gateway.server import packaged_bundle
 
 _ROOT = Path(__file__).resolve().parents[3] / "src" / "ai_assistant" / "interfaces" / "gateway"
@@ -368,11 +374,23 @@ def test_the_page_never_holds_or_sends_a_delivery_id() -> None:
     ADR-0131 §4 makes it a capability held by exactly one device, and ADR-0172 §1
     closes the class of such values a browser holds at three — so a page that named
     one would be the fourth kind that section says takes its own ratified decision.
+
+    **``dismiss`` used to be checked over the whole file and now is not, and the
+    narrowing is ADR-0177 §10 arriving rather than the claim weakening.** While no
+    record-dismissal existed, "the page never says dismiss" was a sound proxy for
+    "the page dismisses no delivery". The review surface dismisses a *record*, and §10
+    says in terms that this is "not a route by which" a ``delivery_id`` could reach a
+    browser — so what is checked now is the thing itself: the stream's reader and its
+    renderer name neither verb and neither path, and no ``delivery_id`` is anywhere.
     """
     script = _code("app.js")
+    functions = _functions(script)
 
-    for named in ("delivery_id", "acknowledg", "dismiss"):
+    for named in ("delivery_id", "acknowledg"):
         assert named not in script, named
+    for named in ("dismiss", "forget", "/notification"):
+        assert named not in functions["watchDeliveries"], named
+        assert named not in functions["renderNotification"], named
 
 
 def test_the_page_says_whether_it_is_watching_rather_than_retrying_unseen() -> None:
@@ -402,8 +420,7 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
 
     The negative half is what is **not** this lane's: ``learn`` is admitted by
     nothing (§1, §11), the CONFIRM pair's act is blocked until #1366's contract lands
-    (§8), and the notification review five and the connection five belong to lanes
-    that have not run.
+    (§8), and the connection five belong to a lane that has not run.
     """
     script = _code("app.js")
 
@@ -424,9 +441,14 @@ def test_the_page_reaches_what_the_gateway_serves_and_nothing_beyond_it() -> Non
         '"/question/answer"',
         '"/question/forget"',
         '"/observe"',
+        '"/notifications"',
+        '"/notification/dismiss"',
+        '"/notification/forget"',
+        '"/notification/preferences"',
+        '"/notification/preferences/set"',
     ):
         assert served in script, served
-    for later in ('"/learn"', '"/resume"', '"/pending_confirmations"', '"/notifications"'):
+    for later in ('"/learn"', '"/resume"', '"/pending_confirmations"', '"/connect"'):
         assert later not in script, later
 
 
@@ -441,14 +463,19 @@ def test_the_page_offers_every_use_a_grant_may_authorise_and_no_proper_subset() 
     Read off the shipped file against ``core``'s own vocabulary, so a fourth member
     added to the enum fails here rather than reaching a user as a silently absent
     option.
+
+    **Counted inside the declaration and not across the file**, which is issue #1332's
+    lesson applied before it bit: a whole-file count of ``label:`` was satisfied by
+    ``USES`` alone only while ``USES`` was the only vocabulary the page carried, and
+    the notification review surface's reach levels are a second one.
     """
-    script = _code("app.js")
+    vocabulary = _declaration(_code("app.js"), "USES")
 
     for use in GrantScope:
-        assert f'value: "{use.value}"' in script, use.value
+        assert f'value: "{use.value}"' in vocabulary, use.value
     # Named in words rather than by member name: the value is what goes on the wire,
     # and the label beside it is what the person reads.
-    assert script.count("label:") == len(GrantScope)
+    assert vocabulary.count("label:") == len(GrantScope)
 
 
 def test_the_page_never_renders_the_uses_a_grant_leaves_out() -> None:
@@ -571,6 +598,11 @@ _RELAY_ENTRIES: Final = (
     "answerQuestion",
     "forgetQuestion",
     "observe",
+    "readNotifications",
+    "dismissNotification",
+    "forgetNotification",
+    "listTuning",
+    "writePreferences",
 )
 
 
@@ -588,6 +620,16 @@ def _functions(script: str) -> dict[str, str]:
         ]
         for index, one in enumerate(opened)
     }
+
+
+def _declaration(script: str, name: str) -> str:
+    """One top-level ``const NAME = [...]`` declaration, from its name to its close.
+
+    Enough to ask what *that* vocabulary carries, which counting occurrences across
+    the whole file cannot once the page carries two.
+    """
+    opened = script.index(f"const {name} = [")
+    return script[opened : script.index("\n];", opened)]
 
 
 def test_every_fetch_the_page_makes_is_guarded() -> None:
@@ -869,3 +911,143 @@ def test_one_generation_is_taken_for_a_whole_listing_and_carried_into_each_read(
     assert "readQuestions(path, true, run)" in functions["readQuestions"]
     assert "readBeliefs(false, runs.beliefs)" in functions["listBeliefs"]
     assert "readBeliefs(true, run)" in functions["readBeliefs"]
+
+
+# --- ADR-0177 §10: the notification review surface ---------------------------
+
+
+def test_the_page_offers_every_reach_a_class_may_be_set_to_and_no_proper_subset() -> None:
+    """ADR-0130 §6's three levels, wherever the page offers a choice among them.
+
+    ``off`` is the member worth naming: §6 has it reach "every actionable held record
+    of that class", so a control that could not send it would leave "never tell me
+    this" unreachable from a browser — the same failure a two-of-three scope group
+    would be on the grant surface.
+
+    Read against ``core``'s own vocabulary, so a fourth level added to the enum fails
+    here rather than reaching a user as a silently absent option.
+    """
+    vocabulary = _declaration(_code("app.js"), "REACHES")
+
+    for reach in NotificationReach:
+        assert f'value: "{reach.value}"' in vocabulary, reach.value
+    assert vocabulary.count("label:") == len(NotificationReach)
+
+
+def test_the_page_states_the_reach_a_class_takes_when_nothing_names_it() -> None:
+    """ADR-0130 §6: a class absent from the preference "takes the default reach",
+    which is ``hold`` for every class "including one no preference names".
+
+    The tuning panel lists only what the user has set, so without this a reader would
+    have no way to tell an unset class from one set to ``hold`` — and the difference
+    is the whole of "why did nothing interrupt me?".
+    """
+    script = _code("app.js")
+
+    assert f'const DEFAULT_REACH = "{DEFAULT_NOTIFICATION_REACH.value}";' in script
+    assert "A class you have not set takes the default — ${" in script
+
+
+def test_every_condition_a_ruling_names_is_rendered_in_words() -> None:
+    """ADR-0130 §5 names each condition "so a ruling can be explained", which is what
+    makes "why did you tell me that?" and "why didn't you?" answerable.
+
+    Total over the vocabulary, against ``core``'s own: a ninth condition would
+    otherwise reach a user as a bare wire value, and the conditions are exactly what
+    a user would have to change.
+    """
+    vocabulary = _code("app.js")
+    opened = vocabulary.index("const CONDITIONS = {")
+    named = vocabulary[opened : vocabulary.index("\n};", opened)]
+
+    for condition in NotificationCondition:
+        assert f"{condition.value}:" in named, condition.value
+
+
+def test_the_page_keeps_the_record_and_the_delivery_apart() -> None:
+    """ADR-0177 §10's first and third clauses, at the level of the layout.
+
+    The delivery list fills from the stream and the review list from
+    ``notifications``; they are two elements in two panels, and neither verb of the
+    review surface appears in the stream's reader or its renderer. ADR-0175 §10 named
+    conflating them as the mistake the deferral existed to prevent, and a browser
+    holding both is the first place they are on one screen.
+    """
+    script = _code("app.js")
+    document = _asset("index.html")
+
+    assert "notification-list" in document
+    assert "review-list" in document
+    assert 'el("review-list")' in _functions(script)["readNotifications"]
+    assert 'el("notification-list")' in _functions(script)["renderNotification"]
+
+
+def test_no_act_on_a_record_is_presented_as_touching_a_delivery() -> None:
+    """§10's third clause: "No surface presents dismissing or forgetting a
+    notification as affecting whether it was delivered, and none presents having
+    received a delivery as affecting the record's disposition. They are two acts on
+    two objects and the surface says so."
+
+    Said rather than left to be inferred, in both places a person meets the pair: the
+    panel that lists the records, and the confirmation shown before one is destroyed.
+    """
+    script = _code("app.js")
+    document = _asset("index.html")
+
+    assert "Neither is a statement about whether it ever reached a device." in document
+    assert "Neither act says anything about whether it reached a device." in script
+
+
+def test_a_write_of_the_settings_reads_them_first_and_renders_what_came_back() -> None:
+    """ADR-0177 §10's fourth clause: the surface "sends the whole
+    ``NotificationPreferences`` value it read, renders what the call **returned**
+    rather than what it sent, and states no preference state it has not read back".
+
+    A page that rendered its own optimistic view, or that assembled a value from a
+    read taken some time ago, would silently revert a preference — the write replaces
+    what is held rather than merging into it, and this surface carries no version
+    token, so the last write wins.
+    """
+    write = _functions(_code("app.js"))["writePreferences"]
+
+    assert 'relay(half, "/notification/preferences", {})' in write
+    assert '"/notification/preferences/set"' in write
+    assert "change(read.preferences)" in write
+    assert "renderTuning(written.preferences)" in write
+
+
+def test_every_edit_of_the_settings_carries_the_members_it_does_not_change() -> None:
+    """The same clause from the other side, and the member that proves it.
+
+    ``budget_window`` is on no control the page offers, so it exists only in what is
+    read and written back — a mutator that built a fresh object instead of spreading
+    the value it read would reset it on every save, and nothing on screen would say
+    so. Each edit is checked for the spread rather than the page being checked for a
+    control it deliberately does not have.
+    """
+    functions = _functions(_code("app.js"))
+
+    for edit in ("withReach", "renderQuietWindows", "quietWindowForm", "renderBudget"):
+        assert "...held," in functions[edit], edit
+    assert "budget_window_seconds" not in functions["withReach"]
+
+
+def test_the_page_reads_the_notification_again_immediately_before_destroying_it() -> None:
+    """A destructive act over a row the page has just seen, rather than one it last
+    saw minutes ago.
+
+    **This is not ADR-0073 §5's ceremony and the page does not claim it is.** That
+    ceremony binds a belief; ADR-0177 §5 carries it to ``forget``,
+    ``forget_question`` and ``forget_conversation`` and stops there, and a
+    notification is not a belief of any band — which is the reason the command line
+    offers none either. What is asserted here is the weaker, real thing: the record
+    shown in the confirmation comes from a read issued immediately before it, the
+    request is sent only for a record that read returned, and a record that has gone
+    says so instead.
+    """
+    forget = _functions(_code("app.js"))["forgetNotification"]
+
+    assert 'relay(half, "/notifications", { limit: PAGE, offset })' in forget
+    assert "body.notifications.find((one) => one.id === id)" in forget
+    assert "fault(NOTIFICATION_GONE)" in forget
+    assert forget.index("window.confirm") < forget.index('"/notification/forget"')

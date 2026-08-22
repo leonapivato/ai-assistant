@@ -100,6 +100,17 @@
           <button type="button" id="questions-button">Questions</button>
           <button type="button" id="observe-button">Look over this conversation</button>
         </p>
+        <!--
+          The notification review surface (ADR-0177 §10). Two buttons and two panels
+          because they answer two questions: what am I holding for you, and what have
+          you decided may reach you. Both are about the notification *record*; the
+          panel above, which fills from the delivery stream, is about a delivery, and
+          §10 keeps the two apart on the surface as well as in the gateway.
+        -->
+        <p class="choice">
+          <button type="button" id="review-button">Notifications I am holding</button>
+          <button type="button" id="tuning-button">What may reach you unprompted</button>
+        </p>
       </section>
 
       <section id="sources" class="panel" hidden>
@@ -150,6 +161,28 @@
         <div id="question-list"></div>
         <h3>Answers that were begun and never recorded</h3>
         <div id="interrupted-list"></div>
+      </section>
+
+      <section id="review" class="panel" hidden>
+        <h3>Notifications I am holding</h3>
+        <p class="hint">
+          Everything I have kept, oldest first, including anything whose moment has
+          passed. Dismissing one deals with it and keeps the record; forgetting one
+          destroys it. Neither is a statement about whether it ever reached a device.
+        </p>
+        <div id="review-list"></div>
+      </section>
+
+      <section id="tuning" class="panel" hidden>
+        <h3>What may reach you unprompted</h3>
+        <p class="hint">
+          Out of the box nothing interrupts: every class is held for when you next
+          look. Only classes you have set appear below; anything else takes the
+          default. Each control here is its own act — what it does not name is read
+          and written back untouched, and if something else changes these at the same
+          moment, the last write wins.
+        </p>
+        <div id="tuning-body"></div>
       </section>
 
       <section id="observation" class="panel" hidden>
