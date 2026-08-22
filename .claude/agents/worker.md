@@ -108,6 +108,48 @@ exposed at all.** A diff touching no file under `assets/` has no page to drive,
 and an MCP server's tool definitions are context every turn of that lane pays
 for.
 
+## If your lane owes both lenses, run both every round
+
+**The required set follows the shape of your diff**, and `CONTRIBUTING.md` →
+"Stop when the required reviews are green" owns the test: adversarial alone for
+most changes, adversarial **and** architecture for a contract-surface one — a
+diff touching `core/protocols.py` or `core/types.py`, or the ADR deciding that
+surface, prose-only though such a PR is (ADR-0015 §1). If your lane is
+single-lens, nothing here applies: `just review-codex adversarial`, unchanged.
+
+**On a both-lens lane, round N is both lenses on one committed tree** —
+`just review-codex-both` — from round 1, not adversarial to terminal with
+architecture at the end. It is one command in the foreground like any other
+review invocation, and it runs the same driver twice in sequence, so both
+artifacts record the same `tree=` and the pair is one round.
+
+**Triage the two verdicts as one queue, before you edit anything**, by the same
+rule as ever: `blocker`/`major` about code in your diff gets fixed; everything
+else becomes an issue. What the union buys you is the pair a sequence hides — a
+finding one lens raises that the other's reading forbids. Take neither, resolve
+it against the texts, and record the reading in the PR as the grounds for the
+finding you waive; where the texts do not settle it, that is a deadlock rather
+than a finding (issue #1155), so waive with grounding or hand the loop over.
+`docs/review/guide.md` → "When a change owes both lenses" carries the worked
+case — PR #1377, where architecture's round-11 blocker reversed the direction
+adversarial's rounds 8–9 had been edited toward.
+
+**Terminal means both verdicts green on the same tree.** That is ADR-0020 §2 as
+written — the required *set* coming back green is the terminal state — so an
+adversarial `APPROVE` on a tree architecture has not passed is not a stopping
+point, and neither is the reverse. `just ship` will not let you past the first
+case anyway on a lane whose diff makes architecture required.
+
+**A both-lens round counts as ONE round toward ADR-0138 §1's seven**, and the
+arithmetic does not double. The figure `codex-review.sh` prints counts distinct
+reviewed *trees* of the branch and is persona-agnostic, so a second persona on
+one tree leaves it where it was; each lens's own count (§2) likewise advances by
+one. Running both lenses every round makes the printed figure and both per-lens
+counts equal, which is the easiest arithmetic the handoff arms admit — do not add
+the two lenses together. The churn arm is unchanged: it fires while **at least
+one** required lens is open, which on this regime is simply "the round was not
+terminal".
+
 ## Finishing
 
 `CONTRIBUTING.md` owns the mechanics; five duties are easy to drop in a dispatched lane:
