@@ -19,6 +19,16 @@ roadmap is a plan and not a status board: what has landed, what is open and what
 is deferred live in the GitHub issue tracker (`CONTRIBUTING.md` → "The
 tracker").
 
+## Run it
+
+If you want to **use** it rather than work on it, [`docs/guide/`](docs/guide/)
+is the walk-through: install from a built wheel, name a data directory and a
+model route, put a provider key in the environment, start the hub, start the
+gateway, and ask it something in a browser. Then, optionally, the same page on a
+phone over your own overlay network, or the hub on a machine of its own.
+
+Everything below this line is for working on the code.
+
 ## Requirements
 
 - Python **3.14+**
