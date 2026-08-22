@@ -263,12 +263,17 @@ def test_the_conversation_a_view_is_reading_is_the_tabs_and_not_the_origins() ->
 
 
 def test_the_conversation_is_destroyed_with_the_session_it_sits_beside() -> None:
-    """A thread carried into a session the owner started afresh would be this page
-    continuing something the hub was never asked to continue.
+    """Three routes end one and all three go through the same place: this view's
+    session half being forgotten, a new bootstrap exchange, and forgetting the
+    conversation itself.
 
-    Three routes end one, and all three go through the same place: the session half
-    being forgotten (a lost session, a replaced one), a new bootstrap exchange, and
-    forgetting the conversation itself.
+    **Tidiness rather than a guarantee, and the difference is worth stating.** A
+    conversation is the hub's and outlives every gateway session by construction —
+    ``assistant ask --conversation`` at a terminal reaches one under whatever session
+    is current — and the id admits nothing on its own (ADR-0168 §6's two values do).
+    So this asserts what the page does with its own selection, and claims nothing
+    about a second tab that bootstraps a replacement session: that tab clears its own
+    and no other, exactly as it did before this file stored one at all.
     """
     functions = _functions(_code("app.js"))
 
