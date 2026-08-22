@@ -47,8 +47,8 @@ import ast
 import inspect
 from dataclasses import dataclass
 from pathlib import Path
-from types import FunctionType
-from typing import TYPE_CHECKING, Final, Literal, is_protocol
+from types import FunctionType, SimpleNamespace
+from typing import TYPE_CHECKING, Final, Literal, cast, is_protocol
 
 import pytest
 
@@ -1094,3 +1094,175 @@ def test_a_narrowed_distributed_run_decides_nothing_and_says_so() -> None:
         test_no_exemption_is_stale.__name__,
     }
     assert all(outcome == "skipped" for outcome, _ in evaluate_for_controller(empty).values())
+
+
+# ---------------------------------------------------------------------------
+# The handover -- the hooks the merge actually travels on (ADR-0179 §1, §2)
+# ---------------------------------------------------------------------------
+#
+# The merge tests above take a payload as given. These start from a worker's own
+# record and drive `tests/conftest.py`'s real hook functions -- worker export,
+# `pytest_testnodedown`, controller decision, synthesised report -- because a
+# break anywhere along that path leaves the two evidence-dependent checks
+# deselected on every worker and reported by nobody, while every pure merge test
+# still passes.
+
+
+class _Relay:
+    """Stands in for the controller's hook relay, keeping what was reported."""
+
+    def __init__(self) -> None:
+        self.reports: list[pytest.TestReport] = []
+
+    def pytest_runtest_logreport(self, report: pytest.TestReport) -> None:
+        self.reports.append(report)
+
+
+class _Config:
+    """Only the surface the session-finish hooks touch, and nothing else."""
+
+    def __init__(self, *, numprocesses: int | None = None, worker: bool = False) -> None:
+        self.hook = _Relay()
+        self.option = SimpleNamespace(numprocesses=numprocesses, collectonly=False)
+        if worker:
+            # `_is_worker` asks for exactly this attribute, and `workeroutput` is
+            # the dict xdist ships back to the controller.
+            self.workerinput: dict[str, str] = {}
+            self.workeroutput: dict[str, object] = {}
+
+    def getoption(self, name: str, default: object = None) -> object:
+        return getattr(self.option, name, default)
+
+
+class _Session:
+    """A session with just the two attributes the hooks read and write."""
+
+    def __init__(self, config: _Config) -> None:
+        self.config = config
+        self.exitstatus: object = pytest.ExitCode.OK
+
+
+def _isolated(monkeypatch: pytest.MonkeyPatch, record: conftest._RunRecord) -> None:
+    """Point the conftest's module-level state at this test's own record."""
+    monkeypatch.setattr(conftest, "_RECORD", record)
+    monkeypatch.setattr(conftest, "_HANDED_OVER", [_HANDED_ITEM])
+    monkeypatch.setattr(conftest, "_WORKER_HALVES", [])
+    monkeypatch.setattr(conftest, "_WORKERS_LOST", [])
+
+
+_HANDED_ITEM = conftest._ItemPayload(
+    nodeid=(
+        f"{conftest._TRIAD_CHECK}::"
+        f"{test_every_protocols_fake_is_bound_by_a_contract_subclass_that_ran.__name__}"
+    ),
+    path=conftest._TRIAD_CHECK,
+    lineno=1,
+    domain="",
+)
+
+
+def _hand_over(worker: _Session) -> None:
+    """Run one worker's session end, then deliver its half as xdist would."""
+    conftest.pytest_sessionfinish(cast("pytest.Session", worker), 0)
+    assert conftest._TRIAD_OUTPUT_KEY in worker.config.workeroutput, (
+        "the worker exported nothing, so nothing can reach the controller"
+    )
+    conftest.pytest_testnodedown(
+        SimpleNamespace(workeroutput=worker.config.workeroutput, gateway="gw0"), None
+    )
+
+
+def _finish(controller: _Session) -> dict[str, tuple[str, str]]:
+    """Run the controller's session end and return what it reported."""
+    conftest.pytest_sessionfinish(cast("pytest.Session", controller), 0)
+    return {
+        report.nodeid: (report.outcome, str(report.longrepr))
+        for report in controller.config.hook.reports
+    }
+
+
+def test_a_narrowed_workers_half_reaches_the_controller_and_is_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The whole path, on the outcome that needs no evidence to be decidable."""
+    _isolated(monkeypatch, conftest._RunRecord(unfiltered=False))
+    worker = _Session(_Config(worker=True))
+
+    _hand_over(worker)
+    controller = _Session(_Config(numprocesses=2))
+    reported = _finish(controller)
+
+    assert list(reported) == [_HANDED_ITEM["nodeid"]]
+    assert reported[_HANDED_ITEM["nodeid"]][0] == "skipped"
+    assert controller.exitstatus == pytest.ExitCode.OK
+
+
+def test_a_gap_in_a_workers_half_fails_the_run_from_the_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A verdict that needed the evidence, and the exit status that goes with it.
+
+    The record carries one binding, for ``MemoryStore``, so every other Protocol
+    is unbound over this evidence -- which is a failure the controller has to both
+    report and make the run's exit status.
+    """
+    suite, bound = _suite_and_binding(overridden=())
+    record = conftest._RunRecord(unfiltered=True)
+    record.reported[bound] = set(_suite_declared_tests(suite))
+    _isolated(monkeypatch, record)
+
+    _hand_over(_Session(_Config(worker=True)))
+    controller = _Session(_Config(numprocesses=2))
+    reported = _finish(controller)
+
+    outcome, message = reported[_HANDED_ITEM["nodeid"]]
+    assert outcome == "failed"
+    assert "is missing" in message, "the Protocols this record carries no binding for"
+    assert "MemoryStore is missing" not in message, "the one binding it does carry"
+    assert controller.exitstatus == pytest.ExitCode.TESTS_FAILED
+
+
+def test_a_worker_that_left_without_handing_over_fails_rather_than_passes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An incomplete union is not the suite's record, so it certifies nothing."""
+    _isolated(monkeypatch, conftest._RunRecord(unfiltered=True))
+    _hand_over(_Session(_Config(worker=True)))
+    conftest.pytest_testnodedown(SimpleNamespace(workeroutput={}, gateway="gw1"), None)
+
+    controller = _Session(_Config(numprocesses=2))
+    reported = _finish(controller)
+
+    outcome, message = reported[_HANDED_ITEM["nodeid"]]
+    assert outcome == "failed"
+    assert "left without handing over their half" in message
+    assert "gw1" in message
+    assert controller.exitstatus == pytest.ExitCode.TESTS_FAILED
+
+
+def test_a_distributed_run_where_no_half_arrives_at_all_fails_loudly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The silence the rest of the mechanism cannot report, because it takes the
+    nodeids with it: no half means no handed-over item to decide anything under.
+    """
+    _isolated(monkeypatch, conftest._RunRecord(unfiltered=True))
+    controller = _Session(_Config(numprocesses=2))
+
+    reported = _finish(controller)
+
+    (nodeid,) = reported
+    assert nodeid.endswith("the_workers_record_reached_the_controller")
+    assert reported[nodeid][0] == "failed"
+    assert controller.exitstatus == pytest.ExitCode.TESTS_FAILED
+
+
+def test_a_serial_run_reports_nothing_from_the_controller(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """None of this exists in a serial session -- the tests themselves run there."""
+    _isolated(monkeypatch, conftest._RunRecord(unfiltered=True))
+    controller = _Session(_Config(numprocesses=None))
+
+    assert _finish(controller) == {}
+    assert controller.exitstatus == pytest.ExitCode.OK
