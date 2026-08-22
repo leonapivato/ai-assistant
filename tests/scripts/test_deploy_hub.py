@@ -50,6 +50,12 @@ def _dry_run(repo: Path, *args: str) -> str:
     return result.stdout
 
 
+def _staged(plan: str) -> str:
+    """The staged wheel path out of a rendered plan."""
+    line = next(part for part in plan.split() if "/deploy-hub-" in part)
+    return line.split(":")[-1]
+
+
 # --------------------------------------------------------------------------- #
 # The command lines the recipe exists to encode                                #
 # --------------------------------------------------------------------------- #
@@ -167,6 +173,8 @@ def test_no_box_specific_value_is_hardcoded(tmp_path: Path) -> None:
         "/var/lib/DEPLOYED",
         "--wheel",
         "/elsewhere/custom-9.9.whl",
+        "--wheel-commit",
+        "HEAD",
         "--stage-dir",
         "/srv/stage",
     )
@@ -178,9 +186,10 @@ def test_no_box_specific_value_is_hardcoded(tmp_path: Path) -> None:
         "/opt/env/bin/python",
         "/opt/bin/uv pip install",
         "/var/lib/DEPLOYED",
-        "/srv/stage/custom-9.9.whl",
+        "custom-9.9.whl",
     ):
         assert expected in plan, expected
+    assert _staged(plan).startswith("/srv/stage/deploy-hub-")
 
 
 def test_with_deps_drops_the_no_deps_flag(tmp_path: Path) -> None:
@@ -228,10 +237,77 @@ def test_a_supplied_wheel_skips_the_build_entirely(tmp_path: Path) -> None:
     # The alternative — building, then looking for a *predicted* name in `dist/` —
     # ships whatever stale wheel happens to carry that name, recorded under
     # today's commit.
-    plan = _dry_run(_repo(tmp_path), "--wheel", "/elsewhere/custom-9.9.whl")
+    plan = _dry_run(
+        _repo(tmp_path), "--wheel", "/elsewhere/custom-9.9.whl", "--wheel-commit", "HEAD"
+    )
 
     assert "deploying the supplied wheel /elsewhere/custom-9.9.whl" in plan
     assert "uv build" not in plan
+
+
+def test_a_supplied_wheel_without_attested_provenance_refuses(tmp_path: Path) -> None:
+    # The marker a deploy writes is what the NEXT deploy diffs uv.lock across, so
+    # recording HEAD for a wheel that may have come from anywhere makes that
+    # answer wrong rather than merely imprecise.
+    result = run(
+        "deploy_hub",
+        ["hub.example", "--wheel", "/elsewhere/w.whl", "--repo", str(_repo(tmp_path)), "--dry-run"],
+    )
+
+    assert result.returncode == 1
+    assert "--wheel needs --wheel-commit" in result.stderr
+
+
+def test_a_supplied_wheels_attested_commit_is_what_gets_recorded(tmp_path: Path) -> None:
+    repo = _repo(tmp_path)
+    earlier = git(repo, "rev-parse", "HEAD~1")
+    (repo / "f.txt").write_text("moved on\n")
+    git(repo, "commit", "-aqm", "later")
+
+    plan = _dry_run(repo, "--wheel", "/elsewhere/w.whl", "--wheel-commit", earlier)
+
+    assert f"commit={earlier}" in plan
+    assert git(repo, "rev-parse", "HEAD") not in plan
+
+
+def test_an_unresolvable_attested_commit_refuses(tmp_path: Path) -> None:
+    result = run(
+        "deploy_hub",
+        [
+            "hub.example",
+            "--wheel",
+            "/elsewhere/w.whl",
+            "--wheel-commit",
+            "0" * 40,
+            "--repo",
+            str(_repo(tmp_path)),
+            "--dry-run",
+        ],
+    )
+
+    assert result.returncode == 1
+    assert "is not a commit in" in result.stderr
+
+
+def test_the_staged_path_is_unique_per_run(tmp_path: Path) -> None:
+    # The staging directory is shared. A fixed name lets a second deploy of the
+    # same version overwrite the first's wheel between scp and install, so one
+    # build is installed while the other's commit and digest go into the marker.
+    repo = _repo(tmp_path)
+
+    first, second = _staged(_dry_run(repo)), _staged(_dry_run(repo))
+
+    assert first != second
+    assert first.startswith(f"{_MODULE.DEFAULT_STAGE_DIR}/deploy-hub-")
+
+
+def test_the_staged_wheel_is_removed_after_the_install(tmp_path: Path) -> None:
+    plan = _dry_run(_repo(tmp_path))
+    lines = plan.splitlines()
+
+    install = next(i for i, line in enumerate(lines) if "uv pip install" in line)
+    unstage = next(i for i, line in enumerate(lines) if line.strip().startswith("rm -f "))
+    assert install < unstage
 
 
 def test_without_a_supplied_wheel_the_build_goes_to_a_fresh_directory(tmp_path: Path) -> None:
@@ -322,7 +398,7 @@ def test_an_unchanged_lockfile_is_no_drift(tmp_path: Path) -> None:
     (repo / "f.txt").write_text("two\n")
     git(repo, "commit", "-aqm", "code only")
 
-    assert _MODULE.lockfile_drift(repo, deployed) is None
+    assert _MODULE.lockfile_drift(repo, deployed, "HEAD") is None
 
 
 def test_a_changed_lockfile_is_drift(tmp_path: Path) -> None:
@@ -331,17 +407,29 @@ def test_a_changed_lockfile_is_drift(tmp_path: Path) -> None:
     (repo / "uv.lock").write_text("version = 2\n")
     git(repo, "commit", "-aqm", "bump deps")
 
-    drift = _MODULE.lockfile_drift(repo, deployed)
+    drift = _MODULE.lockfile_drift(repo, deployed, "HEAD")
 
     assert drift is not None
     assert "uv.lock" in drift
+
+
+def test_drift_is_measured_to_the_commit_being_deployed_not_to_head(tmp_path: Path) -> None:
+    # With a supplied wheel, HEAD is not what is being installed.
+    repo = _repo(tmp_path)
+    deployed = git(repo, "rev-parse", "HEAD")
+    target = git(repo, "rev-parse", "HEAD")
+    (repo / "uv.lock").write_text("version = 2\n")
+    git(repo, "commit", "-aqm", "bump deps after the wheel was built")
+
+    assert _MODULE.lockfile_drift(repo, deployed, target) is None
+    assert _MODULE.lockfile_drift(repo, deployed, "HEAD") is not None
 
 
 def test_an_unknown_deployed_commit_raises_rather_than_reading_as_clean(tmp_path: Path) -> None:
     repo = _repo(tmp_path)
 
     with pytest.raises(_MODULE.DeployError, match="not in this clone's history"):
-        _MODULE.lockfile_drift(repo, "0" * 40)
+        _MODULE.lockfile_drift(repo, "0" * 40, "HEAD")
 
 
 @pytest.mark.parametrize(
