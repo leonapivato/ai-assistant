@@ -2323,15 +2323,23 @@ function quietWindowForm() {
   return form;
 }
 
+// **The budget and the rolling window are strings and are kept as strings.** A JSON
+// number is read into a double, so an integer above 2**53 does not survive the trip —
+// and both of these are bounded well above it. The gateway spells them as decimal
+// digits for that reason, and this page hands back the characters it was given: an
+// edit to a reach must not quietly rewrite a budget nobody touched.
+//
+// The one place a number is made of one is the sentence below, and it never travels.
 function renderBudget(body, preferences) {
   const heading = document.createElement("h4");
   heading.textContent = "How often I may interrupt you";
   body.appendChild(heading);
-  const hours = preferences.budget_window_seconds / 3600;
+  const hours = Number(preferences.budget_window_microseconds) / 3.6e9;
   line(
     body,
-    `${preferences.interruption_budget} interruption(s) per rolling ${hours} hour(s).` +
-      (preferences.interruption_budget === 0
+    `${preferences.interruption_budget} interruption(s) per rolling ` +
+      `${Number.isFinite(hours) ? hours : "?"} hour(s).` +
+      (preferences.interruption_budget === "0"
         ? " Zero means never — it is a setting, not a fault."
         : ""),
     "hint"
@@ -2346,13 +2354,16 @@ function renderBudget(body, preferences) {
   count.id = "budget";
   count.min = "0";
   count.step = "1";
-  count.value = String(preferences.interruption_budget);
+  count.value = preferences.interruption_budget;
   const save = document.createElement("button");
   save.type = "button";
   save.textContent = "Save";
   save.addEventListener("click", () => {
-    const asked = Number(count.value);
-    if (!Number.isInteger(asked) || asked < 0) {
+    // Checked as characters and sent as characters: `Number` would accept the value
+    // and then hand back a different one, which is the whole reason this member does
+    // not travel as a number.
+    const asked = count.value.trim();
+    if (!/^[0-9]{1,20}$/.test(asked)) {
       fault("Give a whole number of interruptions, zero or more.");
       return;
     }
@@ -2362,9 +2373,10 @@ function renderBudget(body, preferences) {
   form.appendChild(count);
   form.appendChild(save);
   body.appendChild(form);
-  // The window itself is on no control here and travels untouched: it is one of the
-  // three settings ADR-0130 §6 holds, the surface writes the value whole, and a page
-  // that dropped it from what it sends would reset it on every save.
+  // The rolling window itself is on no control here and travels untouched: it is one
+  // of the three settings ADR-0130 §6 holds, the surface writes the value whole, and
+  // a page that dropped it — or that rounded it by holding it as a number — would
+  // reset it on every save.
 }
 
 // --- looking over a conversation (ADR-0077 §8) -------------------------------
