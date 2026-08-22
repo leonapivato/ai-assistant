@@ -381,3 +381,18 @@ def test_an_absurd_section_range_reports_rather_than_crashing(tmp_path: Path) ->
 
     assert "Traceback" not in result.stderr
     assert result.returncode in (0, 1)
+    assert _section_of(result.stdout, _row(result.stdout, "...")).startswith("not checked")
+
+
+def test_a_range_too_wide_to_expand_is_reported_rather_than_dropped(tmp_path: Path) -> None:
+    # Returning the range's first section alone would let §§1-40 report clean
+    # while thirty-nine cited sections went unread — the silent under-check the
+    # whole report exists to avoid.
+    _make_repo(tmp_path)
+
+    result = _run(tmp_path, "ADR-0001 §§1-40 governs.")
+
+    assert _section_of(result.stdout, _row(result.stdout, "A numbered heading")).startswith(
+        "present"
+    )
+    assert _section_of(result.stdout, _row(result.stdout, "§1 to 40")).startswith("not checked")
