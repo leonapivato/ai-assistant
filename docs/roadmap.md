@@ -196,6 +196,65 @@ recorded on #1312.
 - The **engagement surface** the Gap register names as on-no-track debt. This
   track is its natural eventual home, but it stays undesigned until ruled.
 
+## `track:world` — the assistant sees and acts on the world
+
+Live record: **#1427**.
+
+**Purpose:** the assistant sees and acts on the world — the `readers/` (sensor)
+and `tools/` (actuator) seams, hub-side and CLI-driven. The browser client
+consumes what lands here (`track:web-client`), voice keeps spoke-as-sensor
+(ADR-0094), and what ingested content *becomes* stays with `track:memory`. The
+adversary is already named and mostly answered — ADR-0098 (the injection class,
+escaping, never-authority, ceilings, detection-is-not-a-gate), ADR-0106 (taint
+through consolidation), ADR-0148/0154 (an egress call authorised whole, per
+call, with no standing authorisation) — and the one thing all of them name as
+unbuilt is **origin**, which is why milestone 23 comes first. Milestones are
+ordered by **dependency only**, and each closes on a QA-driven exit ruling
+recorded on #1427. Voice holds milestones 19–22 (#1318); this track starts
+at 23.
+
+- **23 — the origin seam.** Origin recorded at ingestion and carried unchanged
+  through proposal, consolidation, facet assembly and tool-argument
+  construction; the lineage gate at `MemoryPolicy` and at the permission check;
+  origin per field on the CONFIRM card (CLI and browser). It is `core` surface,
+  so the contract ADR lands first (golden rule 5) and the Protocol/type triad
+  follows with its primary consumer (ADR-0137 §2). Carries #641 (the
+  reader-side threat model) alongside; #668 closes against it.
+  *Exit (two arms, pre-registered): a hostile instruction inside ingested
+  content **(a)** cannot cause a send — the egress is parked and the CONFIRM
+  card shows its origin on the offending field; **(b)** cannot become a belief
+  that justifies a later send without that origin being visible at the ruling
+  point. Measured: ASR-at-gate, ASR-past-gate = 0, poison rate at k=1/k=10.*
+- **24 — the record.** What the world did to the assistant and what the
+  assistant did to the world, readable: the read-side audit ledger (#1017,
+  ADR-0097 §12's deferral), authorised cloud egress in the audit trail (#747),
+  band precedence revisited now a real reader exists (#663).
+  *Exit: every read of a source and every egress is reconstructible from the
+  audit trail alone, origin included.*
+- **25 — closed by construction.** Egress through an injected transport
+  capability rather than import contracts (#85); an approved-recipient policy
+  beyond the tier ceiling (#68); a budget ceiling on what the world may cost.
+  *Exit: a tool that tries to reach the world outside the seam cannot, and the
+  test that proves it is the fake transport, not a grep.*
+
+**Deferred — stated, not scheduled:**
+
+- **Breadth, until milestone 23 closes.** The second reader, further actuators,
+  the reader-agent split (trigger: a reader that needs its own model call), a
+  two-phase planner, any classifier-based defence — ADR-0098's own triggers
+  fire with the second reader.
+- **The relabel sweep.** A cluster of `backlog` issues sits at these seams;
+  they are relabelled `track:world` in one pass once the track's shape is on
+  `main`, not issue by issue.
+
+**Concurrency.** This track runs in parallel with `track:web-client` milestone
+16 (#1230). The subsystems differ — `core/`, `memory/`, `permissions/`,
+`planning/`, `readers/` and `tools/` here, `interfaces/gateway` and `docs/`
+there — with **one late collision**: the CONFIRM-card origin rendering touches
+the browser assets and the CLI renderer, so that consumer lane is sequenced
+after milestone 16's client lanes, never beside them (#1226 §3). Clones and
+review quota are one pool, under Concurrency above.
+
 ## The backlog
 
 The backlog is a **label, not a track** (#1226 §4, amended). It fails the
@@ -222,7 +281,7 @@ tracker — so the claim decays into them rather than into this document.
 | In Control — inspect, correct, restrict, delete | *Inspect and correct*: ADR-0073 — the band-scoped read is an enumeration, killing a belief is show-then-confirm, and correcting is `learn`. *Delete*: ADR-0004 §6's whole-installation delete has its surface in ADR-0126 (`ai-assistant-purge`). *Restrict*: ADR-0097/0102/0133/0139's grants, enforced on the facet, ingest and notify paths — ADR-0102 gives them their CLI doors and milestone 15 their browser surface. *Export*'s missing interface is #692 (ADR-0004 §6, ADR-0073 §10) |
 | More Capable Over Time | ADR-0009/0022 for the explicit loop, ADR-0077 for the ambient one; ADR-0119/0120 are the instrument that judges it. Whether it is improving is `track:memory`'s pre-registered exits, and the owner's measures gate (#881) is what acts on the answer once real usage exists |
 | Context determines usefulness | ADR-0008's facets, fed by readers (ADR-0093/0095/0140) and rendered into the prompt (ADR-0096; #1082 is the gap that had left that arm vacuous). Device as a context facet, a permission input and the audit trail's "approved from where" is #920 |
-| Supported — acts across tools | The seam is decided and attested: ADR-0154 designates `tools/` as the egress seam, ADR-0148 rules an egress call authorised as one whole, ADR-0151/0152 give the connection surface and the derived binding, ADR-0157 the flat-form widening. Breadth of connectors is opportunistic (`backlog`), not a milestone |
+| Supported — acts across tools | The seam is decided and attested: ADR-0154 designates `tools/` as the egress seam, ADR-0148 rules an egress call authorised as one whole, ADR-0151/0152 give the connection surface and the derived binding, ADR-0157 the flat-form widening. Breadth of connectors is opportunistic (`backlog`), not a milestone. Closing the seam *by construction* — an injected transport capability rather than import contracts (#85), an approved-recipient policy beyond the tier ceiling (#68) — is `track:world` milestone 25 |
 | Proactivity that earns its place | ADR-0130 (a notification is a proposal; only a perishable one earns an interruption) and ADR-0131 (it travels as an answer the device asked for), with ADR-0134/0135 around delivery. The first push *consumer* is milestone 14; whether the proactivity is welcome is the owner's deferred experiential ruling (#879); the delivery seam's full contract is #975 |
 | Free to choose models | ADR-0002/0011/0013/0061/0062 — decided; on no track |
 | Observability and evaluation | ADR-0119/0120 give the instrument: a measure is a rate over the trace stream, read offline while the hub is stopped. The harness and the benchmark exits are `track:memory` (#1029, #1231) |
