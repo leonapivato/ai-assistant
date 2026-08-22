@@ -889,6 +889,19 @@ Obligations, each traceable to a clause above:
   destination; a confirmation whose `egress` is `None` renders as it does today. Values
   carrying control sequences or markup are neutralised on the way out, as `_safe`
   already does for the existing members.
+- **§7, at the gateway — owed by the lane that builds the browser's confirmation
+  surface, not by this one.** `_step_view` is an explicit enumeration and today reduces
+  a confirmation to the boolean `awaiting_confirmation`, so nothing about the view
+  carrying §7's content is automatic: a gateway that shipped the approval control while
+  enumerating none of it would satisfy every test above. That lane owes the same
+  rendering tests the CLI owes here, over the view its page actually receives —
+  the account identity, every occurrence with its argument, both forms where the
+  occurrence carries a destination, and the set as `core` derived it, with the
+  account-only and mixed bindings among the cases — plus one that the page renders the
+  set it was handed and derives none of it. The obligation is named here rather than
+  discharged here because milestone 15 builds that surface and ADR-0177 §8 blocks it
+  until this ADR lands; §10's own lane is `core/types.py`, the engine, the CLI and
+  `wire/envelope.py`'s constant.
 - **§9.** No test asserts a size figure that this change did not move; a lane finding
   itself editing one has changed something §9 says is unchanged. A test pins the
   expansion rather than the absence of one: a binding whose argument key is long and
