@@ -8,9 +8,9 @@
 # makes the committed config portable — it finds `npx`, then execs the pinned
 # server package.
 #
-# Two things it does that a bare `npx` in `.mcp.json` does not:
+# Four things it does that a bare `npx` in `.mcp.json` does not:
 #
-#   1. It looks past PATH. An MCP server is spawned by the editor's own
+#   1. It looks past PATH for `npx`. An MCP server is spawned by the editor's own
 #      launcher, not from an interactive shell, so a Node installed by nvm — a
 #      shell function sourced by ~/.bashrc — is frequently absent from that
 #      environment. `ENOENT: npx` is what that looks like, and it is the failure
@@ -20,15 +20,32 @@
 #      `#!/usr/bin/env node`, so naming it by absolute path is NOT sufficient —
 #      in an environment without `node` on PATH it fails with
 #      `env: 'node': No such file or directory`, having never run a line.
+#   3. It writes the server's output files OUTSIDE the repository. The default is
+#      `.playwright-mcp/` under the working directory, i.e. inside the clone: a
+#      console log and a snapshot land there on the first navigation, and an
+#      untracked directory is a dirty tree, which `just review-codex` and
+#      `just ship` both refuse. Driving the page would cost the lane its review.
+#   4. It asks for a browser this repository actually installs. The server's own
+#      default is branded Chrome (`/opt/google/chrome/chrome`), which a Linux dev
+#      box generally does not have, and the failure arrives at the first tool
+#      call rather than at startup.
 #
-# Everything else stays in `.mcp.json`, where a reader expects it. In particular
-# the version is pinned HERE rather than floating, so two clones do not silently
-# drive two different browsers' worth of behaviour.
+# **Install the browsers through THIS script**, so the builds match the pinned
+# server rather than whatever a stray `npx playwright` resolved — the two are
+# versioned separately and a mismatch reads as "Browser is not installed" while
+# `~/.cache/ms-playwright` visibly holds one:
 #
-# Escape hatch: set PLAYWRIGHT_MCP_NPX to an `npx` of your own. Prefer it to
-# editing `.mcp.json`, which is tracked — a modified working tree makes
-# `just review-codex` and `just ship` refuse, so a local edit there costs every
-# lane in that clone its review.
+#     scripts/playwright-mcp.sh install-browser chrome-for-testing
+#     scripts/playwright-mcp.sh install-browser webkit
+#
+# The system libraries under those browsers need the owner's sudo once:
+# `sudo npx playwright install-deps chromium webkit`.
+#
+# Every default below is overridable, and none of them by editing a tracked file:
+# `.mcp.json` and this script are both committed, and a modified working tree
+# costs every lane in that clone its review. Pass a flag after the ones here — a
+# later `--browser` or `--output-dir` wins — or set PLAYWRIGHT_MCP_NPX,
+# PLAYWRIGHT_MCP_BROWSER or PLAYWRIGHT_MCP_OUTPUT_DIR.
 #
 # Usage: scripts/playwright-mcp.sh [extra @playwright/mcp arguments]
 set -euo pipefail
@@ -62,9 +79,12 @@ Install Node (any current LTS) — for example:
     curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
     nvm install --lts
 
-Then run the browsers' one-time install, which needs the owner's sudo once for
-the system libraries:
-    npx playwright install chromium webkit
+Then install the browsers THROUGH THIS SCRIPT, so their builds match the pinned
+server rather than whatever a stray `npx playwright` resolves:
+    scripts/playwright-mcp.sh install-browser chrome-for-testing
+    scripts/playwright-mcp.sh install-browser webkit
+
+The system libraries under them need the owner's sudo once:
     sudo npx playwright install-deps chromium webkit
 
 Or point PLAYWRIGHT_MCP_NPX at an `npx` this script should use.
@@ -78,4 +98,29 @@ node_bin="$(cd -- "$(dirname -- "$npx")" && pwd)"
 PATH="$node_bin:$PATH"
 export PATH
 
-exec "$npx" -y "@playwright/mcp@${version}" "$@"
+# A first argument that is not a flag is a SUBCOMMAND — `install-browser` is the
+# one this script's own guidance names — and the server's subcommands take none
+# of the server's options: prepending them there fails outright with
+# `error: unknown option '--browser'`. So the defaults are added to a server run
+# and to nothing else, which is also the only run they mean anything for.
+if (($# > 0)) && [[ $1 != -* ]]; then
+    exec "$npx" -y "@playwright/mcp@${version}" "$@"
+fi
+
+# Anything the caller passes comes AFTER these, so a `--browser` or
+# `--output-dir` of their own wins on the last occurrence rather than colliding
+# with a default they did not ask for.
+#
+# `--output-dir` is out of the repository because the server's own default is
+# `.playwright-mcp/` under the working directory: one navigation leaves a console
+# log and a snapshot inside the clone, and that untracked directory is a dirty
+# tree that `just review-codex` and `just ship` both refuse.
+#
+# `--browser` is named because the server's own default is branded Chrome, which
+# a Linux dev box generally does not have — and it fails at the first tool call,
+# not at startup, so the server connects and then cannot do anything.
+browser="${PLAYWRIGHT_MCP_BROWSER:-chromium}"
+output_dir="${PLAYWRIGHT_MCP_OUTPUT_DIR:-${TMPDIR:-/tmp}/playwright-mcp}"
+
+exec "$npx" -y "@playwright/mcp@${version}" \
+    --browser "$browser" --output-dir "$output_dir" "$@"

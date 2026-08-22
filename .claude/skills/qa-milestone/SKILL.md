@@ -84,6 +84,42 @@ expensive.
   validity, at startup — a dead key surfaces as the first model call failing,
   which is itself worth one verification pass but blocks everything behind it.
 
+### The browser half, where the exit test is stated in browser terms
+
+Some milestones state their exit in the browser — milestone 15's is the leg-11
+and leg-12 exit tests (#1081, #1159) **re-run entirely from the browser** (#1365).
+Where that is the charter, drive the page the way a user does, through the
+Playwright MCP server this repository's `.mcp.json` declares (approved once per
+clone in an interactive session, `/mcp`; `scripts/playwright-mcp.sh` is what it
+launches).
+
+- **Against the live hub, not a fake.** A lane verifies its own page against a
+  `Gateway` bound in-process over a seeded `FakeAssistantEngine`
+  (`.claude/agents/worker.md`). That is the right instrument for a slice and the
+  wrong one here: this pass exists for the composition, so the page is driven
+  against the resident hub the rest of the run drives, over the same planted
+  store.
+- **Both viewports** — desktop and an iPhone-class one — because the exit test is
+  "as a user", and the phone is where the surface is thinnest.
+- **The refusal arms are browser arms too.** A withheld operation must be absent
+  from the page rather than merely unlabelled: probe what the page can be made to
+  request, not only what it offers.
+- **Two known console false positives**, both named in `.claude/agents/worker.md`:
+  `favicon.ico … 401` before a session exists (admission is decided before
+  routing, so every path answers 401 until one does), and — under WebKit, only on
+  a `fullPage` screenshot — `Refused to apply a stylesheet … style-src`,
+  which is Playwright's own injected screenshot stylesheet meeting the gateway's
+  `style-src 'self'` (ADR-0168 §6).
+
+**Keep the real-device arm for what emulation cannot show.** An emulated iPhone
+viewport is a window size and a user-agent string; it is not iOS Safari. #1369 is
+the class: Safari's automatic HTTPS upgrade of a bare `host:port` put a TLS
+ClientHello at the gateway's plaintext port, which stalled until the read timeout
+while the phone showed a white screen — found on a phone in the milestone-14 QA,
+and invisible to every emulated run. The MCP arm replaces the tedium of driving
+the page by hand; it does not replace the pass on a real device over the tailnet,
+and a run that had no real device says so in its record.
+
 ## 4. Triage findings exactly like review findings
 
 - A real defect becomes a **GitHub issue**, never a fix applied during the run

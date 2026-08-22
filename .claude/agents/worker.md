@@ -54,6 +54,60 @@ Make the call, do the work, and record it in **both** the PR description and you
 
 Most of both lists should surface in the pre-flight, before you have written anything — that is what the pre-flight is for.
 
+## If your diff changes the page, drive it before the first review
+
+**A lane whose diff touches `src/ai_assistant/interfaces/gateway/assets/` drives
+that page before its first review invocation** — at a desktop width and at an
+iPhone-class viewport — and records what it saw in the PR description. Nothing
+else in the loop looks at the rendered page: the gate asserts over the bytes the
+page is built from, and the reviewer reads the diff. PR #1385 found three things
+by looking, every one of which had passed every check this project runs: a label
+case-folded into "keep it for when **i** next look", a control row that broke
+"Remove" into "Remo ve" at phone width, and every instant rendered as a raw UTC
+ISO-8601 string (filed as #1392).
+
+**Bind the real `Gateway` in-process over a seeded `FakeAssistantEngine`**
+(`ai_assistant.testing`), not a live hub. The page is then driven against the
+same server the suite binds, with the seed under your control and no data
+directory, credential or resident process in the way. PR #1385's description is
+the worked shape: Chromium at 1100×900 and at the iPhone 13 Pro viewport, over a
+gateway bound to a seeded fake.
+
+**Drive it through the MCP server where one is exposed to you.** This repository's
+`.mcp.json` declares a project-scope `playwright` server; each developer approves
+it once in an interactive session (`/mcp`), and that approval is recorded outside
+the repository, so nothing tracked here can pre-approve it for you. **Where none
+is exposed** — not offered to your session, or it will not start — say so in the
+PR description and verify the same way by script, driving Playwright directly.
+What is owed is the observation; the instrument is not the point.
+
+**A `Browser "…" is not installed` at the first tool call is an install, not a
+fault.** Run it through the launcher — `scripts/playwright-mcp.sh install-browser
+chrome-for-testing` — because the browser builds are versioned with the pinned
+server, and browsers a stray `npx playwright install` put in the same cache do
+not satisfy it.
+
+**Two known false positives in the console, so that neither is reported as a
+defect.**
+
+- **`favicon.ico … 401` on every load before a session exists.** Admission is
+  decided before routing, so a session-less request to *any* path answers 401 —
+  including the one the browser makes on its own. It is not the page asking for
+  something it should not: an *admitted* request to an unserved path answers 404
+  instead, which `tests/interfaces/gateway/test_gateway.py` pins.
+- **`Refused to apply a stylesheet … style-src`, under WebKit and only on a
+  `fullPage` screenshot.** That is Playwright's own injected screenshot
+  stylesheet meeting the gateway's `style-src 'self'` (`gateway/server.py`,
+  ADR-0168 §6). The page carries no inline style, and the message is absent
+  without the screenshot call — under Chromium it does not appear at all.
+
+Anything else in the console is yours.
+
+**Every other lane ignores this section, and is better off with the server not
+exposed at all.** A diff touching no file under `assets/` has no page to drive,
+and an MCP server's tool definitions are context every turn of that lane pays
+for.
+
 ## Finishing
 
 `CONTRIBUTING.md` owns the mechanics; five duties are easy to drop in a dispatched lane:
