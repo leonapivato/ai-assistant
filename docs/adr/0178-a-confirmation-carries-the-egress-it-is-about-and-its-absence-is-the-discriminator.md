@@ -273,13 +273,13 @@ direction §8 asks for and in no other.
 > destination the spans carry, deduplicated; and where the spans carry none, exactly
 > one member — the connected account. It is **never empty** and it is **never stored**.
 
-> **Normative.** The total order is stated here rather than referred to, because a
-> second implementation has to reproduce it: **account members first, then selected
-> recipients by `protocol` and then by `canonical` form, every string compared by
-> Unicode code point.** That is `EgressBinding.canonical_destination_set`'s own order,
-> restated so that a surface written in another language can derive the same sequence
-> from the same spans without reading Python. No lane orders it a second way, and a
-> lane that finds the two statements disagreeing reports it rather than picking one.
+> **Normative.** The total order is stated here rather than only referred to, so the
+> rule is legible in the decision and not only in the code that implements it:
+> **account members first, then selected recipients by `protocol` and then by
+> `canonical` form, every string compared by Unicode code point.** That is
+> `EgressBinding.canonical_destination_set`'s own order, restated. No lane orders it a
+> second way, and a lane finding the two statements disagreeing reports it rather than
+> picking one.
 
 > **Normative.** Its members are `ConfirmationDestination`, a frozen `core/types.py`
 > model with `extra="forbid"` and ADR-0150 §3's **two shapes and no third**: a
@@ -321,13 +321,18 @@ direction §8 asks for and in no other.
 > whole `BoundAccount` there. No lane ships a derivation that can disagree.
 
 > **Normative.** No lane stores this set as a field, transmits it as one, or supplies
-> it from outside. **A surface receives the spans and computes the set itself**, by the
-> rule and the order stated above — that is the specified route for every surface,
-> including one that is not written in Python and therefore cannot call the property.
-> A producer that sent a materialised set would be sending a value that could disagree
-> with the occurrences it was computed from. Computing it by the stated rule is what
-> §7's clause requires; what that clause forbids is a surface inventing a rule of its
-> own, not a surface doing this arithmetic.
+> it from outside. A producer that sent a materialised set would be sending a value
+> that could disagree with the occurrences it was computed from.
+
+> **Normative.** **`core` derives this set and no adapter re-derives it.** Every
+> surface that renders a `Confirmation` holds the value in a Python process and reads
+> the property: `interfaces/cli.py` directly, and the browser through
+> `interfaces/gateway/`, which holds the `Confirmation` and serves its page a view of
+> it. No lane reimplements the deduplication, the account substitution or the order in
+> another language, in `interfaces/`, or in a page's script — that would be a second
+> derivation of one fact (ADR-0150 §1) and business logic in an adapter (golden rule 3,
+> ADR-0042 §6), and it is the shape the alternatives below reject. A surface renders
+> what `core` derived.
 
 > **Normative.** A `ConfirmationDestination` is a **rendering value and never an
 > authorising one**. No lane compares two of them to decide anything, matches one
@@ -362,30 +367,30 @@ binding is compared by `authorises` and the confirmation is compared by a human:
 set that disagreed with the occurrences beside it would put a recipient on screen
 that the call does not send to, or hide one it does. And because a Python property
 is not a pydantic field, nothing about it reaches the frame — the wire carries the
-occurrences once, and both ends compute the same set from them.
+occurrences once, and the process that renders them derives the set from the value it
+holds.
 
-**A surface that cannot call the property implements the stated rule, and that is not
-the shape the alternatives reject.** `interfaces/cli.py` is Python and calls
-`ConfirmationEgress.canonical_destination_set` directly, so it derives nothing twice.
-The browser is not, and receives only the occurrences — so it computes the set in its
-own language, which is why the clause above states the rule and the order in terms
-rather than pointing at the property. The alternative rejected below is a different
-one: leaving the set *undefined in `core`*, so that each adapter invents its own
-deduplication and there is no authority to disagree with. Here `core` holds the single
-authority, this section states it reproducibly, and §3's correspondence clause is what
-a second implementation is tested against. **The browser lane owes that test**, and it
-owes it over the branches that can diverge rather than over one case: a binding with
-aliased recipients; a binding whose spans carry **no** destination, where the set is
-the account and an implementation that simply filtered and returned what was left would
-produce an empty one; a **mixed** binding, where filtering must not swallow the
-destination-less spans; and an **ordering boundary that crosses out of the BMP**. That
-last one is not pedantry — JavaScript compares strings by UTF-16 code unit, so a
-default sort puts `U+10000` before `U+E000` while the code-point order stated above puts
-`U+E000` first, and a test built only from aliased ASCII recipients cannot see it. Each
-case is compared member for member and in order against the set `core` derives from the
-same spans. The obligation travels with ADR-0177 §8's lane rather than with §10's,
-because the browser is not §10's lane; it is named here so it is inherited rather than
-rediscovered.
+**Every rendering surface is a Python process, including the browser's, and that is
+what keeps the derivation in `core`.** `interfaces/cli.py` calls
+`ConfirmationEgress.canonical_destination_set` directly. The browser is not a peer that
+receives a `Confirmation` and interprets it: `interfaces/gateway/server.py` holds the
+value in Python — it already reads `step.confirmation` to decide
+`"awaiting_confirmation"` — and serves `assets/app.js` a view it has built. So the
+gateway reads the property too, and the page renders the members it is handed. That hop
+is *rendering*, the same act the CLI performs into a terminal, and it is ADR-0177 §3's
+to govern; it is not a second transmission of the contract value, and no lane may treat
+it as licence to send a materialised set on the wire instead (the clause above).
+
+**Which is why no lane implements this rule twice, in any language.** An earlier draft
+of this section said the opposite — that a surface not written in Python computes the
+set itself — and round 11 architecture review was right to refuse it: a deduplication,
+an account substitution and a code-point order reimplemented in a page's script are
+business logic in an adapter (golden rule 3) and a second derivation of one fact
+(ADR-0150 §1), and a page that got any of the three wrong would show a recipient set
+the ruling was not taken over. That draft also owed a cross-language parity test to
+catch exactly that, which is the tell: a rule needing a conformance test in a second
+language is a rule that has left `core`. The alternatives below reject this shape, the
+clause above forbids it, and the gateway makes it unnecessary.
 
 **A third type rather than reusing `CanonicalDestination`, and this is where two
 ratified clauses actually meet.** (§12 records all three §3 clauses this narrows; the
@@ -582,11 +587,12 @@ carries the redeployment.
 > rendered it as though it named a recipient, would fail the whole-rendering clause
 > below in the two opposite directions.
 
-> **Normative.** The canonical destination set is rendered **as the derived set**,
-> computed by §3's rule over the occurrences — never inferred by the surface with a
-> rule of its own, and never accepted from the wire as a materialised value. Where that
-> set is the connected account — every span carrying no destination — the surface names
-> the account as the destination rather than showing no recipients.
+> **Normative.** The canonical destination set is rendered **as `core` derived it**,
+> read from §3's property on the value the rendering process holds — never inferred by
+> the surface with a rule of its own, never reimplemented in another language, and never
+> accepted from the wire as a materialised value. Where that set is the connected
+> account — every span carrying no destination — the surface names the account as the
+> destination rather than showing no recipients.
 
 > **Normative.** Occurrences are rendered **whole**: every span the tuple carries,
 > none omitted, none truncated silently, and none ordered so as to hide one. One
