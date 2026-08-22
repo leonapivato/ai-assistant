@@ -1,7 +1,53 @@
 # 150. The egress binding is one validating value, and nothing in it is stated twice
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0178 (§3's clause that a member of a canonical destination set is a `CanonicalDestination`, and §3's clause that an account member carries the account whole — each only as it reaches the canonical destination set a `Confirmation` names)
 - Date: 2026-08-14
+- Partially superseded: 2026-08-22 by ADR-0178 — **two clauses of §3, at one
+  surface, because ADR-0148 §8's fourth clause and §3's account-member clause cannot
+  both be obeyed there.** ADR-0178 closes #1366 (`track:web-client` milestone 15,
+  #1365): ADR-0148 §8's fourth clause requires a `CONFIRM` on an egress call to name
+  the connected account's identity, the canonical destination set in both forms and
+  the payload description, and it **bars the connection reference from that surface in
+  terms**. `Confirmation` carried none of the three, so ADR-0178 gives it a member
+  carrying the account identity and this ADR's own `spans`, with §2's set derived from
+  them. Clause by clause, under ADR-0070 §1's test.
+
+  **Replaced — §3's member-type clause**, "A member of a canonical destination set is
+  a `CanonicalDestination`, one `core` type with three fields and exactly two
+  well-formed shapes…", **only as it reaches the set a `Confirmation` names.** There
+  the member is `ConfirmationDestination`: the same two shapes, with the account arm
+  carrying the identity rather than a `BoundAccount`.
+
+  **Replaced — §3's account-member clause**, "An account member carries the account
+  **whole** — its identity and its connection reference … No lane reduces an account
+  member to its identity, to its reference, or to any single string", **on the same
+  scope.** A reader holding only this clause either carries the reference to an
+  adapter — which ADR-0148 §8 forbids, and which hands across ADR-0042 §6's boundary
+  the value §6 exists to keep behind it — or refuses to build the set at a
+  confirmation at all, leaving ADR-0148 §8's fourth clause unmeetable at every
+  surface. That is ADR-0070 §1's first limb.
+
+  **The hazard this clause names is closed where it was closed, and the replacement
+  says so.** §3's own reason is that "either alone is a destination that two different
+  accounts can satisfy" — a statement about **comparison**, which is what
+  `authorises` does over `EgressBinding`'s set (§9) and what a standing grant does.
+  ADR-0178 §3 forbids a `ConfirmationDestination` every comparison and every carrier:
+  no lane compares two, matches one against a grant or a rule, passes one to
+  `PermissionDecision.authorises`, treats one as a `CanonicalDestination`, or carries
+  one on an `ActionRequest`, a `PermissionDecision`, an `EgressBinding`, a grant
+  record or an audit row. Its only consumer is the surface rendering the
+  `Confirmation` it arrived on.
+
+  **Not replaced — everything else in §3, and every other section.** `EgressBinding`'s
+  own derived set is untouched: its members stay `CanonicalDestination`, its account
+  arm carries the whole `BoundAccount`, and equality is still over every field. So are
+  the occurrence rule, the function-of-supplied-form refusal, the refusal to move
+  canonicalisation into `core`, the two-shape refusal itself, the derived-property
+  rule, the never-empty rule, the total order, ADR-0148 §8's third floor and the
+  conditional account substitution. §§1–2 and §§4–13 are used as given — §10's four
+  clauses most heavily, since ADR-0178 discharges the first by **reusing** this ADR's
+  `spans` rather than mirroring them, and meets the third by carrying the occurrences
+  and not merely the set.
 - **Decides surface (a) of ADR-0148 §11** — the **egress binding**: a value
   carried as a field of `ActionRequest`, compared by
   `PermissionDecision.authorises`, and transcribed verbatim into
