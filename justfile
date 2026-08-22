@@ -44,8 +44,16 @@ test *args:
 # collected — the `pytest` step at either anchor as well. What discharges an
 # anchor is the run and not the command name, so read the summary line.
 #
-# Two flags here are load-bearing rather than tuning, so neither should be
-# dropped without reading what it buys.
+# It runs the whole suite. It used to deselect
+# `tests/core/test_protocol_triad.py`, because that check reads the run record
+# `tests/conftest.py` accumulates and under xdist each worker accumulates only
+# its own — so the check saw none of the contract subclasses that passed on the
+# other workers and reported every Protocol as missing its triad. ADR-0179
+# aggregates the workers' records on the controller instead, so the deselection
+# is gone and this recipe collects and executes every test the tree declares.
+#
+# `--basetemp` is load-bearing rather than tuning, so it should not be dropped
+# without reading what it buys.
 #
 # `--basetemp` is about socket paths, not about tidiness. xdist inserts a
 # `popen-gwN/` component under the temp root, which took the hub's AF_UNIX paths
@@ -64,33 +72,50 @@ test *args:
 # few runs is gone, so a failing run keeps its tree and says where, and a passing
 # one is removed.
 #
-# `--deselect tests/core/test_protocol_triad.py` is structural. That check reads
-# the run record `tests/conftest.py` accumulates across the session; under xdist
-# each worker accumulates only its own, so the check runs on one worker, sees
-# none of the contract subclasses that passed on the others, and reports every
-# Protocol as missing its triad. It is incompatible with a distributed run, not
-# flaky in one. Since ADR-0166 this recipe may also discharge an ADR-0136 anchor,
-# so the deselection is no longer covered by a serial local run: CI's full serial
-# gate on every push to an open PR is what still catches a real triad gap, and
-# ADR-0166 §2 says to pick `just check` when the diff touches a Protocol or a
-# canonical fake. And only a run that COLLECTED THE WHOLE SUITE AND EXECUTED IT
-# discharges an anchor: the `*args` below reach pytest, as does a `PYTEST_ADDOPTS`
-# in the environment (issue #1243), and anything through either that narrows,
-# stops early or only collects makes this a scoped selection under ADR-0136 §2
-# however the recipe is spelled (ADR-0166 §1).
+# Keeping a failed run's tree is deliberate — it is what makes a failure
+# inspectable — but the trees are ~1.3G each, they are shared across every clone
+# on this machine, and /tmp is a tmpfs. Six of them fill it, and what that looks
+# like from inside a clone is not "no space" but ~1700 failures in
+# `tests/memory/test_sqlite_*`, every one of which passes in isolation (issue
+# #1419). So the recipe reaps by AGE on entry, never by sweep: a tree another
+# clone is writing to right now is minutes old, and one older than the window
+# below belongs to a run nobody is still reading. It also says when /tmp is
+# low, so the 1700-failure run is diagnosed before it happens rather than after.
+#
+# Only a run that COLLECTED THE WHOLE SUITE AND EXECUTED IT discharges an anchor:
+# the `*args` below reach pytest, as does a `PYTEST_ADDOPTS` in the environment
+# (issue #1243), and anything through either that narrows, stops early or only
+# collects makes this a scoped selection under ADR-0136 §2 however the recipe is
+# spelled (ADR-0166 §1).
 #
 # Last line, because `just --list` shows only that one: what this recipe runs.
 # The suite in parallel — ADR-0136 §2's fast gate, and, unnarrowed, an anchor
 test-fast *args:
     #!/usr/bin/env bash
     set -euo pipefail
+    # Four hours: two orders of magnitude longer than a run of this suite, so no
+    # live tree is ever in range, and short enough that a day of failures across
+    # five clones cannot accumulate. Scoped to this user's own trees.
+    stale_after=240
+    stale="$(find /tmp -maxdepth 1 -type d -name 'pt-*' -user "$(id -un)" \
+        -mmin +"$stale_after" -print 2>/dev/null || true)"
+    if [ -n "$stale" ]; then
+        echo "just test-fast: reaping kept temp trees older than ${stale_after}m (#1419):" >&2
+        printf '%s\n' "$stale" | sed 's/^/  /' >&2
+        printf '%s\n' "$stale" | while IFS= read -r old; do rm -rf "$old"; done
+    fi
+    free_kb="$(df -Pk /tmp | awk 'NR == 2 { print $4 }')"
+    if [ "${free_kb:-0}" -lt 3145728 ]; then
+        echo "just test-fast: /tmp has $((free_kb / 1024))M free and one run wants" \
+             "~1.3G — these kept trees are why, and none is old enough to reap:" >&2
+        ls -ldrt /tmp/pt-* >&2 2>/dev/null || true
+    fi
     tmp="$(mktemp -d /tmp/pt-XXXXXX)"
     # `--basetemp` goes *after* "$@" so a forwarded one cannot displace it: pytest
     # takes the last occurrence, and a run that emptied some other directory while
     # the cleanup below removed this one would be the hazard this recipe exists to
     # avoid, silently. `-n auto` leads instead, so `just test-fast -n 4` still works.
-    if uv run pytest -n auto --deselect tests/core/test_protocol_triad.py \
-            "$@" --basetemp="$tmp"; then
+    if uv run pytest -n auto "$@" --basetemp="$tmp"; then
         rm -rf "$tmp"
     else
         status=$?
