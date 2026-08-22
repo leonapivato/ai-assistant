@@ -1,17 +1,19 @@
 # 166. The parallel suite may serve as the `pytest` step at both anchors
 
-- Status: Partially superseded by ADR-0179 (§1's carve-out for the file `just test-fast` deselects, §3's accepted risk, and §4's serial-CI clause)
+- Status: Partially superseded by ADR-0179 (§1's carve-out for the file `just test-fast` deselects and its per-test execution clause, §3's accepted risk, and §4's serial-CI clause)
 - Date: 2026-08-20
 - Partially superseded: 2026-08-22 by
   [ADR-0179](0179-the-triad-check-reads-a-distributed-runs-merged-record-so-both-gates-run-across-cores.md)
   — **the Protocol-triad check now reads a distributed run's merged record, so
   `just test-fast` deselects nothing and CI's `pytest` step runs across cores;
   everything else this ADR decided stands.** Three clauses are replaced:
-  §1's second normative clause only in its parenthetical "less the one file
-  `just test-fast` deselects", which no longer describes that recipe — the rest
-  of the collection clause, including everything it says about narrowing,
-  stopping early and collecting without executing, is untouched and still
-  governs; §3 whole, whose normative accepted risk ("An anchor discharged by
+  §1's second normative clause in two places, both inside its one sentence: the
+  parenthetical "less the one file `just test-fast` deselects", which no longer
+  describes that recipe, and "actually run", which for the two checks the
+  controller answers now asks that they be *answered* rather than executed — the
+  rest of the collection clause, including everything it says about narrowing,
+  stopping early, collecting without executing, and every other test having to
+  run, is untouched and still governs; §3 whole, whose normative accepted risk ("An anchor discharged by
   `just test-fast` leaves `tests/core/test_protocol_triad.py` … unrun locally")
   is discharged rather than transferred, and with it §2's added guidance to
   prefer the serial run for a diff touching a Protocol or a canonical fake —

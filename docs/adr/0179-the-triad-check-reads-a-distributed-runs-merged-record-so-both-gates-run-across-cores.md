@@ -168,10 +168,13 @@ than under a test's, since no test was ever named.
 > **Normative.** In a distributed session the two evidence-dependent checks are
 > collected on every worker, deselected there, and their assertions evaluated on
 > the controller over the merged record, with the outcome reported under their own
-> nodeids. Their test *functions* execute in no process. This satisfies ADR-0136
-> §1's `pytest` step: what an anchor requires is that every test the tree declares
-> is collected and **answered**, and these two are — by the same predicates their
-> bodies call, over strictly more evidence than any one process holds.
+> nodeids. Their test *functions* execute in no process, and a run is not on that
+> ground short of the whole suite. ADR-0166 §1's requirement that every test the
+> tree declares be "actually run" is superseded exactly here and nowhere else: for
+> these two items, being **answered** — by the same predicates their bodies call,
+> over strictly more evidence than any one process holds — is what that clause
+> now asks. Every other test it names must still execute, and every other way of
+> falling short of the clause is untouched.
 
 That last is stated rather than left to be noticed, because it is the one place
 where what runs is not what the file appears to say. It turns on the difference
@@ -217,11 +220,13 @@ assertions is this decision's Revisit condition.
 writes the record.**
 
 A reader holding only ADR-0166 would run `just test-fast` expecting 31 tests to
-be missing from it, would choose `just check` for a diff touching a Protocol on
-that ground, and would hold CI's gate to be serial — ADR-0166 §3's normative
-"leaves `tests/core/test_protocol_triad.py` … unrun locally", §1's "less the one
-file `just test-fast` deselects", and §4's "CI's gate stays the full five steps,
-serial". Under §3 of this ADR they act differently in all three. That is
+be missing from it, would refuse an `-n auto` run at an anchor once they noticed
+two declared tests had not executed, would choose `just check` for a diff touching
+a Protocol, and would hold CI's gate to be serial — ADR-0166 §1's "less the one
+file `just test-fast` deselects, actually run", §3's normative "leaves
+`tests/core/test_protocol_triad.py` … unrun locally", and §4's "CI's gate stays
+the full five steps, serial". Under §3 of this ADR they act differently in all
+four. That is
 ADR-0070 §1's test met, so a record is owed (ADR-0082 §1).
 
 It is a **supersession and not an amendment**, and the distinction is not
@@ -233,7 +238,8 @@ strength of it. Withdrawing a ratified acceptance of a risk is a change to what
 was decided, so it takes ADR-0070 §4's leading-token form.
 
 - **`Status`** becomes `Partially superseded by ADR-0179 (§1's carve-out for the
-  file `just test-fast` deselects, §3's accepted risk, and §4's serial-CI clause)`.
+  file `just test-fast` deselects and its per-test execution clause, §3's accepted
+  risk, and §4's serial-CI clause)`.
   The supersession leads and `Accepted` is dropped (ADR-0070 §4).
 - **An appended dated note** on ADR-0166 states the scope and this reasoning
   (ADR-0070 §1; ADR-0082 §1 makes the note the invariant half of the record).
@@ -272,12 +278,18 @@ which §5 states directly.
 > which trees a recorded review covers, when a base move costs a round, and what
 > `ship` will accept are decided there and are untouched.
 
-No record is owed on ADR-0136 for §3's second clause above. It says what the
-`pytest` step's completeness means for two items rather than changing what an
-author does: a reader holding only ADR-0136 runs the suite at each anchor and
-reads the summary line, and gets a complete pass-or-fail answer for every declared
-test before and after. ADR-0070 §1's test is not met, so there is nothing to
-record (ADR-0082 §1).
+**No record is owed on ADR-0136 for §3's execution clause, and it is worth saying
+which ADR that clause belongs to.** ADR-0136 §1 requires "the whole `pytest` suite
+— is run, and passes"; it says nothing about individual declared tests. The
+per-test wording — "every test the tree declares, less the one file
+`just test-fast` deselects, actually run" — is **ADR-0166 §1's**, added when that
+ADR admitted the parallel recipe at an anchor, and it is superseded above, in the
+one sentence that also carries the carve-out §4 records. A reader holding only
+ADR-0136 runs the suite at each anchor, reads the summary line, and gets a
+complete pass-or-fail answer for every declared test before and after this change,
+so ADR-0070 §1's test is not met against it and there is nothing to record
+(ADR-0082 §1). Against ADR-0166 the test *is* met, which is why §4 records it
+there.
 
 The last is stated because the two loops run in the same window and are easy to
 conflate, as ADR-0136 §5 and ADR-0166 §4 both stated it. A commit made after a
