@@ -194,6 +194,26 @@ EMAIL_READER_ARMED: Final = "email_reader_interval_armed"
 #: §5 and §6 computes over the accumulation.
 EMAIL_READER_SECONDS: Final = "email_reader_interval_seconds"
 
+#: Whether belief consolidation is armed (ADR-0083 §7, ADR-0111 §11). **This is
+#: the arming §9 was written for**, rather than another analogue of it: §9's own
+#: prose states the act it dates as "an operator changing ``consolidation_interval``
+#: from ``None`` to a duration and restarting the hub", and until #820's deadline
+#: landed there was no such setting to name. The observation entry above is
+#: described there as "the closest live analogue"; this is the thing itself.
+#:
+#: It also matters more than the other intervals to what the measures read. This
+#: is the only job whose run distils *stored records* into new beliefs on its own
+#: initiative — ``consolidate`` is in ``MACHINE_SEAMS`` — so arming it moves the
+#: numerator of every ADR-0120 §4, §5 and §6 rate at once, and an accuracy figure
+#: straddling the restart that armed it is two populations reported as one.
+CONSOLIDATION_ARMED: Final = "consolidation_interval_armed"
+
+#: How often it runs, present only when armed. Read against
+#: :data:`SCHEDULER_RUN_BUDGET_SECONDS` and :data:`SCHEDULER_CHUNK_SIZE` below, the
+#: three are what let a reader of the stream reconstruct the duty cycle this job
+#: was given: at most one budget plus one chunk of loop time per interval.
+CONSOLIDATION_SECONDS: Final = "consolidation_interval_seconds"
+
 # --- the allowlist: what one scheduled run and one observation pass may do ----
 
 #: The per-run deadline a chunked scheduled walk is bound by (ADR-0111 §4). It is
@@ -340,6 +360,8 @@ ALLOWLIST_KEYS: Final[frozenset[str]] = frozenset(
         CALENDAR_READER_SECONDS,
         EMAIL_READER_ARMED,
         EMAIL_READER_SECONDS,
+        CONSOLIDATION_ARMED,
+        CONSOLIDATION_SECONDS,
         SCHEDULER_RUN_BUDGET_SECONDS,
         SCHEDULER_CHUNK_SIZE,
         OBSERVATION_BATCH_SIZE,
@@ -538,6 +560,12 @@ class ConfigurationStamp:
             NOTIFICATION_RECONSIDER_SECONDS,
             settings.notification_reconsider_interval,
         )
+        _pair(
+            metrics,
+            CONSOLIDATION_ARMED,
+            CONSOLIDATION_SECONDS,
+            settings.consolidation_interval,
+        )
         return metrics
 
 
@@ -594,6 +622,8 @@ __all__ = [
     "CALENDAR_READER_ARMED",
     "CALENDAR_READER_SECONDS",
     "CONFLICT_SEARCH_LIMIT",
+    "CONSOLIDATION_ARMED",
+    "CONSOLIDATION_SECONDS",
     "CONVERSATION_SWEEP_ARMED",
     "CONVERSATION_SWEEP_SECONDS",
     "EMAIL_READER_ARMED",
