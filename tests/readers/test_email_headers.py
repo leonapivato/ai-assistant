@@ -354,6 +354,57 @@ async def test_a_crlf_framed_store_is_not_a_bare_carriage_return(tmp_path: Path)
     assert await _proposals(tmp_path, _crlf(poisoned)) == ()
 
 
+@pytest.mark.parametrize(
+    ("case", "subject", "expected"),
+    [
+        ("no carriage return at all", "still read", "still read"),
+        # The same store with a `\r` as its very last byte. Both layers end the
+        # line there, so both read the same value — asserted rather than assumed.
+        ("a terminating one", "still read\r", "still read"),
+        # And one that is *not* the last byte, in the same truncated shape, so the
+        # accepting arm above cannot be passed by a reader that stopped checking
+        # the last line.
+        ("an interior one", "still\rread", None),
+    ],
+)
+async def test_a_carriage_return_as_the_blocks_last_byte_is_a_terminator(
+    tmp_path: Path, case: str, subject: str, expected: str | None
+) -> None:
+    """A store with no terminating newline, which is where the one allowance lands.
+
+    ``_header_block`` joins on ``\\n``, so a block's last line keeps a trailing
+    ``\\r`` with nothing after it — and the check has to allow that byte or every
+    CRLF store is skipped. This case is the shape that allowance is *widest* in: a
+    store truncated before its blank line, where the final ``\\r`` is not paired
+    with an ``\\n`` in the source bytes either.
+
+    **Allowing it is right, and the assertion is what says why**: the two layers do
+    not disagree about anything here. ``_header_block``'s cut makes the last line
+    ``Subject: still read\\r`` and ``_unfolded`` strips the ``\\r`` from the value;
+    ``feedparser``'s cut ends the line at the ``\\r`` and yields the same value. No
+    header is re-cut, nothing is truncated, and the proposal is byte-identical to
+    the one from the store without it — which is what makes this a terminator
+    rather than #1463's defect. An interior ``\\r`` in the same position still
+    skips.
+    """
+    raw = (
+        "From nobody@invalid Thu Jan  1 00:00:00 1970\n"
+        "From: Alice\n"
+        f"Date: {DATE}\n"
+        f"{DELIVERED}\n"
+        f"Subject: {subject}"  # no terminating newline: the block ends here
+    ).encode()
+
+    proposed = await _proposals(tmp_path, raw)
+
+    if expected is None:
+        assert proposed == (), case
+    else:
+        assert proposed == (
+            f'Email from "Alice" with subject "{expected}", delivered 2026-08-03 11:00 (UTC).',
+        ), case
+
+
 async def test_the_skip_costs_the_message_and_only_the_message(tmp_path: Path) -> None:
     """Nothing is proposed from the broken block, and its neighbours are untouched.
 
