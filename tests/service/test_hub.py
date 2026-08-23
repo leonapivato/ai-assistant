@@ -27,9 +27,11 @@ for having released it.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import errno
 import os
 import signal
+import socket
 from typing import TYPE_CHECKING, Any, cast
 
 import pytest
@@ -45,6 +47,7 @@ from ai_assistant.service.configuration import SEAM_STARTUP
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.lock import LOCK_FILENAME, InstanceLock
 from ai_assistant.testing import FakeTraceSink
+from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -1429,6 +1432,31 @@ def test_an_argument_the_hub_does_not_take_is_refused_rather_than_ignored(
     assert "--data-dir" in capsys.readouterr().err
 
 
+def test_an_end_of_options_marker_is_an_argument_and_is_refused_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ai-assistant-hub --`` does not start a hub either, pinned because a review
+    round asserted twice that it does.
+
+    A parser with no positionals has nothing for ``--`` to end options *before*, so
+    argparse reports it as an unrecognised argument and exits 2 — the same answer
+    every sibling console script gives it, none of which takes a positional either.
+    The behaviour is argparse's rather than ours; the test is here so the claim is
+    checked by the suite instead of re-argued.
+    """
+
+    def _never() -> Settings:  # pragma: no cover — reaching it is the failure
+        msg = "settings were loaded, so '--' started a hub"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(hub, "load_settings", _never)
+
+    with pytest.raises(SystemExit) as raised:
+        hub.main(["--"])
+
+    assert raised.value.code == 2
+
+
 # --- ADR-0124 §2: the remote listener is off unless it is configured on ------
 
 
@@ -1454,6 +1482,37 @@ async def test_a_hub_with_no_remote_configuration_binds_only_the_loopback_socket
     assert ready["remote"] is None
     assert "hub_remote_listening" not in _events(captured)
     assert not (settings.data_dir / "devices.db").exists()
+
+
+async def test_a_hub_with_no_remote_configuration_removes_a_control_socket_it_will_not_serve(
+    settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine
+) -> None:
+    """A door this hub does not open must not be left standing shut (#1441).
+
+    A remotely-configured hub that crashed leaves ``admin.sock`` behind; started
+    again with the configuration removed, nothing unlinks it, because the only
+    unlink lives in the ``AdminListener.start`` this hub never reaches. The file is
+    not inert: connecting to it is *refused* rather than finding nothing, and that
+    difference is the whole of how ``ai-assistant-device`` tells "the hub has not
+    opened this door yet" from "this hub has no such door". Left lying, it makes
+    the first answer true forever, on a hub where retrying can never succeed.
+
+    ADR-0124 §2 is not engaged by removing it: the clause governs what a hub with no
+    remote-listener configuration *binds*, and this hub still binds only ADR-0084
+    §1's loopback socket.
+    """
+    stale = settings.data_dir / ADMIN_SOCKET_FILENAME
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    # A real socket inode, abandoned exactly as a killed hub abandons one: bound,
+    # never unlinked, and refusing every connect from here on.
+    with contextlib.closing(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)) as abandoned:
+        abandoned.bind(str(stale))
+    assert stale.exists()
+    engine.on_start = _stop_after_start()
+
+    assert await hub.serve(settings) == EXIT_OK
+
+    assert not stale.exists()
 
 
 async def test_a_configured_hub_that_cannot_ask_its_agent_stays_down(
