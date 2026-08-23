@@ -1,6 +1,6 @@
 # 185. Every attempt to read a source is recorded, refusals included, and the trail's bound has no unlimited spelling
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-23
 - **Decides `core/protocols.py` and `core/types.py` surface — a breaking change
   (golden rule 5).** Two new Protocols with their two triads, one new frozen model,
