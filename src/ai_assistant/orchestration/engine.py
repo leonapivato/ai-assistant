@@ -758,11 +758,15 @@ def _confirmation_egress(recorded: PermissionDecision) -> ConfirmationEgress | N
     **The third is ``planned_with_external_content``** (ADR-0181 §3's third clause),
     populated from the recorded decision's ``egress_binding`` here and by no other
     route — which is what makes it the *same fact* reaching a surface rather than a
-    second statement of it (ADR-0150 §1, ADR-0178 §5). What a surface then owes for
-    it is ADR-0181 §6's, and this function asserts none of it: it renders as a
-    statement about the **call**, in **both** states, beside the occurrences rather
-    than in place of any of them, and never as a per-span claim, a detection, a
-    score, a risk level or — when ``False`` — an assurance.
+    second statement of it (ADR-0150 §1, ADR-0178 §5).
+
+    **What a surface owes for it is ADR-0181 §6's, and this function neither
+    discharges nor asserts any of it.** §10 assigns §6's implementation to the
+    *follow-on consumer group* — ``interfaces/cli.py``'s
+    ``_render_confirmation_egress`` and the gateway's confirmation view — which
+    #1427 sequences after track web-client's milestone-16 lanes, and the ADR "does
+    not relax that". Putting the fact on the carrier is what makes that lane
+    possible and is the whole of what this one owes.
 
     **The same function serves both assembly sites**, which is how ADR-0178 §5's
     fourth clause is discharged rather than hoped for: a recovered confirmation
