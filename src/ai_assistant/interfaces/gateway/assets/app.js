@@ -482,9 +482,20 @@ const FAULTS = {
   // wrong half of a sentence — and §6 gives re-entry its own words, which say what to
   // do. This states the condition and stops.
   "no-live-session": "This browser has no live session.",
-  "cookie-half-mismatch":
-    "Another local service replaced this gateway's cookie, so the two halves of " +
-    "the session no longer match. Restart the gateway and start a session again.",
+  // The same treatment, and it was owed twice over (#1471). This named a cause the
+  // gateway had not established — "another local service replaced this gateway's
+  // cookie" — when what it compared was two values: `admit` takes this branch for any
+  // cookie count but exactly one, so a browser that dropped a session cookie when it
+  // closed arrives here by precisely the path a second local service does. The
+  // milestone-16 QA reached it the ordinary way and was told to go looking for an
+  // intruder.
+  //
+  // And it carried the stale remedy on top: a restart, which ADR-0182 §1 replaced with
+  // a mint the owner performs at the running process. None is restated in its place,
+  // for the entry above's reason — §6 gives re-entry its own words, and the bootstrap
+  // panel this is appended to already says where a fresh value comes from. So this
+  // states the condition, which is the whole of what the gateway learned, and stops.
+  "cookie-half-mismatch": "The two halves of this browser's session no longer match.",
   "session-ceiling": "The gateway is holding as many sessions as it admits.",
   "bootstrap-exchange-failed": "That did not start a session.",
   // ADR-0174 §4, and the one refusal on this page whose remedy no status code hints at

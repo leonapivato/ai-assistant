@@ -509,6 +509,49 @@ def test_a_session_that_ended_is_re_entry_and_not_a_fault() -> None:
     assert 'el("reentry").textContent = "";' in _functions(script)["showConsole"]
 
 
+def test_a_mismatch_is_said_as_the_comparison_it_was_and_asks_for_no_restart() -> None:
+    """Issue #1471, found by the milestone-16 QA (#1468, arm B) as a user rather than
+    as a reading: a browser closed with the session cookie in it, opened again inside
+    the idle timeout, and told that "another local service replaced this gateway's
+    cookie" and to "restart the gateway".
+
+    **The cause was asserted and never established.** ``SessionTable.admit`` reaches
+    this condition for any cookie count but exactly one — ``len(cookie_halves) != 1``
+    — so a browser that dropped a session cookie on close takes the same branch a
+    second local service overwriting it does, and the gateway cannot tell them apart.
+    ADR-0168 §6 obliges the *distinction* from an ordinary absent session, which the
+    sentence keeps; it obliges no story about how the halves came apart, and there is
+    none to tell.
+
+    **The remedy was stale rather than merely unnecessary.** ADR-0182 §1 replaced
+    "restart the gateway" with a mint the owner performs at the running process, so
+    the advice named an act that is no longer the way back — and one that, followed,
+    would have ended every other live session to recover this one.
+
+    Nothing takes its place, for the reason the ``no-live-session`` entry beside it
+    states: this prose is appended to ADR-0182 §6's re-entry sentence in the bootstrap
+    panel's own hint, and that panel already says a value is minted at the machine the
+    gateway runs on. It is not said here again, and it is not said with the signal's
+    name — :func:`test_the_page_names_no_signal` is why.
+    """
+    script = _code("app.js")
+    opened = script.index("const FAULTS = {")
+    faults = script[opened : script.index("\n};", opened)]
+    key = faults.index('"cookie-half-mismatch":')
+    # To the next key rather than to the next newline, so a future edit that wraps the
+    # value across lines is read whole rather than read as its first line.
+    after = re.search(r'\n  "?[a-z-]+"?:', faults[key:])
+    entry = faults[key : key + (after.start() if after else len(faults) - key)]
+
+    assert "The two halves of this browser's session no longer match." in entry
+    assert "local service" not in entry
+    assert "restart" not in entry.lower()
+    # Which is only the right shape because this condition is never rendered as a
+    # fault: every path carrying it reaches `sessionLost` first, and the entry is the
+    # `said` that joins the re-entry sentence there.
+    assert '"cookie-half-mismatch"' in _functions(script)["sessionLost"]
+
+
 def test_the_header_half_is_held_in_origin_scoped_storage_shared_across_tabs() -> None:
     """§6: "held in browser storage scoped to **scheme, host and port** and shared
     across that origin's tabs".
