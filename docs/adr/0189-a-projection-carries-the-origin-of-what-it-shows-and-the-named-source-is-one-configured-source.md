@@ -1,4 +1,4 @@
-# 189. A projection carries the origin of what it shows, and the named source is a reader instance rather than a reader
+# 189. A projection carries the origin of what it shows, and the named source is one configured source rather than a reader
 
 - Status: Proposed
 - Date: 2026-08-24
@@ -138,15 +138,21 @@ Both of §7's own statements of its condition are "a second instance of one sour
 type" — "Revisit when a second instance of one source type exists and needs
 distinguishing", and "leaves the question live at the point where it acquires a
 subject: §11's registry deferral, when a second instance of one source type
-exists". Two source *types* is not two instances of one type. The tree holds one
-`CalendarReader` and one `EmailReader`; `calendar_reader_path` and
-`email_reader_path` are each one path. **Nothing on `main` has a second instance of
-anything**, and §11's own third phrasing — "§7 revisits at the third source" — is
-not met either.
+exists". Two source *types* is not two instances of one type. `calendar_reader_path`
+and `email_reader_path` are each one path, so `app/composition.py` builds readers
+for exactly one configured calendar and one configured mailbox. **Nothing on `main`
+has a second instance of anything**, and §11's own differently-worded first phrase —
+"§7 revisits at the third source" — is not met either, nor is ADR-0142 §8's reading
+of §11, in which "the registry *and* its configurable display label *and* its
+instance-distinguishing `reported_by` all fire together" at the third source. The
+corpus offers three phrasings of one trigger and **all three are unfired**, which is
+what lets this ADR proceed without first having to settle which of them is right
+(§8, §12).
 
 So the instance half of this ADR decides a rule before the condition that was to
 bring it back. That is a deliberate act with a precedent and a price, and both are
-stated at §6.
+stated at §6 — which is also why §6 rules an identity's *properties* and refuses to
+rule its shape.
 
 The **owner ruled this cluster into scope** as one decision (#1501, 2026-08-23),
 naming the instance-distinguishing `reported_by` and the display-label rule that
@@ -234,11 +240,14 @@ rather than a better sentence.
 > as stored, projected whole — and
 > `rests_on_recorded_external_content: bool = False`.
 
-> **Normative.** `Retirement` gains one field, `warrant: Warrant | None`, where
-> `Warrant` is the new promoted type §3 defines. `warrant` is `None` **exactly
-> when** `content` is `None` — the case ADR-0045 §6 produces, where `MemoryStore.get`
-> hides a closed window and the retired record no longer resolves. The
-> correspondence is a cross-field validator on `Retirement`.
+> **Normative.** `Retirement` gains one field, `warrant: Warrant | None = None`,
+> where `Warrant` is the new promoted type §3 defines.
+
+> **Normative.** A producer of a `Retirement` sets `warrant` **exactly when** it
+> sets `content`: both are resolved from one `MemoryStore.get`, and `None` on both
+> is the case ADR-0045 §6 produces, where the store hides a closed window and the
+> retired record no longer resolves. The obligation is on the producer; no
+> cross-field validator on `Retirement` asserts it, for the reason §3 gives.
 
 > **Normative.** On `Question`, both fields describe the **proposal** — the record
 > that would be written if the question were accepted — on the same reading
@@ -287,17 +296,36 @@ carrying one bounded optional value.
 Its three facts are resolved together by one `MemoryStore.get` in
 `orchestration/questions.py`'s `_retirement`, or not at all. Making them one
 optional object rather than three separately-nullable fields is ADR-0092 §2's
-argument applied a second time, and it makes the half-state — a band with no
-content, a source named for a record that is no longer held — unconstructable
-rather than merely wrong.
+argument applied a second time: a `Warrant` that exists is always whole — a band, a
+predicate answer and, on the attested band, the source and the instant — so the
+half-answer that section made unconstructable on `Provenance` is unconstructable
+here too.
+
+**What the nesting does not buy is the tie to `content`, and §2 makes that a
+producer obligation rather than a validator on purpose.** A validator asserting
+`content is None ⟺ warrant is None` would refuse, at the moment it landed, the
+`Retirement(record_id=…, content=held.content)` that `orchestration/questions.py`
+constructs today — so the contract PR §9 requires to carry no producer could not
+carry it, and a later PR adding it would be a second contract change for an
+invariant one producer already guarantees. Adversarial review found the ordering on
+round 1 and the finding was correct. ADR-0107 §4 is the precedent for the shape of
+the answer — "No cross-field invariant is added, and the absence is the decision" —
+and the field therefore lands additively with a `None` default, exactly as
+`evidence_elided` did.
 
 ### 3. The shape question, asked once: a value object where the standing is absent, fields where it is not
 
 > **Normative.** `core/types.py` gains one promoted type, `Warrant`, a frozen model
 > with `extra="forbid"`, carrying `band: BeliefBand`,
 > `rests_on_recorded_external_content: bool` and `attestation: Attestation | None`.
-> `attestation` is set **if and only if** `band` is `BeliefBand.ATTESTED`, asserted
-> by a validator on the type.
+
+> **Normative.** A validator on `Warrant` asserts the whole of what the band
+> determines, over all three members and not over `attestation` alone:
+> `ATTESTED` requires `attestation` set and `rests_on_recorded_external_content`
+> `True`; `ASSERTED` requires `attestation` unset and
+> `rests_on_recorded_external_content` `False`; `DERIVED` requires `attestation`
+> unset and admits either value of the predicate. Any other combination is
+> unconstructable.
 
 > **Normative.** No projection that already carries `band` as a top-level field
 > gains a nested object carrying `band` again. A projection carries each fact it
@@ -320,17 +348,31 @@ times or leave `Retirement` with three separately-nullable fields and a validato
 tying them together. The asymmetry is in the models this ADR inherited, and the
 rule that generates the two treatments is one rule.
 
-**The `if and only if` on `Warrant` is admissible precisely because `Warrant` is
-new, and ADR-0106 §7 is the case that shows why that matters.** That section refused
-a band-keyed validator on `Provenance` because "A validator asserting
-`ATTESTED ⟹ True` would refuse, on *decode*, every attested record
-`readers.calendar` has already written — ADR-0086 §3's 'does it refuse something
-that already worked', answered yes." `Warrant` has no stored instances, no encoded
-history and no existing construction site, so the same test is answered **no**.
-That is also why §2 declines to add the equivalent validator to `Belief`,
-`BeliefSummary` and `Question`: those are ratified types with construction sites in
-the tree and in every fixture that builds one, and a new validator tying a new
-field to an existing one would refuse constructions that work today.
+**The band-keyed validator is admissible precisely because `Warrant` is new, and
+ADR-0106 §7 is the case that shows why that matters.** That section refused a
+band-keyed validator on `Provenance` because "A validator asserting `ATTESTED ⟹
+True` would refuse, on *decode*, every attested record `readers.calendar` has
+already written — ADR-0086 §3's 'does it refuse something that already worked',
+answered yes." `Warrant` has no stored instances, no encoded history and no existing
+construction site, so the same test is answered **no**. That is also why §2 declines
+to add the equivalent validator to `Belief`, `BeliefSummary` and `Question`: those
+are ratified types with construction sites in the tree and in every fixture that
+builds one, and a new validator tying a new field to an existing one would refuse
+constructions that work today.
+
+**It reaches all three members because a validator over `attestation` alone leaves
+the type able to contradict §2, and an earlier draft did exactly that.** That draft
+asserted only `attestation` set iff `ATTESTED`, which admits
+`Warrant(band=ASSERTED, rests_on_recorded_external_content=True, attestation=None)`
+— a user's own assertion reporting that its warrant rests on recorded external
+content, which ADR-0106 §2's predicate makes `False` for that band and ADR-0098 §1
+forbids in principle, since "the user's own utterance is not [external], however it
+was composed". It admits the inverse on `ATTESTED` too. Architecture review found it
+on round 1. The repair is the same move ADR-0106 §2 made when it band-guarded its
+own predicate rather than trusting a stray flag: the band is the classifier
+(ADR-0072 §4), so the validator asserts everything the band determines and leaves
+free only what it genuinely does not — the `DERIVED` case, which is the one the
+field exists for.
 
 **`rests_on_recorded_external_content` keeps the function's exact name, and the
 length is the point.** ADR-0106 §2 rules that "Every consumer asking 'does this rest
@@ -450,144 +492,210 @@ value on a record — which is the decision that has to exist *before* anyone
 configures one, because it is the decision a configuration mechanism could
 irreversibly get wrong.
 
-### 6. The named source is a reader **instance**, and its identity is declared, minted and never re-used
+### 6. The named source is a **configured source**, and its identity is minted, durable and not re-used
 
-> **Normative.** A source identity names **one configured reader instance**, not a
-> reader class and not a backing location. `Reader.name` is that identity;
-> `Attestation.reported_by` carries it onto every record the instance proposes.
+> **Normative.** A source identity names **one configured source** — one entry in a
+> deployment's configuration for a reader type, with its own backing location — and
+> not a reader class, not a backing location, and **not a `Reader` object**. Every
+> `Reader` object the composition root builds to serve one configured source carries
+> that one identity.
 
-> **Normative.** ADR-0093 §7's identity rule is unchanged: an identity is declared
-> by the reader, is not a user-authored value, is Tier 2, and is never derived from
-> the source's location or contents. A path, filename, address or account identifier
-> may not be used as one, or as any part of one.
+> **Normative.** ADR-0093 §7's two properties are unchanged and bind every identity:
+> it is a stable Tier 2 value, and it is **never derived from the source's location
+> or contents**. A path, filename, address or account identifier may not be used as
+> one, or as any part of one.
 
-> **Normative.** Where a deployment holds more than one instance of one reader type,
-> each instance's identity carries a **discriminator** that is minted rather than
-> authored: a value drawn by the composition root from a closed alphabet, carrying
-> no information about the source it names. A deployment holding exactly one
-> instance of a type keeps that type's bare declared name as its identity —
-> `"calendar"`, `"email"` — unchanged and unmigrated.
+> **Normative.** Where a deployment configures more than one source of one reader
+> type, each such source's identity carries a **discriminator**: a value **minted**
+> by the deployment, drawn uniformly from a fixed-width closed alphabet — 128 bits,
+> rendered as 32 lowercase hexadecimal characters — carrying no information about the
+> source it names, and refused by every admitting seam if it is not of that form.
 
-> **Normative.** An identity is **never re-used**. Retiring an instance's
-> configuration does not release its identity for a later instance, and no
-> composition root assigns an identity that any instance in that deployment has
-> ever held.
+> **Normative.** A configured source's identity is **durable**: it is minted once,
+> when that source is first configured, persists with that source's own
+> configuration, and does not change across restarts, re-reads, or a repointing of
+> its backing location. A deployment that configures exactly one source of a type
+> keeps that type's bare declared name as its identity — `"calendar"`, `"email"` —
+> unchanged and unmigrated.
+
+> **Normative.** No component re-uses an identity. Retiring a configured source does
+> not release its identity for a later one, and the mint above is what makes an
+> accidental collision with any identity a deployment has ever held unreachable
+> rather than merely unlikely.
 
 > **Normative.** ADR-0097 §9's canonicality rule is unchanged and reaches a
-> discriminated identity exactly as it reaches a bare one: a reader whose declared
-> name is not equal to its own `str.strip()` is not grantable.
+> discriminated identity exactly as it reaches a bare one: a source whose identity is
+> not equal to its own `str.strip()` is not grantable.
 
-**The non-re-use clause is what carries the safety property, and it is the one a
-registry lane would be most likely to drop.** ADR-0097 §9a states the live hazard
-plainly: a grant is keyed to the identity, so a repointed reader keeps its grant. A
-re-used identity turns that from an acknowledged limitation into an authorisation
-transfer — the user granted `email#2` for their archive and a later `email#2` is
-somebody else's mailbox, with the grant already standing over it. Once identities
-are never re-used, "the grant follows the identity" is safe, and §7 can say so
-without qualification.
+> **Normative.** **Which seam carries a discriminated identity is not decided here**
+> — whether `Reader.name` returns it, or a separate instance-identity seam sits
+> beside `Reader`. This ADR rules the properties above and nothing about the shape.
+> A lane taking the first route engages ADR-0093 §7's "declared by the sensor and is
+> not a configurable value" clause and owes the record ADR-0082 §1 requires for it;
+> a lane taking the second owes the argument that two identity values on one seam do
+> not disagree. §11 states why this ADR does not choose between them.
+
+**The unit is the configured source and not the reader object, and the tree is why
+that distinction had to be found rather than assumed.** `app/composition.py` builds
+**three** `CalendarReader` objects for one configured calendar — `facet_reader`,
+`ingestion_reader`, `upcoming_reader` — and **two** `EmailReader` objects for one
+configured mailbox, deliberately, because ADR-0140 §13 requires each consumer its
+own instance and a shared one makes "a running scheduled ingest make the
+request-path facet raise `ReaderError` and vanish". `_held_sources` pairs those
+copies back into one source each. An identity keyed on the reader *object* would
+make one configured calendar three independently grantable sources, which is a
+worse answer than the one this ADR set out to improve on.
 
 **The minted discriminator is ADR-0093 §7's property rather than a rule, applied a
-second time.** That section chose a declared constant over a setting because "A
-declared constant cannot carry personal data at all, which is a property rather than
-a rule". A minted opaque value has the same property for the same reason: there is no
-free-text path into it, so no validator has to tell a chosen name from a personal
-one. What §7 could not have — a *distinguishing* declared constant, since a class
-constant is the same for every instance — is what minting supplies without giving
-the property back.
+second time — and the fixed form is what carries it.** §7 chose a declared constant
+over a setting because "A free-text setting is precisely the mechanism by which a
+user would put their email address or a path there, **and no validator can tell a
+chosen label from a personal one**". A validator *can* tell 32 hexadecimal
+characters from an email address, so the hazard §7 names is closed by the shape of
+the value rather than by a rule about what may be typed into it. That is the same
+kind of answer §7 gave — "A declared constant cannot carry personal data at all,
+which is a property rather than a rule" — reached by a different route because a
+class constant, being the same for every instance, is the one thing a discriminator
+cannot be.
 
-**The bare name survives for a sole instance, and that is what makes this migration
-free.** Every attested record in every deployment carries `reported_by="calendar"`
-or `reported_by="email"`; every grant carries the same values as `source`. Under the
-clause above those identities keep naming exactly the instance they have always
-named, so no record is rewritten, no grant is re-keyed, and nothing that worked
-stops working — ADR-0086 §3's admissibility test answered "no" on both stores. The
-asymmetry between a bare identity and a discriminated one is a fact about when each
-was minted, and ADR-0184 is the corpus's ruling that a value recorded before a
-distinction existed is legible history rather than a defect to backfill.
+**Durability is not decoration, and it is the clause a lane would drop first.** A
+re-minted identity orphans every record whose `Attestation.reported_by` names the
+old one and every grant keyed on it — the belief surface would name a source that no
+longer exists, and the read gate would find no live grant for a source the user
+granted. That is why the mint happens once, at configuration, rather than per
+process.
 
-**This clause is ruled ahead of its trigger, and ADR-0107 is the precedent for doing
-so.** ADR-0093 §11's condition — a second instance of one source type — has not
-fired (Context). ADR-0107 decided the elision's surface before its own trigger fired,
-under a section titled "Why this is worth deciding before the trigger fires", on the
-ground that the moment the decision becomes necessary is the moment it becomes
-expensive to get wrong. The same holds here and is stronger: ADR-0097 §9a makes the
-absence of this rule a **gate** on a capability, so leaving it unwritten does not
-defer a decision, it forbids a feature. What this ADR pays for deciding early is
-stated at §10 and in Consequences: no second instance exists to check the shape
-against, so the *spelling* is deliberately left open and only the properties are
-ruled.
+**"Not re-used" is a property of the mint and not a bookkeeping guarantee, and an
+earlier draft of this section claimed more than it could deliver.** That draft ruled
+that "no composition root assigns an identity that any instance in that deployment
+has ever held", which needs a durable record of every identity ever retired — and
+§8 defers the registry that would hold one, so the clause obliged machinery this ADR
+declines to build. Both reviewers found it on round 1 and both were right. What the
+clause above rules instead is achievable with no allocation ledger at all: a
+128-bit uniform draw will not collide with a retired identity, so retiring a source
+and configuring a new one produces a new identity as a matter of arithmetic rather
+than of bookkeeping.
+
+**What that leaves, stated rather than papered over.** A deployment that
+*deliberately* re-installs a retired identity — copying the old value into a new
+source's configuration — transfers the grant that stood over it, and no rule
+available here prevents that. The exposure is bounded exactly as ADR-0097 §9a bounds
+its own: "on the deployment this system is built for, the operator and the user are
+the same person", so this is that person pasting their own identifier into their own
+configuration file, not a third party substituting a source beneath them. It becomes
+a genuine gap at the same moment §9a's does — when those two roles diverge — and
+§12 defers it there, with that condition.
+
+**The bare name survives for a sole configured source, and that is what makes this
+migration free.** Every attested record in every deployment carries
+`reported_by="calendar"` or `reported_by="email"`; every grant carries the same
+values as `source`. Under the durability clause those identities keep naming exactly
+the source they have always named, so no record is rewritten, no grant is re-keyed,
+and nothing that worked stops working — ADR-0086 §3's admissibility test answered
+"no" on both stores. The asymmetry between a bare identity and a discriminated one
+is a fact about when each was minted, and ADR-0184 is the corpus's ruling that a
+value recorded before a distinction existed is legible history rather than a defect
+to backfill.
+
+**This section is ruled ahead of its trigger, and ADR-0107 is the precedent for
+doing so.** ADR-0093 §11's condition has not fired (Context). ADR-0107 decided the
+elision's surface before its own trigger fired, under a section titled "Why this is
+worth deciding before the trigger fires", on the ground that the moment a decision
+becomes necessary is the moment it becomes expensive to get wrong. The case here is
+stronger: ADR-0097 §9a makes the absence of this rule a **gate** on a capability, so
+leaving it unwritten does not defer a decision, it forbids a feature. What is paid
+for deciding early is that no second configured source exists to check a *shape*
+against — which is why the last clause above rules no shape at all.
 
 ### 7. What a live grant does when identity or location changes — ADR-0097 §9a's gate, lifted
 
-> **Normative.** Repointing a configured reader instance at a different backing
-> location does **not** change its identity, and a live grant over that identity
-> **stands**. This is ADR-0097 §9a's stated behaviour, ratified here as the rule
-> rather than recorded there as an open consequence.
+> **Normative.** Repointing a configured source at a different backing location does
+> **not** change its identity, and a live grant over that identity **stands**. This
+> is ADR-0097 §9a's stated behaviour, ratified here as the rule rather than recorded
+> there as an open consequence.
 
-> **Normative.** Because §6 forbids re-use, a grant can never come to authorise an
-> instance other than the one it was made for. A grant that outlives its instance is
-> history and authorises nothing, which is ADR-0097 §9's existing ruling that "A
-> grant whose reader later disappears is not a defect", unchanged.
+> **Normative.** A grant authorises the configured source its identity names and no
+> other. Because §6's mint does not collide, a later configured source does not
+> inherit a retired one's grant. A grant that outlives its source is history and
+> authorises nothing, which is ADR-0097 §9's existing ruling that "A grant whose
+> reader later disappears is not a defect", unchanged.
 
-> **Normative.** Configuring a second instance of a type changes neither the first
-> instance's identity nor any grant over it. A grant over one instance authorises
-> that instance and no other; nothing about a shared type is inherited.
+> **Normative.** Configuring a second source of a type changes neither the first
+> source's identity nor any grant over it. Nothing about a shared reader type is
+> inherited, and no grant widens because a second source of that type now exists.
 
 > **Normative.** ADR-0097 §9a's disclosure obligation is unchanged and now binds per
-> instance: the grant surface makes the instance's **current configured location**
-> available to the user transiently at the moment of granting, and that location
-> comes to rest nowhere. No client describes a grant as covering a particular file
-> (ADR-0097 §9a).
+> configured source: the grant surface makes that source's **current configured
+> location** available to the user transiently at the moment of granting, and that
+> location comes to rest nowhere. No client describes a grant as covering a
+> particular file (ADR-0097 §9a).
 
-> **Normative.** ADR-0097 §9a's precondition is **discharged** by the four clauses
-> above. A second instance of one source type may become grantable, and its
-> grantability is decided by ADR-0097 §9 and ADR-0102 §4 exactly as a first
-> instance's is: the identity is admitted only when it equals the declared `name` of
-> a `Reader` the hub holds.
+> **Normative.** ADR-0097 §9a's precondition — "the rule for what a live grant does
+> when its source's identity or backing location changes" — is **discharged** by the
+> four clauses above. A second configured source of one reader type may become
+> grantable in a deployment that satisfies §6, and its grantability is then decided
+> by ADR-0097 §9 and ADR-0102 §4 exactly as a first source's is, over whichever seam
+> §6's last clause leaves that lane to choose.
 
 **Lifting a gate is not the same as building what it gated, and the distinction is
 the whole of why this fits in one ADR.** §9a's precondition is written over "the
 rule", and a rule is a text. The registry, the label's configuration, and the engine
-operations that would let a user *see* two instances are separate work with their own
-triggers (§8). What the gate stops is a second instance becoming grantable while the
+operations that would let a user *see* two sources are separate work with their own
+triggers (§8). What the gate stops is a second source becoming grantable while the
 question "whose grant is this now?" has no answer. It has one above.
 
 **Revocation is untouched and stays prospective.** ADR-0097 §6 rules that revoking
-stops the reading and does not unwrite the beliefs; per-instance identities change
-nothing about it except that a revocation is now as narrow as the instance it names,
+stops the reading and does not unwrite the beliefs. Per-source identities change
+nothing about that except that a revocation is now as narrow as the source it names,
 which is the improvement rather than a new question.
 
 ### 8. What stays deferred: the registry, the label's configuration, and the surface that shows two
 
-> **Normative.** The **source registry** stays deferred. Its trigger is ADR-0093
-> §11's, restated unchanged: §7 revisits at the third source type, and the registry
-> acquires its subject at the second instance of one source type. Neither has fired.
-> This ADR rules the properties an instance identity must have (§6) and the rule a
-> live grant follows (§7); it builds no registry and no lane may read it as having
-> built one.
+> **Normative.** The **source registry** stays deferred, with ADR-0093 §11's trigger
+> unchanged and unfired. This ADR rules the properties a source identity must have
+> (§6) and the rule a live grant follows (§7); it builds no registry, adds no
+> list-valued or mapping-valued source configuration, and no lane may read it as
+> having done either — ADR-0142 §8's clause is unchanged and still governs.
+
+> **Normative.** ADR-0102 §10's obligation on the registry lane — a re-derivation of
+> `grantable_sources`' worst case over the whole `GrantableSource` graph, in the same
+> change — is unchanged and still owed by that lane. This ADR adds nothing to that
+> graph and does not discharge it.
 
 > **Normative.** **Where a display label is configured, and by what mechanism**, is
 > the registry lane's. §5 rules what a label may never be and where it may never
 > settle; a lane that adds one inherits both clauses and adds its own storage
 > argument.
 
-> **Normative.** **The client surface for more than one instance** — how a user
-> distinguishes two mailboxes when granting, listing or revoking — is the grant
+> **Normative.** **The client surface for more than one configured source** — how a
+> user distinguishes two mailboxes when granting, listing or revoking — is the grant
 > surface's (ADR-0102), on ADR-0084 §5's step-1/step-2 split. This ADR adds no
 > `AssistantEngine` method and changes no signature.
 
+**The trigger is restated by reference rather than paraphrased, because the corpus
+does not agree with itself about what it says.** ADR-0093 §7 states it twice as "a
+second instance of one source type"; §11's own first phrase says "§7 revisits at the
+third source"; and ADR-0142 §8 reads §11 as one entry in which "the registry *and*
+its configurable display label *and* its instance-distinguishing `reported_by` all
+fire together" at the third source. Under every one of the three readings the trigger
+is **unfired** on this tree — two source types, one configured source each — which is
+why this ADR can note the divergence without having to settle it. Settling it is
+ADR-0093's own lane's, and §12 records it.
+
 **Naming what is not built is load-bearing here because §6 and §7 read like a
 registry if they are skimmed.** They are not one. They are the two texts ADR-0097 §9a
-and ADR-0093 §11 each said had to exist before a second instance could be granted,
-and nothing more — which is precisely the scope that lets this ADR decide ahead of a
-trigger without guessing at a shape it has no producer for.
+and ADR-0093 §11 each said had to exist before a second source of one type could be
+granted, and nothing more — which is precisely the scope that lets this ADR decide
+ahead of a trigger without guessing at a shape it has no producer for.
 
 ### 9. What the implementing lanes owe
 
 > **Normative.** The contract lane lands §2's and §3's `core/types.py` surface —
-> three field pairs, one new `Warrant` type and its validator, and `Retirement`'s
-> cross-field validator — as its own PR ahead of any consumer, with no producer and
-> no surface change in it (golden rule 5, ADR-0015).
+> three field pairs, one new `Warrant` type with §3's band validator, and
+> `Retirement.warrant` — as its own PR ahead of any consumer, with no producer and
+> no surface change in it (golden rule 5, ADR-0015). Every field it adds is
+> additive with a default, so that PR leaves every construction site in the tree
+> compiling and passing unchanged.
 
 > **Normative.** That lane bumps `PROTOCOL_VERSION`. Every one of these models is
 > wire-carried and declares `extra="forbid"`, so a new hub's `Belief` is refused by
@@ -596,10 +704,11 @@ trigger without guessing at a shape it has no producer for.
 > change widens or narrows the type", is engaged in the direction that bites.
 
 > **Normative.** The projection lane populates the new fields at the four sites that
-> build them — `Belief.from_record` and `_summarise` in `orchestration/engine.py`,
-> `_project` and `_retirement` in `orchestration/questions.py` — reading
-> `rests_on_recorded_external_content` (ADR-0106 §2) and never
-> `Provenance.derived_from_external`.
+> build them — `belief_from_record` and `belief_summary_from_record` in
+> `orchestration/engine.py`, `_project` and `_retirement` in
+> `orchestration/questions.py` — reading `rests_on_recorded_external_content`
+> (ADR-0106 §2) and never `Provenance.derived_from_external`. It carries §2's
+> producer obligation on `Retirement`: `warrant` is set exactly when `content` is.
 
 > **Normative.** The surface lane rewrites the attested explanation on both live
 > surfaces — `_why` in `interfaces/cli.py` and `whyHeld` in
@@ -653,10 +762,14 @@ and leaves "Last revised" as the only instant has met §8's second clause and br
   ADR-0098 §5 establishes the link is unrecoverable once a model's output is recorded
   truthfully.
 - **`MemoryStore`, `MemoryWriter`, `Reader` or `AssistantEngine` signatures.** No
-  Protocol signature changes. §6 states a conformance obligation on what
-  `Reader.name` returns in a multi-instance deployment; the shared conformance suite
-  is where it lands (ADR-0095 §3), and the obligation binds no reader in a
-  single-instance deployment.
+  Protocol changes of any kind, and §6's last clause is explicit that **which seam
+  carries a discriminated identity is not decided here** — so nothing in this ADR
+  changes what `Reader.name` returns, what `ReaderContract` requires of it, or what
+  the shared conformance suite (ADR-0095 §3) asserts about it.
+- **Whether one configured source may be served by readers declaring different
+  identities.** §6 rules the opposite — every reader object serving one configured
+  source carries that source's one identity — and rules nothing about how a
+  composition root arranges that, which is `app/`'s and is not a contract question.
 
 ### 11. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -676,15 +789,29 @@ reading is available:
   needs `Provenance` to grow fields is a `core` decision for that lane" — ADR-0092 §1
   took the record half, this ADR takes the projection half, and neither re-decides
   what §4 asks for.
-- **ADR-0093 §7 and §11** are **not amended**. §7's identity rule is adopted verbatim
-  (§6) and its label fallback is adopted verbatim (§5). §11's registry deferral stands
-  with its trigger restated and unfired (§8). What §6 adds is the property a
-  discriminator must have — a question §7 explicitly left live "at the point where it
-  acquires a subject" — and adding a property to a deferral that named its own
-  successor is not a change to what §7 decided. A reader holding ADR-0093 alone would
-  read that a display label and an instance-distinguishing `reported_by` await the
-  registry lane; after this ADR the label's *rule* exists and the registry still does
-  not, which is a state §7's own closing sentence contemplates.
+- **ADR-0093 §7 and §11** are **not amended, and §6's last clause is what keeps that
+  true.** §7's two surviving properties — a stable Tier 2 value, never derived from
+  the source's location or contents — are adopted verbatim (§6), and its label
+  fallback is adopted verbatim (§5). §11's registry deferral stands with its trigger
+  unfired (§8).
+
+  **The clause a discriminator would engage is §7's "declared by the sensor and is
+  not a configurable value", and this ADR deliberately stops short of engaging it.**
+  Architecture review raised on round 1 that a composition-root-minted discriminator
+  returned from `Reader.name` would be neither a reader-declared constant nor the
+  existing Protocol semantics, so a §11 claiming ADR-0093 unamended would be false.
+  The finding was correct against the draft it was made on, in which §6 put the
+  minted value into `Reader.name`. It is answered by **removing the shape decision
+  rather than by re-labelling it**: §6 now rules the properties an identity must have
+  and explicitly declines to say which seam carries it, and its last clause hands the
+  `Reader.name` route's ADR-0082 §1 record to whichever lane takes that route. A
+  reader holding ADR-0093 alone reads that an instance-distinguishing `reported_by`
+  awaits the registry lane and that `Reader.name` is a declared constant; both stay
+  true after this ADR, because this ADR adds no such value to any seam.
+
+  **What §6 adds is the property a discriminator must have** — a question §7 left
+  live by name, "at the point where it acquires a subject" — and adding properties to
+  a deferral that named its own successor is not a change to what §7 decided.
 - **ADR-0097 §9a's precondition** is **discharged** (§7), in the form it specified —
   "the rule for what a live grant does when its source's identity or backing location
   changes". §9a's other clauses, including the prohibition on describing a grant as
@@ -708,15 +835,30 @@ to be someone else's, not an amendment to any of them.
 
 ### 12. Deferred, by name, each with the condition that fires it
 
-- **The source registry.** ADR-0093 §11's, with its trigger unchanged: §7's revisit at
-  the third source type, and the registry's subject at the second instance of one
-  source type. Neither has fired (§8).
+- **The source registry**, with ADR-0102 §10's re-derivation of `grantable_sources`'
+  worst case riding on it. ADR-0093 §11's, trigger unchanged and unfired under every
+  one of the corpus's three phrasings of it (§8).
+- **Which of those three phrasings ADR-0093 §11's trigger actually has.** §7 says "a
+  second instance of one source type" twice, §11's own first phrase says "the third
+  source", and ADR-0142 §8 reads all three of §11's items as firing together at the
+  third source. Nothing turns on it while none of them is met; it is ADR-0093's lane's
+  to settle, and it **fires with whichever of the three arrives first**.
+- **Which seam carries a discriminated identity** — `Reader.name` extended, or a
+  separate instance-identity seam. §6's last clause defers it with the record each
+  route owes. Fires with the first deployment that configures a second source of one
+  reader type.
+- **A deliberate re-installation of a retired identity.** §6's mint makes accidental
+  re-use unreachable and cannot stop an operator pasting an old identity into a new
+  source's configuration. The exposure is bounded by ADR-0097 §9a's own ground — the
+  operator and the user are the same person — and **fires with the same condition
+  §9a's does**: when those two roles diverge, which is the multi-user case ADR-0097
+  §12 already defers.
 - **Where a display label is configured and which response carries it.** Fires with
-  the registry, or with the first lane that gives a user two instances to tell apart.
+  the registry, or with the first lane that gives a user two sources to tell apart.
   §5 binds it in advance on the two points that cannot be got wrong later.
-- **The client surface for multiple instances** — granting, listing and revoking
-  across two mailboxes. ADR-0102's, on ADR-0084 §5's split. Fires with the first
-  deployment that configures a second instance.
+- **The client surface for more than one configured source** — granting, listing and
+  revoking across two mailboxes. ADR-0102's, on ADR-0084 §5's split. Fires with the
+  first deployment that configures a second one.
 - **A citation count, and an elision ceiling, on the `ATTESTED` line.** ADR-0073 §4's
   own `ATTESTED` gate and ADR-0107 §10's; fires with the lane that holds the evidence
   to answer it.
@@ -751,14 +893,16 @@ And every surface that renders an attested belief now owes two facts where it ow
 none, so a surface that renders one of them is newly capable of a specific error —
 naming the source while still showing our clock as the source's.
 
-**What is paid for deciding §6 and §7 ahead of their trigger.** No second instance
-exists, so nothing checks the identity's shape against a real one. This ADR therefore
-rules the *properties* — declared, minted, non-personal, never re-used — and leaves
-the *spelling* to the lane that has an instance in hand, which is the same division
-ADR-0097 §9a used when it ruled that a location must be shown and must not settle
-while leaving the carrying shape to the surface ADR. If that lane finds the properties
-unsatisfiable, it supersedes §6 with a producer in hand and a better argument than
-this one could have.
+**What is paid for deciding §6 and §7 ahead of their trigger.** No second configured
+source exists, so nothing checks an identity's shape against a real one. This ADR
+therefore rules the *properties* — Tier 2, minted, fixed-form, durable, not re-used —
+and leaves both the *spelling* and the *seam* to the lane that has a second source in
+hand, which is the same division ADR-0097 §9a used when it ruled that a location must
+be shown and must not settle while leaving the carrying shape to the surface ADR. If
+that lane finds the properties unsatisfiable, it supersedes §6 with a producer in hand
+and a better argument than this one could have. What is **not** paid is a claim this
+ADR cannot keep: §6 rules no re-use ledger, no registry and no `Reader` contract
+change, because it would have to defer all three to build any of them.
 
 **What would trigger revisiting this.** Three things, named so a later lane does not
 have to derive them. If a third source type arrives, ADR-0093 §7's own revisit fires
@@ -814,10 +958,29 @@ on the record is the Tier 1 leak the identity rule exists to prevent, and a dige
 the path avoids the leak by inventing an instance identity through a field — which is
 the question §6 answers openly instead.
 
+**Require a durable allocation ledger — every identity a deployment has ever held,
+kept so that none is ever re-issued.** It is what an unqualified "never re-used"
+needs, and both reviewers correctly pointed out on round 1 that the draft's clause
+obliged one without ruling one. Refused rather than adopted: a ledger is durable
+hub-side state with an owner, a lifecycle, an export story and a retention rule —
+which is the schema decision ADR-0142 §8 says two sources do not buy — and §6's
+128-bit uniform mint delivers the same guarantee arithmetically with no store at all.
+What the ledger would additionally buy is the *deliberate* re-installation case,
+which §6 states as its residual and §12 defers on ADR-0097 §9a's own condition; that
+is a small gain for a store this ADR would otherwise be building on the way past.
+
+**Put the minted discriminator into `Reader.name` and record the ADR-0093 §7
+amendment here.** The architecture reviewer's second option, and the one a lane with a
+second source in hand may well take. Refused **for this ADR** because choosing it
+means partially superseding a clause of ADR-0093 with no producer to check the choice
+against — the widening ADR-0073 §4 declined in its own words, "not one to guess here"
+— and because the alternative seam is genuinely open. §6's last clause hands the
+choice, and the record each route owes, to the lane that has the evidence.
+
 **Leave §6 and §7 out and ship the projection alone.** Defensible: ADR-0093 §11's
 trigger has not fired, and ADR-0045 §1 and ADR-0028 §7 both rule that a field with no
 consumer is surface. Refused because §6 and §7 add no field and no surface — they add
 two texts — and because the absence of one of those texts is not a deferral but a
-**gate**: ADR-0097 §9a forbids a second instance becoming grantable until the rule
-exists. Deferring here would keep a capability locked on the absence of a paragraph.
-The price of deciding early is stated in Consequences rather than avoided.
+**gate**: ADR-0097 §9a forbids a second configured source becoming grantable until
+the rule exists. Deferring here would keep a capability locked on the absence of a
+paragraph. The price of deciding early is stated in Consequences rather than avoided.
