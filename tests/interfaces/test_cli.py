@@ -14,7 +14,7 @@ import re
 import shlex
 import socket
 from datetime import UTC, datetime, timedelta
-from inspect import getsource, unwrap
+from inspect import getsource, isfunction, unwrap
 from io import StringIO
 from itertools import count, product
 from typing import TYPE_CHECKING, Final
@@ -720,19 +720,69 @@ def test_neither_arm_names_a_source_a_span_or_a_verdict(output: StringIO) -> Non
             assert span_word not in origin, (planned, span_word)
 
 
-def test_the_cli_reads_no_permission_decision_and_no_binding(output: StringIO) -> None:
-    """ADR-0178 §5's third clause, and ADR-0042 §6 word for word.
+def test_the_cli_mints_no_ruling_and_authorises_nothing(output: StringIO) -> None:
+    """ADR-0042 §6, narrowed by ADR-0186 §1 rather than dropped.
 
-    ``lint-imports`` already keeps ``interfaces`` from importing a subsystem's
-    concrete module; what it cannot see is this adapter acquiring a *read* of a
-    ``PermissionDecision``, a ``ToolCall``, an ``ActionRequest`` or an
-    ``EgressBinding``. The whole point of ADR-0178 §1 is that the facts reach the
-    surface as a member of ``Confirmation`` instead, so naming any of those four
-    here would be the route around §6 the decision exists to close.
+    This case used to forbid the *name* ``PermissionDecision`` in this module
+    outright, together with ``ActionRequest``, ``EgressBinding`` and ``ToolCall``.
+    ADR-0186 §1 promotes two operations that **return**
+    ``tuple[PermissionDecision, ...]`` and §9 obliges this module to render what they
+    return, so the blanket form is now false: a ruling reaches this adapter the way a
+    ``Confirmation`` does, handed over the engine surface, and §7's floor cannot be
+    paid without naming the value it is stated over.
+
+    What ADR-0042 §6 actually forbids survives intact, in the two forms it can take.
+    **This adapter never mints a ruling**: it constructs no ``PermissionDecision``, no
+    binding, and reaches no ``from_request`` — the fabrication ADR-0184 §4 closed the
+    last route to. And **it never computes an authorisation**, which is ADR-0186 §8's
+    second clause, "no surface computes, displays or implies
+    ``PermissionDecision.authorises``".
+
+    Call shapes are what is scanned for rather than bare words, because
+    ``_render_decision``'s own docstring cites the bars it is written against, and a
+    module forbidden to *name* the rule it obeys is a module whose reasoning has to
+    live somewhere else.
     """
     source = getsource(cli)
-    for forbidden in ("PermissionDecision", "ActionRequest", "EgressBinding", "ToolCall"):
+    for forbidden in ("ActionRequest", "ToolCall", "from_request", "authorises("):
         assert forbidden not in source, f"interfaces/cli.py names {forbidden}"
+    for minted in ("PermissionDecision(", "EgressBinding(", "OriginUnrecordedBinding("):
+        assert minted not in source, f"interfaces/cli.py constructs {minted}"
+
+
+def test_a_recorded_ruling_reaches_the_audit_surface_and_nothing_else() -> None:
+    """ADR-0178 §5's third clause, pinned where a source scan can no longer pin it.
+
+    §5 builds a ``ConfirmationEgress`` from the recorded decision *in `core`*, so the
+    card's facts reach this adapter as a member of ``Confirmation`` and the
+    confirmation path never holds a ruling. That used to be guaranteed by the module
+    naming no decision at all; since ADR-0186 §9 it has to be guaranteed by **where**
+    the decision goes instead.
+
+    So the walk asserts the whole set rather than spot-checking: a decision, or either
+    binding it may carry, is annotated on exactly the audit surface's five functions
+    and on no others. A sixth entry — most of all ``_render_confirmation`` or
+    ``_prompt_for_approval`` — fails here, which is the route around ADR-0042 §6 that
+    ADR-0178 exists to close and that ADR-0186 §8's last clause bars from the other
+    direction.
+    """
+    holders = {
+        name
+        for name, member in vars(cli).items()
+        if isfunction(member)
+        and member.__module__ == cli.__name__
+        and any(
+            recorded in str(member.__annotations__)
+            for recorded in ("PermissionDecision", "EgressBinding", "OriginUnrecordedBinding")
+        )
+    }
+    assert holders == {
+        "_decisions_artifact",
+        "_recorded_origin_line",
+        "_render_decision",
+        "_render_decisions",
+        "_render_recorded_egress",
+    }
 
 
 def test_disposition_render_names_the_executed_tool(output: StringIO) -> None:

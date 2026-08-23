@@ -7206,8 +7206,7 @@ def _render_decision(decision: PermissionDecision) -> None:
     console.print(f"  [bold]Why:[/] {_safe(decision.ruling.reason)}")
     console.print(
         f"  [bold]Digest:[/] {_safe(decision.parameters_digest)} "
-        "[dim](binds the arguments this ruling was taken over; they are not "
-        "themselves in the record)[/]"
+        "[dim](a digest, never the arguments)[/]"
     )
     if decision.resolves is not None:
         console.print(f"  [bold]Answers the question:[/] {_safe(decision.resolves)}")
@@ -7252,7 +7251,7 @@ def _render_decisions(recorded: tuple[PermissionDecision, ...], *, limit: int) -
             "count, and 'assistant export-decisions' writes the whole record.[/]"
         )
     console.print(
-        "\n[dim]Each row is a ruling that was made. It does not say the ruling still "
+        "[dim]Each row is a ruling that was made. It does not say the ruling still "
         "stands, that a grant is current, that an account is still connected, or that "
         "the tool is still registered under the identifier above — and it does not say "
         "the call ever ran: this record bounds what was decided, not what was carried "
@@ -7262,6 +7261,10 @@ def _render_decisions(recorded: tuple[PermissionDecision, ...], *, limit: int) -
         "[dim]A question and the answer to it are two rows. An answer can fall outside "
         "this page, so a question with nothing answering it here is a fact about the "
         "page and not about the question.[/]"
+    )
+    console.print(
+        "[dim]A digest binds the arguments a ruling was taken over. The arguments "
+        "themselves are not in this record and are not shown.[/]"
     )
 
 
