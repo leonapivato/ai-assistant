@@ -22,8 +22,8 @@
   places the dated note on the change that makes the count false, which is the
   contract lane rather than this document.
 - **Refs:** #1485 (the gap this closes), #1484 (the milestone-23 QA run that found
-  it), #1427 (track:world, milestone 24), #1501 (the batch), #1017 (the read-record
-  ADR, being decided in parallel — §10), #747 (authorised cloud egress in the trail),
+  it), #1427 (track:world, milestone 24), #1501 (the batch), ADR-0185 with #1017
+  (the read record, merged while this was in review — §10), #747 (cloud egress in the trail),
   #108 (the trail's deferred retention). **Filed by this lane:** #1502 (ADR-0004 §6's
   composed export reaches no user either, and `DataExport` has no consumer at all),
   #1503 (the trail bounds rulings, not invocations, and milestone 24's exit wording
@@ -134,8 +134,8 @@ as an event.
 We will put the trail on the promoted engine surface as **two operations** — a bounded
 listing and the whole-trail export ADR-0021 §4 already names — carry both on the
 transports that carry every other Tier 1 read, give a row a rendering floor that says
-what the row says and no more, and leave the browser and the read record to the
-decisions that own them.
+what the row says and no more, and leave the browser and the read surface to the
+lanes that own them.
 
 ### 1. Two operations, and they are two because the store's reads are two
 
@@ -509,34 +509,66 @@ the export would no longer be an export. The user reading rendered history gets 
 words; the user reading the artifact gets the row, and ADR-0184 §3 makes the absence of
 that one member total and unambiguous.
 
-### 10. How the read record joins later
+### 10. How the read record joins
 
-> **Normative.** This surface returns permission decisions and states nothing about
-> reads. No lane presents `recent_decisions` or `export_decisions` as an answer to what
-> was read from a source, and the CLI's existing `assistant granted` sentence — that
-> "whether anything was actually read is a question nothing here answers yet" — stays
-> true until the read-record decision lands.
+ADR-0185 — "Every attempt to read a source is recorded, refusals included, and the
+trail's bound has no unlimited spelling" — merged while this document was in review,
+and its header states in terms that it "decides no user surface … How the trail reaches
+a person — an engine operation, a CLI command, a browser view — is the surface ADR's,
+which is being written beside this one". This section is that answer, at the extent this
+ADR can give it without minting a surface for a store whose consumer nobody has driven.
 
-> **Normative.** The read record joins **additively**: as its own operation or
-> operations on this Protocol, or as a composed artifact one level up in the sense
-> ADR-0074 §9 already fixed, decided by the read-record ADR (#1017) in its own text. It
-> does not join by widening `PermissionDecision`, by adding a member to it, or by
-> reshaping either operation this ADR mints.
+> **Normative.** The two trails **partition** the subject and neither answers the
+> other's half, which is ADR-0185 §10's first clause: a read is never a
+> `PermissionDecision` and an egress is never a `SourceReadRecord`. No lane presents
+> `recent_decisions` or `export_decisions` as an answer to what was read from a source,
+> and none presents a read surface as an answer to what was decided about an act on the
+> world. The CLI's existing `assistant granted` sentence — that "whether anything was
+> actually read is a question nothing here answers yet" — stays true until the read
+> surface lands.
+
+> **Normative.** The read surface is a **second pair** mirroring §1's, over
+> ADR-0185 §12's `SourceReadTrail.recent` and `SourceReadTrail.export`, minted by its
+> own lane against the merged contract. It does not arrive by widening
+> `PermissionDecision`, by adding a member to either operation this ADR mints, or by
+> reshaping §2's order — and ADR-0185 §12 leaves that lane the per-source query and the
+> count it declined to mint without a consumer, which are this surface's to ask for and
+> not this document's to guess at.
+
+> **Normative.** That lane inherits, without restating them: §2's determinism, §3's
+> local refusal of `limit`, §7's last two clauses (render whole or render fewer rows;
+> insert every value as data), and §8's bars on liveness, on authorisation and on event
+> wording — the first of which ADR-0185 §8 already binds the read trail by, from the
+> other side. It does **not** inherit §7's egress content floor, which is about a
+> binding no read record carries.
+
+> **Normative.** **The two exports are not equally complete, and no surface presents
+> them as though they were.** `export_decisions` returns every row the trail holds and
+> the trail prunes nothing (#108). `SourceReadTrail.export` "delivers the horizon rather
+> than the history" (ADR-0185 §9, §10), because ADR-0185 §6 caps the store and prunes
+> oldest-first, and ADR-0004 §6's export right is satisfied "to that extent and no
+> further". A composed artifact carrying both states the read half's horizon on its
+> face; one that presented a pruned half and an unpruned half as one record would claim
+> a completeness half of it does not have.
 
 **The composition point is the one ADR-0074 §9 already chose, and it is why neither
 operation returns a wrapper type.** That section split a store's own snapshot from the
 composed user-facing artifact — "`ConversationStore.export` returns the store's own
 snapshot … the `orchestration` stage composes the user-facing export" — and put the
-composition in the layer that holds both stores. An operation named for decisions
-returning decisions is correctly named at that split; a `PermissionDecision` tuple is
-what every other enumerating operation on this surface returns; and the artifact that
-one day carries decisions *and* reads is the composed thing, which is a different name
-for a different value and is #1502's territory as much as #1017's.
+composition in the layer that holds both stores. ADR-0185 §10's partition is that split
+arriving from the other direction: two stores, two records, no shared key, and "the exit
+test does not ask them to" join. An operation named for decisions returning decisions is
+correctly named at that split, and the artifact that one day carries decisions *and*
+reads is the composed thing — a different name for a different value, and #1502's
+territory as much as ADR-0185's.
 
-**Nothing here pre-empts the read record's shape**, deliberately. Whether a read is a
-`PermissionDecision` with a new ruling, a new `core` type in a new store, or an entry
-in the same store is exactly what that ADR decides, and this one is written so that
-every answer it could give leaves §1 through §9 standing.
+**What is deliberately not decided here is the read surface's own spelling.** Its
+operation names, its CLI door, whether ADR-0185 §1's six outcomes and §7's refused read
+want a rendering of their own — each is a question about a record this ADR does not
+carry, driven by an exit arm (ADR-0185 §11) this ADR does not measure. Stating the
+partition, the inheritance and the horizon bar is what a surface decision owes its
+sibling; guessing the rest would be the surface-with-no-consumer ADR-0185 §12 refused
+one level down.
 
 ### 11. Two lanes, and what each owes
 
@@ -735,7 +767,7 @@ row, and the portability obligation ADR-0021 §4 assigns to `export` is discharg
 somebody for the first time. Milestone 24's exit acquires something to drive: five of
 its seven measurements above are impossible today because no command reaches the store.
 Every surface that renders decision history from now on — the browser's view, whatever
-#747's cloud-egress rows become, whatever #1017's read record joins as — inherits §7's
+#747's cloud-egress rows become, whatever ADR-0185's read surface joins as — inherits §7's
 floor and §8's bars without a second decision, which is what stating them over "a
 surface" buys.
 
@@ -754,7 +786,7 @@ artifact that re-validates.
 **What would trigger revisiting this.** A real trail that does not fit the contract
 limit fires §3's cursor question and #108's retention question together, and they should
 be answered together. A consumer that needs one row by id fires §4's deferred `get`. The
-read-record decision (#1017) may make a composed artifact the right shape, at which
+read surface ADR-0185 §12 leaves to its own lane may make a composed artifact the right shape, at which
 point §10's second clause is the seam it lands on. And #1503's question — whether
 milestone 24's "every egress" means the decision or the invocation — is the owner's at
 the exit ruling; if it means the invocation, the invocation contract (ADR-0016 §7,
@@ -785,8 +817,8 @@ right for acts that need the instance lock or a stopped hub; a read needs neithe
 `ConversationExport`.** Rejected, and it is the closest call here. Those two exist
 because a store's export carries *several* collections that need naming together; this
 one carries a single homogeneous sequence, and every other enumerating operation on this
-surface returns a bare tuple. The wrapper's real attraction is somewhere for #1017's read
-record to join, and §10 places that join at ADR-0074 §9's composition point instead —
+surface returns a bare tuple. The wrapper's real attraction is somewhere for ADR-0185's
+read record to join, and §10 places that join at ADR-0074 §9's composition point instead —
 where the same argument already put the memory-and-conversation artifact.
 
 **Promoting all five of `AuditTrail`'s reads.** Rejected in §4. `resolution_of` is keyed
@@ -808,9 +840,12 @@ is not merely wrong but unbuildable: ADR-0184 §8 forbids a `ConfirmationEgress`
 unrecorded origin, and that model's `planned_with_external_content` is required with no
 default, so composing the card would demand the fabrication ADR-0184 exists to avoid.
 
-**Waiting for the read record (#1017) and deciding one surface for both.** Rejected.
-The two are on different critical paths — this one closes a gap that exists today over
-rows that exist today, and that one mints a record nothing yet writes — and §10 is
-written so that every shape #1017 could choose leaves this surface standing. Coupling
-them would hold a discharged portability obligation hostage to an undesigned one, and
-would put both in one lane against golden rule 5's grain.
+**Waiting for the read record and deciding one surface for both.** Rejected, and the
+outcome settled it rather than an argument. The two ADRs were written beside each other
+and ADR-0185 merged first; had they been one document, a portability obligation
+discharged over rows that exist today would have been held hostage to a record nothing
+yet writes, and both would have ridden one lane against golden rule 5's grain. What
+ADR-0185 then decided is what vindicates the split: §10 of it **partitions** the
+subject — "a read is never a `PermissionDecision` and an egress is never a
+`SourceReadRecord`" — so the one surface a coupled ADR would have minted was never the
+right shape. §10 above records the partition rather than repairing a coupling.
