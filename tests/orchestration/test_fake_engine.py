@@ -20,7 +20,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 from assistant_engine_contract import (
+    _DECISION_LIMIT,
     _NOT_CANONICAL,
+    _OVERFULL_DECISIONS,
     _OVERFULL_GRANTS,
     _SOURCE,
     _TINY_LIMIT,
@@ -29,8 +31,10 @@ from assistant_engine_contract import (
     _UNWRITABLE_SOURCE,
     AssistantEngineContract,
     ConnectionSubject,
+    DecisionSubject,
     backwards_clock,
     page_after_mutating_the_filter,
+    seeded_trail,
 )
 
 from ai_assistant.core.errors import OversizedValueError
@@ -178,6 +182,42 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         """
         engine = FakeAssistantEngine()
         engine.park("h-1", egress=_binding())
+        return engine
+
+    @pytest.fixture
+    async def decisions(self) -> DecisionSubject:
+        """The fake over a seeded trail — the same object the suite reads as its control.
+
+        ``trail`` is a plain attribute for the reason every other scriptable
+        behaviour here is one: a test changes one thing without restating the rest,
+        and the canonical fake's default remains a conforming ``FakeAuditTrail``.
+        """
+        trail = await seeded_trail()
+        engine = FakeAssistantEngine()
+        engine.trail = trail
+        return DecisionSubject(engine=engine, trail=trail)
+
+    @pytest.fixture
+    async def unordered_decisions(self) -> DecisionSubject:
+        """The same fake over a trail whose ``export`` exercises the contract's freedom.
+
+        **This binding is why the fake holds an ``AuditTrail`` rather than a list of
+        decisions.** A fake that kept rows in a list of its own could only ever hand
+        back what its own sort produced, so the case separating an engine which
+        sorts from one which relays would pass while asserting nothing.
+        """
+        trail = await seeded_trail(ordered_export=False)
+        engine = FakeAssistantEngine()
+        engine.trail = trail
+        return DecisionSubject(engine=engine, trail=trail)
+
+    @pytest.fixture
+    async def overfull_decisions(self) -> AssistantEngine:
+        """A fake at the decision limit whose whole trail does not fit it."""
+        engine = FakeAssistantEngine(max_payload_bytes=_DECISION_LIMIT)
+        engine.trail = await seeded_trail(
+            rows=tuple((f"d-{index}", index) for index in range(_OVERFULL_DECISIONS))
+        )
         return engine
 
 

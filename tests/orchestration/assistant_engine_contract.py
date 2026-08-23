@@ -65,7 +65,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 from pydantic import SecretStr
@@ -89,23 +89,33 @@ from ai_assistant.core.types import (
     ACCOUNT_IDENTITY_MAX_BYTES,
     DEFAULT_PAGE_SIZE,
     SECRET_VALUE_MAX_BYTES,
+    ActionRequest,
     AnswerKind,
     BeliefBand,
     BeliefSummary,
     BoundAccount,
     ContinuationToken,
+    CostBasis,
     Disposition,
     EgressBinding,
     FeedbackEvent,
     FeedbackKind,
     GrantScope,
+    Idempotency,
     MemoryKind,
+    PermissionDecision,
+    PermissionOutcome,
+    PermissionRuling,
     ProvisioningState,
     ReplyChunk,
+    Reversibility,
+    RiskLevel,
+    ToolCost,
+    ToolDefinition,
     TurnOutcome,
     secret_value,
 )
-from ai_assistant.testing import Disclosure, SecretMethod
+from ai_assistant.testing import Disclosure, FakeAuditTrail, SecretMethod
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -234,6 +244,172 @@ class ConnectionSubject:
 
     engine: AssistantEngine
     provisioner: FakeConnectionProvisioner
+
+
+#: When the seeded trail's first ruling was made. Fixed, so an ordering assertion
+#: is about the values under test rather than about how fast the suite runs.
+_RULED_AT: Final = datetime(2026, 3, 1, 9, 0, 0, tzinfo=UTC)
+
+#: The rows every seeded trail holds, as ``(id, seconds after`` :data:`_RULED_AT`
+#: ``)``, **in the order they are recorded**. Two properties are deliberate and each
+#: is a case below (ADR-0186 §11). The recording order is not the ``decided_at``
+#: order, so an implementation relaying insertion order is caught; and ``d-3`` and
+#: ``d-4`` share an instant **and are recorded in the wrong order for it**, so the
+#: ``id`` tie-break is *exercised* rather than assumed. Both halves are needed: rows
+#: at distinct instants leave an implementation with no tie-break at all passing,
+#: and a tie whose recording order already agrees with the tie-break leaves one
+#: passing that merely relies on its sort being stable.
+_SEEDED_DECISIONS: Final[tuple[tuple[str, int], ...]] = (
+    ("d-1", 2),
+    ("d-2", 0),
+    ("d-4", 1),
+    ("d-3", 1),
+)
+
+#: ADR-0186 §2's total order over :data:`_SEEDED_DECISIONS`: ``decided_at``
+#: descending, ties broken by ``id`` ascending. Written out rather than computed, so
+#: the expectation is something a reader checks against the ADR rather than against
+#: a second copy of the implementation.
+_DECISION_ORDER: Final[tuple[str, ...]] = ("d-1", "d-3", "d-4", "d-2")
+
+#: A contract limit that holds **one** ``PermissionDecision`` and not three.
+#:
+#: A constant of its own rather than :data:`_TINY_LIMIT`, because one decision
+#: encodes to something over 600 bytes — it embeds a whole ``ToolDefinition``
+#: (ADR-0021 §1) — so at 512 the *page* would be refused too and the case would
+#: assert nothing about the export in particular. Both halves matter here for
+#: :data:`_TINY_LIMIT`'s reason: large enough that ``recent_decisions(limit=1)``
+#: answers, small enough that the whole trail does not fit.
+_DECISION_LIMIT = 1024
+
+#: How many rulings the overfull subject's trail holds. Three, which is over
+#: :data:`_DECISION_LIMIT` while each row is comfortably under it — so what is
+#: refused is the **artifact**, which is the only thing that distinguishes a
+#: complete export from a truncated one (ADR-0186 §3).
+_OVERFULL_DECISIONS = 3
+
+#: The declaration every seeded ruling is recorded over. The least severe
+#: representable one, for ``permission_builders.tool``'s reason: nothing in these
+#: cases is about severity, and a decision embeds its definition by value.
+_RULED_TOOL: Final = ToolDefinition(
+    id="smtp",
+    capability="send_email",
+    description="Send an email.",
+    risk_level=RiskLevel.LOW,
+    reversibility=Reversibility.REVERSIBLE,
+    side_effecting=True,
+    reads=(),
+    writes=(),
+    discloses=(),
+    cost=ToolCost(basis=CostBasis.FREE),
+    idempotency=Idempotency.NONE,
+)
+
+
+def _ruling(decision_id: str, *, at: datetime) -> PermissionDecision:
+    """One recorded ``ALLOW``, built through the sanctioned construction path.
+
+    ``from_request`` rather than the constructor even in a builder: it is what the
+    contract asks callers to use, and it is what makes a decision's subject agree
+    with the request it was ruled over by construction rather than by care
+    (ADR-0021 §1).
+    """
+    return PermissionDecision.from_request(
+        ActionRequest(tool=_RULED_TOOL, parameters={"to": "a@example.com"}, step_id="step-1"),
+        PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="within policy"),
+        id=decision_id,
+        decided_at=at,
+    )
+
+
+class SeededAuditTrail(FakeAuditTrail):
+    """A conforming ``AuditTrail`` that logs its reads and can unorder its export.
+
+    Two capabilities the canonical fake does not owe a consumer, each of which
+    ADR-0186 §11 makes a suite case need.
+
+    **``reads`` is the negative control** for §3's "locally and before any I/O": an
+    assertion that a malformed ``limit`` was refused is worth little unless a case
+    can see the read it did not cause. It is the role
+    ``FakeConnectionProvisioner.entries`` already plays for the connection clauses.
+
+    **``ordered_export=False`` exercises the contract's own freedom**, and it is not
+    a contrived fixture — it is the only one that tests the clause.
+    ``AuditTrail.export``'s Protocol docstring states **no** order, which is exactly
+    why ADR-0186 §2 puts the obligation on the engine operation; but both shipped
+    trails promise ``recent``'s order in their own docstrings ("Return every
+    recorded decision, in the same order as ``recent``", in ``permissions/audit.py``
+    and in ``testing/permissions.py`` alike). So a case driven through either of
+    them passes for an engine that writes ``tuple(await trail.export())`` and never
+    sorts — and the day a conforming trail returns insertion order, the exports are
+    wrong and §2's prefix guarantee is gone with them.
+
+    Reversed rather than shuffled, so the wrong answer is **deterministic**: a
+    relaying implementation fails every run rather than most of them.
+    """
+
+    def __init__(self, *, ordered_export: bool = True) -> None:
+        """Create an empty trail.
+
+        Args:
+            ordered_export: Whether ``export`` hands back the order ``recent`` uses.
+                ``False`` returns the reverse, which the store's contract permits.
+        """
+        super().__init__()
+        #: Which reads reached the store, in the order they arrived.
+        self.reads: list[str] = []
+        self._ordered_export = ordered_export
+
+    async def recent(self, *, limit: int = 50) -> list[PermissionDecision]:
+        """Log the read, then answer as the canonical fake does."""
+        self.reads.append("recent")
+        return await super().recent(limit=limit)
+
+    async def export(self) -> list[PermissionDecision]:
+        """Log the read, and hand back the order this trail was built to hand back."""
+        self.reads.append("export")
+        rows = await super().export()
+        return rows if self._ordered_export else list(reversed(rows))
+
+
+async def seeded_trail(
+    *, ordered_export: bool = True, rows: tuple[tuple[str, int], ...] = _SEEDED_DECISIONS
+) -> SeededAuditTrail:
+    """A trail holding ``rows``, recorded in that order.
+
+    Shared so the three bindings cannot arrange three different premises for one
+    clause, exactly as :func:`backwards_clock` is.
+
+    Args:
+        ordered_export: Handed to :class:`SeededAuditTrail`.
+        rows: What to record, as ``(id, seconds after`` :data:`_RULED_AT` ``)``.
+
+    Returns:
+        The seeded trail, with :attr:`SeededAuditTrail.reads` cleared — so a case
+        reading it reads what the *subject* caused rather than what the setup did.
+    """
+    trail = SeededAuditTrail(ordered_export=ordered_export)
+    for decision_id, offset in rows:
+        await trail.record(_ruling(decision_id, at=_RULED_AT + timedelta(seconds=offset)))
+    trail.reads.clear()
+    return trail
+
+
+@dataclass(frozen=True, slots=True)
+class DecisionSubject:
+    """An engine on the audit surface, and the trail standing behind it.
+
+    Attributes:
+        engine: The subject under test.
+        trail: The seeded trail the engine ultimately reads, reached from the test
+            process rather than through the surface. Read by a case as a **negative
+            control** — a ``limit`` ADR-0186 §3 refuses locally must leave ``reads``
+            empty — and as the evidence that the unordered binding is not vacuous,
+            since a case can ask the trail directly what order it handed over.
+    """
+
+    engine: AssistantEngine
+    trail: SeededAuditTrail
 
 
 class AssistantEngineContract(ABC):
@@ -406,6 +582,62 @@ class AssistantEngineContract(ABC):
         and still pass a suite. What the confirmation carries is otherwise
         unconstrained: which account, which arguments and how many occurrences are
         each implementation's own.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def decisions(self) -> DecisionSubject:
+        """A subject over a trail holding :data:`_SEEDED_DECISIONS`, and that trail.
+
+        **A fixture because nothing on this surface writes one.** ADR-0186 §4
+        refuses a promoted ``record`` — a client that could append to the audit
+        record of what was permitted could fabricate history — so the only way a
+        case reaches a trail with rows in it is to be handed an implementation
+        already holding them. :func:`seeded_trail` builds it, so the three bindings
+        cannot arrange three different premises for one clause.
+
+        **The trail comes with it** for :attr:`connections`' reason: ADR-0186 §3's
+        local refusals are negative clauses — refused "before any I/O" — and an
+        assertion that no read happened is worth nothing unless a case can see the
+        log it did not reach. It is read from the test process rather than through
+        the surface, which is the point of a negative control.
+
+        Its export is **ordered**, so the two cases about the order over an ordinary
+        conforming trail stay separate from the one that exercises the store
+        contract's own freedom (:attr:`unordered_decisions`).
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def unordered_decisions(self) -> DecisionSubject:
+        """:attr:`decisions`' subject over a trail whose ``export`` is **unordered**.
+
+        The same rows, handed back by ``AuditTrail.export`` in an order ADR-0021 §4
+        does not state and ADR-0186 §2 does not inherit —
+        ``seeded_trail(ordered_export=False)``.
+
+        **The case that separates an engine which sorts from one which relays**, and
+        the only one of the three order cases that does (ADR-0186 §11). Both shipped
+        trails promise ``recent``'s order for ``export`` in their own docstrings, so
+        every case driven through either of them passes for an implementation that
+        writes ``tuple(await trail.export())`` and never sorts. A fixture rather
+        than a step in a test, because no caller can ask a trail to answer
+        differently.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def overfull_decisions(self) -> AssistantEngine:
+        """A subject at :data:`_DECISION_LIMIT` holding :data:`_OVERFULL_DECISIONS` rulings.
+
+        Enough that the whole trail does not fit the contract limit, and few enough
+        that a single row does — so what is refused is the **artifact**, which is
+        the only thing that distinguishes a complete export from a truncated one
+        (ADR-0186 §3).
+
+        A fixture for :attr:`decisions`' reason, and one of its own: at a limit this
+        small the *setup* would be refused if it ran through the surface, exactly as
+        :attr:`overfull_granting_engine`'s six grants would be.
         """
 
     # --- the shape of the surface -----------------------------------------
@@ -2087,6 +2319,206 @@ class AssistantEngineContract(ABC):
         rendered = repr((record, live, acts))
         assert plaintext not in rendered
         assert "SecretStr" not in rendered
+
+    # --- the audit trail's two reads (ADR-0186 §11) ------------------------
+    #
+    # **What a store cannot exhibit**, which is what puts these here rather than in
+    # ``AuditTrailContract``. That is a different suite over a different contract
+    # and it is indeed untouched; this one is subclassed by the concrete engine, by
+    # the canonical fake **and** by ``HubClient``, so it is the only place a clause
+    # binds all three. It is also the precedent ADR-0102 §12 item 2 set, for exactly
+    # this reason — and it settles where the client's two methods land: the suite
+    # runs against the client, so they cannot be deferred to a later lane without
+    # this block going red the day it arrives.
+
+    async def test_the_listing_and_the_export_share_one_total_order(
+        self, decisions: DecisionSubject
+    ) -> None:
+        """ADR-0186 §2: ``decided_at`` descending, ties broken by ``id`` ascending, on both.
+
+        **Determinism is not tidiness here, it is what the exit test is measured
+        on.** Milestone 24 asks whether a history is *reconstructible* from the
+        trail alone; two implementations handing back the same rows in different
+        orders satisfy every other clause of ADR-0186 while giving two users two
+        different accounts of the same events.
+        """
+        listed = await decisions.engine.recent_decisions()
+        exported = await decisions.engine.export_decisions()
+
+        assert tuple(row.id for row in listed) == _DECISION_ORDER
+        assert tuple(row.id for row in exported) == _DECISION_ORDER
+
+    async def test_the_tie_break_orders_two_rulings_made_at_one_instant(
+        self, decisions: DecisionSubject, unordered_decisions: DecisionSubject
+    ) -> None:
+        """ADR-0186 §2, over rows that really share a ``decided_at``.
+
+        "Newest first" is ambiguous between insertion order and decision time, and
+        an ``id`` tie-break is what makes the order **total** rather than merely
+        mostly determined (ADR-0021 §4). The pair is asserted on its own because a
+        whole-sequence comparison passes for an implementation whose tie-break
+        happens to agree with the order it was handed — here ``d-4`` is recorded
+        **before** ``d-3`` and must still come second of the two, so a stable sort
+        on ``decided_at`` alone answers them the wrong way round.
+
+        **Over both bindings, because only one of them can fail.** A conforming
+        trail's ``recent`` is *already* in this order (ADR-0021 §4 fixes it), so an
+        engine with no tie-break of its own still answers correctly there; the
+        unordered export is where the engine's own sort is the only thing deciding.
+        The ordinary binding is kept because the other failure is real too — an
+        implementation whose sort **destroys** an order the store had.
+        """
+        for subject in (decisions, unordered_decisions):
+            exported = await subject.engine.export_decisions()
+            tied = [row for row in exported if row.decided_at == _RULED_AT + timedelta(seconds=1)]
+
+            assert [row.id for row in tied] == ["d-3", "d-4"]
+
+    async def test_the_order_is_not_the_order_the_rulings_were_recorded_in(
+        self, decisions: DecisionSubject, unordered_decisions: DecisionSubject
+    ) -> None:
+        """ADR-0186 §2: it orders the instant a ruling was **made**.
+
+        ADR-0021 §4 chose ``decided_at`` over insertion order "precisely because
+        they disagree", and this trail is seeded so that they do: ``d-2`` is
+        recorded second and ruled first, ``d-1`` recorded first and ruled last. An
+        implementation relaying the store's append order answers ``d-1, d-2, d-4,
+        d-3`` and fails here — which is also why no surface may present a position
+        as a claim about when anything was *done*.
+
+        Over both bindings for the tie-break case's reason.
+        """
+        recorded = tuple(decision_id for decision_id, _offset in _SEEDED_DECISIONS)
+        for subject in (decisions, unordered_decisions):
+            exported = await subject.engine.export_decisions()
+
+            assert tuple(row.id for row in exported) != recorded
+            assert tuple(row.id for row in exported) == _DECISION_ORDER
+
+    async def test_the_export_is_sorted_by_the_engine_and_not_relayed(
+        self, unordered_decisions: DecisionSubject
+    ) -> None:
+        """ADR-0186 §2's second clause: the **engine** owes the sort.
+
+        ``AuditTrail.export`` states no order and ADR-0186 adds none to it, so "an
+        implementation relaying a store read that arrives unordered owes the sort,
+        over a list it has already materialised". This is the one case that
+        distinguishes an engine which sorts from one which relays: both shipped
+        trails promise ``recent``'s order for ``export`` in their own docstrings, so
+        every other case here passes for ``tuple(await trail.export())``.
+
+        The trail is asked directly first, which is what stops the fixture being
+        vacuous — a binding whose double had quietly started answering in order
+        would make this assertion true for the wrong reason.
+        """
+        assert [row.id for row in await unordered_decisions.trail.export()] != list(
+            _DECISION_ORDER
+        ), "the fixture must exercise the store contract's freedom, or it tests nothing"
+
+        exported = await unordered_decisions.engine.export_decisions()
+
+        assert tuple(row.id for row in exported) == _DECISION_ORDER
+
+    async def test_the_listing_is_a_prefix_of_the_export(self, decisions: DecisionSubject) -> None:
+        """ADR-0186 §2: ``recent_decisions(limit=n)`` is the first ``n`` of the export.
+
+        **The case nothing else would catch.** An implementation that sorted its
+        listing and relayed an unordered export passes every construction case,
+        every rendering case and every transport case, and hands two conforming
+        implementations' users two different accounts of one history. It is also
+        what makes the two answers *comparable*, which is why ADR-0186 §1 has the
+        engine relay rather than compose: an engine that filtered or enriched either
+        one would break this with no surface able to tell.
+        """
+        exported = await decisions.engine.export_decisions()
+
+        for size in range(1, len(_DECISION_ORDER) + 1):
+            page = await decisions.engine.recent_decisions(limit=size)
+            assert page == exported[:size], f"the page of {size} is not the export's prefix"
+
+    @pytest.mark.parametrize("bad", [0, -1, 2**63])
+    async def test_recent_decisions_refuses_a_non_positive_limit_locally(
+        self, decisions: DecisionSubject, bad: int
+    ) -> None:
+        """ADR-0186 §3's local-refusal clause, and ``0`` is the case it exists for.
+
+        Zero follows ADR-0151 §2a rather than ADR-0102 §10's compromise:
+        ``AuditTrail.recent`` refuses a non-positive ``limit`` and ADR-0085 §9 would
+        admit it, and ADR-0186 §3 resolves that by refusing it **locally in every
+        implementation** rather than reproducing the live wart ``recent_grants``'
+        own contract records.
+
+        The untouched log is the half that says *locally*: a client that shipped
+        ``limit=0`` to the hub would be exactly the silently more permissive
+        implementation §9 forbids, and would leave a ``recent`` behind here.
+        """
+        with pytest.raises(ValueError, match=r"\w"):
+            await decisions.engine.recent_decisions(limit=bad)
+
+        assert decisions.trail.reads == []
+
+    @pytest.mark.parametrize("bad", [1.5, True, "1", None])
+    async def test_a_decision_limit_that_is_not_an_integer_is_refused_locally(
+        self, decisions: DecisionSubject, bad: object
+    ) -> None:
+        """The type before the range, for :meth:`beliefs`' reason (ADR-0186 §3).
+
+        ``0 < 1.5 < 2**63`` is true, so a range check alone admits a float; and
+        ``True`` is an ``int`` that would silently mean a page of one, which is a
+        wrong answer rather than a refusal.
+        """
+        with pytest.raises(TypeError, match=r"\w"):
+            # The wrong *type* is the point of the case, so the annotation is
+            # deliberately violated here.
+            await decisions.engine.recent_decisions(limit=bad)  # type: ignore[arg-type]
+
+        assert decisions.trail.reads == []
+
+    def test_the_decision_page_size_default_is_the_declared_one(
+        self, decisions: DecisionSubject
+    ) -> None:
+        """ADR-0085 §3a reaches ``recent_decisions`` like every other paging method."""
+        parameter = inspect.signature(decisions.engine.recent_decisions).parameters["limit"]
+        assert parameter.default == DEFAULT_PAGE_SIZE
+
+    def test_the_export_takes_no_argument(self, decisions: DecisionSubject) -> None:
+        """ADR-0186 §1 and §3: no ``limit``, no ``offset``, no filter, no cursor.
+
+        Two operations rather than one, "because a single method cannot be both
+        bounded and complete": a ``limit`` that could be omitted to mean everything
+        would make the unbounded read of a Tier 1 store the *default* shape of the
+        listing and hide a data-rights act inside a page query. Asserted over the
+        signature because the failure is an argument being **added**, which no call
+        that omits it would ever notice.
+        """
+        assert inspect.signature(decisions.engine.export_decisions).parameters == {}
+
+    async def test_both_decision_reads_return_a_tuple(self, decisions: DecisionSubject) -> None:
+        """ADR-0085 §3b: a caller that mutated what it was handed changed nothing."""
+        assert isinstance(await decisions.engine.recent_decisions(), tuple)
+        assert isinstance(await decisions.engine.export_decisions(), tuple)
+
+    async def test_an_export_too_large_for_the_frame_is_refused_whole(
+        self, overfull_decisions: AssistantEngine
+    ) -> None:
+        """ADR-0186 §3: the oversized **result**, refused as an oversized argument is.
+
+        The suite's own fifth clause applied to the largest result this surface can
+        produce. An export concentrates a whole history in one frame where a
+        confirmation concentrates one call, and §3 states the answer rather than
+        waving at it: "No implementation truncates the artifact, samples it, or
+        returns a partial export without saying so." A refusal is typed, so a client
+        renders it as one and cannot mistake it for an empty trail — which is the
+        whole reason an artifact was declined.
+
+        The neighbouring read still answers at the same limit, which is the control:
+        a case that only asserted the raise would pass against an implementation
+        whose limit was simply too small for anything at all.
+        """
+        with pytest.raises(OversizedValueError):
+            await overfull_decisions.export_decisions()
+
+        assert await overfull_decisions.recent_decisions(limit=1) != ()
 
 
 def backwards_clock() -> Callable[[], datetime]:

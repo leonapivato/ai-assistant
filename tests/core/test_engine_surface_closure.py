@@ -155,8 +155,18 @@ PROMOTED: Final[frozenset[str]] = frozenset(
 #: ``bool``/``int``/``str``, and the two stdlib modules cover ``datetime`` and
 #: ``timedelta``, which :data:`~ai_assistant.core.types.UtcInstant` and the
 #: ``timeout`` argument reach.
+#:
+#: ``decimal`` joins them for ADR-0186 §1's two audit reads. Their
+#: ``PermissionDecision`` embeds a whole ``ToolDefinition`` by value (ADR-0021 §1),
+#: whose ``ToolCost.amount`` is a ``Decimal`` — ADR-0016 §4's choice, so a money
+#: figure is not a binary float. It is a **pre-existing** ``core`` leaf reached for
+#: the first time rather than anything this change declared: nothing moved into
+#: ``core`` and the closure stays closed under golden rule 2, which is the only
+#: property this list exists to protect. Adding it here rather than to
+#: :data:`PROMOTED` is what the split means — that set is the *promoted models*, and
+#: a stdlib scalar is not one.
 _ALLOWED_MODULES: Final[frozenset[str]] = frozenset(
-    {"builtins", "datetime", "enum", "types", "typing"}
+    {"builtins", "datetime", "decimal", "enum", "types", "typing"}
 )
 
 
@@ -330,13 +340,27 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     replaces" it (ADR-0042 §5). ``resume`` deliberately gains none, so the count
     moves by one and not two.
 
+    ADR-0186 §1's two take it to thirty-four: ``recent_decisions``, the bounded
+    listing of what the permission layer ruled, and ``export_decisions``, the
+    whole-trail read that discharges ADR-0004 §6's portability obligation for that
+    store. **Two rather than one**, because a single method whose ``limit`` could be
+    omitted to mean everything would make the unbounded read of a Tier 1 store the
+    default shape of the listing (ADR-0021 §4 declines that in terms) and would
+    destroy §2's prefix property, since one method cannot be both a page and the
+    whole. Three of ``AuditTrail``'s five reads are deliberately **not** here and
+    §4 gives each its own reason — ``resolution_of`` answers a question the user
+    cannot ask, ``record`` would let a client append to the audit record of what was
+    permitted, ``clear`` would put an irreversible destruction of the whole record
+    one request away on a remote transport — while ``get`` is deferred with its
+    trigger rather than refused.
+
     **This assertion is now also #1125's answer.** ``core/types.py`` and
     ``wire/surface.py`` each carried a prose count of this surface that had gone
     stale by seven; both now name this check instead of restating a number, which
     is `CONTRIBUTING.md` -> "No state claims in living documents" applied to a
     comment in ``src/``.
     """
-    assert len(_method_names()) == 32
+    assert len(_method_names()) == 34
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -421,6 +445,18 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     thirty-two methods, and ADR-0181's Consequences state the bump in the deciding
     ADR rather than leaving a lane to discover it here.
 
+    **ADR-0186 §1 is back under the first limb**, and it is the first change since
+    ADR-0173 §11 to move the method set at all. ``recent_decisions`` and
+    ``export_decisions`` take it to thirty-four, so the version goes to 12 —
+    ``wire/surface.METHODS`` is derived from the Protocol, so a version 12 client
+    sending ``export_decisions`` to a version 11 hub is refused there. **No
+    wire-carried ``core`` type changes for it**, which is what makes this the first
+    limb alone: ``PermissionDecision`` is untouched and reaches the surface by being
+    named in a return annotation rather than by being minted, so a version 11 peer's
+    trouble is the unknown *method*, never an unknown member. ADR-0186 §5 states the
+    bump in the deciding ADR and §11 puts it on the implementing lane, rather than
+    leaving either to be discovered here.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -429,7 +465,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (32, 11), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (34, 12), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

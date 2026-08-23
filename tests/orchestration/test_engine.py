@@ -136,7 +136,7 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    from ai_assistant.core.protocols import EgressBinder
+    from ai_assistant.core.protocols import AuditTrail, EgressBinder
     from ai_assistant.core.types import (
         Conversation,
         CurrentContext,
@@ -400,9 +400,16 @@ class Harness:
         trace_sink: FakeTraceSink | None = None,
         trace_retention: timedelta | None = TRACE_RETENTION,
         binder: EgressBinder | None = None,
+        trail: AuditTrail | None = None,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT)
-        self.trail = FakeAuditTrail()
+        # ``trail`` is a knob because the audit surface's own reader cases need a
+        # store that holds **bytes**: ADR-0184 §10 puts the origin-unrecorded row's
+        # read half in each implementation's own tests, "because it is a property of
+        # a store that persists a serialised payload and rebuilds it, and a fake
+        # holding objects has no bytes for a shared case to seed". The default stays
+        # the canonical fake, which is what every other case here wants.
+        self.trail: AuditTrail = FakeAuditTrail() if trail is None else trail
         # One object as both registry and invoker, as ADR-0029 §8 requires.
         self.invoker = FakeToolInvoker([(definition, _succeeds) for definition in tools])
         self.policy = policy if policy is not None else FakeActionPolicy()

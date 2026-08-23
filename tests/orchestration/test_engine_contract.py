@@ -26,7 +26,9 @@ from typing import TYPE_CHECKING
 
 import pytest
 from assistant_engine_contract import (
+    _DECISION_LIMIT,
     _NOT_CANONICAL,
+    _OVERFULL_DECISIONS,
     _OVERFULL_GRANTS,
     _SOURCE,
     _TINY_LIMIT,
@@ -35,7 +37,9 @@ from assistant_engine_contract import (
     _UNWRITABLE_SOURCE,
     AssistantEngineContract,
     ConnectionSubject,
+    DecisionSubject,
     backwards_clock,
+    seeded_trail,
 )
 
 from ai_assistant.core.types import (
@@ -92,7 +96,7 @@ from ai_assistant.testing.grants import source_grant
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
-    from ai_assistant.core.protocols import AssistantEngine
+    from ai_assistant.core.protocols import AssistantEngine, AuditTrail
     from ai_assistant.core.types import (
         CurrentContext,
         FrozenJson,
@@ -234,6 +238,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     grants: Sequence[SourceGrant] = (),
     grant_clock: Callable[[], datetime] | None = None,
     provisioner: FakeConnectionProvisioner | None = None,
+    trail: AuditTrail | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -244,6 +249,12 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     ``sources`` is what the composition root would have read off the readers it
     built (ADR-0102 §7). Empty by default, which is the ordinary deployment: a
     reader ships disabled, so nothing is grantable until one is configured.
+
+    ``trail`` is the audit trail the two ADR-0186 §1 reads relay. A knob because
+    nothing on this surface writes a decision — ADR-0186 §4 refuses a promoted
+    ``record`` — so a subject with rulings in it has to be *built* with them, and
+    because the case separating an engine that sorts from one that relays needs a
+    conforming trail whose ``export`` exercises the freedom ADR-0021 §4 leaves it.
     """
     # **The conversation store's clock advances**, because ADR-0074 §2's sort key
     # is activity and a frozen clock cannot express "more recently active" at all —
@@ -253,7 +264,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     ticks = count(1)
     conversation_clock = lambda: AT + timedelta(seconds=next(ticks))  # noqa: E731
     plans = FakePlanStore(now=lambda: AT)
-    trail = FakeAuditTrail()
+    audit: AuditTrail = FakeAuditTrail() if trail is None else trail
     confirmable = _confirmable()
     invoker = FakeToolInvoker([(confirmable, _succeeds)] if parks else [])
     # The egress binding seam, wired only where the suite needs a park: ADR-0178
@@ -300,7 +311,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         plans=plans,
         registry=invoker,
         policy=FakeActionPolicy(),
-        trail=trail,
+        trail=audit,
         executor=StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=lambda: AT),
         now=lambda: AT,
         id_factory=_counter("d"),
@@ -311,7 +322,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         loop=loop,
         runner=runner,
         plans=plans,
-        trail=trail,
+        trail=audit,
         memory=memory,
         deferrals=deferrals,
         # The narrow deletion seam (ADR-0119 §7), with the horizon the composition
@@ -507,6 +518,53 @@ class TestEngineContract(AssistantEngineContract):
             outcome = await built.converse("send the note", timeout=timedelta(seconds=30))
             assert outcome.step is not None
             assert outcome.step.disposition is Disposition.AWAITING_CONFIRMATION
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def decisions(self) -> AsyncIterator[DecisionSubject]:
+        """One wired engine over a seeded trail, and that trail.
+
+        The trail is built here and handed to the engine, which is the only way the
+        suite's negative controls are expressible: the engine holds its
+        ``AuditTrail`` privately, so a case that must prove no read happened reads
+        the subject the composition root wired rather than reaching through the
+        engine for it — ``connections``' pattern, one store over.
+        """
+        trail = await seeded_trail()
+        built = _wire(trail=trail)
+        await built.start()
+        try:
+            yield DecisionSubject(engine=built, trail=trail)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def unordered_decisions(self) -> AsyncIterator[DecisionSubject]:
+        """The same wiring over a trail whose ``export`` is deliberately unordered.
+
+        ``AuditTrail.export`` states no order, so this trail is **conforming** and
+        the engine still owes ADR-0186 §2's sort over what it hands back. It is the
+        binding that would catch a ``tuple(await trail.export())`` here.
+        """
+        trail = await seeded_trail(ordered_export=False)
+        built = _wire(trail=trail)
+        await built.start()
+        try:
+            yield DecisionSubject(engine=built, trail=trail)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def overfull_decisions(self) -> AsyncIterator[AssistantEngine]:
+        """One wired engine at the decision limit, over a trail too large for it."""
+        trail = await seeded_trail(
+            rows=tuple((f"d-{index}", index) for index in range(_OVERFULL_DECISIONS))
+        )
+        built = _wire(trail=trail, max_payload_bytes=_DECISION_LIMIT)
+        await built.start()
+        try:
             yield built
         finally:
             await built.aclose()

@@ -235,7 +235,17 @@ def _fixture_value(func: Callable[..., object]) -> object | None:
     evaluated here and so cannot be proven; that is a deliberate false
     negative. It surfaces as a loud, fixable gate failure rather than a silent
     hole, and no canonical fake needs one today.
+
+    **An asynchronous fixture is the same false negative and is skipped by
+    name.** Running one without a loop yields a coroutine or an async generator
+    rather than a subject, so it could never have been evidence of a binding --
+    it was already ignored, silently, by failing every ``isinstance`` below.
+    Saying so here rather than leaving it implicit is what stops the *coroutine*
+    being left un-awaited, which the interpreter reports as a ``RuntimeWarning``
+    on collection of any suite whose bindings need an ``await`` to set up.
     """
+    if inspect.iscoroutinefunction(func) or inspect.isasyncgenfunction(func):
+        return None
     if list(inspect.signature(func).parameters) != ["self"]:
         return None
     try:
