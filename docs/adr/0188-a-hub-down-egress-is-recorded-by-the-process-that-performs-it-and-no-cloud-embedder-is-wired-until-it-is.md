@@ -324,13 +324,24 @@ misstate both.
 > survives — a completed run, a failure raised out of the embedder or the store, and
 > a `KeyboardInterrupt`.
 
-> **Normative.** A run is left unsealed by exactly three things: a path that ends the
-> process without running its exit (`SIGKILL`, a power cut, a kernel panic); a seal
-> that cannot be appended or flushed; and a seal whose durability the filesystem will
-> not confirm. The second and third are reported to the operator on standard error,
-> naming the file, and neither turns a migration that completed into one that failed —
-> the record's durability and the run's outcome are separate facts, which is the shape
-> ADR-0104 §3 already chose for a swap that happened but could not be flushed.
+> **Normative.** "Sealed" and "unsealed" are properties of **the file**, never of
+> what the writing process knew or intended. A run is sealed when the file holds a
+> complete, well-formed `sealed` line carrying that run's identifier, and unsealed
+> otherwise. A line that is incomplete or malformed is not an event: a reader ignores
+> it, and the run it would have belonged to is unsealed.
+
+> **Normative.** A run is therefore left unsealed by a path that ends the process
+> without running its exit — `SIGKILL`, a power cut, a kernel panic — and by a seal
+> that could not be appended at all or reached the file only in part. A failure to
+> append is reported to the operator on standard error, naming the file.
+
+> **Normative.** A seal that was appended but whose durability the filesystem will
+> not confirm **is a seal**. The run reads as sealed, and the operator is warned on
+> standard error that the line may not survive a power loss until the filesystem next
+> syncs — ADR-0104 §3's shape for a swap that happened but could not be flushed, and
+> the same words it already prints. Neither that warning nor a failed append turns a
+> migration that completed into one that failed: the record's durability and the run's
+> outcome are separate facts.
 
 > **Normative.** A run whose `opened` event stands with no `sealed` event
 > reconstructs as *authorised, sending entered, extent undeterminable* — never as no
@@ -357,6 +368,18 @@ process would only discard the run's remaining work. What is available in the se
 case is to say so, which the clause requires, and to leave the record in the one state
 that is true — unsealed, meaning the extent is not known from the file. Treating a
 seal failure as fatal would trade a recoverable ignorance for an unrecoverable one.
+
+**Sealedness is read off the file and not off the process's belief, which is what
+keeps the two answers from disagreeing.** A `sealed` line that was appended but not
+confirmed durable is *in the file*, so a reader joins it to its `opened` line and gets
+the outcome and the counts; calling that run unsealed because the writer's `fsync`
+returned an error would give one answer to the process and a different one to anyone
+who opened the file a second later. The warning is about the future — the line may not
+survive a power loss — and if it does not survive, the file after the restart holds no
+seal and the run is unsealed then, by the same rule, with no reinterpretation
+required. Requiring completeness and well-formedness is what makes that rule total: a
+torn final line from an interrupted write is not half a seal, it is not an event at
+all.
 
 **A seal that cannot be written is why the unsealed reading may not be refined.**
 It would be tempting to let a surface say "this run completed, we merely failed to
