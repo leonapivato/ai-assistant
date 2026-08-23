@@ -14,10 +14,12 @@ empty.
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -473,6 +475,118 @@ def test_a_login_banner_does_not_hide_the_staged_digest(
     monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, banner, ""))
 
     _MODULE._assert_staged(_plan(_repo(tmp_path)), "cafe1234")
+
+
+# --------------------------------------------------------------------------- #
+# Cleanup: the failure paths are the ones that get retried                     #
+# --------------------------------------------------------------------------- #
+
+
+def _staged_plan(repo: Path) -> Any:
+    """A plan holding a local file to stand in for the built wheel."""
+    wheel = repo / "ai_assistant-0.1.0-py3-none-any.whl"
+    wheel.write_bytes(b"not really a wheel, but it has a digest")
+    parsed = _MODULE._parser().parse_args(["hub.example", "--repo", str(repo)])
+    plan = _MODULE.Plan(parsed, wheel.name)
+    plan.use(wheel)
+    return plan
+
+
+def _remote_recorder(monkeypatch: pytest.MonkeyPatch, plan: Any, *, fail_at: str) -> list[str]:
+    """Record every remote command, failing at the first one matching ``fail_at``.
+
+    The digest probe answers correctly, so a run only stops where it is told to.
+    """
+    issued: list[str] = []
+    digest = hashlib.sha256(plan.local.read_bytes()).hexdigest()
+    answers = f"STAGED_SHA256={digest}\nINVOCATION_ID=inv\nUNIT_STATE=active\nhub_ready jobs=[]\n"
+
+    def _record(argv: list[str], **_kwargs: object) -> str:
+        issued.append(" ".join(argv))
+        if fail_at in issued[-1]:
+            raise _MODULE.DeployError(f"{fail_at} failed")
+        return answers
+
+    def _probe(argv: list[str]) -> tuple[int, str, str]:
+        issued.append(" ".join(argv))
+        if fail_at in issued[-1]:
+            return 1, "", f"{fail_at} failed"
+        return 0, answers, ""
+
+    monkeypatch.setattr(_MODULE, "_run_local", _record)
+    monkeypatch.setattr(_MODULE, "_probe", _probe)
+    return issued
+
+
+@pytest.mark.parametrize("step", ["scp", "chmod 0644", "uv pip install"])
+def test_a_failed_deploy_still_removes_its_staging_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, step: str
+) -> None:
+    # A dropped transfer leaves tens of megabytes on the box, and a directory per
+    # attempt under a name nothing will look for again. Unstaging only on the
+    # happy path means the runs that get retried are the ones that accumulate.
+    plan = _staged_plan(_repo(tmp_path))
+    issued = _remote_recorder(monkeypatch, plan, fail_at=step)
+
+    with pytest.raises(_MODULE.DeployError, match=step.split(maxsplit=1)[0]):
+        _MODULE._install_and_verify(plan, "abc1234", "", "0.0.1")
+
+    assert any("rmdir" in command for command in issued), issued
+    # And nothing is recorded for a deploy that did not happen.
+    assert not any("commit=abc1234" in command for command in issued), issued
+
+
+def test_a_failed_digest_check_removes_the_staging_directory_and_installs_nothing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _staged_plan(_repo(tmp_path))
+    issued = _remote_recorder(monkeypatch, plan, fail_at="sha256sum")
+
+    with pytest.raises(_MODULE.DeployError, match="could not digest the staged wheel"):
+        _MODULE._install_and_verify(plan, "abc1234", "", "0.0.1")
+
+    assert any("rmdir" in command for command in issued), issued
+    assert not any("uv pip install" in command for command in issued), issued
+
+
+def test_a_successful_deploy_still_unstages_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan = _staged_plan(_repo(tmp_path))
+    issued = _remote_recorder(monkeypatch, plan, fail_at="nothing fails")
+
+    _MODULE._install_and_verify(plan, "abc1234", "", "0.0.1")
+
+    assert sum("rmdir" in command for command in issued) == 1, issued
+    # The install happened, and the marker followed it rather than the cleanup.
+    install = next(i for i, c in enumerate(issued) if "uv pip install" in c)
+    marker = next(i for i, c in enumerate(issued) if "commit=abc1234" in c)
+    assert install < marker
+
+
+def test_a_cleanup_that_cannot_run_warns_rather_than_becoming_the_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # On the way out of an error it would replace the reason with a symptom, and
+    # after a successful install it would fail a deploy that worked.
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (255, "", "ssh: connect: refused"))
+
+    _MODULE._discard_stage(_plan(_repo(tmp_path)))
+
+    assert "could not remove the staging directory" in capsys.readouterr().err
+
+
+def test_a_cleanup_with_no_ssh_at_all_warns_rather_than_raising(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def _no_ssh(_argv: list[str]) -> tuple[int, str, str]:
+        raise _MODULE.DeployError("ssh not found on PATH")
+
+    monkeypatch.setattr(_MODULE, "_probe", _no_ssh)
+
+    _MODULE._discard_stage(_plan(_repo(tmp_path)))
+
+    assert "ssh not found on PATH" in capsys.readouterr().err
 
 
 def test_without_a_supplied_wheel_the_build_goes_to_a_fresh_directory(tmp_path: Path) -> None:
