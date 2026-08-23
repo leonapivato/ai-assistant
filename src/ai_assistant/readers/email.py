@@ -1020,6 +1020,15 @@ def _carries_a_bare_carriage_return(block: bytes) -> bool:
     in exactly that byte, and a check that refused it would skip every message in
     every such store.
 
+    **And the allowance costs no interpretation, which is the part worth checking
+    rather than assuming.** A ``\r`` ending a physical line is a terminator to
+    *both* layers, whether it came from a ``CRLF`` pair or from a store truncated
+    before its blank line: ``feedparser`` ends the line at it, this cut ends the
+    line at it, and :func:`_unfolded` strips it from the value in the one reading
+    where it survives that far. So no header is re-cut and no value differs — which
+    is exactly what a bare ``\r`` *inside* a line does do, and is why the two are
+    not the same byte in the same place.
+
     Every other ``\r`` sits *inside* a header value, which ADR-0140 §4 names a
     fetcher fault and §13's recipe forbids by construction:
     ``" ".join(value.splitlines())`` puts each value on one physical line and
