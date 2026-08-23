@@ -60,9 +60,29 @@ dependencies = [
     # expansion are the parts of the format it is not sensible to hand-roll; what
     # ADR-0093 §7b makes normative — the window, the overrides, the seek and the
     # budgets — is ours and is implemented *over* it rather than delegated to it,
-    # which is also what keeps a swap confined to one package. `python-dateutil`
-    # and `tzdata` arrive transitively with it.
+    # which is also what keeps a swap confined to one package. `tzdata` arrives
+    # transitively with it; `python-dateutil` is declared on its own line below,
+    # because this package is not the only reason it is installed.
     "icalendar>=6.0",
+    # `RRULE` expansion for the calendar reader, and for nothing else:
+    # `readers/_occurrences.py` hands `dateutil.rrule.rrulestr` an RFC 5545
+    # recurrence rule the source chose, and the standard library has no
+    # equivalent — `calendar`, `datetime` and `zoneinfo` between them expand no
+    # recurrence at all. It arrives transitively with `icalendar` too, which is
+    # exactly why it is declared here (#1448): a direct import that is present
+    # only because another package happens to want it would vanish from the
+    # environment the day `icalendar` stopped wanting it, and the module that
+    # broke would be ours.
+    #
+    # **Ranged, in `icalendar`'s form and for `icalendar`'s reason.** `>=2.9` is
+    # the floor `uv.lock` already fixes (`2.9.0.post0`); no upper bound, which is
+    # this file's convention for every dependency outside ADR-0024 §3's
+    # exact-pinned set. Whether "parses adversary-chosen bytes" should be a
+    # *second* axis for exact-pinning beside §3's reproducibility one is a
+    # dependency-policy question about §3's scope, which is closed to four
+    # audited embedding packages and is not this lane's to widen; it is filed as
+    # #1462 and nothing here pre-empts it.
+    "python-dateutil>=2.9",
     # ChaCha20-Poly1305 for the backup artifact's age v1 container (ADR-0123 §4),
     # and for nothing else. §4 fixes the *format* — "age version 1 … with an
     # scrypt passphrase recipient" — and leaves the library to the lane against
