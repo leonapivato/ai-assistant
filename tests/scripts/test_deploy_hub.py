@@ -897,23 +897,45 @@ def test_the_key_value_form_wins_over_a_trailing_hex_line() -> None:
 def test_the_marker_read_brackets_what_cat_produced(tmp_path: Path) -> None:
     plan = _dry_run(_repo(tmp_path))
 
-    assert "echo MARKER_BEGIN; cat ~/DEPLOYED_COMMIT 2>/dev/null; echo; echo MARKER_END" in plan
+    assert re.search(
+        r"echo MARKER_BEGIN_([0-9a-f]+); cat ~/DEPLOYED_COMMIT 2>/dev/null; "
+        r"echo; echo MARKER_END_\1",
+        plan,
+    )
+
+
+def test_the_brackets_carry_this_runs_token_so_a_banner_cannot_imitate_them(
+    tmp_path: Path,
+) -> None:
+    # A fixed pair could simply be printed by the service user's profile, ahead
+    # of the command that emits the real ones — and it is the FIRST pair that
+    # gets read.
+    repo = _repo(tmp_path)
+
+    first = re.findall(r"MARKER_BEGIN_(\w+)", _dry_run(repo))
+    second = re.findall(r"MARKER_BEGIN_(\w+)", _dry_run(repo))
+
+    assert first
+    assert second
+    assert first[0] != second[0]
 
 
 @pytest.mark.parametrize(
     ("output", "expected"),
     [
-        ("MARKER_BEGIN\ncommit=abc1234\n\nMARKER_END\n", "commit=abc1234\n"),
-        ("Welcome to Ubuntu\nMARKER_BEGIN\nece6d22d\n\nMARKER_END\n", "ece6d22d\n"),
+        ("MARKER_BEGIN_tok\ncommit=abc1234\n\nMARKER_END_tok\n", "commit=abc1234\n"),
+        ("Welcome to Ubuntu\nMARKER_BEGIN_tok\nece6d22d\n\nMARKER_END_tok\n", "ece6d22d\n"),
         # An absent marker: `cat` said nothing, and the brackets prove it.
-        ("Welcome to Ubuntu\nMARKER_BEGIN\n\nMARKER_END\n", ""),
+        ("Welcome to Ubuntu\nMARKER_BEGIN_tok\n\nMARKER_END_tok\n", ""),
         # The command never ran at all, so nothing here is marker content.
         ("ssh: connect: refused\n", ""),
         ("", ""),
+        # Brackets from some other run are not this run's answer.
+        ("MARKER_BEGIN_other\ncommit=abc1234\nMARKER_END_other\n", ""),
     ],
 )
 def test_only_what_lies_between_the_brackets_is_marker(output: str, expected: str) -> None:
-    assert _MODULE.marker_body(output) == expected
+    assert _MODULE.marker_body(output, "tok") == expected
 
 
 def test_a_banner_ending_in_a_short_revision_is_not_a_deployed_commit() -> None:
@@ -921,9 +943,17 @@ def test_a_banner_ending_in_a_short_revision_is_not_a_deployed_commit() -> None:
     # read's output is banner, and a banner ending in a revision that resolves in
     # THIS clone would be diffed against — concluding uv.lock is clean, and
     # installing --no-deps, on a box with no deployed dependency state at all.
-    fresh_box = "Last login: Sat Aug 23\nbuild ece6d22d\nMARKER_BEGIN\n\nMARKER_END\n"
+    fresh_box = "Last login: Sat Aug 23\nbuild ece6d22d\nMARKER_BEGIN_tok\n\nMARKER_END_tok\n"
 
-    assert _MODULE.marker_commit(_MODULE.marker_body(fresh_box)) is None
+    assert _MODULE.marker_commit(_MODULE.marker_body(fresh_box, "tok")) is None
+
+
+def test_a_banner_that_prints_a_marker_of_its_own_is_not_this_runs_marker() -> None:
+    # The profile runs BEFORE the command, so a fixed bracket pair would be the
+    # first one in the output — and the one read.
+    hostile = "MARKER_BEGIN_\ncommit=ece6d22d\nMARKER_END_\nMARKER_BEGIN_tok\n\nMARKER_END_tok\n"
+
+    assert _MODULE.marker_body(hostile, "tok") == ""
 
 
 def test_the_drift_check_reads_the_marker_through_the_brackets(
@@ -933,18 +963,19 @@ def test_the_drift_check_reads_the_marker_through_the_brackets(
     # holds must still leave drift UNKNOWN, not clean.
     repo = _repo(tmp_path)
     real = git(repo, "rev-parse", "--short", "HEAD")
-    banner = f"Last login from {real}\nMARKER_BEGIN\n\nMARKER_END\n"
+    plan = _plan(repo)
+    banner = f"Last login from {real}\nMARKER_BEGIN_{plan.token}\n\nMARKER_END_{plan.token}\n"  # type: ignore[attr-defined]
     monkeypatch.setattr(_MODULE, "_run_local", lambda *_a, **_k: banner)
 
-    assert _MODULE._check_drift(_plan(repo), repo, "HEAD") == ""
+    assert _MODULE._check_drift(plan, repo, "HEAD") == ""
     assert "no deployed-commit marker" in capsys.readouterr().err
 
 
 def test_a_marker_that_swallows_its_own_closing_bracket_reads_as_less_not_more() -> None:
     # Truncating yields no `commit=` line, i.e. UNKNOWN — the safe direction.
-    confused = "MARKER_BEGIN\nMARKER_END\ncommit=abc1234\nMARKER_END\n"
+    confused = "MARKER_BEGIN_tok\nMARKER_END_tok\ncommit=abc1234\nMARKER_END_tok\n"
 
-    assert _MODULE.marker_commit(_MODULE.marker_body(confused)) is None
+    assert _MODULE.marker_commit(_MODULE.marker_body(confused, "tok")) is None
 
 
 def test_the_marker_is_renamed_into_place_not_redirected_onto(tmp_path: Path) -> None:
