@@ -233,7 +233,11 @@ half-implements.
   ``From `` at one, and with every emitted line either the separator or
   ``Name: value``, no other line can begin the framing sequence. A fetcher that
   keeps bodies loses that argument and owes the ``>``-prefix escape instead — one
-  more reason not to keep them.
+  more reason not to keep them. **A fetcher that emits one anyway does not decide
+  the outcome by where it fell**: a bare carriage return is the one such character
+  ``BytesParser`` treats as a line boundary while ``_header_block`` does not, and
+  a header block carrying one is skipped on the reader's own check
+  (``_carries_a_bare_carriage_return``, #1463).
 - **Replaced whole by ``rename(2)`` on the same filesystem** (§2).
   ``mkstemp(dir=...)`` stages the replacement in the target's **own directory**,
   which is what makes it the same filesystem, and ``os.replace`` is ``rename(2)``.
@@ -909,11 +913,22 @@ def _header_block(region: bytes) -> bytes:
     A line of whitespace is not blank and stays in the block as a continuation,
     which is what makes a folded ``Subject`` survive framing intact.
 
-    Split on ``\\n`` alone rather than with ``bytes.splitlines``, which also
-    breaks on a bare ``\\r``: ``mailbox.mbox`` frames with ``readline``, so a
-    lone ``\\r`` inside a header value is *not* a line boundary there and must
-    not become one here. Matching the stdlib exactly is the point of the whole
-    function (ADR-0140 §2).
+    Split on ``\n`` alone rather than with ``bytes.splitlines``, which also
+    breaks on a bare ``\r``: ``mailbox.mbox`` frames with ``readline``, so a
+    lone ``\r`` is not a line boundary *there*, and where the block ends is what
+    decides which bytes belong to this message rather than to the next. Matching
+    the stdlib's framing is what this function is for (ADR-0140 §2), and it is
+    all it does.
+
+    **It does not buy a lone ``\r`` surviving into a header value**, which is
+    what an earlier version of this docstring claimed by calling the stdlib match
+    "the point of the whole function" (#1463). :func:`_interpret` hands the block
+    to ``BytesParser``, whose ``feedparser`` cuts lines on ``NLCRE`` — ``\r\n``,
+    ``\r`` **or** ``\n`` — so the block is re-cut one layer down on a wider
+    boundary set than the one used here. That disagreement is not left to produce
+    whatever it produces: :func:`_carries_a_bare_carriage_return` is the check
+    :func:`_interpret` refuses such a block on, so the skip is this reader's and
+    is stated where it can be read.
     """
     _, _, rest = region.partition(b"\n")
     lines: list[bytes] = []
@@ -925,7 +940,7 @@ def _header_block(region: bytes) -> bytes:
 
 
 def _interpret(block: bytes) -> _Envelope | None:
-    """One header block as an envelope, or ``None`` where it cannot be one.
+    r"""One header block as an envelope, or ``None`` where it cannot be one.
 
     Every ``None`` here is ADR-0140 §5's **skip**, and a skip raises nothing.
     Nothing is substituted for a fact the source did not make: no fallback dates
@@ -952,7 +967,21 @@ def _interpret(block: bytes) -> _Envelope | None:
     anyway — so a normalising pass would put this reader's own interpretation on a
     value whose whole standing is that the store said it. What is done to the raw
     value is unfolding and nothing else.
+
+    **A block carrying a bare ``\r`` is skipped here, before anything is parsed**
+    (#1463). :func:`_header_block` cuts on ``\n`` alone and ``BytesParser`` cuts
+    on ``\r`` as well, so such a block is two different sequences of header lines
+    depending on which layer is asked — and a reader that cannot say what its own
+    header block is cannot interpret the message, which is §5's skip in as many
+    words. Taking it on a check of this reader's own is the whole of the change,
+    and it is not only a restatement: where the ``\r`` fell above a header §5
+    reads the outcome was already a skip, but it emerged from the disagreement
+    rather than from a rule anybody had written down — and where it fell *below*
+    them there was no skip at all. See :func:`_carries_a_bare_carriage_return`.
     """
+    if _carries_a_bare_carriage_return(block):
+        return None
+
     message = BytesParser(policy=compat32).parsebytes(block, headersonly=True)
 
     delivered = _sole_header(message, DELIVERED_AT_HEADER)
@@ -978,6 +1007,36 @@ def _interpret(block: bytes) -> _Envelope | None:
         reported_at=reported_at,
         text_bytes=len(sender.encode()) + len(subject.encode()),
     )
+
+
+def _carries_a_bare_carriage_return(block: bytes) -> bool:
+    r"""Whether any physical line of ``block`` holds a ``\r`` that does not end it.
+
+    :func:`_header_block` cut the block on ``\n``, so within one of these lines
+    the only ``\r`` that is a line terminator is the one that cut left behind at
+    the end: the ``CR`` of a ``CRLF`` store's framing, which the block's last line
+    keeps with no ``\n`` after it to be paired with. **Allowing that one is not a
+    loophole, it is the whole CRLF case** — an honest ``CRLF`` store's block ends
+    in exactly that byte, and a check that refused it would skip every message in
+    every such store.
+
+    Every other ``\r`` sits *inside* a header value, which ADR-0140 §4 names a
+    fetcher fault and §13's recipe forbids by construction:
+    ``" ".join(value.splitlines())`` puts each value on one physical line and
+    ``str.splitlines`` counts ``\r`` as a boundary, so an honest fetcher cannot
+    emit one at all.
+
+    **The check reads the whole block rather than the fields the reader wants, and
+    that is the part that changes an outcome.** Where the bare ``\r`` sits decides
+    nothing about whether the store is trustworthy, but before this it decided
+    whether the message was proposed: one in a ``Subject`` above ``Date`` ended the
+    parser's header section early and cost the delivery header, while one in a
+    trailing ``X-`` header left both instants parsed and proposed the message from
+    a block whose remainder the parser had already reinterpreted as a body. Two
+    different answers to one fetcher fault, chosen by ordering. §5's skip is the
+    fail-closed answer and it is owed to the block rather than to the field.
+    """
+    return any(b"\r" in line.removesuffix(b"\r") for line in block.split(b"\n"))
 
 
 def _sole_header(message: Message, name: str) -> str | None:
