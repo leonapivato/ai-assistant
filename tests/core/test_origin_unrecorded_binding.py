@@ -4,7 +4,9 @@
 answerable from `core` alone: construction, the two rosters, the derived set's
 correspondence with :class:`EgressBinding`'s, the **structural** claim that the
 derivation is declared once, the mutual exclusion of §3 at model level, ``authorises``
-answering ``False`` with no conjunct added, and ``PROTOCOL_VERSION`` unmoved.
+answering ``False`` with no conjunct added, and §8's wire claim — which is a claim
+about the *shape a peer emits* and never about a version number, since ADR-0186 §13
+reads §8 as binding ADR-0184's own change rather than every later one.
 
 **The discrimination is also pinned over a real store**, in
 ``tests/permissions/test_audit.py``, because §10 asks for it there: the rows this
@@ -21,14 +23,18 @@ is exactly what a *store decoding a row* does and what no caller may do.
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from typing import get_type_hints
 
 import pytest
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from ai_assistant.core import types as core_types
+from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.types import (
     ActionRequest,
     BoundAccount,
     CanonicalDestination,
+    ConfirmationEgress,
     CostBasis,
     DataTier,
     DestinationProtocol,
@@ -47,7 +53,6 @@ from ai_assistant.core.types import (
     ToolDefinition,
     _EgressBindingBase,
 )
-from ai_assistant.wire import PROTOCOL_VERSION
 
 _AT = datetime(2026, 8, 23, 9, 0, tzinfo=UTC)
 _ACCOUNT = BoundAccount(identity="work@example.com", reference="conn-0001")
@@ -453,17 +458,76 @@ def test_from_request_transcribes_the_narrow_field_and_makes_no_sibling() -> Non
     assert recorded.egress_binding.planned_with_external_content is True
 
 
-# --- §8: no wire move ---------------------------------------------------------
+# --- §8: no wire move, and the shape that now crosses -------------------------
 
 
-def test_the_protocol_version_does_not_move_for_this_decision() -> None:
-    """§8's first clause, pinned rather than asserted in prose.
+def test_this_decision_still_changes_no_shape_a_peer_emits() -> None:
+    """§8's first clause, pinned as the property it is rather than as a number.
 
-    ADR-0124 §9's second limb fires on "a change to a wire-carried `core` type that
-    makes a value one peer emits invalid for the other". ``PermissionDecision`` is
-    named nowhere under ``wire/`` and is returned by no promoted method; what crosses
-    is ``Confirmation``, carrying ``ConfirmationEgress``, which is untouched and
-    which no lane composes from an origin-unrecorded row. So the emitted shape does
-    not change and the version stays where ADR-0181's implementation left it.
+    **The absolute pin this used to be is gone, and its removal is the clause read
+    correctly rather than a relaxation.** §8 says ``PROTOCOL_VERSION`` "does not move
+    **for this decision**"; ADR-0186 §13 reads that as being about ADR-0184's own
+    change and "not a bar on any later one", and ADR-0186 §5 then moves the version
+    to 12 under ADR-0124 §9's **first** limb — two methods added to the promoted set.
+    A test asserting ``== 11`` here would have made a later, unrelated and correctly
+    reasoned bump look like a violation of this ADR, which is the failure
+    ``CONTRIBUTING.md`` -> "No state claims in living documents" is about. The one
+    place that number is pinned is
+    ``tests/core/test_engine_surface_closure.py``, where a lane moving it is made to
+    name the limb it is under.
+
+    What survives here is the half §8 actually decides and this module can check:
+    ADR-0124 §9's **second** limb did not fire for ADR-0184, because the shape a peer
+    emits is unchanged. ``ConfirmationEgress`` — the type that crosses, on
+    ``TurnOutcome.step.confirmation`` and as the element type of
+    ``pending_confirmations`` — gains no member and no origin-unrecorded variant, so a
+    peer at either version emits and accepts exactly what it did.
     """
-    assert PROTOCOL_VERSION == 11
+    members = set(ConfirmationEgress.model_fields)
+
+    assert "planned_with_external_content" in members
+    # The widening §8's second clause forbids: a nullable member, or a second
+    # binding-shaped one, would be how an origin-unrecorded confirmation arrived.
+    assert ConfirmationEgress.model_fields["planned_with_external_content"].is_required()
+    assert not any(name.startswith("origin") for name in members)
+
+
+def test_the_sibling_survives_the_promoted_surfaces_own_return_adapter() -> None:
+    """ADR-0186 §5, verified in this tree rather than reasoned about.
+
+    ADR-0186 puts ``PermissionDecision`` on the promoted surface, so §8's premise that
+    it "is named nowhere under ``wire/`` and is returned by no promoted method" no
+    longer holds — and the question §8 answered for ``Confirmation`` has to be
+    answered again for this type. ADR-0186 §5 answers it: the decision round-trips
+    **equal** through a ``TypeAdapter`` of ``export_decisions``' own declared return
+    annotation, which is the shape ADR-0085 §10 builds a result payload from, and the
+    decoded value carries no ``planned_with_external_content`` key anywhere under
+    ``egress_binding``.
+
+    **So ADR-0184 §3's discrimination is total on the client side too**, with no
+    discriminator member and nothing transcribed into a wire-side schema: the union
+    re-discriminates *structurally* at the far end, because ``EgressBinding`` sets
+    ``extra="forbid"`` and therefore refuses the member's absence exactly as
+    ``OriginUnrecordedBinding`` refuses its presence. A lane that "helpfully" gave the
+    sibling a default would break this and nothing else would notice.
+    """
+    recorded = PermissionDecision(
+        id="d-1",
+        ruling=PermissionRuling(outcome=PermissionOutcome.ALLOW, reason="a rule allowed it"),
+        tool=_TOOL,
+        parameters_digest="0" * 64,
+        decided_at=_AT,
+        step_id="step-1",
+        execution_id="exec-1",
+        egress_binding=OriginUnrecordedBinding(**_SHARED),  # type: ignore[arg-type]  # heterogeneous test kwargs
+    )
+    adapter: TypeAdapter[tuple[PermissionDecision, ...]] = TypeAdapter(
+        get_type_hints(AssistantEngine.export_decisions, globalns=vars(core_types))["return"]
+    )
+
+    projected = adapter.dump_python((recorded,), mode="json")
+    decoded = adapter.validate_python(projected)
+
+    assert decoded == (recorded,)
+    assert isinstance(decoded[0].egress_binding, OriginUnrecordedBinding)
+    assert "planned_with_external_content" not in projected[0]["egress_binding"]

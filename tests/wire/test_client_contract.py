@@ -51,7 +51,9 @@ import pytest
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "orchestration"))
 
 from assistant_engine_contract import (
+    _DECISION_LIMIT,
     _NOT_CANONICAL,
+    _OVERFULL_DECISIONS,
     _OVERFULL_GRANTS,
     _SOURCE,
     _TINY_LIMIT,
@@ -60,7 +62,9 @@ from assistant_engine_contract import (
     _UNWRITABLE_SOURCE,
     AssistantEngineContract,
     ConnectionSubject,
+    DecisionSubject,
     backwards_clock,
+    seeded_trail,
 )
 
 from ai_assistant.core.types import (
@@ -330,4 +334,60 @@ class TestHubEngineClientContract(AssistantEngineContract):
         backing = FakeAssistantEngine()
         backing.park("h-1", egress=_binding())
         async with serving(backing, tmp_path / "hub.sock") as client:
+            yield client
+
+    @pytest.fixture
+    async def decisions(self, tmp_path: Path) -> AsyncIterator[DecisionSubject]:
+        """A client of a hub whose engine reads a seeded trail, and that trail.
+
+        Arranged entirely hub-side, as it arises: the trail is the hub's and a
+        client has no way to put a ruling in one — ADR-0186 §4 refuses a promoted
+        ``record`` precisely so that it cannot. The trail is read from the test
+        process rather than over the wire, which is what makes it a negative
+        control: §3's refusals must happen **before a frame is sent**, and only a
+        log read from where the read would have landed says so.
+        """
+        trail = await seeded_trail()
+        backing = FakeAssistantEngine()
+        backing.trail = trail
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield DecisionSubject(engine=client, trail=trail)
+
+    @pytest.fixture
+    async def unordered_decisions(self, tmp_path: Path) -> AsyncIterator[DecisionSubject]:
+        """A client of a hub whose trail hands back an unordered ``export``.
+
+        **What this binding proves is that the sort happens hub-side**, where
+        ADR-0186 §2 puts it, rather than in whichever implementation the suite
+        happened to reach first. A client that sorted a relayed export of its own
+        would pass the in-process bindings' version of this case and would still be
+        wrong: the artifact a second consumer of the same hub reads is the one the
+        engine produced.
+        """
+        trail = await seeded_trail(ordered_export=False)
+        backing = FakeAssistantEngine()
+        backing.trail = trail
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield DecisionSubject(engine=client, trail=trail)
+
+    @pytest.fixture
+    async def overfull_decisions(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub whose published limit the whole trail exceeds.
+
+        **The binding that proves the other two are enforcing anything.** This one
+        really serialises, so the frame is the bound rather than an in-process
+        measurement of a payload nobody will encode — and the hub publishes the same
+        number the backing engine measures against, so the refusal the client
+        renders is the refusal the engine made.
+        """
+        trail = await seeded_trail(
+            rows=tuple((f"d-{index}", index) for index in range(_OVERFULL_DECISIONS))
+        )
+        backing = FakeAssistantEngine(max_payload_bytes=_DECISION_LIMIT)
+        backing.trail = trail
+        async with serving(
+            backing,
+            tmp_path / "hub.sock",
+            max_frame_bytes=_DECISION_LIMIT + ENVELOPE_RESERVE_BYTES,
+        ) as client:
             yield client

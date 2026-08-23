@@ -29,6 +29,8 @@ from ai_assistant.wire import HubEngineClient
 from ai_assistant.wire import envelope as env
 from ai_assistant.wire.errors import HubUnavailableError
 from ai_assistant.wire.framing import read_frame, write_frame
+from ai_assistant.wire.server import CONNECTION_METHODS
+from ai_assistant.wire.surface import METHODS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -1114,3 +1116,60 @@ async def test_the_loopback_listener_still_serves_them(tmp_path: Path) -> None:
     finally:
         await listener.stop_accepting()
         await listener.aclose()
+
+
+# --- ADR-0186 §5: the audit reads are carried on this listener too ------------
+
+
+@pytest.mark.parametrize(
+    ("method", "payload"),
+    [("recent_decisions", {"limit": 10}), ("export_decisions", {})],
+)
+async def test_both_audit_reads_are_served_on_the_remote_listener(
+    tmp_path: Path, method: str, payload: dict[str, Any]
+) -> None:
+    """ADR-0186 §5's first clause, held where the refusal above is held.
+
+    **The negative and the positive are one mechanism**, which is why this sits
+    beside ``test_no_connection_operation_is_served_on_the_remote_listener`` rather
+    than in the wire package. ``serve_connection`` bars a method from this listener
+    exactly when it is in ``CONNECTION_METHODS``, so "carried here" and "not one of
+    the five" are the same fact reached from opposite sides — and a lane that added
+    either of these to that set would break this pair and nothing else.
+
+    **Withholding them was the alternative and §5 rejects it in terms.** The five
+    are withheld because they carry a **Tier 0 credential**, which ADR-0124 §3's
+    accepted-disclosure list does not cover. A ``PermissionDecision`` carries none:
+    its ``tool`` is Tier 2 configuration declared by code, ``parameters_digest``
+    exists to "bind the payload without storing it", and the binding's account
+    identity, occurrences and payload description **already cross this hop today**
+    inside a ``Confirmation``'s ``ConfirmationEgress``. What is new is quantity, and
+    §5 answers that with ADR-0124's posture and §3's ceiling rather than by leaving
+    a user on their own second machine unable to read their own audit trail.
+    """
+    engine = FakeAssistantEngine()
+    async with _remote(tmp_path, engine=engine) as hub:
+        minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        async with _dialling(hub) as peer:
+            assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
+            await peer.send(
+                env.Envelope(kind=env.FrameKind.REQUEST, id="r-0", payload=payload, method=method)
+            )
+            answer = await peer.receive()
+
+    assert answer.kind is env.FrameKind.RESULT, f"{method} was not served: {answer.payload}"
+    assert [name for name, _arguments in engine.calls] == [method]
+
+
+def test_neither_audit_read_is_a_connection_method() -> None:
+    """ADR-0186 §5: "Neither joins ``CONNECTION_METHODS``".
+
+    Asserted against the **frozen set itself** rather than by absence from a
+    hand-written list, so a rename or an addition on either side is caught here. The
+    membership is checked in both directions — the two reads are on the promoted
+    surface, and neither is among the five ADR-0151 §13 withholds.
+    """
+    reads = {"recent_decisions", "export_decisions"}
+
+    assert reads <= METHODS
+    assert not (reads & CONNECTION_METHODS)
