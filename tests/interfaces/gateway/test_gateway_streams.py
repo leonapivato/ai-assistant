@@ -643,14 +643,16 @@ async def test_a_delivery_stream_discloses_the_cadence_it_will_be_written_at() -
         assert engine.calls[-1] == ("next_notification", {"acknowledging": None, "budget": budget})
 
 
-async def test_the_opening_value_costs_a_delivery_none_of_the_one_pending_slot() -> None:
-    """§4 holds "at most one value pending per stream and queues nothing behind one",
-    and a write that has not completed when the next value is due abandons the stream.
+async def test_a_delivery_returning_as_a_stream_opens_reaches_it_behind_the_opening() -> None:
+    """The opening value takes no pending slot, so a delivery returning in the same
+    instant the stream opened is taken rather than refused.
 
-    So an opening value *offered* to the stream would race the first delivery against
-    it, and a gateway could abandon a stream on its own first write. Written straight
-    to the connection ahead of the iteration, it takes no slot — which is what this
-    checks, by letting a delivery return in the same instant the stream opened.
+    That is the half ``test_delivery.py`` cannot show on a real socket, and the half
+    that matters for a **second** tab opened while notifications are flowing: seeding
+    the slot at open — §4's literal reading — ends such a stream before it has read
+    anything, because the slot is full before the connection handler has been
+    scheduled. The ordering on the wire is still opening-then-delivery, and each is
+    drained before the next is written (``test_delivery.py`` pins that).
     """
     engine = _Delivering([_delivery(1)])
     async with _harness(engine) as one:
