@@ -512,6 +512,49 @@ async def test_a_device_command_on_a_hub_with_no_remote_listener_says_that_inste
     assert "start it with 'ai-assistant-hub'" not in printed
 
 
+async def test_a_control_socket_bound_but_not_yet_serving_is_restartable_not_fatal(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The third state, which the loopback probe alone would misreport.
+
+    ADR-0083 §14.2's "every door binds before any door accepts" makes the hub bind
+    ``admin.sock`` *before* it opens ADR-0084 §1's door and begin serving it just
+    *after* — and a Unix socket that is bound and not yet serving refuses rather
+    than accepting. So there is a startup instant in which the loopback door
+    answers and this one refuses, and a report deciding on the loopback probe alone
+    would tell an operator whose ``ASSISTANT_HUB_REMOTE_ADDRESS`` is perfectly good
+    to go and set it, fatally.
+
+    The errno separates them at no cost: a refusal means the socket file is there,
+    which this state has and a hub that never configured a remote listener does
+    not. The state is restartable, because the next attempt succeeds.
+    """
+
+    async def _accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        del reader
+        writer.close()
+
+    loopback = tmp_path / SOCKET_FILENAME
+    control = tmp_path / ADMIN_SOCKET_FILENAME
+    hub = await asyncio.start_unix_server(_accept, path=str(loopback))
+    # Bound, deliberately never served: this is what the hub's own `start` does
+    # before `begin_serving`, and it is the state under test.
+    door = await asyncio.start_unix_server(_accept, path=str(control), start_serving=False)
+    try:
+        code = await _perform(control, {"act": "list"}, loopback=loopback)
+    finally:
+        for server in (hub, door):
+            server.close()
+            await server.wait_closed()
+
+    assert code == EXIT_RESTART
+    printed = capsys.readouterr().err
+    assert "not answering yet" in printed
+    assert "try again" in printed
+    # Not the fatal message: the deployment is not misconfigured, it is starting.
+    assert "it bound no control socket" not in printed
+
+
 async def test_a_client_that_hangs_up_mid_act_does_not_fault_the_hub(tmp_path: Path) -> None:
     """The mirror of the two cases above, on the hub's side.
 

@@ -118,8 +118,12 @@ async def _perform(socket: Path, request: dict[str, Any], *, loopback: Path) -> 
     """
     try:
         reader, writer = await asyncio.open_unix_connection(str(socket))
-    except FileNotFoundError, ConnectionRefusedError:
-        return await _report_no_control_socket(socket, loopback)
+    except (FileNotFoundError, ConnectionRefusedError) as exc:
+        # The errno is the third state's evidence, so it is carried rather than
+        # collapsed — see :func:`_report_no_control_socket`.
+        return await _report_no_control_socket(
+            socket, loopback, bound=isinstance(exc, ConnectionRefusedError)
+        )
     except OSError as exc:
         print(f"device: cannot reach the hub at {socket}: {exc}", file=sys.stderr)
         return EXIT_RESTART
@@ -152,55 +156,87 @@ async def _perform(socket: Path, request: dict[str, Any], *, loopback: Path) -> 
     return _render(reply, request["act"])
 
 
-async def _report_no_control_socket(socket: Path, loopback: Path) -> int:
-    """Say which of the two states an absent control socket is, rather than assuming.
+async def _report_no_control_socket(socket: Path, loopback: Path, *, bound: bool) -> int:
+    """Say which of three states an unanswering control socket is, rather than assuming.
 
-    **The socket's absence is ambiguous and the two states want opposite acts**
+    **The socket not answering is ambiguous, and the states want opposite acts**
     (#1441). ADR-0124 §2 binds the control socket only where the remote listener is
     configured on — "a hub with no remote-listener configuration binds only
     ADR-0084 §1's loopback socket, and the loopback socket is bound whether or not
-    the remote listener is" — so a missing ``admin.sock`` means either that no hub
-    is running, or that one is running and was never configured to admit devices.
-    Reporting the first for both sent an owner to start a hub that was already
-    serving, where the advice either contended for the instance lock or did
-    nothing and produced the identical message on the next try.
+    the remote listener is" — so a silent ``admin.sock`` means one of: no hub is
+    running; a hub is running and was never configured to admit devices; or a hub
+    is running and has not opened this door yet. Reporting the first for all three
+    sent an owner to start a hub that was already serving, where the advice either
+    contended for the instance lock or did nothing and produced the identical
+    message on the next try.
 
-    **The same clause supplies the discriminator.** The loopback socket is bound
-    "whether or not the remote listener is", so a hub answering there and no
-    control socket beside it is exactly the second state, with nothing inferred.
-    The instance lock would have been the weaker probe: it is held by the offline
-    tools too (``ai-assistant-reembed`` and the rest), so contention names a
-    directory in use rather than a hub that is serving.
+    **Two facts separate them, and each is read rather than guessed at.**
+
+    The first is the loopback socket. §2 binds it "whether or not the remote
+    listener is", so a hub answering there decides *hub or no hub* outright. The
+    instance lock would have been the weaker probe: it is held by the offline tools
+    too (``ai-assistant-reembed`` and the rest), so contention names a directory in
+    use rather than a hub that is serving.
+
+    The second is ``bound`` — which failure the connect raised. A hub binds this
+    socket **before** it opens ADR-0084 §1's door and begins serving it just
+    *after* (``hub.py``, ADR-0083 §14.2's "every door binds before any door
+    accepts"), and a bound-but-not-yet-serving Unix socket refuses rather than
+    accepting. So there is a startup instant in which the loopback door answers and
+    this one refuses, and a report that read the loopback probe alone would tell an
+    operator with a perfectly good ``ASSISTANT_HUB_REMOTE_ADDRESS`` to go and set
+    it. ``ConnectionRefusedError`` means the socket file is there, which that state
+    has and a hub that never configured a remote listener does not; so the third
+    state is named by the errno, at no cost, rather than by retrying the connect for
+    a startup window — which would put latency on every genuine failure to cover an
+    instant that is already legible.
 
     Args:
-        socket: The control socket that was not there.
+        socket: The control socket that did not answer.
         loopback: ADR-0084 §1's socket, in the same data directory.
+        bound: Whether the connect was *refused* rather than finding nothing at the
+            path — that is, whether the socket file exists.
 
     Returns:
         The process exit code.
     """
-    if await _hub_is_serving(loopback):
-        # A deployment fault rather than a restartable one, by
-        # :func:`~ai_assistant.service.exits.classify`'s own question: running this
-        # again, unchanged, never succeeds. Nothing is contended and nothing is
-        # draining — the hub is up and is configured not to admit devices, and only
-        # a human changing that configuration moves it.
+    if not await _hub_is_serving(loopback):
         print(
-            f"device: a hub is running here — it answers at {loopback} — but it bound no "
-            f"control socket at {socket}, because it has no remote listener configured. "
-            f"Devices are enrolled in order to arrive on that listener, so a hub without "
-            f"one has no device acts to perform; set ASSISTANT_HUB_REMOTE_ADDRESS, "
-            f"restart the hub, and try again.",
+            f"device: no hub is listening at {socket}. Device acts are performed by the "
+            f"running hub, because revoking a device closes the connections it holds; "
+            f"start it with 'ai-assistant-hub' and try again.",
             file=sys.stderr,
         )
-        return EXIT_DEPLOYMENT
+        return EXIT_RESTART
+    if bound:
+        # Restartable, and by the same question as everything else here: the hub is
+        # opening its doors and the next attempt succeeds. The persistent case is
+        # named too, because the one other way to reach this state is a socket file
+        # a hub left behind by not shutting down cleanly, which no retry clears.
+        print(
+            f"device: a hub is running here — it answers at {loopback} — but {socket} "
+            f"exists and is not answering yet. The hub binds that socket before it opens "
+            f"its own door and serves it just afterwards, so this is the instant between "
+            f"the two; try again. If it persists, that file is left over from a hub that "
+            f"did not shut down cleanly and the hub running now has no remote listener: "
+            f"set ASSISTANT_HUB_REMOTE_ADDRESS and restart it.",
+            file=sys.stderr,
+        )
+        return EXIT_RESTART
+    # A deployment fault rather than a restartable one, by
+    # :func:`~ai_assistant.service.exits.classify`'s own question: running this
+    # again, unchanged, never succeeds. Nothing is contended and nothing is
+    # draining — the hub is up and is configured not to admit devices, and only a
+    # human changing that configuration moves it.
     print(
-        f"device: no hub is listening at {socket}. Device acts are performed by the "
-        f"running hub, because revoking a device closes the connections it holds; "
-        f"start it with 'ai-assistant-hub' and try again.",
+        f"device: a hub is running here — it answers at {loopback} — but it bound no "
+        f"control socket at {socket}, because it has no remote listener configured. "
+        f"Devices are enrolled in order to arrive on that listener, so a hub without "
+        f"one has no device acts to perform; set ASSISTANT_HUB_REMOTE_ADDRESS, "
+        f"restart the hub, and try again.",
         file=sys.stderr,
     )
-    return EXIT_RESTART
+    return EXIT_DEPLOYMENT
 
 
 async def _hub_is_serving(loopback: Path) -> bool:
