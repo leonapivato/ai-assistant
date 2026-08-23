@@ -548,8 +548,89 @@ def _grouped(components: list[Any], zone: tzinfo, ledger: _Ledger) -> dict[objec
 def _reduce(component: Any, zone: tzinfo, ledger: _Ledger) -> _Entry | None:
     """Reduce one ``VEVENT``, or return ``None`` if it cannot be interpreted.
 
-    The ``ledger`` records only what :func:`_dates` could not localise; the caller
-    records the ``None`` returns, so a component is never counted twice.
+    **An override is never merely dropped, and a master is** (§7b). Returning
+    ``None`` for a component takes it out of its group, and for an override that
+    leaves the *master's* occurrence at that ``RECURRENCE-ID`` to be proposed —
+    which is the one outcome §7b singles out as worse than omission: "an override
+    is a **correction**, so getting its scope wrong does not merely omit
+    information, it proposes stale information as current". A cancellation this
+    reader cannot read therefore un-cancels the occurrence it was cancelling.
+
+    So the classification is made **first**, and an override whose values this
+    reader cannot read is reduced to the suppression it owes rather than to
+    nothing: §7b's "an override whose form a sensor cannot interpret suppresses
+    the occurrences it could affect", with :func:`_suppressed` carrying the form
+    that says *which* — the named occurrence for a single-instance override, that
+    occurrence onward for a ``THISANDFUTURE`` one, and the whole series where the
+    ``RECURRENCE-ID`` itself is unreadable and the affected extent is therefore
+    unknown. A master has no correction to lose, so it is skipped as before.
+
+    Adversarial review found this on round 1, against a cancelled single-instance
+    override carrying an unresolvable ``TZID`` on its own ``DTSTART`` (#1491). The
+    same hole was already open — and is closed here — for every other way an
+    override fails to reduce: no usable ``DTSTART``, a negative duration, an
+    ``RRULE`` ``dateutil`` refuses.
+
+    The ``ledger`` records what :func:`_dates` could not localise and each override
+    reduced to a suppression; the caller records the ``None`` returns, so a
+    component is never counted twice.
+    """
+    form, recurrence_id = _override_form(component, zone)
+    if form is _Form.OPAQUE:
+        # Carried rather than dropped: an opaque override suppresses what it might
+        # have changed, so the group's resolution has to *see* it. `_resolve`
+        # latches the ledger for this one, because it is the *series* it suppresses.
+        return _suppressed(form, recurrence_id)
+
+    entry = _readable(component, zone, ledger, form=form, recurrence_id=recurrence_id)
+    if entry is not None or form is _Form.MASTER:
+        return entry
+    ledger.unaccounted()
+    return _suppressed(form, recurrence_id)
+
+
+def _suppressed(form: _Form, recurrence_id: datetime | None) -> _Entry:
+    """An override this reader cannot read, reduced to the occurrences it suppresses.
+
+    Every field but three is inert and is written to say so. ``form`` and
+    ``recurrence_id`` are what :func:`_governing` selects on, and ``cancelled``
+    is what makes the selected occurrences produce nothing — the same three fields
+    the opaque-override entry has always been read for. The anchor is the
+    ``RECURRENCE-ID`` itself so that :func:`_shift_slack` reads a zero shift from
+    it: a suppressed occurrence needs no band widened to reach it, because it is
+    suppressed at the instant the master generates it.
+    """
+    return _Entry(
+        local_start=recurrence_id if recurrence_id is not None else UTC_MIN,
+        duration=timedelta(0),
+        all_day=False,
+        cancelled=True,
+        reported_at=None,
+        summary="",
+        location="",
+        text_bytes=0,
+        form=form,
+        recurrence_id=recurrence_id,
+        rules=(),
+        rdates=(),
+        exdates=frozenset(),
+    )
+
+
+def _readable(
+    component: Any,
+    zone: tzinfo,
+    ledger: _Ledger,
+    *,
+    form: _Form,
+    recurrence_id: datetime | None,
+) -> _Entry | None:
+    """The component's own values, or ``None`` where this reader cannot read them.
+
+    Split out of :func:`_reduce` so that "cannot be read" and "is therefore
+    dropped" are two decisions rather than one: the second depends on whether the
+    component is a master or a correction, and only the caller knows what to do
+    with the answer.
     """
     start = _localised(component.get("DTSTART"), zone)
     if start is None:
@@ -559,26 +640,6 @@ def _reduce(component: Any, zone: tzinfo, ledger: _Ledger) -> _Entry | None:
     duration = _duration(component, local_start, all_day=all_day, zone=zone)
     if duration is None or duration < timedelta(0):
         return None
-
-    form, recurrence_id = _override_form(component, zone)
-    if form is _Form.OPAQUE:
-        # Carried rather than dropped: an opaque override suppresses what it might
-        # have changed, so the group's resolution has to *see* it.
-        return _Entry(
-            local_start=local_start,
-            duration=duration,
-            all_day=all_day,
-            cancelled=True,
-            reported_at=None,
-            summary="",
-            location="",
-            text_bytes=0,
-            form=form,
-            recurrence_id=recurrence_id,
-            rules=(),
-            rdates=(),
-            exdates=frozenset(),
-        )
 
     rules = _rules(component, local_start, zone)
     if rules is None:
