@@ -31,7 +31,9 @@ from ai_assistant.core.errors import (
     InvalidResolutionError,
 )
 from ai_assistant.core.types import (
+    BoundAccount,
     CostBasis,
+    OriginUnrecordedBinding,
     PermissionDecision,
     PermissionOutcome,
     RiskLevel,
@@ -993,6 +995,52 @@ class AuditTrailContract:
 
         with pytest.raises(AuditError):
             await trail.record(corrupted)
+
+        assert await trail.get("d-2") is None
+        assert [held.id for held in await trail.export()] == ["d-1"]
+
+    async def test_a_decision_whose_binding_records_no_origin_is_refused(
+        self, trail: AuditTrail
+    ) -> None:
+        """ADR-0184 §4's second clause, §10's eleventh: read such a row, never write one.
+
+        An :class:`~ai_assistant.core.types.OriginUnrecordedBinding` represents a row
+        written before ADR-0181 §3 added ``planned_with_external_content``. ADR-0184
+        §5 makes a trail *return* one from its history readers, and this is the other
+        half: an epoch that has ended may be read out of and never appended to.
+        Without the refusal, a caller bypassing ``PermissionDecision.from_request``
+        could mint a new row in that epoch — a fabrication of **history**, and harder
+        to notice later than a fabricated value, since every field of it would look
+        exactly like a genuine old record.
+
+        **This is the one refusal the model cannot make for itself**, which is why it
+        belongs to ``record`` rather than to ``PermissionDecision``: that shape is a
+        *valid* decision, because it has to be for a stored row to decode into one at
+        all. ``record`` is where the trail already enforces what a model cannot see —
+        the resolution invariant, the authorisation pointer, the ordering rule — for
+        ADR-0021 §4's reason: it is the boundary where the whole record is in hand.
+
+        The subject is built by substitution rather than by a builder, deliberately:
+        ADR-0184 §4 leaves **no** sanctioned path that produces one, so a suite that
+        could arrange it the ordinary way would be evidence the field was widened
+        somewhere it should not have been.
+
+        ``_refuses`` asserts the write left no trace, which matters more here than
+        usual: a store that appended and *then* raised would be holding precisely the
+        fabricated history this clause exists to make impossible.
+        """
+        await trail.record(decision("d-1"))
+        unrecorded = decision("d-2").model_copy(
+            update={
+                "egress_binding": OriginUnrecordedBinding(
+                    spans=(),
+                    account=BoundAccount(identity="work@example.com", reference="conn-0001"),
+                    transport_endpoint="test://endpoint/one",
+                )
+            }
+        )
+
+        await _refuses(trail, unrecorded, AuditError)
 
         assert await trail.get("d-2") is None
         assert [held.id for held in await trail.export()] == ["d-1"]

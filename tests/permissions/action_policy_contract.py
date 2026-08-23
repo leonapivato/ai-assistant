@@ -33,6 +33,7 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     EgressBinding,
+    OriginUnrecordedBinding,
     PermissionOutcome,
     Reversibility,
     RiskLevel,
@@ -42,7 +43,7 @@ from ai_assistant.core.types import (
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import ActionPolicy
-    from ai_assistant.core.types import ActionRequest, PermissionRuling
+    from ai_assistant.core.types import ActionRequest, PermissionDecision, PermissionRuling
 
 #: Severity ladders, least severe first.
 _RISK_LADDER = (RiskLevel.LOW, RiskLevel.MEDIUM, RiskLevel.HIGH, RiskLevel.CRITICAL)
@@ -81,25 +82,62 @@ def _name_tiers(tiers: tuple[DataTier, ...]) -> str:
     return "+".join(tiers) or "nothing"
 
 
+#: The three members both binding classes carry, so every subject below differs from
+#: its twin in exactly one thing. The least that makes a well-formed binding — no
+#: described span, one account, one endpoint — which keeps it constructible over
+#: ``action()``'s empty ``parameters``. An empty description is not a non-egress
+#: marker: the binding still names an account and still derives a non-empty canonical
+#: set (ADR-0148 §2's third clause), and ``egress_binding is None`` is the
+#: discriminator (ADR-0178 §4).
+_SHARED_MEMBERS: dict[str, object] = {
+    "spans": (),
+    "account": BoundAccount(identity="work@example.com", reference="conn-0001"),
+    "transport_endpoint": "test://endpoint/one",
+}
+
+
 def _planned_over_external(*, marked: bool) -> EgressBinding:
     """A whole binding differing from its twin in ``planned_with_external_content`` alone.
 
     Built here rather than in ``permission_builders`` because only this suite rules
     over it: ADR-0181 §5's obligation is the ``ActionPolicy`` contract's, and the
-    trail's suite has no clause that reads the field. Everything else is the least
-    that makes a well-formed binding — no described span, one account, one endpoint
-    — which keeps it constructible over ``action()``'s empty ``parameters`` and,
-    more to the point, leaves nothing but this field for a refusal to be about.
-    An empty description is not a non-egress marker: the binding still names an
-    account and still derives a non-empty canonical set (ADR-0148 §2's third
-    clause), and ``egress_binding is None`` is the discriminator (ADR-0178 §4).
+    trail's suite has no clause that reads the field. Everything else is
+    :data:`_SHARED_MEMBERS`, which leaves nothing but this field for a refusal to be
+    about.
     """
-    return EgressBinding(
-        spans=(),
-        account=BoundAccount(identity="work@example.com", reference="conn-0001"),
-        transport_endpoint="test://endpoint/one",
-        planned_with_external_content=marked,
-    )
+    return EgressBinding(**_SHARED_MEMBERS, planned_with_external_content=marked)  # type: ignore[arg-type]  # heterogeneous shared members
+
+
+def _origin_unrecorded() -> OriginUnrecordedBinding:
+    """The pre-ADR-0181 binding, over the exact members its twin above carries.
+
+    Built directly, because ADR-0184 §4 leaves no producer that can make one: a
+    request cannot carry the shape, ``from_request`` has no route to it, and
+    ``AuditTrail.record`` refuses it outright. What a suite may do is what a **store
+    decoding a row** does, which is this.
+
+    Sharing ``_SHARED_MEMBERS`` with :func:`_planned_over_external` is what makes the
+    boundary case sharp: the two subjects differ in their *class* and in nothing
+    else, so a policy refusing the legacy one on some unrelated ground would fail
+    the pair rather than pass the clause.
+    """
+    return OriginUnrecordedBinding(**_SHARED_MEMBERS)  # type: ignore[arg-type]  # heterogeneous shared members
+
+
+def _confirmed_with(binding: EgressBinding | OriginUnrecordedBinding) -> PermissionDecision:
+    """A recorded ``CONFIRM`` carrying ``binding``, whichever class it is.
+
+    ``model_copy`` rather than the builder for the legacy arm, and deliberately: the
+    builder goes through ``from_request``, which ADR-0184 §4 gives no route to the
+    shape. Substituting the field afterwards is precisely the caller ADR-0184 §7's
+    floor is written against — one that reached ``resolve`` holding a decision no
+    sanctioned path could have produced.
+    """
+    return decision(
+        "d-binding",
+        request=action(egress_binding=_planned_over_external(marked=False)),
+        ruled=ruling(PermissionOutcome.CONFIRM),
+    ).model_copy(update={"egress_binding": binding})
 
 
 @dataclass(frozen=True)
@@ -565,3 +603,68 @@ class ActionPolicyContract:
         baseline = await policy.resolve(clean, approved=True)
 
         assert answered.outcome is baseline.outcome
+
+    # --- ADR-0184 §7: the floor on a confirmation whose origin was never recorded
+
+    @pytest.mark.parametrize("approved", [True, False])
+    async def test_resolve_returns_no_allow_on_a_binding_recording_no_origin(
+        self, policy: ActionPolicy, *, approved: bool
+    ) -> None:
+        """ADR-0184 §7's first clause, §10's eleventh: no ``ALLOW``, whatever was answered.
+
+        Such a decision records a call made before ADR-0181 §3's
+        ``planned_with_external_content`` existed, so its origin cannot be
+        established at all — §3 forbids a default and §4's second clause forbids a
+        seam inventing one, which rules out ``False`` and ``True`` alike — and
+        ADR-0181 §5's second clause then leaves no route by which any authorisation
+        covers it, the user's own answer included.
+
+        **Parametrised over both answers because that is the whole of the clause.**
+        The declining arm is already required by ADR-0021 §3 and would pass on its
+        own; it is the approving arm that separates a policy honouring the floor from
+        one that treats consent as sufficient. Asserting both is what stops the case
+        being satisfied by the pre-existing obligation.
+
+        A **floor rather than a route that exists**: ``AuditTrail.pending_confirmation``
+        never offers such a park and ``StepRunner.resume`` refuses one before any
+        ruling is sought, so no conforming caller reaches this today. ADR-0021 §5's
+        "fail-closed twice over" is why it is stated anyway — a floor is worth having
+        because it holds when a route appears, and this one is checkable on any
+        implementation without knowing its rules.
+        """
+        unrecorded = _confirmed_with(_origin_unrecorded())
+
+        resolved = await policy.resolve(unrecorded, approved=approved)
+
+        assert resolved.outcome is not PermissionOutcome.ALLOW
+        assert resolved.authorised_by is None
+
+    async def test_resolve_judges_a_whole_binding_on_the_ordinary_path(
+        self, policy: ActionPolicy
+    ) -> None:
+        """ADR-0184 §10's eleventh clause: the boundary, so the floor is not a blanket.
+
+        The two subjects carry the **same** spans, account and transport endpoint and
+        differ only in their class, so a policy that refused every egress
+        confirmation would pass the case above and fail this one. Without it, "return
+        no ``ALLOW`` on a legacy binding" is satisfied by an implementation that
+        stopped approving anything with a binding at all — which would refuse exactly
+        the calls ADR-0181 §6 exists to put to the user.
+
+        A policy may still decline on rules of its own, so what is asserted is that
+        the answer to an ordinary approved confirmation is the answer it gives to any
+        approved confirmation, and that the legacy one does not get it.
+        """
+        whole = _confirmed_with(_planned_over_external(marked=False))
+        unrecorded = _confirmed_with(_origin_unrecorded())
+        unbound = decision("d-plain", ruled=ruling(PermissionOutcome.CONFIRM))
+
+        ordinary = await policy.resolve(whole, approved=True)
+        baseline = await policy.resolve(unbound, approved=True)
+        refused = await policy.resolve(unrecorded, approved=True)
+
+        assert ordinary.outcome is baseline.outcome, (
+            "a binding whose origin was recorded is judged as any confirmation is"
+        )
+        if baseline.outcome is PermissionOutcome.ALLOW:
+            assert refused.outcome is not PermissionOutcome.ALLOW
