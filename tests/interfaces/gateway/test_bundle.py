@@ -277,9 +277,9 @@ def test_the_conversation_is_destroyed_with_the_session_it_sits_beside() -> None
     """
     functions = _functions(_code("app.js"))
 
-    assert "setConversation(null);" in functions["forgetHeaderHalf"]
-    assert "setConversation(null);" in functions["startSession"]
-    assert "setConversation(null);" in functions["forgetConversation"]
+    assert "changeConversation(null);" in functions["forgetHeaderHalf"]
+    assert "changeConversation(null);" in functions["startSession"]
+    assert "changeConversation(null);" in functions["forgetConversation"]
     assert "window.sessionStorage.removeItem(CONVERSATION_KEY);" in functions["setConversation"]
 
 
@@ -491,7 +491,7 @@ def test_the_page_renders_the_terminal_reply_over_what_it_accumulated() -> None:
     script = _code("app.js")
 
     assert "composing.textContent += value.text;" in script
-    assert "renderOutcome(terminal.outcome);" in script
+    assert "renderOutcome(terminal.outcome, chosenAt);" in script
     assert "clearNode(body);" in script
 
 
@@ -755,11 +755,43 @@ def test_the_page_offers_a_way_out_of_the_thread_it_is_reading() -> None:
 
     assert 'id="new-conversation"' in document
     assert 'el("new-conversation").addEventListener("click", startFresh);' in script
-    assert "setConversation(null);" in fresh
+    assert "changeConversation(null);" in fresh
     for sends in ("fetch(", "relay(", "act("):
         assert sends not in fresh, sends
     # Hidden while there is nothing to leave, so it is never a control that does nothing.
     assert 'el("new-conversation").hidden = id === null;' in _functions(script)["setConversation"]
+
+
+def test_an_answer_in_flight_cannot_undo_the_owners_own_choice() -> None:
+    """Ask under ``C``, then press "Start a new conversation" while that request is
+    still out: the selection clears, the answer arrives, and an unguarded
+    ``renderOutcome`` puts ``C`` back — so the next question continues the thread the
+    owner had just, explicitly, left.
+
+    The Ask button is disabled for the duration and this control deliberately is not:
+    leaving a thread is not something to make the owner wait for. So the turn carries
+    the count it was sent under instead, and the answer is still rendered whole — it is
+    only the *selection* that is not moved. Adversarial review found it on round 4.
+
+    It is this file's third use of the device: ``pendingRun`` for the confirmations
+    listing, ``runs`` for the questions listing, and now ``chose`` for the selection.
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    # Read before the request goes out, at both places a turn outcome comes back.
+    for entry in ("ask", "answerConfirmation"):
+        assert "const chosenAt = chose;" in functions[entry], entry
+    # Bumped in exactly one place, so a route that changes the selection cannot forget.
+    assert script.count("chose += 1;") == 1
+    assert "chose += 1;" in functions["changeConversation"]
+    assert "outcome.conversation_id && chose === chosenAt" in functions["renderOutcome"]
+    # Every outcome rendered carries a count; one that did not would silently stop
+    # continuing the conversation rather than fail.
+    rendered = re.findall(r"renderOutcome\(([^)]*)\)", script)
+    assert rendered
+    for call in rendered:
+        assert call.endswith(", chosenAt") or call == "outcome, chosenAt", call
 
 
 def test_a_stale_selection_is_dropped_where_the_gateway_names_the_condition() -> None:
@@ -777,7 +809,7 @@ def test_a_stale_selection_is_dropped_where_the_gateway_names_the_condition() ->
 
     assert 'body.fault === "no-such-conversation"' in lost
     assert "sent === conversationId" in lost
-    assert "setConversation(null)" in lost
+    assert "changeConversation(null)" in lost
     assert "conversationLost(body, payload.conversation_id);" in _functions(script)["relay"]
     assert "conversationLost(body, asked.conversation_id);" in _functions(script)["askWhole"]
 
