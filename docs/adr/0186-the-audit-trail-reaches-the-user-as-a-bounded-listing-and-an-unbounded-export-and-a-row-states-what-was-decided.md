@@ -623,13 +623,39 @@ differently while both looking correct".
 > direction too: that a value carrying markup for the target is neutralised on render
 > (ADR-0042 §4).
 
-**The enumeration is written out because the two rounds that produced it each found one
-more member.** A listing rendering only the deduplicated destination set passes an
-origin-state test, a non-egress test and an export round-trip; one rendering every span
-but not its `tier`, or the tool's identifier but not its `capability`, passes a test
-that names the members it happens to check. Naming every member §7's first two clauses
-require is what makes the obligation checkable by reading the clause against the
-assertions rather than by judging whether enough was asserted.
+> **Normative.** The consumer lane ships **one test per bar of §8**, over a fixture
+> built to tempt that bar rather than over a convenient row — seven tests, not a sample:
+> a decision whose tool is no longer registered and whose grant has since been revoked,
+> asserted to render as a ruling and not as a live permission; a resolved `ALLOW`
+> against a second, differing request, asserted not to render as covering it and with no
+> `authorises` result reaching the output; a resolved `ALLOW` for a call that was **never
+> invoked**, asserted to render decision wording and no transmission wording — no
+> "sent", "delivered", "read" or any other word for an event; a row whose
+> `parameters_digest` is asserted to appear as a digest and never expanded or labelled
+> as the payload; a decision whose tool declares a non-empty `discloses` alongside a
+> narrower recipient list, asserted not to render the tier reach as what the call
+> transmitted; a row whose origin is `True`, asserted to render no detection, score,
+> risk level or warning wording and to suppress or reorder nothing §7 requires; and a
+> row asserted to carry no answer, approve or deny control and to compose no
+> `Confirmation`.
+
+**The enumeration in both clauses is written out because the rounds that produced them
+each found one more member.** A listing rendering only the deduplicated destination set
+passes an origin-state test, a non-egress test and an export round-trip; one rendering
+every span but not its `tier`, or the tool's identifier but not its `capability`, passes
+a test that names the members it happens to check; and one labelling a resolved `ALLOW`
+"Sent" passes every test about what is rendered, because §8 is about what must not be.
+Naming every member and every bar is what makes the obligation checkable by reading the
+clause against the assertions rather than by judging whether enough was asserted — and
+it is what stops the test plan being discovered one clause per review round.
+
+**A bar on wording is pinned by a weak test and that is stated rather than hidden.** No
+assertion over rendered text can prove a renderer never claims an event; what the third
+test above catches is the specific, likely regression — a status column that reads
+"Sent" beside an `ALLOW` — and the clause it serves is §8's, which binds whether or not
+a test reaches it. #1503 is why the case is worth a test at all: the gap between a
+ruling and an invocation is real, and the surface is the place a reader would otherwise
+stop noticing it.
 
 - **#1485 closes against the consumer lane**, because that is where the trail first
   becomes drivable by a user, which is the gap the issue records.
