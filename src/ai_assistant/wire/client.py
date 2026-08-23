@@ -111,6 +111,7 @@ if TYPE_CHECKING:
         NotificationDelivery,
         NotificationPreferences,
         ObservationReport,
+        PermissionDecision,
         Question,
         ReplyChunk,
         SecretValue,
@@ -1161,6 +1162,71 @@ class HubClient:
         self._refuse_off_loopback("recent_connection_acts")
         positive_page_argument(limit, name="limit")
         return await self._call("recent_connection_acts", limit=limit)  # type: ignore[no-any-return]
+
+    # --- the audit trail's two reads (ADR-0186 §1) -------------------------
+    #
+    # **Hand-written here because the client is, where the server is reflected**
+    # (ADR-0186 §5). ``wire/surface.py`` reads the Protocol, so ``wire/server.py``'s
+    # dispatch and both adapters grow with it by construction — but every promoted
+    # method is its own ``async def`` here, so a client that grew none would raise
+    # ``AttributeError`` before a frame was ever sent, and §5's "both listeners
+    # carry both operations" would be satisfied by a hub nothing could ask.
+    # ADR-0151 §11 states the precedent in the same form, with a different number.
+
+    async def recent_decisions(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[PermissionDecision, ...]:
+        """One page of what the permission layer ruled, newest first (ADR-0186 §1).
+
+        **Not a connection method**, so no :meth:`_refuse_off_loopback` and no entry
+        in ``wire/server.py``'s ``CONNECTION_METHODS`` (ADR-0186 §5). The five that
+        are withheld are withheld because they carry a Tier 0 credential, and a
+        ``PermissionDecision`` carries none: every class of fact one holds already
+        crosses ADR-0124's hop inside a ``Confirmation``'s ``ConfirmationEgress``.
+
+        ``limit`` is refused when it is **not strictly positive**, locally and
+        before a frame is sent, on :meth:`recent_grants`' reason (ADR-0186 §3) — the
+        clause ``AssistantEngineContract`` holds all three implementations to, so a
+        client that shipped ``limit=0`` to the hub would be exactly the silently
+        more permissive implementation ADR-0085 §9 forbids.
+
+        Args:
+            limit: How many rows this page holds.
+
+        Returns:
+            The page, newest first, ties broken by ``id`` ascending — the first
+            ``limit`` rows of :meth:`export_decisions`. **The order is a claim about
+            when a ruling was made and about nothing else** (ADR-0186 §2), and a
+            resolution may fall outside a bounded page (§7).
+
+        Raises:
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+        """
+        positive_page_argument(limit, name="limit")
+        return await self._call("recent_decisions", limit=limit)  # type: ignore[no-any-return]
+
+    async def export_decisions(self) -> tuple[PermissionDecision, ...]:
+        """The whole trail, in :meth:`recent_decisions`' order (ADR-0186 §1).
+
+        **No local refusal to add**, because the method takes no argument — the
+        shape :meth:`standing_grants` already has: there is nothing to validate
+        before the round trip, so this is a bare ``_call``. The refusal that matters
+        is the hub's: a trail too large for the frame comes back as an
+        ``OversizedValueError`` carrying the limit and the measured size rather than
+        as a truncated artifact (ADR-0186 §3), and it arrives as a typed error frame
+        like any other. The remedy is ``hub_max_frame_bytes``, the number the
+        connect reply already published to this client.
+
+        Returns:
+            Every recorded decision, sorted hub-side. A row whose binding records no
+            origin comes back carrying an ``OriginUnrecordedBinding`` with **no**
+            ``planned_with_external_content`` key under it — the union
+            re-discriminates structurally at this end, so the third origin state
+            survives the wire with no discriminator member and nothing transcribed
+            into a wire-side schema (ADR-0186 §5, ADR-0184 §3).
+        """
+        return await self._call("export_decisions")  # type: ignore[no-any-return]
 
 
 class HubEngineClient(HubClient):

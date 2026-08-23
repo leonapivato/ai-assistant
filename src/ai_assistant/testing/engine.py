@@ -101,10 +101,12 @@ from ai_assistant.testing.notifications import (
     FakeNotificationPolicy,
     FakeNotificationStore,
 )
+from ai_assistant.testing.permissions import FakeAuditTrail
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
 
+    from ai_assistant.core.protocols import AuditTrail
     from ai_assistant.core.types import (
         ConnectedAccount,
         ConnectionAct,
@@ -116,6 +118,7 @@ if TYPE_CHECKING:
         NonBlankEncodableText,
         NotificationDelivery,
         NotificationPreferences,
+        PermissionDecision,
         SecretValue,
     )
 
@@ -239,6 +242,20 @@ class FakeAssistantEngine:
         #: while exhibiting none of the partial outcomes ADR-0151 §7 exists to make
         #: reportable.
         self.connections = FakeConnectionProvisioner()
+        #: The audit trail ADR-0186 §1's two reads relay, public so a consumer can
+        #: seed it — ``await engine.trail.record(decision)`` is how a ruling gets
+        #: here, there being no producer for one on this surface: ADR-0186 §4
+        #: refuses a promoted ``record``, because a client that could append to the
+        #: audit record of what was permitted could fabricate history.
+        #:
+        #: **A whole ``AuditTrail`` rather than a list of decisions**, and it is
+        #: replaceable for the reason ADR-0186 §11 makes a shared suite case of:
+        #: ``AuditTrail.export`` states **no** order, so the case separating an
+        #: engine that sorts from one that relays needs a conforming trail
+        #: exercising that freedom. A fake holding a bare list could only hand back
+        #: what its own sort produced, and would pass that case while asserting
+        #: nothing.
+        self.trail: AuditTrail = FakeAuditTrail()
         #: Every call, in order, as ``(method, arguments)`` — so a test can assert
         #: what reached the engine without reaching into its state.
         #:
@@ -930,6 +947,34 @@ class FakeAssistantEngine:
             await self.connections.recent_acts(limit=limit), "recent_connection_acts"
         )
 
+    # --- the audit trail's two reads (ADR-0186 §1) -------------------------
+
+    async def recent_decisions(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[PermissionDecision, ...]:
+        """What the permission layer ruled, newest first, bounded by ``limit``.
+
+        ``limit`` is refused when it is **not strictly positive**, locally and
+        before the trail is touched, on ``recent_grants``' reason (ADR-0186 §3).
+        """
+        positive_page_argument(limit, name="limit")
+        check_arguments("recent_decisions", max_bytes=self._max_payload_bytes, limit=limit)
+        self.calls.append(("recent_decisions", {"limit": limit}))
+        return self._checked(
+            _ordered_decisions(await self.trail.recent(limit=limit)), "recent_decisions"
+        )
+
+    async def export_decisions(self) -> tuple[PermissionDecision, ...]:
+        """Every recorded decision, in :meth:`recent_decisions`' order.
+
+        **Sorted here rather than relayed**, which is ADR-0186 §2's clause and the
+        reason this fake holds a whole :class:`~ai_assistant.core.protocols.AuditTrail`
+        rather than a list: ``AuditTrail.export`` promises no order, so a trail is
+        free to hand back insertion order and the engine operation still owes §2's.
+        """
+        self.calls.append(("export_decisions", {}))
+        return self._checked(_ordered_decisions(await self.trail.export()), "export_decisions")
+
     def _live_grant(self, source: str) -> SourceGrant | None:
         """The grant on ``source`` no recorded revocation names (ADR-0097 §4).
 
@@ -1191,6 +1236,23 @@ def _is_grantable(identity: str, location: str | None) -> bool:
     except ValueError:
         return False
     return True
+
+
+def _ordered_decisions(rows: Sequence[PermissionDecision]) -> tuple[PermissionDecision, ...]:
+    """Put ADR-0186 §2's total order on what a trail read returned.
+
+    ``decided_at`` **descending**, ties broken by ``id`` **ascending** — the order
+    ADR-0021 §4 fixes for ``AuditTrail.recent`` and ADR-0186 §2 puts on both engine
+    operations, the export included, whose store contract states none.
+
+    **Two sorts rather than one reversed key**, exactly as :meth:`recent_grants`
+    does it: ``reverse=True`` over a compound key reverses **both** halves, which
+    would put ``d-2`` above ``d-1`` at one instant. Python's sort is stable, so
+    sorting by the tie-break first and the primary key second composes them
+    correctly.
+    """
+    by_id = sorted(rows, key=lambda decision: decision.id)
+    return tuple(sorted(by_id, key=lambda decision: decision.decided_at, reverse=True))
 
 
 def _summary_of(belief: Belief) -> BeliefSummary:
