@@ -15,10 +15,14 @@ the databases — the runner, the executor, the audit trail — is real.
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from itertools import count
 from typing import TYPE_CHECKING
 from uuid import uuid4
+
+import structlog.testing
 
 from ai_assistant.core.types import (
     ActionPlan,
@@ -49,6 +53,7 @@ from ai_assistant.orchestration import (
 )
 from ai_assistant.orchestration.loop import LearningLoop
 from ai_assistant.permissions import SqliteAuditTrail
+from ai_assistant.permissions.audit import ORIGIN_UNRECORDED
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.testing import (
     FakeActionPolicy,
@@ -56,6 +61,7 @@ from ai_assistant.testing import (
     FakeContextProvider,
     FakeConversationStore,
     FakeDeferralStore,
+    FakeEgressBinder,
     FakeFeedbackProcessor,
     FakeMemoryPolicy,
     FakeMemoryStore,
@@ -70,10 +76,10 @@ from ai_assistant.testing import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
 
-    from ai_assistant.core.types import CurrentContext, Goal, MemoryRecord
+    from ai_assistant.core.types import CurrentContext, FrozenJson, Goal, MemoryRecord
 
 AT = datetime(2026, 7, 24, 9, 0, tzinfo=UTC)
 
@@ -147,6 +153,40 @@ def _confirmable_tool() -> ToolDefinition:
     )
 
 
+#: ADR-0152 §3's two keywords on the one destination-bearing argument, so a runner
+#: holding a binder derives a **real** binding for :data:`PARAMETERS` and the
+#: recorded ``CONFIRM`` carries an ``egress_binding`` — which is what a legacy row
+#: has to have before it can be missing a field of one.
+EGRESS_SCHEMA: Mapping[str, FrozenJson] = {
+    "type": "object",
+    "properties": {
+        "to": {"type": "string", "x-egress-destination": "smtp", "x-egress-tier": "personal"}
+    },
+    "additionalProperties": False,
+}
+
+EGRESS_REFERENCE = "conn-0001"
+EGRESS_IDENTITY = "work@example.com"
+EGRESS_ENDPOINT = "test://endpoint/one"
+
+
+def _egress_tool() -> ToolDefinition:
+    """The confirmable declaration plus the schema that makes it an egress call."""
+    return _confirmable_tool().model_copy(update={"parameters_schema": EGRESS_SCHEMA})
+
+
+def _egress_binder(tool: ToolDefinition) -> FakeEgressBinder:
+    """A binder holding ``tool`` against one active connected account."""
+    binder = FakeEgressBinder()
+    binder.register_egress(
+        tool,
+        reference=EGRESS_REFERENCE,
+        identity=EGRESS_IDENTITY,
+        transport_endpoint=EGRESS_ENDPOINT,
+    )
+    return binder
+
+
 class _OneStepPlanner:
     """Plans exactly one confirmable step for the goal it is given."""
 
@@ -175,7 +215,11 @@ def _aclose(close: Callable[[], None]) -> Callable[[], Awaitable[None]]:
 
 
 def _make_engine(
-    plans: SqlitePlanStore, trail: SqliteAuditTrail, conversations: FakeConversationStore
+    plans: SqlitePlanStore,
+    trail: SqliteAuditTrail,
+    conversations: FakeConversationStore,
+    *,
+    egress: bool = False,
 ) -> Engine:
     """Wire a façade over the given *real* durable stores (fake loop, real runner).
 
@@ -197,12 +241,18 @@ def _make_engine(
         now=lambda: AT,
         id_factory=lambda: "g-1",
     )
-    invoker = FakeToolInvoker([(_confirmable_tool(), _succeeds)])
+    # ``egress`` wires the binding seam and the schema that reaches it, so the
+    # recorded CONFIRM carries an ``egress_binding`` (ADR-0152 §1). Off by default:
+    # every case above this one is about the *recovery* path rather than the egress
+    # one, and a binder they did not ask for would change what their rows hold.
+    tool = _egress_tool() if egress else _confirmable_tool()
+    invoker = FakeToolInvoker([(tool, _succeeds)])
     runner = StepRunner(
         plans=plans,
         registry=invoker,
         policy=FakeActionPolicy(),
         trail=trail,
+        binder=_egress_binder(tool) if egress else None,
         executor=StepExecutor(plans=plans, registry=invoker, invoker=invoker, now=lambda: AT),
         now=lambda: AT,
         # Unique decision ids, as production does (uuid): a second process must not
@@ -339,3 +389,105 @@ async def test_a_recovered_confirmation_can_be_denied_across_a_restart(tmp_path:
         assert step.skip_reason is SkipReason.APPROVAL_DENIED
     finally:
         plans3.close()
+
+
+# --- ADR-0181's dated record, through the engine that would rebuild the park ---
+
+
+async def test_a_park_whose_row_predates_the_origin_field_is_not_offered_after_a_restart(
+    tmp_path: Path,
+) -> None:
+    """ADR-0181's dated record of 2026-08-23, end to end over the real durable stores.
+
+    The unit case in ``tests/permissions/test_audit.py`` pins what the trail answers;
+    this pins what the **user** can reach, which is the claim that matters. An egress
+    confirmation is parked by one process, its audit row is rewritten as a
+    pre-ADR-0181 build wrote it — the current encoding minus exactly one key — and a
+    second process over the same two database files is asked what is pending.
+
+    **Four things, and they are four different claims.** The park is not offered, so
+    no card naming no account and no recipient is put to a user (ADR-0178 §4 makes an
+    absent binding the "not an egress call" discriminator, which is why handing the
+    decoded row back would be a *false* card rather than a partial one). Nothing was
+    written, so the step is still durably ``AWAITING_APPROVAL`` — refused, not
+    resolved, and not erased. The row is still readable as history, which is the half
+    that keeps a trail holding one from failing whole. And the refusal is *named*:
+    a silent omission is indistinguishable from a resolved binding.
+
+    **Resume is unreachable rather than separately refused**, and that is stronger
+    than a refusal at the resume seam. A continuation token exists only where
+    ``converse`` minted one in this process or ``pending_confirmations`` minted one
+    during recovery; a fresh process has neither, so there is no handle with which to
+    ask. Nothing reaches ``resolve``, an ``ALLOW`` or a transmission.
+    """
+    plans_path = tmp_path / "plans.db"
+    audit_path = tmp_path / "audit.db"
+    conversations = FakeConversationStore(now=lambda: AT)
+
+    engine1 = _make_engine(
+        SqlitePlanStore(path=plans_path),
+        SqliteAuditTrail(path=audit_path),
+        conversations,
+        egress=True,
+    )
+    parked = await engine1.converse("send it", timeout=PATIENT)
+    assert parked.step is not None
+    assert parked.step.disposition is Disposition.AWAITING_CONFIRMATION
+    assert parked.step.confirmation is not None
+    assert parked.step.confirmation.egress is not None, "the park really is an egress park"
+    execution_id = parked.step.state.id
+    await engine1.aclose()
+
+    _downgrade_egress_rows(audit_path)
+
+    engine2 = _make_engine(
+        SqlitePlanStore(path=plans_path),
+        SqliteAuditTrail(path=audit_path),
+        conversations,
+        egress=True,
+    )
+    try:
+        with structlog.testing.capture_logs() as captured:
+            pending = await engine2.pending_confirmations()
+
+        assert pending == (), "the park is not offered, so no false card reaches a user"
+        assert ORIGIN_UNRECORDED in {entry["event"] for entry in captured}, (
+            "the refusal is named rather than a silent omission"
+        )
+    finally:
+        await engine2.aclose()
+
+    plans3 = SqlitePlanStore(path=plans_path)
+    trail3 = SqliteAuditTrail(path=audit_path)
+    try:
+        state = await plans3.get_execution(execution_id)
+        assert state is not None
+        step = state.step("step-1")
+        assert step is not None
+        assert step.status is StepStatus.AWAITING_APPROVAL, "refused, not resolved, not erased"
+        assert len(await trail3.export()) == 1, "and still legible as history"
+    finally:
+        plans3.close()
+        trail3.close()
+
+
+def _downgrade_egress_rows(audit_path: Path) -> None:
+    """Rewrite every stored egress binding as a pre-ADR-0181 build wrote it.
+
+    Rewritten from what this build actually stored rather than hand-built, so the
+    fixture is the current encoding minus exactly one key — a hand-written row could
+    drift into a shape no build ever produced, and would then be testing nothing.
+    """
+    conn = sqlite3.connect(audit_path)
+    try:
+        rows = conn.execute("SELECT id, data FROM decisions").fetchall()
+        for row_id, data in rows:
+            stored = json.loads(str(data))
+            binding = stored.get("egress_binding")
+            if binding is None:
+                continue
+            del binding["planned_with_external_content"]
+            conn.execute("UPDATE decisions SET data = ? WHERE id = ?", (json.dumps(stored), row_id))
+        conn.commit()
+    finally:
+        conn.close()
