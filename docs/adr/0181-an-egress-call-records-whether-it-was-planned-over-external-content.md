@@ -34,10 +34,13 @@
   annotated `PermissionDecision`, that type is `core`'s, and the three answers the
   module could give alone are each closed — `egress_binding=None` by ADR-0150 §1's
   second clause, a supplied value by §3 and §4 here, and a type minted in
-  `permissions` by golden rule 1. So the remedy is a `core` surface and takes its own
-  ratified ADR: ADR-0184 adds `OriginUnrecordedBinding` and widens
+  `permissions` by golden rule 1. So the remedy is a `core` surface, which golden rule
+  5 puts in an ADR of its own, ratified before anything implements against it. That is
+  ADR-0184: it adds `OriginUnrecordedBinding` and widens
   `PermissionDecision.egress_binding` alone, so that `get`, `recent`, `export` and
-  `resolution_of` return such a row as history (#1465).
+  `resolution_of` return such a row as history (#1465). This note is written in
+  ADR-0184's own change and takes effect with it on merge, which is the sequence
+  ADR-0181's five records used (ADR-0184 §11's last paragraph).
   **This note decides nothing and adds no obligation**, and a reader acts identically
   on every clause here before and after it. §3's required-with-no-default and its four
   model clauses, §4's discard-not-merge, §5's two ruling points and §10's test

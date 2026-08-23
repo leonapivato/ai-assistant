@@ -549,6 +549,24 @@ model clauses, §4's discard-not-merge, §5's two ruling points, §10's test obl
 under ADR-0070 §1 it is an amendment. A dated header note is appended to ADR-0181 in this
 change.
 
+**Both records are written in this change and take effect on merge, which is the only
+sequence this project's mechanism admits.** ADR-0165 §5 constrains the ratifying commit
+to a single changed line — one ADR's `- Status: Proposed` becoming `- Status: Accepted`
+and no other byte — so a record on another ADR cannot ride in it, and `just ready`
+refuses while an ADR the PR touches still reads `Proposed`, so there is no
+post-ratification change in the workflow to defer a record to either. Every cross-ADR
+record in this corpus is therefore written while its deciding ADR still reads
+`Proposed`: ADR-0181's authoring commit wrote its records on ADR-0178, ADR-0152,
+ADR-0150, ADR-0106 and ADR-0154 — ADR-0178's Status line named ADR-0181 in that same
+commit — and its ratifying commit came afterwards. ADR-0070 §1 permits a Status-line
+edit "recording a supersession that has landed", and its stated condition is that the
+superseding ADR *exists* rather than that it was ratified in an earlier change; the
+edit it forbids is "flipping a live decision to `Superseded` with no such ADR", which
+is not this. Nothing intermediate is published: a reader meets ADR-0150's Status line
+and this ADR's `Accepted` status at the same instant, and ADR-0015 §5's rule — that
+this ADR is ratified before anything **implements** against it — is untouched, since
+the implementation lane is briefed after this merges.
+
 **No record is owed on ADR-0021, ADR-0044, ADR-0049, ADR-0148, ADR-0152 or ADR-0178.**
 ADR-0021 §4's append-only rule is *used* here and not narrowed — §4 above obeys it rather
 than carving an exception. ADR-0049 §1's observation that the corrupted-row rule is
