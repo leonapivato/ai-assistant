@@ -11,7 +11,16 @@ Contracts: :class:`~ai_assistant.core.protocols.ActionPolicy` and
 :class:`~ai_assistant.permissions.audit.SqliteAuditTrail` (ADR-0036); plus
 :class:`~ai_assistant.core.protocols.SourceGrants` and
 :class:`~ai_assistant.core.protocols.SourceGrantStore` (ADR-0097), both satisfied
-by the one :class:`~ai_assistant.permissions.grants.SqliteSourceGrantStore`.
+by the one :class:`~ai_assistant.permissions.grants.SqliteSourceGrantStore`; and
+:class:`~ai_assistant.core.protocols.SourceReadRecorder` and
+:class:`~ai_assistant.core.protocols.SourceReadTrail` (ADR-0185), both satisfied
+by the one :class:`~ai_assistant.permissions.reads.SqliteSourceReadTrail`.
+
+**ADR-0004 §7's other half, for source access.** ADR-0097 built the *gate* — "is
+this source granted for this use" — and ADR-0185 builds the *record of the access
+itself*, which ADR-0139 §6 ruled the grant store does not discharge: that store
+records the authorisation, and granting is not access. Every attempt to read a
+source is one row, refusals included, written by the driver that held the gate.
 
 **The policy rules; the caller records.** ADR-0021 §3 keeps ``ActionPolicy`` a
 pure function — no clock, no id minting, no store — because a ``CONFIRM`` is
@@ -37,5 +46,11 @@ from __future__ import annotations
 from ai_assistant.permissions.audit import SqliteAuditTrail
 from ai_assistant.permissions.grants import SqliteSourceGrantStore
 from ai_assistant.permissions.policy import ThresholdActionPolicy
+from ai_assistant.permissions.reads import SqliteSourceReadTrail
 
-__all__ = ["SqliteAuditTrail", "SqliteSourceGrantStore", "ThresholdActionPolicy"]
+__all__ = [
+    "SqliteAuditTrail",
+    "SqliteSourceGrantStore",
+    "SqliteSourceReadTrail",
+    "ThresholdActionPolicy",
+]

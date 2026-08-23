@@ -44,6 +44,7 @@ from ai_assistant.orchestration.upcoming import CONFIDENCE, NOTIFICATION_CLASS, 
 from ai_assistant.testing import (
     FakeReader,
     FakeSourceGrants,
+    FakeSourceReadRecorder,
     attested_proposal,
     source_grant,
 )
@@ -194,13 +195,18 @@ class Harness:
         )
         self.writer = writer if writer is not None else _RecordingWriter()
         #: Counts every reading. ADR-0132 §1 has the producer hold a clock and §4
-        #: forbids it anchoring on one, so "held" and "unread" are two assertions
-        #: and this is what makes the second checkable.
+        #: forbids it *anchoring* on one; since ADR-0185 §12 exactly one clause reads
+        #: it, for the read record's ``checked_at``. So "read once" and "anchored on
+        #: ``read_at``" are two assertions and this is what makes the pair checkable.
         self.clock = _CountingClock()
+        #: ADR-0185 §5's recorder, held so a case can read back the row the producer
+        #: wrote for its attempt.
+        self.reads = FakeSourceReadRecorder()
         self.stage = UpcomingEventStage(
             reader=self.reader,
             grants=self.grants,
             writer=self.writer,
+            reads=self.reads,
             now=self.clock,
             lead=lead,
         )
@@ -378,6 +384,7 @@ async def test_a_lead_window_of_no_width_is_refused_at_construction() -> None:
             reader=FakeReader([]),
             grants=FakeSourceGrants(),
             writer=_RecordingWriter(),
+            reads=FakeSourceReadRecorder(),
             now=_CountingClock(),
             lead=timedelta(0),
         )
@@ -403,6 +410,7 @@ async def test_a_lead_window_that_is_not_exactly_a_timedelta_is_refused() -> Non
             reader=FakeReader([]),
             grants=FakeSourceGrants(),
             writer=_RecordingWriter(),
+            reads=FakeSourceReadRecorder(),
             now=_CountingClock(),
             lead=_Sneaky(minutes=20),
         )
@@ -820,22 +828,29 @@ async def test_the_producer_holds_no_state_between_runs_and_re_offers() -> None:
     assert first == second
 
 
-async def test_the_clock_it_holds_is_never_read() -> None:
-    """§1 has the producer hold a clock; §4 forbids it anchoring on one.
+async def test_the_clock_it_holds_is_read_once_and_anchors_nothing() -> None:
+    """§1 has the producer hold a clock; §4 forbids it *anchoring* on one.
 
-    The two clauses are reconciled by holding it and never reading it, and this is
-    what makes the second half checkable rather than a comment. §4: the instant a
-    candidate was noticed "is the reading's own ``read_at`` … and never a later
-    clock reading taken when the candidate was constructed or offered", and both
-    the selection and ADR-0130 §2's validation are evaluated "against one instant,
-    not two".
+    §4: the instant a candidate was noticed "is the reading's own ``read_at`` … and
+    never a later clock reading taken when the candidate was constructed or
+    offered", and both the selection and ADR-0130 §2's validation are evaluated
+    "against one instant, not two".
 
-    **The counter is the weaker half of the assertion.** The injected clock answers
-    thirteen minutes past the reading, so an implementation that anchored on it
-    would select a different set — the occurrence at +25 leaves the window, the one
-    at +5 falls behind it — and would stamp a different ``noticed_at``. Both are
-    asserted, so a producer that read the clock fails on what it *concluded* and
-    not only on having asked.
+    **The count is one rather than zero since ADR-0185 §12**, which requires this
+    producer to read the clock it already holds for the read record's
+    ``checked_at`` and states normatively that doing so "does not touch ADR-0132
+    §4" — ``checked_at`` "anchors no selection, no validation and no expiry". The
+    ADR names this very test and tells the lane how to tighten it: keep the strong
+    half exactly as it is and replace the zero with a count of one.
+
+    **The counter was always the weaker half of the assertion**, and asserting the
+    pair is what makes the tightened form stronger than the zero ever was. The
+    injected clock answers thirteen minutes past the reading, so an implementation
+    that anchored on it would select a different set — the occurrence at +25 leaves
+    the window, the one at +5 falls behind it — and would stamp a different
+    ``noticed_at``. So this now fails **both** on a producer that anchors on the
+    clock and on one that reads it twice, where the zero could only catch the first
+    reading at all.
     """
     harness = Harness(
         [_occurrence(starts_in=timedelta(minutes=n), summary=f"E{n}") for n in (5, 15, 25)]
@@ -843,7 +858,7 @@ async def test_the_clock_it_holds_is_never_read() -> None:
 
     assert await harness.stage.notice() == 2
 
-    assert harness.clock.calls == 0
+    assert harness.clock.calls == 1
     assert {candidate.noticed_at for candidate in harness.offered} == {_READ_AT}
     # Anchored on the reading, the window is (0, 20) and selects E5 and E15.
     # Anchored on the clock it would be (13, 33) and select E15 and E25 — the same
@@ -872,6 +887,7 @@ def test_the_clock_it_holds_is_still_stored_through_the_shared_guard() -> None:
         reader=FakeReader([]),
         grants=FakeSourceGrants(),
         writer=_RecordingWriter(),
+        reads=FakeSourceReadRecorder(),
         now=lambda: datetime(2026, 6, 1, 14, 0),  # noqa: DTZ001 — the naive reading is the subject
         lead=_LEAD,
     )
@@ -889,7 +905,14 @@ def test_the_producer_holds_nothing_a_memory_or_a_model_would_need() -> None:
     Both are properties of what the object can be *given*, so the signature is
     where they are checkable — a later lane adding a store to build some
     convenience on would fail here rather than in review.
+
+    **``reads`` is a store and belongs here, which is why the set is asserted whole
+    rather than by exclusion.** ADR-0185 §5 makes the recorder a required argument,
+    and §4 makes it the *narrow* seam: what the producer may be given is a
+    ``SourceReadRecorder`` and never a ``SourceReadTrail``, so the thing §1 and §8
+    forbid — durable state this producer can *read* — is still absent. The
+    no-cursor half of that is pinned separately, below.
     """
     parameters = set(inspect.signature(UpcomingEventStage.__init__).parameters)
 
-    assert parameters == {"self", "reader", "grants", "writer", "now", "lead"}
+    assert parameters == {"self", "reader", "grants", "writer", "reads", "now", "lead"}

@@ -36,6 +36,13 @@ is this stage's, not the reader's — "A ``Reader`` neither holds a grant seam n
 learns of one" — because ADR-0093 §1 already put the decision of when a reader
 runs here, and a reader that gated itself would be its own caller.
 
+**Every attempt is recorded, refusals included** (ADR-0185 §5). The record is the
+driver's for the same reason the gate is: a ``Reader`` "holds no store handle, no
+writer, no policy and no engine", and could not record a refusal at all, because
+in that case no reader is reached. One row per attempt — refused, unanswerable,
+failed, discarded, unconfirmed or completed — written **before** the reading is
+used, so nothing durable comes of a read the trail does not hold.
+
 **No check stands between the reader and the writer, deliberately.** The sibling
 :class:`~ai_assistant.orchestration.observation.ObservationStage` refuses a
 proposal citing an episode it never handed the producer, because only that stage
@@ -57,14 +64,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
-from ai_assistant.core.errors import SourceNotGrantedError
-from ai_assistant.core.types import GrantScope, MemoryDecisionKind
+from ai_assistant.core.clock import checked_clock
+from ai_assistant.core.errors import GrantError, ReaderError, SourceNotGrantedError
+from ai_assistant.core.types import (
+    GrantScope,
+    MemoryDecisionKind,
+    ReadOutcome,
+    SourceReadRecord,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
 
-    from ai_assistant.core.protocols import Reader, SourceGrants
+    from ai_assistant.core.clock import Clock
+    from ai_assistant.core.protocols import Reader, SourceGrants, SourceReadRecorder
+    from ai_assistant.core.types import SourceReading
     from ai_assistant.orchestration.writes import MemoryWriteStage
 
 
@@ -82,6 +98,19 @@ def _refusal(source: str) -> str:
         f"no live {GrantScope.INGEST.value} grant covers the {source!r} source, so "
         f"nothing was read; grant it before ingestion can run (ADR-0097 §5)"
     )
+
+
+def _produced_by(reading: SourceReading) -> int:
+    """How many items ``reading`` carried — its proposals, and its facet if it had one.
+
+    ADR-0185 §2's ``produced``: "the number of items the **reading** carried — its
+    proposals, and its facet where it carried one". A count and never a thing, and a
+    property of what the source returned rather than of what the use did with it. It
+    is deliberately *not* ``len(reading.proposals)``: an ingestion read of a source
+    that also carries a facet still read that facet, and the record is about the
+    read rather than about this stage's use of it.
+    """
+    return len(reading.proposals) + (0 if reading.facet is None else 1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -159,8 +188,16 @@ class IngestionReport:
 class IngestionStage:
     """Reads one source and puts what it proposed through the write path."""
 
-    def __init__(self, *, reader: Reader, writes: MemoryWriteStage, grants: SourceGrants) -> None:
-        """Wire the stage from an injected reader, the write stage and the grant seam.
+    def __init__(
+        self,
+        *,
+        reader: Reader,
+        writes: MemoryWriteStage,
+        grants: SourceGrants,
+        reads: SourceReadRecorder,
+        now: Clock,
+    ) -> None:
+        """Wire the stage from a reader, the write stage, the grant seam and the recorder.
 
         Args:
             reader: The producer. It is given its own source and its own bound
@@ -206,10 +243,32 @@ class IngestionStage:
                 authorising itself, with nothing about the record looking wrong
                 afterwards. So the capability is removed from the type this stage
                 names.
+            reads: The **write** seam of the read trail, and never a
+                ``SourceReadTrail`` (ADR-0185 §4, §5). Required with no default, on
+                the grant seam's own pattern and for its own reason: a composition
+                that omits the recorder does not type-check, so "every attempt is
+                recorded" is a mechanism rather than a habit honoured by review.
+
+                **Narrow by type for the opposite reason to ``grants``'.** A stage
+                that could *read* the trail is a stage that can ask "when did I last
+                read this, and what did it produce" and skip, back off or resume —
+                which is precisely the cursor ADR-0093 §5 removed from a sensor's
+                bound: "It may not be derived from durable state recording what
+                previous runs read." Removing ``recent`` and ``export`` from the
+                type this stage names makes that a ``mypy --strict`` failure rather
+                than a review note.
+            now: The clock ``checked_at`` is read from, wrapped through
+                ``checked_clock`` on ADR-0026 §2's rule. Required with no default
+                (ADR-0185 §12): this stage held no clock before, and a lane reaching
+                for ``datetime.now()`` at the call site is the path of least
+                resistance that would make ADR-0185 §11's deterministic arms
+                untestable.
         """
         self._reader = reader
         self._writes = writes
         self._grants = grants
+        self._reads = reads
+        self._now = checked_clock(now, owner="IngestionStage")
 
     async def ingest(self) -> IngestionReport:
         """Read the source once and ingest every proposal it returned.
@@ -302,20 +361,63 @@ class IngestionStage:
                 reader's proposals reach nobody in the moment, so ADR-0078 §7
                 promises this path nothing beyond reporting the failure to its own
                 stage — which propagating does.
+            ReadTrailError: If the attempt could not be recorded (ADR-0185 §5).
+                **Nothing is proposed**: the reading is discarded, exactly as it is
+                across a revocation, because ADR-0004 §7 conditions access on a
+                record of it and a system that kept what it read when it could not
+                record the reading has kept Tier 1 data outside the trail its
+                charter puts it in.
             CancelledError: Re-raised unchanged from a cancelled read. It is never
                 converted into a ``ReaderError``, so a shutdown that is working
-                correctly is not logged as a source fault (ADR-0093 §8).
+                correctly is not logged as a source fault (ADR-0093 §8) — and no
+                recorder call is started on the way out (ADR-0185 §1, §5a).
         """
         source = self._reader.name
         # The check and the start of the read are one synchronous step: nothing
-        # between this `await` returning and `read()` being called may suspend.
-        if await self._grants.live(source=source, use=GrantScope.INGEST) is None:
+        # between this `await` returning and `read()` being called may suspend, and
+        # ADR-0185 §5 puts no recorder `await` in that gap either. Reading the clock
+        # is synchronous, so `checked_at` is captured *inside* the one step.
+        try:
+            granted = await self._grants.live(source=source, use=GrantScope.INGEST)
+        except GrantError:
+            # ADR-0185 §12: the clock is read immediately after the first check
+            # resolves — "by answering or by raising". `live()` may suspend, so an
+            # instant taken before the call could predate the very grant act that
+            # decided the outcome.
+            await self._record(source, self._now(), ReadOutcome.UNANSWERED, None, 0)
+            raise
+        checked_at = self._now()
+        if granted is None:
+            await self._record(source, checked_at, ReadOutcome.REFUSED, None, 0)
             raise SourceNotGrantedError(_refusal(source))
-        reading = await self._reader.read()
-        # The revocation that landed while the read ran wins: the reading is
-        # discarded whole, and nothing durable records that it happened.
-        if await self._grants.live(source=source, use=GrantScope.INGEST) is None:
+        try:
+            reading = await self._reader.read()
+        except ReaderError:
+            # ADR-0185 §1: the read was attempted and raised, and whether the source
+            # was opened is *not determinable* from the record — a reader can refuse
+            # before starting work at all (`OneWorker`'s outstanding reservation:
+            # "Nothing is started.") or fail with the bytes in hand, and both cross
+            # the seam as `ReaderError` because ADR-0093 §8 requires it.
+            await self._record(source, checked_at, ReadOutcome.FAILED, granted.id, 0)
+            raise
+        produced = _produced_by(reading)
+        try:
+            still_granted = await self._grants.live(source=source, use=GrantScope.INGEST)
+        except GrantError:
+            await self._record(source, checked_at, ReadOutcome.UNCONFIRMED, granted.id, produced)
+            raise
+        if still_granted is None:
+            # The revocation that landed while the read ran wins: the reading is
+            # discarded whole — and since ADR-0185 the trail records that it
+            # happened, with the count it carried. "This read across your revocation
+            # carried fourteen proposals that were dropped" is a materially
+            # different audit fact from "it carried none".
+            await self._record(source, checked_at, ReadOutcome.DISCARDED, granted.id, produced)
             raise SourceNotGrantedError(_refusal(source))
+        # Written **before** the reading is used (ADR-0185 §5). `COMPLETED` says the
+        # gate ruled the reading admissible and claims nothing about the use — not
+        # that the write stage ran, and not that a belief was stored.
+        await self._record(source, checked_at, ReadOutcome.COMPLETED, granted.id, produced)
         # **The whole reading in one call** (ADR-0115 §2). ADR-0110 §5a refuses the
         # absence reconciliation over an unserialised read-modify-write, and that
         # sequence spans the ingest — so the writer has to hold its serialisation
@@ -337,6 +439,47 @@ class IngestionStage:
             proposed=len(reading.proposals),
             stored=stored,
             deferred=deferred,
+        )
+
+    async def _record(
+        self,
+        source: str,
+        checked_at: datetime,
+        outcome: ReadOutcome,
+        grant: str | None,
+        produced: int,
+    ) -> None:
+        """Append one row for this attempt (ADR-0185 §1, §5).
+
+        The id is minted **here**, by the caller, because ADR-0021 §3 rules that a
+        store neither mints ids nor reads a clock — the division ``SourceGrant`` and
+        ``PermissionDecision`` already keep. A fresh ``uuid4`` rather than anything
+        derived from the attempt: two attempts at the same instant for the same
+        source and use are two rows, and a derived id would fold them.
+
+        Args:
+            source: The reader's declared identity, byte for byte (ADR-0185 §2).
+            checked_at: The instant the **first** grant check resolved, whichever
+                outcome this row carries — one attempt, one instant.
+            outcome: How the attempt ended.
+            grant: The grant it ran under, or ``None`` on the two outcomes decided
+                before anything was opened.
+            produced: How many items the reading carried; zero where there is none.
+
+        Raises:
+            ReadTrailError: If the trail refuses the record or cannot be written.
+                Propagated, and this stage proposes nothing.
+        """
+        await self._reads.record(
+            SourceReadRecord(
+                id=uuid4().hex,
+                source=source,
+                use=GrantScope.INGEST,
+                checked_at=checked_at,
+                outcome=outcome,
+                grant=grant,
+                produced=produced,
+            )
         )
 
 

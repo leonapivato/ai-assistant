@@ -35,9 +35,17 @@ acquisition instant on every run, so there is no accumulating backlog for a curs
 to track, and ADR-0130 §8 absorbs the repetition that buys — "A producer that
 re-notices the same fact on every tick is behaving as designed."
 
-Nothing concrete is imported: the reader, the grant seam and the notification
-writer all arrive by injection and are seen only through their Protocols
-(CLAUDE.md golden rule 1). ``lint-imports`` enforces that literally — no
+**Every attempt to read is recorded** (ADR-0185 §5). This producer is the driver
+for :attr:`~ai_assistant.core.types.GrantScope.NOTIFY`, so it holds a
+``SourceReadRecorder`` beside its gate and writes one row per attempt — refused,
+unanswerable, failed, discarded, unconfirmed or completed — **before** the first
+offer. §7 above and ADR-0097 §5 both name the revoked-but-configured source that
+"logs a refusal every interval"; since ADR-0185 that refusal is a durable row the
+user can read rather than a line in an operator's terminal.
+
+Nothing concrete is imported: the reader, the grant seam, the recorder and the
+notification writer all arrive by injection and are seen only through their
+Protocols (CLAUDE.md golden rule 1). ``lint-imports`` enforces that literally — no
 subsystem, `orchestration` included, may import ``ai_assistant.readers``.
 
 **Arming it is three independent acts and the recipe is not here** (§4): the
@@ -57,17 +65,29 @@ import json
 from datetime import timedelta
 from hashlib import sha256
 from typing import TYPE_CHECKING, Final
+from uuid import uuid4
 
 from ai_assistant.core.clock import checked_clock
-from ai_assistant.core.errors import SourceNotGrantedError
-from ai_assistant.core.types import DataTier, GrantScope, NotificationCandidate
+from ai_assistant.core.errors import GrantError, ReaderError, SourceNotGrantedError
+from ai_assistant.core.types import (
+    DataTier,
+    GrantScope,
+    NotificationCandidate,
+    ReadOutcome,
+    SourceReadRecord,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.protocols import NotificationWriter, Reader, SourceGrants
-    from ai_assistant.core.types import MemoryUpdateProposal, ReportedExtent
+    from ai_assistant.core.protocols import (
+        NotificationWriter,
+        Reader,
+        SourceGrants,
+        SourceReadRecorder,
+    )
+    from ai_assistant.core.types import MemoryUpdateProposal, ReportedExtent, SourceReading
 
 #: The producer's declared name (ADR-0130 §2, on ADR-0093 §7's rule for a reader's
 #: identity): a stable Tier 2 constant, never derived from the source's location or
@@ -114,6 +134,19 @@ def _refusal(source: str) -> str:
         f"nothing was read; grant it before the upcoming-event producer can run "
         f"(ADR-0097 §5, ADR-0133 §1)"
     )
+
+
+def _produced_by(reading: SourceReading) -> int:
+    """How many items ``reading`` carried — its proposals, and its facet if it had one.
+
+    ADR-0185 §2's ``produced``: "the number of items the **reading** carried — its
+    proposals, and its facet where it carried one". It is a property of what the
+    source returned and states **nothing** about what this producer did with it —
+    not how many occurrences the window selected, and not how many candidates were
+    offered. Those are `notice`'s own return value and the notification store's
+    records; the trail's subject is the *access*.
+    """
+    return len(reading.proposals) + (0 if reading.facet is None else 1)
 
 
 def _extent_of(proposal: MemoryUpdateProposal) -> ReportedExtent | None:
@@ -179,34 +212,40 @@ def _key(sentence: str, extent: ReportedExtent) -> str:
 class UpcomingEventStage:
     """Reads the calendar on its own cadence and offers what is about to start.
 
-    **It holds a clock and never reads one, and both halves are ADR-0132's.** §1
-    enumerates the producer's collaborators as "a ``Reader``, a ``SourceGrants``, a
-    clock and the ``NotificationWriter`` seam of ADR-0130 §3", so the clock is held
-    — a ratified ADR is not narrowed by an implementation's judgement that one of
-    its collaborators has nothing to do. §4 then rules that it may not be *read*:
-    the instant a candidate was noticed "is the reading's own ``read_at`` … and
-    never a later clock reading taken when the candidate was constructed or
-    offered", and both the window selection and ADR-0130 §2's validation are
-    anchored on that one instant — "Selection and ADR-0130 §2's validation are
-    evaluated against one instant, not two".
+    **It holds a clock, reads it exactly once, and anchors nothing on what it
+    read.** §1 enumerates the producer's collaborators as "a ``Reader``, a
+    ``SourceGrants``, a clock and the ``NotificationWriter`` seam of ADR-0130 §3",
+    so the clock is held. §4 then rules what it may not be read *for*: the instant a
+    candidate was noticed "is the reading's own ``read_at`` … and never a later
+    clock reading taken when the candidate was constructed or offered", and both the
+    window selection and ADR-0130 §2's validation are anchored on that one instant —
+    "Selection and ADR-0130 §2's validation are evaluated against one instant, not
+    two".
 
-    **The two clauses only look contradictory, and the way they are reconciled is
-    a test rather than a comment.** §4 spends four paragraphs on what a second
-    clock reading here would cost — "the producer offers a defect, on a schedule,
-    for a window whose width is its own parse time" — so the hazard of holding one
-    is a later edit reaching for it. ``tests/orchestration/test_upcoming.py`` pins
-    the invariant directly: a full pass over a reading full of upcoming
-    occurrences calls the injected clock **zero** times. An implementation that
-    began anchoring on it fails there rather than in review, which is what makes
-    the held collaborator safe instead of merely explained.
+    **The one reading it now takes is ADR-0185 §12's, and that ADR states
+    normatively that it does not touch §4.** ``SourceReadRecord.checked_at`` is the
+    instant the *grant check* resolved; it "anchors no selection, no validation and
+    no expiry", and §4's subject — the instant a candidate was **noticed** — stays
+    ``read_at``. A reader holding only ADR-0132 acts identically.
+
+    **The reconciliation is a test rather than a comment.** §4 spends four
+    paragraphs on what a second *anchoring* clock reading here would cost — "the
+    producer offers a defect, on a schedule, for a window whose width is its own
+    parse time" — so the hazard is a later edit anchoring on it.
+    ``tests/orchestration/test_upcoming.py`` pins the invariant directly: a full
+    pass calls the injected clock exactly **once**, *and* every candidate's
+    ``noticed_at`` still equals the reading's ``read_at``. That pins §4 more tightly
+    than the earlier zero-call assertion did, because it fails both on a producer
+    that anchors on the clock and on one that reads it twice.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 — §1's four collaborators, ADR-0185 §5's recorder and §4's lead window; each is one seam a composition root wires
         self,
         *,
         reader: Reader,
         grants: SourceGrants,
         writer: NotificationWriter,
+        reads: SourceReadRecorder,
         now: Clock,
         lead: timedelta,
     ) -> None:
@@ -234,13 +273,24 @@ class UpcomingEventStage:
                 seam and no client connection; its only outcome is the disposition
                 this returns, and it may not select one, exempt itself from §5, or
                 write to the store other than through here.
+            reads: The **write** seam of the read trail, and never a
+                ``SourceReadTrail`` (ADR-0185 §4, §5). Required with no default, on
+                the grant seam's own pattern: a composition that omits the recorder
+                does not type-check. Narrow by type for the *opposite* reason to
+                ``grants``' — a producer that could **read** the trail could derive
+                a cursor from it, which ADR-0093 §5 forbids and which §10 above
+                already refuses this producer by another route.
             now: The hub's clock, held because §1 enumerates it among this
-                producer's collaborators and **read by nothing here** because §4
-                anchors every instant on the reading's own ``read_at``. Stored
-                through ``checked_clock`` like every other clock seam in the tree,
-                on ADR-0026 §2 and on §7's refusal to exempt a clock whose consumer
-                is advisory. The class docstring carries the reconciliation and the
-                test that keeps it true.
+                producer's collaborators. Since ADR-0185 §12 it is read **exactly
+                once per pass**, for the read record's ``checked_at``, and for
+                nothing else: §4 still anchors every instant this producer
+                *concludes* on the reading's own ``read_at``, and ADR-0185 §12 states
+                normatively that it "does not touch ADR-0132 §4" — ``checked_at``
+                "anchors no selection, no validation and no expiry". Stored through
+                ``checked_clock`` like every other clock seam in the tree, on
+                ADR-0026 §2 and on §7's refusal to exempt a clock whose consumer is
+                advisory. The class docstring carries the reconciliation and the test
+                that keeps it true.
             lead: How far ahead of a start instant an occurrence is noticed (§4).
                 ``Settings`` has already refused a figure that is not strictly
                 positive, that outruns the reader's own forward window, or that is
@@ -284,15 +334,17 @@ class UpcomingEventStage:
         self._reader = reader
         self._grants = grants
         self._writer = writer
+        self._reads = reads
         # **Wrapped rather than stored raw, and ADR-0026 §7 is why it is wrapped
         # even here.** §2 requires every constructor holding a clock to store
         # `checked_clock(now, owner=...)`, and §7 refuses an exemption for a clock
         # whose consumer is advisory or absent in as many words: "A rule that
         # exempted 'advisory' clocks would oblige every future author to classify
         # their clock, with nothing checking the guess and a wrong timestamp —
-        # unfalsifiable afterwards — as the failure." Nothing here reads it (§4),
-        # so the guard is inert today; what it buys is that the day a clause does,
-        # the reading is already held to §3's range and to ADR-0023 §5's aware.
+        # unfalsifiable afterwards — as the failure." Since ADR-0185 §12 exactly one
+        # clause reads it, for the read record's `checked_at`, and the guard is what
+        # holds that reading to §3's range and to ADR-0023 §5's aware. Nothing this
+        # producer *concludes* is anchored on it (§4).
         self._now = checked_clock(now, owner="UpcomingEventStage")
         self._lead = lead
 
@@ -367,20 +419,49 @@ class UpcomingEventStage:
                 record.
             NotificationOutboxError: If a ruled interruption could not be handed to
                 the delivery seam (ADR-0131 §3b).
+            ReadTrailError: If the attempt could not be recorded (ADR-0185 §5).
+                **No candidate is concluded**: the reading is discarded, exactly as
+                it is across a revocation.
             CancelledError: Re-raised unchanged from a cancelled read, so a
-                shutdown that is working correctly is not logged as a source fault.
+                shutdown that is working correctly is not logged as a source fault —
+                and no recorder call is started on the way out (ADR-0185 §1, §5a).
         """
         source = self._reader.name
         # The check and the start of the read are one synchronous step: nothing
-        # between this `await` returning and `read()` being called may suspend.
-        if await self._grants.live(source=source, use=GrantScope.NOTIFY) is None:
+        # between this `await` returning and `read()` being called may suspend, and
+        # ADR-0185 §5 puts no recorder `await` in that gap either. Reading the clock
+        # is synchronous, so `checked_at` is captured *inside* the one step.
+        try:
+            granted = await self._grants.live(source=source, use=GrantScope.NOTIFY)
+        except GrantError:
+            # ADR-0185 §12: read immediately after the first check resolves, "by
+            # answering or by raising".
+            await self._record(source, self._now(), ReadOutcome.UNANSWERED, None, 0)
+            raise
+        checked_at = self._now()
+        if granted is None:
+            await self._record(source, checked_at, ReadOutcome.REFUSED, None, 0)
             raise SourceNotGrantedError(_refusal(source))
-        reading = await self._reader.read()
-        # The revocation that landed while the read ran wins: the reading is
-        # discarded whole, before the first offer, and nothing durable records that
-        # it happened (ADR-0133 §5).
-        if await self._grants.live(source=source, use=GrantScope.NOTIFY) is None:
+        try:
+            reading = await self._reader.read()
+        except ReaderError:
+            await self._record(source, checked_at, ReadOutcome.FAILED, granted.id, 0)
+            raise
+        produced = _produced_by(reading)
+        try:
+            still_granted = await self._grants.live(source=source, use=GrantScope.NOTIFY)
+        except GrantError:
+            await self._record(source, checked_at, ReadOutcome.UNCONFIRMED, granted.id, produced)
+            raise
+        if still_granted is None:
+            # The revocation that landed while the read ran wins: the reading is
+            # discarded whole, before the first offer — and since ADR-0185 the trail
+            # records that it happened (ADR-0133 §5, ADR-0185 §1).
+            await self._record(source, checked_at, ReadOutcome.DISCARDED, granted.id, produced)
             raise SourceNotGrantedError(_refusal(source))
+        # Written **before** the first offer (ADR-0185 §5). `COMPLETED` says the gate
+        # ruled the reading admissible and claims nothing about what was noticed.
+        await self._record(source, checked_at, ReadOutcome.COMPLETED, granted.id, produced)
         offered = 0
         for proposal in reading.proposals:
             candidate = self._candidate(proposal, reading.read_at)
@@ -389,6 +470,49 @@ class UpcomingEventStage:
             await self._writer.offer(candidate)
             offered += 1
         return offered
+
+    async def _record(
+        self,
+        source: str,
+        checked_at: datetime,
+        outcome: ReadOutcome,
+        grant: str | None,
+        produced: int,
+    ) -> None:
+        """Append one row for this attempt (ADR-0185 §1, §5).
+
+        The id is minted **here**, by the caller, because ADR-0021 §3 rules that a
+        store neither mints ids nor reads a clock. A fresh ``uuid4`` rather than
+        anything derived from the attempt: two attempts at the same instant for the
+        same source and use are two rows, and a derived id would fold them — which
+        is §6's key-projection reasoning inverted, since a *read record* is not
+        supposed to fold at all.
+
+        Args:
+            source: The reader's declared identity, byte for byte (ADR-0185 §2).
+            checked_at: The instant the **first** grant check resolved, whichever
+                outcome this row carries — one attempt, one instant. It is **not**
+                the instant a candidate was noticed and anchors nothing §4 governs.
+            outcome: How the attempt ended.
+            grant: The grant it ran under, or ``None`` on the two outcomes decided
+                before anything was opened.
+            produced: How many items the reading carried; zero where there is none.
+
+        Raises:
+            ReadTrailError: If the trail refuses the record or cannot be written.
+                Propagated, and this producer offers nothing.
+        """
+        await self._reads.record(
+            SourceReadRecord(
+                id=uuid4().hex,
+                source=source,
+                use=GrantScope.NOTIFY,
+                checked_at=checked_at,
+                outcome=outcome,
+                grant=grant,
+                produced=produced,
+            )
+        )
 
     def _candidate(
         self, proposal: MemoryUpdateProposal, read_at: datetime

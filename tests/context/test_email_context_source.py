@@ -47,6 +47,7 @@ from ai_assistant.core.types import (
 from ai_assistant.testing import (
     FakeReader,
     FakeSourceGrants,
+    FakeSourceReadRecorder,
     source_grant,
 )
 from ai_assistant.testing.readers import DEFAULT_READER_NAME
@@ -54,10 +55,23 @@ from ai_assistant.testing.readers import DEFAULT_READER_NAME
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ai_assistant.core.protocols import SourceGrants
+    from ai_assistant.core.protocols import Reader, SourceGrants
 
 _READ_AT = datetime(2026, 3, 4, 9, 30, tzinfo=UTC)
 _NOW = datetime(2026, 3, 4, 9, 31, tzinfo=UTC)
+
+#: The instant the drivers' injected clock serves, and deliberately **not**
+#: ``_READ_AT``: ADR-0185 §12 forbids deriving ``checked_at`` from
+#: ``SourceReading.read_at``, so a source that reached for the reading's own stamp
+#: would be indistinguishable from one that read the clock if the two agreed.
+_CHECKED_AT = datetime(2026, 3, 4, 9, 29, tzinfo=UTC)
+
+
+def _clock() -> datetime:
+    """The clock every gated source below is wired with (ADR-0185 §12)."""
+    return _CHECKED_AT
+
+
 _WINDOW = timedelta(days=7)
 _ARRIVED = 3
 """How many messages this module's scripted facet counts — nothing turns on it."""
@@ -93,8 +107,24 @@ def _granted(source: str = DEFAULT_READER_NAME) -> FakeSourceGrants:
     return FakeSourceGrants([source_grant(source)])
 
 
-def _source(reader: FakeReader, grants: FakeSourceGrants) -> EmailContextSource:
-    return EmailContextSource(reader=reader, grants=grants)
+def _source(
+    reader: Reader,
+    grants: SourceGrants,
+    reads: FakeSourceReadRecorder | None = None,
+) -> EmailContextSource:
+    return EmailContextSource(
+        reader=reader,
+        grants=grants,
+        reads=FakeSourceReadRecorder() if reads is None else reads,
+        now=_clock,
+    )
+
+
+def _calendar_source(reader: FakeReader, grants: FakeSourceGrants) -> CalendarContextSource:
+    """The *other* adapter over the same collaborators, for the crossing cases."""
+    return CalendarContextSource(
+        reader=reader, grants=grants, reads=FakeSourceReadRecorder(), now=_clock
+    )
 
 
 def _awaited_names(func: Callable[..., object]) -> list[str]:
@@ -118,6 +148,62 @@ def _awaited_names(func: Callable[..., object]) -> list[str]:
     # Sorted by position: `ast.walk` is breadth-first, and the subject is the
     # sequence the event loop sees rather than the tree's shape.
     return [name for _, _, name in sorted(found)]
+
+
+def _leaves_the_function(body: list[ast.stmt]) -> bool:
+    """Whether ``body`` always leaves — its last statement raises or returns."""
+    return bool(body) and isinstance(body[-1], ast.Raise | ast.Return)
+
+
+def _fall_through_awaits(body: list[ast.stmt]) -> list[str]:
+    """The awaited attribute names on the path that reaches the end of ``body``.
+
+    ADR-0185 §5 put four recorder ``await``s into this driver on branches that
+    **raise or return**, so a flat source-order list can no longer say what
+    ADR-0097 §5a's first clause is about. This walks the statements that a single
+    authorised pass actually executes: a ``try`` body counts, its handler counts
+    only where the handler falls through, and an ``if`` branch counts only where it
+    does not leave. What comes back is the sequence the event loop sees on the path
+    where a read really happens — so "no ``await`` between the ``live()`` answer and
+    ``read()``" is readable as two adjacent entries rather than argued from prose.
+    """
+    names: list[str] = []
+    for statement in body:
+        if isinstance(statement, ast.Try):
+            names += _fall_through_awaits(statement.body)
+            names += _fall_through_awaits(statement.orelse)
+            for handler in statement.handlers:
+                if not _leaves_the_function(handler.body):
+                    names += _fall_through_awaits(handler.body)
+            names += _fall_through_awaits(statement.finalbody)
+        elif isinstance(statement, ast.If):
+            if not _leaves_the_function(statement.body):
+                names += _fall_through_awaits(statement.body)
+            if not _leaves_the_function(statement.orelse):
+                names += _fall_through_awaits(statement.orelse)
+        else:
+            names += _awaits_within(statement)
+    return names
+
+
+def _awaits_within(node: ast.stmt) -> list[str]:
+    """Every awaited attribute name inside one statement, in source order."""
+    found: list[tuple[int, int, str]] = []
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Await):
+            continue
+        call = child.value
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute):
+            found.append((child.lineno, child.col_offset, call.func.attr))
+    return [name for _, _, name in sorted(found)]
+
+
+def _awaited_on_the_authorised_path(func: Callable[..., object]) -> list[str]:
+    """The awaits one authorised, uninterrupted pass through ``func`` performs."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    definition = tree.body[0]
+    assert isinstance(definition, ast.AsyncFunctionDef)
+    return _fall_through_awaits(definition.body)
 
 
 # --- the seam ---------------------------------------------------------------
@@ -234,12 +320,36 @@ def test_no_await_stands_between_the_check_and_the_read() -> None:
 
     The awaits are asserted **exhaustively and in order** rather than by a
     between-ness check, because a fourth await anywhere in this body is the defect
-    whatever it happens to sit next to. It is read off ``EmailContextSource``
+    whatever it happens to sit next to.
+
+    **Six of the awaits here are ADR-0185 §5's recorder**, and every one of them
+    sits on a branch that raises or returns — so the span this test exists to
+    protect is untouched. The exhaustive list below is what fails on a seventh
+    landing anywhere; the *authorised-path* list beside it is what says the two
+    entries either side of the gate are still adjacent, which is the clause itself.
+
+    Both are read off ``EmailContextSource``
     rather than off the base it shares with the calendar's adapter: what ADR-0140
     §13 owes is the property of *this* driver, and a later override would be
     invisible to an assertion aimed at the base.
     """
-    assert _awaited_names(EmailContextSource.contribute) == ["live", "read", "live"]
+    assert _awaited_names(EmailContextSource.contribute) == [
+        "live",
+        "_record",  # UNANSWERED — the branch re-raises
+        "_record",  # REFUSED — the branch returns
+        "read",
+        "_record",  # FAILED — the branch re-raises
+        "live",
+        "_record",  # UNCONFIRMED — the branch re-raises
+        "_record",  # DISCARDED — the branch returns
+        "_record",  # COMPLETED — before the facet is contributed (ADR-0185 §5)
+    ]
+    assert _awaited_on_the_authorised_path(EmailContextSource.contribute) == [
+        "live",
+        "read",
+        "live",
+        "_record",
+    ]
 
 
 # --- the gate: all six cases ADR-0097 §5 and §5a distinguish -----------------
@@ -323,7 +433,7 @@ async def test_an_unanswerable_re_check_discards_the_reading_too() -> None:
     grants = _FailsOnTheRecheck(_granted())
 
     with pytest.raises(GrantError):
-        await EmailContextSource(reader=reader, grants=grants).contribute()
+        await _source(reader, grants).contribute()
 
     assert reader.call_count == 1
 
@@ -386,7 +496,7 @@ async def test_an_email_facet_at_the_calendar_adapter_is_a_wiring_bug() -> None:
     direction above would leave that one untested, and the two adapters are the
     same object with two pairings, so the property has to hold of both.
     """
-    source = CalendarContextSource(reader=_reader(_facet()), grants=_granted())
+    source = _calendar_source(_reader(_facet()), _granted())
 
     with pytest.raises(ContextError, match="wiring bug"):
         await source.contribute()
@@ -440,7 +550,7 @@ async def test_two_facet_sources_each_reach_their_own_field() -> None:
     root that builds it (ADR-0140 §13's registration item, which is a later lane's).
     """
     context = await _assemble_with(
-        CalendarContextSource(reader=_reader(_calendar_facet()), grants=_granted()),
+        _calendar_source(_reader(_calendar_facet()), _granted()),
         _source(_reader(_facet()), _granted()),
     )
 
@@ -472,7 +582,7 @@ async def test_every_absence_looks_identical_in_the_assembled_context(
     honour: an absent facet says nothing about whether mail is still being fetched
     onto the box by a process outside this system.
     """
-    context = await _assemble_with(EmailContextSource(reader=reader, grants=grants))
+    context = await _assemble_with(_source(reader, grants))
 
     assert context.email is None, label
     assert context.now == _NOW, label  # the rest of the context assembled

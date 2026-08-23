@@ -123,6 +123,7 @@ from ai_assistant.testing import (
     FakeReader,
     FakeSourceGrants,
     FakeSourceGrantStore,
+    FakeSourceReadRecorder,
     FakeStreamingCompleter,
     FakeToolInvoker,
     FakeTraceRetention,
@@ -459,6 +460,10 @@ class Harness:
         # sequence, because the engine holds one stage per source and this harness
         # should not be able to express a shape the engine cannot.
         self.email_reader = email_reader
+        # ADR-0185 §5's recorder, one object behind both ingestion stages exactly as
+        # the grant seam is: a composition root passes one store to every driver, and
+        # a harness that gave each its own could not show a trail holding both.
+        self.reads = FakeSourceReadRecorder()
         self.grants = FakeSourceGrants(
             [
                 # `reader` is deliberately `object` here — the duck-typed fakes this
@@ -476,6 +481,8 @@ class Harness:
                 reader=reader,  # type: ignore[arg-type]  # a duck-typed fake stands in for the Protocol
                 writes=self.writes,
                 grants=self.grants,
+                reads=self.reads,
+                now=lambda: AT,
             )
         )
         self.email_ingestion = (
@@ -485,6 +492,8 @@ class Harness:
                 reader=email_reader,  # type: ignore[arg-type]  # a duck-typed fake stands in for the Protocol
                 writes=self.writes,
                 grants=self.grants,
+                reads=self.reads,
+                now=lambda: AT,
             )
         )
         loop = LearningLoop(
