@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from ai_assistant.core.errors import ConnectionStoreError
+from ai_assistant.core.errors import ConnectionStoreError, PermissionDeniedError
 from ai_assistant.core.types import (
     ActionPlan,
     ActionRequest,
@@ -30,6 +30,7 @@ from ai_assistant.core.types import (
     Goal,
     Idempotency,
     MemorySource,
+    OriginUnrecordedBinding,
     PermissionOutcome,
     PlanStep,
     Provenance,
@@ -766,3 +767,85 @@ async def test_a_parked_call_planned_over_external_content_resumes_and_executes(
     assert rebound.binding.planned_with_external_content is True
     assert rebound.binding == approved.egress_binding
     assert len(harness.invoker.invocations) == 1
+
+
+class _DowngradingTrail(FakeAuditTrail):
+    """A trail that hands back one named decision as a pre-ADR-0181 row would decode.
+
+    What a real :class:`~ai_assistant.permissions.SqliteAuditTrail` does for a row
+    written before ADR-0181 §3's ``planned_with_external_content`` (ADR-0184 §5), put
+    on the fake because the fake holds **objects rather than bytes** and so cannot be
+    seeded with such a row — and because ``record`` now refuses the shape outright
+    (§4), which is exactly why the substitution happens on the read.
+
+    Only the named id is downgraded: the write path reads its own record back
+    (``StepRunner._recorded``), and a trail that answered this way for every row
+    would break the parking the case depends on.
+    """
+
+    def __init__(self) -> None:
+        """A trail downgrading nothing until told which id to downgrade."""
+        super().__init__()
+        self.downgrade: str | None = None
+
+    async def get(self, decision_id: str) -> PermissionDecision | None:
+        """Answer with the stored decision, its origin dropped where asked."""
+        stored = await super().get(decision_id)
+        if stored is None or decision_id != self.downgrade:
+            return stored
+        binding = stored.egress_binding
+        if not isinstance(binding, EgressBinding):
+            return stored
+        return stored.model_copy(
+            update={
+                "egress_binding": OriginUnrecordedBinding(
+                    spans=binding.spans,
+                    account=binding.account,
+                    transport_endpoint=binding.transport_endpoint,
+                )
+            }
+        )
+
+
+async def test_resuming_a_confirmation_whose_origin_was_never_recorded_is_refused() -> None:
+    """ADR-0184 §8's fourth clause: narrow the union and refuse, before any ruling.
+
+    ``StepRunner.resume`` reaches the recorded ``CONFIRM`` two ways. The restart path
+    goes through ``AuditTrail.pending_confirmation``, which never offers such a row —
+    so it cannot arrive that way. The in-process path goes through ``_recorded`` →
+    ``AuditTrail.get``, which since ADR-0184 §5 returns the row **as history** rather
+    than raising, and that is the route this closes.
+
+    Refused by this seam's own existing name, which is what ADR-0184 §5 means by "the
+    two callers refuse by their own existing names". Four things are asserted because
+    they are four claims: the refusal happened, ``EgressBinder.rebind`` was never
+    handed the shape (§8's third clause), the policy was never asked to resolve it —
+    so ADR-0184 §7's floor is a *second* lock rather than the only one — and nothing
+    was written, so the step is still durably parked and its ``CONFIRM`` unresolved.
+    """
+    tool = _tool(egress=True)
+    binder = _WatchingBinder(_bound_binder(tool))
+    trail = _DowngradingTrail()
+    harness = _Harness(tool=tool, binder=binder, trail=trail)
+    state = await _an_execution(harness.plans, _step())
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+    assert parked.disposition is Disposition.AWAITING_CONFIRMATION
+    assert parked.decision_id is not None
+    binder.returned.clear()
+    trail.downgrade = str(parked.decision_id)
+
+    with pytest.raises(PermissionDeniedError, match="origin was never recorded"):
+        await harness.runner.resume(
+            parked.state,
+            STEP,
+            confirmation_id=str(parked.decision_id),
+            approved=True,
+            timeout=PATIENT,
+        )
+
+    assert binder.returned == [], "rebind never receives a binding recording no origin"
+    assert harness.policy.resolutions == []
+    assert harness.invoker.invocations == []
+    assert await harness.trail.get("d-2") is None
+    stored = await _stored(harness.plans, state)
+    assert stored.status is StepStatus.AWAITING_APPROVAL

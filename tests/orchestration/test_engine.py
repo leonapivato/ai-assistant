@@ -60,6 +60,7 @@ from ai_assistant.core.types import (
     MemoryUpdateProposal,
     ObservationReport,
     ObservedProposal,
+    OriginUnrecordedBinding,
     PlanStep,
     Provenance,
     ProvisioningState,
@@ -792,6 +793,47 @@ async def test_no_engine_path_builds_an_egress_member_for_a_non_egress_call() ->
     reduced = engine_module._confirmation_egress(with_binding)
     assert reduced is not None
     assert reduced.spans, "an egress call's description is not empty here"
+
+
+async def test_no_confirmation_is_composed_for_a_binding_recording_no_origin() -> None:
+    """ADR-0184 §8's second and fourth clauses: refused, not projected, not blanked.
+
+    ``ConfirmationEgress.planned_with_external_content`` is required with no default
+    (ADR-0181 §3), so composing one for a decision that never recorded the value
+    would demand exactly the fabrication ADR-0184 exists to avoid — at the surface
+    where the user is being asked to approve something, which is the worst place in
+    the system to invent a fact.
+
+    **``None`` is not the answer either**, and that is the half worth asserting.
+    ADR-0178 §4 makes ``None`` the discriminator for "the ruling was not taken over
+    an egress binding at all", so answering it for a row naming an account and a
+    recipient would put a *false* card in front of the user — the same falsification
+    ADR-0150 §1 forbids for a projected decision, one layer out.
+
+    Unreachable from either assembly site: both are fed by
+    ``AuditTrail.pending_confirmation``, which refuses such a row, and by a decision
+    the runner has just recorded, which ``record`` refuses to be one. Exercised
+    directly here because "unreachable" is a claim about the *callers*, and a later
+    caller could change it — a guard nothing reaches is still a guard that must be
+    right.
+    """
+    bound = _egress_harness()
+    await bound.engine.converse("send it", timeout=PATIENT)
+    recorded = await bound.trail.get("d-1")
+    assert recorded is not None
+    assert isinstance(recorded.egress_binding, EgressBinding)
+    legacy = recorded.model_copy(
+        update={
+            "egress_binding": OriginUnrecordedBinding(
+                spans=recorded.egress_binding.spans,
+                account=recorded.egress_binding.account,
+                transport_endpoint=recorded.egress_binding.transport_endpoint,
+            )
+        }
+    )
+
+    with pytest.raises(PlanningError, match="records no origin"):
+        engine_module._confirmation_egress(legacy)
 
 
 # ADR-0178 §9: the expansion, the refusal it can cause, and the park surviving it.

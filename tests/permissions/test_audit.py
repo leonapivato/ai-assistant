@@ -18,7 +18,7 @@ import json
 import sqlite3
 import threading
 from datetime import timedelta
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 import structlog.testing
@@ -28,12 +28,14 @@ from permission_builders import AT, action, decision, ruling, tool
 from ai_assistant.core.errors import AuditError, DuplicateDecisionError
 from ai_assistant.core.types import (
     BoundAccount,
+    CanonicalDestination,
     DataTier,
     DestinationProtocol,
     DiscloserProvenance,
     EgressBinding,
     EgressDestination,
     EgressSpan,
+    OriginUnrecordedBinding,
     PermissionDecision,
     PermissionOutcome,
 )
@@ -1257,10 +1259,17 @@ async def test_a_base_exception_from_the_worker_reaches_the_caller() -> None:
 
 
 # --- A row recorded before ADR-0181's origin field ----------------------------
+# ADR-0184 §5 and §10 put these here rather than in the shared conformance suite,
+# for ADR-0049 §5's reason: the behaviour is a property of a store that persists a
+# **serialised payload** and rebuilds it, and the canonical fake holds objects
+# rather than bytes, so no shared case could seed the row. ``record``'s refusal of
+# the same shape is a different matter and *is* in the suite, because a test can
+# construct such a decision directly.
+#
 # Kept in one block so a rebase across another lane's edits moves it whole.
 
 
-def _egress_decision(decision_id: str = "d-egress") -> PermissionDecision:
+def _egress_decision(decision_id: str = "d-egress", **overrides: object) -> PermissionDecision:
     """A parked egress ``CONFIRM``, of the shape a real `send_email` park has."""
     binding = EgressBinding(
         spans=(
@@ -1280,15 +1289,37 @@ def _egress_decision(decision_id: str = "d-egress") -> PermissionDecision:
         transport_endpoint="smtp://mail.example.com:587",
         planned_with_external_content=False,
     )
+    fields: dict[str, object] = {
+        "parameters": {"to": "a@example.com"},
+        "execution_id": "exec-a",
+        "egress_binding": binding,
+    }
+    fields.update(overrides)
     return decision(
         decision_id,
-        request=action(
-            parameters={"to": "a@example.com"},
-            execution_id="exec-a",
-            egress_binding=binding,
-        ),
+        request=action(**fields),
         ruled=ruling(PermissionOutcome.CONFIRM),
     )
+
+
+def _stored(trail: SqliteAuditTrail, decision_id: str) -> dict[str, Any]:
+    """The row's ``data`` column, decoded as JSON — the bytes, not a model."""
+    row = trail._conn.execute("SELECT data FROM decisions WHERE id = ?", (decision_id,)).fetchone()
+    assert row is not None, f"no row for {decision_id!r}"
+    decoded: dict[str, Any] = json.loads(str(row[0]))
+    return decoded
+
+
+def _rewrite(trail: SqliteAuditTrail, decision_id: str, payload: dict[str, Any]) -> None:
+    """Put ``payload`` back into the row's ``data`` column and commit.
+
+    Committed, so the implicit transaction this ``UPDATE`` opened is not still open
+    when a later ``record`` starts one of its own.
+    """
+    trail._conn.execute(
+        "UPDATE decisions SET data = ? WHERE id = ?", (json.dumps(payload), decision_id)
+    )
+    trail._conn.commit()
 
 
 async def _record_as_legacy(trail: SqliteAuditTrail, recorded: PermissionDecision) -> None:
@@ -1297,61 +1328,267 @@ async def _record_as_legacy(trail: SqliteAuditTrail, recorded: PermissionDecisio
     Rewritten rather than hand-built, so the fixture is the **current** encoding
     minus exactly one key. A hand-written row could drift from what the trail
     actually stores and would then be testing a shape no build ever produced.
+
+    Seeded through the ``data`` column directly because ADR-0184 §4 makes the row
+    unproducible through ``record``, which now refuses the shape outright — the
+    write half of the same decision these cases pin the read half of.
     """
     await trail.record(recorded)
-    stored = trail._conn.execute(
-        "SELECT data FROM decisions WHERE id = ?", (recorded.id,)
-    ).fetchone()[0]
-    legacy = json.loads(str(stored))
+    legacy = _stored(trail, recorded.id)
     del legacy["egress_binding"]["planned_with_external_content"]
-    trail._conn.execute(
-        "UPDATE decisions SET data = ? WHERE id = ?", (json.dumps(legacy), recorded.id)
-    )
-    # Committed, so the implicit transaction this UPDATE opened is not still
-    # open when a later ``record`` starts one of its own.
-    trail._conn.commit()
+    _rewrite(trail, recorded.id, legacy)
 
 
-async def test_a_history_read_still_reports_a_row_recorded_before_the_origin_field(
+# --- §3, §10: the discrimination, over a real store ---------------------------
+
+
+async def test_a_stored_row_carrying_the_origin_decodes_as_a_whole_binding(
     ephemeral: SqliteAuditTrail,
 ) -> None:
-    """First arm: a reader that only reads is unchanged, and that is deliberate.
+    """§3's first row, over bytes rather than a dict.
 
-    ``EgressBinding`` is a stored member of ``PermissionDecision`` and ADR-0181 §3
-    makes ``planned_with_external_content`` required with no default, so a row
-    written before that field existed no longer satisfies the model. It stays the
-    "corrupted or downgraded database" this trail has always reported.
+    The baseline the other two are read against: a row this build wrote decodes with
+    its binding whole and its origin intact, so nothing below is evidence that the
+    trail simply stopped reading the field.
+    """
+    recorded = _egress_decision()
+    await ephemeral.record(recorded)
 
-    **Serving these readers a binding-less decision instead would breach a ratified
-    clause.** ADR-0150 §1 is normative that ``None`` on a decision "means the
-    request is not an egress call and carries no binding", so a decision projected
-    without its binding would state that a call with an account and a recipient had
-    neither — a falsified audit record, which is the one thing this store exists to
-    make impossible. The damage a legacy row does is to the **park** path, and the
-    cases below are where it is answered.
+    got = await ephemeral.get("d-egress")
+
+    assert got is not None
+    assert isinstance(got.egress_binding, EgressBinding)
+    assert got.egress_binding.planned_with_external_content is False
+    assert got.egress_binding == recorded.egress_binding
+
+
+async def test_a_stored_row_missing_only_the_origin_decodes_as_the_sibling(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """§3's second row, and the whole of what ADR-0184 adds to what the trail tolerates.
+
+    The same JSON with **exactly** that key removed decodes carrying an
+    ``OriginUnrecordedBinding`` — not a projection, not a marker: every other fact
+    the row holds comes back, which is the second test ADR-0184's Context sets. The
+    user reading their trail sees the connected account, the occurrence in both its
+    supplied and canonical forms and the payload description, and learns exactly one
+    thing more, that the origin of this call was never recorded.
+    """
+    recorded = _egress_decision()
+    await _record_as_legacy(ephemeral, recorded)
+
+    got = await ephemeral.get("d-egress")
+
+    assert got is not None
+    assert isinstance(got.egress_binding, OriginUnrecordedBinding)
+    assert got.egress_binding.account == BoundAccount(
+        identity="work@example.com", reference="conn-0001"
+    )
+    assert got.egress_binding.transport_endpoint == "smtp://mail.example.com:587"
+    assert got.egress_binding.spans == recorded.egress_binding.spans  # type: ignore[union-attr]  # built whole above
+    assert got.egress_binding.canonical_destination_set == (
+        CanonicalDestination(protocol=DestinationProtocol.SMTP, canonical="a@example.com"),
+    )
+
+
+async def test_a_stored_row_missing_the_origin_and_faulty_elsewhere_still_raises(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """§3's third row, §10's fifth clause: the case a widened tolerance fails.
+
+    ADR-0184 admits a row whose **only** difference from a current one is the absent
+    origin. A row that is also faulty elsewhere satisfies neither arm of the union
+    and is a corrupted or downgraded database exactly as before — otherwise the
+    representation would quietly become a general tolerance for rows the model
+    rejects, which is the opposite of what an audit trail is for.
+
+    The narrowness used to be a hand-written predicate over a ``ValidationError``'s
+    shape; it is now a property of the types, so a lane cannot widen it by loosening
+    a check.
     """
     await _record_as_legacy(ephemeral, _egress_decision())
+    also_broken = _stored(ephemeral, "d-egress")
+    del also_broken["egress_binding"]["account"]
+    _rewrite(ephemeral, "d-egress", also_broken)
 
     with pytest.raises(AuditError, match="no longer validates"):
         await ephemeral.get("d-egress")
-    with pytest.raises(AuditError):
-        await ephemeral.export()
+
+
+async def test_a_stored_row_carrying_an_undeclared_member_still_raises(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """§3's fourth row: a row from a schema neither model knows is not a legacy row.
+
+    ``extra="forbid"`` on the shared base is what makes this hold for **both** arms
+    of the union at once. Without it the row would decode as whichever arm ignored
+    the key, and a downgraded database would be served as history.
+    """
+    await _record_as_legacy(ephemeral, _egress_decision())
+    from_the_future = _stored(ephemeral, "d-egress")
+    from_the_future["egress_binding"]["schema_epoch"] = 2
+    _rewrite(ephemeral, "d-egress", from_the_future)
+
+    with pytest.raises(AuditError, match="no longer validates"):
+        await ephemeral.get("d-egress")
+
+
+# --- §5, §10: what the four history readers answer ----------------------------
+
+
+async def test_one_legacy_row_no_longer_denies_the_user_every_other_row(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """§5's first clause, §10's sixth: the all-or-nothing failure this closes.
+
+    ``recent`` and ``export`` select every matching row and map the decode over the
+    whole list, so before ADR-0184 **one** unreadable row denied the user every
+    other row in the trail — and ADR-0021 §4 says ``export`` is what discharges
+    ADR-0004 §6's portability obligation for this store, so two such rows defeated
+    that obligation wholesale.
+
+    The subject is deliberately **one legacy row among several ordinary ones**, as
+    §10 requires: a case over a trail whose only row is the legacy one would pass an
+    implementation that still failed the whole list, and would not satisfy the
+    clause.
+    """
+    await ephemeral.record(_egress_decision("d-before", execution_id="exec-before"))
+    await _record_as_legacy(ephemeral, _egress_decision())
+    await ephemeral.record(decision("d-after", request=action(execution_id="exec-after")))
+
+    exported = await ephemeral.export()
+    recent = await ephemeral.recent(limit=50)
+
+    assert {held.id for held in exported} == {"d-before", "d-egress", "d-after"}
+    assert [held.id for held in recent] == [held.id for held in exported]
+    legacy = next(held for held in exported if held.id == "d-egress")
+    assert isinstance(legacy.egress_binding, OriginUnrecordedBinding)
+
+
+async def test_get_returns_the_legacy_row_by_id(ephemeral: SqliteAuditTrail) -> None:
+    """§5's first clause for the one reader with a production consumer today.
+
+    ``StepRunner._recorded`` reads through ``get``, so this is the read that decides
+    whether a named legacy decision is legible at all. It answers as history; the
+    runner then narrows the union and refuses to *resume* it (ADR-0184 §8's fourth
+    clause), which is a different question from whether it can be read.
+    """
+    await _record_as_legacy(ephemeral, _egress_decision())
+
+    got = await ephemeral.get("d-egress")
+
+    assert got is not None
+    assert got.id == "d-egress"
+    assert isinstance(got.egress_binding, OriginUnrecordedBinding)
+
+
+async def test_resolution_of_returns_a_legacy_resolution_by_its_binding(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """§5's fifth clause, §10's sixth: history, and nothing more.
+
+    ``resolution_of`` is the reader recovery *acts* on — a step stranded
+    ``AWAITING_APPROVAL`` with its ruling durable but its transition uncommitted
+    (#257) is driven to the disposition already decided. So the row has to be
+    readable, and reading it must not be mistaken for an authorisation: no consumer
+    treats a decision a reader returned as one without
+    ``PermissionDecision.authorises``, which ADR-0184 §6 makes answer ``False`` for
+    this shape against every request.
+
+    The resolution itself is downgraded here — not the ``CONFIRM`` it answers —
+    because it is the *returned* row this clause is about.
+    """
+    confirmed = _egress_decision("d-confirm")
+    await ephemeral.record(confirmed)
+    answer = _egress_decision(
+        "d-answer",
+        egress_binding=confirmed.egress_binding,
+    ).model_copy(
+        update={
+            "ruling": ruling(PermissionOutcome.ALLOW, authorised_by="d-confirm"),
+            "resolves": "d-confirm",
+        }
+    )
+    await ephemeral.record(answer)
+    legacy = _stored(ephemeral, "d-answer")
+    del legacy["egress_binding"]["planned_with_external_content"]
+    _rewrite(ephemeral, "d-answer", legacy)
+
+    resolution = await ephemeral.resolution_of(execution_id="exec-a", step_id="step-1")
+
+    assert resolution is not None
+    assert resolution.id == "d-answer"
+    assert isinstance(resolution.egress_binding, OriginUnrecordedBinding)
+
+
+async def test_a_returned_legacy_decision_fabricates_no_origin_on_the_way_out(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """§10's seventh clause: an export is a faithful copy of what the row says.
+
+    The whole design turns on fabricating nothing, and a dump is where a fabrication
+    would surface: a defaulted ``False`` would state that no external material was
+    selected, on behalf of a lane that made no selection, and a ``True`` would be
+    worse. The model does not carry the member at all, so there is no key to emit —
+    asserted over the **whole** dump rather than under ``egress_binding`` alone, so a
+    lane that moved the fact somewhere else in the record is caught too.
+    """
+    await _record_as_legacy(ephemeral, _egress_decision())
+
+    got = await ephemeral.get("d-egress")
+
+    assert got is not None
+    assert "planned_with_external_content" not in json.dumps(got.model_dump(mode="json"))
+    assert "planned_with_external_content" not in got.model_dump()["egress_binding"]
+
+
+async def test_a_row_carrying_the_origin_round_trips_unchanged(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """Nothing changes for a row written by this build.
+
+    The tolerance is reached only by the one legacy shape, so a current row decodes
+    with its binding whole **and** its park is still answerable. Without this the
+    park case below would be satisfied by an implementation that refused every
+    egress park.
+    """
+    recorded = _egress_decision()
+    await ephemeral.record(recorded)
+
+    got = await ephemeral.get("d-egress")
+    park = await ephemeral.pending_confirmation(execution_id="exec-a", step_id="step-1")
+
+    assert got is not None
+    assert got.egress_binding == recorded.egress_binding
+    assert isinstance(got.egress_binding, EgressBinding)
+    assert got.egress_binding.planned_with_external_content is False
+    assert park is not None, "a current park is still answerable"
+    assert park.egress_binding == recorded.egress_binding
+
+
+# --- §5, §10: the park is still refused, by name and without a write ----------
 
 
 async def test_a_park_rebuilt_from_a_row_without_an_origin_is_refused_by_name(
     ephemeral: SqliteAuditTrail,
 ) -> None:
-    """Second arm: an unresumable park, refused under its name and not by an exception.
+    """§5's second and third clauses, §10's eighth: an unresumable park, refused by name.
 
-    ``pending_confirmation`` is the one reader whose answer a caller *rebuilds a
-    park from*, so it is where ADR-0181's consequence is answered. Such a call's
-    origin cannot be established — §3 forbids a default, §4's second clause forbids
-    a seam inventing one, so ``False`` and ``True`` are both out — and §5's second
-    clause then leaves no route by which any authorisation covers it. There is no
-    answerable question to hand back.
+    #1443's follow-on lane's case, re-pointed at the structural check. ADR-0184 §10
+    is explicit that a lane which *deletes* these has removed the refusal rather than
+    reimplemented it, so what changed is only how the case is detected — on the
+    decoded value's type rather than on the shape of a ``ValidationError`` — and the
+    ``origin-unrecorded`` condition stands in name and in effect.
 
-    Two things are asserted because they are two claims: that no park comes back,
-    and that the refusal is *named* rather than an unexplained silence.
+    ``pending_confirmation`` is the one reader whose answer a caller *rebuilds a park
+    from*. Such a call's origin cannot be established — ADR-0181 §3 forbids a
+    default, §4's second clause forbids a seam inventing one — and §5's second clause
+    then leaves no route by which any authorisation covers it. There is no answerable
+    question to hand back, and that is a different question from whether the row is
+    legible, which the readers above answer yes to.
+
+    Two things are asserted because they are two claims: that no park comes back, and
+    that the refusal is *named* rather than an unexplained silence.
     """
     await _record_as_legacy(ephemeral, _egress_decision())
 
@@ -1364,17 +1601,36 @@ async def test_a_park_rebuilt_from_a_row_without_an_origin_is_refused_by_name(
     assert refusals[0]["step_id"] == "step-1"
 
 
+async def test_refusing_the_park_writes_nothing_and_leaves_the_row_intact(
+    ephemeral: SqliteAuditTrail,
+) -> None:
+    """§5's second clause, §10's eighth: refused, not resolved, and not erased.
+
+    The park stays unanswerable and the record stays exactly as it was: nothing is
+    migrated, backfilled, annotated, versioned, re-keyed or deleted (§4). Asserted
+    over the **bytes in the ``data`` column** rather than over a decoded value,
+    because a read-side representation is precisely the thing a decoded comparison
+    could not tell apart from a rewrite.
+    """
+    await _record_as_legacy(ephemeral, _egress_decision())
+    before = _stored(ephemeral, "d-egress")
+
+    assert await ephemeral.pending_confirmation(execution_id="exec-a", step_id="step-1") is None
+
+    assert _stored(ephemeral, "d-egress") == before
+    assert [held.id for held in await ephemeral.export()] == ["d-egress"]
+
+
 async def test_one_legacy_row_does_not_hide_another_bindings_pending_confirmation(
     ephemeral: SqliteAuditTrail,
 ) -> None:
-    """The point of refusing rather than raising, stated as its own case.
+    """§5, §10's eighth: the point of refusing rather than raising, as its own case.
 
     A second, current park under a different binding is still offered while the
     legacy one is refused. An implementation that raised here would fail the
     enumeration that reaches both, so **every** pending confirmation in the trail
     would become unanswerable because of one pre-upgrade row — which is the damage
-    this branch exists to stop, and the reason it is not simply ``_decode``'s
-    behaviour.
+    this branch exists to stop.
     """
     await _record_as_legacy(ephemeral, _egress_decision())
     current = decision(
@@ -1392,51 +1648,22 @@ async def test_one_legacy_row_does_not_hide_another_bindings_pending_confirmatio
     assert other_park.id == "d-current"
 
 
-async def test_a_row_carrying_the_origin_round_trips_unchanged(
+async def test_the_trail_reads_the_shape_and_refuses_to_write_one(
     ephemeral: SqliteAuditTrail,
 ) -> None:
-    """Third arm: nothing changes for a row written by this build.
+    """§4's second clause on the concrete store, beside the read it is the mirror of.
 
-    The branch is reached only by the one legacy shape, so a current row decodes
-    with its binding whole **and** its park is still answerable. Without this the
-    case above would be satisfied by an implementation that refused every egress
-    park.
+    The shared suite holds every implementation to the refusal; this pins the pair on
+    the one store that can hold such a row at all, so the asymmetry is legible in one
+    place: the same value the trail hands *out* of a row it cannot be handed *into*
+    one. An epoch that has ended is readable and unappendable.
     """
-    recorded = _egress_decision()
-    await ephemeral.record(recorded)
+    await _record_as_legacy(ephemeral, _egress_decision())
+    read_back = await ephemeral.get("d-egress")
+    assert read_back is not None
+    assert isinstance(read_back.egress_binding, OriginUnrecordedBinding)
 
-    got = await ephemeral.get("d-egress")
-    park = await ephemeral.pending_confirmation(execution_id="exec-a", step_id="step-1")
+    with pytest.raises(AuditError, match="records no origin"):
+        await ephemeral.record(read_back.model_copy(update={"id": "d-forged"}))
 
-    assert got is not None
-    assert got.egress_binding == recorded.egress_binding
-    assert isinstance(got.egress_binding, EgressBinding)
-    assert got.egress_binding.planned_with_external_content is False
-    assert park is not None, "a current park is still answerable"
-    assert park.egress_binding == recorded.egress_binding
-
-
-async def test_a_row_missing_more_than_the_origin_is_still_reported_as_corruption(
-    ephemeral: SqliteAuditTrail,
-) -> None:
-    """The branch is exactly one shape wide, and this is what holds it there.
-
-    ADR-0181's record admits a row whose **only** fault is the absent origin. A row
-    that is also missing something else is a corrupted or downgraded database and
-    keeps today's ``AuditError`` — otherwise the migration seam would quietly become
-    a general tolerance for rows the model rejects, which is the opposite of what an
-    audit trail is for.
-    """
-    recorded = _egress_decision()
-    await _record_as_legacy(ephemeral, recorded)
-    stored = ephemeral._conn.execute(
-        "SELECT data FROM decisions WHERE id = ?", ("d-egress",)
-    ).fetchone()[0]
-    also_broken = json.loads(str(stored))
-    del also_broken["egress_binding"]["account"]
-    ephemeral._conn.execute(
-        "UPDATE decisions SET data = ? WHERE id = ?", (json.dumps(also_broken), "d-egress")
-    )
-
-    with pytest.raises(AuditError):
-        await ephemeral.get("d-egress")
+    assert await ephemeral.get("d-forged") is None
