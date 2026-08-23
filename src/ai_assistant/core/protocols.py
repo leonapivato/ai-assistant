@@ -3204,6 +3204,21 @@ class ActionPolicy(Protocol):
           comparison exists one seam out, on
           :meth:`~ai_assistant.core.types.PermissionDecision.authorises`, over the
           binding as one whole.
+        * **A ``confirmed`` whose ``egress_binding`` is an**
+          :class:`~ai_assistant.core.types.OriginUnrecordedBinding` **must not
+          produce an ``ALLOW``, whatever ``approved`` says** (ADR-0184 §7). The
+          origin of such a call cannot be established at all — ADR-0181 §3 forbids a
+          default and §4's second clause forbids a seam inventing one — and ADR-0181
+          §5's second clause then leaves no route by which any authorisation covers
+          it, the user's own answer included. It is a **floor rather than a route
+          that exists**: ``AuditTrail.pending_confirmation`` answers ``None`` for
+          such a row, so nothing in the tree hands one here today, and ADR-0021 §5's
+          "fail-closed twice over" is why the clause is written anyway — a floor is
+          worth having because it holds when a route appears, and this one is
+          checkable on any implementation without knowing its rules. ``decide``
+          gains no matching clause and no lane adds one, because
+          :attr:`~ai_assistant.core.types.ActionRequest.egress_binding` stays narrow
+          and the case is unconstructable at that member (ADR-0184 §2, §7).
 
         A resolving ``ALLOW`` sets ``authorised_by`` to ``confirmed.id`` — this
         is the one path that may set it, and what it sets is verifiable, since
@@ -3243,6 +3258,25 @@ class AuditTrail(Protocol):
     with it, and an affordance that removes one inconvenient record undoes the
     guarantee for all of them. So the user may burn the book; nobody may tear
     out a page.
+
+    **A history read hands back what the row says, including a binding recorded
+    before ADR-0181 §3's ``planned_with_external_content`` existed** (ADR-0184 §5).
+    ``get``, ``recent``, ``export`` and ``resolution_of`` return such a decision
+    carrying an :class:`~ai_assistant.core.types.OriginUnrecordedBinding` as
+    history, rather than failing — and a ``recent`` or an ``export`` over a trail
+    holding one returns it **together with** every other row, which is the
+    all-or-nothing failure that closes. ``pending_confirmation`` still answers
+    ``None`` for it: a park is a question put to the user and there is no
+    answerable question in one whose origin was never recorded, while a history
+    read states what was recorded. Every *other* unreadable row is reported exactly
+    as before; the tolerance is one shape wide (ADR-0184 §1).
+
+    That obligation is stated here and pinned in each implementation's own tests
+    rather than in the shared conformance suite, for ADR-0049 §5's reason: it is a
+    property of a store that persists a **serialised payload** and rebuilds it, and
+    a fake holding objects has no bytes for a shared case to seed. ``record``'s
+    refusal of the same shape is a different matter and *is* in the suite, because
+    a test can construct such a decision directly.
 
     Cancelling any method here is governed by this module's cancellation clause
     (ADR-0060).
@@ -3317,7 +3351,24 @@ class AuditTrail(Protocol):
         belongs to the invocation contract. "Approve once" means the question is
         settled once, not that the answer is spent on exactly one call.
 
+        **Refuses a decision whose ``egress_binding`` is an**
+        :class:`~ai_assistant.core.types.OriginUnrecordedBinding` (ADR-0184 §4),
+        with the trail's existing ``AuditError`` for a decision that is not a valid
+        record and no new error class. That shape represents a row written before
+        ADR-0181 §3 added ``planned_with_external_content``, so it is only ever
+        **read** out of a store and never minted into one: a caller bypassing
+        ``PermissionDecision.from_request`` could otherwise construct such a
+        decision and append it, minting a new row in an epoch that has ended — a
+        fabrication of *history*, and the harder one to notice later than a
+        fabricated value. This is a refusal of the same kind as the three above,
+        and for ADR-0021 §4's reason: ``record`` is the boundary where the whole
+        record is in hand. It does not contradict the rows that already exist —
+        they were written when that shape *was* the current shape, which is the
+        whole point of representing them rather than accepting new ones.
+
         Raises:
+            AuditError: If the decision is not a valid record, which now includes
+                one carrying an ``OriginUnrecordedBinding``.
             DuplicateDecisionError: If a decision with this ``id`` is already
                 recorded.
             InvalidResolutionError: If ``resolves`` is set and the invariant

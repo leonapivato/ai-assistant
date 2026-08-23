@@ -23,7 +23,7 @@ from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
-from typing import Annotated, Any, Final, Literal, assert_never
+from typing import Annotated, Any, Final, Literal, Self, assert_never
 from urllib.parse import unquote
 from uuid import uuid4
 
@@ -6480,41 +6480,41 @@ class EgressSpan(BaseModel):
     )
 
 
-class EgressBinding(BaseModel):
-    """The whole egress binding: surface (a) of ADR-0148 §11 (ADR-0150 §1).
+class _EgressBindingBase(BaseModel):
+    """The members an egress binding carries, whatever epoch recorded it (ADR-0184 §2).
 
-    One value rather than several fields, for three reasons and the third is the
-    one that would be hard to recover from. :meth:`PermissionDecision.authorises`
-    gains one conjunct rather than four, and it is an explicit conjunction rather
-    than a total field comparison, so every field added to it is a line someone
-    has to remember. Four independent optional fields admit fifteen partial
-    states, of which fourteen name a destination set and no account or an account
-    and no description — and ADR-0148 §8's third clause makes those a *floor*,
-    which means an implementation that gets it wrong is the thing the floor
-    defends against. And the facts are only meaningful together: a canonical
-    destination set with no connected account is not authorisable, and a payload
-    description with no destinations is ADR-0146 §5's "your words, to this
-    recipient" with the second half missing.
+    A private base with two public siblings, which is the shape this file already
+    uses for ``_SeverityScale``, ``MemoryBase`` and ``ContextFacet``.
+    :class:`EgressBinding` is the whole binding a live call carries;
+    :class:`OriginUnrecordedBinding` is the same three facts read back out of a row
+    recorded before ADR-0181 §3 added ``planned_with_external_content``. The three
+    members, their validators and the derived :attr:`canonical_destination_set` are
+    declared **once**, here, and neither sibling restates any of them.
 
-    A binding is **either whole or absent**. Every field here is required; there
-    is no partially populated binding, and ``None`` on a request or a decision
-    means the request is not an egress call.
+    **Declaring them once is what makes "the same three facts" true by
+    construction** rather than by review, and ADR-0184 §2 names what a second
+    declaration would be: the "second shape that must agree" ADR-0150 is named
+    after, arriving one level down. It matters most for the derived set, because
+    that is what a surface renders — a history row whose recipients were computed
+    by a second copy of the derivation could disagree with the set the user was
+    shown when the ruling was made.
 
-    **``planned_with_external_content`` rides here rather than beside the binding**
-    (ADR-0181 §3). One carriage, for ADR-0150 §1's reason: the binding is the thing
-    bound, the thing :meth:`PermissionDecision.authorises` compares and the thing
-    transcribed into the record, and a second carriage would have to be joined to it
-    by something. It is on the binding rather than on a span because ADR-0181 §2
-    rules the fact a property of the **call**; a call-level fact on a span would look
-    like a span-level claim, which that section's third clause refuses to mint.
+    **The inheritance runs this way round and not the other.** Making
+    :class:`EgressBinding` inherit from :class:`OriginUnrecordedBinding` would mint
+    one name instead of two and is wrong twice: it reads as "a binding with a
+    recorded origin is a kind of binding whose origin was never recorded", and it
+    would make ``isinstance(binding, OriginUnrecordedBinding)`` answer ``True`` for
+    every live binding, so the one narrowing every consumer performs would silently
+    misfire (ADR-0184 §2).
 
-    **This value does not carry ``parameters``, and no lane gives it a copy so
-    that it can check them here.** That is the state stated twice this decision
-    is named against. The three structural invariants below are facts about this
-    value's own span tuple, so they stay with the value that holds them; every
-    parameter-relative invariant is :class:`ActionRequest`'s alone (ADR-0150 §4),
-    checked by its validator against its own arguments, where both sides are in
-    hand.
+    **Not a value in its own right.** Nothing constructs this base, no field is
+    annotated with it, and no lane widens a field to it to avoid narrowing a union.
+    ``extra="forbid"`` is declared here and inherited by both siblings, which is
+    what makes that union total and mutually exclusive with no discriminator field
+    (ADR-0184 §3): a stored object carrying ``planned_with_external_content``
+    validates as :class:`EgressBinding` and as nothing else, one without it
+    validates as :class:`OriginUnrecordedBinding` and as nothing else, and one that
+    is faulty in any further way still raises.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, hide_input_in_errors=True)
@@ -6539,21 +6539,6 @@ class EgressBinding(BaseModel):
             "host, port and path **not at all**, and that absence is not "
             "permission: what the endpoint must be, and what a redirect may do, is "
             "issue #83's and is decided neither here nor by ADR-0148 §6."
-        )
-    )
-    planned_with_external_content: bool = Field(
-        description=(
-            "The value the seam was handed on "
-            ":attr:`CarriedProvenance.planned_with_external_content`, unchanged "
-            "(ADR-0181 §3). Fixed in the :class:`ActionRequest` before the ruling "
-            "and transcribed verbatim into the recorded decision, exactly as every "
-            "other member of the binding is (ADR-0148 §6). **Required with no "
-            "default**, like every field ADR-0150 §2 names, and for the reason "
-            "ADR-0181 §3 gives: a defaulted False would state that no external "
-            "material was selected, on behalf of a lane that made no selection. "
-            "``rebind`` **transcribes** it from the approved binding rather than "
-            "re-deriving it, which is the second of the two things ADR-0152 §7's "
-            "count now admits (ADR-0181 §3's fifth clause)."
         )
     )
 
@@ -6620,7 +6605,7 @@ class EgressBinding(BaseModel):
         return tuple(sorted(members, key=_destination_order))
 
     @model_validator(mode="after")
-    def _spans_describe_one_decomposition(self) -> EgressBinding:
+    def _spans_describe_one_decomposition(self) -> Self:
         """Refuse ADR-0150 §4's three **structural** span invariants.
 
         Exactly those three, and they are not the whole of what this value
@@ -6674,7 +6659,7 @@ class EgressBinding(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def _one_supplied_form_canonicalises_one_way(self) -> EgressBinding:
+    def _one_supplied_form_canonicalises_one_way(self) -> Self:
         """Refuse two occurrences that canonicalise one supplied form two ways (ADR-0150 §3).
 
         A canonicaliser is a **function** of the supplied form, so two
@@ -6705,6 +6690,133 @@ class EgressBinding(BaseModel):
                 )
                 raise ValueError(msg)
         return self
+
+
+class EgressBinding(_EgressBindingBase):
+    """The whole egress binding: surface (a) of ADR-0148 §11 (ADR-0150 §1).
+
+    One value rather than several fields, for three reasons and the third is the
+    one that would be hard to recover from. :meth:`PermissionDecision.authorises`
+    gains one conjunct rather than four, and it is an explicit conjunction rather
+    than a total field comparison, so every field added to it is a line someone
+    has to remember. Four independent optional fields admit fifteen partial
+    states, of which fourteen name a destination set and no account or an account
+    and no description — and ADR-0148 §8's third clause makes those a *floor*,
+    which means an implementation that gets it wrong is the thing the floor
+    defends against. And the facts are only meaningful together: a canonical
+    destination set with no connected account is not authorisable, and a payload
+    description with no destinations is ADR-0146 §5's "your words, to this
+    recipient" with the second half missing.
+
+    A binding is **either whole or absent**. Every field here is required; there
+    is no partially populated binding, and ``None`` on a request or a decision
+    means the request is not an egress call.
+
+    **``planned_with_external_content`` rides here rather than beside the binding**
+    (ADR-0181 §3). One carriage, for ADR-0150 §1's reason: the binding is the thing
+    bound, the thing :meth:`PermissionDecision.authorises` compares and the thing
+    transcribed into the record, and a second carriage would have to be joined to it
+    by something. It is on the binding rather than on a span because ADR-0181 §2
+    rules the fact a property of the **call**; a call-level fact on a span would look
+    like a span-level claim, which that section's third clause refuses to mint.
+
+    **This value does not carry ``parameters``, and no lane gives it a copy so
+    that it can check them here.** That is the state stated twice this decision
+    is named against. The three structural invariants below are facts about this
+    value's own span tuple, so they stay with the value that holds them; every
+    parameter-relative invariant is :class:`ActionRequest`'s alone (ADR-0150 §4),
+    checked by its validator against its own arguments, where both sides are in
+    hand.
+
+    **Three of its four members are declared on the private base it shares with**
+    :class:`OriginUnrecordedBinding` (ADR-0184 §2). Nothing about *this* model
+    moves: ``planned_with_external_content`` stays ``bool``, required, with no
+    default; no member is added to it, removed from it or re-typed; and every
+    ADR-0181 §10 invariant over a binding that has the field holds exactly as
+    ratified. What changed is only where the other three are written down.
+    """
+
+    planned_with_external_content: bool = Field(
+        description=(
+            "The value the seam was handed on "
+            ":attr:`CarriedProvenance.planned_with_external_content`, unchanged "
+            "(ADR-0181 §3). Fixed in the :class:`ActionRequest` before the ruling "
+            "and transcribed verbatim into the recorded decision, exactly as every "
+            "other member of the binding is (ADR-0148 §6). **Required with no "
+            "default**, like every field ADR-0150 §2 names, and for the reason "
+            "ADR-0181 §3 gives: a defaulted False would state that no external "
+            "material was selected, on behalf of a lane that made no selection. "
+            "``rebind`` **transcribes** it from the approved binding rather than "
+            "re-deriving it, which is the second of the two things ADR-0152 §7's "
+            "count now admits (ADR-0181 §3's fifth clause)."
+        )
+    )
+
+
+class OriginUnrecordedBinding(_EgressBindingBase):
+    """A recorded egress binding from before the origin field existed (ADR-0184 §2).
+
+    Read out of the permission trail and **never** minted. It represents a decision
+    row written between ``egress_binding``'s arrival on
+    :class:`PermissionDecision` (ADR-0150 §1) and
+    ``planned_with_external_content``'s (ADR-0181 §3): a stored binding carrying
+    every member :class:`EgressBinding` requires **except** that one, each
+    satisfying its own constraint, and carrying no member ``EgressBinding`` does not
+    declare. A row failing in any other way, in any additional way, or at any other
+    position is a corrupted or downgraded store exactly as it was before (ADR-0184
+    §1). ADR-0184 §9 authorises exactly this one sibling for exactly that one epoch;
+    a further member added required-with-no-default to a stored model decides its
+    own history representation in its own ADR rather than inheriting this one.
+
+    **The shape of the stored value is the whole of the condition.** No lane
+    recognises such a row by ``decided_at``, by a date range, by a schema-version
+    marker, by a table column or by a deployment identifier (ADR-0184 §1). The trail
+    is append-only and ordered but carries no record of which code wrote a row, and
+    a restored backup or a copied data directory carries rows whose timestamps say
+    nothing about the schema they were written under.
+
+    **It carries the facts the row recorded rather than standing for their
+    absence.** A user reading their exported trail sees the connected account, every
+    occurrence in both its supplied and its canonical form, the payload description
+    and the transport endpoint — everything the row actually holds — and learns
+    exactly one thing more: that the origin of this call was never recorded. A
+    marker type saying only "this row is old" would have thrown the rest away to say
+    it.
+
+    **Nothing is fabricated, in either direction.** ADR-0181 §3 makes
+    ``planned_with_external_content`` required with no default and §4's second
+    clause forbids a seam inventing it, so ``False`` and ``True`` are both out; this
+    model does not carry the member at all, so ``model_dump`` emits no key for it
+    and an export is a faithful copy of what the row says. Nothing is written back
+    either: no migration rewrites, backfills, annotates, versions, re-keys or
+    deletes such a row, and
+    :meth:`~ai_assistant.core.protocols.AuditTrail.record` refuses a decision
+    carrying this shape, so it is only ever read out of a store and never minted
+    into one (ADR-0184 §4).
+
+    **A decision carrying one authorises nothing.**
+    :meth:`PermissionDecision.authorises` answers ``False`` for it against every
+    request, and no conjunct was added to make that true: the binding is compared
+    whole and by value (ADR-0150 §9, ADR-0181 §3), pydantic's equality is per class,
+    so a model of this class never equals an :class:`EgressBinding` whatever its
+    members hold, and ``None`` equals neither (ADR-0184 §6).
+    :meth:`~ai_assistant.core.protocols.ActionPolicy.resolve` returns no ``ALLOW``
+    on a ``confirmed`` carrying one, whatever ``approved`` says (ADR-0184 §7).
+
+    **Unconstructable from any live path.** :attr:`ActionRequest.egress_binding`
+    stays ``EgressBinding | None`` and :meth:`PermissionDecision.from_request`
+    transcribes the binding from the request, so no builder can mint this shape and
+    no request can carry one (ADR-0184 §2, §4). Nothing under ``wire/`` changes
+    either, and no lane composes a ``ConfirmationEgress`` from one — that model's
+    ``planned_with_external_content`` is required with no default, so composing one
+    would demand the fabrication this whole representation exists to avoid, at the
+    surface where a user is being asked to approve something (ADR-0184 §8).
+
+    **A consumer tells the two apart with** ``isinstance`` **and nothing else.** No
+    tag, no version key, no ``Literal`` member and no ``Field(discriminator=...)``
+    is added to either model — ``extra="forbid"`` on the shared base already does
+    the job — and ADR-0184 §2 declines to mint a convenience for the narrowing.
+    """
 
 
 class ConfirmationEgress(BaseModel):
@@ -7686,13 +7798,19 @@ class PermissionDecision(BaseModel):
             "deployment that set no confirmation lifetime."
         ),
     )
-    egress_binding: EgressBinding | None = Field(
+    egress_binding: EgressBinding | OriginUnrecordedBinding | None = Field(
         default=None,
         description=(
             "The binding the ruling was taken over, transcribed verbatim from the "
             "request by :meth:`from_request` and never supplied by a caller "
             "(ADR-0150 §9). ``None`` for every decision about a non-egress call, "
-            "which is every decision the tree holds today."
+            "and it continues to mean exactly that and nothing else (ADR-0150 §1). "
+            "An :class:`OriginUnrecordedBinding` is the third arm and arrives by "
+            "**one** route only: a store decoding a row recorded before ADR-0181 §3 "
+            "added ``planned_with_external_content`` (ADR-0184 §2). It is one field "
+            "still, with that name and that default; a consumer that must tell the "
+            "two bindings apart narrows with ``isinstance``, and no convenience is "
+            "minted for it."
         ),
     )
 
@@ -7733,6 +7851,12 @@ class PermissionDecision(BaseModel):
         together. Copying here is the same discipline ADR-0018 §3 applied to
         registry queries, at the moment the value stops being the caller's and
         becomes the record's.
+
+        **This cannot produce an** :class:`OriginUnrecordedBinding` **and gains no
+        route to** (ADR-0184 §4). It transcribes the binding from
+        :attr:`ActionRequest.egress_binding`, which stays ``EgressBinding | None``,
+        so the origin-unrecorded shape is unreachable from every live path by
+        construction rather than by a check — there is no branch here to forget.
 
         **The binding is a nested model reached the same way, and copying it is
         ADR-0148 §4's third clause enforced rather than restated** (ADR-0150 §9).
@@ -7843,6 +7967,18 @@ class PermissionDecision(BaseModel):
         (ADR-0181 §3's fifth and sixth clauses) — a ``rebind`` that re-derived it
         would receive no selection set, answer ``False``, and refuse every resumed
         egress call the user was asked about and approved.
+
+        **An** :class:`OriginUnrecordedBinding` **answers** ``False`` **through
+        that same conjunct, and nothing was added for it** (ADR-0184 §6). The
+        binding is compared whole and by value; pydantic's equality is per class,
+        so a model of that class never equals an :class:`EgressBinding` whatever
+        its members hold, and ``None`` equals neither. Two independent grounds
+        meet at the same answer and it is worth stating rather than economising
+        on: a request can never carry that class at all
+        (:attr:`ActionRequest.egress_binding` stays narrow), so a future lane that
+        changed the comparison would have to break both to make such a decision
+        authorise anything. No lane compares the binding's members separately or
+        exempts any of them.
 
         The conjunct is ``None``-safe in **both** directions and neither is an
         exemption. Only one of the two is obvious: a request with a binding

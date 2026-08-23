@@ -31,6 +31,7 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     CostBasis,
+    OriginUnrecordedBinding,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -52,6 +53,14 @@ _NOT_A_CONFIRMATION = "fake: the decision resolved was not a CONFIRM, so it auth
 _PLANNED_OVER_EXTERNAL = (
     "the material selected into the model call that produced this request included "
     "a record resting on recorded external content"
+)
+
+#: ADR-0184 §7's floor, worded as a statement about the **record** rather than about
+#: the call: what is missing is a fact the trail never wrote down, and no reading of
+#: the user's answer supplies it.
+_ORIGIN_UNRECORDED = (
+    "fake: the user approved, but this decision records an egress call whose origin "
+    "was never recorded, and no answer can establish it"
 )
 
 
@@ -161,6 +170,16 @@ class FakeActionPolicy:
         ``confirmed``. Nothing is added for the approving case, because the user's
         answer about that call **is** route (a) — the one route §5's second clause
         leaves open.
+
+        **ADR-0184 §7's floor is the one clause that does need a branch here**, and
+        it is the only case where an approval is not enough: where
+        ``confirmed.egress_binding`` records no origin — an
+        :class:`~ai_assistant.core.types.OriginUnrecordedBinding`, which only a row
+        written before ADR-0181 can carry — no ``ALLOW`` is returned whatever
+        ``approved`` says, because the origin of such a call cannot be established
+        at all and ADR-0181 §5's second clause leaves no route by which any
+        authorisation covers it. Nothing in the tree hands one here; it is a floor,
+        written because a floor's value is that it holds when a route appears.
         """
         self.resolutions.append((confirmed.model_copy(deep=True), approved))
 
@@ -170,6 +189,8 @@ class FakeActionPolicy:
             )
         if confirmed.ruling.outcome is not PermissionOutcome.CONFIRM:
             return PermissionRuling(outcome=PermissionOutcome.DENY, reason=_NOT_A_CONFIRMATION)
+        if isinstance(confirmed.egress_binding, OriginUnrecordedBinding):
+            return PermissionRuling(outcome=PermissionOutcome.DENY, reason=_ORIGIN_UNRECORDED)
         return PermissionRuling(
             outcome=PermissionOutcome.ALLOW,
             reason="fake: the user approved the confirmation",
@@ -250,8 +271,21 @@ class FakeAuditTrail:
         a subclass's extra fields rather than flattening them away at
         serialisation.
 
+        **A decision whose ``egress_binding`` records no origin is refused**
+        (ADR-0184 §4), and it is the one refusal the model cannot make for itself:
+        an :class:`~ai_assistant.core.types.OriginUnrecordedBinding` is a *valid*
+        member of a ``PermissionDecision``, because it has to be for a stored row to
+        decode into one. It represents a row from an epoch that has ended, so it is
+        only ever read out of a store and never minted into one — a caller bypassing
+        ``from_request`` could otherwise append one and fabricate history rather
+        than a value. This fake holds objects rather than bytes and so cannot be
+        seeded with such a row at all, which is why the read half of ADR-0184 §5 is
+        pinned in ``SqliteAuditTrail``'s own tests while *this* clause is in the
+        shared conformance suite.
+
         Raises:
-            AuditError: If the decision does not satisfy its own model. Raised
+            AuditError: If the decision does not satisfy its own model, or carries
+                an ``OriginUnrecordedBinding``. Raised
                 as an ``AuditError`` rather than letting pydantic's
                 ``ValidationError`` escape, because CONTRIBUTING has this layer
                 raise only from the ``AssistantError`` hierarchy — a caller
@@ -260,6 +294,13 @@ class FakeAuditTrail:
             DuplicateDecisionError: If the id is already recorded.
             InvalidResolutionError: If ``resolves`` fails the invariant.
         """
+        if isinstance(decision.egress_binding, OriginUnrecordedBinding):
+            msg = (
+                f"decision {decision.id!r} is not a valid record: its egress binding "
+                f"records no origin, which is a shape only a row written before "
+                f"ADR-0181 can have; the trail reads such rows and never writes one"
+            )
+            raise AuditError(msg)
         try:
             snapshot = PermissionDecision.model_validate(decision.model_dump())
         except ValidationError as exc:
