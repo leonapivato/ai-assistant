@@ -199,3 +199,66 @@ async def test_a_quotation_mark_and_a_nul_survive_both_readers(tmp_path: Path) -
     assert from_email == [
         f'Email from "Alice" with subject "{hostile}", delivered 2026-08-03 11:00 (UTC).'
     ]
+
+
+@pytest.mark.parametrize("boundary", ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85"])
+async def test_a_boundary_inside_the_delivery_stamp_is_never_removed_into_acceptance(
+    tmp_path: Path, boundary: str
+) -> None:
+    """The shape rule stops at the two fields that carry an instant (ADR-0140 §5).
+
+    A removal applied to ``X-Assistant-Delivered-At`` would delete the character
+    from the middle of the stamp and hand ``_delivery_instant`` a value the store
+    never wrote — ``11:<boundary>00`` becoming ``11:00`` — so §5's closed subset
+    would accept a spelling it excludes. §5 forbids it in as many words: "no
+    separator is case-folded, and no precision is dropped to make a value
+    acceptable". So the message is skipped, and it is skipped for the value the
+    store actually holds.
+    """
+    stamp = delivered(INSIDE).replace("T11:", f"T11:{boundary}")
+
+    reading = await email_reader(
+        store(
+            tmp_path,
+            message(
+                "From: Alice",
+                "Subject: Standup notes",
+                f"Date: {DATE}",
+                f"{DELIVERED_AT_HEADER}: {stamp}",
+            ),
+            name="stamp.mbox",
+        )
+    ).read()
+
+    assert contents(reading.proposals) == []
+
+
+@pytest.mark.parametrize("boundary", ["\v", "\f", "\x1c", "\x1d", "\x1e", "\x85"])
+async def test_a_boundary_inside_the_report_date_is_never_removed_into_acceptance(
+    tmp_path: Path, boundary: str
+) -> None:
+    """``Date`` is the other instant-carrying field, under the same rule.
+
+    Its parser is more permissive than the delivery header's closed subset, which
+    is exactly why the removal must not run ahead of it: a reader that tidied the
+    value first would be deciding what a malformed ``Date`` meant.
+    """
+    control = await _email_content(
+        tmp_path, "From: Alice", "Subject: Standup notes", name="honest-date.mbox"
+    )
+    assert control != [], "the same message with an honest Date proposes"
+
+    reading = await email_reader(
+        store(
+            tmp_path,
+            message(
+                "From: Alice",
+                "Subject: Standup notes",
+                f"Date: Mon, 03 Aug 2026 11:{boundary}00:00 +0000",
+                f"{DELIVERED_AT_HEADER}: {delivered(INSIDE)}",
+            ),
+            name="broken-date.mbox",
+        )
+    ).read()
+
+    assert contents(reading.proposals) == []
