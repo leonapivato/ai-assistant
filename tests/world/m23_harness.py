@@ -34,23 +34,34 @@ here because ``build_composition`` resolves its ``ModelProvider`` from ``Setting
 and reaches a vendor SDK; there is no seam to hand it a fake. Where this harness
 diverges from that root it is stated at the site.
 
-**The live arm's caps, stated before the first live run (ADR-0181 §8, §10).** The
-live arm is *not* run by this module and is never in the gate. It runs the same
-scenario corpus against a real ``ModelProvider``, and it is capped as follows.
+**The live arm's caps, stated before the first live run (ADR-0181 §8, §10).**
 
-* **Scenario cap: 20 scenarios per live run.** The corpus this module defines is
-  smaller than that today; the cap is the ceiling a live run may not cross, taken
-  in corpus order, so growing the deterministic corpus cannot silently grow a paid
-  run.
-* **Spend cap: 60 logical model calls per live run**, which is three per scenario
-  at the cap — one planning call, one consolidation call, one composing call — and
-  the run refuses the call that would cross it rather than detecting the crossing
-  afterwards. **The cap is stated in calls and not in money, deliberately**, and
-  the reasoning is :mod:`benchmarks.memory.spend`'s rather than a preference of
-  this module's: a call count "is a figure the harness *knows*", where "tokens
-  would be an estimate over prompts it has not built yet and money would be a
-  vendor's price list this tree has no business carrying". A run wanting a
-  monetary figure reads it off the ledger that guard already carries.
+**No live runner exists, and none may live in this module.** §10's last clause puts
+two things on the lane implementing §8's exit test — it "ships the replaying-fake
+arm in the ordinary gate, and **states** the live arm's scenario cap, spend cap and
+trigger in its own text before the first live run" — and this paragraph is the
+second of them. §8 puts the live run "**never in the gate**", so a runner built
+here would breach that clause in the act of satisfying it: everything under
+``tests/`` is collected. The runner is owed by **#1478**, in the shape
+``benchmarks/`` already has, and its trigger has not fired. The three figures below
+are what it must enforce when it is built; nothing in this tree enforces them
+today, and no sentence here should be read as saying otherwise.
+
+* **Scenario cap: 20 scenarios per live run**, taken in corpus order. The corpus
+  this module defines is smaller than that today, so the cap is a ceiling rather
+  than a count — which is the point of fixing it now: growing the deterministic
+  corpus must not silently grow a paid run.
+* **Spend cap: 60 logical model calls per live run** — three per scenario at the
+  scenario cap: one planning call, one consolidation call, one composing call. The
+  runner is to charge **before** each call, so the bound is never crossed rather
+  than detected afterwards, which is what
+  :class:`~benchmarks.memory.spend.SpendGuard` already does and the reason it is
+  named as the mechanism. **The cap is stated in calls and not in money,
+  deliberately**, and the reasoning is that module's rather than a preference of
+  this one's: a call count "is a figure the harness *knows*", where "tokens would
+  be an estimate over prompts it has not built yet and money would be a vendor's
+  price list this tree has no business carrying". A run wanting a monetary figure
+  reads it off the ledger that guard already carries.
 * **Trigger: once per model change** — a change of provider, a change of model id,
   or a change to **any prompt this system assembles**. Never per calendar, never on
   a schedule, and never in the gate. ADR-0181 §8 gives the reason: a live run
