@@ -197,11 +197,29 @@ whether a source may be read.
 > the paths on which a read can have run with no row; §6's horizon is a third. No
 > surface may present a source with no rows as a source that was never read.
 
-> **Normative.** Whether the source was opened is a **total function of `outcome`**
-> and is not a field. `REFUSED` and `UNANSWERED` mean nothing was opened —
-> "the source is not resolved, not opened and not parsed" (ADR-0097 §5). `FAILED`,
-> `DISCARDED`, `UNCONFIRMED` and `COMPLETED` mean the read ran. No implementation
-> records that fact a second time.
+> **Normative.** Whether the source was opened is determined by `outcome` for five
+> of the six, and is not a field. `REFUSED` and `UNANSWERED` mean the driver never
+> called `read()`, so nothing was opened — "the source is not resolved, not opened
+> and not parsed" (ADR-0097 §5). `COMPLETED`, `DISCARDED` and `UNCONFIRMED` mean a
+> reading exists, so it was. No implementation records that fact a second time.
+
+> **Normative.** On `FAILED` the read was **attempted** and raised, and whether the
+> source was opened is **not determinable from the record**. No consumer infers
+> opened-ness from a `FAILED` row in either direction, and no surface renders one as
+> a read that happened or as one that did not.
+
+**The `FAILED` indeterminacy is forced by a boundary rather than chosen, and hiding
+it would have been the easy error.** A reader can refuse before it starts work at
+all: `OneWorker.run` raises `ReadAlreadyOutstandingError` when the previous read's
+worker is still alive, and its own contract says so in three words — "**Nothing is
+started.**" It can equally fail with the bytes already in hand. Both cross the seam
+as `ReaderError`, because ADR-0093 §8 requires it — "A sensor may not let a
+source-level exception … cross the seam unwrapped" — and the discriminating classes
+live in `readers/_source.py`, which `orchestration` and `context` may not import
+under golden rule 1. So a driver genuinely cannot tell, and a record that claimed
+either way would assert something nobody knew. Closing it needs a way for a `Reader`
+to say whether it started, which is a `core/protocols.py` change owing its own ADR;
+§14 defers it with that condition.
 
 The six, each pinned to the ratified clause that creates it. Two are decided at the
 gate before the read, and neither opens anything:
@@ -210,7 +228,7 @@ gate before the read, and neither opens anything:
 - **`UNANSWERED`** — the first `live()` raised `GrantError`, so the driver could not
   tell whether a grant existed and failed closed (ADR-0097 §5).
 
-Four follow a read that actually ran:
+Four follow a call to `read()`, of which three carry a reading and one does not:
 
 - **`FAILED`** — the read raised, under ADR-0093 §8: "A read that cannot complete
   may not return what it managed to gather."
@@ -751,11 +769,13 @@ alone, origin included
 
 > **Normative.** "Reconstructible" means, for a read, that the trail alone yields
 > the source's declared identity, the use, the instant the attempt started, its
-> outcome, whether the source was opened (§1), the grant it ran under where there
-> was one, and how many items the reading carried. It does **not** mean the content
-> of the read, and no lane may report the milestone met on the strength of a trail
-> that carries any. It also does not mean what the *use* did with what it was
-> handed: that is memory's record and the notification store's, not this trail's.
+> outcome, whether the source was opened where §1 determines it, the grant it ran
+> under where there was one, and how many items the reading carried. It does **not**
+> mean the content of the read, and no lane may report the milestone met on the
+> strength of a trail that carries any. It also does not mean what the *use* did
+> with what it was handed: that is memory's record and the notification store's, not
+> this trail's. On a `FAILED` row §1 rules opened-ness undeterminable, and the
+> reconstruction claim excludes it rather than asserting it.
 
 **The second clause is a narrowing of the ruled text, and it is declared rather than
 glossed** — the discipline ADR-0181 §8 used on milestone 23's arm (a). Read at full
@@ -809,7 +829,11 @@ no key, and the exit test does not ask them to.
 > clock served when the first `live()` answered — on a `live()` made to suspend
 > across a clock tick, so a lane that read the clock before the call fails here, and
 > on a read whose bytes are acquired later, so a lane that reached for
-> `SourceReading.read_at` fails here too.
+> `SourceReading.read_at` fails here too. The `FAILED` member is driven **twice**:
+> once from a reader that refuses before starting work (`OneWorker`'s outstanding
+> reservation) and once from one that fails with the bytes in hand, and the arm
+> asserts the two records are indistinguishable, which is §1's indeterminacy
+> exercised rather than assumed.
 
 > **Normative.** **Arm (b) — the revocation question.** A run grants a source,
 > drives reads, revokes it, and lets the driver run again; the trail alone must
@@ -1103,6 +1127,14 @@ supplies no obligation of its own (ADR-0089 §3).
   trail's subject is access rather than diagnosis and nothing asks. Fires with the
   first surface that reports *why* a read failed; it is one optional field under
   ADR-0008 §1's additive pattern.
+- **Closing `FAILED`'s opened-ness indeterminacy** (§1). It needs a `Reader` that can
+  say whether it started — a return value, a distinct error class in `core`, or a
+  seam of its own — which is a `core/protocols.py` change owing its own ADR under
+  golden rule 5 and reopening ADR-0093 §7's refusal to give a reader anything more.
+  Fires when a consumer needs the distinction for something, which today nothing
+  does: both shapes are the same fact for the user — the source was not read — and
+  differ only in the operator's diagnosis, which the failure class above is the
+  cheaper answer to.
 - **A duration or a `finished_at`.** Fires with the first consumer that needs to know
   how long a read took — a budget, a health measure, a timeout tuning surface — none
   of which exists.
