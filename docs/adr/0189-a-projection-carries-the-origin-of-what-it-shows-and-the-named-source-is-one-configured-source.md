@@ -431,9 +431,15 @@ re-deriving it is how the second half gets dropped.
 > held* (ADR-0045 §6) and asserts nothing about its band, its origin or its source.
 > It renders no third state as `False` and no absence as a value.
 
-> **Normative.** Nothing this section adds is a ranking, ordering or filtering
-> input. Naming a source does not reorder a listing, does not change a band's
-> precedence (ADR-0187 §1, §4) and does not adjust a confidence.
+> **Normative.** Nothing this ADR adds is an input to anything the **store or the
+> engine** ranks, orders or selects on. `beliefs()` and `list_beliefs` stay
+> order-neutral and confidence-neutral over these fields, no retrieval ranks on them,
+> a band's precedence is unchanged (ADR-0187 §1, §4), and no confidence is adjusted.
+
+> **Normative.** A **client** may style, filter and order the rows it already holds
+> by these fields, which is what carrying them structurally is for (#746). Doing so
+> changes what that client shows and never what the store returns, and no client may
+> present its own ordering as the assistant's judgement of which belief matters more.
 
 **This is ADR-0098 §8's second tier, reached.** The system can now say "your
 calendar" and, with §5's label, "your work calendar". It still may never say "Bob",
@@ -472,6 +478,20 @@ because an earlier draft did not state it.** `Retirement` carries no `band` and 
 `rests_on_recorded_external_content` of its own — §2 puts both inside `warrant` — so a
 clause naming them bare was not implementable as written. Adversarial review found it
 on round 3, and the access path is now spelled in the clauses themselves.
+
+**Splitting the ranking clause in two is a repair, and the draft it repairs said both
+things at once.** That draft ruled flatly that "Nothing this section adds is a
+ranking, ordering or filtering input" while the Consequences promised a client could
+"style, filter and order" on the new fields — and architecture review found on round 4
+that an implementing surface cannot satisfy both. The two halves are genuinely
+different questions and the corpus already separates them: ADR-0107 §9 declines
+"Making `beliefs()` or `list_beliefs` order or filter on the count" on ADR-0077 §6's
+ground that "a number computed at presentation cannot reorder a store it never
+touches", which is a rule about the *store*. What a client does with a page it is
+holding is the presentation side of the same sentence, and it is the whole point of
+#746's complaint that a surface "cannot style it, filter on it, or order by it". So
+the store-side prohibition stands unweakened and the client-side permission is stated
+rather than left to collide with it.
 
 **What the two live surfaces owe changes, and both currently say they cannot.**
 `interfaces/cli.py`'s `_why` and `gateway/assets/app.js`'s `whyHeld` each tell the
@@ -795,8 +815,22 @@ ahead of a trigger without guessing at a shape it has no producer for.
 > `gateway/assets/app.js` — so that each names the source and the report instant
 > under §4, and neither continues to state that it cannot show them. It renders a
 > retirement under §4's three retirement clauses, taking all three arms — attested,
-> asserted-or-derived, and no longer held. Its tests assert the rendering, not only
-> that a field is present.
+> asserted-or-derived, and no longer held — at `_render_retirements` in
+> `interfaces/cli.py` and `renderRetirements` in `gateway/assets/app.js`. Its tests
+> assert the rendering, not only that a field is present.
+
+> **Normative.** The same lane renders an **attested question** under §4's first
+> clause, at `_render_question` in `interfaces/cli.py` and `renderQuestion` in
+> `gateway/assets/app.js`. §4 binds every surface that renders an attested belief,
+> question or retirement, and a question is the projection the first attested
+> proposals actually reach; a lane that updated only the belief explanation would
+> leave the surface §4 was written for unchanged.
+
+> **Normative.** For each of those four rendering paths, the surface lane ships a
+> test over an **attested** subject asserting that the source identity and the
+> source-clock instant both reach the rendered output, and a test over an attested
+> retirement whose retired record no longer resolves asserting the *no longer held*
+> arm. A test asserting only that a field is populated does not satisfy either.
 
 > **Normative.** Every value these fields carry is inserted into a surface's output
 > as **data**, neutralised for that target on render (ADR-0042 §4, ADR-0098 §7's
@@ -804,11 +838,12 @@ ahead of a trigger without guessing at a shape it has no producer for.
 > `reported_at` is an instant, but a `Retirement.content` is not, and the surface
 > that renders the two together neutralises both.
 
-> **Normative.** The projection lane ships a test that builds a question whose
-> `retires` names an attested record whose `content` carries the rendering target's
-> own syntax, and asserts that the rendered attribution of every span is unchanged
-> by it. This is ADR-0098 §9's marked test obligation, read one projection over, and
-> a test asserting only that a source name appears does not satisfy it.
+> **Normative.** The **surface** lane, for **each** rendering target that presents a
+> retirement, ships a test that builds a question whose `retires` names an attested
+> record whose `content` carries that target's own syntax, and asserts that the
+> rendered attribution of every span is unchanged by it. This is ADR-0098 §9's marked
+> test obligation read one projection over, and a test asserting only that a source
+> name appears does not satisfy it.
 
 **The `reported_at` half is the one an implementing lane will drop, because the
 source-naming half is the one everybody is talking about.** ADR-0073 §4's gate asks
@@ -816,6 +851,16 @@ for both and its floor forbids substituting our clock for the source's — the e
 error the current CLI sentence exists to avoid making. A lane that names the source
 and leaves "Last revised" as the only instant has met §8's second clause and breached
 §4's gate.
+
+**The rendering-security test sits on the surface lane and not the projection lane,
+and an earlier draft had it on the wrong one.** That draft asked the projection lane
+to assert "the rendered attribution of every span" — output that lane does not
+produce, since the surfaces are still unchanged when it lands, so the test could only
+have been made to pass by moving a surface into a lane §9 fences to `orchestration/`.
+Adversarial review found it on round 4. It is per rendering target rather than once
+because ADR-0042 §4's division is per target — "the engine carries the value verbatim,
+the adapter escapes for its target" — so a terminal's syntax and a browser's are two
+different tests of one clause.
 
 ### 10. What this ADR does not decide
 
@@ -981,7 +1026,9 @@ producer: a user reading a belief can see *which* connected source reported it a
 both and cannot show them. A question that would retire an attacker-authorable
 calendar line renders that line as somebody else's words, which is the surface
 ADR-0098 §7 exists for and the one it could not reach. A client can style, filter and
-order on a warrant that came from outside instead of parsing a sentence for it. And a
+order the page it holds on a warrant that came from outside instead of parsing a
+sentence for it, while the store it drew that page from stays as order-neutral as it
+was (§4). And a
 second mailbox stops being an open design question and becomes a specified one: the
 grant rule ADR-0097 §9a gated it on exists, and what remains between here and a
 second source is one clause of one ADR, named and written out.
