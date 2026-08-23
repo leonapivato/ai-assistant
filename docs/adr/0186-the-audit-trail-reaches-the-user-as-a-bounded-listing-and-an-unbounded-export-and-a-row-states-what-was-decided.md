@@ -20,7 +20,7 @@
   more such operations and states in terms that no browser request resolves to them,
   so every obligation that clause imposes binds unchanged; §13 classifies it and
   places the dated note on the change that makes the count false, which is the
-  implementation rather than this document.
+  contract lane rather than this document.
 - **Refs:** #1485 (the gap this closes), #1484 (the milestone-23 QA run that found
   it), #1427 (track:world, milestone 24), #1501 (the batch), #1017 (the read-record
   ADR, being decided in parallel — §10), #747 (authorised cloud egress in the trail),
@@ -287,12 +287,31 @@ one from a listing.
 
 > **Normative.** `recent_decisions` and `export_decisions` are served on the hub's
 > loopback listener **and** on its remote listener. Neither joins
-> `CONNECTION_METHODS`, and no lane adds a per-listener restriction for them.
+> `CONNECTION_METHODS`, and neither calls `wire/client.py`'s `_refuse_off_loopback`.
+> No lane adds a per-listener restriction for them.
 
 > **Normative.** `PROTOCOL_VERSION` moves for this decision, under ADR-0124 §9's first
 > limb, and the obligation falls on the change that adds the methods, in that same
-> change (§11). Nothing else under `wire/` changes: `METHODS`, the argument and result
-> adapters and the error mapping are all derived from the Protocol.
+> change (§11).
+
+> **Normative.** `HubClient` gains a forwarding method for each operation, refusing
+> `limit` on §3's terms **locally and before any frame is sent**. Nothing else under
+> `wire/` changes: `METHODS`, `STREAMING_METHODS`, the argument and result adapters and
+> the error mapping are all derived from the Protocol.
+
+**The client's two methods are named because the client is hand-written where the
+server is reflected, and an earlier draft of the clause above said "nothing else under
+`wire/` changes" without them.** Adversarial review found it. `wire/surface.py` reads
+the Protocol, so `wire/server.py`'s dispatch and both adapters are total by
+construction — but `wire/client.py` exposes each promoted method as its own `async def`
+relaying through `_call`, so a client that grew no methods would raise `AttributeError`
+before a frame was ever sent, and §5's first clause would be satisfied by a hub nothing
+could ask. ADR-0151 §11 states the precedent in exactly this form — "Nothing in `wire/`
+changes but the client's five methods" — and this is that sentence with the right
+number in it. The **local** refusal is not optional either: `AssistantEngineContract`
+asserts that "a malformed page argument and a blank identifier are refused locally
+(§9), so neither implementation is silently more permissive", and a client that shipped
+`limit=0` to the hub would be exactly that.
 
 **The withheld five are withheld for a reason that does not reach a history read.**
 ADR-0151 §13 keeps the connection operations on the loopback socket because they carry
@@ -518,58 +537,80 @@ for a different value and is #1502's territory as much as #1017's.
 in the same store is exactly what that ADR decides, and this one is written so that
 every answer it could give leaves §1 through §9 standing.
 
-### 11. What the implementing lane owes
+### 11. Two lanes, and what each owes
 
-> **Normative.** The lane is the two Protocol methods, their implementation in
-> `orchestration/engine.py`, the canonical fake in `ai_assistant.testing`, the two CLI
-> commands, and the `PROTOCOL_VERSION` bump — one change, under ADR-0137 §2's rule that
-> a contract seam rides with the primary production implementation whose demands shape
-> it, with every other site adaptation in ADR-0137 §1's sense.
+> **Normative.** The **contract lane** is the two Protocol methods, the shared
+> conformance cases below, their implementation in `orchestration/engine.py`, the
+> canonical fake in `ai_assistant.testing`, `HubClient`'s two forwarding methods, and
+> the `PROTOCOL_VERSION` bump — one change under ADR-0137 §2, with `orchestration` the
+> primary production implementation and every other site adaptation in ADR-0137 §1's
+> sense.
 
-> **Normative.** The lane moves `PROTOCOL_VERSION` from 11 to 12 and records the reason
-> beside the constant in `wire/envelope.py`'s own form, citing ADR-0124 §9's first limb.
-> It ships a test pinning the new value.
+> **Normative.** §9's two commands are a **follow-on consumer lane** under ADR-0137 §4,
+> briefed only after the contract lane has merged, with the merged contract text as that
+> brief's authority. No lane carries them into the contract lane.
 
-> **Normative.** The lane appends the dated note §13 places on ADR-0177, in the same
-> change, because that change is the one that makes ADR-0177 §1's count false.
+> **Normative.** The contract lane moves `PROTOCOL_VERSION` from 11 to 12 and records
+> the reason beside the constant in `wire/envelope.py`'s own form, citing ADR-0124 §9's
+> first limb. It ships a test pinning the new value.
 
-> **Normative.** The lane ships paging tests: `limit` refused for a `bool`, for a
-> non-integer, for zero, for a negative value and at `2**63`, each before any I/O; and
-> `recent_decisions(limit=n)` equal to the first `n` of `export_decisions()` over a
-> trail of more than `n` rows, which is §2's prefix property and the one clause a
-> correct-looking implementation with its own ordering would fail.
+> **Normative.** The contract lane appends the dated note §13 places on ADR-0177,
+> because that change is the one that makes ADR-0177 §1's count false.
 
-> **Normative.** The lane ships the ordering test over rows sharing a `decided_at`, so
-> the `id` tie-break is exercised rather than assumed, and over a trail whose insertion
-> order differs from its `decided_at` order, which is the disagreement ADR-0021 §4's
-> rule exists for.
+**The shared conformance suite is where §2 and §3 are made checkable, and an earlier
+draft of this section said no suite case was owed.** Both review lenses found it, and
+they were right twice over. `AssistantEngineContract` is the shared suite for **this**
+Protocol — `AuditTrailContract` is a different suite and is indeed untouched — and it is
+subclassed by the concrete engine, by the canonical fake **and** by `HubClient`, which is
+what makes it the only place a clause binds all three. It is also the precedent: ADR-0102
+§12 item 2 put "a clause per ruling above that a store cannot exhibit" here for exactly
+this reason. And it settles where `HubClient`'s methods land — the suite runs against the
+client, so the client's two methods cannot be deferred to a later lane without the suite
+going red the day it lands.
 
-> **Normative.** The lane ships reader tests over a trail holding **one**
+> **Normative.** `AssistantEngineContract` gains, for both operations: §2's **order**,
+> asserted over rows sharing a `decided_at` so the `id` tie-break is exercised rather
+> than assumed, and over a trail whose insertion order differs from its `decided_at`
+> order; §2's **prefix** property, `recent_decisions(limit=n)` equal to the first `n` of
+> `export_decisions()` over a trail of more than `n` rows; §3's **local refusal** of
+> `limit` for a `bool`, for a non-integer, for zero, for a negative value and at
+> `2**63`, each before any I/O; and §3's **oversized result**, refused coming back
+> exactly as an oversized argument is refused going in, which is the suite's own fifth
+> clause applied to the largest result this surface can produce.
+
+**The prefix case is the one nothing else would catch.** An implementation that sorted
+its listing and relayed an unordered export would pass every construction test, every
+rendering test and every transport test, and would hand two conforming implementations'
+users two different accounts of one history — which is the failure the suite's own
+preamble says it exists for, "a way two implementations could answer the same call
+differently while both looking correct".
+
+> **Normative.** The contract lane ships reader tests over a trail holding **one**
 > origin-unrecorded row among **several** ordinary ones — the shape ADR-0184 §10
 > requires and for its reason: `recent_decisions` and `export_decisions` each return
 > every row including it, and a test whose trail holds only the legacy row does not
-> satisfy this clause.
+> satisfy this clause. These are the implementation's own, not the suite's, for ADR-0049
+> §5's reason: the row is seeded by writing JSON into a `SqliteAuditTrail`'s `data`
+> column, and a fake holding objects has no bytes for a shared case to seed.
 
-> **Normative.** The lane ships a round-trip test at the surface: the JSON
+> **Normative.** The contract lane ships a transport test that both methods are served
+> on the remote listener — that neither is in `CONNECTION_METHODS`, asserted against
+> the frozen set rather than by absence from a hand-written list — and a gateway test
+> that a browser request naming either is refused, which pins §6 against ADR-0177 §1.
+
+> **Normative.** The consumer lane ships a round-trip test at the surface: the JSON
 > `assistant export-decisions` writes re-validates as `tuple[PermissionDecision, ...]`
 > and compares equal to what the engine returned, with the legacy row's
 > `planned_with_external_content` key absent in both directions.
 
-> **Normative.** The lane ships CLI rendering tests for the three origin states over
-> three rows in one listing, asserting that the third state's rendering is distinct
+> **Normative.** The consumer lane ships rendering tests for the three origin states
+> over three rows in one listing, asserting that the third state's rendering is distinct
 > from the `False` state's rather than merely present; for a non-egress row, that no
 > recipient, account or origin is rendered; and for an unresolved `CONFIRM`, that it is
 > rendered as neither allowed nor denied.
 
-> **Normative.** The lane ships a transport test that both methods are served on the
-> remote listener — that neither is in `CONNECTION_METHODS`, asserted against the
-> frozen set rather than by absence from a hand-written list — and a gateway test that a
-> browser request naming either is refused, which pins §6 against ADR-0177 §1.
-
-- **No conformance-suite case is owed.** Neither method is on `AuditTrail`, and the
-  behaviour §5 and §7 bind is the engine's and the surfaces'. `AuditTrailContract` is
-  untouched by this ADR.
-- **#1485 closes against this lane**, once both commands are drivable.
+- **#1485 closes against the consumer lane**, because that is where the trail first
+  becomes drivable by a user, which is the gap the issue records.
 
 ### 12. The pre-registered exit measurement for this surface
 
@@ -609,7 +650,7 @@ decision, which is untouched; §1's *first* clause is an explicit closed enumera
 §6 above states the same conclusion for these two in terms. So it is an amendment,
 recorded as a dated header note.
 
-**The note is placed on the implementation and not on this document, which is a
+**The note is placed on the contract lane and not on this document, which is a
 departure from ADR-0184 §11 and is argued rather than assumed.** ADR-0184 wrote its
 records in its authoring commit because "a record and the clause it records are one
 judgement" — its §2 changed what a type *is*, so ADR-0150's sentence became false the
