@@ -15,6 +15,7 @@ empty.
 from __future__ import annotations
 
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -51,8 +52,8 @@ def _dry_run(repo: Path, *args: str) -> str:
 
 
 def _staged(plan: str) -> str:
-    """The staged wheel path out of a rendered plan."""
-    line = next(part for part in plan.split() if "/deploy-hub-" in part)
+    """The staged wheel path out of a rendered plan — the scp destination."""
+    line = next(line for line in plan.splitlines() if line.startswith("stage   :"))
     return line.split(":")[-1]
 
 
@@ -142,7 +143,7 @@ def test_the_marker_is_written_after_the_install_not_before(tmp_path: Path) -> N
     lines = plan.splitlines()
 
     install = next(i for i, line in enumerate(lines) if "uv pip install" in line)
-    marker = next(i for i, line in enumerate(lines) if "> ~/DEPLOYED_COMMIT" in line)
+    marker = next(i for i, line in enumerate(lines) if "commit=" in line)
     assert install < marker
 
 
@@ -244,7 +245,7 @@ def test_the_default_paths_render_unquoted_so_the_tilde_expands(tmp_path: Path) 
     plan = _dry_run(_repo(tmp_path))
 
     assert "--python ~/venv/bin/python" in plan
-    assert "> ~/DEPLOYED_COMMIT" in plan
+    assert re.search(r"mv -f ~/DEPLOYED_COMMIT\.[0-9a-f]+\.tmp ~/DEPLOYED_COMMIT;", plan)
     assert "~/.local/bin/uv pip install" in plan
 
 
@@ -357,6 +358,121 @@ def test_the_staged_wheel_is_removed_after_the_install(tmp_path: Path) -> None:
     install = next(i for i, line in enumerate(lines) if "uv pip install" in line)
     unstage = next(i for i, line in enumerate(lines) if line.strip().startswith("rm -f "))
     assert install < unstage
+
+
+# --------------------------------------------------------------------------- #
+# Staging: a directory of this deploy's own, and the wheel's own name in it     #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_staged_wheel_keeps_the_name_the_build_gave_it(tmp_path: Path) -> None:
+    # The whole of issue #1481. A wheel's filename is its metadata — PEP 427 says
+    # five or six dash-delimited components — so the per-run token cannot go in
+    # it: `deploy-hub-<token>-` adds two more and `uv pip install` refuses the
+    # file before reading a byte of it.
+    repo = _repo(tmp_path)
+    expected = _MODULE.wheel_name(repo)
+
+    staged = _staged(_dry_run(repo))
+
+    assert staged.rsplit("/", 1)[-1] == expected
+    assert len(expected.removesuffix(".whl").split("-")) in (5, 6)
+
+
+def test_the_per_run_token_names_the_directory_not_the_file(tmp_path: Path) -> None:
+    directory, _, name = _staged(_dry_run(_repo(tmp_path))).rpartition("/")
+
+    assert directory.startswith(f"{_MODULE.DEFAULT_STAGE_DIR}/deploy-hub-")
+    assert "deploy-hub-" not in name
+
+
+def test_the_staging_directory_is_created_before_the_wheel_is_copied(tmp_path: Path) -> None:
+    # scp does not create the destination's parent, so a missing directory fails
+    # the copy rather than the install — three minutes of transfer later.
+    plan = _dry_run(_repo(tmp_path))
+    lines = plan.splitlines()
+
+    mkdir = next(i for i, line in enumerate(lines) if "mkdir -m 0755 " in line)
+    stage = next(i for i, line in enumerate(lines) if line.startswith("stage   :"))
+    assert mkdir < stage
+    # 0755, because the service user reads the wheel the login user wrote.
+    assert f"mkdir -m 0755 {_staged(plan).rsplit('/', 1)[0]}" in plan
+
+
+def test_the_staging_directory_goes_with_the_wheel_and_not_recursively(tmp_path: Path) -> None:
+    plan = _dry_run(_repo(tmp_path))
+    lines = plan.splitlines()
+    directory = _staged(plan).rsplit("/", 1)[0]
+
+    install = next(i for i, line in enumerate(lines) if "uv pip install" in line)
+    rmdir = next(i for i, line in enumerate(lines) if f"rmdir {directory}" in line)
+    assert install < rmdir
+    # An interpolated path is never handed to a recursive delete; the directory
+    # holds one wheel, which the same command has just removed.
+    assert "rm -rf" not in plan
+
+
+def test_a_staging_directory_with_a_space_is_one_shell_word(tmp_path: Path) -> None:
+    plan = _dry_run(_repo(tmp_path), "--stage-dir", "/srv/stage dir")
+
+    assert "mkdir -p '/srv/stage dir'" in plan
+    assert re.search(r"mkdir -m 0755 '/srv/stage dir/deploy-hub-[0-9a-f]+'", plan)
+
+
+# --------------------------------------------------------------------------- #
+# Verifying the staged wheel before anything installs it                       #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_staged_wheel_is_digested_before_it_is_installed(tmp_path: Path) -> None:
+    plan = _dry_run(_repo(tmp_path))
+    lines = plan.splitlines()
+
+    verify = next(i for i, line in enumerate(lines) if "sha256sum" in line)
+    install = next(i for i, line in enumerate(lines) if "uv pip install" in line)
+    assert verify < install
+    # As the service user, so one answer settles both readability and integrity.
+    assert "su - assistant -c 'echo STAGED_SHA256=$(sha256sum " in plan
+
+
+def test_a_truncated_transfer_is_caught_before_the_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # An scp killed midway leaves a wheel that installs as far as "unable to
+    # locate the end of central directory record", from inside uv.
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, "STAGED_SHA256=deadbeef\n", ""))
+
+    with pytest.raises(_MODULE.DeployError, match="not the one that was sent"):
+        _MODULE._assert_staged(_plan(_repo(tmp_path)), "cafe1234")
+
+
+def test_a_staged_wheel_the_service_user_cannot_read_is_named_as_that(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # sha256sum writes its complaint to stderr and nothing to stdout, so the
+    # label arrives empty — which is a permission answer, not a digest mismatch.
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, "STAGED_SHA256=\n", ""))
+
+    with pytest.raises(_MODULE.DeployError, match="cannot read the staged wheel"):
+        _MODULE._assert_staged(_plan(_repo(tmp_path)), "cafe1234")
+
+
+def test_an_unanswered_digest_check_is_not_reported_as_a_bad_wheel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (255, "", "ssh: connect: refused"))
+
+    with pytest.raises(_MODULE.DeployError, match="could not digest the staged wheel"):
+        _MODULE._assert_staged(_plan(_repo(tmp_path)), "cafe1234")
+
+
+def test_a_login_banner_does_not_hide_the_staged_digest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    banner = "Welcome to Ubuntu 24.04 LTS\n\nSTAGED_SHA256=cafe1234\n"
+    monkeypatch.setattr(_MODULE, "_probe", lambda _argv: (0, banner, ""))
+
+    _MODULE._assert_staged(_plan(_repo(tmp_path)), "cafe1234")
 
 
 def test_without_a_supplied_wheel_the_build_goes_to_a_fresh_directory(tmp_path: Path) -> None:
@@ -625,3 +741,59 @@ def test_an_unknown_deployed_commit_raises_rather_than_reading_as_clean(tmp_path
 )
 def test_marker_commit_reads_the_commit_field(text: str, expected: str | None) -> None:
     assert _MODULE.marker_commit(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # What a box deployed by hand before this recipe existed actually holds.
+        ("ece6d22d\n", "ece6d22d"),
+        ("ece6d22d", "ece6d22d"),
+        ("ece6d22d-dirty\n", "ece6d22d"),
+        ("0123456789abcdef0123456789abcdef01234567\n", "0123456789abcdef0123456789abcdef01234567"),
+        # `cat` runs in a login shell, so the marker is what comes LAST.
+        ("Welcome to Ubuntu 24.04 LTS\n\nece6d22d\n", "ece6d22d"),
+        # Too short to be a sha, and not hex at all: neither is a commit.
+        ("abc123\n", None),
+        ("deployed by hand\n", None),
+        ("Welcome to Ubuntu\n", None),
+    ],
+)
+def test_a_pre_recipe_bare_sha_marker_is_read_rather_than_called_absent(
+    text: str, expected: str | None
+) -> None:
+    # Reading it as absent says "dependency drift is UNKNOWN" about a box that
+    # records exactly what is deployed (issue #1481).
+    assert _MODULE.marker_commit(text) == expected
+
+
+def test_the_key_value_form_wins_over_a_trailing_hex_line() -> None:
+    # `wheel_sha256=` is hex, and it is last. The field is the answer.
+    marker = "commit=abc1234\nwheel_sha256=0123456789abcdef\n"
+
+    assert _MODULE.marker_commit(marker) == "abc1234"
+
+
+def test_the_marker_is_renamed_into_place_not_redirected_onto(tmp_path: Path) -> None:
+    # A marker left root-owned by a hand-run deploy cannot be reopened by the
+    # service user (issue #1481). `mv` needs only the directory, which is its
+    # home — and the next deploy then never reads a half-written marker.
+    plan = _MODULE.Plan(
+        _MODULE._parser().parse_args(["hub.example", "--repo", str(_repo(tmp_path))]), "w.whl"
+    )
+
+    command = plan.write_marker("abc1234", "ff")
+
+    assert f"> ~/DEPLOYED_COMMIT.{plan.token}.tmp && mv -f " in command
+    assert f"mv -f ~/DEPLOYED_COMMIT.{plan.token}.tmp ~/DEPLOYED_COMMIT;" in command
+    # And a failed rename takes the scratch file with it, rather than leaving one
+    # per attempt under a name nothing will look for again.
+    assert f"|| {{ rm -f ~/DEPLOYED_COMMIT.{plan.token}.tmp; exit 1; }}" in command
+
+
+def test_a_hostile_marker_path_is_quoted_in_the_scratch_name_too(tmp_path: Path) -> None:
+    plan = _dry_run(_repo(tmp_path), "--marker", "~; touch /tmp/pwned")
+
+    assert "> ~; touch" not in plan
+    assert "mv -f ~; touch" not in plan
+    assert "rm -f ~; touch" not in plan
