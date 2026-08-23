@@ -163,18 +163,33 @@ nothing bounds that number (#1447).
 > quantity of `ATTESTED` material is **not** a ground to reorder the bands, and no
 > lane may read #663, #1447 or #1484 as licensing a reordering.
 
-**What the outsider can displace, and what they cannot.** The ordering's protective
-half does exactly what it was ruled to do under the adversarial input, and this is
-the first thing to state because it is the part at risk of being lost in the
-argument. `ASSERTED` is read first. A source that supplies thirty thousand entries
-does not displace one word the user said, because the user's band is filled before
-the outsider's is read at all. The band an outsider can write into sits **below**
-the band the supersession law protects, and every mechanism that keeps it there —
-ADR-0072 §2's refusal to fold `EXTERNAL` into `ASSERTED`, ADR-0183 §3's refusal to
-let content buy a band — holds under supply as well as under content.
+**What the outsider's volume can displace, and what it cannot.** The ordering's
+protective half does exactly what it was ruled to do under the adversarial input,
+and this is the first thing to state because it is the part at risk of being lost in
+the argument. `ASSERTED` is read first, so what a source supplies is read into
+whatever the user's own band leaves. **The outsider's quantity buys them nothing
+against it**: thirty thousand entries reach the composed context on exactly the same
+terms as one, because the asserted band is filled before the attested band is read
+at all. The band an outsider can write into sits **below** the band the supersession
+law protects, and every mechanism that keeps it there — ADR-0072 §2's refusal to
+fold `EXTERNAL` into `ASSERTED`, ADR-0183 §3's refusal to let content buy a band —
+holds under supply as well as under content.
 
-What the outsider can displace is `DERIVED`: the system's own inferences about the
-user. That is precisely what ADR-0098 §10 said, and it is real. §4 is where it is
+**One assertion is displaced, and it is §4's doing rather than the outsider's.**
+Under §4's floor a band whose read returns a record keeps one slot, so on a store
+whose assertions would otherwise fill the budget the attested band holds one record
+and the asserted band holds one fewer. That is stated rather than glossed, and three
+things bound it. The cost is **one slot**, not a share: it is the same whether the
+source holds one entry or thirty thousand, which is precisely the property that
+makes volume worthless here. It is **the floor's cost and not the ordering's** — the
+same slot is owed to `DERIVED` on a store dominated by assertions, with no outsider
+anywhere in the picture. And it is **the price of the fact that the band is
+represented at all**, which is what a reader of the prompt would otherwise have to
+infer from an absence.
+
+What the outsider's volume *can* displace is `DERIVED`: the system's own inferences
+about the user, which strict precedence lets an unbounded supply reduce to nothing.
+That is precisely what ADR-0098 §10 said, and it is real. §4 is where it is
 answered.
 
 **Reversing the two lower bands is refused, on three grounds.**
@@ -203,7 +218,8 @@ belief "nothing is asked and nothing is closed". Reversing would put the
 unfalsifiable band above the falsifiable one.
 
 **The honest cost of affirming.** A turn's context can be filled with material an
-outsider chose, up to whatever the budget leaves after `ASSERTED`. This ADR does
+outsider chose, up to whatever the budget leaves after `ASSERTED` and after §4's
+floor for `DERIVED`. This ADR does
 not claim otherwise and does not treat ADR-0098 §2's labelling as making it
 harmless: §2 makes the material arrive as data rather than instruction, which is a
 different property from how much of the prompt it occupies. §4 bounds the
@@ -344,9 +360,19 @@ making them few, it does not restore personalization at volume, and it is not a
 defence of the prompt's composition against a determined supply. One slot is the
 boundary between representation and exclusion, and it is the only reservation
 derivable without a number nobody has measured — which is why §4's no-larger-share
-clause gates every larger one behind #789 rather than picking a proportion here. ADR-0103
-§5's standing objection is the reason: "a number invented here would arrive with
-the authority of a ratified decision and the evidence of a guess."
+clause gates every larger one behind #789 rather than picking a proportion here.
+ADR-0103 §5's standing objection is the reason: "a number invented here would arrive
+with the authority of a ratified decision and the evidence of a guess."
+
+**What it costs, on the same terms.** At most one slot per band below the one that
+would otherwise have filled the budget — two of thirty at today's
+`RETRIEVAL_LIMIT` — and only where those bands' reads return anything. The donor is
+named by §4's second clause and it is the band that had the most to give, so what is
+lost is the least relevant member of the band that was crowding the composition. §1
+states the case that matters most and does not soften it: on a store whose
+assertions would have filled the budget, the floor costs the user's own band a slot,
+and it costs the same one slot whether the source behind the attested record holds
+one entry or thirty thousand.
 
 **The objection this section has to meet, and its honest answer.** A reader may say
 the correction affordance does not run through the prompt at all: the user inspects
