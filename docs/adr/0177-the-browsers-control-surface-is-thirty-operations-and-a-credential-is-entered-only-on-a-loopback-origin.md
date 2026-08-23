@@ -2,6 +2,26 @@
 
 - Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries ADR-0178 §1's egress member)
 - Date: 2026-08-22
+- Amended: 2026-08-24 by ADR-0186 — **§1's third clause, by a count and nothing
+  else.** That clause reads that `learn` "is the one operation of the promoted
+  surface that is neither in the enumeration above nor the gateway's own". The
+  change carrying this note adds `recent_decisions` and `export_decisions` to
+  `AssistantEngine` (ADR-0186 §1), so there are now **three** such operations and
+  the word "one" is false. Under ADR-0070 §1's test a reader acts identically: the
+  obligation that clause imposes is that no lane puts `learn` in a browser without
+  its own ratified decision, and that is untouched — as is §1's *first* clause, an
+  explicit closed enumeration ("exactly these **thirty** … and no others") which
+  governs any method it does not name. ADR-0186 §6 states the same conclusion for
+  these two in terms: neither is one of the thirty, no browser request resolves to
+  either, and the gateway makes neither call of its own. **The count of thirty is
+  itself unchanged**, because it counts what a browser may reach and not what the
+  promoted surface carries.
+
+  The note lands on the change that adds the methods rather than in ADR-0186's own
+  authoring commit, which ADR-0186 §13 places and argues as a departure from
+  ADR-0184 §11: this sentence counts methods on the promoted surface and stays
+  **true** until a method lands, so a note written when that document merged would
+  have had ADR-0177 disclaim a state of the world that had not happened yet.
 - Partially superseded: 2026-08-22 by ADR-0178 — **two sentences of §8, and the
   precondition beside them is discharged rather than replaced.** ADR-0178 is the
   decision §8's precondition names (#1366), and it discharges it on **its own

@@ -478,6 +478,42 @@ async def _as_tuple[T](page: Awaitable[list[T]]) -> tuple[T, ...]:
     return tuple(await page)
 
 
+async def _ordered_decisions(
+    read: Awaitable[list[PermissionDecision]],
+) -> tuple[PermissionDecision, ...]:
+    """Await one audit-trail read and put ADR-0186 §2's total order on what it returned.
+
+    **The sort is owed here rather than assumed from the store**, and that is
+    ADR-0186 §2's own clause: ``AuditTrail.export`` "states no order and this ADR
+    adds none to it; an implementation relaying a store read that arrives unordered
+    owes the sort, over a list it has already materialised". Both shipped trails
+    happen to promise ``recent``'s order for ``export`` too, in their own
+    docstrings — so an engine that wrote ``tuple(await trail.export())`` would pass
+    every test driven through either of them and be wrong the day a conforming trail
+    returned insertion order, taking §2's prefix guarantee with it.
+
+    Applied to the **listing** as well, though ``AuditTrail.recent``'s contract does
+    fix the order: one helper for both is what makes the two answers comparable by
+    construction rather than by two implementations agreeing, and re-sorting a
+    conforming page changes nothing about which rows it holds.
+
+    **Two sorts rather than one reversed key**, as ``FakeAssistantEngine`` and
+    ``SqliteAuditTrail`` already do it: the order is ``decided_at`` descending with
+    ties broken by ``id`` *ascending*, and ``reverse=True`` over a compound key
+    reverses **both** halves — which puts ``d-2`` above ``d-1`` at one instant, the
+    opposite of what ADR-0021 §4 states. Python's sort is stable, so sorting by the
+    tie-break first and the primary key second composes them correctly.
+
+    Args:
+        read: The trail read to await — ``recent`` or ``export``.
+
+    Returns:
+        Its rows, as the tuple ADR-0085 §3b requires, in §2's total order.
+    """
+    by_id = sorted(await read, key=lambda decision: decision.id)
+    return tuple(sorted(by_id, key=lambda decision: decision.decided_at, reverse=True))
+
+
 async def _written_preferences(
     store: NotificationStore, preferences: NotificationPreferences
 ) -> NotificationPreferences:
@@ -3912,6 +3948,56 @@ class Engine:
             "recent_connection_acts",
             checked=True,
             traced=False,
+        )
+
+    # --- the audit trail's two reads (ADR-0186 §1) --------------------------
+
+    async def recent_decisions(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[PermissionDecision, ...]:
+        """List what the permission layer ruled, newest first (ADR-0186 §1).
+
+        ``limit`` is refused when it is **not strictly positive**, on
+        ``recent_grants``' reason and in every implementation (ADR-0186 §3), so
+        neither is silently more permissive than the other: ``AuditTrail.recent``
+        refuses zero and ADR-0085 §9 would admit it.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+            AuditError: If the trail cannot be read.
+            OversizedValueError: If the page exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        positive_page_argument(limit, name="limit")
+        check_arguments("recent_decisions", max_bytes=self._max_payload_bytes, limit=limit)
+        return await self._tracked(
+            _ordered_decisions(self._trail.recent(limit=limit)),
+            "recent_decisions",
+            checked=True,
+        )
+
+    async def export_decisions(self) -> tuple[PermissionDecision, ...]:
+        """Return every recorded decision, in ``recent_decisions``' order (ADR-0186 §1).
+
+        Takes no argument and pages nothing: it is the unbounded read ADR-0021 §4
+        keeps distinct from the listing, and the surface discharging ADR-0004 §6's
+        portability obligation for this store. A trail too large for the frame is an
+        ``OversizedValueError`` and no artifact at all — the measurement ``_tracked``
+        already applies to every result, which is the whole of what stops a partial
+        export being handed back as a complete one.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            AuditError: If the trail cannot be read.
+            OversizedValueError: If the whole trail exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        return await self._tracked(
+            _ordered_decisions(self._trail.export()),
+            "export_decisions",
+            checked=True,
         )
 
     async def aclose(self) -> None:

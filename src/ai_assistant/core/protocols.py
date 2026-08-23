@@ -7835,6 +7835,168 @@ class AssistantEngine(Protocol):
         """
         ...
 
+    # --- the audit trail's two reads (ADR-0186 §1) --------------------------
+    #
+    # **The trail becomes readable by the person it is kept for, and that is the
+    # whole of what these two add.** ADR-0021 §4 gives :class:`AuditTrail` five
+    # reads and #1485 records what the milestone-23 QA run found when it drove
+    # them: every one answers exactly as ruled, and nothing a user can drive
+    # reaches four of them. These promote two of the five and no more.
+    #
+    # **Neither composes.** Each relays one store read, sorted, and reads no other
+    # store (ADR-0186 §1) — so the listing is a **prefix** of the export under §2's
+    # order, which is the property an engine that filtered or enriched either one
+    # would break with no surface able to tell.
+    #
+    # **Three of the five stay unpromoted, each for its own reason** (ADR-0186 §4),
+    # and no lane adds a counterpart on the strength of this Protocol.
+    # ``resolution_of`` is keyed on a binding a user does not hold and every row it
+    # can return is in the export; ``record`` would let a client append to the audit
+    # record of what was permitted, which is the fabrication ADR-0184 §4 closed the
+    # last route to; and ``clear`` would put an irreversible destruction of the whole
+    # record one request away on a transport an enrolled device reaches — the user's
+    # erasure right stays where ADR-0021 §4 and ADR-0126 §2 put it. ``get`` is
+    # *deferred* rather than refused, with its trigger: a surface that must deep-link
+    # one row (ADR-0008 §1).
+    #
+    # **Both are served on both listeners** (ADR-0186 §5). Neither is a connection
+    # method and neither is withheld from ADR-0124's remote listener: a
+    # ``PermissionDecision`` carries no credential and no payload, and every class of
+    # fact in one already crosses that hop inside a ``Confirmation``'s
+    # ``ConfirmationEgress``. Neither is one of ADR-0177 §1's thirty browser
+    # operations, and no browser request resolves to either (ADR-0186 §6).
+
+    async def recent_decisions(
+        self, *, limit: int = DEFAULT_PAGE_SIZE
+    ) -> tuple[PermissionDecision, ...]:
+        """What the permission layer ruled, newest first, bounded (ADR-0186 §1).
+
+        The bounded half of the pair, reading :meth:`AuditTrail.recent`. It
+        **relays**: no composition, no filter by tool, by outcome or by window, no
+        projection, no enrichment and no summary, and no read of any other store.
+        A consumer wanting a subset selects it from what this returns.
+
+        **Bounded and complete are two operations rather than one** (ADR-0186 §1).
+        ADR-0021 §4 fixes the store's two reads against each other in terms —
+        ``recent`` is bounded by default "because the realistic query is 'what has
+        the assistant just done', and an unbounded read of a Tier 1 store by
+        default is a shape worth not offering", while ``export`` is the deliberate
+        unbounded read discharging a portability obligation. A single method whose
+        ``limit`` could be omitted to mean *everything* would make the unbounded
+        read the default shape of the listing and hide a data-rights act inside a
+        page query.
+
+        **The order is this operation's own guarantee** (ADR-0186 §2), and it is
+        the same total order for both: ``decided_at`` **descending**, ties broken
+        by ``id`` **ascending**. ``recent_decisions(limit=n)`` returns the first
+        ``n`` of the sequence :meth:`export_decisions` returns over the same trail
+        state — the **prefix** property, which is what keeps the two answers
+        comparable.
+
+        **The order is a claim about when a ruling was made and about nothing
+        else** (ADR-0186 §2, ADR-0021 §4). It is not insertion order, and the two
+        disagree whenever records are appended out of order; no surface presents a
+        position as a statement about when anything was *done*.
+
+        **A page's silence is a fact about the page** (ADR-0186 §7). A resolution
+        may lie outside a bounded page, so no surface renders an unresolved
+        ``CONFIRM`` as denied, as allowed, as expired, or as awaiting anything.
+
+        **What a surface owes a row it renders is ADR-0186 §7 and §8**, stated once
+        over "a surface" so that every adapter inherits it: the ruling's outcome,
+        its reason, the instant, and the recorded ``ToolDefinition``'s identifier
+        and capability read from the row rather than a registry; ADR-0178 §7's
+        content obligations in full over an ``EgressBinding`` or an
+        :class:`~ai_assistant.core.types.OriginUnrecordedBinding`; the call's origin
+        in **three** distinct states, the third — never recorded — rendered as
+        neither of the other two (ADR-0184 §2); nothing at all asserted where the
+        binding is ``None``; every value inserted as data; and a row rendered whole
+        or not at all, a surface that cannot render one rendering **fewer rows**
+        rather than partial ones. §8's bars are the other half: no liveness, no
+        authorisation, no transmission wording, no payload behind the digest, no
+        tier reach presented as a measurement, and no confirmation composed from a
+        row.
+
+        Args:
+            limit: The most rows to return. Refused when **not strictly
+                positive**, locally and before any I/O, in every implementation —
+                stricter than ADR-0085 §9's ``[0, 2**63)`` for
+                :meth:`recent_grants`' reason (ADR-0186 §3), since
+                ``AuditTrail.recent`` itself refuses zero and §9 forbids either
+                implementation from being silently more permissive. There is
+                deliberately no ``offset``: the store has none, so an offset would
+                be either a store change this contract does not own or an
+                engine-side over-fetch-and-slice, which is a paging surface that
+                lies about its cost (ADR-0102 §10).
+
+        Returns:
+            Up to ``limit`` decisions, newest first, ties broken by ``id``
+            ascending — the first ``limit`` of :meth:`export_decisions`' sequence.
+
+        Raises:
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+            AuditError: If the trail cannot be read, or holds a row that no longer
+                validates. A row whose binding records no origin is **not** such a
+                row: it comes back as history, carrying an
+                :class:`~ai_assistant.core.types.OriginUnrecordedBinding`, together
+                with every other row (ADR-0184 §5).
+            OversizedValueError: If the page exceeds the contract limit.
+        """
+        ...
+
+    async def export_decisions(self) -> tuple[PermissionDecision, ...]:
+        """Every recorded decision, in the same order (ADR-0186 §1, ADR-0021 §4).
+
+        The unbounded half, reading :meth:`AuditTrail.export`, and the surface that
+        **discharges ADR-0004 §6's portability obligation for this store** —
+        ADR-0021 §4 assigns it there, and until this operation existed it was
+        assigned to nobody a user could reach. It relays on :meth:`recent_decisions`'
+        terms: nothing composed, filtered, projected, enriched or summarised, and no
+        other store read.
+
+        **The order is this operation's own guarantee even though the store states
+        none** (ADR-0186 §2). ``AuditTrail.export`` promises no order and this
+        contract adds none to it, so an implementation relaying a store read that
+        arrives unordered **owes the sort**, over a list it has already
+        materialised. Two implementations handing back the same rows in different
+        orders would satisfy every other clause here while giving two users two
+        different accounts of one history.
+
+        **Complete or refused, never truncated.** It takes no argument and is
+        bounded by nothing at the contract, and is subject to ADR-0085 §8c's payload
+        limit exactly as every other unbounded read on this surface is. A trail whose
+        canonical encoding exceeds the limit raises
+        :class:`~ai_assistant.core.errors.OversizedValueError` carrying the limit and
+        the measured size; no implementation truncates the artifact, samples it, or
+        returns a partial export without saying so. The remedy is
+        ``hub_max_frame_bytes``, the setting the connect reply already carries to the
+        client — a ceiling rather than a bound, since the trail has no retention rule
+        (#108). A cursor is rejected rather than deferred (ADR-0186 §3): it would
+        change a ratified store contract for a trail size nobody has observed, and
+        replace one honest refusal with an assembly a user cannot verify is complete.
+
+        **A row this returns is read under §7's floor and §8's bars**, exactly as
+        :meth:`recent_decisions`' rows are; an artifact written from them is a
+        **faithful copy**, and a row whose binding records no origin carries no
+        ``planned_with_external_content`` key anywhere under ``egress_binding``
+        (ADR-0184 §3). The absence *is* the state, and annotating it would make the
+        artifact fail re-validation against ``PermissionDecision``, whose models set
+        ``extra="forbid"`` — so the export would no longer be an export.
+
+        Returns:
+            Every recorded decision, ordered by ``decided_at`` descending with ties
+            broken by ``id`` ascending — :meth:`recent_decisions`' order, applied to
+            the whole trail.
+
+        Raises:
+            AuditError: If the trail cannot be read, or holds a row that no longer
+                validates — on :meth:`recent_decisions`' terms, an unrecorded origin
+                excepted.
+            OversizedValueError: If the whole trail exceeds the contract limit.
+        """
+        ...
+
 
 @runtime_checkable
 class Secrets(Protocol):

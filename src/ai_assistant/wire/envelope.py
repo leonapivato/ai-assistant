@@ -221,7 +221,34 @@ from ai_assistant.wire.errors import (
 #: untouched. A result payload takes the shape of the method's own declared return
 #: annotation (ADR-0085 §10), so the member crosses without a second declaration and
 #: nothing transcribes it into a wire-side schema.
-PROTOCOL_VERSION: Final[int] = 11
+#:
+#: **12 since ADR-0186 §1**, which adds two methods to the promoted
+#: ``AssistantEngine`` surface — ``recent_decisions``, the bounded listing of what
+#: the permission layer ruled, and ``export_decisions``, the whole-trail read that
+#: discharges ADR-0004 §6's portability obligation for that store. This is
+#: ADR-0124 §9's **first** limb, the one that decided 3, 4 and 6: the rule reaches
+#: "any change to the promoted surface's method set", and "adding a method bumps,
+#: and that is the honest consequence rather than an oversight. A sixteenth method
+#: on the promoted surface is a request an older hub answers with a failure the
+#: client did not ask for." ADR-0186 §5 states the obligation in the deciding ADR
+#: and §11 puts it on this change rather than leaving a lane to discover it.
+#: ``wire/surface.METHODS`` is derived from the Protocol, so a version 12 client
+#: sending ``export_decisions`` to a version 11 hub is refused there — the
+#: frame-one-peer-may-send-that-the-other-refuses test, and the half-finished
+#: upgrade §3 wants legible at the handshake rather than inside a call.
+#:
+#: **Nothing else under** ``wire/`` **changes for it but the client's two methods**
+#: (ADR-0186 §5, on ADR-0151 §11's precedent). The connect exchange gains no member,
+#: no frame's encoding changes, no :class:`FrameKind` is added, and no ``core`` type
+#: is added or altered: ``PermissionDecision`` is unchanged and reaches this surface
+#: by being named in a return annotation rather than by being minted, so the second
+#: limb is not what is being invoked here. ``METHODS``, ``STREAMING_METHODS``, both
+#: adapters and the error mapping are all derived from the Protocol;
+#: ``wire/client.py`` is hand-written, so its two forwarding methods are the one
+#: edit, and a client that grew none would raise ``AttributeError`` before a frame
+#: was ever sent. Neither method joins ``wire/server.py``'s ``CONNECTION_METHODS``:
+#: both listeners carry both (ADR-0186 §5).
+PROTOCOL_VERSION: Final[int] = 12
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
