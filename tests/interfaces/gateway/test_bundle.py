@@ -63,9 +63,10 @@ def _asset(name: str) -> str:
 def _style(name: str) -> str:
     """One shipped stylesheet with its comments removed.
 
-    For :func:`_code`'s reason: the comments in that file *name* the declarations it
-    must not carry — `display: none`, a clamped line count — so a check reading the
-    whole file would fail on the prose explaining the rule it enforces.
+    For :func:`_code`'s reason: the comments in that file *name* the declarations
+    under check — `display: none`, which one rule carries and no other may, and a
+    clamped line count, which nothing may — so a check reading the whole file would
+    be answered by the prose explaining the rule it enforces.
     """
     return re.sub(r"/\*.*?\*/", "", _asset(name), flags=re.DOTALL)
 
@@ -79,6 +80,17 @@ def _rule(stylesheet: str, selector: str) -> str:
     """
     opened = stylesheet.index(f"\n{selector} {{") + len(selector) + 4
     return stylesheet[opened : stylesheet.index("\n}", opened)]
+
+
+def _tag(document: str, identifier: str) -> str:
+    """The opening tag of one element, by its id.
+
+    Asked for rather than searched for, so that "this control ships hidden" is decided
+    over *that element's* attributes: a ``hidden`` counted anywhere in the document
+    would be satisfied by any of the fifteen panels that carry one.
+    """
+    opened = document.rindex("<", 0, document.index(f'id="{identifier}"'))
+    return document[opened : document.index(">", opened) + 1]
 
 
 def _markup(name: str) -> str:
@@ -307,6 +319,47 @@ def test_every_control_on_the_page_meets_the_touch_floor() -> None:
     assert "font: inherit;" in _rule(stylesheet, "select")
 
 
+def test_a_control_the_page_hides_is_hidden_by_the_sheet_as_well() -> None:
+    """#1475 and #1472, which are one fault: nothing on this page was ever hidden.
+
+    ``[hidden] { display: none }`` is a **user agent** rule and every rule in this
+    sheet is an **author** rule, so an author ``display`` beats the attribute whatever
+    their selectors say. ``button { display: inline-flex }`` — asserted above, and
+    load-bearing for the touch floor — therefore un-hid every button on the page:
+    ``el("watch-button").hidden = true`` set the attribute and changed nothing on
+    screen, leaving an inert "Watch for notifications" under the line saying watching
+    was already happening (#1475), including after ADR-0182 §7's announced re-arm,
+    which is where the milestone-16 QA met it (#1472).
+
+    **It is not a fact about buttons.** ``.panel-index`` is the third rule this file
+    declares a ``display`` for, and the panel index is a ``nav`` that ships ``hidden``
+    — so the index rendered below the floor of two open panels it is supposed to
+    appear at. What is pinned here is the attribute beating *every* author ``display``,
+    which is why the rule is written for the attribute and carries ``!important``: an
+    attribute selector ties with a class on specificity, so a sheet that relied on this
+    rule coming last would lose it again to the next class rule added.
+
+    A source check is all this can be — there are no executable front-end tests here
+    (#1476) — so what it cannot see is that the box is off screen. That was driven, at
+    both viewports and on the re-arm path, and is recorded on the pull request.
+    """
+    stylesheet = _style("app.css")
+    document = _markup("index.html")
+
+    assert _rule(stylesheet, "[hidden]").strip() == "display: none !important;"
+    # The sheet's only one, so it hides what carries the attribute and nothing else —
+    # never a width, a class, or a panel a script has to reveal (ADR-0182 §6, below).
+    assert stylesheet.count("display: none") == 1
+    # The three controls that ship hidden and are un-hidden by the script alone. Each
+    # carries the attribute in the document, so each was on screen at first paint.
+    for identifier in ("new-conversation", "watch-button", "panel-index"):
+        assert " hidden" in _tag(document, identifier), identifier
+    script = _code("app.js")
+    assert 'el("new-conversation").hidden = id === null;' in script
+    assert 'el("watch-button").hidden = watching;' in script
+    assert "nav.hidden = open.length < PANEL_INDEX_FLOOR;" in script
+
+
 def test_the_page_has_one_layout_for_a_phone() -> None:
     """#1429: a narrow layout at 480px and below, driven at 390x844.
 
@@ -444,10 +497,22 @@ def test_the_page_states_the_three_conditions_of_the_session_it_runs_under() -> 
     #    that the gateway cannot see which.
     assert "may end it and may not" in conditions
     assert "minted at the machine the gateway runs on" in conditions
-    # And it is reached by no script and hidden at no width — including by a rule that
-    # names nothing, since `display: none` appears nowhere in the sheet at all.
+    # And it is reached by no script and hidden by no rule. The sheet does carry one
+    # `display: none` — the rule that makes `[hidden]` hide anything at all (#1475),
+    # without which nothing on this page is ever off screen — so the claim is made
+    # about what that rule can reach rather than about the string: it is the sheet's
+    # only one, it keys on the attribute, and these sentences carry the attribute
+    # neither on their own element nor on an ancestor. They sit between two panels
+    # rather than inside one, which is what makes the second half decidable here: the
+    # last section tag before them is a close.
     assert "session-conditions" not in _code("app.js")
-    assert "display: none" not in _style("app.css")
+    stylesheet = _style("app.css")
+    assert stylesheet.count("display: none") == 1
+    assert _rule(stylesheet, "[hidden]").strip() == "display: none !important;"
+    assert "hidden" not in document[opened : document.index(">", opened)]
+    markup = _markup("index.html")
+    sentences = markup.index('<div class="session-conditions">')
+    assert markup.rindex("</section>", 0, sentences) > markup.rindex("<section", 0, sentences)
 
 
 def test_the_page_names_no_signal() -> None:
