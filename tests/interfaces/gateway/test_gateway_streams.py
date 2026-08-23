@@ -321,6 +321,22 @@ async def _read_all(reader: asyncio.StreamReader) -> list[dict[str, Any]]:
     return [value async for value in _values(reader)]
 
 
+def _opening(budget: timedelta) -> dict[str, Any]:
+    """What every delivery stream begins with (#1442, ADR-0175 §4 and §8).
+
+    Written out rather than imported from ``streams`` so that a change to either half
+    of the disclosure fails here: what is pinned is the value a browser reads, and a
+    check built from the same expression it is checking would pass whatever that
+    expression became.
+    """
+    return {"kind": "open", "keep_alive_microseconds": str(budget // timedelta(microseconds=1))}
+
+
+async def _past_opening(reader: asyncio.StreamReader, budget: timedelta) -> None:
+    """Read the opening value off a delivery stream, checking it is the one owed."""
+    assert await anext(_values(reader)) == _opening(budget)
+
+
 def _free_port() -> int:
     """A port nothing is listening on, so two runs do not collide."""
     with socket.socket() as probe:
@@ -579,6 +595,7 @@ async def test_a_delivery_reaches_the_browser_without_its_token() -> None:
         assert status == 200
         assert headers["content-type"] == ["application/x-ndjson"]
 
+        await _past_opening(reader, one.settings.gateway_notification_budget)
         await engine.answer_one_poll()
         value = await anext(_values(reader))
 
@@ -589,6 +606,61 @@ async def test_a_delivery_reaches_the_browser_without_its_token() -> None:
             "detail": "the detail",
         }
         assert _TOKEN not in json.dumps(value)
+
+
+async def test_a_delivery_stream_discloses_the_cadence_it_will_be_written_at() -> None:
+    """Issue #1442, at the end that owes the figure.
+
+    §4 obliges a write on every open delivery stream "at least once per
+    ``gateway_notification_budget``" — a delivery where the poll returned one, "and
+    otherwise a value carrying nothing but its own kind" — spent so that "the liveness
+    of the gateway, of its hub connection and of the browser's own socket" is
+    "observable at a bounded cadence". A browser could not observe it: the figure is
+    gateway configuration (§8) and no value the page read carried one, so a ``fetch``
+    that never settled left the page reading "Watching for notifications" with its own
+    control hidden and no deadline it could derive.
+
+    **Disclosed on the stream and not on the exchange**, because ADR-0168 §5 has that
+    exchange "return nothing but the two session values §6 requires" — while ADR-0175
+    §2 makes "the exact framing of a value on a stream" this lane's, which is what this
+    is. It adds no request class and no ADR-0177 §6 operation.
+
+    **It is the configured figure and not a constant**, so a gateway tuned away from
+    §8's twenty seconds discloses what it will actually do — and it is the same figure
+    the poll is given, which is §8's "one figure paces both".
+    """
+    engine = _Delivering([None])
+    budget = timedelta(seconds=7)
+    async with _harness(engine, gateway_notification_budget=budget) as one:
+        reader, _, status = await one.send("GET", "/deliveries")
+
+        assert status == 200
+        assert await anext(_values(reader)) == {
+            "kind": "open",
+            "keep_alive_microseconds": "7000000",
+        }
+        await engine.polling.wait()
+        assert engine.calls[-1] == ("next_notification", {"acknowledging": None, "budget": budget})
+
+
+async def test_the_opening_value_costs_a_delivery_none_of_the_one_pending_slot() -> None:
+    """§4 holds "at most one value pending per stream and queues nothing behind one",
+    and a write that has not completed when the next value is due abandons the stream.
+
+    So an opening value *offered* to the stream would race the first delivery against
+    it, and a gateway could abandon a stream on its own first write. Written straight
+    to the connection ahead of the iteration, it takes no slot — which is what this
+    checks, by letting a delivery return in the same instant the stream opened.
+    """
+    engine = _Delivering([_delivery(1)])
+    async with _harness(engine) as one:
+        reader, _, _ = await one.send("GET", "/deliveries")
+        await engine.answer_one_poll()
+
+        values = [await anext(_values(reader)) for _ in range(2)]
+
+        assert values[0] == _opening(one.settings.gateway_notification_budget)
+        assert values[1]["summary"] == "notification 1"
 
 
 async def test_a_quiet_poll_writes_the_keep_alive_so_the_stream_stays_legible() -> None:
@@ -603,6 +675,7 @@ async def test_a_quiet_poll_writes_the_keep_alive_so_the_stream_stays_legible() 
     async with _harness(engine) as one:
         reader, _, _ = await one.send("GET", "/deliveries")
 
+        await _past_opening(reader, one.settings.gateway_notification_budget)
         await engine.answer_one_poll()
         value = await anext(_values(reader))
 
@@ -629,6 +702,8 @@ async def test_one_delivery_reaches_both_of_one_browsers_streams() -> None:
         # as "originates a call" would build two and be closed on the second.
         assert [name for name, _ in engine.calls] == ["next_notification"]
 
+        await _past_opening(first, one.settings.gateway_notification_budget)
+        await _past_opening(second, one.settings.gateway_notification_budget)
         await engine.answer_one_poll()
 
         assert (await anext(_values(first)))["summary"] == "notification 1"
@@ -647,11 +722,12 @@ async def test_a_poll_the_gateway_cannot_complete_ends_the_stream_naming_it() ->
         values = await _read_all(reader)
 
         assert values == [
+            _opening(one.settings.gateway_notification_budget),
             {
                 "kind": "fault",
                 "fault": "hub-unreachable",
                 "detail": "no hub is listening on that socket",
-            }
+            },
         ]
 
 
@@ -692,6 +768,7 @@ async def test_the_read_deadline_does_not_cut_a_stream_it_is_shorter_than() -> N
     engine = _Delivering([None, _delivery(2)])
     async with _harness(engine, gateway_read_timeout=timedelta(milliseconds=20)) as one:
         reader, _, _ = await one.send("GET", "/deliveries")
+        await _past_opening(reader, one.settings.gateway_notification_budget)
         await engine.answer_one_poll()
         assert (await anext(_values(reader)))["kind"] == "alive"
 
@@ -720,6 +797,7 @@ async def test_an_open_stream_is_not_use_of_the_session_and_dies_with_it() -> No
     engine = _Delivering([None, None])
     async with _harness(engine, gateway_session_idle_timeout=timedelta(minutes=5)) as one:
         reader, _, _ = await one.send("GET", "/deliveries")
+        await _past_opening(reader, one.settings.gateway_notification_budget)
         await engine.answer_one_poll()
         assert (await anext(_values(reader)))["kind"] == "alive"
 

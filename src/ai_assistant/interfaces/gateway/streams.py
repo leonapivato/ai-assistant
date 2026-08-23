@@ -40,6 +40,7 @@ it.
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Final
 
@@ -57,6 +58,10 @@ MEDIA_TYPE: Final = "application/x-ndjson"
 #: What separates two values on a stream.
 _TERMINATOR: Final = b"\n"
 
+#: The unit :func:`opened` spells a duration in, named once so this module and the
+#: page cannot disagree about it. ``timedelta``'s own resolution.
+_MICROSECOND: Final = timedelta(microseconds=1)
+
 
 class ValueKind(StrEnum):
     """The kinds a stream value can be, fixed in advance (ADR-0175 §2).
@@ -66,6 +71,30 @@ class ValueKind(StrEnum):
     request shape nobody has thought of yet". A reader that meets a kind it does
     not know treats the value as one it cannot render rather than guessing.
     """
+
+    OPEN = "open"
+    """The first value on a **delivery** stream: the stream is open, and the
+    interval within which ADR-0175 §4 obliges the gateway to write on it again.
+
+    **It exists so the browser can tell a silent stream from a dead one** (#1442).
+    §4 spends the keep-alive to make "the liveness of the gateway, of its hub
+    connection and of the browser's own socket observable at a bounded cadence", and
+    the cadence is `gateway_notification_budget` — gateway configuration (§8), which
+    no value the page read carried. Without it a ``fetch`` that never settled left
+    the page reading "Watching for notifications" for ever with its own control
+    hidden, and ADR-0182 §7's announced re-arm could not fire either, because §7
+    re-establishes a stream "only while it holds none".
+
+    **Disclosed here rather than on the exchange or in a response header.**
+    ADR-0168 §5 has the bootstrap exchange "return nothing but the two session
+    values §6 requires", so the figure may not ride that body; and ADR-0175 §2 makes
+    "the exact framing of a value on a stream" this lane's, which is exactly what
+    this is. It is also the right lifetime: the figure is a fact about the process
+    serving *this* stream, restated on every stream rather than remembered from a
+    session that may have been minted by a differently configured gateway.
+
+    Never terminal, and written before anything else — a delivery may follow it in
+    the same instant."""
 
     CHUNK = "chunk"
     """One :class:`~ai_assistant.core.types.ReplyChunk` of a streamed answer
@@ -177,6 +206,28 @@ def notification(delivery: NotificationDelivery) -> dict[str, Any]:
         "notification_class": candidate.notification_class,
         "summary": candidate.summary,
         "detail": candidate.detail,
+    }
+
+
+def opened(budget: timedelta) -> dict[str, Any]:
+    """The first value on a delivery stream, carrying §4's cadence (#1442).
+
+    **Spelled in microseconds as a decimal string**, which is
+    ``server._preferences_view``'s own spelling and for its reason: microseconds are
+    ``timedelta``'s own resolution, so the integer is exact in both directions and no
+    fraction has to be parsed anywhere, and a decimal *string* crosses a reader that
+    would round a large JSON number into an IEEE-754 double.
+
+    Args:
+        budget: ``gateway_notification_budget`` (ADR-0175 §8) — "the interval within
+            which §4 obliges a write on every open delivery stream".
+
+    Returns:
+        The value to write.
+    """
+    return {
+        "kind": ValueKind.OPEN.value,
+        "keep_alive_microseconds": str(budget // _MICROSECOND),
     }
 
 
