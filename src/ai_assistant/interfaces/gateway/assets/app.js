@@ -161,12 +161,22 @@ let chose = 0;
 // which is §8's own argument against a separate heartbeat interval.
 const SILENT_CADENCES = 3;
 
-// The largest delay `setTimeout` can be asked for. It carries its argument in a signed
-// 32-bit count of milliseconds and clamps anything above this to fire *immediately*, so
-// a deadline past it is not a long wait — it is an instant abort wearing one's clothes.
-// This is the platform's own limit rather than a figure this page chose, which is why
-// naming it is not a second claim about the cadence (ADR-0175 §8).
-const TIMER_CEILING = 2147483647;
+// The longest one `setTimeout` can be asked for. It carries its delay in a signed
+// 32-bit count of milliseconds and **clamps** anything above this to fire *immediately*,
+// so a deadline past it is not a long wait — it is an instant abort wearing one's
+// clothes. A deadline longer than this is therefore armed in segments against an
+// absolute instant rather than refused, which is what keeps the rule exact: the bound is
+// three times the cadence the gateway disclosed, whatever the gateway disclosed.
+//
+// **An earlier draft treated an unrepresentable figure as no figure at all**, leaving
+// such a stream unbounded — and adversarial review was right on round 3 that this
+// re-opens #1442 for exactly the configurations it is hardest to notice on.
+// `gateway_notification_budget` is validated as strictly positive and against nothing
+// else (ADR-0175 §8), so a budget above about 8.3 days reached the ceiling once the
+// multiple was applied. A representability limit is not a policy, and this is the
+// platform's own number rather than a figure this page chose — which is why naming it
+// is not a second claim about the cadence.
+const TIMER_SEGMENT = 2147483647;
 
 // Whether a delivery stream is open. One at a time: a second would be a second poll
 // the hub would close under ADR-0131 §2, and the gateway holds one poll however
@@ -258,27 +268,19 @@ function adoptCadence(microseconds) {
 // the member's presence: `""`, `"0"` and anything unparseable would each arm a timer
 // that fired at once or never.
 //
-// **A deadline past `setTimeout`'s own ceiling is refused, and refusing it is the
-// conservative direction.** `gateway_notification_budget` is validated as strictly
-// positive and against nothing else (ADR-0175 §8), so a gateway may be configured with
-// a budget of days. `setTimeout` carries its delay in a signed 32-bit count of
-// milliseconds and *clamps* anything larger to fire immediately — so the largest
-// budgets would abort every healthy stream the instant it opened, which is worse than
-// the failure this page is bounding. A figure the browser cannot express is treated as
-// one this page has none of: the stream runs unbounded, exactly as every stream did
-// before this existed. Adversarial review found it on round 1.
+// **Every strictly positive figure is usable, however large**, because the deadline is
+// armed in segments (`TIMER_SEGMENT`) rather than in one `setTimeout` call. `Infinity`
+// is not one: a non-finite value is a figure with no instant to compute.
 //
-// **There is no floor at the other end and none is owed.** A gateway configured to
-// write every microsecond has promised something no network delivers, so a page that
-// abandons the stream is applying §4's rule faithfully rather than misreading it — and
-// it says so, naming the setting, every time.
+// **There is no floor either, and none is owed.** A gateway configured to write every
+// microsecond has promised something no network delivers, so a page that abandons the
+// stream is applying ADR-0175 §4's rule faithfully rather than misreading it — and it
+// says so, naming the setting, every time.
 function usableCadence(microseconds) {
   const value = Number(microseconds);
-  if (typeof microseconds !== "string" || !Number.isFinite(value) || value <= 0) {
-    return null;
-  }
-  const milliseconds = value / 1000;
-  return milliseconds * SILENT_CADENCES <= TIMER_CEILING ? milliseconds : null;
+  return typeof microseconds === "string" && Number.isFinite(value) && value > 0
+    ? value / 1000
+    : null;
 }
 
 function forgetHeaderHalf() {
@@ -1608,18 +1610,37 @@ async function readDeliveries(half) {
   let disclosed = false;
   let silent = false;
   let deadline = null;
+  // One deadline, held as the **instant** it falls due and armed in segments no longer
+  // than `setTimeout` can express. A single call cannot carry a delay past a signed
+  // 32-bit count of milliseconds — it is clamped to fire at once — so a long cadence
+  // armed in one call would abort a healthy stream immediately, which is worse than the
+  // failure being bounded. Segments keep the rule exact at every figure a gateway may
+  // hold: the bound is three times the cadence it disclosed, and nothing else.
+  //
+  // This opens no stream and re-establishes nothing (ADR-0182 §7): a segment that finds
+  // the instant still ahead arms the next one, and the last one ends the stream.
+  const arm = (at) => {
+    deadline = window.setTimeout(
+      () => {
+        if (Date.now() < at) {
+          arm(at);
+          return;
+        }
+        silent = true;
+        reader.abort();
+      },
+      Math.min(at - Date.now(), TIMER_SEGMENT)
+    );
+  };
   // Restarted by every value the stream delivers, so the bound is on silence — and
   // armed only where a cadence is actually known, because a deadline derived from
   // nothing is a figure this page would have made up.
   const heard = () => {
     window.clearTimeout(deadline);
-    deadline =
-      cadence === null
-        ? null
-        : window.setTimeout(() => {
-            silent = true;
-            reader.abort();
-          }, cadence * SILENT_CADENCES);
+    deadline = null;
+    if (cadence !== null) {
+      arm(Date.now() + cadence * SILENT_CADENCES);
+    }
   };
   heard();
   try {
