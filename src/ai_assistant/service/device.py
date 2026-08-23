@@ -189,7 +189,11 @@ async def _report_no_control_socket(socket: Path, loopback: Path, *, bound: bool
     has and a hub that never configured a remote listener does not; so the third
     state is named by the errno, at no cost, rather than by retrying the connect for
     a startup window — which would put latency on every genuine failure to cover an
-    instant that is already legible.
+    instant that is already legible. The errno is only this sharp because the hub
+    removes a control socket it does not serve (``hub.py``'s ``_build_remote``):
+    one left behind by a remotely-configured hub that crashed would otherwise
+    refuse forever on a hub since unconfigured, and a refusal would stop meaning
+    "starting".
 
     Args:
         socket: The control socket that did not answer.
@@ -210,16 +214,15 @@ async def _report_no_control_socket(socket: Path, loopback: Path, *, bound: bool
         return EXIT_RESTART
     if bound:
         # Restartable, and by the same question as everything else here: the hub is
-        # opening its doors and the next attempt succeeds. The persistent case is
-        # named too, because the one other way to reach this state is a socket file
-        # a hub left behind by not shutting down cleanly, which no retry clears.
+        # opening its doors and the next attempt succeeds. It stays true because the
+        # hub removes a control socket it does not serve (``hub.py``'s
+        # ``_build_remote``), so this path cannot be reached by a stale file that no
+        # retry would clear.
         print(
             f"device: a hub is running here — it answers at {loopback} — but {socket} "
             f"exists and is not answering yet. The hub binds that socket before it opens "
             f"its own door and serves it just afterwards, so this is the instant between "
-            f"the two; try again. If it persists, that file is left over from a hub that "
-            f"did not shut down cleanly and the hub running now has no remote listener: "
-            f"set ASSISTANT_HUB_REMOTE_ADDRESS and restart it.",
+            f"the two; try again.",
             file=sys.stderr,
         )
         return EXIT_RESTART

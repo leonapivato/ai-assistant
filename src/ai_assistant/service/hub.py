@@ -80,6 +80,7 @@ from ai_assistant.service.overlay import OverlayIdentityUnavailableError, local_
 from ai_assistant.service.remote import RemoteListener
 from ai_assistant.service.scheduler import Scheduler, jobs_for
 from ai_assistant.service.transport import ConnectionBudget, DeliverySlots, Listener
+from ai_assistant.wire.address import admin_socket_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -757,7 +758,10 @@ async def _build_remote(
             loopback listener for the same reason the budget is.
 
     Returns:
-        The apparatus, or ``None`` on a hub with no remote-listener configuration.
+        The apparatus, or ``None`` on a hub with no remote-listener configuration —
+        having first removed any control socket a previous, remotely-configured hub
+        left behind, so that this socket's presence always means *this* hub bound
+        it (#1441; see the comment at the early return).
 
     Raises:
         ConfigurationError: If the overlay agent cannot say what this machine is,
@@ -769,6 +773,19 @@ async def _build_remote(
             configuration they set (ADR-0083 §5, ruling 4).
     """
     if settings.hub_remote_address is None:
+        # **A control socket left behind by a previous, remotely-configured hub is
+        # removed rather than left lying** (#1441). This hub does not serve that
+        # door, and a socket file nothing accepts on is not inert: it answers
+        # `ai-assistant-device` with a refusal rather than an absence, which is the
+        # one signal that tells "the hub has not opened this door yet" from "this
+        # hub has no such door" — and left in place it makes the first answer true
+        # forever. `AdminListener.start` already unlinks a stale socket on the path
+        # where it binds one, for the same reason and under the same guarantee: the
+        # instance lock has been held since ADR-0083 §3's step 2, so nothing else
+        # owns this directory. An `OSError` propagates, as that unlink's does —
+        # ADR-0083 §3 step 3 wants a filesystem access fault to be a stay-down exit
+        # wherever in startup it surfaces.
+        admin_socket_path(data_dir).unlink(missing_ok=True)
         return None
     agent = local_agent(settings.hub_overlay_agent_socket)
     try:
