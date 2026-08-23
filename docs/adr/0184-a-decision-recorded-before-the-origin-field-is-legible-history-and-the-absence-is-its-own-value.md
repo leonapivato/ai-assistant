@@ -467,6 +467,16 @@ sibling and a version, in its own text, with two data points instead of one.
 > `planned_with_external_content` omitted; and each model's `model_fields` roster is
 > asserted, so a member added to either without the other is caught.
 
+> **Normative.** The lane ships a **correspondence** test for the derived set, which is
+> the clause that would otherwise rot: over the same `spans` and `account`,
+> `OriginUnrecordedBinding.canonical_destination_set` equals `EgressBinding`'s member for
+> member and in order — for spans carrying several destinations, for an aliased pair that
+> deduplicates, and for spans carrying **none**, where both are exactly the account
+> (ADR-0148 §2's third clause). §2's shared base makes the two one function rather than two;
+> this is the test that fails an implementation which declared it twice, and without it a
+> legacy row could export the wrong recipients or omit the account fallback while passing
+> every construction, roster and discrimination test above.
+
 > **Normative.** The lane ships the discrimination tests of §3 **over a real
 > `SqliteAuditTrail`**, seeding the row by writing the JSON into the `data` column
 > directly, because §4 makes the row unproducible through `record`: the stored decision
