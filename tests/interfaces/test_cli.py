@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from inspect import getsource, unwrap
 from io import StringIO
 from itertools import count, product
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import pytest
 import typer.main
@@ -411,7 +411,11 @@ def _egress_span(  # noqa: PLR0913 — one keyword per field of the span being b
     )
 
 
-def _egress_confirmation(*spans: EgressSpan, identity: str = _EGRESS_IDENTITY) -> Confirmation:
+def _egress_confirmation(
+    *spans: EgressSpan,
+    identity: str = _EGRESS_IDENTITY,
+    planned_with_external_content: bool = False,
+) -> Confirmation:
     """A parked egress confirmation carrying ``spans``."""
     return Confirmation(
         tool_id="smtp",
@@ -420,9 +424,23 @@ def _egress_confirmation(*spans: EgressSpan, identity: str = _EGRESS_IDENTITY) -
         reason="this discloses data off-device",
         token=ContinuationToken(handle="tok"),
         egress=ConfirmationEgress(
-            account_identity=identity, spans=spans, planned_with_external_content=False
+            account_identity=identity,
+            spans=spans,
+            planned_with_external_content=planned_with_external_content,
         ),
     )
+
+
+#: ADR-0181 §6's two arms, spelled here so a reworded renderer fails rather than a
+#: test quietly matching a shorter substring of whichever arm it was handed.
+_PLANNED_OVER_EXTERNAL: Final = (
+    "Planned over: material this assistant selected, which includes a record "
+    "marked as resting on recorded external content"
+)
+_PLANNED_OVER_NOTHING_MARKED: Final = (
+    "Planned over: material this assistant selected, in which no record is "
+    "marked as resting on recorded external content"
+)
 
 
 def test_an_egress_confirmation_names_the_account_the_set_and_every_occurrence(
@@ -553,7 +571,17 @@ def test_a_non_egress_confirmation_renders_as_it_did_and_claims_nothing(
 
     assert "Write a note." in rendered
     assert "an unknown cost" in rendered
-    for absent in ("Account:", "Goes to", "Describing", "the connected account", "no destination"):
+    for absent in (
+        "Account:",
+        "Goes to",
+        "Describing",
+        "the connected account",
+        "no destination",
+        # ADR-0181 §6's last clause: a confirmation whose `egress` is `None` owes the
+        # origin line too, and asserts neither of its arms.
+        "Planned over:",
+        "external content",
+    ):
         assert absent not in rendered
 
 
@@ -580,6 +608,116 @@ def test_the_new_members_are_neutralised_on_the_way_out(output: StringIO) -> Non
 
     assert "\x1b" not in rendered  # no escape byte reaches the terminal at all
     assert "[red]" in rendered  # markup is shown literally, not interpreted as colour
+
+
+def test_a_call_planned_over_external_content_says_so_beside_the_whole_floor(
+    output: StringIO,
+) -> None:
+    """ADR-0181 §10's clause for this lane, in the conjunction it states.
+
+    "A confirmation carrying ``True`` renders the fact **and** every occurrence
+    ADR-0178 §7's floor already requires" — so the floor is asserted here rather
+    than in a separate case, because §6's sixth clause is precisely that nothing of
+    it is suppressed, reordered or de-emphasised on the strength of the new fact. A
+    test asserting only that the marker appears would pass a renderer that had
+    dropped the recipients to make room for it.
+    """
+    cli._render_confirmation(
+        _egress_confirmation(
+            _egress_span("body", extent=5),
+            _egress_span(
+                "to", canonical="alice@example.org", supplied="Alice@Example.ORG", extent=17
+            ),
+            planned_with_external_content=True,
+        )
+    )
+    rendered = _flowed(output.getvalue())
+
+    assert _PLANNED_OVER_EXTERNAL in rendered  # §6's first clause, in the True state
+
+    # ...and the whole of ADR-0178 §7's floor, unmoved.
+    assert _EGRESS_IDENTITY in rendered  # the connected account
+    assert "alice@example.org" in rendered  # the canonical form
+    assert "Alice@Example.ORG" in rendered  # the supplied form
+    assert "smtp" in rendered  # the protocol the equivalence was computed under
+    assert "to" in rendered  # every occurrence, by the argument it was selected by
+    assert "body" in rendered
+    assert "this discloses data off-device" in rendered  # the ruling's own reason
+
+    # §6's sixth clause is an ordering obligation as well as a membership one: the
+    # account and the recipients keep their places, and the new line sits between
+    # them rather than displacing either.
+    assert rendered.index("Account:") < rendered.index(_PLANNED_OVER_EXTERNAL)
+    assert rendered.index(_PLANNED_OVER_EXTERNAL) < rendered.index("Goes to:")
+    assert rendered.index("Goes to:") < rendered.index("Describing:")
+
+
+def test_a_call_no_selected_record_marked_renders_the_fact_too(output: StringIO) -> None:
+    """ADR-0181 §6's fourth clause: rendered in **both** states.
+
+    "A fact shown only when it is alarming is a fact a user learns to read as an
+    alarm, and its absence as clearance" — and §10 makes the ``False`` case its own
+    test in terms, because "a test asserting only that a marker is present when it
+    is ``True`` does not satisfy this clause".
+
+    The wording is asserted whole, which is what holds §6's third clause: this arm
+    states that no *selected record carried the marker*, and a renderer that had
+    shortened it to "no external content" would be issuing the assurance ADR-0181
+    §7 says nothing in this corpus can give.
+    """
+    cli._render_confirmation(
+        _egress_confirmation(
+            _egress_span("to", canonical="alice@example.org", extent=17),
+            planned_with_external_content=False,
+        )
+    )
+    rendered = _flowed(output.getvalue())
+
+    assert _PLANNED_OVER_NOTHING_MARKED in rendered
+    assert _EGRESS_IDENTITY in rendered  # beside the floor here too, not instead of it
+    assert "alice@example.org" in rendered
+
+
+def test_neither_arm_names_a_source_a_span_or_a_verdict(output: StringIO) -> None:
+    """ADR-0181 §6's second, fifth and sixth clauses, as absences on both arms.
+
+    The clauses bar what a renderer would drift toward, so they are checked as
+    absences: no source and no kind of source ("from a source you connected" is
+    named in the ADR in terms), no attribution to an argument or a recipient, and
+    no detection, score, risk level or claim that the call is malicious.
+
+    ``parameters`` carries ``to``/``body`` on this fixture and the floor names both
+    arguments, so the span check is scoped to the origin line itself rather than to
+    the whole render.
+    """
+    for planned in (True, False):
+        output.truncate(0)
+        output.seek(0)
+        cli._render_confirmation(
+            _egress_confirmation(
+                _egress_span("to", canonical="alice@example.org", extent=17),
+                planned_with_external_content=planned,
+            )
+        )
+        rendered = _flowed(output.getvalue())
+        origin = rendered[rendered.index("Planned over:") :].split("Goes to:")[0]
+
+        for forbidden in (
+            "source you connected",
+            "connected source",
+            "malicious",
+            "suspicious",
+            "untrusted",
+            "risk",
+            "warning",
+            "attack",
+            "injected",
+            "unsafe",
+        ):
+            assert forbidden not in origin.lower(), (planned, forbidden)
+        # Never a statement about a span (§6's fifth clause).
+        for span_word in ("alice@example.org", "Alice@Example.ORG", "argument", "recipient"):
+            assert span_word not in origin, (planned, span_word)
 
 
 def test_the_cli_reads_no_permission_decision_and_no_binding(output: StringIO) -> None:

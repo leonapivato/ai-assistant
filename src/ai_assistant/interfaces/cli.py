@@ -6615,6 +6615,52 @@ def _egress_span_line(span: EgressSpan) -> str:
     return f"{where} — {head}; " + "; ".join(facts)
 
 
+def _egress_origin_line(egress: ConfirmationEgress) -> str:
+    """The call's origin, at the strength the predicate carries (ADR-0181 §6).
+
+    **A property of the call, never of a span.** What the boolean records is whether
+    the material this system *selected* into the model call that produced this
+    request included any record for which ``rests_on_recorded_external_content`` is
+    true (ADR-0106 §1). ADR-0181 §2's third clause refuses to mint a per-span
+    marker, so this line names no argument, no position, no destination and no
+    payload span, and is rendered beside the occurrences rather than against one.
+
+    **Neither state names a source, or a kind of source.** ADR-0181 §6's second
+    clause bars "from a source you connected" in terms: ADR-0098 §1's class is
+    wider than connected sources, reaching a tool or MCP result, a provider's error
+    text and a third party's speech captured by a spoke. The subject here is the
+    selection this system performed, which is the one actor the value can honestly
+    name.
+
+    **The ``False`` arm is not an assurance and is worded so it cannot be read as
+    one.** It says no *selected record carried the marker* — not that no external
+    content was involved, which is ADR-0181 §7's residual and is not closed by
+    anything here. It is a self-contained sentence rather than a "no" against the
+    ``True`` arm's wording, because a reader in the ``False`` case never sees the
+    ``True`` arm and would have no antecedent for a bare negation.
+
+    **Both arms are rendered, which is the point of the clause** (§6's fourth): a
+    fact shown only when it is alarming is one a user learns to read as an alarm,
+    and its absence as clearance. Neither arm is a detection, a score, a risk level
+    or a claim that the call is malicious (§6's sixth, §7's second).
+
+    Args:
+        egress: The egress facts this confirmation is about.
+
+    Returns:
+        The sentence rendered beside the floor, for whichever state the call carries.
+    """
+    if egress.planned_with_external_content:
+        return (
+            "material this assistant selected, which includes a record marked as "
+            "resting on recorded external content"
+        )
+    return (
+        "material this assistant selected, in which no record is marked as "
+        "resting on recorded external content"
+    )
+
+
 def _render_confirmation_egress(egress: ConfirmationEgress) -> None:
     """What ADR-0148 §8's fourth clause requires, before the answer is collected.
 
@@ -6632,8 +6678,16 @@ def _render_confirmation_egress(egress: ConfirmationEgress) -> None:
 
     **Every span, none omitted and none reordered.** The tuple is rendered in the
     binding's own order, which is the artifact the ruling was taken over.
+
+    **ADR-0181 §6 adds one line and moves none of the others.** The call's origin is
+    rendered beside this floor rather than in place of any part of it, and nothing
+    above is suppressed, reordered or de-emphasised on the strength of it (§6's
+    sixth clause). It sits after the account and before the recipients because it is
+    a property of the call rather than of a span — putting it among the occurrences
+    would read as the per-span attribution §2's third clause refuses to mint.
     """
     console.print(f"  [bold]Account:[/] {_safe(egress.account_identity)}")
+    console.print(f"  [bold]Planned over:[/] {_egress_origin_line(egress)}")
     console.print("  Goes to:")
     for member in egress.canonical_destination_set:
         console.print(f"    {_egress_destination_line(member)}")
