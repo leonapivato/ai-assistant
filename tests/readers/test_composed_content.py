@@ -169,10 +169,16 @@ async def test_a_bare_carriage_return_in_a_header_costs_the_message_before_the_r
 
     ``_header_block`` deliberately does not treat a lone ``\\r`` as a line
     boundary, because ``mailbox.mbox`` does not — but ``BytesParser`` beneath it
-    does, so the header block ends at the carriage return and the two headers
-    carrying instants land past it. ``_interpret`` then skips the message under
-    ADR-0140 §5, which is fail-closed, which is why it is #1463 rather than a fix
-    in this change.
+    does, so the two layers would cut the same block into different header lines.
+    Since #1463 ``_interpret`` refuses such a block on a check this reader owns
+    (``_carries_a_bare_carriage_return``) and skips the message under ADR-0140 §5,
+    rather than letting the disagreement decide the outcome by where the ``\\r``
+    happened to fall.
+
+    So the message is gone before ``one_line`` is reached, and what this case pins
+    for #1449 is unchanged by that: the empty result here is a **skip**, not this
+    rule removing a character. ``test_email_headers.py`` is where the skip itself
+    is pinned, in both directions.
     """
     composed = await _email_content(tmp_path, "From: Alice", "Subject: a\rb", name="bare-cr.mbox")
 

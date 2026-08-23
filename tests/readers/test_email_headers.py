@@ -40,6 +40,10 @@ INSIDE = NOW - timedelta(hours=1)
 #: character of it.
 INSIDE_STAMP = delivered(INSIDE)
 
+#: The whole delivery header as an honest fetcher writes it, for the cases that
+#: are about some *other* header entirely.
+DELIVERED = f"{DELIVERED_AT_HEADER}: {INSIDE_STAMP}"
+
 
 async def _proposals(tmp_path: Path, *messages: bytes) -> tuple[str, ...]:
     """Read a store of ``messages`` and return each proposal's rendered content."""
@@ -260,6 +264,116 @@ async def test_a_date_the_reader_can_resolve_is_carried_as_reported_at(
     attestation = proposal.proposed.provenance.attestation
     assert attestation is not None
     assert attestation.reported_at == datetime(2026, 8, 3, 11, 0, tzinfo=UTC)
+
+
+# --- a bare carriage return is the reader's own skip, over the whole block ----
+
+
+def _crlf(raw: bytes) -> bytes:
+    """The same store framed with ``CRLF`` rather than ``LF``.
+
+    A bare ``\\r`` already in a header value is untouched by this, because it has
+    no ``\\n`` after it to be paired with — which is the point: it is the one
+    ``\\r`` the framing did not put there.
+    """
+    return raw.replace(b"\n", b"\r\n")
+
+
+@pytest.mark.parametrize(
+    ("case", "headers"),
+    [
+        # Above the instant-carrying headers: the parser's header section ends at
+        # the carriage return, so neither instant is found. #1463's own case.
+        ("in the subject", ("From: Alice", "Subject: a\rb", f"Date: {DATE}", DELIVERED)),
+        ("in the sender", ("From: a\rb", "Subject: ok", f"Date: {DATE}", DELIVERED)),
+        # In an instant-carrying header itself.
+        (
+            "in Date",
+            ("From: Alice", "Subject: ok", "Date: Mon, 03 Aug 2026 11:\r00:00 +0000", DELIVERED),
+        ),
+        (
+            "in the delivery stamp",
+            (
+                "From: Alice",
+                "Subject: ok",
+                f"Date: {DATE}",
+                f"{DELIVERED_AT_HEADER}: 2026-08-03T11:\r00:00Z",
+            ),
+        ),
+        # **Below both of them**, which is the arm the emergent behaviour got
+        # wrong: every header the reader wants is parsed before the section ends,
+        # so this message *was* proposed — from a block whose remainder the parser
+        # had already reinterpreted, and whose `X-Note` it had silently truncated
+        # to `a`.
+        (
+            "in a trailing header the reader never reads",
+            ("From: Alice", "Subject: ok", f"Date: {DATE}", DELIVERED, "X-Note: a\rb"),
+        ),
+    ],
+)
+async def test_a_bare_carriage_return_in_any_header_skips_the_message(
+    tmp_path: Path, case: str, headers: tuple[str, ...]
+) -> None:
+    """#1463: the skip is owed to the block, not to whichever field the ``\\r`` broke.
+
+    ``_header_block`` cuts on ``\\n`` alone because that is ``mailbox.mbox``'s
+    framing and framing is what decides where one message's bytes end;
+    ``BytesParser``'s ``feedparser`` cuts on ``NLCRE`` — ``\\r\\n``, ``\\r`` or
+    ``\\n``. So a block carrying a bare ``\\r`` is two different sequences of
+    header lines depending on which layer is asked, and a reader that cannot say
+    what its own header block is cannot interpret the message: ADR-0140 §5's skip,
+    taken on a check this reader owns rather than emerging from the disagreement.
+
+    **The last arm is the one that changes an outcome**, and it is why the check
+    is not scoped to the four fields §5 reads. A fetcher fault ADR-0140 §4 names
+    and §13's recipe forbids outright must not produce a proposal in one ordering
+    and a skip in another.
+    """
+    proposed = await _proposals(tmp_path, message(*headers))
+
+    assert proposed == (), case
+
+
+async def test_a_crlf_framed_store_is_not_a_bare_carriage_return(tmp_path: Path) -> None:
+    """The allowance the check has to make, and the one it must not make twice.
+
+    ``_header_block`` joins on ``\\n``, so a ``CRLF`` store's block keeps the
+    ``CR`` of every terminator — including a trailing one on the last line, which
+    has no ``\\n`` after it at all. A check reading "no ``\\r`` in the block" would
+    skip **every message in every CRLF store**, which is the failure this case
+    exists to catch. A ``\\r`` the framing did not put there is still a skip in the
+    same store.
+    """
+    honest = envelope(subject="framed with CRLF", delivered_at=INSIDE)
+    poisoned = message("From: Alice", "Subject: a\rb", f"Date: {DATE}", DELIVERED)
+
+    assert await _proposals(tmp_path, _crlf(honest)) == (
+        'Email from "Alice <alice@example.com>" with subject "framed with CRLF", '
+        "delivered 2026-08-03 11:00 (UTC).",
+    )
+    assert await _proposals(tmp_path, _crlf(poisoned)) == ()
+
+
+async def test_the_skip_costs_the_message_and_only_the_message(tmp_path: Path) -> None:
+    """Nothing is proposed from the broken block, and its neighbours are untouched.
+
+    The check runs per header block, which is what keeps one fetcher fault from
+    emptying a reading — and asserting the survivor is what stops the skip being
+    satisfied by a reader that gave up on the store. ``arrived_in_window`` is
+    asserted with it by ``_proposals``: a reader can drop the proposal and still
+    count the message.
+    """
+    proposed = await _proposals(
+        tmp_path,
+        message("From: Mallory", "Subject: a\rb", f"Date: {DATE}", DELIVERED),
+        envelope(subject="unaffected", delivered_at=INSIDE),
+    )
+
+    assert proposed == (
+        'Email from "Alice <alice@example.com>" with subject "unaffected", '
+        "delivered 2026-08-03 11:00 (UTC).",
+    )
+    assert all("Mallory" not in content for content in proposed)
 
 
 # --- the sender and the subject are never on their own a reason to skip ------
