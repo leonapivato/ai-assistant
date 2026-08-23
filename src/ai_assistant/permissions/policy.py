@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING
 
 from ai_assistant.core.types import (
     CostBasis,
+    OriginUnrecordedBinding,
     PermissionOutcome,
     PermissionRuling,
     Reversibility,
@@ -32,6 +33,14 @@ if TYPE_CHECKING:
 
 #: Reported when ``resolve`` is handed a decision the user was never shown.
 _NOT_A_CONFIRMATION = "the decision resolved was not a CONFIRM, so it authorises nothing"
+
+#: ADR-0184 §7's floor, worded as a statement about the **record** rather than about
+#: the call: what is missing is the fact the trail never wrote down, and no reading
+#: of the user's answer supplies it.
+_ORIGIN_UNRECORDED = (
+    "the user approved, but this decision records an egress call whose origin was never "
+    "recorded, and no answer can establish it"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,6 +308,22 @@ class ThresholdActionPolicy:
         clause here would refuse every approval of exactly the calls §6 exists to
         put to the user, which is the failure §5's sixth clause names.
 
+        **ADR-0184 §7's floor *does* add a branch, and it is the one case where an
+        approval is not enough.** Where ``confirmed.egress_binding`` records no
+        origin — an
+        :class:`~ai_assistant.core.types.OriginUnrecordedBinding`, which only a row
+        written before ADR-0181 can carry — no ``ALLOW`` is returned whatever
+        ``approved`` says. The origin of such a call cannot be established at all,
+        and ADR-0181 §5's second clause leaves no route by which any authorisation
+        covers it; the user's answer is route (a) for a call whose facts are known,
+        and here one of them never was. It is a **floor rather than a route that
+        exists**: ``AuditTrail.pending_confirmation`` refuses to offer such a park
+        and ``StepRunner.resume`` refuses it again before any ruling is sought, so
+        nothing in the tree reaches this branch — which is exactly ADR-0021 §5's
+        "fail-closed twice over" and why it is written anyway. ``decide`` gains no
+        counterpart: :attr:`ActionRequest.egress_binding` stays narrow, so the case
+        is unconstructable at that member.
+
         **Only ``True`` is consent.** ``approved`` is annotated ``bool`` and
         mypy runs strict over `src` and `tests`, so a caller passing anything
         else is a type error before it is a runtime one. The test is written as
@@ -316,6 +341,8 @@ class ThresholdActionPolicy:
             return PermissionRuling(outcome=PermissionOutcome.DENY, reason="the user declined")
         if confirmed.ruling.outcome is not PermissionOutcome.CONFIRM:
             return PermissionRuling(outcome=PermissionOutcome.DENY, reason=_NOT_A_CONFIRMATION)
+        if isinstance(confirmed.egress_binding, OriginUnrecordedBinding):
+            return PermissionRuling(outcome=PermissionOutcome.DENY, reason=_ORIGIN_UNRECORDED)
         if self._outcome_for(confirmed.tool) is PermissionOutcome.DENY:
             return PermissionRuling(
                 outcome=PermissionOutcome.DENY,

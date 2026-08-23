@@ -41,7 +41,11 @@ from ai_assistant.core.errors import (
     DuplicateDecisionError,
     InvalidResolutionError,
 )
-from ai_assistant.core.types import PermissionDecision, PermissionOutcome
+from ai_assistant.core.types import (
+    OriginUnrecordedBinding,
+    PermissionDecision,
+    PermissionOutcome,
+)
 from ai_assistant.permissions._transactions import transaction
 
 if TYPE_CHECKING:
@@ -540,8 +544,13 @@ class SqliteAuditTrail:
     async def record(self, decision: PermissionDecision) -> str:
         """Append ``decision`` and return its id.
 
+        **A decision carrying an ``OriginUnrecordedBinding`` is refused**
+        (ADR-0184 §4, :func:`_revalidated`): that shape is only ever read out of a
+        row written before ADR-0181 and never minted into one.
+
         Raises:
-            AuditError: If the decision does not satisfy its own model, or the
+            AuditError: If the decision does not satisfy its own model, carries an
+                ``OriginUnrecordedBinding``, or the
                 database refuses the write. Pydantic's ``ValidationError`` is
                 deliberately not allowed to escape: CONTRIBUTING has this layer
                 raise only from the ``AssistantError`` hierarchy, and a caller
@@ -586,6 +595,19 @@ class SqliteAuditTrail:
 
     def _check_resolution(self, decision: PermissionDecision) -> None:
         """Enforce ADR-0021 §1 and ADR-0044 §2's invariant on a resolving decision.
+
+        **The referenced ``CONFIRM`` is read through :func:`_decode`, so since
+        ADR-0184 a pre-ADR-0181 one is legible here rather than raising.** No clause
+        is added for it and none is owed: ADR-0184 §4 states ``record``'s refusal
+        over the **incoming** decision, and a resolution *of* such a row is closed
+        one seam out rather than here. Nothing can build one — ``StepRunner.resume``
+        narrows the recovered decision's binding and refuses before any ruling is
+        sought (ADR-0184 §8's fourth clause), ``pending_confirmation`` never offers
+        such a park at all, and ``ActionPolicy.resolve`` returns no ``ALLOW`` on one
+        whatever the user answered (§7). What reaching this check would take is a
+        caller hand-authoring a resolving decision, which is the boundary ADR-0018
+        §3 drew for detachment: a caller falsifying its own trail, not a producer
+        this store can catch.
 
         Raises:
             InvalidResolutionError: If the referenced decision is absent, was not
@@ -702,15 +724,24 @@ class SqliteAuditTrail:
         carries none. Query-only, returning a detached snapshot rebuilt from JSON.
 
         **A third way to answer ``None``: the ``CONFIRM`` is there and its origin
-        was never recorded** (:data:`ORIGIN_UNRECORDED`). ``EgressBinding`` is a
-        stored member of a decision and ADR-0181 §3 made
-        ``planned_with_external_content`` required with no default, so a row written
-        before that field existed cannot be rebuilt into a decision at all: §3
-        forbids a default and §4's second clause forbids a seam inventing one, which
-        rules out ``False`` and ``True`` alike. Such a call's origin therefore cannot
-        be established, and ADR-0181 §5's second clause leaves no route by which any
-        authorisation covers it — so there is no answerable question here to hand
+        was never recorded** (:data:`ORIGIN_UNRECORDED`). A row written before
+        ADR-0181 §3 added ``planned_with_external_content`` decodes carrying an
+        :class:`~ai_assistant.core.types.OriginUnrecordedBinding` (ADR-0184 §2), and
+        such a call's origin cannot be established at all: §3 forbids a default and
+        §4's second clause forbids a seam inventing one, which rules out ``False``
+        and ``True`` alike. ADR-0181 §5's second clause then leaves no route by which
+        any authorisation covers it — so there is no answerable question here to hand
         back, and this returns ``None`` rather than a decision.
+
+        **What ADR-0184 changed here is only the detection.** The case is recognised
+        on the decoded value's **type** rather than on the shape of a
+        ``ValidationError``, which is strictly the stronger form of the same rule:
+        the narrowness ``_is_origin_unrecorded`` maintained by hand — "a row with a
+        second fault, a fault anywhere else, or a fault of any other type is a
+        corrupted or downgraded database exactly as before" — is now carried by the
+        type system, so no lane can widen the tolerance by loosening a predicate
+        (ADR-0184 §1, §3, §5). The condition name a reader meets in the log is
+        unchanged.
 
         **This is the one reader whose answer a caller rebuilds a park from** — the
         engine's recovery enumeration and the runner's restart path both reach a
@@ -733,13 +764,15 @@ class SqliteAuditTrail:
         erased; reclaiming one is the same open question a permanently unanswerable
         park already poses.
 
-        **A reader that only reads is unaffected**, and deliberately: :meth:`get`,
-        :meth:`recent`, :meth:`export` and :meth:`resolution_of` still report such a
-        row through :func:`_decode`'s ``AuditError``, exactly as they did before
-        ADR-0181 landed. Serving them a binding-less decision to make them succeed
-        would breach ADR-0150 §1 for the sake of a read, and this method's refusal
-        does not need it: the damage a legacy row does is to the **park** path, and
-        that is where it is answered.
+        **A reader that only reads answers differently, and the asymmetry is the
+        distinction the design turns on** (ADR-0184 §5). :meth:`get`,
+        :meth:`recent`, :meth:`export` and :meth:`resolution_of` now return such a
+        row **as history**, carrying the account, the recipients and the payload
+        description it actually holds. A park is a question put to the user and
+        answering it composes a card they act on; a history read states what was
+        recorded. There is no answerable question in an unanswerable park, so this
+        hands back nothing — and there is a perfectly legible record behind it, so
+        the readers hand it back.
 
         Raises:
             AuditError: If the trail cannot be read, or holds a row that no longer
@@ -749,12 +782,9 @@ class SqliteAuditTrail:
             data = await _run_to_completion(self._pending_confirmation_sync, execution_id, step_id)
         if data is None:
             return None
-        try:
-            return PermissionDecision.model_validate_json(data)
-        except ValidationError as exc:
-            if not _is_origin_unrecorded(exc):
-                msg = f"the audit trail holds a record that no longer validates: {exc}"
-                raise AuditError(msg) from exc
+        park = _decode(data)
+        if not isinstance(park.egress_binding, OriginUnrecordedBinding):
+            return park
         _log.info(
             ORIGIN_UNRECORDED,
             execution_id=execution_id,
@@ -942,9 +972,26 @@ def _revalidated(decision: PermissionDecision) -> PermissionDecision:
     them here rather than letting them vanish at serialisation and make the
     stored record differ from the one that reloads.
 
+    **An ``OriginUnrecordedBinding`` is refused here** (ADR-0184 §4), and it is the
+    one refusal the model cannot make for itself: that shape is a *valid*
+    ``PermissionDecision``, because it has to be for a stored row to decode into
+    one. It represents a row from an epoch that has ended, so it is only ever read
+    out of a store and never minted into one — a caller bypassing ``from_request``
+    could otherwise construct such a decision and append it, fabricating history
+    rather than a value. ``record`` is where the trail already enforces what a model
+    cannot see for itself (ADR-0021 §4), and this is one more clause of that kind.
+
     Raises:
-        AuditError: If the decision does not satisfy its own model.
+        AuditError: If the decision does not satisfy its own model, or carries an
+            ``OriginUnrecordedBinding``.
     """
+    if isinstance(decision.egress_binding, OriginUnrecordedBinding):
+        msg = (
+            f"decision {decision.id!r} is not a valid record: its egress binding "
+            f"records no origin, which is a shape only a row written before "
+            f"ADR-0181 can have; the trail reads such rows and never writes one"
+        )
+        raise AuditError(msg)
     try:
         return PermissionDecision.model_validate(decision.model_dump())
     except ValidationError as exc:
@@ -952,42 +999,30 @@ def _revalidated(decision: PermissionDecision) -> PermissionDecision:
         raise AuditError(msg) from exc
 
 
-def _is_origin_unrecorded(exc: ValidationError) -> bool:
-    """Whether ``exc`` is *exactly* the pre-ADR-0181 egress row and nothing else.
-
-    Deliberately narrow, because the whole value of this predicate is that it does
-    **not** widen what the trail tolerates. It matches one shape: a single
-    ``missing`` error, at ``egress_binding.planned_with_external_content`` and
-    nowhere else. A row with a second fault, a fault anywhere else, or a fault of
-    any other type is a corrupted or downgraded database exactly as before.
-
-    Args:
-        exc: The failure ``model_validate_json`` raised.
-
-    Returns:
-        Whether the row is a row recorded before ADR-0181 rather than a broken one.
-    """
-    errors = exc.errors()
-    if len(errors) != 1:
-        return False
-    only = errors[0]
-    return only["type"] == "missing" and tuple(only["loc"]) == (
-        "egress_binding",
-        "planned_with_external_content",
-    )
-
-
 def _decode(data: str) -> PermissionDecision:
     """Rebuild a stored decision from its JSON.
 
+    **A row recorded before ADR-0181 §3's ``planned_with_external_content`` decodes
+    rather than raising** (ADR-0184 §2, §5), carrying an
+    :class:`~ai_assistant.core.types.OriginUnrecordedBinding` in place of an
+    ``EgressBinding``. Nothing here recognises it: the discrimination is structural,
+    done by the union on :attr:`PermissionDecision.egress_binding` and by
+    ``extra="forbid"`` on both models, so there is no predicate to widen and no
+    branch to take. The tolerance is exactly one shape wide — a row that is *also*
+    faulty elsewhere satisfies neither arm of the union and still raises below,
+    which is what the retired ``_is_origin_unrecorded`` bought with a hand-written
+    check over ``exc.errors()``.
+
+    Nothing is written back for such a row and nothing is fabricated on the way out:
+    the model carries no ``planned_with_external_content`` member, so a
+    ``model_dump`` of what this returns emits no key for it and an ``export`` is a
+    faithful copy of what the row says (ADR-0184 §4).
+
     Raises:
         AuditError: If the stored row no longer validates — a corrupted or
-            downgraded database, which is a fault to report rather than a record
-            to hand on. A row recorded before ADR-0181 (:func:`_is_origin_unrecorded`)
-            is one such row **here**, and deliberately: see
-            :meth:`SqliteAuditTrail.pending_confirmation` for where that case is
-            answered instead, and why it cannot be answered by handing back a
-            decision.
+            downgraded database, which is a fault to report rather than a record to
+            hand on. Every unreadable row but the one shape above is reported here
+            exactly as it was before.
     """
     try:
         return PermissionDecision.model_validate_json(data)

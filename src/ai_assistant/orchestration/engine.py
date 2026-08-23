@@ -115,6 +115,7 @@ from ai_assistant.core.types import (
     LearnOutcome,
     MemoryDecisionKind,
     MemoryKind,
+    OriginUnrecordedBinding,
     ParkedBinding,
     QueuedQuestion,
     QueueOutcome,
@@ -750,8 +751,11 @@ def _confirmation_egress(recorded: PermissionDecision) -> ConfirmationEgress | N
     **Three fields off a value already in hand, and nothing else.** It derives no
     binding, reads no connection record, opens no store, calls no seam and reads no
     clock — which is what keeps :meth:`Engine._confirmation`'s standing guarantee
-    true (#287): everything that could raise still happens before ``run`` commits
-    ``AWAITING_APPROVAL``, and this raises nothing. The account's ``reference`` and
+    true (#287): everything that could **fail** still happens before ``run`` commits
+    ``AWAITING_APPROVAL``, and no fallible work is left here. The one ``raise``
+    below is an internal-fault guard over an unconstructable state, the same shape
+    as :meth:`Engine._confirmation`'s three, not a check that could turn a parked
+    step into a stranded one. The account's ``reference`` and
     the binding's ``transport_endpoint`` are the two fields deliberately left
     behind (ADR-0178 §2), so nothing this returns can carry them to an adapter.
 
@@ -775,6 +779,19 @@ def _confirmation_egress(recorded: PermissionDecision) -> ConfirmationEgress | N
     round-trips whole (ADR-0150 §9) and both sites hold a whole decision. There is
     no reduced, digested or partial recovered form.
 
+    **An origin-unrecorded binding is refused rather than assumed away**
+    (ADR-0184 §8). ``ConfirmationEgress.planned_with_external_content`` is required
+    with no default, so composing one for a row that never recorded the value would
+    demand exactly the fabrication ADR-0184 exists to avoid — at the surface where
+    the user is being asked to approve something, which is the worst place in the
+    system to invent a fact. ``None`` is not the answer either: ADR-0178 §4 makes it
+    the discriminator for "the ruling was not taken over an egress binding at all",
+    which for a row naming an account and a recipient would be false. So the absence
+    is answered by not asking the question, and neither assembly site can reach one:
+    both are fed by ``AuditTrail.pending_confirmation``, which answers ``None`` for
+    such a row (ADR-0184 §5), and by a decision this process has just recorded,
+    which ``record`` refuses to be one (§4).
+
     Args:
         recorded: The recorded ``CONFIRM`` this confirmation is about.
 
@@ -782,10 +799,21 @@ def _confirmation_egress(recorded: PermissionDecision) -> ConfirmationEgress | N
         The egress facts, or ``None`` where the decision carries no binding — which
         is ADR-0178 §4's discriminator and states that the ruling was taken over an
         egress binding and nothing more.
+
+    Raises:
+        PlanningError: If the decision's binding records no origin. Unreachable
+            from either assembly site, and stated as a floor rather than a route
+            that exists.
     """
     binding = recorded.egress_binding
     if binding is None:
         return None
+    if isinstance(binding, OriginUnrecordedBinding):
+        msg = (
+            "a confirmation cannot be composed for a decision whose egress binding records "
+            "no origin: the value the user would be shown was never recorded"
+        )
+        raise PlanningError(msg)
     return ConfirmationEgress(
         account_identity=binding.account.identity,
         spans=binding.spans,

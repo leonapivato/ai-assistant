@@ -1410,7 +1410,7 @@ async def test_a_row_carrying_the_origin_round_trips_unchanged(
 
     assert got is not None
     assert got.egress_binding == recorded.egress_binding
-    assert got.egress_binding is not None
+    assert isinstance(got.egress_binding, EgressBinding)
     assert got.egress_binding.planned_with_external_content is False
     assert park is not None, "a current park is still answerable"
     assert park.egress_binding == recorded.egress_binding

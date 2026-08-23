@@ -64,6 +64,7 @@ from ai_assistant.core.types import (
     CarriedProvenance,
     Disposition,
     ExecutionState,
+    OriginUnrecordedBinding,
     PermissionDecision,
     PermissionOutcome,
     PlanStep,
@@ -634,7 +635,9 @@ class StepRunner:
             PermissionDeniedError: If the named confirmation was not a ``CONFIRM``,
                 or is a ``CONFIRM`` about a different step, or one this execution
                 is not parked on (:meth:`_check_parked`), or one answered past the
-                deadline fixed on it when it was asked (:meth:`_check_fresh`); or,
+                deadline fixed on it when it was asked (:meth:`_check_fresh`); or
+                one recording an egress call whose origin was never recorded, which
+                is unanswerable (ADR-0184 §8); or,
                 on the restart
                 path, if the trail holds no pending confirmation for the binding —
                 it is already resolved, or the step was never parked
@@ -667,9 +670,26 @@ class StepRunner:
             raise PermissionDeniedError(msg)
         self._check_parked(opened, step, confirmed.tool.id, confirmation_id=confirmed.id)
         self._check_fresh(confirmed)
+        approved_binding = confirmed.egress_binding
+        if isinstance(approved_binding, OriginUnrecordedBinding):
+            # ADR-0184 §8's fourth clause: narrow the union and refuse rather than
+            # assume the case away. Such a decision records a call whose origin was
+            # never recorded, so ADR-0181 §5's second clause leaves no route by
+            # which any authorisation covers it and `EgressBinder.rebind` must
+            # never receive one (ADR-0184 §8). `pending_confirmation` already
+            # refuses to offer such a park, so the recovery path cannot arrive
+            # here; the in-process path can, because `_recorded` reads the trail's
+            # `get`, which since ADR-0184 §5 returns the row as history rather than
+            # raising. Refused by this seam's own existing name, before any ruling
+            # is sought, so nothing is written and the step stays parked.
+            msg = (
+                f"decision {confirmed.id!r} records an egress call whose origin was never "
+                f"recorded, so it cannot be resumed: the question it asked is unanswerable"
+            )
+            raise PermissionDeniedError(msg)
 
         try:
-            bound = await self._rebound(confirmed.tool, step.parameters, confirmed.egress_binding)
+            bound = await self._rebound(confirmed.tool, step.parameters, approved_binding)
         except EgressBindingError:
             # ADR-0152 §7: the binding derived for this resumed call is not the
             # one that was approved, or the reference went `PENDING` while the

@@ -43,6 +43,7 @@ from ai_assistant.core.types import (
     CostBasis,
     DataTier,
     Disposition,
+    EgressBinding,
     EpisodicMemory,
     Evidence,
     FeedbackEvent,
@@ -4733,7 +4734,7 @@ async def test_a_call_planned_over_no_selection_at_all_carries_false() -> None:
     assert outcome.step.disposition is Disposition.AWAITING_CONFIRMATION
     recorded = await harness.trail.get("d-1")
     assert recorded is not None
-    assert recorded.egress_binding is not None
+    assert isinstance(recorded.egress_binding, EgressBinding)
     assert recorded.egress_binding.planned_with_external_content is False
 
 
@@ -4768,7 +4769,7 @@ async def test_a_plans_own_claim_about_the_field_is_discarded_and_not_merged() -
     )
     recorded = await harness.trail.get("d-1")
     assert recorded is not None
-    assert recorded.egress_binding is not None
+    assert isinstance(recorded.egress_binding, EgressBinding)
     assert recorded.egress_binding.planned_with_external_content is True
 
 
@@ -4799,7 +4800,7 @@ async def test_a_second_clean_selection_does_not_clear_what_the_first_recorded()
     )
     recorded = await harness.trail.get("d-1")
     assert recorded is not None
-    assert recorded.egress_binding is not None
+    assert isinstance(recorded.egress_binding, EgressBinding)
     assert recorded.egress_binding.planned_with_external_content is True
 
 
@@ -4824,7 +4825,7 @@ async def test_the_confirmation_the_user_answers_carries_the_calls_origin() -> N
     assert confirmation.egress is not None
     recorded = await harness.trail.get("d-1")
     assert recorded is not None
-    assert recorded.egress_binding is not None
+    assert isinstance(recorded.egress_binding, EgressBinding)
     assert (
         confirmation.egress.planned_with_external_content
         == recorded.egress_binding.planned_with_external_content

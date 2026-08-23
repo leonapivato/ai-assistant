@@ -210,9 +210,16 @@ class _TamperedTrail(FakeAuditTrail):
     async def get(self, decision_id: str) -> PermissionDecision | None:
         """Answer with the stored decision, its binding forged where asked."""
         stored = await super().get(decision_id)
-        if stored is None or decision_id != self.forge or stored.egress_binding is None:
+        if stored is None or decision_id != self.forge:
             return stored
-        return stored.model_copy(update={"egress_binding": _forged(stored.egress_binding)})
+        binding = stored.egress_binding
+        if not isinstance(binding, EgressBinding):
+            # ADR-0184 §2 widened the field to a three-member union. The forged
+            # occurrence this double exists to plant is a fact about a *current*
+            # binding, and nothing here writes the origin-unrecorded shape, so the
+            # other two arms are passed through untouched rather than forged.
+            return stored
+        return stored.model_copy(update={"egress_binding": _forged(binding)})
 
 
 class _RecordingPolicy(FakeActionPolicy):
@@ -708,7 +715,7 @@ async def test_the_request_carries_the_origin_the_runner_was_given(
     assert parked.decision_id is not None
     recorded = await harness.trail.get(parked.decision_id)
     assert recorded is not None
-    assert recorded.egress_binding is not None
+    assert isinstance(recorded.egress_binding, EgressBinding)
     assert recorded.egress_binding.planned_with_external_content is selected_external
 
 
@@ -740,7 +747,7 @@ async def test_a_parked_call_planned_over_external_content_resumes_and_executes(
     assert parked.decision_id is not None
     approved = await harness.trail.get(parked.decision_id)
     assert approved is not None
-    assert approved.egress_binding is not None
+    assert isinstance(approved.egress_binding, EgressBinding)
     assert approved.egress_binding.planned_with_external_content is True
 
     resumed = await harness.runner.resume(
