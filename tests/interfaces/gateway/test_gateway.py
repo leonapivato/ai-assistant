@@ -22,11 +22,12 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+import structlog
 from gateway_mint import bootstrap_value
 from gateway_timing import Clock, Timers
 
 from ai_assistant.core.config import Settings
-from ai_assistant.core.errors import UnknownConversationError
+from ai_assistant.core.errors import ConfigurationError, UnknownConversationError
 from ai_assistant.core.types import (
     ActionPlan,
     CurrentContext,
@@ -41,7 +42,7 @@ from ai_assistant.core.types import (
     TurnOutcome,
     TurnResult,
 )
-from ai_assistant.interfaces.gateway.server import Gateway
+from ai_assistant.interfaces.gateway.server import Disclosure, Gateway
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire.errors import HubUnavailableError
 
@@ -271,6 +272,14 @@ async def _start_session(harness: Harness) -> tuple[str, str]:
     return cookie.split(";")[0].partition("=")[2], answer.payload["header_half"]
 
 
+async def _exchange(harness: Harness, value: str) -> Answer:
+    """Present one bootstrap value at the exchange and read the answer."""
+    body = json.dumps({"bootstrap_value": value}).encode()
+    return await harness.send(
+        f"POST /session HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}", body
+    )
+
+
 def _ask(
     harness: Harness,
     *,
@@ -453,6 +462,124 @@ async def test_a_fresh_mint_replaces_the_outstanding_value_rather_than_being_ref
     assert refused.status == 400
     assert refused.payload == {"fault": "bootstrap-exchange-failed"}
     assert admitted.status == 200
+
+
+async def test_the_exchange_is_refused_at_the_ceiling_and_consumes_the_value_anyway() -> None:
+    """ADR-0182 §4: the one door the ceiling is enforced at, reachable at last.
+
+    "The **bootstrap exchange is the only place the ceiling is enforced**, because
+    it is the only act that raises the live session count. An exchange that would
+    take the count past ``gateway_max_sessions`` is **refused**, and no session is
+    minted." And the value goes with it: "the value the exchange carried is consumed
+    exactly as a spent value is, so a refused exchange is not a value the caller may
+    present again", because "the alternative leaves a live ticket outstanding after
+    a failure the caller can drive, which turns the ceiling into a way to keep a
+    value alive".
+    """
+    async with _harness(gateway_max_sessions=1) as one:
+        first = bootstrap_value(one.gateway)
+        assert (await _exchange(one, first)).status == 200
+        second = bootstrap_value(one.gateway)
+
+        refused = await _exchange(one, second)
+        again = await _exchange(one, second)
+
+    assert refused.status == 400
+    assert refused.payload == {"fault": "bootstrap-exchange-failed"}
+    assert again.status == 400
+    assert again.payload == {"fault": "bootstrap-exchange-failed"}
+
+
+async def test_a_ceiling_refusal_is_recorded_as_the_ceiling_and_answered_as_a_failure() -> None:
+    """ADR-0182 §4's split: the owner is told everything and the browser nothing.
+
+    "The refusal **is** recorded, and the record names the ceiling as the condition
+    it was refused on… That record is the owner's channel for the fact the browser
+    is not told." Telling the browser instead "would hand any local process a probe
+    for how many browsers the owner has admitted".
+    """
+    async with _harness(gateway_max_sessions=1) as one:
+        assert (await _exchange(one, bootstrap_value(one.gateway))).status == 200
+        with structlog.testing.capture_logs() as records:
+            refused = await _exchange(one, bootstrap_value(one.gateway))
+            one.timers.fire_all()
+
+    assert refused.payload == {"fault": "bootstrap-exchange-failed"}
+    conditions = [record.get("condition") for record in records]
+    assert "session-ceiling" in conditions
+
+
+async def test_every_way_a_value_can_have_ceased_is_the_same_refusal(harness: Harness) -> None:
+    """ADR-0182 §2: a failed exchange "never [discloses] which of the four events
+    above ended the value it carried".
+
+    ADR-0168 §5's rule governs all four, so the four cessation events, an unknown
+    value and an absent one are one answer with one body.
+    """
+    spent = bootstrap_value(harness.gateway)
+    assert (await _exchange(harness, spent)).status == 200
+
+    expired = bootstrap_value(harness.gateway)
+    harness.timers.fire_all()
+    replaced = bootstrap_value(harness.gateway)
+    bootstrap_value(harness.gateway)
+    ended = bootstrap_value(harness.gateway)
+    harness.gateway.close()
+
+    answers = [await _exchange(harness, one) for one in (spent, expired, replaced, ended)]
+    answers.append(await _exchange(harness, "never-minted"))
+    answers.append(await harness.send("POST /session HTTP/1.1\nHost: {host}\nContent-Length: 0"))
+
+    assert {(one.status, one.body) for one in answers} == {
+        (400, answers[0].body),
+    }
+    assert answers[0].payload == {"fault": "bootstrap-exchange-failed"}
+
+
+async def test_an_exchange_presenting_a_candidate_no_disclosure_promoted_is_refused(
+    harness: Harness,
+) -> None:
+    """ADR-0182 §1: such a value "is **not minted**", and §2: it "admits nothing".
+
+    The interval in which a candidate sits in memory beside a still-outstanding
+    value is pinned where it exists, on ``BootstrapMint`` itself
+    (``test_sessions.py``); what is pinned here is the door — a value the gateway
+    generated and never disclosed buys no session, and the value that was disclosed
+    still does.
+    """
+    standing = bootstrap_value(harness.gateway)
+    captured: list[str] = []
+
+    def capture_then_fail(one: Disclosure) -> None:
+        captured.append(one.value)
+        msg = "standard output is not writable"
+        raise ConfigurationError(msg)
+
+    with pytest.raises(ConfigurationError):
+        harness.gateway.mint_bootstrap(capture_then_fail, act=None)
+
+    refused = await _exchange(harness, captured[0])
+    admitted = await _exchange(harness, standing)
+
+    assert refused.status == 400
+    assert refused.payload == {"fault": "bootstrap-exchange-failed"}
+    assert admitted.status == 200
+
+
+async def test_a_disclosed_value_ceases_when_its_ttl_elapses(harness: Harness) -> None:
+    """ADR-0182 §2's second cessation event, at the door.
+
+    Driven by firing what the gateway deferred rather than by moving the clock,
+    because §3 puts this bound on a monotonic source and §10 asks it pinned "by
+    driving the injected deferral seam rather than by moving a clock".
+    """
+    value = bootstrap_value(harness.gateway)
+
+    harness.timers.fire_all()
+
+    refused = await _exchange(harness, value)
+    assert refused.status == 400
+    assert refused.payload == {"fault": "bootstrap-exchange-failed"}
 
 
 # --- The exit test: an `ask` round-trips from a browser (#1230) ---

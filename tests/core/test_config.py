@@ -1246,6 +1246,10 @@ def test_every_duration_setting_is_discovered() -> None:
         "gateway_session_idle_timeout",
         "gateway_record_interval",
         "gateway_read_timeout",
+        # ADR-0182 §3's bootstrap bound, acknowledged for the same reason: the
+        # ``bool`` guard is the difference between a value an owner has ten minutes
+        # to carry to a phone and one that is dead before they have unlocked it.
+        "gateway_bootstrap_ttl",
         # ADR-0175 §8's poll budget, acknowledged here for the reason the four above
         # are: §8 states its range in ADR-0168 §8's own terms — strictly positive,
         # not nullable, and no value meaning "off" — and joining this tuple is what

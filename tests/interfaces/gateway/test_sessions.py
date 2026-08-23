@@ -1,4 +1,4 @@
-"""The web session: two values, a ceiling that refuses, and two clocks (ADR-0168 §4, §6)."""
+"""The web session and the value that buys one (ADR-0168 §4, §6; ADR-0182 §1, §2, §3)."""
 
 from __future__ import annotations
 
@@ -12,6 +12,7 @@ from gateway_timing import Clock, Timers
 
 from ai_assistant.interfaces.gateway.sessions import (
     Admission,
+    BootstrapMint,
     SessionTable,
     mint_value,
     verifier,
@@ -332,3 +333,141 @@ def test_a_minted_value_carries_at_least_128_bits() -> None:
 def test_two_mints_do_not_repeat() -> None:
     """A source that repeated would make every session the same session."""
     assert mint_value() != mint_value()
+
+
+# --- ADR-0182 §2: one outstanding value, and the four ways it ceases ---
+
+
+_BOOTSTRAP_TTL = timedelta(minutes=10)
+
+
+def _mint(timers: Timers) -> BootstrapMint:
+    """A bootstrap mint on ADR-0182 §3's own figure, with the timer a test fires."""
+    values = (f"bootstrap-{index}" for index in count())
+    return BootstrapMint(ttl=_BOOTSTRAP_TTL, defer=timers, mint_value=lambda: next(values))
+
+
+def _disclosed(mint: BootstrapMint) -> str:
+    """Mint a candidate and promote it, as a successful disclosure does."""
+    candidate = mint.mint()
+    mint.promote(candidate)
+    return candidate.value
+
+
+def test_an_undisclosed_candidate_admits_nothing(timers: Timers) -> None:
+    """§2: "An undisclosed **candidate** is not a value (§3), it admits nothing, and
+    no exchange accepts one before the disclosure that promotes it".
+
+    This is what makes §2's admission invariant true across the interval §1's order
+    creates — the candidate and the still-outstanding value are both in the
+    gateway's memory for the width of the write, and only one of them admits.
+    """
+    mint = _mint(timers)
+    standing = _disclosed(mint)
+    candidate = mint.mint()
+
+    assert mint.spend(candidate.value) is False
+    assert mint.spend(standing) is True
+
+
+def test_a_value_ceases_on_its_exchange(timers: Timers) -> None:
+    """§2's first event, which is ADR-0168 §5's single use."""
+    mint = _mint(timers)
+    value = _disclosed(mint)
+
+    assert mint.spend(value) is True
+    assert mint.spend(value) is False
+
+
+def test_a_value_ceases_when_its_ttl_elapses_on_the_deferral_seam(timers: Timers) -> None:
+    """§2's second event, and §3's monotonic clause pinned the way §10 asks.
+
+    "It is measured on a **monotonic** elapsed-time source — one the system clock
+    being moved in either direction does not affect — and a value that has ceased
+    is destroyed continuously, through the deferral seam ADR-0168 §4's own
+    continuous destruction already uses." So the bound is asserted by *firing* what
+    the mint deferred, and no clock is moved: there is no clock here to move.
+    """
+    mint = _mint(timers)
+    value = _disclosed(mint)
+    armed = timers.armed[-1]
+
+    assert armed.delay == _BOOTSTRAP_TTL.total_seconds()
+    timers.fire_all()
+
+    assert mint.spend(value) is False
+
+
+def test_a_value_ceases_when_a_fresh_mint_replaces_it(timers: Timers) -> None:
+    """§2's third event: "A **disclosed** mint (§1) replaces the outstanding value,
+    which ceases to admit anything at that moment".
+
+    The replaced value's timer goes with it, so a gateway does not hold a callback
+    against a value nothing can spend.
+    """
+    mint = _mint(timers)
+    first = _disclosed(mint)
+    second = _disclosed(mint)
+
+    assert first != second
+    assert len(timers.armed) == 1
+    assert mint.spend(first) is False
+    assert mint.spend(second) is True
+
+
+def test_a_value_ceases_when_the_gateway_process_ends(timers: Timers) -> None:
+    """§2's fourth event: "the end of the gateway process (ADR-0168 §4)"."""
+    mint = _mint(timers)
+    value = _disclosed(mint)
+
+    mint.clear()
+
+    assert mint.spend(value) is False
+    assert timers.armed == []
+
+
+def test_a_candidate_that_was_not_disclosed_leaves_the_previous_value_alone(
+    timers: Timers,
+) -> None:
+    """§1: such a value "is **not minted**".
+
+    "The gateway destroys the candidate… leaves any previously outstanding value
+    exactly as it was — still outstanding, still on its own clock." The clock half
+    is what the armed timer below stands for: a replacement would have cancelled it
+    and armed another.
+    """
+    mint = _mint(timers)
+    standing = _disclosed(mint)
+    armed = timers.armed[-1]
+    candidate = mint.mint()
+
+    mint.discard(candidate)
+
+    assert mint.spend(candidate.value) is False
+    assert timers.armed == [armed]
+    assert mint.spend(standing) is True
+
+
+def test_the_clock_starts_at_the_promotion_and_not_at_the_mint(timers: Timers) -> None:
+    """§3: the clock "runs from the **successful disclosure** that promotes a
+    candidate to the outstanding value (§1)… and from no other".
+
+    "The write is the act that can block, so a gateway whose standard output is
+    back-pressured could generate a candidate, block for longer than the whole
+    bound, and then promote a value already past its clock" — so nothing is
+    scheduled until the promotion, which is what the empty list below says.
+    """
+    mint = _mint(timers)
+
+    candidate = mint.mint()
+    assert timers.scheduled == []
+
+    mint.promote(candidate)
+
+    assert [one.delay for one in timers.armed] == [_BOOTSTRAP_TTL.total_seconds()]
+
+
+def test_a_mint_holding_nothing_spends_nothing(timers: Timers) -> None:
+    """Before the first disclosure there is no outstanding value, and a constant-time
+    comparison against nothing is a refusal rather than an error."""
+    assert _mint(timers).spend("anything") is False
