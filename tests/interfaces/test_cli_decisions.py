@@ -445,6 +445,34 @@ def test_an_empty_trail_lists_as_nothing_recorded(
     assert "Nothing recorded" in _listing(output, monkeypatch)
 
 
+def test_an_explicit_limit_is_forwarded_and_bounds_the_page(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§9: ``assistant decisions`` "taking ``--limit``" — the value, not just its shape.
+
+    The refusal case and the default case together leave one hole open: a command
+    that parsed ``--limit`` and then passed ``DEFAULT_PAGE_SIZE`` regardless passes
+    both, and silently hands the user a page they did not ask for. So this asserts
+    the *value* reaching the operation and the page it produced, over a trail with
+    more rows than the bound — a full page, which is also the one that has to say it
+    is one, since a bound with no way to tell it was reached is a truncation the
+    reader cannot see.
+    """
+    engine = _ScriptedDecisionEngine(_decision("d-new"), _decision("d-old"))
+    _wire(monkeypatch, engine)
+
+    result = CliRunner().invoke(cli.app, ["decisions", "--limit", "1"])
+    assert result.exit_code == 0
+    assert engine.calls == [("recent_decisions", {"limit": 1})]
+
+    rendered = _flat(output.getvalue())
+    assert "1 ruling(s)" in rendered
+    assert "d-new" in rendered
+    assert "d-old" not in rendered
+    assert "Showing 1. Ask for more with --limit" in rendered
+    assert "there is no total count" in rendered
+
+
 # --- §7: the three origin states ---------------------------------------------
 
 
