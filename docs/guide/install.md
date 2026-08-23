@@ -10,8 +10,10 @@ python3 --version
 
 It must report **3.14 or newer**. The package declares `requires-python =
 ">=3.14"`, so an older interpreter refuses the install rather than half-doing
-it. If yours is older, install 3.14 — `uv python install 3.14` will do it once
-you have uv (step 2), as will pyenv or your platform's packages.
+it. If yours is older, install 3.14 — uv will do it for you once you have uv
+(step 2: `python3 -m pip install uv`, then `python3 -m uv python install 3.14`),
+as will pyenv or your platform's packages. You do not need a 3.14 to *get* uv;
+you need one to install this package into.
 
 **Every command below spells that interpreter `python3.14`**, because that is
 what it was called on the machine these commands were run on. If yours answers
@@ -31,14 +33,19 @@ installer is at the link above; `pip` will also do it:
 
 ```bash
 python3.14 -m pip install uv
+python3.14 -m uv --version
 ```
 
-Then:
+The second line is the check and the convention. A pip install puts the `uv`
+script wherever that interpreter puts scripts, which is not necessarily on your
+`PATH`; `python3.14 -m uv` reaches it either way, so that is how this page
+spells it. If uv's own installer put a bare `uv` on your `PATH`, use that
+instead — the two are the same program.
 
 ```bash
 git clone https://github.com/leonapivato/ai-assistant.git
 cd ai-assistant
-uv build
+python3.14 -m uv build
 ```
 
 That writes two files into `dist/`. The one you want is the wheel:
@@ -63,7 +70,7 @@ in an environment of their own that cannot collide with anything else you have
 installed:
 
 ```bash
-uv tool install ./dist/ai_assistant-0.1.0-py3-none-any.whl
+python3.14 -m uv tool install ./dist/ai_assistant-0.1.0-py3-none-any.whl
 ```
 
 It ends by naming what it installed:
@@ -131,11 +138,13 @@ that owns those (ADR-0084 §6).
 
 **`ERROR: Package 'ai-assistant' requires a different Python: 3.12.13 not in
 '>=3.14'`** — the interpreter running `pip` is older than 3.14, and it says so
-before downloading anything. Point it at a 3.14 interpreter, or use `uv tool
-install`, which selects a suitable one itself.
+before downloading anything. Point it at a 3.14 interpreter, or use the
+`uv tool install` route, which selects a suitable one itself.
 
-**`assistant: command not found` after `uv tool install`** — uv installs into
-`~/.local/bin`, which is on your `PATH` only if something put it there. `uv tool
-update-shell` adds it; open a new shell afterwards.
+**`assistant: command not found` after `uv tool install`** — uv installs the
+commands into `~/.local/bin`, which is on your `PATH` only if something put it
+there. `python3.14 -m uv tool update-shell` adds it; open a new shell
+afterwards. Or call them by their full path, which is what the
+`~/.venvs/assistant/bin/` route above amounts to.
 
 Next: [`first-run.md`](first-run.md).
