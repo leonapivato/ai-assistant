@@ -8,7 +8,7 @@ Read the pages in order. Each one ends where the next one starts.
 
 | Page | What it gets you |
 | --- | --- |
-| [`install.md`](install.md) | Python 3.14, the wheel, and the nine commands it installs |
+| [`install.md`](install.md) | uv, the wheel built from a checkout, and the nine commands it installs |
 | [`first-run.md`](first-run.md) | A data directory, a model key, a running hub, and a browser you can ask things in |
 | [`phone.md`](phone.md) | The same browser page on your phone, over your own overlay network |
 | [`remote-hub.md`](remote-hub.md) | The hub on one machine and your laptop as a client of it |
@@ -38,12 +38,13 @@ running, a client says so plainly rather than quietly doing the work itself.
 ## What you need before you start
 
 - A machine running Linux or macOS. Everything below was run on Linux.
-- **Python 3.14 or newer.** The package requires it and will not install under
-  an older one.
-- **git** and **[uv](https://docs.astral.sh/uv/)**, to get a checkout and build
-  the wheel from it — there is no published release yet. `install.md` names both
-  and gets uv for you if you do not have it. Neither is needed on a machine you
-  only *install* the finished wheel on.
+- **[uv](https://docs.astral.sh/uv/)** and **git**. There is no published
+  release yet, so you build the wheel from a checkout: git gets the checkout and
+  uv builds and installs it.
+- **Python 3.14 or newer** — which uv supplies. The package declares
+  `requires-python = ">=3.14"` and refuses an older interpreter, but you do not
+  have to install one yourself: uv resolves it for the build and for the
+  install. `install.md` says where that stops being true.
 - An API key for **Anthropic** or **OpenAI**. The assistant is model-agnostic
   and you pick the route at configuration time; those two are the vendors whose
   libraries ship in the distribution, so they are the two that work without
