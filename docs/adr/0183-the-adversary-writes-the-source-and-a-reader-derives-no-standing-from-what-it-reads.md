@@ -1,6 +1,6 @@
 # 183. The adversary writes the source, and a reader derives no standing from what it reads
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-23
 - **Decides no `core` surface: no Protocol, no type, no field, no error class and
   no function.** It is a threat model for the `readers/` seam — an adversary, the
