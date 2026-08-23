@@ -1045,7 +1045,7 @@ def test_a_stream_abandoned_for_silence_says_so_and_hands_the_control_back() -> 
     assert 'el("watch-button").hidden = watching;' in _functions(script)["deliveryState"]
     # The sentence is built from the multiple, so the number in it cannot drift from the
     # number the deadline is armed with.
-    assert "${SILENT_CADENCES} times the cadence it disclosed" in script
+    assert "${SILENT_CADENCES} times the keep-alive cadence this gateway last disclosed" in script
     # A third ending and not a re-wording of the second: a body that ended is the
     # connection going away, and a body still open and silent is not.
     assert "stopped saying anything" in script
@@ -1082,9 +1082,60 @@ def test_the_page_remembers_the_cadence_this_origin_last_disclosed() -> None:
     assert "CADENCE_KEY" not in functions["startSession"]
     # A figure no deadline can be derived from is `null` rather than a guess, and it
     # does not overwrite one that was readable.
-    assert 'typeof microseconds === "string"' in functions["usableCadence"]
-    assert "Number.isFinite(value) && value > 0" in functions["usableCadence"]
+    assert 'typeof microseconds !== "string"' in functions["usableCadence"]
+    assert "!Number.isFinite(value) || value <= 0" in functions["usableCadence"]
     assert "return notificationCadence();" in functions["adoptCadence"]
+
+
+def test_a_cadence_the_browsers_own_timer_cannot_express_bounds_nothing() -> None:
+    """Adversarial review, round 1, and it is the dangerous direction.
+
+    ``gateway_notification_budget`` is validated as strictly positive and against
+    nothing else (ADR-0175 §8, which says in terms that "no load-time check relates it
+    to ``hub_max_notification_budget``"), so a gateway may be configured with a budget
+    of days. ``setTimeout`` carries its delay in a signed 32-bit count of milliseconds
+    and **clamps** anything larger to fire immediately — so the largest budgets would
+    abort every healthy stream the instant it opened, which is worse than the failure
+    this page bounds.
+
+    A figure the browser cannot express is therefore treated as one this page has none
+    of: the stream runs unbounded, exactly as every stream did before the deadline
+    existed. The ceiling is the platform's own limit and not a figure this page chose,
+    which is why naming it is not a second claim about the cadence.
+    """
+    script = _code("app.js")
+    usable = _functions(script)["usableCadence"]
+
+    assert "const TIMER_CEILING = 2147483647;" in script
+    assert "milliseconds * SILENT_CADENCES <= TIMER_CEILING" in usable
+    # The check is on the deadline the figure produces, not on the figure itself: it is
+    # the multiplied delay that reaches `setTimeout`.
+    assert usable.index("SILENT_CADENCES") < usable.index("TIMER_CEILING")
+
+
+def test_a_remembered_cadence_a_stream_never_confirmed_is_dropped() -> None:
+    """Adversarial review, round 1: without this the page can be trapped.
+
+    A gateway reconfigured from a short budget to a long one is bounded by the short
+    figure it no longer serves. Every attempt is abandoned before the new ``open`` value
+    can arrive, so the page never learns the figure that would have let it stay
+    — and ADR-0182 §7 forbids it from spinning to find out, correctly.
+
+    Forgetting a figure the stream never confirmed makes it self-healing in one further
+    attempt: the next stream is unbounded, so it survives long enough to disclose, and
+    is bounded by its own gateway's figure from then on. A stream that *did* disclose
+    keeps what it disclosed, because that is a fact about the gateway serving it.
+    """
+    read = _functions(_code("app.js"))["readDeliveries"]
+
+    assert "let disclosed = false;" in read
+    assert "disclosed = true;" in read
+    assert "if (!disclosed) {" in read
+    assert read.index("if (!disclosed) {") < read.index("stopWatching(WENT_SILENT);")
+    assert "forgetCadence();" in read
+    # And only on the ending this page reached itself — a stream the gateway ended, or
+    # one whose connection failed, says nothing about the figure.
+    assert read.index("if (silent) {") < read.index("if (!disclosed) {")
 
 
 def test_a_re_arm_happens_only_where_there_is_a_session_and_no_open_stream() -> None:

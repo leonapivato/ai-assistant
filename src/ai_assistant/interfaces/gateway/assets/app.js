@@ -161,6 +161,13 @@ let chose = 0;
 // which is §8's own argument against a separate heartbeat interval.
 const SILENT_CADENCES = 3;
 
+// The largest delay `setTimeout` can be asked for. It carries its argument in a signed
+// 32-bit count of milliseconds and clamps anything above this to fire *immediately*, so
+// a deadline past it is not a long wait — it is an instant abort wearing one's clothes.
+// This is the platform's own limit rather than a figure this page chose, which is why
+// naming it is not a second claim about the cadence (ADR-0175 §8).
+const TIMER_CEILING = 2147483647;
+
 // Whether a delivery stream is open. One at a time: a second would be a second poll
 // the hub would close under ADR-0131 §2, and the gateway holds one poll however
 // many streams watch it (ADR-0175 §4).
@@ -204,6 +211,23 @@ function notificationCadence() {
 // cannot use is `null` rather than a guess — the stream then runs unbounded exactly as
 // it did before this existed, which is the honest outcome for a gateway that disclosed
 // something unreadable, and it is not written over a figure that *was* readable.
+// Drop the remembered figure. Called where a stream was abandoned **before** it
+// disclosed anything of its own: the stored cadence was then the only thing that bound
+// it, and it was not confirmed. Keeping it would be the trap adversarial review found
+// on round 1 — a gateway reconfigured from a short budget to a long one is bounded by
+// the short one it no longer serves, and every attempt is abandoned before its `open`
+// value can arrive, so the page can never learn the figure that would have let it
+// stay. Forgetting is what makes that self-healing in one further attempt: the next
+// stream is unbounded, so it survives long enough to disclose, and is bounded by its
+// own gateway's figure from then on.
+function forgetCadence() {
+  try {
+    window.localStorage.removeItem(CADENCE_KEY);
+  } catch (_) {
+    // A browser that will not store has nothing to forget.
+  }
+}
+
 function adoptCadence(microseconds) {
   const value = usableCadence(microseconds);
   if (value === null) {
@@ -222,11 +246,28 @@ function adoptCadence(microseconds) {
 // figure a deadline can be derived from. The guard is on the *value* rather than on
 // the member's presence: `""`, `"0"` and anything unparseable would each arm a timer
 // that fired at once or never.
+//
+// **A deadline past `setTimeout`'s own ceiling is refused, and refusing it is the
+// conservative direction.** `gateway_notification_budget` is validated as strictly
+// positive and against nothing else (ADR-0175 §8), so a gateway may be configured with
+// a budget of days. `setTimeout` carries its delay in a signed 32-bit count of
+// milliseconds and *clamps* anything larger to fire immediately — so the largest
+// budgets would abort every healthy stream the instant it opened, which is worse than
+// the failure this page is bounding. A figure the browser cannot express is treated as
+// one this page has none of: the stream runs unbounded, exactly as every stream did
+// before this existed. Adversarial review found it on round 1.
+//
+// **There is no floor at the other end and none is owed.** A gateway configured to
+// write every microsecond has promised something no network delivers, so a page that
+// abandons the stream is applying §4's rule faithfully rather than misreading it — and
+// it says so, naming the setting, every time.
 function usableCadence(microseconds) {
   const value = Number(microseconds);
-  return typeof microseconds === "string" && Number.isFinite(value) && value > 0
-    ? value / 1000
-    : null;
+  if (typeof microseconds !== "string" || !Number.isFinite(value) || value <= 0) {
+    return null;
+  }
+  const milliseconds = value / 1000;
+  return milliseconds * SILENT_CADENCES <= TIMER_CEILING ? milliseconds : null;
 }
 
 function forgetHeaderHalf() {
@@ -581,7 +622,8 @@ const DELIVERY_STREAM_SILENT =
 // number the deadline is armed with.
 const WENT_SILENT =
   `Nothing arrived on that stream — not even the gateway's keep-alive — for ` +
-  `${SILENT_CADENCES} times the cadence it disclosed, so it was abandoned.`;
+  `${SILENT_CADENCES} times the keep-alive cadence this gateway last disclosed, so it ` +
+  `was abandoned.`;
 
 const DELIVERY_STREAM_CUT =
   "The connection carrying notifications ended before the gateway finished it, so " +
@@ -1552,6 +1594,7 @@ async function watchDeliveries(because) {
 async function readDeliveries(half) {
   const reader = new AbortController();
   let cadence = notificationCadence();
+  let disclosed = false;
   let silent = false;
   let deadline = null;
   // Restarted by every value the stream delivers, so the bound is on silence — and
@@ -1582,6 +1625,7 @@ async function readDeliveries(half) {
     let terminal = null;
     for await (const value of streamValues(response)) {
       if (value.kind === "open") {
+        disclosed = true;
         // The cadence this stream will be written at, adopted before the deadline is
         // restarted below, so this stream is bounded by its own gateway's figure and
         // not by whatever an earlier one disclosed. Remembered for the next stream
@@ -1611,6 +1655,11 @@ async function readDeliveries(half) {
     // would be a wrong explanation rather than a missing one: the gateway may be
     // perfectly alive at the other end of a socket that stopped carrying.
     if (silent) {
+      if (!disclosed) {
+        // Bounded by a remembered figure this stream never confirmed, so the figure is
+        // dropped rather than used again — see `forgetCadence`.
+        forgetCadence();
+      }
       stopWatching(WENT_SILENT);
       fault(DELIVERY_STREAM_SILENT, "notifications");
     } else {
