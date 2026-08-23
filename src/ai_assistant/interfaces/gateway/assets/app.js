@@ -1617,19 +1617,27 @@ async function readDeliveries(half) {
   // failure being bounded. Segments keep the rule exact at every figure a gateway may
   // hold: the bound is three times the cadence it disclosed, and nothing else.
   //
+  // **On `performance.now()` and not on `Date.now()`, because the wall clock moves.**
+  // A device whose clock steps back an hour — a time-zone correction, an NTP
+  // adjustment, an owner setting it — makes a segment that reads the wall clock find
+  // the instant still an hour ahead and arm another hour of waiting, so a black-holed
+  // stream would hold the panel for an hour instead of the minute the cadence promised.
+  // `performance.now()` is monotonic from page load and is unaffected by any of them.
+  // Adversarial review found it on round 4.
+  //
   // This opens no stream and re-establishes nothing (ADR-0182 §7): a segment that finds
   // the instant still ahead arms the next one, and the last one ends the stream.
   const arm = (at) => {
     deadline = window.setTimeout(
       () => {
-        if (Date.now() < at) {
+        if (performance.now() < at) {
           arm(at);
           return;
         }
         silent = true;
         reader.abort();
       },
-      Math.min(at - Date.now(), TIMER_SEGMENT)
+      Math.min(at - performance.now(), TIMER_SEGMENT)
     );
   };
   // Restarted by every value the stream delivers, so the bound is on silence — and
@@ -1639,7 +1647,7 @@ async function readDeliveries(half) {
     window.clearTimeout(deadline);
     deadline = null;
     if (cadence !== null) {
-      arm(Date.now() + cadence * SILENT_CADENCES);
+      arm(performance.now() + cadence * SILENT_CADENCES);
     }
   };
   heard();

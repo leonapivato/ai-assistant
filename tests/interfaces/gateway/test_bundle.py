@@ -1005,9 +1005,9 @@ def test_a_delivery_stream_that_stops_saying_anything_is_abandoned_on_a_bound() 
     # argument against a separate heartbeat interval.
     # The deadline is the instant `SILENT_CADENCES` cadences from now, and the timer's
     # own delay is a segment of the wait to it — never a figure of this page's own.
-    assert "arm(Date.now() + cadence * SILENT_CADENCES);" in read
-    assert calls[0].rstrip().endswith("Math.min(at - Date.now(), TIMER_SEGMENT)")
-    assert not re.search(r"arm\(Date\.now\(\) \+ [\d.]", read)
+    assert "arm(performance.now() + cadence * SILENT_CADENCES);" in read
+    assert calls[0].rstrip().endswith("Math.min(at - performance.now(), TIMER_SEGMENT)")
+    assert not re.search(r"arm\(performance\.now\(\) \+ [\d.]", read)
     assert "const SILENT_CADENCES = 3;" in script
     assert "let cadence = notificationCadence();" in read
     # The figure comes from the gateway, and a stream is bounded by its own gateway's
@@ -1119,10 +1119,12 @@ def test_a_deadline_longer_than_the_browsers_timer_is_armed_in_segments() -> Non
 
     assert "const TIMER_SEGMENT = 2147483647;" in script
     # Against an absolute instant, so segments cannot drift the deadline outward.
-    assert "arm(Date.now() + cadence * SILENT_CADENCES);" in read
-    assert "Math.min(at - Date.now(), TIMER_SEGMENT)" in read
-    assert "if (Date.now() < at) {" in read
-    assert read.index("if (Date.now() < at) {") < read.index("silent = true;")
+    assert "arm(performance.now() + cadence * SILENT_CADENCES);" in read
+    assert "Math.min(at - performance.now(), TIMER_SEGMENT)" in read
+    assert "if (performance.now() < at) {" in read
+    assert read.index("if (performance.now() < at) {") < read.index("silent = true;")
+    # Monotonic, so a wall-clock step backwards cannot extend the wait.
+    assert "Date.now()" not in read
     # And no figure is refused for being large: only one with no instant to compute.
     assert "TIMER_SEGMENT" not in usable
     assert "Number.isFinite(value) && value > 0" in usable
