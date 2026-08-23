@@ -55,11 +55,26 @@ if TYPE_CHECKING:  # pragma: no cover — imported for typing alone
 #: type, and naming it here would invite a lane to reach for `EventSource` again.
 MEDIA_TYPE: Final = "application/x-ndjson"
 
+#: The header a **delivery** stream states its own keep-alive cadence in (#1442).
+#:
+#: **The unit is in the name, because the wire is where it has to be readable.** The
+#: value is a decimal count of microseconds — ``timedelta``'s own resolution, so the
+#: integer is exact in both directions, no fraction is parsed anywhere, and no reader
+#: has to round it through an IEEE-754 double. A header carrying a bare number whose
+#: unit lived only in a docstring would be the one thing a reader can misread silently,
+#: and the cost of saying it is twelve characters.
+#:
+#: The ``X-`` prefix is RFC 6648's deprecated form and is used anyway, for one reason:
+#: ``X-Assistant-Session`` is already the name the page sets on every admitted request
+#: (ADR-0168 §6), and one convention a reader can see twice beats two conventions each
+#: of which is right on its own.
+KEEP_ALIVE_HEADER: Final = "X-Assistant-Keep-Alive-Microseconds"
+
 #: What separates two values on a stream.
 _TERMINATOR: Final = b"\n"
 
-#: The unit :func:`opened` spells a duration in, named once so this module and the
-#: page cannot disagree about it. ``timedelta``'s own resolution.
+#: The unit :func:`keep_alive_header` spells a duration in, named once so this module
+#: and the page cannot disagree about it. ``timedelta``'s own resolution.
 _MICROSECOND: Final = timedelta(microseconds=1)
 
 
@@ -71,30 +86,6 @@ class ValueKind(StrEnum):
     request shape nobody has thought of yet". A reader that meets a kind it does
     not know treats the value as one it cannot render rather than guessing.
     """
-
-    OPEN = "open"
-    """The first value on a **delivery** stream: the stream is open, and the
-    interval within which ADR-0175 §4 obliges the gateway to write on it again.
-
-    **It exists so the browser can tell a silent stream from a dead one** (#1442).
-    §4 spends the keep-alive to make "the liveness of the gateway, of its hub
-    connection and of the browser's own socket observable at a bounded cadence", and
-    the cadence is `gateway_notification_budget` — gateway configuration (§8), which
-    no value the page read carried. Without it a ``fetch`` that never settled left
-    the page reading "Watching for notifications" for ever with its own control
-    hidden, and ADR-0182 §7's announced re-arm could not fire either, because §7
-    re-establishes a stream "only while it holds none".
-
-    **Disclosed here rather than on the exchange or in a response header.**
-    ADR-0168 §5 has the bootstrap exchange "return nothing but the two session
-    values §6 requires", so the figure may not ride that body; and ADR-0175 §2 makes
-    "the exact framing of a value on a stream" this lane's, which is exactly what
-    this is. It is also the right lifetime: the figure is a fact about the process
-    serving *this* stream, restated on every stream rather than remembered from a
-    session that may have been minted by a differently configured gateway.
-
-    Never terminal, and written before anything else — a delivery may follow it in
-    the same instant."""
 
     CHUNK = "chunk"
     """One :class:`~ai_assistant.core.types.ReplyChunk` of a streamed answer
@@ -209,28 +200,6 @@ def notification(delivery: NotificationDelivery) -> dict[str, Any]:
     }
 
 
-def opened(budget: timedelta) -> dict[str, Any]:
-    """The first value on a delivery stream, carrying §4's cadence (#1442).
-
-    **Spelled in microseconds as a decimal string**, which is
-    ``server._preferences_view``'s own spelling and for its reason: microseconds are
-    ``timedelta``'s own resolution, so the integer is exact in both directions and no
-    fraction has to be parsed anywhere, and a decimal *string* crosses a reader that
-    would round a large JSON number into an IEEE-754 double.
-
-    Args:
-        budget: ``gateway_notification_budget`` (ADR-0175 §8) — "the interval within
-            which §4 obliges a write on every open delivery stream".
-
-    Returns:
-        The value to write.
-    """
-    return {
-        "kind": ValueKind.OPEN.value,
-        "keep_alive_microseconds": str(budget // _MICROSECOND),
-    }
-
-
 def alive() -> dict[str, Any]:
     """The keep-alive: its own kind and nothing else (ADR-0175 §4).
 
@@ -238,6 +207,44 @@ def alive() -> dict[str, Any]:
         The value to write.
     """
     return {"kind": ValueKind.ALIVE.value}
+
+
+def keep_alive_header(budget: timedelta) -> tuple[str, str]:
+    """A delivery stream's own head, stating the cadence §4 obliges a write within.
+
+    **This is the fact a browser needs and could not have** (#1442). §4 spends the
+    keep-alive to make "the liveness of the gateway, of its hub connection and of the
+    browser's own socket observable at a bounded cadence", so a stream silent past a
+    multiple of that cadence is the one thing the keep-alive exists to expose — but
+    the cadence is ``gateway_notification_budget``, gateway configuration (§8), and
+    nothing the page read carried it. Without it a ``fetch`` that never settled left
+    the page reading "Watching for notifications" for ever with its own control
+    hidden, and ADR-0182 §7's announced re-arm could not fire either, because §7
+    re-establishes a stream "only while it holds none".
+
+    **In the head rather than as a value on the stream.** ADR-0175 §2 leaves "the
+    exact framing of a value on a stream" to this lane, so either was available — and
+    the head is right on both clauses. §4 governs *values*: at most one pending per
+    stream, and one whose write has not completed when the next is due is abandoned.
+    A preamble is not a delivery, and making it a value put it under a rule written
+    about browsers that stopped reading, where it ended freshly opened streams. A
+    header is read off the response before a single value is, needs no place in the
+    ordering, and cannot be abandoned. ADR-0168 §5 independently closes the other
+    candidate — the bootstrap exchange "returns nothing but the two session values §6
+    requires" — so the figure could never have ridden that body.
+
+    **It is on the delivery stream alone.** An answer stream carries no keep-alive
+    and §4 obliges nothing on it, so a header there would be a claim about an
+    obligation that does not exist.
+
+    Args:
+        budget: ``gateway_notification_budget`` (ADR-0175 §8) — "the interval within
+            which §4 obliges a write on every open delivery stream".
+
+    Returns:
+        The header's name and value.
+    """
+    return KEEP_ALIVE_HEADER, str(budget // _MICROSECOND)
 
 
 def fault(name: str, *, detail: str | None = None) -> dict[str, Any]:

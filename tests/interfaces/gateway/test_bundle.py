@@ -987,12 +987,8 @@ def test_a_delivery_stream_that_stops_saying_anything_is_abandoned_on_a_bound() 
     "observable at a bounded cadence". Silence past a multiple of that is the thing the
     keep-alive exists to expose, observed at the end it was written for.
 
-    **The figure arrives as the stream's first value** (``open``, carrying
-    ``keep_alive_microseconds``), and is remembered for the next stream this origin
-    opens — because the first failure the issue names is a ``fetch`` that never settles
-    at all, on which no value can arrive, and ``showConsole`` opens a stream on load
-    before any other request. What that leaves unbounded is the first delivery stream a
-    browser ever opens at an origin and nothing after it.
+    **The figure comes off the stream's own head**, so the deadline is armed before the
+    first value is read and covers the silence that begins the moment the head lands.
     """
     script = _code("app.js")
     read = _functions(script)["readDeliveries"]
@@ -1000,7 +996,7 @@ def test_a_delivery_stream_that_stops_saying_anything_is_abandoned_on_a_bound() 
     calls = _timeouts(script)
 
     assert len(calls) == 1
-    # Derived from what the gateway disclosed, and from no figure of this page's own: a
+    # Derived from what this gateway stated, and from no figure of this page's own: a
     # literal here would be a second claim about the cadence, which is ADR-0175 §8's own
     # argument against a separate heartbeat interval.
     # The deadline is the instant `SILENT_CADENCES` cadences from now, and the timer's
@@ -1009,18 +1005,16 @@ def test_a_delivery_stream_that_stops_saying_anything_is_abandoned_on_a_bound() 
     assert calls[0].rstrip().endswith("Math.min(at - performance.now(), TIMER_SEGMENT)")
     assert not re.search(r"arm\(performance\.now\(\) \+ [\d.]", read)
     assert "const SILENT_CADENCES = 3;" in script
-    assert "let cadence = notificationCadence();" in read
-    # The figure comes from the gateway, and a stream is bounded by its own gateway's
-    # rather than by whatever an earlier one disclosed.
-    assert "cadence = adoptCadence(value.keep_alive_microseconds);" in read
-    delivered = read[read.index("for await (const value of streamValues(response)) {") :]
-    assert delivered.index("adoptCadence(") < delivered.index("heard();")
+    # Read off the head of the stream it bounds, and armed before a value is read.
+    assert "cadence = usableCadence(response.headers.get(KEEP_ALIVE_HEADER));" in read
+    assert read.index("cadence = usableCadence(") < read.index("heard();")
+    assert read.index("heard();") < read.index("for await (const value of streamValues(")
     # A cadence this page has none of arms nothing, rather than a figure it made up.
     assert "if (cadence !== null) {" in read
-    # Armed before the request goes out, and restarted by every value that arrives —
-    # keep-alive included — so what it measures is silence and never the stream's life.
-    assert read.index("heard();") < read.index("await fetch(")
+    # Restarted by every value that arrives — keep-alive included — so what it measures
+    # is silence and never the stream's life.
     assert "signal: reader.signal," in read
+    delivered = read[read.index("for await (const value of streamValues(response)) {") :]
     assert delivered.index("heard();") < delivered.index('if (value.kind === "notification")')
     assert "watching" in watch
 
@@ -1047,8 +1041,9 @@ def test_a_stream_abandoned_for_silence_says_so_and_hands_the_control_back() -> 
     assert 'fault(DELIVERY_STREAM_SILENT, "notifications");' in read
     assert 'el("watch-button").hidden = watching;' in _functions(script)["deliveryState"]
     # The sentence is built from the multiple, so the number in it cannot drift from the
-    # number the deadline is armed with.
-    assert "${SILENT_CADENCES} times the keep-alive cadence this gateway last disclosed" in script
+    # number the deadline is armed with — and it says where the figure came from, which
+    # is the stream that was abandoned rather than any earlier one.
+    assert "${SILENT_CADENCES} times the keep-alive cadence this gateway stated when it" in script
     # A third ending and not a re-wording of the second: a body that ended is the
     # connection going away, and a body still open and silent is not.
     assert "stopped saying anything" in script
@@ -1056,44 +1051,49 @@ def test_a_stream_abandoned_for_silence_says_so_and_hands_the_control_back() -> 
     assert read.index("if (silent) {") < read.index("fault(GATEWAY_GONE,")
 
 
-def test_the_page_remembers_the_cadence_this_origin_last_disclosed() -> None:
-    """The figure is gateway configuration (ADR-0175 §8) and no value the page read
+def test_the_cadence_is_read_off_the_streams_own_head_and_kept_nowhere() -> None:
+    """The figure is gateway configuration (ADR-0175 §8) and nothing the page read
     carried it, which is why #1442 could not be fixed in the page alone.
 
-    **Remembered rather than only held in page state**, because ``showConsole`` opens a
-    delivery stream on load, before any other request — so a page that had only the
-    arriving figure would open one unbounded stream on every reload, and a reload is
-    exactly what an owner does when the notifications panel has stuck.
+    **A response header, so nothing has to be remembered between streams.** The head is
+    the part of a streamed response that exists before its body does — ``fetch``
+    settles with the headers in hand and not one value read — so every stream is
+    bounded by what *its own* gateway stated, from before its first value. A page that
+    kept the last figure instead would hold a gateway reconfigured from a short budget
+    to a long one to the short one it no longer serves, abandon every attempt before it
+    could learn better, and have no way out that ADR-0182 §7 permits.
 
-    **It is not a session value and is not tied to one.** It admits nothing and is
-    spendable against nothing, so ADR-0172 §1's closed class of three values a browser
-    holds is untouched; and it is a fact about the gateway at this origin rather than
-    about the session that happened to be current, so ``forgetHeaderHalf`` does not take
-    it — a session ends whenever the gateway process does, and the next stream that
-    opens replaces the figure anyway.
+    **It is not a session value and is in no ``localStorage`` key at all.** It admits
+    nothing
+    and is spendable against nothing, so ADR-0172 §1's closed class of three values a
+    browser holds is untouched — and the two keys the page does store are the session's
+    header half and the conversation id, neither of which this touches.
 
-    **The exchange carries nothing of it**, which is ADR-0168 §5: the bootstrap exchange
-    "returns nothing but the two session values §6 requires".
+    **The exchange carries nothing of it either**, which is ADR-0168 §5: the bootstrap
+    exchange "returns nothing but the two session values §6 requires".
     """
     script = _code("app.js")
     functions = _functions(script)
 
-    assert 'const CADENCE_KEY = "assistant.session.notification-cadence";' in script
-    assert "window.localStorage.setItem(CADENCE_KEY, microseconds);" in functions["adoptCadence"]
-    assert "usableCadence(window.localStorage.getItem(CADENCE_KEY))" in script
-    assert "CADENCE_KEY" not in functions["forgetHeaderHalf"]
-    assert "CADENCE_KEY" not in functions["startSession"]
-    # A figure no deadline can be derived from is `null` rather than a guess, and it
-    # does not overwrite one that was readable.
+    assert 'const KEEP_ALIVE_HEADER = "X-Assistant-Keep-Alive-Microseconds";' in script
+    assert "response.headers.get(KEEP_ALIVE_HEADER)" in functions["readDeliveries"]
+    # Nothing about the cadence is stored, so there is no stale figure to be held to:
+    # the roster of what this page keeps is pinned whole rather than by absence.
+    assert sorted(re.findall(r"(?:local|session)Storage\.\w+\((\w+)", script)) == [
+        "CONVERSATION_KEY",
+        "CONVERSATION_KEY",
+        "CONVERSATION_KEY",
+        "STORAGE_KEY",
+        "STORAGE_KEY",
+        "STORAGE_KEY",
+    ]
+    # A figure no deadline can be derived from is `null` rather than a guess.
     assert 'typeof microseconds === "string"' in functions["usableCadence"]
     assert "Number.isFinite(value) && value > 0" in functions["usableCadence"]
-    # And a stream is bounded by what *it* disclosed: no fallback to the remembered
-    # figure, which would hold a gateway to a budget it never uttered.
-    assert "notificationCadence()" not in functions["adoptCadence"]
 
 
 def test_a_deadline_longer_than_the_browsers_timer_is_armed_in_segments() -> None:
-    """Adversarial review, rounds 1 and 3 — the second correcting the first's fix.
+    """Adversarial review, act one, rounds 1 and 3 — the second correcting the first.
 
     ``setTimeout`` carries its delay in a signed 32-bit count of milliseconds and
     **clamps** anything larger to fire immediately, so a long cadence armed in one call
@@ -1106,8 +1106,8 @@ def test_a_deadline_longer_than_the_browsers_timer_is_armed_in_segments() -> Non
     Round 1 refused such a figure and left the stream unbounded. Round 3 was right that
     this re-opens #1442 for exactly the configurations it is hardest to notice on, so the
     deadline is now held as the **instant** it falls due and armed in segments. The rule
-    is then exact at every figure a gateway may hold: three times the cadence it
-    disclosed, and nothing else.
+    is then exact at every figure a gateway may hold: three times the cadence it stated,
+    and nothing else.
 
     **The segments open nothing** (ADR-0182 §7). A segment that finds the instant still
     ahead arms the next one; the last one ends the stream. Nothing here re-establishes
@@ -1130,59 +1130,33 @@ def test_a_deadline_longer_than_the_browsers_timer_is_armed_in_segments() -> Non
     assert "Number.isFinite(value) && value > 0" in usable
 
 
-def test_a_remembered_cadence_a_stream_never_confirmed_is_dropped() -> None:
-    """Adversarial review, round 1: without this the page can be trapped.
+def test_a_head_that_states_no_usable_cadence_leaves_the_stream_unbounded() -> None:
+    """Adversarial review, act one, round 2 — and the shape survives the move to a head.
 
-    A gateway reconfigured from a short budget to a long one is bounded by the short
-    figure it no longer serves. Every attempt is abandoned before the new ``open`` value
-    can arrive, so the page never learns the figure that would have let it stay
-    — and ADR-0182 §7 forbids it from spinning to find out, correctly.
+    An earlier draft fell back to a figure from somewhere else where the stated one was
+    unusable. What that does is hold a gateway *entitled* to a thirty-day budget, and
+    stating it honestly, to the twenty seconds a differently configured process served.
+    So an unusable header leaves the stream unbounded, exactly as every stream was
+    before the deadline existed: a gateway that says it may be silent for a month is
+    believed rather than second-guessed against a figure it never uttered, and one that
+    says nothing this page can time has said nothing at all.
 
-    Forgetting a figure the stream never confirmed makes it self-healing in one further
-    attempt: the next stream is unbounded, so it survives long enough to disclose, and
-    is bounded by its own gateway's figure from then on. A stream that *did* disclose
-    keeps what it disclosed, because that is a fact about the gateway serving it.
-    """
-    read = _functions(_code("app.js"))["readDeliveries"]
-
-    assert "let disclosed = false;" in read
-    # *Usably* disclosed: a stream that said nothing this page can time has told it
-    # nothing, and an `open` carrying `"0"` must not preserve a stale bound for ever.
-    assert "disclosed = cadence !== null;" in read
-    assert "if (!disclosed) {" in read
-    assert read.index("if (!disclosed) {") < read.index("stopWatching(WENT_SILENT);")
-    assert "forgetCadence();" in read
-    # And only on the ending this page reached itself — a stream the gateway ended, or
-    # one whose connection failed, says nothing about the figure.
-    assert read.index("if (silent) {") < read.index("if (!disclosed) {")
-
-
-def test_a_stream_is_bounded_by_what_it_disclosed_and_by_nothing_else() -> None:
-    """Adversarial review, round 2, and it is the same mistake in two places.
-
-    An earlier draft fell back to the remembered figure where the disclosed one was
-    unusable — reasoning that an unreadable value should not overwrite a readable one.
-    What that does is hold a gateway *entitled* to a thirty-day budget, disclosing it
-    honestly, to the twenty seconds some earlier process was configured with; and
-    because the stream counted as disclosed, the abort path kept the stale figure and
-    every later stream repeated the false timeout.
-
-    So an unusable disclosure leaves the stream unbounded, exactly as every stream was
-    before the deadline existed, and it does not count as a disclosure. A gateway that
-    says it may be silent for a month is believed rather than second-guessed against a
-    figure it never uttered.
+    ``Headers.get`` answers ``null`` for a header that was not sent, which
+    ``usableCadence`` refuses along with ``""``, ``"0"`` and anything unparseable — the
+    guard is on the value and not on the header's presence.
     """
     script = _code("app.js")
-    adopt = _functions(script)["adoptCadence"]
     read = _functions(script)["readDeliveries"]
+    usable = _functions(script)["usableCadence"]
 
-    # No fallback: the remembered figure bounds the pre-opening window and nothing else.
-    assert "notificationCadence()" not in adopt
-    assert "return value;" in adopt
-    # The stream takes whatever `adoptCadence` returned, `null` included.
-    assert "cadence = adoptCadence(value.keep_alive_microseconds);" in read
-    assert "disclosed = cadence !== null;" in read
-    assert read.index("cadence = adoptCadence(") < read.index("disclosed = cadence !== null;")
+    # One source for the figure, and no second one to fall back to: the declaration and
+    # the single assignment off this stream's head, and nothing else writes to it.
+    assert read.count("cadence =") == 2
+    assert "cadence = usableCadence(response.headers.get(KEEP_ALIVE_HEADER));" in read
+    assert "let cadence = null;" in read
+    # `null` is a figure it refuses rather than one it inspects for presence.
+    assert usable.rstrip().endswith(": null;\n}")
+    assert 'typeof microseconds === "string"' in usable
 
 
 def test_a_re_arm_happens_only_where_there_is_a_session_and_no_open_stream() -> None:

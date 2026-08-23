@@ -8,7 +8,7 @@ partition a reader can act on, and no ``delivery_id`` anywhere.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -114,6 +114,45 @@ def test_the_media_type_is_not_the_one_an_event_source_reads() -> None:
 
     assert b"text/event-stream" not in served
     assert b"Content-Type: application/x-ndjson" in served
+
+
+def test_the_keep_alive_cadence_is_a_header_in_microseconds_naming_its_unit() -> None:
+    """Issue #1442: the figure a browser needs to tell a silent stream from a quiet one.
+
+    ADR-0175 §4 obliges a write on every open delivery stream "at least once per
+    ``gateway_notification_budget``" so that "the liveness of the gateway, of its hub
+    connection and of the browser's own socket" is "observable at a bounded cadence" —
+    but the figure is gateway configuration (§8) and nothing the page read carried it.
+
+    **Microseconds, and the unit is in the name.** That is ``timedelta``'s own
+    resolution, so the integer is exact in both directions and no reader rounds it
+    through an IEEE-754 double; and a header carrying a bare number whose unit lived
+    only in a docstring is the one thing a reader can misread in silence.
+
+    Both halves are spelled out here rather than built from the constant they check,
+    because a check assembled from its own subject passes whatever that subject
+    becomes.
+    """
+    assert streams.keep_alive_header(timedelta(seconds=20)) == (
+        "X-Assistant-Keep-Alive-Microseconds",
+        "20000000",
+    )
+    assert streams.keep_alive_header(timedelta(microseconds=1))[1] == "1"
+
+
+def test_the_cadence_is_stated_in_a_head_and_is_no_kind_of_stream_value() -> None:
+    """The framing decision, pinned where the kinds are.
+
+    §4's clauses about pending writes and abandonment are about *values*: "at most one
+    value pending per stream", and one whose write has not completed when the next is
+    due ends the stream. A preamble stating how the stream will be written is not a
+    delivery, and making it a value put it under a rule written about a browser that
+    had stopped reading — where it ended streams that had merely just opened. In the
+    head it takes no place in the ordering and cannot be abandoned.
+    """
+    assert "open" not in {kind.value for kind in streams.ValueKind}
+    assert all("keep_alive" not in kind.value for kind in streams.ValueKind)
+    assert "keep_alive" not in json.dumps(streams.alive())
 
 
 # --- the framing this lane chose: one JSON object, one line ------------------

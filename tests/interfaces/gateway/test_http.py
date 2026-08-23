@@ -429,6 +429,57 @@ def test_a_stream_carries_every_header_an_ordinary_response_does() -> None:
         assert header in whole, header
 
 
+def test_a_stream_may_carry_headers_of_its_own_and_carries_none_by_default() -> None:
+    """The slot a delivery stream states its keep-alive cadence in (#1442).
+
+    A head is the one part of a streamed response that exists before its body does, so
+    a fact about *how the stream will be written* belongs there rather than in a value
+    on it — a value would fall under ADR-0175 §4's rule that at most one is pending per
+    stream and that one still in flight when the next is due ends the stream, which is
+    a rule about a browser that stopped reading and not about a preamble.
+
+    **Empty by default**, so no stream states anything unless its handler chose to:
+    the headers ADR-0168 §6 requires of every response are added by
+    ``render_stream_head`` itself and are not what this slot is for.
+    """
+    bare = render_stream_head(StreamHead(content_type="text/plain"), policy="p")
+    stated = render_stream_head(
+        StreamHead(content_type="text/plain", headers=(("X-One", "1"), ("X-Two", "2"))),
+        policy="p",
+    )
+
+    assert StreamHead(content_type="text/plain").headers == ()
+    assert b"X-One" not in bare
+    assert b"X-Two" not in bare
+    assert b"X-One: 1\r\n" in stated
+    assert b"X-Two: 2\r\n" in stated
+
+
+def test_a_streams_own_headers_displace_nothing_the_head_owes() -> None:
+    """A handler supplies values, never the shape of the head.
+
+    The common headers ADR-0168 §6 requires come first and the transfer and connection
+    lines last, with anything a handler added between them — so a header a handler
+    chose can neither push one of §6's out nor change how the body is framed. The order
+    is fixed in ``render_stream_head`` rather than at a call site, and
+    :class:`StreamHead` is frozen.
+    """
+    written = render_stream_head(
+        StreamHead(content_type="application/x-ndjson", headers=(("X-One", "1"),)),
+        policy="p",
+    )
+    lines = written.split(b"\r\n")
+
+    for header in (
+        b"Content-Security-Policy: p",
+        b"X-Content-Type-Options: nosniff",
+        b"Cache-Control: no-store",
+    ):
+        assert lines.index(header) < lines.index(b"X-One: 1"), header
+    assert lines.index(b"X-One: 1") < lines.index(b"Transfer-Encoding: chunked")
+    assert lines.index(b"X-One: 1") < lines.index(b"Connection: keep-alive")
+
+
 def test_a_stream_keeps_the_connection_by_default_and_closes_when_told() -> None:
     """A stream that finished is a response that completed, and ADR-0175 §7 restarts
     ``gateway_read_timeout`` from there rather than ending the connection."""
