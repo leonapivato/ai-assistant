@@ -157,7 +157,12 @@ assistant gateway
 Assistant gateway listening on http://127.0.0.1:8422
 Bootstrap value (good once, and only for this gateway process):
 GxiDDPy-iKHkzc5led4fxv9UwGo5bFs73s-ZU9-UWms
+Live sessions: 0 of 8. For another value: kill -SIGUSR1 3941204
 ```
+
+That last line is the gateway saying how many browsers it is already serving and
+how to get another value. Step 7 is where both matter; for now, note that
+`3941204` is **this** gateway's process id, and yours will be a different number.
 
 Leave it running too. It binds `127.0.0.1` and nothing else, on port 8422 by
 default (`ASSISTANT_GATEWAY_PORT` moves it). The address is not configurable —
@@ -175,24 +180,57 @@ Open **`http://127.0.0.1:8422`** in a browser on this same machine.
 The page shows one panel, **Start a session**. Paste the bootstrap value into
 the *Bootstrap value* field and press **Start**.
 
-That value is good exactly once. The gateway mints one when it starts, prints
-it on standard output, and never prints it again — not in a log record, not in
-an error, not in any page. Exchanging it gives this browser a session; a second
-exchange of the same value is refused:
+That value is good exactly once, and it is good for ten minutes. The gateway
+mints one when it starts, prints it on standard output, and never prints that
+one again — not in a log record, not in an error, not in any page. Exchanging it
+gives this browser a session; a second exchange of the same value is refused:
 
 ```text
 HTTP/1.1 400 Bad Request
 ```
 
-If you lose it, stop the gateway and start it again: you get a new one.
+### If you lose it, ask for another one
 
-> **This is the part that changes next.** One value per gateway *process* means
-> a second browser today needs a gateway restart. #1429's ruling 1 replaces that
-> with an on-demand mint — the gateway prints a fresh bootstrap value when you
-> ask it to, without restarting, so a second browser joins a running gateway.
-> A session stays bound to the gateway process either way. That lands with lane
-> 2 of milestone 16; until it does, the paragraph above is what the gateway
-> does.
+You do not restart the gateway. Send it `SIGUSR1`, from any terminal on the
+machine it runs on — the process id is on the last line it printed:
+
+```bash
+kill -SIGUSR1 3941204
+```
+
+It prints a fresh value on its own terminal, straight away:
+
+```text
+Assistant gateway listening on http://127.0.0.1:8422
+Bootstrap value (good once, and only for this gateway process):
+IznwmhTUYUKp04I8Z_BfM8_tMFKYaCrDZqcFm_wCNGQ
+Live sessions: 1 of 8. For another value: kill -SIGUSR1 3941204
+```
+
+Nothing restarts and nothing is logged out: a browser that already has a session
+keeps it. That is also how a **second** browser joins a running gateway, which is
+the last step of [`phone.md`](phone.md).
+
+Three things about that act, and none of them is incidental.
+
+- **It is a signal, not a command and not a URL.** Every process on this machine
+  can reach the gateway's port, so minting is put behind something only you and
+  root can do *here* (ADR-0182 §1). There is no `assistant gateway mint`, and no
+  request on any listener mints a value.
+- **One value stands at a time.** A fresh mint replaces the outstanding one, so
+  the value on your screen is always the value that works. Mint twice and the
+  first of the two has stopped admitting anything.
+- **`Live sessions: 1 of 8`** is how many browsers already hold a session,
+  against `ASSISTANT_GATEWAY_MAX_SESSIONS`. It is information rather than a
+  refusal: the gateway mints whatever that count is, and it is the *exchange*
+  that is refused when the table is full.
+
+**A value nobody spends dies after ten minutes**
+(`ASSISTANT_GATEWAY_BOOTSTRAP_TTL`). Long enough to carry it to another device
+and retype it; short enough that one left in a terminal's scrollback is dead well
+before you have scrolled past it. Four things end a value and there is no fifth:
+spending it, those ten minutes, a fresh mint replacing it, and the gateway
+process ending.
 
 ## 8. Ask it something in the browser
 
@@ -216,7 +254,8 @@ Three facts, because all three surprise people.
   and is not written down anywhere.
 - **A session ends after an hour of not being used.** The idle timeout is one
   hour by default (`ASSISTANT_GATEWAY_SESSION_IDLE_TIMEOUT`). A tab left open
-  overnight comes back needing a new bootstrap value.
+  overnight comes back needing a fresh bootstrap value — `kill -SIGUSR1` at the
+  gateway, as in step 7, and no restart.
 - **And in any case after twelve hours.** The ceiling is twelve hours from the
   moment it was minted, however busy it was
   (`ASSISTANT_GATEWAY_SESSION_TTL`). A session ends at whichever of the three
@@ -225,8 +264,8 @@ Three facts, because all three surprise people.
 Reloading the page does **not** end a session. The browser holds the session
 across a reload, so a refresh costs you nothing. **Closing the browser** is a
 different matter: half of the session is a cookie that does not outlive the
-browser, so the next launch needs a new bootstrap value even if the gateway
-never stopped.
+browser, so the next launch needs a fresh bootstrap value even if the gateway
+never stopped. Again: the signal, not a restart.
 
 ## Stopping
 
@@ -251,14 +290,23 @@ not count.
 malformed. The message names the field, quotes the value it got, and says what
 would be acceptable; the fix is almost always in that sentence.
 
-**The gateway exits with a long traceback ending in `OSError: [Errno 98] …
-address already in use`.** Something else already holds port 8422 — most often
-another gateway you forgot about. Stop it, or set `ASSISTANT_GATEWAY_PORT` to a
-free port. (The traceback is a rough edge, filed as #1436; the cause is what
-the last line says.)
+**`Error: the gateway could not bind port 8422 … address already in use`.**
+Something else already holds that port — most often another gateway you forgot
+about. Stop it, or set `ASSISTANT_GATEWAY_PORT` to a free port. The gateway
+prints its bootstrap value *before* it binds, so there will be one on the screen
+above the error: it went with the process that failed to start, and the next
+gateway prints its own.
+
+**`This gateway could not install the mint act …`**, printed at start. It is
+serving normally and every browser it admits is fine, but `kill -SIGUSR1` will
+not get you a second value — restarting it is how you get one. Read the whole
+line: it says whether `SIGUSR1` has been made safe to send (set to ignored) or
+whether sending it would stop the gateway.
 
 **Nothing happens in the browser and the page keeps showing *Start a
-session*.** The value was already spent, or the gateway was restarted after it
-printed. Restart the gateway and use the value it prints then.
+session*.** The value was already spent, its ten minutes ran out, a later mint
+replaced it, or the gateway was restarted after it printed. The gateway will not
+say which — a failed exchange discloses only that it failed. Send `SIGUSR1` and
+use the value it prints then.
 
 Next, if you want the same page on a phone: [`phone.md`](phone.md).
