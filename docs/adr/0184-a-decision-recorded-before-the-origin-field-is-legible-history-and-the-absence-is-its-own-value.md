@@ -1,6 +1,6 @@
 # 184. A decision recorded before the origin field is legible history, and the absence is its own value
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-23
 - **Decides `core/types.py` surface and one `core/protocols.py` obligation.** One
   new model over a private base shared with `EgressBinding`, one widened annotation on
