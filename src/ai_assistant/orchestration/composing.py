@@ -786,17 +786,38 @@ def _render_record(record: MemoryRecord) -> str:
     system's own words. The band, the confidence and the stance clause are derived
     the same way — from held data, not from reading the content.
 
+    **The origin term predicates the record's warrant, and only the `ATTESTED` arm
+    predicates its content** (#1466). ADR-0106 §1 states the predicate as "a record
+    **rests on** recorded external content" — a claim about the warrant — and the
+    two bands satisfying it satisfy it for different reasons. In `ATTESTED` the
+    content *is* what a connected source reported, so "reported by a connected
+    source" is exactly true. In `DERIVED` the content was authored here, by the
+    observer or the consolidator, over material that included such a report; saying
+    a source reported it asserts an `ATTESTED` attribution on this system's own
+    words, and the bullet then carries that phrase beside a ``DERIVED`` stance
+    clause saying the opposite of it. That is the standing-inflation ADR-0072 §6 and
+    ADR-0073 §4 forbid — a record never reads as a standing it does not have — and it
+    inverts the marker, which exists so a taint reads as caution rather than as
+    corroboration. So the tainted derived arm predicates the warrant ("resting on
+    what a connected source reported") and leaves the authorship to the stance
+    clause. ADR-0098 §2's fourth clause leaves this wording to the assembler.
+
     **A belief states the standing it is held with** (ADR-0072 §6): a derived belief
     reaching a prompt is rendered as a belief, carrying its band and its confidence,
     "never as a bare fact indistinguishable from what the user stated".
     """
     provenance = record.provenance
     band = band_of(provenance.source)
-    origin = (
-        "reported by a connected source"
-        if rests_on_recorded_external_content(provenance)
-        else "recorded by this system"
-    )
+    # Band first, then the predicate: `rests_on_recorded_external_content` is true of
+    # every `ATTESTED` record (ADR-0106 §1), so the second arm is exactly "`DERIVED`
+    # and carrying §2's marker" without reading `derived_from_external` directly,
+    # which §2's second clause rules no consumer does for this question.
+    if band is BeliefBand.ATTESTED:
+        origin = "reported by a connected source"
+    elif rests_on_recorded_external_content(provenance):
+        origin = "resting on what a connected source reported"
+    else:
+        origin = "recorded by this system"
     standing = f"{band.value}, confidence {provenance.confidence:.2f}, {origin}"
     label = f"  - [{record.kind}/{provenance.source.value}]"
     content = _quoted_span(record.content)
