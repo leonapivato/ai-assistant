@@ -49,6 +49,8 @@ from dateutil.rrule import rrulestr
 from icalendar import Calendar
 from icalendar.prop import vRecur
 
+from ai_assistant.readers._compose import one_line
+
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
     from datetime import tzinfo
@@ -665,7 +667,29 @@ def _reported_at(component: Any, zone: tzinfo) -> datetime | None:
 
 
 def _text(value: object) -> str:
-    return "" if value is None else str(value)
+    r"""One ``SUMMARY`` or ``LOCATION`` as the single-line ``str`` a rendering takes.
+
+    Two coercions, and the second is #1449's answer.
+
+    ``icalendar`` returns a ``vText`` for a present property and ``None`` for an
+    absent one, so the ``str`` call is what makes the field's *type* independent
+    of whether the component carried it.
+
+    The removal is :func:`~ai_assistant.readers._compose.one_line`'s: RFC 5545
+    decodes a ``\n`` escape in a TEXT property into a real newline, so before
+    this an adversary-chosen ``SUMMARY`` put a line break inside the sentence
+    :func:`~ai_assistant.readers.calendar._render` composes, while the email
+    reader removed one from a header value. Both readers now apply the one rule,
+    and it is applied **here rather than at the rendering** so that
+    :attr:`_Entry.text_bytes` — what ``calendar_max_content_bytes`` is measured
+    against — counts the characters that actually reach a proposal, which is what
+    the email reader's own ``text_bytes`` has always counted.
+
+    It neutralises nothing a consumer may rely on. ADR-0183 §8 binds unchanged
+    over the composed string, the quotation mark is untouched, and ``_compose``'s
+    docstring is where that is argued.
+    """
+    return "" if value is None else one_line(str(value))
 
 
 def _zone_label(instant: datetime) -> str:
