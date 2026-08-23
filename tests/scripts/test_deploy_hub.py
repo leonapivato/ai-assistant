@@ -865,12 +865,13 @@ def test_marker_commit_reads_the_commit_field(text: str, expected: str | None) -
         ("ece6d22d", "ece6d22d"),
         ("ece6d22d-dirty\n", "ece6d22d"),
         ("0123456789abcdef0123456789abcdef01234567\n", "0123456789abcdef0123456789abcdef01234567"),
-        # `cat` runs in a login shell, so the marker is what comes LAST.
-        ("Welcome to Ubuntu 24.04 LTS\n\nece6d22d\n", "ece6d22d"),
         # Too short to be a sha, and not hex at all: neither is a commit.
         ("abc123\n", None),
         ("deployed by hand\n", None),
-        ("Welcome to Ubuntu\n", None),
+        # The bare form was ONE line holding one sha. More than that is not it,
+        # and guessing which line to trust is what a banner would exploit.
+        ("Welcome to Ubuntu 24.04 LTS\n\nece6d22d\n", None),
+        ("ece6d22d\nsomething else\n", None),
     ],
 )
 def test_a_pre_recipe_bare_sha_marker_is_read_rather_than_called_absent(
@@ -886,6 +887,64 @@ def test_the_key_value_form_wins_over_a_trailing_hex_line() -> None:
     marker = "commit=abc1234\nwheel_sha256=0123456789abcdef\n"
 
     assert _MODULE.marker_commit(marker) == "abc1234"
+
+
+# --------------------------------------------------------------------------- #
+# Telling an absent marker from a login banner                                 #
+# --------------------------------------------------------------------------- #
+
+
+def test_the_marker_read_brackets_what_cat_produced(tmp_path: Path) -> None:
+    plan = _dry_run(_repo(tmp_path))
+
+    assert "echo MARKER_BEGIN; cat ~/DEPLOYED_COMMIT 2>/dev/null; echo; echo MARKER_END" in plan
+
+
+@pytest.mark.parametrize(
+    ("output", "expected"),
+    [
+        ("MARKER_BEGIN\ncommit=abc1234\n\nMARKER_END\n", "commit=abc1234\n"),
+        ("Welcome to Ubuntu\nMARKER_BEGIN\nece6d22d\n\nMARKER_END\n", "ece6d22d\n"),
+        # An absent marker: `cat` said nothing, and the brackets prove it.
+        ("Welcome to Ubuntu\nMARKER_BEGIN\n\nMARKER_END\n", ""),
+        # The command never ran at all, so nothing here is marker content.
+        ("ssh: connect: refused\n", ""),
+        ("", ""),
+    ],
+)
+def test_only_what_lies_between_the_brackets_is_marker(output: str, expected: str) -> None:
+    assert _MODULE.marker_body(output) == expected
+
+
+def test_a_banner_ending_in_a_short_revision_is_not_a_deployed_commit() -> None:
+    # The blocker this bracketing exists for: on a fresh box the whole of the
+    # read's output is banner, and a banner ending in a revision that resolves in
+    # THIS clone would be diffed against — concluding uv.lock is clean, and
+    # installing --no-deps, on a box with no deployed dependency state at all.
+    fresh_box = "Last login: Sat Aug 23\nbuild ece6d22d\nMARKER_BEGIN\n\nMARKER_END\n"
+
+    assert _MODULE.marker_commit(_MODULE.marker_body(fresh_box)) is None
+
+
+def test_the_drift_check_reads_the_marker_through_the_brackets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # End to end for the same blocker: a banner naming a commit this clone really
+    # holds must still leave drift UNKNOWN, not clean.
+    repo = _repo(tmp_path)
+    real = git(repo, "rev-parse", "--short", "HEAD")
+    banner = f"Last login from {real}\nMARKER_BEGIN\n\nMARKER_END\n"
+    monkeypatch.setattr(_MODULE, "_run_local", lambda *_a, **_k: banner)
+
+    assert _MODULE._check_drift(_plan(repo), repo, "HEAD") == ""
+    assert "no deployed-commit marker" in capsys.readouterr().err
+
+
+def test_a_marker_that_swallows_its_own_closing_bracket_reads_as_less_not_more() -> None:
+    # Truncating yields no `commit=` line, i.e. UNKNOWN — the safe direction.
+    confused = "MARKER_BEGIN\nMARKER_END\ncommit=abc1234\nMARKER_END\n"
+
+    assert _MODULE.marker_commit(_MODULE.marker_body(confused)) is None
 
 
 def test_the_marker_is_renamed_into_place_not_redirected_onto(tmp_path: Path) -> None:
