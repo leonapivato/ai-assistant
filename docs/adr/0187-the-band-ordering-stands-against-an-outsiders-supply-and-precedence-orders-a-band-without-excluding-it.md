@@ -277,16 +277,25 @@ that was still missing is §4.
 
 > **Normative.** Band precedence orders the assembler's budget and does not remove
 > a band from it. Where the budget admits at least as many records as there are
-> bands in `BAND_PRECEDENCE`, every band that has an eligible record for the turn's
-> query is represented in the composed context by **at least one** record, and no
-> other band's supply may reduce it below that. Precedence governs every other slot
-> and every within-band order exactly as ADR-0072 §5 rules it.
+> bands in `BAND_PRECEDENCE`, **no band's read may be skipped, or bounded to zero,
+> because a higher-precedence band's supply exhausted the budget**, and a band whose
+> own read returns a record holds **at least one** of them in the composed context.
+> Precedence governs every other slot and every within-band order exactly as
+> ADR-0072 §5 rules it.
 
 > **Normative.** Where a reservation must be taken from a band that would otherwise
 > have held the slot, it is taken from the **lowest-precedence band holding more
 > than its own floor**, and within that band from its least relevant record. A band
-> with no eligible record reserves nothing, and no slot is left empty in order to
+> whose read returns nothing reserves nothing, and no slot is left empty in order to
 > hold a reservation open.
+
+> **Normative.** The floor promises what each band's **own read returns** and
+> promises nothing about the store's state at any other instant. ADR-0113 §5's
+> no-snapshot residue is retained unchanged: a record moved between bands by a
+> concurrent fold may be missed exactly as it is today, a band may be unrepresented
+> because its read raced a writer, and no lane may read the floor as requiring a
+> snapshot, a transaction, a re-read or any other cross-call consistency the
+> `MemoryStore` contract does not offer.
 
 > **Normative.** This ADR rules the floor and **no share beyond it**. A proportional
 > split, a per-band quota, a cap on any band's take, or any other reservation
@@ -333,8 +342,8 @@ making the assistant's own beliefs *absent* from a turn. It does not stop them
 making them few, it does not restore personalization at volume, and it is not a
 defence of the prompt's composition against a determined supply. One slot is the
 boundary between representation and exclusion, and it is the only reservation
-derivable without a number nobody has measured — which is why the third clause
-gates every larger one behind #789 rather than picking a proportion here. ADR-0103
+derivable without a number nobody has measured — which is why §4's no-larger-share
+clause gates every larger one behind #789 rather than picking a proportion here. ADR-0103
 §5's standing objection is the reason: "a number invented here would arrive with
 the authority of a ratified decision and the evidence of a guess."
 
@@ -465,8 +474,8 @@ scheduled, not because the exit test measures it.
 - **Whether `MemoryStore.search` gains a relevance threshold.** It is what would
   change the disclosure #1508 records, and it is a `core/protocols.py` decision
   under golden rule 5, gated by ADR-0112 §7 if its case is a frequency.
-- **Any share larger than §4's floor** — a proportion, a quota, a cap. §4's third
-  clause and #789.
+- **Any share larger than §4's floor** — a proportion, a quota, a cap. §4's
+  no-larger-share clause and #789.
 - **What bounds the supply** (#1447, §6).
 - **Anything about what a lapse does to standing.** ADR-0110 owns it in full and
   §2 consumes it unchanged.
@@ -505,7 +514,7 @@ deferral was between two signatures. Both are discharged (ADR-0073 for the
 enumeration, ADR-0113 for the filter), and §4 adds no read.
 
 **ADR-0112 §1, §2 and §3 — nothing owed.** §1's prohibition on currency ordering is
-affirmed in §2 and relied on in §4's fourth clause; §2's citation discipline is
+affirmed in §2 and relied on in §4's consumer's-budget clause; §2's citation discipline is
 respected — §4 is a consumer-side budget rule, not the store weighting whose only
 door is ADR-0072's Consequences, and this ADR does not open that door; §3's refusal
 of within-band currency ordering is untouched, because §4 reserves a slot without
@@ -529,18 +538,30 @@ note. §3 above records it and changes no obligation: a reader holding only ADR-
 record owed.**
 
 **ADR-0112 §7 — nothing owed, and it is applied rather than narrowed.** Its first
-clause gates headroom changes on the measurement. §4's third clause routes every
+clause gates headroom changes on the measurement. §4's no-larger-share clause routes every
 share beyond the floor to exactly that gate, and §4d forecloses the over-request
 shape that would be a headroom bet. The floor itself is not a bet on a frequency:
-its case is that a band with eligible records should not be absent, which is true
+its case is that a band whose read returned records should not be absent from the
+composition, which is true
 at every frequency and is the same species of claim §7's third clause admits when
 it distinguishes a correctness remedy from a headroom one. **Applied; no record
 owed.**
 
-**ADR-0113 §5 and §6 — nothing owed.** §5's cross-call deduplication rule is
-untouched and §4's floor composes with it unchanged: a record already held is still
-skipped, and a band whose only eligible record was deduplicated has no eligible
-record left to reserve for. §6 is a routing clause that decides no budget and
+**ADR-0113 §5 and §6 — nothing owed, and §5 is retained rather than worked
+around.** §5's cross-call deduplication rule is untouched and §4's floor composes
+with it unchanged: a record already held is still skipped, and a band whose only
+returned record was deduplicated has nothing left to hold its floor with and obliges
+no further read. §5's *other* half — that the three calls see no common snapshot, so
+a record a concurrent fold moves between bands may be missed — is retained
+explicitly by §4's no-snapshot clause, which is why the floor is written over what each
+band's own read returns rather than over what the store holds. An earlier draft
+promised representation for every band "that has an eligible record for the turn's
+query", which is a claim about a store state no composition observes and which the
+adversarial lens falsified on round 2 with the three-band case: a permitted
+`REINFORCE` promoting the sole derived record after the attested read and before the
+derived one leaves both reads empty while the store, afterwards, holds an attested
+record. The floor now promises nothing about that instant. §6 is a routing clause
+that decides no budget and
 assigns the decision to the consumer's lane; this ADR makes that decision for one
 of its aspects and leaves the rest — the number of calls, the assembly order, the
 donation of a short band's remainder — exactly where §6 put it. A reader holding
@@ -633,7 +654,7 @@ than it holds; none acquires an exception and none loses one.
   adversary's gift), so the qualification would be a dial the attacker turns and
   would penalise exactly the honest source that has not changed.
 - **A per-band proportional share — a third of the budget each, or a fixed
-  percentage.** Rejected in §4's third clause. It is a number with no measurement
+  percentage.** Rejected in §4's no-larger-share clause. It is a number with no measurement
   behind it, which ADR-0103 §5 and ADR-0112 §7 both refuse in terms, and it
   degrades badly in the ordinary case: on a store holding almost nothing but
   assertions it would return a third of a budget it could have filled, which is the
