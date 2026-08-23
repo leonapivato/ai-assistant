@@ -2573,6 +2573,83 @@ def test_the_page_renders_the_set_it_was_handed_and_derives_none_of_it() -> None
     )
 
 
+def test_the_page_states_the_calls_origin_beside_the_whole_floor_in_both_states() -> None:
+    """ADR-0181 §6 and §10's clause for this lane, at the half a handler test cannot reach.
+
+    §10 requires that a confirmation carrying ``True`` render "the fact **and** every
+    occurrence ADR-0178 §7's floor already requires", and that ``False`` render the
+    fact too. The gateway's own tests pin what crosses; this pins what the *page*
+    does with it, which is where a lane could take the boolean and render half of it.
+
+    **The order is asserted, not just the membership** (§6's sixth clause): the new
+    line sits after the account and before the recipients, and nothing of the floor
+    is displaced by it. It goes there because the fact is a property of the call
+    rather than of a span — among the occurrences it would read as the per-span
+    attribution ADR-0181 §2's third clause refuses to mint.
+    """
+    functions = _functions(_code("app.js"))
+    body = functions["renderEgress"]
+
+    # The page reads the fact it was handed, and derives nothing (ADR-0178 §3).
+    assert "egress.planned_with_external_content" in body
+
+    # Beside the floor, and between the account and the recipients.
+    assert body.index("egress.account_identity") < body.index("planned_with_external_content")
+    assert body.index("planned_with_external_content") < body.index("egress.destinations")
+
+    # ...and the floor itself, whole and in its own order.
+    assert body.index("It would reach:") < body.index("What it describes sending:")
+    assert "egress.destinations.forEach" in body
+    assert "egress.spans.forEach" in body
+
+
+def test_neither_arm_of_the_origin_line_names_a_source_a_span_or_a_verdict() -> None:
+    """ADR-0181 §6's second, third, fifth and sixth clauses, on the wording itself.
+
+    Both arms are spelled out because the clauses are about what each *says*: no
+    source and no kind of source ("from a source you connected" is barred in terms,
+    ADR-0098 §1's class being wider than connected sources); the ``False`` arm an
+    absence of a marker and never an assurance that no external content was
+    involved; no attribution to a span; and no detection, score, risk level or claim
+    that the call is malicious.
+
+    Adjacent string literals are joined first, so the assertion reads the sentence
+    the browser would show rather than however the source happens to wrap it.
+    """
+    joined = re.sub(r'"\s*\+\s*"', "", _functions(_code("app.js"))["originWords"])
+
+    assert (
+        "material this assistant selected, which includes a record marked as "
+        "resting on recorded external content" in joined
+    )
+    assert (
+        "material this assistant selected, in which no record is marked as "
+        "resting on recorded external content" in joined
+    )
+
+    # §6's second and sixth clauses, as the absences they are stated as.
+    for forbidden in (
+        "source you connected",
+        "connected source",
+        "malicious",
+        "suspicious",
+        "untrusted",
+        "risk",
+        "warning",
+        "attack",
+        "injected",
+        "unsafe",
+    ):
+        assert forbidden not in joined.lower(), forbidden
+
+    # §6's fourth clause leaves exactly two arms: the field is required with no
+    # default (ADR-0181 §3) and the process that served this script serialised the
+    # view, so there is no third state, and inventing one would be a fabrication at
+    # the surface where the owner is being asked to approve something.
+    assert "undefined" not in joined
+    assert "null" not in joined
+
+
 def test_the_approval_control_is_built_after_the_whole_floor() -> None:
     """ADR-0178 §7's first clause is an ordering obligation: a surface renders the floor
     "**before it collects the user's answer**".

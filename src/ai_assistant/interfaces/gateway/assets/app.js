@@ -910,6 +910,7 @@ function renderParameters(item, parameters) {
 // `to` and again by `bcc` is one member of the set and two disclosures here.
 function renderEgress(item, egress) {
   line(item, `From the connected account: ${egress.account_identity}`, "hint");
+  line(item, `Planned over: ${originWords(egress.planned_with_external_content)}`, "hint");
   line(item, "It would reach:", "hint");
   egress.destinations.forEach((one) => line(item, destinationWords(one), "hint"));
   line(item, "What it describes sending:", "hint");
@@ -917,6 +918,43 @@ function renderEgress(item, egress) {
     line(item, "the payload description names no span", "hint");
   }
   egress.spans.forEach((one) => line(item, spanWords(one), "hint"));
+}
+
+// The call's origin, at the strength the recorded predicate carries (ADR-0181 §6).
+//
+// **A property of the call, never of a span.** The boolean records whether the material
+// this system *selected* into the model call that produced this request included any
+// record marked as resting on recorded external content. ADR-0181 §2's third clause
+// refuses to mint a per-span marker, so neither arm names an argument, a position, a
+// destination or a payload span, and the line is rendered beside the occurrences rather
+// than against one.
+//
+// **Neither arm names a source, or a kind of source** — §6's second clause bars "from a
+// source you connected" in terms, because ADR-0098 §1's class is wider than connected
+// sources, reaching a tool or MCP result, a provider's error text and a third party's
+// speech captured by a spoke.
+//
+// **The `false` arm is not an assurance.** It says no selected record carried the
+// marker, never that no external content was involved (§6's third clause; §7 names the
+// residual it does not close). Each arm is a whole sentence rather than a "yes"/"no"
+// against the other's wording, because a reader in one state never sees the other.
+//
+// **There is no third arm to render.** `ConfirmationEgress.planned_with_external_content`
+// is required with no default (ADR-0181 §3), and the process that serialised this view
+// is the one that served this script, so the key is always present and always a boolean.
+// An "unknown" arm would be inventing a state the model cannot hold, at the surface
+// where the owner is being asked to approve something.
+function originWords(plannedWithExternalContent) {
+  if (plannedWithExternalContent) {
+    return (
+      "material this assistant selected, which includes a record marked as " +
+      "resting on recorded external content"
+    );
+  }
+  return (
+    "material this assistant selected, in which no record is marked as " +
+    "resting on recorded external content"
+  );
 }
 
 // One member of the set `core` derived, in the two shapes it has and no third.

@@ -107,6 +107,7 @@ def _confirmation(
     identity: str = _IDENTITY,
     parameters: Mapping[str, FrozenJson] | None = None,
     egress: bool = True,
+    planned_with_external_content: bool = False,
 ) -> Confirmation:
     """One parked confirmation, with an egress member unless ``egress`` is false.
 
@@ -126,7 +127,7 @@ def _confirmation(
             ConfirmationEgress(
                 account_identity=identity,
                 spans=spans,
-                planned_with_external_content=False,
+                planned_with_external_content=planned_with_external_content,
             )
             if egress
             else None
@@ -495,7 +496,14 @@ async def test_no_connection_reference_or_endpoint_reaches_the_page() -> None:
     async with _harness(_holding()) as one:
         egress = (await _view(one, confirmation))["egress"]
 
-        assert set(egress) == {"account_identity", "destinations", "spans"}
+        # ADR-0181 §6's addition moves this roster by one and changes nothing else
+        # about what it excludes: no connection reference, no transport endpoint.
+        assert set(egress) == {
+            "account_identity",
+            "destinations",
+            "spans",
+            "planned_with_external_content",
+        }
         assert set(egress["spans"][0]) == {
             "argument",
             "index",
@@ -504,6 +512,87 @@ async def test_no_connection_reference_or_endpoint_reaches_the_page() -> None:
             "tier",
             "destination",
         }
+
+
+async def test_a_call_planned_over_external_content_crosses_beside_the_whole_floor() -> None:
+    """ADR-0181 §6 and §10's clause for this lane, at the half a page cannot supply.
+
+    §10 requires the ``True`` case to carry "the fact **and** every occurrence
+    ADR-0178 §7's floor already requires", so the floor is asserted here rather than
+    trusted: §6's sixth clause is that nothing of it is suppressed or reordered on
+    the strength of the new fact, and a view that had dropped the recipients to make
+    room would pass a membership-only check.
+
+    The value crosses at all because ADR-0178 §3 leaves the page no other route to
+    it — the page renders what it was handed and derives nothing (#1445).
+    """
+    confirmation = _confirmation(
+        _span("body", extent=5),
+        _span("to", canonical="alice@example.org", supplied="Alice@Example.ORG", extent=17),
+        planned_with_external_content=True,
+    )
+    async with _harness(_holding()) as one:
+        egress = (await _view(one, confirmation))["egress"]
+
+        assert egress["planned_with_external_content"] is True
+
+        # ...and ADR-0178 §7's floor, whole and unmoved.
+        assert egress["account_identity"] == _IDENTITY
+        assert egress["destinations"] == _derived(confirmation)
+        assert [span["argument"] for span in egress["spans"]] == ["body", "to"]
+        named = egress["spans"][1]["destination"]
+        assert named["canonical"] == "alice@example.org"
+        assert named["supplied"] == "Alice@Example.ORG"
+
+
+async def test_a_call_no_selected_record_marked_crosses_the_fact_too() -> None:
+    """ADR-0181 §6's fourth clause at this seam: rendered in **both** states.
+
+    §10 makes this its own case in terms — "a test asserting only that a marker is
+    present when it is ``True`` does not satisfy this clause" — and the gateway is
+    where a lane would most plausibly lose it, by omitting a falsy key from the
+    payload and leaving the page to read ``undefined``. So the assertion is on the
+    key's presence and its value, not on truthiness.
+    """
+    confirmation = _confirmation(
+        _span("to", canonical="alice@example.org", extent=17),
+        planned_with_external_content=False,
+    )
+    async with _harness(_holding()) as one:
+        egress = (await _view(one, confirmation))["egress"]
+
+        assert "planned_with_external_content" in egress
+        assert egress["planned_with_external_content"] is False
+        assert egress["account_identity"] == _IDENTITY  # beside the floor here too
+
+
+async def test_the_recovery_route_carries_the_origin_the_live_one_does() -> None:
+    """ADR-0177 §8 read against ADR-0181 §6: one view function, so one floor.
+
+    §7 is stated over "a surface rendering a ``Confirmation``" and not over the route
+    it arrived by, and §6 extends that clause rather than replacing it. A browser
+    recovering a park through this read is being asked the same question as one that
+    watched it park, so it is shown the same fact.
+    """
+    planned = _confirmation(
+        _span("to", canonical="alice@example.org", extent=17),
+        handle="h-1",
+        planned_with_external_content=True,
+    )
+    unplanned = _confirmation(
+        _span("to", canonical="bob@example.org", extent=17),
+        handle="h-2",
+        planned_with_external_content=False,
+    )
+    async with _harness(_holding(planned, unplanned)) as one:
+        status, body = await one.whole("POST", "/confirmations", {})
+
+        assert status == 200
+        assert [view["token"] for view in body["confirmations"]] == ["h-1", "h-2"]
+        crossed = [
+            view["egress"]["planned_with_external_content"] for view in body["confirmations"]
+        ]
+        assert crossed == [True, False]
 
 
 # --- ADR-0177 §8: pending_confirmations is the one recovery route ------------
