@@ -198,8 +198,16 @@ class _ReadLog:
         return snapshot.id
 
     def recording_order(self) -> list[SourceReadRecord]:
-        """Every row held, oldest-recorded first. The list is fresh; the rows frozen."""
-        return list(self._rows)
+        """Every row held, oldest-recorded first, as **detached** copies.
+
+        ADR-0018 §3's read-path rule, which a fake holding objects has to keep by
+        hand where a serialising store gets it for free: ``frozen=True`` refuses
+        ``row.outcome = …`` and not ``row.__dict__["outcome"] = …``, so handing back
+        the stored instances would let a reader rewrite an append-only row through
+        the very call that reports it. The list is fresh too, for the same reason at
+        one level up.
+        """
+        return [row.model_copy() for row in self._rows]
 
     def clear(self) -> int:
         """Drop every row, returning how many there were."""
