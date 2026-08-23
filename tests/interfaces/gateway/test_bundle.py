@@ -1003,8 +1003,11 @@ def test_a_delivery_stream_that_stops_saying_anything_is_abandoned_on_a_bound() 
     # Derived from what the gateway disclosed, and from no figure of this page's own: a
     # literal here would be a second claim about the cadence, which is ADR-0175 §8's own
     # argument against a separate heartbeat interval.
-    assert calls[0].rstrip().endswith("cadence * SILENT_CADENCES")
-    assert not re.search(r",\s*[\d.]", calls[0])
+    # The deadline is the instant `SILENT_CADENCES` cadences from now, and the timer's
+    # own delay is a segment of the wait to it — never a figure of this page's own.
+    assert "arm(Date.now() + cadence * SILENT_CADENCES);" in read
+    assert calls[0].rstrip().endswith("Math.min(at - Date.now(), TIMER_SEGMENT)")
+    assert not re.search(r"arm\(Date\.now\(\) \+ [\d.]", read)
     assert "const SILENT_CADENCES = 3;" in script
     assert "let cadence = notificationCadence();" in read
     # The figure comes from the gateway, and a stream is bounded by its own gateway's
@@ -1013,7 +1016,7 @@ def test_a_delivery_stream_that_stops_saying_anything_is_abandoned_on_a_bound() 
     delivered = read[read.index("for await (const value of streamValues(response)) {") :]
     assert delivered.index("adoptCadence(") < delivered.index("heard();")
     # A cadence this page has none of arms nothing, rather than a figure it made up.
-    assert "cadence === null" in read
+    assert "if (cadence !== null) {" in read
     # Armed before the request goes out, and restarted by every value that arrives —
     # keep-alive included — so what it measures is silence and never the stream's life.
     assert read.index("heard();") < read.index("await fetch(")
@@ -1082,37 +1085,47 @@ def test_the_page_remembers_the_cadence_this_origin_last_disclosed() -> None:
     assert "CADENCE_KEY" not in functions["startSession"]
     # A figure no deadline can be derived from is `null` rather than a guess, and it
     # does not overwrite one that was readable.
-    assert 'typeof microseconds !== "string"' in functions["usableCadence"]
-    assert "!Number.isFinite(value) || value <= 0" in functions["usableCadence"]
+    assert 'typeof microseconds === "string"' in functions["usableCadence"]
+    assert "Number.isFinite(value) && value > 0" in functions["usableCadence"]
     # And a stream is bounded by what *it* disclosed: no fallback to the remembered
     # figure, which would hold a gateway to a budget it never uttered.
     assert "notificationCadence()" not in functions["adoptCadence"]
 
 
-def test_a_cadence_the_browsers_own_timer_cannot_express_bounds_nothing() -> None:
-    """Adversarial review, round 1, and it is the dangerous direction.
+def test_a_deadline_longer_than_the_browsers_timer_is_armed_in_segments() -> None:
+    """Adversarial review, rounds 1 and 3 — the second correcting the first's fix.
 
-    ``gateway_notification_budget`` is validated as strictly positive and against
-    nothing else (ADR-0175 §8, which says in terms that "no load-time check relates it
-    to ``hub_max_notification_budget``"), so a gateway may be configured with a budget
-    of days. ``setTimeout`` carries its delay in a signed 32-bit count of milliseconds
-    and **clamps** anything larger to fire immediately — so the largest budgets would
-    abort every healthy stream the instant it opened, which is worse than the failure
-    this page bounds.
+    ``setTimeout`` carries its delay in a signed 32-bit count of milliseconds and
+    **clamps** anything larger to fire immediately, so a long cadence armed in one call
+    aborts a healthy stream at once: worse than the failure being bounded.
+    ``gateway_notification_budget`` is validated as strictly positive and against nothing
+    else (ADR-0175 §8, which says in terms that "no load-time check relates it to
+    ``hub_max_notification_budget``"), so a budget above about 8.3 days reached that
+    ceiling once the multiple was applied.
 
-    A figure the browser cannot express is therefore treated as one this page has none
-    of: the stream runs unbounded, exactly as every stream did before the deadline
-    existed. The ceiling is the platform's own limit and not a figure this page chose,
-    which is why naming it is not a second claim about the cadence.
+    Round 1 refused such a figure and left the stream unbounded. Round 3 was right that
+    this re-opens #1442 for exactly the configurations it is hardest to notice on, so the
+    deadline is now held as the **instant** it falls due and armed in segments. The rule
+    is then exact at every figure a gateway may hold: three times the cadence it
+    disclosed, and nothing else.
+
+    **The segments open nothing** (ADR-0182 §7). A segment that finds the instant still
+    ahead arms the next one; the last one ends the stream. Nothing here re-establishes
+    one, which the timer check above pins over the whole file.
     """
     script = _code("app.js")
+    read = _functions(script)["readDeliveries"]
     usable = _functions(script)["usableCadence"]
 
-    assert "const TIMER_CEILING = 2147483647;" in script
-    assert "milliseconds * SILENT_CADENCES <= TIMER_CEILING" in usable
-    # The check is on the deadline the figure produces, not on the figure itself: it is
-    # the multiplied delay that reaches `setTimeout`.
-    assert usable.index("SILENT_CADENCES") < usable.index("TIMER_CEILING")
+    assert "const TIMER_SEGMENT = 2147483647;" in script
+    # Against an absolute instant, so segments cannot drift the deadline outward.
+    assert "arm(Date.now() + cadence * SILENT_CADENCES);" in read
+    assert "Math.min(at - Date.now(), TIMER_SEGMENT)" in read
+    assert "if (Date.now() < at) {" in read
+    assert read.index("if (Date.now() < at) {") < read.index("silent = true;")
+    # And no figure is refused for being large: only one with no instant to compute.
+    assert "TIMER_SEGMENT" not in usable
+    assert "Number.isFinite(value) && value > 0" in usable
 
 
 def test_a_remembered_cadence_a_stream_never_confirmed_is_dropped() -> None:
