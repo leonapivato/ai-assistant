@@ -112,9 +112,12 @@ _ENVELOPE: Final = """\
 
 Reply with a single JSON object and nothing else — no prose, no code fence:
 
-{"relations": [{"id": "<stored belief id, exactly as quoted above>",
+{"relations": [{"id": "<stored belief id, exactly as given>",
                 "relation": "restates" | "adds" | "contradicts"}]}
 
+Each stored belief above shows its id as a JSON string. Give the id back as a JSON \
+string too, carrying the same value: the quotation marks around it are how it is \
+displayed and are not part of it. \
 Give one entry for each stored belief listed above and none for anything else. \
 Omit an entry you cannot decide; an omission is a valid answer and is better than \
 a guess."""
