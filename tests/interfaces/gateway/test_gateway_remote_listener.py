@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import structlog
+from gateway_mint import bootstrap_value
 from gateway_timing import Clock, Timers
 
 from ai_assistant.core.config import Settings
@@ -354,7 +355,7 @@ async def remote() -> AsyncIterator[Remote]:
 
 async def _start_session(one: Remote) -> tuple[str, str]:
     """Exchange the bootstrap value from a listed device; return the two halves."""
-    value = one.gateway.mint_bootstrap()
+    value = bootstrap_value(one.gateway)
     body = json.dumps({"bootstrap_value": value}).encode()
     answer = await one.send(
         f"POST /session HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}\n"
@@ -735,7 +736,7 @@ async def test_a_bootstrap_exchange_from_an_unlisted_device_is_refused() -> None
     alone.
     """
     async with _remote(agent=_FakeAgent(default_peer=_STRANGER)) as one:
-        value = one.gateway.mint_bootstrap()
+        value = bootstrap_value(one.gateway)
         body = json.dumps({"bootstrap_value": value}).encode()
 
         answer = await one.send(
@@ -756,7 +757,7 @@ async def test_a_value_refused_at_an_unlisted_device_is_not_consumed() -> None:
     holding a value that no longer works, with nothing saying why.
     """
     async with _remote(agent=_FakeAgent(peers=[_STRANGER], default_peer=_PHONE)) as one:
-        value = one.gateway.mint_bootstrap()
+        value = bootstrap_value(one.gateway)
         body = json.dumps({"bootstrap_value": value}).encode()
         head = f"POST /session HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}"
         assert (await one.send(head, body)).status == 403
@@ -820,7 +821,7 @@ async def test_an_empty_device_list_means_no_device_may_exchange() -> None:
     async with _remote(devices=()) as one:
         assert (await one.send("GET / HTTP/1.1\nHost: {host}")).status == 200
 
-        value = one.gateway.mint_bootstrap()
+        value = bootstrap_value(one.gateway)
         body = json.dumps({"bootstrap_value": value}).encode()
         answer = await one.send(
             f"POST /session HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}", body
@@ -833,7 +834,7 @@ async def test_a_listed_device_is_matched_whole_and_never_by_prefix() -> None:
     """§8: "no element is matched by prefix, suffix, pattern or any form of partial
     comparison"."""
     async with _remote(devices=(_PHONE,), agent=_FakeAgent(default_peer=_PHONE[:-1])) as one:
-        value = one.gateway.mint_bootstrap()
+        value = bootstrap_value(one.gateway)
         body = json.dumps({"bootstrap_value": value}).encode()
 
         answer = await one.send(
@@ -1103,7 +1104,7 @@ async def test_the_one_bootstrap_value_is_the_gateways_and_not_each_listeners(
 
 async def _spend_the_bootstrap_value(one: Remote) -> str:
     """Exchange the one value at the overlay door, and hand it back spent."""
-    value = one.gateway.mint_bootstrap()
+    value = bootstrap_value(one.gateway)
     body = json.dumps({"bootstrap_value": value}).encode()
     answer = await one.send(
         f"POST /session HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}\n"
@@ -1144,7 +1145,7 @@ async def test_a_remote_refusal_records_which_device_was_refused() -> None:
     """§3: "an owner reading a refusal learns *which of their devices* was refused",
     which ADR-0168 §6 could record no such thing about a loopback peer."""
     async with _remote(agent=_FakeAgent(default_peer=_STRANGER)) as one:
-        value = one.gateway.mint_bootstrap()
+        value = bootstrap_value(one.gateway)
         body = json.dumps({"bootstrap_value": value}).encode()
         await one.send(f"POST /session HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}", body)
 

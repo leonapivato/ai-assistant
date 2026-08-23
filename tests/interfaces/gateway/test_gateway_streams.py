@@ -20,6 +20,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from gateway_mint import bootstrap_value
 from gateway_timing import Clock, Timers
 
 from ai_assistant.core.config import Settings
@@ -346,7 +347,7 @@ async def _harness(
         timers=timers,
     )
     try:
-        value = gateway.mint_bootstrap()
+        value = bootstrap_value(gateway)
         reader, headers, status = await harness.send(
             "POST", "/session", {"bootstrap_value": value}, admitted=False
         )

@@ -132,6 +132,7 @@ v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import math
 import re
 import shlex
@@ -187,7 +188,7 @@ from ai_assistant.core.types import (
     encodable_text,
     secret_value,
 )
-from ai_assistant.interfaces.gateway import run_gateway
+from ai_assistant.interfaces.gateway import Disclosure, Note, run_gateway
 from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.wire import (
     HubClient,
@@ -2231,7 +2232,12 @@ async def _serve_gateway() -> int:
         settings = load_settings()
         configure_logging(settings)
         engine = _client_for(settings)
-        await run_gateway(settings=settings, engine=engine, disclose=_disclose_bootstrap)
+        await run_gateway(
+            settings=settings,
+            engine=engine,
+            disclose=_disclose_bootstrap,
+            report=_report_gateway_note,
+        )
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
@@ -2240,7 +2246,49 @@ async def _serve_gateway() -> int:
     return _EXIT_OK
 
 
-def _disclose_bootstrap(value: str, origin: str) -> None:
+#: What the owner is told about each of ADR-0182 §1's three reportable conditions.
+#: The words live here rather than in the gateway because golden rule 3 keeps the
+#: rendering in the adapter, which is ADR-0042 §7's own split one condition over:
+#: the gateway decides *which* holds, and this decides how it reads.
+_GATEWAY_NOTES: Final[dict[Note, str]] = {
+    Note.MINT_ACT_IGNORED: (
+        "This gateway could not install the mint act, so it can mint no further "
+        "bootstrap value; restart it to get one. SIGUSR1 is set to ignored, so "
+        "sending it will not stop the gateway."
+    ),
+    Note.MINT_ACT_UNSAFE: (
+        "This gateway could not install the mint act and could not make SIGUSR1 "
+        "safe, so it can mint no further bootstrap value; restart it to get one. "
+        "Do not send SIGUSR1 to this process: it would stop the gateway and end "
+        "every session with it."
+    ),
+    Note.MINT_NOT_DISCLOSED: (
+        "A bootstrap value could not be written to standard output, so none was "
+        "minted. The gateway is still serving, every session is still live, and "
+        "any value already outstanding is unchanged."
+    ),
+}
+
+
+def _report_gateway_note(note: Note) -> None:
+    """Tell the owner one thing about the mint act that carries no value (ADR-0182 §1).
+
+    **Best effort, and deliberately so for one of the three.**
+    :data:`Note.MINT_NOT_DISCLOSED` says that standard output refused a write, and
+    this system's structured records go to standard output too
+    (``PrintLoggerFactory``) — so there is no second channel to fall back to, and a
+    report that raised on the way out would turn a mint act the owner can simply
+    repeat into a gateway that stopped. The other two are written at start on a
+    stream that has not yet failed.
+
+    Args:
+        note: The condition the gateway reached.
+    """
+    with contextlib.suppress(OSError):
+        console.print(f"[yellow]{_GATEWAY_NOTES[note]}[/]")
+
+
+def _disclose_bootstrap(disclosure: Disclosure) -> None:
     """Print the bootstrap value once, on standard output, and nowhere else (ADR-0168 §5).
 
     **Written straight to the stream rather than through Rich or the logger, and
@@ -2256,18 +2304,37 @@ def _disclose_bootstrap(value: str, origin: str) -> None:
     whose standard output cannot be written to cannot hand the owner the one value
     that admits a browser, so it does not go on to bind a port nobody can use.
 
+    **Three things travel with the value, and none of them is a decision.**
+    ADR-0182 §4 puts the live session count and ``gateway_max_sessions`` beside it
+    "as **information and not a refusal**, so that an owner minting into a full
+    table learns it where they are standing" — the mint act itself "makes no
+    decision that depends on the live session count". ADR-0182 §1 puts the act and
+    this process's id there so "the act is discoverable from the disclosure rather
+    than from a document", and omits both on a gateway that could not make the
+    signal safe, because "an advertisement the gateway cannot make safe is an
+    instruction to kill it".
+
     Args:
-        value: The bootstrap value, disclosed exactly once.
-        origin: Where to open a browser.
+        disclosure: The value, the origins, the advisory count and the act.
 
     Raises:
         ConfigurationError: If standard output cannot be written.
     """
+    act = disclosure.mint_act
+    beside = (
+        f"Live sessions: {disclosure.live_sessions} of {disclosure.max_sessions}.\n"
+        if act is None
+        else (
+            f"Live sessions: {disclosure.live_sessions} of {disclosure.max_sessions}. "
+            f"For another value: kill -{act.signal} {act.pid}\n"
+        )
+    )
     try:
         sys.stdout.write(
-            f"Assistant gateway listening on {origin}\n"
+            f"Assistant gateway listening on {', '.join(disclosure.origins)}\n"
             f"Bootstrap value (good once, and only for this gateway process):\n"
-            f"{value}\n"
+            f"{disclosure.value}\n"
+            f"{beside}"
         )
         sys.stdout.flush()
     except OSError as exc:

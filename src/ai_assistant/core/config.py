@@ -1530,6 +1530,17 @@ class Settings(BaseSettings):
             "refused rather than evicting an existing session (ADR-0168 §4, §8)."
         ),
     )
+    gateway_bootstrap_ttl: _DurationSetting = Field(
+        default=timedelta(minutes=10),
+        gt=timedelta(0),
+        description=(
+            "How long a disclosed bootstrap value still admits a browser (ADR-0182 "
+            "§3). Positive. Measured on a monotonic source from the disclosure that "
+            "promoted it, and deliberately unrelated to the session bounds: it "
+            "bounds a value that is not a session, so no load-time check relates it "
+            "to gateway_session_ttl or gateway_session_idle_timeout."
+        ),
+    )
     gateway_max_hub_connections: _IntegerSetting = Field(
         default=8,
         gt=0,

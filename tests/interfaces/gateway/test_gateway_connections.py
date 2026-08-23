@@ -28,6 +28,7 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 import structlog
+from gateway_mint import bootstrap_value
 from test_gateway_remote_listener import Answer, Remote, _read_answer, _remote, _start_session
 from test_gateway_streams import Harness, _harness
 
@@ -450,7 +451,7 @@ async def test_the_same_gateways_loopback_listener_still_admits_the_credential_p
     included" — on the very gateway whose remote listener refuses them, so the split
     is the listener and not the process."""
     async with _remote() as one:
-        value = one.gateway.mint_bootstrap()
+        value = bootstrap_value(one.gateway)
         answer = await _send_loopback(one, "/session", {"bootstrap_value": value}, None, None)
         assert answer.status == 200, answer.body
         cookie = answer.header("set-cookie")
