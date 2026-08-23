@@ -143,13 +143,16 @@ read off `main` and each is load-bearing for a clause below.
   `f"the {self.name} source reported this entry"` — or "…this message" — over a
   declared, Tier 2, constant identity. That is a property worth keeping rather
   than a coincidence.
-- **Both prompt assemblers already escape and already convey origin.**
-  `orchestration/composing.py` and `planning/planner.py` each render a record
-  through their own `_quoted_span`, which is `json.dumps` at its default
-  `ensure_ascii=True`, and each builds a `standing` string whose origin term is
-  read from `rests_on_recorded_external_content(provenance)` rather than from the
-  text. ADR-0098 §2's deterministic construction and its
-  marking-derived-from-held-data clause are met at both, on `main`.
+- **Three assemblers put a stored record into a prompt, all three escape, and two
+  of the three carry an origin term.** `orchestration/composing.py`,
+  `orchestration/consolidation.py` and `planning/planner.py` each render a record
+  through their own `_quoted_span` — `json.dumps` at its default
+  `ensure_ascii=True` — and each emits a band-derived stance
+  (`"a source the user connected reported"`). Composing and consolidation
+  additionally build a `standing` term read from
+  `rests_on_recorded_external_content(provenance)`; `planning/planner.py`'s
+  `standing` is `f"{band.value}, confidence {provenance.confidence:.2f}"` and
+  consults that predicate nowhere. §8 states what follows and what does not.
 - **Both readers state `sensitivity=DataTier.PERSONAL` uniformly**, per source
   rather than per record, and each says in its own comment why: for the calendar
   because `PERSONAL` "is correct for a calendar and must not be *assumed* correct
@@ -381,11 +384,19 @@ problem, and #659 is where it is tracked.
 > memory, its stack depth, its recursion, or any I/O of its own.
 
 > **Normative.** A parser a reader hands adversary-chosen bytes to **resolves no
-> reference the source names**: it makes no network request, opens no second file,
-> and expands no external entity, however the source spells the request. A parser
-> that would is not adoptable at this seam; a reader using one would be reaching the
-> world from outside the designated `tools/` egress seam (ADR-0017 §1, ADR-0154 §3)
-> through a library, on a schedule, with no permission check in the path.
+> reference whose target the source directs**: it makes no network request, opens
+> no file the source names or locates, and expands no external entity, however the
+> source spells the request. A parser that would is not adoptable at this seam; a
+> reader using one would be reaching the world from outside the designated `tools/`
+> egress seam (ADR-0017 §1, ADR-0154 §3) through a library, on a schedule, with no
+> permission check in the path.
+
+> **Normative.** Resolving a name the source supplies against a **fixed local
+> namespace the source cannot direct or extend** is not forbidden by the clause
+> above, and is admissible only where the namespace refuses to be escaped by the
+> name — where a supplied key can select a member and can never denote a path
+> outside it. The reader's own configuration is not a source-directed reference at
+> all and is outside this clause entirely.
 
 > **Normative.** A parser at this seam is **memory-safe over its input**:
 > adversary-chosen bytes may not reach a compiled parse path in which a malformed
@@ -393,11 +404,18 @@ problem, and #659 is where it is tracked.
 > parser with a compiled parse path over such bytes argues that property in its own
 > text and inherits it from nothing here.
 
-> **Normative.** The wrapping at a reader's seam catches **every** exception its
-> parser can raise, including the ones the parser's own documentation does not name.
-> The breadth of that catch is the obligation rather than a lapse in it, and no lane
-> may narrow it to an enumerated set of exception classes on the grounds of
-> precision.
+> **Normative.** The wrapping at a reader's seam catches **every exception arising
+> from interpreting the source's bytes**, including the ones the parser's own
+> documentation does not name. The breadth of that catch is the obligation rather
+> than a lapse in it, and no lane may narrow it to an enumerated set of exception
+> classes on the grounds of precision.
+
+> **Normative.** ADR-0093 §8's cancellation carve-out is **untouched** and takes
+> precedence over the clause above: a cancellation delivered from outside the call
+> is delivered onward unchanged and is never converted into a `ReaderError`, and
+> nothing in this ADR obliges or permits a reader to catch a `BaseException` that is
+> not a failure of interpreting its source. `core/protocols.py`'s cancellation
+> preamble and ADR-0060 bind this seam exactly as they did.
 
 **The refusal half of #641's question is already answered and this ADR adds
 nothing to it.** ADR-0093 §8 rules that a read "either completes within its bound
@@ -411,8 +429,20 @@ reservation, which §7 keys to the *worker* precisely so that a cancellation can
 release it early. **That is the honest state of the parse-failure half: met, by
 clause, and met in the tree.**
 
+**The cancellation clause above is a fence around the breadth, and an earlier draft
+did not have it.** That draft said the wrapping catches "every exception its parser
+can raise", which a lane could read as licence to catch `BaseException` — and
+ADR-0093 §8's carve-out is explicit that a cancellation delivered from outside "is
+delivered onward unchanged and is never converted into a `SensorError`", with the
+harm named: both consumers would treat a caller's own cancellation as a degraded
+source, on a shutdown that was working correctly. `core/protocols.py` states the
+same carve-out on the seam. The breadth this ADR wants is over *what interpreting
+hostile bytes can throw* and stops exactly where ADR-0093 §8 already stopped it;
+saying so is cheaper than leaving a lane to reconcile two rules that only appear to
+disagree. Architecture review found the earlier wording on round 1.
+
 **What was genuinely unruled is the class of parser a reader may hand hostile bytes
-to at all**, and the three clauses above are that. Each is stated because the
+to at all**, and the clauses above are that. Each is stated because the
 obvious reasoning fails in a specific way:
 
 - **"The caps bound it" is false about the parser**, because the caps are the
@@ -433,9 +463,26 @@ obvious reasoning fails in a specific way:
   outbound request with no `ActionPolicy` in the path, no CONFIRM card, and no
   ADR-0181 origin, driven by a scheduler on a timer. The class is familiar — an
   XML external entity, a stylesheet reference, a remote schema — and it does not
-  arrive by anyone deciding to add egress. It arrives by adopting a parser. Both
-  parsers on `main` resolve nothing, and the clause exists so the third one is
-  chosen with that as a criterion rather than discovered to have it.
+  arrive by anyone deciding to add egress. It arrives by adopting a parser. The
+  clause exists so the third parser is chosen with that as a criterion rather than
+  discovered to have it.
+- **The calendar path already resolves a source-supplied name, and that is why the
+  rule is stated over the reference's *target* rather than over resolution as
+  such.** An earlier draft of the clause above said "opens no second file", and it
+  was false of the tree it claimed to describe: `readers/_occurrences.py` records
+  that "`icalendar` does the format — line unfolding, property escaping, **`TZID`
+  resolution**", and resolving `DTSTART;TZID=Europe/Berlin` means reading the
+  platform's timezone database. **That is admissible, and the second clause is what
+  says why rather than an exception carved for it.** The source supplies a *key*
+  into a fixed local namespace it cannot direct or extend: `zoneinfo.ZoneInfo`
+  refuses an absolute path ("ZoneInfo keys may not be absolute paths") and refuses a
+  key that would leave `TZPATH` ("ZoneInfo keys must refer to subdirectories of
+  TZPATH"), so no `TZID` denotes a file of the adversary's choosing, and the worst
+  a hostile one produces is a `ZoneInfoNotFoundError` or an `OSError` that the
+  wrapping clause turns into a legible refusal. A parser resolving a `URI`, a
+  filesystem path, or a `SYSTEM` entity is the opposite case on every one of those
+  properties, which is the distinction the two clauses draw. Adversarial review
+  found the earlier wording on round 1.
 - **Memory safety is a dependency-selection property and belongs where the
   selection is made.** `CONTRIBUTING.md` already filters dependencies, and ADR-0024
   §3 already exact-pins the behaviour-affecting stack. Neither is expressed over
@@ -603,14 +650,30 @@ said "readers strip control characters" would leave the quotation mark and would
 teach a consumer that reader output is safe, which is the worse of the two errors.
 
 **The prompt assemblers are not the exposed consumer here, and saying so keeps the
-residual narrow.** `orchestration/composing.py` and `planning/planner.py` each pass
-a record's content through `json.dumps` at `ensure_ascii=True` before it reaches a
-model, and each derives the record's standing from
-`rests_on_recorded_external_content` rather than from the text — ADR-0098 §2's
-deterministic construction and its marking-from-held-data clause, met. What is
-exposed is everything *else* that reads a stored belief: an inspection surface, an
-export, a log line, a client rendering. Those owe ADR-0098 §7 and this section is
+residual narrow.** All three of them — `orchestration/composing.py`,
+`orchestration/consolidation.py` and `planning/planner.py` — pass a record's content
+through `json.dumps` at `ensure_ascii=True` before it reaches a model, so ADR-0098
+§2's deterministic construction holds wherever a stored belief becomes a prompt. What
+is exposed is everything *else* that reads a stored belief: an inspection surface, an
+export, a log line, a client rendering. Those owe ADR-0098 §7, and this section is
 what tells them the reader's punctuation is not a help.
+
+**One divergence among the three is recorded rather than ruled, because ruling it is
+not this ADR's.** For an `ATTESTED` record all three convey externality the same way,
+through a band-derived stance — `"a source the user connected reported"` — which is
+ADR-0098 §2's marking-from-held-data clause met and is the case this seam produces.
+Where they differ is one band further on: composing and consolidation add an origin
+term computed from `rests_on_recorded_external_content`, so a `DERIVED` belief
+carrying ADR-0106's taint reaches those two prompts marked as resting on a connected
+source's report, and reaches the planner's marked only `derived, confidence …`.
+**Whether that is a defect is a question about ADR-0098 §2's reach over a
+system-authored span whose *warrant* is external, and about ADR-0106 §2's marker
+rather than about a reader** — a derived belief's text is not itself external
+content under ADR-0098 §1, which is why this ADR does not assert a nonconformance it
+has not established. It is `src/` besides, and outside this lane's fence. Filed as
+**#1453**. Adversarial review found the inventory and the divergence on round 1; an
+earlier draft of this ADR asserted that both assemblers carried the origin term and
+that there were two of them, and both halves were wrong.
 
 **This is ADR-0181 §2's unobtainability met at the other end of the same chain, and
 reached by the same argument.** That section withdrew "on the offending field" from
@@ -657,11 +720,14 @@ vigilance, and listing them is what makes the third list credible.
   superseding, and `MemoryIngestor`'s own fold guard raises rather than folding an
   `EXTERNAL` record onto a `USER_ASSERTED` one — a writer-side floor that holds
   whatever policy a deployment injects.
-- **A span reaches a model call escaped and labelled.** Both prompt assemblers
-  render a record's content through `json.dumps` and build its standing from
-  `rests_on_recorded_external_content`, so ADR-0098 §2's two properties —
-  a deterministic transform, and a marking derived from held data rather than from
-  the text — hold at the only two places a stored belief becomes a prompt.
+- **A span reaches a model call escaped and labelled.** All three assemblers that
+  put a stored record into a prompt — `orchestration/composing.py`,
+  `orchestration/consolidation.py`, `planning/planner.py` — render its content
+  through `json.dumps` and emit a band-derived stance, so ADR-0098 §2's two
+  properties hold for an attested record at every one of them: a deterministic
+  transform, and a marking derived from held data rather than from the text. The
+  one place they diverge is a `DERIVED` record's origin term, which is a band this
+  seam does not produce; §8 records it and #1453 carries it.
 - **No episode, and no absence proposed.** ADR-0093 §4, and the `Reader` Protocol's
   own docstring. The narrow absence path ADR-0110 opened is opt-in in both halves
   and confined to the source's own records (§6).
