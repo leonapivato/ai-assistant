@@ -860,6 +860,32 @@ def _check_drift(plan: Plan, repo: Path, commit: str) -> str:
     return marker
 
 
+def _discard_stage(plan: Plan) -> None:
+    """Remove this deploy's staged wheel and its directory, best effort.
+
+    Best effort in both directions, because it runs on the failure path too. A
+    cleanup that cannot run must not *become* the failure — on the way out of an
+    error it would replace the reason with a symptom, and after a successful
+    install it would fail a deploy that worked. So it warns and names the path,
+    which is the one thing an operator cannot reconstruct.
+
+    Args:
+        plan: The plan, carrying the staging directory to remove.
+    """
+    command = ssh_command(plan.args.host, plan.args.ssh_user, plan.unstage())
+    try:
+        status, out, error = _probe(command)
+    except DeployError as exc:  # ssh itself is unavailable
+        status, out, error = 1, "", str(exc)
+    if status != 0:
+        print(
+            f"warning: could not remove the staging directory {plan.stage_dir} on\n"
+            f"         {plan.args.host}: {(error or out).strip() or f'exit {status}'}\n"
+            f"         The wheel in it is this deploy's; remove it by hand.",
+            file=sys.stderr,
+        )
+
+
 def _assert_staged(plan: Plan, digest: str) -> None:
     """Confirm the box holds the whole wheel, before anything installs it.
 
@@ -1098,11 +1124,19 @@ def _install_and_verify(plan: Plan, commit: str, before_marker: str, before_vers
     with plan.local.open("rb") as wheel_file:
         digest = hashlib.file_digest(wheel_file, "sha256").hexdigest()
     _run_local(ssh(plan.make_stage_dir()))
-    _run_local(plan.stage())
-    _run_local(ssh(plan.make_readable()))
-    _assert_staged(plan, digest)
-    _run_local(ssh(plan.install()))
-    _run_local(ssh(plan.unstage()))
+    # Everything from here to the install is cleaned up whichever way it ends. A
+    # dropped transfer leaves tens of megabytes on the box, and a directory per
+    # attempt under a name nothing will look for again; unstaging only on the
+    # happy path means the failures — the runs that get retried — are exactly the
+    # ones that accumulate. `finally` rather than a second call in an `except`,
+    # so the error the operator needs to see is still the one that propagates.
+    try:
+        _run_local(plan.stage())
+        _run_local(ssh(plan.make_readable()))
+        _assert_staged(plan, digest)
+        _run_local(ssh(plan.install()))
+    finally:
+        _discard_stage(plan)
     _run_local(ssh(plan.write_marker(commit, digest)))
 
     invocation = invocation_id(_run_local(ssh(plan.restart())))
