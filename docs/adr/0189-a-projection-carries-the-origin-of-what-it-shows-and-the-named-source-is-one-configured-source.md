@@ -812,34 +812,49 @@ ahead of a trigger without guessing at a shape it has no producer for.
 
 > **Normative.** The surface lane rewrites the attested explanation on both live
 > surfaces — `_why` in `interfaces/cli.py` and `whyHeld` in
-> `interfaces/gateway/assets/app.js` — so that each names the source and the report instant
-> under §4, and neither continues to state that it cannot show them. It renders a
-> retirement under §4's three retirement clauses, taking all three arms — attested,
-> asserted-or-derived, and no longer held — at `_render_retirements` in
-> `interfaces/cli.py` and `renderRetirements` in `interfaces/gateway/assets/app.js`. Its tests
-> assert the rendering, not only that a field is present.
+> `interfaces/gateway/assets/app.js` — so that each names the source and the report
+> instant under §4, and neither continues to state that it cannot show them. It
+> renders a retirement under §4's three retirement clauses, taking all three arms —
+> attested, asserted-or-derived, and no longer held — at `_render_retirements` in
+> `interfaces/cli.py` and `renderRetirements` in
+> `interfaces/gateway/assets/app.js`. Its tests assert the rendering, not only that a
+> field is present.
 
 > **Normative.** The same lane renders an **attested question** under §4's first
 > clause, at `_render_question` in `interfaces/cli.py` and `renderQuestion` in
-> `interfaces/gateway/assets/app.js`. §4 binds every surface that renders an attested belief,
-> question or retirement, and a question is the projection the first attested
+> `interfaces/gateway/assets/app.js`. §4 binds every surface that renders an attested
+> belief, question or retirement, and a question is the projection the first attested
 > proposals actually reach; a lane that updated only the belief explanation would
 > leave the surface §4 was written for unchanged.
 
-> **Normative.** For each of those four rendering paths, the surface lane ships a
-> test over an **attested, resolved** subject asserting that the source identity and
-> the source-clock instant both reach the rendered output. A test asserting only that
-> a field is populated does not satisfy it.
+> **Normative.** The surface lane ships, for **each of the six rendering paths the
+> two clauses above name** — `_why`, `_render_retirements` and `_render_question` in
+> `interfaces/cli.py`, and `whyHeld`, `renderRetirements` and `renderQuestion` in
+> `interfaces/gateway/assets/app.js` — a test over an **attested, resolved** subject
+> asserting that **both** `reported_by` and `reported_at` reach the rendered output.
+> A test asserting only that a field is populated, or only that the source is named,
+> does not satisfy it.
 
-> **Normative.** For each of the **two retirement paths**, the surface lane
+> **Normative.** For the **two retirement paths** of those six, the surface lane
 > additionally ships a test over an **unresolved** retirement — `warrant` and
 > `content` both `None` — asserting that the output renders *no longer held* and
 > states no band, no origin and no source.
 
-**Those are two tests rather than one, because the state the single test would have
-named cannot exist.** An earlier draft asked for "a test over an attested retirement
-whose retired record no longer resolves", and §2 makes `warrant` and `content` `None`
-together for exactly that record — so an unresolved retirement is in no band, carries
+**The matrix is enumerated rather than counted, because a numeral in it went stale
+inside one round.** An earlier draft said "those four rendering paths" when the two
+clauses above named four; the round-4 repair added the two question renderers without
+moving the numeral, and on round 5 the two lenses read the surviving "four" as two
+*different* sets of four — adversarial as belief-plus-question, architecture as
+belief-plus-retirement — each correctly reporting that the paths it thought were
+excluded could regress with every required test still passing. Both were right about
+the gap and neither was right about which paths it covered, which is what a counted
+list buys and an enumerated one does not.
+
+**The tombstone arm is a second test rather than a clause of the first, because the
+state a single test would have named cannot exist.** An earlier draft asked for "a
+test over an attested retirement whose retired record no longer resolves", and §2
+makes `warrant` and `content` `None` together for exactly that record — so an
+unresolved retirement is in no band, carries
 no attestation, and there is no attested tombstone to construct. Adversarial review
 found it on round 5. The attribution arm and the tombstone arm are different subjects
 and get a test each.
