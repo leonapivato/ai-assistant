@@ -6580,7 +6580,9 @@ def test_a_start_failure_that_is_not_a_taken_port_claims_no_port_and_no_remedy()
     a distinction only ``interfaces/gateway/server.py`` can draw, so the claim is
     narrowed instead: the port and its remedy belong to ``EADDRINUSE`` alone.
     """
-    refused = cli._gateway_did_not_start(OSError(errno.EIO, "input/output error"), port=8422)
+    refused = cli._gateway_did_not_start(
+        OSError(errno.EIO, "input/output error"), port=8422, probes_an_address=False
+    )
 
     assert "could not start" in str(refused)
     assert "operating system's own refusal" in str(refused)
@@ -6589,6 +6591,37 @@ def test_a_start_failure_that_is_not_a_taken_port_claims_no_port_and_no_remedy()
     # The half that is true whatever failed: nothing is serving, and the value the
     # gateway printed before it tried to bind went with the process (#1436).
     assert "already dead" in str(refused)
+
+
+def test_a_taken_address_is_pinned_on_the_port_only_where_nothing_else_could_be_it() -> None:
+    """``EADDRINUSE`` is not always ``gateway_port``, and the flat claim is conditional.
+
+    ``start_remote`` probes the configured overlay address by binding an *ephemeral*
+    port, and an exhausted ephemeral range raises ``EADDRINUSE`` — on a gateway whose
+    loopback listener has already bound ``gateway_port`` successfully, since ``serve``
+    binds that one first. Adversarial review found on the second round that the flat
+    claim sends that operator to free a port that is not the problem.
+
+    The probe exists only where a remote listener is configured, and that is a fact
+    this adapter holds. So without one the flat claim is sound — which is every reader
+    of ``docs/guide/first-run.md`` — and with one the message stops naming a single
+    port as the cause.
+    """
+    taken = OSError(errno.EADDRINUSE, "address already in use")
+
+    alone = str(cli._gateway_did_not_start(taken, port=8422, probes_an_address=False))
+    with_overlay = str(cli._gateway_did_not_start(taken, port=8422, probes_an_address=True))
+
+    assert "could not bind port 8422" in alone
+    assert "ASSISTANT_GATEWAY_REMOTE_ADDRESS" not in alone
+
+    assert "could not bind port 8422" not in with_overlay
+    assert "could not bind an address it needed" in with_overlay
+    # Both settings named, because either listener could be the one holding it, and
+    # the ephemeral case named as the one that is about neither.
+    assert "ASSISTANT_GATEWAY_PORT" in with_overlay
+    assert "ASSISTANT_GATEWAY_REMOTE_ADDRESS" in with_overlay
+    assert "ephemeral port" in with_overlay
 
 
 def test_a_pre_bind_failure_is_rendered_without_being_called_a_bind(

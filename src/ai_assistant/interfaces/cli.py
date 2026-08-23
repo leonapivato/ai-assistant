@@ -2292,34 +2292,65 @@ async def _run_the_gateway(settings: Settings, engine: AssistantEngine) -> None:
             report=_report_gateway_note,
         )
     except OSError as exc:
-        raise _gateway_did_not_start(exc, port=settings.gateway_port) from exc
+        raise _gateway_did_not_start(
+            exc,
+            port=settings.gateway_port,
+            probes_an_address=settings.gateway_remote_address is not None,
+        ) from exc
 
 
-def _gateway_did_not_start(exc: OSError, *, port: int) -> ConfigurationError:
+def _gateway_did_not_start(
+    exc: OSError, *, port: int, probes_an_address: bool
+) -> ConfigurationError:
     """One line for a gateway the operating system would not let start.
 
     A taken port is the case a stranger following ``docs/guide/first-run.md``
     actually hits — most often a gateway they forgot was running — and
-    ``EADDRINUSE`` is the one errno that says so by itself, whichever listener
-    raised it. Only that branch names ``gateway_port`` and the act that frees it.
+    ``EADDRINUSE`` is the errno that says so. Everything else gets the kernel's own
+    refusal and nothing invented on top, because this boundary cannot see which part
+    of the start failed (see :func:`_run_the_gateway`): naming the port for an
+    unreadable asset bundle or an agent socket would be a confident answer to a
+    question that was not asked.
 
-    Everything else gets the kernel's own refusal and nothing invented on top,
-    because this boundary cannot see which part of the start failed (see
-    :func:`_run_the_gateway`): naming the port for an unreadable asset bundle or an
-    agent socket would be a confident answer to a question that was not asked.
+    **``EADDRINUSE`` is not always about ``gateway_port`` either**, which adversarial
+    review found on the second round, correctly. ``start_remote`` probes the
+    configured overlay address by binding an *ephemeral* port before it binds
+    ``gateway_port`` there, and an exhausted ephemeral range raises the same errno —
+    on a gateway whose loopback listener has already bound ``gateway_port``
+    successfully, since ``serve`` binds that one first. Telling that operator to free
+    ``gateway_port`` would name a port that is not the problem.
+
+    Distinguishing the two takes a fact only ``interfaces/gateway/server.py`` holds,
+    so this uses the one fact the adapter *does* hold: the probe runs only where a
+    remote listener is configured (``gateway_remote_address``). Without one there is
+    no ephemeral bind in the path at all and ``EADDRINUSE`` is ``gateway_port``,
+    stated flatly — which is every reader of ``first-run.md``. With one, the message
+    says an address was in use, names both settings, and leaves the errno's own text
+    to say which. It is the round-one repair one level down: claim what is visible
+    from here, and no more.
 
     Args:
         exc: What the start raised.
         port: ``gateway_port``, named only where the errno is about a port.
+        probes_an_address: Whether a remote browser listener is configured, and so
+            whether an ephemeral bind of its own is in the path.
 
     Returns:
         The error :func:`_serve_gateway`'s boundary renders and exits non-zero on.
     """
-    if exc.errno == errno.EADDRINUSE:
+    if exc.errno == errno.EADDRINUSE and not probes_an_address:
         cause = (
             f"could not bind port {port}: {exc}. something else already holds it — most "
             f"often another gateway — so stop that, or set ASSISTANT_GATEWAY_PORT to a "
             f"free port"
+        )
+    elif exc.errno == errno.EADDRINUSE:
+        cause = (
+            f"could not bind an address it needed: {exc}. usually that is port {port}, on "
+            f"one of the two listeners ASSISTANT_GATEWAY_REMOTE_ADDRESS puts on it — stop "
+            f"whatever holds it, or set ASSISTANT_GATEWAY_PORT to a free port. Where the "
+            f"errno names no port, it is the overlay address being probed and this machine "
+            f"has no ephemeral port left, which is not about either setting"
         )
     else:
         cause = (
