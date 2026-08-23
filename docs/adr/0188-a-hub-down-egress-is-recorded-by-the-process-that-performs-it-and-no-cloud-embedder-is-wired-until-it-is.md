@@ -202,12 +202,17 @@ opener and no second door.
 
 ### 3. The record is a file, deliberately, and not a store
 
-> **Normative.** The record is a single append-only, line-delimited file in the
-> data directory, beside the databases and not among them —
-> `<data_dir>/offline-egress.jsonl` — with owner-only permissions, holding one
-> object per egress **run**. It is not a SQLite database, gains no Protocol, no
-> `core/` type and no conformance suite, and nothing in `src/ai_assistant/`
-> imports it to read.
+> **Normative.** The record lives in a single append-only, line-delimited file in
+> the data directory, beside the databases and not among them —
+> `<data_dir>/offline-egress.jsonl` — with owner-only permissions. It is not a
+> SQLite database, gains no Protocol, no `core/` type and no conformance suite, and
+> nothing in `src/ai_assistant/` imports it to read.
+
+> **Normative.** The file holds **events**, one per line. A run contributes an
+> `opened` event and, if it reaches its exit, a `sealed` event; the two carry the
+> same run identifier and **together are that run's record**. A line once written is
+> never rewritten, truncated or removed, and nothing in the file is amended in place
+> — the seal is a second line, not an edit of the first.
 
 > **Normative.** Nothing prunes it. It has no row cap, no retention duration and no
 > eviction rule, and no lane adds one on the strength of ADR-0185 §6. The user's
@@ -223,10 +228,19 @@ the exception would be granted for a store whose only writer is the exempt proce
 which is a store the rule was never about. A file sidesteps the question rather
 than arguing it.
 
+**Two events rather than one mutable object, and the reason is the same one that
+makes this a file.** A record that had to be *revised* at the end of the run would
+need either an in-place rewrite — which is the property an audit record exists to
+deny, and which a crash between the read and the write can lose entirely — or a
+store that can update a row, which §2's ownership problem forbids. Appending a
+second line costs neither, and it makes §5's hard case self-describing rather than
+inferred: a run identifier with an `opened` line and no `sealed` one **is** the
+unsealed record, legible to anyone reading the file with no schema to consult.
+
 **The arithmetic supports it and is worth stating.** There is exactly one writer,
-it holds an exclusive lock for the whole of its run, and the number of objects an
-installation accumulates over its lifetime is the number of times an operator
-deliberately re-embedded to a cloud target — a handful, not a stream. `AuditTrail`'s
+it holds an exclusive lock for the whole of its run, and the number of events an
+installation accumulates over its lifetime is at most twice the number of times an
+operator deliberately re-embedded to a cloud target — a handful, not a stream. `AuditTrail`'s
 atomic write-once check exists because two concurrent resolutions can race
 (ADR-0021 §4); there is no second writer here to race with. ADR-0185 §6's row cap
 exists because reads arrive on an interval; these do not arrive at all unless a
@@ -236,7 +250,7 @@ and a database ADR-0123's counting hazard would then have to count.
 **Line-delimited and human-readable, because for now the file *is* the surface.**
 §7 defers a rendered surface; until one exists, the record has to be legible to the
 operator who wrote it and copyable by the user exercising ADR-0004 §6's export
-right. A row per act in a text file satisfies both without a mechanism.
+right. A line per event in a text file satisfies both without a mechanism.
 
 ### 4. What the record carries, and what "reconstructible" means for an act performed while the hub is down
 
@@ -245,14 +259,24 @@ right. A row per act in a text file satisfies both without a mechanism.
 > hub**. No clause of this ADR makes reconstructibility depend on a later process
 > running, on the hub starting again, or on any store being opened.
 
-> **Normative.** The record for a run yields, from itself alone: the configured
-> target — the `EmbedderKind` member, the target `model_id` and the recipient the
-> configuration names; the source store's path and its recorded `model_id`; the
-> authorisation — that an operator passed `--upload-entire-memory-store` at a
-> command line and the instant they did; the extent — the record count disclosed
-> before the first send and, where §5 sealed it, the count actually embedded and the
-> count carried over from an earlier run; and the instants of authorisation, of the
-> first send, and of the seal.
+> **Normative.** The `opened` event carries, and yields from itself alone: the run
+> identifier; the configured target — the `EmbedderKind` member, the target
+> `model_id` and the recipient the configuration names; the source store's path and
+> its recorded `model_id`; the authorisation — that an operator passed
+> `--upload-entire-memory-store` at a command line — and the instant it was taken;
+> the counts ADR-0104 §4's disclosure had already stated, being the records in the
+> store and the records still outstanding; and the instant at which sending was
+> entered.
+
+> **Normative.** The `sealed` event carries the same run identifier, the outcome,
+> the count actually embedded, the count carried over from an earlier run, and the
+> instant of the seal. It restates nothing the `opened` event already carries; a
+> reader joins the two on the run identifier.
+
+> **Normative.** The `opened` event asserts that the sending was **entered**, never
+> that any byte reached the recipient, and no lane, surface or measurement reads it
+> as the latter. Whether a first request left, arrived, or failed inside the
+> embedder is not determinable from this side, and the record does not claim it.
 
 > **Normative.** The record carries **no content**. Not a memory record, not its
 > text, not a vector, not a digest of one, not an identifier of one. ADR-0004 §5,
@@ -280,19 +304,27 @@ what the recipient did with it, which is outside anything this system observes.
 
 **The unit is a run, not a migration.** ADR-0104 §2 makes the migration resumable,
 so a second invocation sends only the records still outstanding. Each invocation
-that sends anything is its own egress and gets its own object, carrying its own
-counts. Folding two runs into one record would misstate both.
+that enters sending is its own egress and gets its own run identifier and its own
+pair of events, carrying its own counts. Folding two runs into one record would
+misstate both.
 
 ### 5. Write-ahead, then seal; an unsealed record is not an absent one
 
-> **Normative.** The record is written and flushed to durable storage **before the
-> first record leaves the device**, and sealed at exit with the outcome and the
-> counts. The write-ahead half is not conditional on the run succeeding.
+> **Normative.** The `opened` event is appended and flushed to durable storage
+> **before the first record leaves the device**. The append is not conditional on
+> the run succeeding, on any send succeeding, or on the seal ever being reached.
 
-> **Normative.** An unsealed record reconstructs as *authorised, begun, extent
-> undeterminable* — never as no egress, and never as a completed one. No lane, no
-> surface and no exit measurement treats the absence of a seal as the absence of an
-> act.
+> **Normative.** The `sealed` event is appended at exit, on every path the process
+> survives — a completed run, a failure raised out of the embedder or the store, and
+> a `KeyboardInterrupt`. Only a path that ends the process without running its exit —
+> `SIGKILL`, a power cut, a kernel panic — leaves a run unsealed.
+
+> **Normative.** A run whose `opened` event stands with no `sealed` event
+> reconstructs as *authorised, sending entered, extent undeterminable* — never as no
+> egress, and never as a completed one. No lane, no surface and no exit measurement
+> treats a missing seal as the absence of an act, and none infers the extent from the
+> `opened` event's disclosed counts, which state what was *authorised* and not what
+> was sent.
 
 **The order is the whole of it.** A record written at the commit point records
 nothing when the run is killed halfway, which is the case that matters most: an
@@ -376,6 +408,18 @@ reason ADR-0104 §4 gave for the allow-list itself: a member "added later is ref
 until somebody adds it deliberately", and the deliberate act is exactly where a
 condition is cheap to enforce and impossible to forget.
 
+**This narrows nothing ADR-0104 §4 decided, and the distinction is worth stating
+here rather than only in §10.** §4's authorised path is untouched: the act stays
+authorisable, the flag still lifts the refusal, the disclosure still precedes the
+first record, and an operator who reaches the path gets exactly the migration §4
+describes. What acquires a precondition is the *widening of the allow-list* — an act
+§4 mentions only to say what happens when it has **not** been performed ("a member
+added later is refused until somebody adds it deliberately"). That sentence is a
+statement about the mechanism's fail-closed default, not a grant of permission to
+widen, and §4 nowhere says that deliberateness is the only condition that will ever
+attach. So no clause of §4 becomes false and none is read more widely; another
+obligation is joined to it from here. §10 applies ADR-0082 §1's test to it in terms.
+
 ### 9. What this pre-registers for milestone 24
 
 > **Normative.** This lane pre-registers **one figure and no live arm**: the number
@@ -402,10 +446,35 @@ the lane that lifts it will be the one holding the question.
 ADR-0082 §1's test is whether a reader holding only the earlier ADR would now act
 differently or read one of its clauses more widely.
 
-- **ADR-0104.** §4's clauses are untouched — the refusal, the exhaustive
-  construction, the flag and the disclosure all bind exactly as ratified. §8 above
-  adds a condition on *widening the allow-list*, which §4 says nothing about; a
-  reader of §4 alone still refuses every absent member and still requires the flag.
+- **ADR-0104.** §4's three normative clauses are untouched — the refusal, the
+  exhaustive construction, the flag and the disclosure all bind exactly as ratified,
+  and a reader of §4 alone still refuses every absent member, still refuses a member
+  with no construction branch, and still requires the flag before an authorised run
+  proceeds. §8 above joins a condition to the *widening of the allow-list*. **The
+  one sentence of §4 that touches widening is the place to apply ADR-0082 §1's
+  test**, and it is applied rather than asserted: "The allow-list is enumerated by
+  name, so a member added later is refused until somebody adds it deliberately."
+  That is a statement of the mechanism's fail-closed default — it says what happens
+  to a member nobody has added — and it neither grants permission to widen nor
+  declares deliberateness the only condition that may ever attach. After §8 the
+  sentence is still true word for word, and a reader acting on it does the same
+  thing: refuse the unlisted member. So the earlier ADR's sentences "all stay true,
+  merely joined by another obligation stated elsewhere", which is ADR-0082 §1's own
+  description of a stacked addition, and no record is owed.
+
+  **This is deliberately not declared a partial supersession, and the label would be
+  wrong twice over.** ADR-0070 §3's shape requires that a *part of the earlier
+  decision be replaced*, and §8 replaces nothing: the allow-list mechanism, the
+  refusal, the exhaustive construction, the flag and the disclosure all continue to
+  operate. ADR-0082 §1 is explicit that "the test controls, not the label", so
+  marking ADR-0104 `Partially superseded` while every clause of it still binds would
+  put a wrong record on a live decision. And it could not be written from this PR in
+  any case: ADR-0070 §1 permits recording "a supersession **that has landed**" and
+  says in terms that "flipping a live decision to `Superseded` with no such ADR is
+  not a status change but an unrecorded decision change, and is not permitted" — an
+  ADR standing `Proposed` on an unmerged branch has landed nowhere and binds no
+  reader.
+
   The Consequences bullet #747 quotes describes a state and imposes nothing —
   ADR-0104 is a marked ADR, and ADR-0089 §3 is that unmarked text supplies no
   obligation — and it stays a true account of what ADR-0104 itself decided. It is
@@ -494,9 +563,10 @@ escapes the audit obligation *by being performed at the right moment*, which is 
 exception shaped like an incentive. ADR-0004 §7 is better served by an act that
 records itself than by a clause saying it need not.
 
-**A ninth durable store with a Protocol, a conformance suite and a canonical
+**A durable store of its own — a twelfth database in the data directory — with a
+Protocol, a conformance suite and a canonical
 fake.** Refused for now, and §3 gives the arithmetic: one writer under an exclusive
-lock, no reader, no query, no bound, and a handful of objects in a lifetime. A
+lock, no reader, no query, no bound, and a handful of events in a lifetime. A
 Protocol with no consumer is machinery ahead of demand, it is a `core/protocols.py`
 change owing its own ADR under golden rule 5, and it reintroduces the ownership
 problem the file exists to sidestep. The trigger is named in Consequences: the first
