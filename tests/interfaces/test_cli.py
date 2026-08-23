@@ -6568,15 +6568,54 @@ def test_a_gateway_whose_port_is_taken_renders_one_line_rather_than_a_traceback(
     assert "already dead" in rendered
 
 
-def test_a_bind_failure_that_is_not_a_taken_port_invents_no_advice() -> None:
+def test_a_start_failure_that_is_not_a_taken_port_claims_no_port_and_no_remedy() -> None:
     """Every other errno gets the kernel's refusal and nothing made up on top of it.
 
-    Pointing at ``ASSISTANT_GATEWAY_PORT`` for, say, a permission the user does not
-    hold would name a setting that is not the cause — worse than naming none, and
-    the shape of over-helpful error text this project keeps out of the adapter.
+    The boundary is wide because it has to be — ``run_gateway`` reads the front-end
+    bundle off the installed distribution and may stat an overlay agent's socket
+    before either listener binds, and the remote listener probes an *ephemeral* port
+    before it goes near ``gateway_port``. Adversarial review found on the first round
+    that calling all of those "could not bind port 8422" points an operator at the
+    wrong subsystem and at a setting that is not the cause. Narrowing the catch takes
+    a distinction only ``interfaces/gateway/server.py`` can draw, so the claim is
+    narrowed instead: the port and its remedy belong to ``EADDRINUSE`` alone.
     """
-    refused = cli._listener_refused(OSError(errno.EACCES, "permission denied"), port=8422)
+    refused = cli._gateway_did_not_start(OSError(errno.EIO, "input/output error"), port=8422)
 
-    assert "8422" in str(refused)
+    assert "could not start" in str(refused)
     assert "operating system's own refusal" in str(refused)
+    assert "8422" not in str(refused)
     assert "ASSISTANT_GATEWAY_PORT" not in str(refused)
+    # The half that is true whatever failed: nothing is serving, and the value the
+    # gateway printed before it tried to bind went with the process (#1436).
+    assert "already dead" in str(refused)
+
+
+def test_a_pre_bind_failure_is_rendered_without_being_called_a_bind(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, output: StringIO
+) -> None:
+    """The same boundary, driven end to end on the half that is not about the port.
+
+    ``run_gateway`` reads the front-end bundle off the installed distribution before
+    either listener starts, so an unreadable installation arrives at this adapter as
+    an ``OSError`` indistinguishable from a bind — the case adversarial review raised
+    against the first draft. It still has to be rendered rather than dumped, and it
+    still has to exit non-zero; what it must not do is send the operator to
+    ``ASSISTANT_GATEWAY_PORT``.
+    """
+    monkeypatch.setenv("ASSISTANT_DATA_DIR", str(tmp_path))
+
+    async def unreadable(**_kwargs: object) -> None:
+        """Fail the way a bundle read off a broken installation would."""
+        raise OSError(errno.EIO, "input/output error")
+
+    monkeypatch.setattr(cli, "run_gateway", unreadable)
+
+    result = CliRunner().invoke(cli.app, ["gateway"])
+    rendered = " ".join(output.getvalue().split())
+
+    assert result.exit_code == 1
+    assert "Traceback" not in rendered
+    assert "could not start" in rendered
+    assert "input/output error" in rendered
+    assert "ASSISTANT_GATEWAY_PORT" not in rendered
