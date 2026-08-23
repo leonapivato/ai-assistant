@@ -405,14 +405,17 @@ async def test_a_park_whose_row_predates_the_origin_field_is_not_offered_after_a
     pre-ADR-0181 build wrote it — the current encoding minus exactly one key — and a
     second process over the same two database files is asked what is pending.
 
-    **Four things, and they are four different claims.** The park is not offered, so
-    no card naming no account and no recipient is put to a user (ADR-0178 §4 makes an
-    absent binding the "not an egress call" discriminator, which is why handing the
-    decoded row back would be a *false* card rather than a partial one). Nothing was
-    written, so the step is still durably ``AWAITING_APPROVAL`` — refused, not
-    resolved, and not erased. The row is still readable as history, which is the half
-    that keeps a trail holding one from failing whole. And the refusal is *named*:
-    a silent omission is indistinguishable from a resolved binding.
+    **Three things, and they are three different claims.** The enumeration
+    *succeeds* rather than raising, which is the damage this branch exists to stop:
+    one pre-upgrade row would otherwise make every pending confirmation in the trail
+    unanswerable. The park itself is not offered, so no card naming no account and no
+    recipient is put to a user — handing the decoded row back would be a *false*
+    card, because ADR-0150 §1 rules that an absent binding "means the request is not
+    an egress call". And nothing was written: the step is still durably
+    ``AWAITING_APPROVAL``, refused rather than resolved and not erased.
+
+    The refusal is *named* rather than an unexplained silence, which the trail's own
+    case asserts over the log; here what matters is that a user cannot reach it.
 
     **Resume is unreachable rather than separately refused**, and that is stronger
     than a refusal at the resume seam. A continuation token exists only where
@@ -458,17 +461,14 @@ async def test_a_park_whose_row_predates_the_origin_field_is_not_offered_after_a
         await engine2.aclose()
 
     plans3 = SqlitePlanStore(path=plans_path)
-    trail3 = SqliteAuditTrail(path=audit_path)
     try:
         state = await plans3.get_execution(execution_id)
         assert state is not None
         step = state.step("step-1")
         assert step is not None
         assert step.status is StepStatus.AWAITING_APPROVAL, "refused, not resolved, not erased"
-        assert len(await trail3.export()) == 1, "and still legible as history"
     finally:
         plans3.close()
-        trail3.close()
 
 
 def _downgrade_egress_rows(audit_path: Path) -> None:

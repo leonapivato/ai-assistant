@@ -702,52 +702,66 @@ class SqliteAuditTrail:
         carries none. Query-only, returning a detached snapshot rebuilt from JSON.
 
         **A third way to answer ``None``: the ``CONFIRM`` is there and its origin
-        was never recorded** (:data:`ORIGIN_UNRECORDED`, :func:`_decode_row`). This
-        is the one reader whose answer a caller *rebuilds a park from* — the engine's
-        recovery enumeration and the runner's restart path both reach a durably
-        parked step through it — so it is where unresumability is enforced, rather
-        than in :func:`_decode`, which serves readers that only read.
+        was never recorded** (:data:`ORIGIN_UNRECORDED`). ``EgressBinding`` is a
+        stored member of a decision and ADR-0181 §3 made
+        ``planned_with_external_content`` required with no default, so a row written
+        before that field existed cannot be rebuilt into a decision at all: §3
+        forbids a default and §4's second clause forbids a seam inventing one, which
+        rules out ``False`` and ``True`` alike. Such a call's origin therefore cannot
+        be established, and ADR-0181 §5's second clause leaves no route by which any
+        authorisation covers it — so there is no answerable question here to hand
+        back, and this returns ``None`` rather than a decision.
 
-        Refusing here rather than handing the decoded row back is what stops a
-        *false* card: the projection of such a row carries no ``egress_binding``
-        (:func:`_decode_row`), and ADR-0178 §4 makes that absence the discriminator
-        for "this ruling was not about an egress call". Presented, it would put a
-        confirmation to the user naming no account and no recipient for a call that
-        has both. Withheld, the two callers refuse by their own existing names: the
-        engine's enumeration skips the step exactly as it skips a decided binding,
-        and ``StepRunner._confirmation_for`` raises ``PermissionDeniedError``. Under
-        no route does such a park reach ``resolve``, an ``ALLOW`` or a transmission.
+        **This is the one reader whose answer a caller rebuilds a park from** — the
+        engine's recovery enumeration and the runner's restart path both reach a
+        durably parked step through it — which is why the case is answered here and
+        not in :func:`_decode`. Two things follow, and they are the whole reason the
+        branch is worth having. One legacy row no longer takes **every** park down
+        with it: the enumeration walks past it exactly as it walks past a decided
+        binding, so every other pending confirmation is still offered. And no
+        *false* card is composed, which is what handing back a decision would have
+        cost: ADR-0150 §1 rules that ``None`` on a decision "means the request is not
+        an egress call", so a decision projected without its binding would state that
+        a call with an account and a recipient had neither.
 
-        **Refused, not resolved.** Nothing is written, so the step stays durably
-        ``AWAITING_APPROVAL`` with its ``CONFIRM`` unresolved and its row intact.
-        The park is unanswerable, not erased — reclaiming one is the same open
-        question a permanently unanswerable park already poses.
+        **Refused, not resolved, and never authorised.** Nothing is written, so the
+        step stays durably ``AWAITING_APPROVAL`` with its ``CONFIRM`` unresolved and
+        its row intact. The two callers refuse by their own existing names — the
+        enumeration skips the step, and ``StepRunner._confirmation_for`` raises
+        ``PermissionDeniedError`` — so under no route does such a park reach
+        ``resolve``, an ``ALLOW`` or a transmission. The park is unanswerable, not
+        erased; reclaiming one is the same open question a permanently unanswerable
+        park already poses.
 
-        **Unresumable is the ADR's, not this method's.** ADR-0181 §3 and §4 leave
-        the value unsupplied for such a row and §5's second clause leaves no route
-        by which an authorisation covers a call whose origin cannot be established;
-        what is decided here is only *where* that shows up — at the reader a park is
-        rebuilt from, so the refusal lands before a card is composed rather than
-        after a user has answered one.
+        **A reader that only reads is unaffected**, and deliberately: :meth:`get`,
+        :meth:`recent`, :meth:`export` and :meth:`resolution_of` still report such a
+        row through :func:`_decode`'s ``AuditError``, exactly as they did before
+        ADR-0181 landed. Serving them a binding-less decision to make them succeed
+        would breach ADR-0150 §1 for the sake of a read, and this method's refusal
+        does not need it: the damage a legacy row does is to the **park** path, and
+        that is where it is answered.
 
         Raises:
-            AuditError: If the trail cannot be read.
+            AuditError: If the trail cannot be read, or holds a row that no longer
+                validates for any reason but the one above.
         """
         async with self._lock:
             data = await _run_to_completion(self._pending_confirmation_sync, execution_id, step_id)
         if data is None:
             return None
-        decoded, origin_unrecorded = _decode_row(data)
-        if origin_unrecorded:
-            _log.info(
-                ORIGIN_UNRECORDED,
-                decision_id=decoded.id,
-                execution_id=execution_id,
-                step_id=step_id,
-                refused="park",
-            )
-            return None
-        return decoded
+        try:
+            return PermissionDecision.model_validate_json(data)
+        except ValidationError as exc:
+            if not _is_origin_unrecorded(exc):
+                msg = f"the audit trail holds a record that no longer validates: {exc}"
+                raise AuditError(msg) from exc
+        _log.info(
+            ORIGIN_UNRECORDED,
+            execution_id=execution_id,
+            step_id=step_id,
+            refused="park",
+        )
+        return None
 
     def _pending_confirmation_sync(self, execution_id: str, step_id: str) -> str | None:
         conn = self._conn
@@ -941,18 +955,17 @@ def _revalidated(decision: PermissionDecision) -> PermissionDecision:
 def _is_origin_unrecorded(exc: ValidationError) -> bool:
     """Whether ``exc`` is *exactly* the pre-ADR-0181 egress row and nothing else.
 
-    Deliberately narrow, because the whole value of this branch is that it does
-    **not** widen :func:`_decode`'s tolerance. It matches one shape: a single
-    ``missing`` error, at
-    ``egress_binding.planned_with_external_content`` and nowhere else. A row with a
-    second fault, a fault anywhere else, or a fault of any other type is a corrupted
-    or downgraded database exactly as before, and still raises.
+    Deliberately narrow, because the whole value of this predicate is that it does
+    **not** widen what the trail tolerates. It matches one shape: a single
+    ``missing`` error, at ``egress_binding.planned_with_external_content`` and
+    nowhere else. A row with a second fault, a fault anywhere else, or a fault of
+    any other type is a corrupted or downgraded database exactly as before.
 
     Args:
         exc: The failure ``model_validate_json`` raised.
 
     Returns:
-        Whether the row is a legacy egress row rather than a broken one.
+        Whether the row is a row recorded before ADR-0181 rather than a broken one.
     """
     errors = exc.errors()
     if len(errors) != 1:
@@ -964,92 +977,23 @@ def _is_origin_unrecorded(exc: ValidationError) -> bool:
     )
 
 
-def _decode_row(data: str) -> tuple[PermissionDecision, bool]:
-    """Rebuild a stored decision, saying whether its origin was never recorded.
-
-    **The second member is this store's answer to a row recorded before ADR-0181.**
-    ``EgressBinding.planned_with_external_content`` is required with no default, and
-    a row written before that field existed carries an ``egress_binding`` without
-    it. What the ADR settles is that the value may not be supplied: §3 forbids a
-    default in terms, and §4's second clause forbids a seam inventing one — "no seam
-    invents it where a caller did not supply it" — which rules out ``False`` and
-    ``True`` alike, since both would state something about a selection nobody
-    recorded. So the origin of such a call cannot be established, §5's second clause
-    leaves no route by which an authorisation covers it, and ADR-0181's dated note
-    of 2026-08-23 records that this condition has fired.
-
-    **How a store *reads* such a row is not the ADR's and is decided here**, which
-    is where this trail's neighbouring rule already lives: that a corrupted or
-    downgraded row "is a fault to report rather than a record to hand on" is stated
-    in this module and pinned by its tests, and no ADR states it — ADR-0049 §1 cites
-    it as behaviour established here rather than deciding it. This is the same class
-    of question at the same seam, and it is answered the same way: in the module,
-    with its argument, under test.
-
-    **The answer is that such a row is legible history and an unresumable park.**
-    Reporting it as corruption would be the worse of the two available readings: one
-    row would take ``get``, ``recent``, ``export`` and every park enumeration down
-    with it, so a trail holding a single pre-upgrade egress row would be unreadable
-    whole — and an audit trail exists to stay readable. So it decodes; its binding is
-    *omitted from this projection*, because no ``EgressBinding`` value can be built
-    without fabricating the field the ADR forbids fabricating; and the flag is how
-    every caller that would act on it learns not to.
-
-    **Omitting the binding fails closed at every seam that could act on it**, which
-    is why the omission is safe rather than merely tidy.
-    :meth:`~ai_assistant.core.types.PermissionDecision.authorises` compares
-    ``egress_binding`` whole and is ``None``-safe in **both** directions, so a
-    decision decoded this way answers ``False`` for every egress request — it can
-    authorise nothing. And :meth:`SqliteAuditTrail.pending_confirmation` refuses to
-    hand one back at all, so no confirmation card is ever built from one.
-
-    **The row on disk is untouched.** This trail is append-only and never rewrites a
-    row; the omission is in the value this function returns, not in the record. An
-    operator reading the database still sees the binding the ruling was taken over.
-
-    Args:
-        data: The stored row's JSON.
-
-    Returns:
-        The decision, and whether its origin was recorded before ADR-0181 — in
-        which case the decision carries no ``egress_binding``.
+def _decode(data: str) -> PermissionDecision:
+    """Rebuild a stored decision from its JSON.
 
     Raises:
         AuditError: If the stored row no longer validates — a corrupted or
             downgraded database, which is a fault to report rather than a record
-            to hand on. Unchanged for every row but the one shape above.
+            to hand on. A row recorded before ADR-0181 (:func:`_is_origin_unrecorded`)
+            is one such row **here**, and deliberately: see
+            :meth:`SqliteAuditTrail.pending_confirmation` for where that case is
+            answered instead, and why it cannot be answered by handing back a
+            decision.
     """
     try:
-        return PermissionDecision.model_validate_json(data), False
+        return PermissionDecision.model_validate_json(data)
     except ValidationError as exc:
-        if not _is_origin_unrecorded(exc):
-            msg = f"the audit trail holds a record that no longer validates: {exc}"
-            raise AuditError(msg) from exc
-    without_binding = dict(json.loads(data))
-    without_binding.pop("egress_binding", None)
-    try:
-        decoded = PermissionDecision.model_validate(without_binding)
-    except ValidationError as exc:
-        # The row is a legacy egress row *and* something else. Reported as the
-        # corruption it also is, rather than half-served.
         msg = f"the audit trail holds a record that no longer validates: {exc}"
         raise AuditError(msg) from exc
-    _log.info(ORIGIN_UNRECORDED, decision_id=decoded.id, dropped="egress_binding")
-    return decoded, True
-
-
-def _decode(data: str) -> PermissionDecision:
-    """Rebuild a stored decision from its JSON, for a caller reading history.
-
-    :func:`_decode_row` without its flag, which is what every reader but
-    :meth:`SqliteAuditTrail.pending_confirmation` wants: a legacy egress row is
-    history to be read, and the one thing a reader must not do with it — rebuild a
-    park — is refused at that method rather than here.
-
-    Raises:
-        AuditError: If the stored row no longer validates.
-    """
-    return _decode_row(data)[0]
 
 
 def _check_authorisation(decision: PermissionDecision) -> None:
