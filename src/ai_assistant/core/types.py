@@ -6831,10 +6831,16 @@ class ConfirmationEgress(BaseModel):
             "by no other route (ADR-0178 §5, ADR-0181 §3). **Required with no "
             "default**, like the two members above. It carries no second copy of "
             "anything else, mints no type, and is not a "
-            ":class:`ConfirmationDestination`. A surface renders it as a statement "
-            "about **the call** and in **both** states — never as a per-span claim, "
-            "a detection, a score, a risk level, or, when False, an assurance that "
-            "no external content was involved (ADR-0181 §6, §7)."
+            ":class:`ConfirmationDestination`. **What a surface owes for it is "
+            "ADR-0181 §6's and is the follow-on consumer group's, not this "
+            "member's** (§10, ADR-0137 §4): the two renderers gain it in their own "
+            "lane, which #1427 sequences after track web-client's milestone-16 "
+            "lanes. Carrying the fact here is what makes that lane possible; it "
+            "asserts nothing about whether either renderer has landed it yet. When "
+            "one does, §6 fixes the shape — a statement about **the call**, in "
+            "**both** states, beside the occurrences and never in place of any of "
+            "them; never a per-span claim, a detection, a score, a risk level, or, "
+            "when False, an assurance that no external content was involved."
         )
     )
 
