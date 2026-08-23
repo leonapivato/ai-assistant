@@ -2452,6 +2452,61 @@ class AssistantEngineContract(ABC):
             page = await decisions.engine.recent_decisions(limit=size)
             assert page == exported[:size], f"the page of {size} is not the export's prefix"
 
+    async def test_each_operation_reaches_its_own_store_read_and_no_other(
+        self, decisions: DecisionSubject
+    ) -> None:
+        """ADR-0186 §1: the listing reads ``recent``, the export reads ``export``.
+
+        Stated normatively and otherwise untestable by answers alone, because the two
+        are indistinguishable over any trail small enough to write down. An
+        ``export_decisions`` implemented as ``trail.recent(limit=50)`` agrees with a
+        conforming one on every other fixture in this block and silently truncates a
+        real trail at the default page — turning the artifact that discharges
+        ADR-0004 §6 into exactly the partial export §3 forbids "without saying so".
+        The mirror error is cheaper but still wrong: a listing served by loading the
+        whole trail and slicing is a paging surface that lies about its cost
+        (ADR-0102 §10).
+
+        Asserted from the store's own read log rather than from row counts, so the
+        case is exact rather than sized: it fails on the *first* call to the wrong
+        method, whatever the trail happens to hold.
+        """
+        await decisions.engine.recent_decisions(limit=2)
+
+        assert decisions.trail.reads == ["recent"]
+
+        decisions.trail.reads.clear()
+        await decisions.engine.export_decisions()
+
+        assert decisions.trail.reads == ["export"]
+
+    async def test_the_export_is_not_bounded_by_the_listing_s_default_page(
+        self, decisions: DecisionSubject
+    ) -> None:
+        """ADR-0186 §3: the export is "bounded by nothing at the contract".
+
+        The observable half of the clause above, over a trail larger than
+        :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE` — the size at which a
+        truncating implementation stops agreeing with a conforming one. Seeded by the
+        case rather than by a fixture, because what every other case needs is a trail
+        small enough to state ADR-0186 §2's order over by name.
+
+        The prefix property is re-asserted at this size, and that is the point of
+        doing it twice: it is the one place where "the listing is the first ``n`` of
+        the export" and "the export is complete" can come apart, since over a trail
+        that fits in one page a listing which *is* the whole trail satisfies the
+        prefix rule vacuously.
+        """
+        for index in range(DEFAULT_PAGE_SIZE):
+            await decisions.trail.record(
+                _ruling(f"e-{index:03d}", at=_RULED_AT - timedelta(seconds=index + 1))
+            )
+
+        exported = await decisions.engine.export_decisions()
+
+        assert len(exported) == len(_SEEDED_DECISIONS) + DEFAULT_PAGE_SIZE
+        assert await decisions.engine.recent_decisions() == exported[:DEFAULT_PAGE_SIZE]
+
     @pytest.mark.parametrize("bad", [0, -1, 2**63])
     async def test_recent_decisions_refuses_a_non_positive_limit_locally(
         self, decisions: DecisionSubject, bad: int
