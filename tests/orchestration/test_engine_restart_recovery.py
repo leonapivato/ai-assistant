@@ -391,13 +391,13 @@ async def test_a_recovered_confirmation_can_be_denied_across_a_restart(tmp_path:
         plans3.close()
 
 
-# --- ADR-0181's dated record, through the engine that would rebuild the park ---
+# --- A pre-ADR-0181 row, through the engine that would rebuild its park -------
 
 
 async def test_a_park_whose_row_predates_the_origin_field_is_not_offered_after_a_restart(
     tmp_path: Path,
 ) -> None:
-    """ADR-0181's dated record of 2026-08-23, end to end over the real durable stores.
+    """The pre-ADR-0181 row, end to end over the real durable stores.
 
     The unit case in ``tests/permissions/test_audit.py`` pins what the trail answers;
     this pins what the **user** can reach, which is the claim that matters. An egress

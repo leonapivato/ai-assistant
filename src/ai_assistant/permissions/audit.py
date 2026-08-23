@@ -51,10 +51,10 @@ if TYPE_CHECKING:
 _log = structlog.get_logger(__name__)
 
 #: The named condition a park is refused under when the row it would be rebuilt
-#: from predates ADR-0181's origin field (ADR-0181's dated record of 2026-08-23).
-#: In the corpus's condition style — ``hub-unreachable``, ``no-live-session`` — and
-#: a module constant rather than a literal so a test asserts the *name* a reader
-#: will meet in the log rather than a spelling of it.
+#: from predates ADR-0181's ``planned_with_external_content``. In the corpus's
+#: condition style — ``hub-unreachable``, ``no-live-session`` — and a module
+#: constant rather than a literal so a test asserts the *name* a reader will meet
+#: in the log rather than a spelling of it.
 ORIGIN_UNRECORDED = "origin-unrecorded"
 
 _OWNER_ONLY = 0o600
@@ -702,12 +702,11 @@ class SqliteAuditTrail:
         carries none. Query-only, returning a detached snapshot rebuilt from JSON.
 
         **A third way to answer ``None``: the ``CONFIRM`` is there and its origin
-        was never recorded** (:data:`ORIGIN_UNRECORDED`, ADR-0181's dated record of
-        2026-08-23). This is the one reader whose answer a caller *rebuilds a park
-        from* — the engine's recovery enumeration and the runner's restart path both
-        reach a durably parked step through it — so it is where ADR-0181's
-        unresumability is enforced, rather than in :func:`_decode`, which serves
-        readers that only read.
+        was never recorded** (:data:`ORIGIN_UNRECORDED`, :func:`_decode_row`). This
+        is the one reader whose answer a caller *rebuilds a park from* — the engine's
+        recovery enumeration and the runner's restart path both reach a durably
+        parked step through it — so it is where unresumability is enforced, rather
+        than in :func:`_decode`, which serves readers that only read.
 
         Refusing here rather than handing the decoded row back is what stops a
         *false* card: the projection of such a row carries no ``egress_binding``
@@ -723,6 +722,13 @@ class SqliteAuditTrail:
         ``AWAITING_APPROVAL`` with its ``CONFIRM`` unresolved and its row intact.
         The park is unanswerable, not erased — reclaiming one is the same open
         question a permanently unanswerable park already poses.
+
+        **Unresumable is the ADR's, not this method's.** ADR-0181 §3 and §4 leave
+        the value unsupplied for such a row and §5's second clause leaves no route
+        by which an authorisation covers a call whose origin cannot be established;
+        what is decided here is only *where* that shows up — at the reader a park is
+        rebuilt from, so the refusal lands before a card is composed rather than
+        after a user has answered one.
 
         Raises:
             AuditError: If the trail cannot be read.
@@ -961,20 +967,33 @@ def _is_origin_unrecorded(exc: ValidationError) -> bool:
 def _decode_row(data: str) -> tuple[PermissionDecision, bool]:
     """Rebuild a stored decision, saying whether its origin was never recorded.
 
-    **The second member is ADR-0181's migration seam** (its dated record of
-    2026-08-23). ``EgressBinding.planned_with_external_content`` is required with no
-    default, and a row written before that field existed carries an
-    ``egress_binding`` without it. ADR-0181 §3 forbids a default and §4's second
-    clause forbids this seam inventing one — "no seam invents it where a caller did
-    not supply it" — so neither ``False`` nor ``True`` may be supplied here: both
-    would state something about a selection nobody recorded.
+    **The second member is this store's answer to a row recorded before ADR-0181.**
+    ``EgressBinding.planned_with_external_content`` is required with no default, and
+    a row written before that field existed carries an ``egress_binding`` without
+    it. What the ADR settles is that the value may not be supplied: §3 forbids a
+    default in terms, and §4's second clause forbids a seam inventing one — "no seam
+    invents it where a caller did not supply it" — which rules out ``False`` and
+    ``True`` alike, since both would state something about a selection nobody
+    recorded. So the origin of such a call cannot be established, §5's second clause
+    leaves no route by which an authorisation covers it, and ADR-0181's dated note
+    of 2026-08-23 records that this condition has fired.
 
-    What is left is the honest reading, and it is what the record decided: such a
-    row is **legible history and an unresumable park**. It decodes, so a trail
-    holding one stays readable rather than failing whole; its binding is *omitted
-    from this projection*, because no ``EgressBinding`` value can be built without
-    fabricating the field; and the flag is how every caller that would act on it
-    learns not to.
+    **How a store *reads* such a row is not the ADR's and is decided here**, which
+    is where this trail's neighbouring rule already lives: that a corrupted or
+    downgraded row "is a fault to report rather than a record to hand on" is stated
+    in this module and pinned by its tests, and no ADR states it — ADR-0049 §1 cites
+    it as behaviour established here rather than deciding it. This is the same class
+    of question at the same seam, and it is answered the same way: in the module,
+    with its argument, under test.
+
+    **The answer is that such a row is legible history and an unresumable park.**
+    Reporting it as corruption would be the worse of the two available readings: one
+    row would take ``get``, ``recent``, ``export`` and every park enumeration down
+    with it, so a trail holding a single pre-upgrade egress row would be unreadable
+    whole — and an audit trail exists to stay readable. So it decodes; its binding is
+    *omitted from this projection*, because no ``EgressBinding`` value can be built
+    without fabricating the field the ADR forbids fabricating; and the flag is how
+    every caller that would act on it learns not to.
 
     **Omitting the binding fails closed at every seam that could act on it**, which
     is why the omission is safe rather than merely tidy.
