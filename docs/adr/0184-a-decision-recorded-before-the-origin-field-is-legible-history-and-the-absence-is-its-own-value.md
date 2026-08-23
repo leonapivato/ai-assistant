@@ -3,11 +3,15 @@
 - Status: Proposed
 - Date: 2026-08-23
 - **Decides `core/types.py` surface and one `core/protocols.py` obligation.** One
-  new model, one widened annotation on one existing field, and two behavioural
-  clauses — one on `ActionPolicy`, one on `AuditTrail` — with no signature change on
-  either Protocol. It adds no Protocol, no enum, no error class, no function, no
-  property and no method. Golden rule 5 and ADR-0015 §5 put it in its own PR,
-  ratified before anything implements against it.
+  new model over a private base shared with `EgressBinding`, one widened annotation on
+  one existing field, and two behavioural clauses — one on `ActionPolicy`, one on
+  `AuditTrail` — with no signature change on
+  either Protocol. It adds no Protocol, no enum, no error class, no function and no
+  method. The one derivation in the surface is `EgressBinding`'s existing
+  `canonical_destination_set`, which §2 moves onto a private base so that both models
+  derive it once rather than twice; nothing new is derived and no member is added to
+  `EgressBinding`. Golden rule 5 and ADR-0015 §5 put it in its own PR, ratified before
+  anything implements against it.
 - **Required review set: adversarial *and* architecture.** Compelled, not declared:
   `CONTRIBUTING.md` → "Stop when the required reviews are green" makes a change
   contract-surface when it is "the ADR deciding that surface", and §2 decides
@@ -549,22 +553,25 @@ model clauses, §4's discard-not-merge, §5's two ruling points, §10's test obl
 under ADR-0070 §1 it is an amendment, recorded as a dated header note appended to
 ADR-0181.
 
-**Both records are made on ratification, in this PR's own ratification commit, and
-that commit therefore pays its round.** ADR-0165 §2 exempts exactly one commit shape
-from a fresh review — one ADR's `- Status: Proposed` becoming `- Status: Accepted`
-and no other byte — and §2's own text says what an author who needs more does: one who
-must restamp the date "writes it in the flip commit and pays the round, exactly as an
-author who writes a ratification note does". This flip carries more, so it is
-reviewed rather than exempt, and `just ship` refuses it until a review covers the
-flipped tree. The records wait for ADR-0165 §9's reason, which is the one that
-decides it rather than the mechanism: writing "Partially superseded by ADR-0184" on
-ADR-0150's Status line while this ADR still reads `Proposed` is a claim that a
-supersession has happened when it has not — ADR-0019 §1's "claim that some piece of
-work is finished". ADR-0026 §6 set the form, ADR-0027 §7 followed it and ADR-0165 §9
-followed both. Nor are they deferred to the implementation lane: a record is decision
-bookkeeping and travels with the decision, and an ADR-0150 that still told its reader
-`PermissionDecision.egress_binding` is typed `EgressBinding | None`, after this
-merged, would be false for as long as that lane took.
+**Both records are written in this change, beside the decision they record, and the
+other sequence is available rather than closed.** ADR-0165 §2 exempts one commit shape
+from a fresh review — one ADR's `- Status: Proposed` becoming `- Status: Accepted` and
+no other byte — and an author who needs the flip to carry more "writes it in the flip
+commit and pays the round". ADR-0165 §9 took that path for its own records, on the
+ground that writing them earlier is ADR-0019 §1's claim that a piece of work is
+finished, and ADR-0026 §6 and ADR-0027 §7 did the same. ADR-0181 took the other,
+writing its five records — on ADR-0178, ADR-0152, ADR-0150, ADR-0106 and ADR-0154 — in
+its authoring commit while it still read `Proposed`. This ADR follows ADR-0181, for one
+reason: a record and the clause it records are **one judgement**, and a reviewer asked
+whether ADR-0150 §1's first clause is really replaced can only answer that with both
+texts in the same diff. The state-claim objection is answered by what is actually
+published rather than by argument — the records and this ADR's `Accepted` status reach
+a reader at the same instant, because they merge together — and nothing here forecloses
+the other sequence for an ADR whose records read better after the fact. Neither is
+deferred to the implementation lane: a record is decision bookkeeping and travels with
+the decision, and an ADR-0150 that still told its reader `PermissionDecision.egress_binding`
+is typed `EgressBinding | None`, after this merged, would be false for as long as that
+lane took.
 
 **No record is owed on ADR-0021, ADR-0044, ADR-0049, ADR-0148, ADR-0152 or ADR-0178.**
 ADR-0021 §4's append-only rule is *used* here and not narrowed — §4 above obeys it rather

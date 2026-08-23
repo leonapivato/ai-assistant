@@ -1,6 +1,6 @@
 # 150. The egress binding is one validating value, and nothing in it is stated twice
 
-- Status: Partially superseded by ADR-0178 (§3's clause that a member of a canonical destination set is a `CanonicalDestination`; §3's clause that an account member carries the account whole; and §3's clause that the canonical destination set is a single derived property of `EgressBinding` — each only as it reaches the canonical destination set a `Confirmation` names)
+- Status: Partially superseded by ADR-0178 (§3's clause that a member of a canonical destination set is a `CanonicalDestination`; §3's clause that an account member carries the account whole; and §3's clause that the canonical destination set is a single derived property of `EgressBinding` — each only as it reaches the canonical destination set a `Confirmation` names) and ADR-0184 (§1's clause typing `PermissionDecision.egress_binding` as `EgressBinding | None`)
 - Date: 2026-08-14
 - **Note (2026-08-23): §5's third clause is decided by ADR-0181, and §5's first
   clause is unchanged.** The third clause left open "how a recorded origin reaches
@@ -75,6 +75,30 @@
   clauses most heavily, since ADR-0178 discharges the first by **reusing** this ADR's
   `spans` rather than mirroring them, and meets the third by carrying the occurrences
   and not merely the set.
+- Partially superseded: 2026-08-23 by ADR-0184 — **§1's first clause, by a type on
+  one field of one model, and nothing else in §1.** That clause rules that
+  `PermissionDecision` gains "exactly one" field for the binding, "named
+  `egress_binding`", "typed `EgressBinding | None`", "defaulting to `None`".
+  ADR-0184 §2 widens that annotation to
+  `EgressBinding | OriginUnrecordedBinding | None`, so that a decision recorded
+  before ADR-0181 §3 added `planned_with_external_content` — a stored member with no
+  default, which such a row cannot carry and which §3 and ADR-0181 §4 forbid anyone
+  supplying for it — can be read back as history instead of raising (#1465, #1451).
+  A reader holding only this clause reads the annotation and concludes the row must
+  either be projected with `egress_binding=None` or reported as corrupt; the first is
+  what §1's **second** clause forbids, which is ADR-0070 §1's first limb.
+
+  **Everything else in §1 stands whole.** Still exactly one field, still that name,
+  still that default; `ActionRequest.egress_binding` is untouched and stays
+  `EgressBinding | None`, with its `_detached_binding` validator unchanged; the second
+  clause — `None` means the request is not an egress call, and a binding is either
+  whole or absent — is not merely intact but is the reason ADR-0184 exists, since it
+  is what rules out the cheap projection. An `OriginUnrecordedBinding` is not a
+  partially populated `EgressBinding`: it is a distinct model, every member of which
+  is required, so the fifteen partial states this section refuses stay unexpressible.
+  §9's one-conjunct argument is untouched — ADR-0184 §6 adds none, and `authorises`
+  answers `False` for such a decision by the whole-value comparison this section
+  already fixed.
 - **Decides surface (a) of ADR-0148 §11** — the **egress binding**: a value
   carried as a field of `ActionRequest`, compared by
   `PermissionDecision.authorises`, and transcribed verbatim into
