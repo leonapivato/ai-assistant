@@ -42,6 +42,23 @@ commit. ``--wheel`` deploys an already-built file instead of building at all, an
 then ``--wheel-commit`` is required: such a wheel need not have come from this
 checkout, and the marker is what the next deploy trusts to rule on drift.
 
+**It keeps that name on the box, in a directory of its own.** Two deploys of one
+version must not overwrite each other's wheel between ``scp`` and install, so
+something per-run has to distinguish them — but that something cannot be a
+*filename* prefix: a wheel's name is its metadata (PEP 427, five or six
+dash-delimited components), and ``deploy-hub-<token>-`` adds two more, so
+``uv pip install`` rejects the file before reading a byte of it (issue #1481).
+The per-run token therefore names a **directory**, created for this deploy and
+removed after it, and the wheel inside keeps the name the build gave it.
+
+**A staged wheel is verified before it is installed.** The wheel is tens of
+megabytes over a link that takes minutes, and an ``scp`` killed midway leaves a
+*truncated* file that installs as far as "unable to locate the end of central
+directory record". So the deploy asks the box for the staged file's sha256 — as
+the service user, which proves readability and integrity in one step — and
+refuses unless it matches the digest of the local file, which is the same digest
+the marker records.
+
 ``--dry-run`` prints the exact commands the run would issue and contacts nothing.
 It is what the tests drive, because the remote half cannot be exercised from a
 gate that has no box to talk to.
@@ -75,14 +92,18 @@ DEFAULT_UNIT = "ai-assistant-hub"
 DEFAULT_VENV = "~/venv"
 DEFAULT_UV = "~/.local/bin/uv"
 DEFAULT_MARKER = "~/DEPLOYED_COMMIT"
-#: Where the wheel is staged on the box before the service user installs it.
+#: Where the per-deploy staging directory is created on the box.
 DEFAULT_STAGE_DIR = "/tmp"  # noqa: S108  # world-readable by design: root writes, the service user reads
+#: The staging directory's name, before the per-run token is appended.
+_STAGE_PREFIX = "deploy-hub-"
 #: Seconds to wait for ``hub_ready`` after the restart before calling it a failure.
 DEFAULT_READY_TIMEOUT = 60
 #: Seconds between journal polls while waiting for it.
 _POLL_INTERVAL = 2.0
 #: The marker's first field, so a reader (human or the next deploy) can parse it.
 _MARKER_COMMIT_PREFIX = "commit="
+#: A marker written before this recipe existed: the bare sha, on a line of its own.
+_BARE_COMMIT = re.compile(r"[0-9a-fA-F]{7,40}")
 #: The only pre-slash segments left unquoted for the shell: `~` and `~username`.
 _TILDE_SEGMENT = re.compile(r"~[A-Za-z0-9_][A-Za-z0-9_.-]*|~")
 
@@ -273,12 +294,22 @@ def lockfile_uncommitted(repo: Path) -> bool:
 def marker_commit(marker_text: str) -> str | None:
     """Extract the commit from a marker file's contents.
 
+    Two formats are read. This recipe writes ``key=value`` lines. A box deployed
+    by hand before the recipe existed carries the older one — the bare sha and
+    nothing else — and reading that as *absent* would say "drift is UNKNOWN" on a
+    box that in fact records exactly what is deployed (issue #1481). The older
+    form is recognised on the **last** non-blank line, because the marker is the
+    last thing ``cat`` writes and everything before it may be the login shell's
+    banner; a banner line that is itself a bare hex word would be misread, and
+    the cost of that is a commit this clone does not hold, which already reports
+    itself as unknown rather than as clean.
+
     Args:
         marker_text: The marker file as read from the box.
 
     Returns:
-        The recorded commit, or ``None`` when no ``commit=`` line is present.
-        A ``-dirty`` suffix is stripped, because the dependency question is about
+        The recorded commit, or ``None`` when neither form is present. A
+        ``-dirty`` suffix is stripped, because the dependency question is about
         the committed lockfile and a dirty deploy still answers it.
     """
     for line in marker_text.splitlines():
@@ -286,6 +317,9 @@ def marker_commit(marker_text: str) -> str | None:
         if stripped.startswith(_MARKER_COMMIT_PREFIX):
             value = stripped.removeprefix(_MARKER_COMMIT_PREFIX).strip()
             return value.removesuffix("-dirty") or None
+    lines = [line.strip() for line in marker_text.splitlines() if line.strip()]
+    if lines and _BARE_COMMIT.fullmatch(lines[-1].removesuffix("-dirty")):
+        return lines[-1].removesuffix("-dirty")
     return None
 
 
@@ -411,11 +445,13 @@ class Plan:
         """
         self.args = args
         self.wheel = wheel
-        #: A per-run token in the staged filename. The staging directory is shared
-        #: and world-readable, so a fixed name lets two deploys of one version
+        #: A per-run token naming the staging DIRECTORY. The parent is shared and
+        #: world-readable, so a fixed location lets two deploys of one version
         #: overwrite each other's wheel between `scp` and install — installing one
         #: build while recording the other's commit and digest in the marker,
-        #: which is exactly the provenance the drift check later trusts.
+        #: which is exactly the provenance the drift check later trusts. The token
+        #: cannot go in the filename: a wheel's name is its metadata, and a prefix
+        #: makes it unreadable to `uv pip install` (issue #1481).
         self.token = secrets.token_hex(4)
         #: The wheel on THIS machine. `None` until a real run has one — a dry run
         #: never resolves it, because a dry run never builds.
@@ -445,8 +481,17 @@ class Plan:
         self.wheel = wheel.name
 
     @property
+    def stage_dir(self) -> str:
+        """The directory this deploy stages its wheel in, and nothing else does.
+
+        Returns:
+            The remote directory path.
+        """
+        return f"{self.args.stage_dir.rstrip('/')}/{_STAGE_PREFIX}{self.token}"
+
+    @property
     def staged(self) -> str:
-        """Where the wheel lands on the box.
+        """Where the wheel lands on the box, under the name the build gave it.
 
         Derived rather than stored, because the name is only *predicted* until
         the build has run: a real deploy replaces :attr:`wheel` with the file the
@@ -455,7 +500,20 @@ class Plan:
         Returns:
             The staged path.
         """
-        return f"{self.args.stage_dir.rstrip('/')}/deploy-hub-{self.token}-{self.wheel}"
+        return f"{self.stage_dir}/{self.wheel}"
+
+    def make_stage_dir(self) -> str:
+        """Return the command that creates this deploy's staging directory.
+
+        Returns:
+            The remote command line. The parent is created if it is missing, and
+            the per-deploy directory is created **without** ``-p``, so a name
+            that somehow already exists is an error rather than a directory
+            somebody else owns; ``0755`` is what lets the service user read the
+            wheel inside it.
+        """
+        parent = remote_path(self.args.stage_dir)
+        return f"mkdir -p {parent} && mkdir -m 0755 {remote_path(self.stage_dir)}"
 
     def read_marker(self) -> str:
         """Return the command that reads the deployed-commit marker.
@@ -495,6 +553,22 @@ class Plan:
         """
         return f"chmod 0644 {remote_path(self.staged)}"
 
+    def verify_staged(self) -> str:
+        """Return the command that digests the staged wheel on the box.
+
+        Run **as the service user**, so one answer settles both questions the
+        install is about to ask of that file: that it is readable by the identity
+        that installs it, and that it is the whole file rather than what a
+        killed transfer left behind.
+
+        Returns:
+            The remote command line. The digest is emitted on a labelled line
+            because a login shell prints its own banner alongside it, and it is
+            empty rather than absent when the file cannot be read at all.
+        """
+        inner = f"echo STAGED_SHA256=$(sha256sum {remote_path(self.staged)} | cut -d' ' -f1)"
+        return as_service_user(inner, self.args.user)
+
     def install(self) -> str:
         """Return the install command, run in the service user's login shell.
 
@@ -516,6 +590,14 @@ class Plan:
         deploy that did not happen. The wheel digest is recorded beside the commit
         so two deploys of one commit are still distinguishable.
 
+        Written to a neighbouring temporary file and *renamed* over the marker
+        rather than redirected onto it. Redirection opens the existing file, which
+        fails outright when a hand-run deploy left one owned by root (issue
+        #1481); ``mv`` needs only write permission on the directory, which the
+        service user has because the marker lives in its own home — and the file
+        the next deploy reads is then always a whole one, never a half-written
+        marker from a run that died mid-write.
+
         Args:
             commit: The commit the wheel was built from.
             digest: The wheel's sha256.
@@ -525,16 +607,24 @@ class Plan:
         """
         stamp = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         body = f"{_MARKER_COMMIT_PREFIX}{commit}\nwheel_sha256={digest}\ndeployed_at={stamp}\n"
-        inner = f"printf %s {shlex.quote(body)} > {remote_path(self.args.marker)}"
+        marker = remote_path(self.args.marker)
+        scratch = remote_path(f"{self.args.marker}.{self.token}.tmp")
+        write = f"printf %s {shlex.quote(body)} > {scratch} && mv -f {scratch} {marker}"
+        # A failed rename must not leave the scratch file behind to accumulate
+        # under a name nothing will ever look for again.
+        inner = f"{{ {write}; }} || {{ rm -f {scratch}; exit 1; }}"
         return as_service_user(inner, self.args.user)
 
     def unstage(self) -> str:
-        """Return the command that removes the staged wheel after the install.
+        """Return the command that removes the staged wheel and its directory.
 
         Returns:
-            The remote command line. Run as the login user, which owns the file.
+            The remote command line. Run as the login user, which owns both. The
+            directory goes with ``rmdir`` rather than a recursive delete: it is
+            an interpolated path, and the only thing that should ever be in it is
+            the one wheel just removed.
         """
-        return f"rm -f {remote_path(self.staged)}"
+        return f"rm -f {remote_path(self.staged)} && rmdir {remote_path(self.stage_dir)}"
 
     def restart(self) -> str:
         """Return the restart command, which also prints the new invocation id.
@@ -625,6 +715,7 @@ def render(plan: Plan, commit: str) -> list[str]:
         ("version ", plan.read_version()),
     ]
     lines.extend(_step_lines(ssh_prefix, steps))
+    lines.extend(_step_lines(ssh_prefix, [("stagedir", plan.make_stage_dir())]))
     staged = f"{args.ssh_user}@{args.host}:{plan.staged}"
     lines.append(f"stage   : scp <the wheel above> {staged}")
     lines.extend(
@@ -632,6 +723,7 @@ def render(plan: Plan, commit: str) -> list[str]:
             ssh_prefix,
             [
                 ("perms   ", plan.make_readable()),
+                ("verify  ", plan.verify_staged()),
                 ("install ", plan.install()),
                 ("unstage ", plan.unstage()),
                 ("marker! ", plan.write_marker(commit, "<sha256 of the built wheel>")),
@@ -766,6 +858,50 @@ def _check_drift(plan: Plan, repo: Path, commit: str) -> str:
             "not from this repository's lockfile."
         )
     return marker
+
+
+def _assert_staged(plan: Plan, digest: str) -> None:
+    """Confirm the box holds the whole wheel, before anything installs it.
+
+    The wheel is tens of megabytes over a link that takes minutes. A transfer
+    killed midway leaves a *truncated* file that ``scp`` may still have exited
+    non-zero for — but which, if the deploy is retried past it, installs as far
+    as "unable to locate the end of central directory record", from inside uv,
+    naming nothing an operator can act on (issue #1481).
+
+    Args:
+        plan: The plan.
+        digest: The sha256 of the local wheel, which is also what the marker
+            records for this deploy.
+
+    Raises:
+        DeployError: If the check could not run, the staged file is unreadable,
+            or its digest is not the local wheel's.
+    """
+    command = ssh_command(plan.args.host, plan.args.ssh_user, plan.verify_staged())
+    status, out, error = _probe(command)
+    staged = _labelled(out, "STAGED_SHA256=")
+    if staged is None:
+        raise DeployError(
+            f"could not digest the staged wheel (exit {status}):\n"
+            f"{error.strip() or out.strip() or '(no output)'}\n"
+            f"Nothing has been installed; the check is what could not run."
+        )
+    if not staged:
+        raise DeployError(
+            f"the service user {plan.args.user} cannot read the staged wheel at\n"
+            f"  {plan.staged}\n"
+            "so the install would fail inside su with a message about the file."
+        )
+    if staged != digest:
+        raise DeployError(
+            f"the staged wheel is not the one that was sent:\n"
+            f"  local  {digest}\n"
+            f"  staged {staged}\n"
+            "A transfer cut short leaves a truncated wheel that installs as far as\n"
+            "'unable to locate the end of central directory record'. Nothing has\n"
+            "been installed; re-run the deploy."
+        )
 
 
 def _assert_active(plan: Plan) -> None:
@@ -961,8 +1097,10 @@ def _install_and_verify(plan: Plan, commit: str, before_marker: str, before_vers
     # megabytes today, with no ceiling that says it stays there.
     with plan.local.open("rb") as wheel_file:
         digest = hashlib.file_digest(wheel_file, "sha256").hexdigest()
+    _run_local(ssh(plan.make_stage_dir()))
     _run_local(plan.stage())
     _run_local(ssh(plan.make_readable()))
+    _assert_staged(plan, digest)
     _run_local(ssh(plan.install()))
     _run_local(ssh(plan.unstage()))
     _run_local(ssh(plan.write_marker(commit, digest)))
@@ -1034,7 +1172,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--venv", default=DEFAULT_VENV, help="the service venv on the box")
     parser.add_argument("--uv", default=DEFAULT_UV, help="the service user's uv binary")
     parser.add_argument("--marker", default=DEFAULT_MARKER, help="the deployed-commit marker")
-    parser.add_argument("--stage-dir", default=DEFAULT_STAGE_DIR, help="where to stage the wheel")
+    parser.add_argument(
+        "--stage-dir",
+        default=DEFAULT_STAGE_DIR,
+        help="where this deploy's staging directory is created",
+    )
     parser.add_argument(
         "--wheel", help="deploy this already-built wheel instead of running uv build"
     )
