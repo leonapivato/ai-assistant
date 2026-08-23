@@ -128,6 +128,24 @@
   test and ADR-0082 §1's record rule clause by clause to show why — including to
   the three places where the opposite reading is available: ADR-0008 §2's internal
   seam, ADR-0075 §2's exemption boundary, and ADR-0083 §7's job table.
+- Note (2026-08-23): **the threat model that §7's defences were only one kind of
+  now exists — [ADR-0183](0183-the-adversary-writes-the-source-and-a-reader-derives-no-standing-from-what-it-reads.md).**
+  §7 and §7a bound what a *large or slow* source can cost; **#641** recorded that
+  they say nothing about a *hostile* one and that this ADR names no adversary, and
+  ADR-0095 §6 carried it as owed. ADR-0183 is that decision. **It changes no clause
+  below**: §4's band, episode, absence and sensitivity rules, §7's configuration
+  discipline, §7a's figures, §7b's `.ics` semantics, §8's failure postures, §9's
+  gates, §10's surface and §11's deferrals all bind exactly as written, and its §12
+  applies ADR-0070 §1's test to each place the opposite reading is available. What
+  it adds *beside* them is an adversary (anyone who can place bytes in the source,
+  the co-located fetcher included), a ruling that a reader derives no standing from
+  anything inside its source, the **domain** of §4's "chosen for what the source
+  holds" — a ceiling over the field set a reader's own ADR admits, never a
+  per-record judgement — three properties required of a parser handed
+  adversary-chosen bytes, and an explicit statement of what §7's caps do **not**
+  bound: a parser's internals, and the store's cumulative growth. This is ADR-0070
+  §1's appended dated note; no ratified text below is rewritten and the `Status`
+  line is unchanged. Refs #641, #1427.
 
 ## Context
 
