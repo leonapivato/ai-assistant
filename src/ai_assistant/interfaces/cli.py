@@ -133,6 +133,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import math
 import re
 import shlex
@@ -2232,18 +2233,87 @@ async def _serve_gateway() -> int:
         settings = load_settings()
         configure_logging(settings)
         engine = _client_for(settings)
-        await run_gateway(
-            settings=settings,
-            engine=engine,
-            disclose=_disclose_bootstrap,
-            report=_report_gateway_note,
-        )
+        await _run_the_gateway(settings, engine)
     except (AssistantError, TransportError) as exc:
         _render_error(exc)
         return _EXIT_ERROR
     except KeyboardInterrupt, asyncio.CancelledError:
         console.print("[dim]Gateway stopped. Every session ended with it.[/]")
     return _EXIT_OK
+
+
+async def _run_the_gateway(settings: Settings, engine: AssistantEngine) -> None:
+    """Serve, and turn a listener that will not bind into a rendered fault (#1436).
+
+    ``Gateway.start`` and ``Gateway.start_remote`` bind with
+    ``asyncio.start_server`` and leave a failed bind as a raw ``OSError``, on
+    purpose: "the raw errno distinguishes a stay-down fault from a transient one",
+    and neither is a statement about a setting the gateway could have checked. That
+    is right for the gateway and wrong for the terminal — ADR-0042 §7 puts the
+    rendering in this adapter so that a failure "is rendered, not dumped", and a
+    port that will not bind is that same rule one layer out. Until this boundary
+    existed the bind failure escaped :func:`_serve_gateway` as a hundred-line Rich
+    traceback with the one useful sentence at the bottom, on the guide's own
+    first-run path (#1436).
+
+    **The errno is carried into the message rather than replaced by it**, for the
+    reason it was left raw. The address comes with it, from the operating system's
+    own text, because this adapter cannot tell which of the two listeners refused —
+    both bind ``gateway_port`` (ADR-0174 §2 gives the remote one no port of its
+    own), and only the bind knows which one got there. The port is named from the
+    settings as well, so that it is stated even where an errno's text does not
+    carry it.
+
+    Args:
+        settings: The loaded configuration.
+        engine: The hub, as the promoted ``AssistantEngine``.
+
+    Raises:
+        ConfigurationError: If a listener could not be bound. The category is this
+            adapter's boundary rather than a claim that a setting is malformed —
+            the same conversion :func:`_disclose_bootstrap` already makes of the
+            ``OSError`` from a standard output that will not take the value.
+    """
+    try:
+        await run_gateway(
+            settings=settings,
+            engine=engine,
+            disclose=_disclose_bootstrap,
+            report=_report_gateway_note,
+        )
+    except OSError as exc:
+        raise _listener_refused(exc, port=settings.gateway_port) from exc
+
+
+def _listener_refused(exc: OSError, *, port: int) -> ConfigurationError:
+    """One line for a gateway listener the operating system would not give us.
+
+    The in-use case gets the act that fixes it, because it is the one a stranger
+    following ``docs/guide/first-run.md`` actually hits — most often a gateway they
+    forgot was running. Every other errno gets no advice invented for it: the
+    kernel's own refusal is the fact, and pointing at a setting that is not the
+    cause would be worse than pointing at nothing.
+
+    Args:
+        exc: What the bind raised.
+        port: ``gateway_port``, named whether or not ``exc`` carries it.
+
+    Returns:
+        The error :func:`_serve_gateway`'s boundary renders and exits non-zero on.
+    """
+    advice = (
+        "something else already holds it — most often another gateway — so stop that, "
+        "or set ASSISTANT_GATEWAY_PORT to a free port"
+        if exc.errno == errno.EADDRINUSE
+        else "that is the operating system's own refusal rather than a setting this "
+        "system checks, so the errno above is what to act on"
+    )
+    msg = (
+        f"the gateway could not bind port {port}, so it is not serving and admitted no "
+        f"browser: {exc}. {advice}. Any bootstrap value it printed above is already "
+        f"dead — it ceased with this process (ADR-0182 §2)"
+    )
+    return ConfigurationError(msg)
 
 
 #: What the owner is told about each of ADR-0182 §1's three reportable conditions.

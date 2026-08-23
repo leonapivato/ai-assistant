@@ -9,8 +9,10 @@ the production, model-backed engine, so no network or key is needed.
 from __future__ import annotations
 
 import asyncio
+import errno
 import re
 import shlex
+import socket
 from datetime import UTC, datetime, timedelta
 from inspect import getsource, unwrap
 from io import StringIO
@@ -6522,3 +6524,59 @@ def test_the_notification_commands_reach_exactly_the_five_operations_adr_0130_ra
         "notification_preferences",
         "set_notification_preferences",
     ]
+
+
+@pytest.mark.integration
+def test_a_gateway_whose_port_is_taken_renders_one_line_rather_than_a_traceback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, output: StringIO
+) -> None:
+    """#1436: the bind failure a stranger hits at step 6 of the first-run guide.
+
+    ``asyncio.start_server`` raises a plain ``OSError``, which is neither an
+    ``AssistantError`` nor a ``TransportError`` — so it used to escape
+    :func:`cli._serve_gateway`'s boundary and reach the terminal as about a hundred
+    lines of Rich traceback with the one useful sentence at the bottom. That is the
+    failure ADR-0042 §7 exists to prevent: a fault "is rendered, not dumped".
+
+    The gateway is right to raise it raw (``server.py``: "the raw errno
+    distinguishes a stay-down fault from a transient one"), so the errno's own text
+    is carried into the rendered line rather than replaced by it — which is also
+    where the *address* comes from, since this adapter cannot tell which of the two
+    listeners refused.
+    """
+    monkeypatch.setenv("ASSISTANT_DATA_DIR", str(tmp_path))
+    with socket.socket() as held:
+        held.bind(("127.0.0.1", 0))
+        held.listen()
+        port = int(held.getsockname()[1])
+        monkeypatch.setenv("ASSISTANT_GATEWAY_PORT", str(port))
+
+        result = CliRunner().invoke(cli.app, ["gateway"])
+
+    # Unwrapped before it is read: the console wraps at its width, so a phrase this
+    # case is about can arrive with a newline through the middle of it.
+    rendered = " ".join(output.getvalue().split())
+
+    assert result.exit_code == 1
+    assert "Traceback" not in rendered
+    assert f"could not bind port {port}" in rendered
+    assert "127.0.0.1" in rendered  # the address, from the errno's own text
+    assert "in use" in rendered
+    assert "ASSISTANT_GATEWAY_PORT" in rendered
+    # The value printed a moment earlier went with the process, and #1436 records
+    # that a reader otherwise has no way to tell.
+    assert "already dead" in rendered
+
+
+def test_a_bind_failure_that_is_not_a_taken_port_invents_no_advice() -> None:
+    """Every other errno gets the kernel's refusal and nothing made up on top of it.
+
+    Pointing at ``ASSISTANT_GATEWAY_PORT`` for, say, a permission the user does not
+    hold would name a setting that is not the cause — worse than naming none, and
+    the shape of over-helpful error text this project keeps out of the adapter.
+    """
+    refused = cli._listener_refused(OSError(errno.EACCES, "permission denied"), port=8422)
+
+    assert "8422" in str(refused)
+    assert "operating system's own refusal" in str(refused)
+    assert "ASSISTANT_GATEWAY_PORT" not in str(refused)
