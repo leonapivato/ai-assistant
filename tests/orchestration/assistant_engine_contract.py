@@ -73,6 +73,7 @@ from pydantic import SecretStr
 from ai_assistant.core import errors as error_module
 from ai_assistant.core.errors import (
     AssistantError,
+    AuditError,
     IncompleteProvisioningError,
     InvalidGrantError,
     OversizedValueError,
@@ -358,16 +359,31 @@ class SeededAuditTrail(FakeAuditTrail):
         super().__init__()
         #: Which reads reached the store, in the order they arrived.
         self.reads: list[str] = []
+        #: Scripted, and when set **both** reads raise it instead of answering.
+        #:
+        #: A store that cannot be read is a declared failure of both operations —
+        #: ``SqliteAuditTrail.recent`` and ``export`` raise ``AuditError`` "if the
+        #: trail cannot be read, or holds a row that no longer validates" — and it
+        #: is the one failure no sequence of surface calls produces, since nothing a
+        #: caller can do corrupts a database. Scripted here for
+        #: ``FakeConnectionProvisioner.secrets.fail``'s reason: a knob on the object
+        #: standing behind the subject is how a suite reaches a state the surface
+        #: cannot ask for, and it reaches it identically through a seam and a socket.
+        self.fail_with: AuditError | None = None
         self._ordered_export = ordered_export
 
     async def recent(self, *, limit: int = 50) -> list[PermissionDecision]:
-        """Log the read, then answer as the canonical fake does."""
+        """Log the read, then raise :attr:`fail_with` or answer as the fake does."""
         self.reads.append("recent")
+        if self.fail_with is not None:
+            raise self.fail_with
         return await super().recent(limit=limit)
 
     async def export(self) -> list[PermissionDecision]:
-        """Log the read, and hand back the order this trail was built to hand back."""
+        """Log the read, then raise :attr:`fail_with` or hand back this trail's order."""
         self.reads.append("export")
+        if self.fail_with is not None:
+            raise self.fail_with
         rows = await super().export()
         return rows if self._ordered_export else list(reversed(rows))
 
@@ -2497,6 +2513,35 @@ class AssistantEngineContract(ABC):
         """ADR-0085 §3b: a caller that mutated what it was handed changed nothing."""
         assert isinstance(await decisions.engine.recent_decisions(), tuple)
         assert isinstance(await decisions.engine.export_decisions(), tuple)
+
+    @pytest.mark.parametrize("operation", ["recent_decisions", "export_decisions"])
+    async def test_a_trail_that_cannot_be_read_is_reported_as_the_failure_it_was(
+        self, decisions: DecisionSubject, operation: str
+    ) -> None:
+        """The store's declared failure reaches the caller as itself, on both reads.
+
+        ``AuditError`` is what ``AuditTrail.recent`` and ``export`` raise when "the
+        trail cannot be read, or holds a row that no longer validates" — a corrupt
+        or unopenable database, which is the one failure no sequence of surface calls
+        produces. **A clause the shared suite is the only place for**, because the
+        three implementations reach it by three different routes and could disagree
+        without any of them looking wrong on its own: the in-process pair let the
+        exception out of a relayed store call, while the client has to recognise the
+        type on an error frame and rebuild it (ADR-0085 §10a fixes the wire's error
+        vocabulary as "exactly the ``AssistantError`` subtree").
+
+        **What it forecloses is a plausible kindness**: an implementation that
+        answered ``()`` for an unreadable trail would tell a user their audit trail
+        is *empty* — the one wrong answer this surface can give, since the whole
+        value of the artifact is that its emptiness means nothing was ruled.
+
+        The message is asserted too, because reconstruction that lost it would leave
+        a caller holding the right class and no account of what went wrong.
+        """
+        decisions.trail.fail_with = AuditError("the trail could not be read")
+
+        with pytest.raises(AuditError, match="could not be read"):
+            await getattr(decisions.engine, operation)()
 
     async def test_an_export_too_large_for_the_frame_is_refused_whole(
         self, overfull_decisions: AssistantEngine
