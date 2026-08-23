@@ -999,8 +999,9 @@ class AuditTrailContract:
         assert await trail.get("d-2") is None
         assert [held.id for held in await trail.export()] == ["d-1"]
 
+    @pytest.mark.parametrize("supplied", ["model", "mapping"])
     async def test_a_decision_whose_binding_records_no_origin_is_refused(
-        self, trail: AuditTrail
+        self, trail: AuditTrail, supplied: str
     ) -> None:
         """ADR-0184 §4's second clause, §10's eleventh: read such a row, never write one.
 
@@ -1025,20 +1026,33 @@ class AuditTrailContract:
         could arrange it the ordinary way would be evidence the field was widened
         somewhere it should not have been.
 
+        **Both routes into the field are exercised, and the second is the one an
+        implementation fails.** ``model_copy(update=...)`` does not validate, so a
+        caller may put either a built model *or* a bare mapping there. A store that
+        checks the decision it was handed rather than the snapshot it is about to
+        write sees a ``dict`` for the mapping case, answers "not that shape", and then
+        rebuilds the mapping into precisely that shape on its way into the row — so
+        the refusal holds for the arrangement nobody would try and fails for the one a
+        careless caller actually produces. Checking what will be *stored* is what
+        closes both at once, and is the same reason ADR-0021 §4 asks for a validated
+        snapshot rather than a copied one.
+
         ``_refuses`` asserts the write left no trace, which matters more here than
         usual: a store that appended and *then* raised would be holding precisely the
         fabricated history this clause exists to make impossible.
         """
-        await trail.record(decision("d-1"))
-        unrecorded = decision("d-2").model_copy(
-            update={
-                "egress_binding": OriginUnrecordedBinding(
-                    spans=(),
-                    account=BoundAccount(identity="work@example.com", reference="conn-0001"),
-                    transport_endpoint="test://endpoint/one",
-                )
-            }
+        members: dict[str, object] = {
+            "spans": (),
+            "account": BoundAccount(identity="work@example.com", reference="conn-0001"),
+            "transport_endpoint": "test://endpoint/one",
+        }
+        binding: object = (
+            OriginUnrecordedBinding(**members)  # type: ignore[arg-type]  # heterogeneous members
+            if supplied == "model"
+            else members
         )
+        await trail.record(decision("d-1"))
+        unrecorded = decision("d-2").model_copy(update={"egress_binding": binding})
 
         await _refuses(trail, unrecorded, AuditError)
 
