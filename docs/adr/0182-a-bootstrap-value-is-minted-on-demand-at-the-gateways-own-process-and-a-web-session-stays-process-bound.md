@@ -1,6 +1,6 @@
 # 182. A bootstrap value is minted on demand at the gateway's own process, and a web session stays process-bound
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-23
 
 - **This is `track:web-client` milestone 16's sessions decision** (#1230, #1429).
