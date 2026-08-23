@@ -138,6 +138,7 @@ Assistant gateway listening on http://127.0.0.1:8422,
 http://100.86.154.22:8422, http://laptop.tail2e4542.ts.net:8422
 Bootstrap value (good once, and only for this gateway process):
 pDSYe-a4xKAcwzG_nJMU0vvgpQ1fN0cTHfQCqNwDOGc
+Live sessions: 0 of 8. For another value: kill -SIGUSR1 3941204
 ```
 
 Copy one of those origins. That is the address you type on the phone, and it is
@@ -165,19 +166,43 @@ works identically and is much easier to type.
 
 **Pick one of the two and stay on it.** A session belongs to the origin it was
 minted at, so a session started at the numeric address does not admit at the
-MagicDNS name. With one bootstrap value per gateway process, the second
-authority cannot get a session at all without a restart.
+MagicDNS name — the phone would need a second value and would then hold a second
+session. Nothing stops you; it is just two of everything for no gain.
 
-## 6. Paste the bootstrap value
+## 6. Mint a value for the phone, and paste it
 
-Same panel, same field, same rule: it is good once, and there is one per gateway
-process. So today you choose — laptop or phone — and restarting the gateway is
-how you change your mind.
+Same panel, same field, same rule: good once, and good for ten minutes.
 
-> **This is the part that changes next.** #1429's ruling 1 has the gateway mint
-> a fresh bootstrap value on demand, without a restart, so the laptop and the
-> phone can both hold a session at the same time. That lands with lane 2 of
-> milestone 16.
+The value the gateway printed at start has almost certainly gone to the laptop's
+browser already, and it is spent. So mint another one — at the **laptop**, in the
+terminal running the gateway or any other on that machine:
+
+```bash
+kill -SIGUSR1 3941204
+```
+
+The process id is on the last line of every disclosure the gateway makes. A fresh
+value appears on the gateway's own terminal:
+
+```text
+Assistant gateway listening on http://127.0.0.1:8422,
+http://100.86.154.22:8422, http://laptop.tail2e4542.ts.net:8422
+Bootstrap value (good once, and only for this gateway process):
+IznwmhTUYUKp04I8Z_BfM8_tMFKYaCrDZqcFm_wCNGQ
+Live sessions: 1 of 8. For another value: kill -SIGUSR1 3941204
+```
+
+Nothing restarted and the laptop is still logged in — `Live sessions: 1 of 8` is
+its session, counted against `ASSISTANT_GATEWAY_MAX_SESSIONS`. That count is
+information rather than a refusal: the gateway mints whatever it is, and it is
+the *exchange* that is refused once the table is full. Paste the new value on the
+phone and both devices hold a session at once (ADR-0182 §1, §2).
+
+Ten minutes is the window between reading the value off the laptop and the phone
+spending it (`ASSISTANT_GATEWAY_BOOTSTRAP_TTL`) — generous for walking across a
+room, and the reason a value left in your scrollback is not a lasting liability.
+If it runs out, send the signal again; the value it replaces stops working the
+moment the new one is printed.
 
 Getting the value onto the phone is your problem and worth a moment's thought:
 it admits a browser to everything the assistant can do. Reading 43 characters
@@ -216,7 +241,8 @@ request (HTTP 403).`** Your phone is not in
 identifier. Check the `ID` you took in step 2 — `HostName` is the wrong field,
 and so is the address. The page cannot currently be more specific than that
 (#1438); the gateway's own answer names the condition, `device-not-listed`.
-Your bootstrap value is untouched and still works.
+Your bootstrap value is untouched and still works — it was not read or spent, so
+it admits for the rest of its ten minutes.
 
 **The phone cannot reach the address at all.** That is the overlay, not the
 gateway. `tailscale status` on the phone, and check the laptop is not asleep.
