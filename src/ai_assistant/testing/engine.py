@@ -1147,7 +1147,9 @@ class FakeAssistantEngine:
                 None
                 if egress is None
                 else ConfirmationEgress(
-                    account_identity=egress.account.identity, spans=egress.spans
+                    account_identity=egress.account.identity,
+                    spans=egress.spans,
+                    planned_with_external_content=egress.planned_with_external_content,
                 )
             ),
         )

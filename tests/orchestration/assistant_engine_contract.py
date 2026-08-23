@@ -938,6 +938,7 @@ class AssistantEngineContract(ABC):
             spans=egress.spans,
             account=BoundAccount(identity=egress.account_identity, reference="conn-rebuilt"),
             transport_endpoint="test://rebuilt",
+            planned_with_external_content=egress.planned_with_external_content,
         )
 
         ours = egress.canonical_destination_set

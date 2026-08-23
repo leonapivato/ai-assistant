@@ -95,6 +95,7 @@ if TYPE_CHECKING:
         ToolDefinition,
     )
     from ai_assistant.orchestration.executor import StepExecutor
+    from ai_assistant.orchestration.origin import SelectionOrigin
 
 _log = structlog.get_logger(__name__)
 
@@ -447,6 +448,7 @@ class StepRunner:
         step_id: str,
         *,
         timeout: timedelta,  # noqa: ASYNC109 — passed through to the seam, which owns the deadline (ADR-0029 §4)
+        origin: SelectionOrigin,
     ) -> StepDisposition:
         """Select a tool for ``step_id``, rule on it, and run it if allowed.
 
@@ -477,6 +479,17 @@ class StepRunner:
             timeout: How long the seam may wait, per attempt; passed through to
                 the executor. The caller's budget, not the tool's property
                 (ADR-0029 §4).
+            origin: What the material this system selected into the model call
+                whose output produced this step rests on (ADR-0181 §2, §4) —
+                stamped onto the carrier :meth:`_bound` hands the egress seam, and
+                read there and nowhere else. **Required with no default**, for the
+                reason ADR-0181 §3 gives the ``core`` field: the safe-looking
+                default is "nothing external was selected", which is a claim about
+                a selection the defaulting caller never made, and a lane that never
+                wired a selection through would get it for free. A caller that
+                genuinely selected nothing passes
+                :data:`~ai_assistant.orchestration.origin.NOTHING_EXTERNAL`, in
+                code a reviewer can see.
 
         Returns:
             What became of the step, and the durable state after it.
@@ -512,7 +525,7 @@ class StepRunner:
 
         tool = chosen
         try:
-            bound = await self._bound(tool, step.parameters)
+            bound = await self._bound(tool, step.parameters, origin)
         except EgressBindingError:
             # ADR-0152 §9: the seam refused, so the call cannot be completed. It
             # commits nothing -- no ruling requested, no audit record written, no
@@ -676,7 +689,7 @@ class StepRunner:
         return await self._deny(state, step, decision, confirmed.tool)
 
     async def _bound(
-        self, tool: ToolDefinition, parameters: FrozenJsonMapping
+        self, tool: ToolDefinition, parameters: FrozenJsonMapping, origin: SelectionOrigin, /
     ) -> BoundEgressCall | None:
         """Ask the binding seam what this call's egress binding is (ADR-0152 §1, §10).
 
@@ -694,13 +707,26 @@ class StepRunner:
         without one cannot reach an egress call to leave unbound. The composition
         root wires the one implementation when there is something to bind.
 
-        The provenance handed over is **empty**, and that is ADR-0152 §5's named
-        residue rather than an omission: nothing in this tree records a span's
-        origin, so every span the seam describes today is ``SYSTEM_SELECTED`` —
-        the fail-closed answer ADR-0146 §2 requires, and an under-statement of what
-        a user typed. The lane that first records an origin is the lane that closes
-        it; it is passed deliberately rather than defaulted, which is why
+        The carrier's ``spans`` mapping is **empty**, and that is ADR-0152 §5's
+        named residue rather than an omission: nothing in this tree records a
+        *span's* origin, so every span the seam describes today is
+        ``SYSTEM_SELECTED`` — the fail-closed answer ADR-0146 §2 requires, and an
+        under-statement of what a user typed. ADR-0181 closes that residue in one
+        direction only: it records a **call-level** origin and no span-level one, so
+        no span becomes ``USER_AUTHORED`` by anything here and ADR-0154's
+        condition-13 limit stands exactly as attested. The mapping is passed
+        deliberately rather than defaulted, which is why
         :class:`~ai_assistant.core.types.CarriedProvenance` has no default for it.
+
+        **``planned_with_external_content`` is the caller's ``origin``, unchanged**
+        (ADR-0181 §3, §4). It is stamped here, before the request reaches the seam,
+        and this is the only place it is written on the ``bind`` path. Nothing is
+        derived for it, nothing merged into it, and no value a model, a tool, a
+        declaration or a plan emitted is consulted: a producer's claim has no code
+        path by which to have an effect, which is what makes ADR-0181 §4's
+        discard-not-merge total rather than a rule to remember. The resuming path
+        does not come through here at all — :meth:`_rebound` transcribes the field
+        from the approved binding instead (ADR-0181 §3's fifth clause).
 
         Returns:
             The derived binding beside the detached call, or ``None``.
@@ -714,7 +740,12 @@ class StepRunner:
         if self._binder is None:
             return None
         return await self._binder.bind(
-            tool, parameters=parameters, provenance=CarriedProvenance(spans={})
+            tool,
+            parameters=parameters,
+            provenance=CarriedProvenance(
+                spans={},
+                planned_with_external_content=origin.planned_with_external_content,
+            ),
         )
 
     async def _rebound(
@@ -732,6 +763,17 @@ class StepRunner:
         inside the seam (ADR-0152 §7). A ``rebind`` handed a fresh, empty carrier
         would describe every span as ``SYSTEM_SELECTED`` and refuse every resumed
         call whose user typed anything.
+
+        **Nor is a ``SelectionOrigin``, and for the same reason one field over**
+        (ADR-0181 §3's fifth and sixth clauses, which narrow ADR-0152 §7's count
+        from exactly one to exactly two). The fact is about a selection made before
+        the confirmation was parked — plausibly before a restart, on a path where
+        no turn survives at all (ADR-0052 §3) — so there is no selection set here to
+        recompute it from. The seam transcribes ``planned_with_external_content``
+        from ``approved``; a member that re-derived it would answer ``False``,
+        compare unequal to every approved binding carrying ``True``, and refuse
+        every resumed egress call planned over external material, which is precisely
+        the call the user was asked about and approved.
 
         Returns:
             The **derived** binding beside the detached call, or ``None``.

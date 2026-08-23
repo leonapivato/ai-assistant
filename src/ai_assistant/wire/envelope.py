@@ -196,7 +196,32 @@ from ai_assistant.wire.errors import (
 #: intended user-visible outcome. The operational cost is one redeployment —
 #: hub and clients upgrade together — which ADR-0178 §6 names rather than
 #: minimises.
-PROTOCOL_VERSION: Final[int] = 10
+#:
+#: **11 since ADR-0181 §3**, which adds a third field,
+#: ``planned_with_external_content``, to
+#: :class:`~ai_assistant.core.types.ConfirmationEgress`. The same limb of ADR-0124
+#: §9 decides it as decided 10, and ADR-0181's Consequences name the obligation
+#: rather than weigh it: "``PROTOCOL_VERSION`` moves, because ``ConfirmationEgress``
+#: is a wire type (ADR-0178 §6's rule), and the implementing lane owes that
+#: arithmetic." It bites in **both** directions, which is what makes it a bump
+#: rather than a widening one side can absorb. The field is **required with no
+#: default** (ADR-0181 §3), so a version 11 client decoding a version 10 hub's
+#: confirmation fails with ``missing``; and ``ConfirmationEgress`` sets
+#: ``extra="forbid"`` while ``wire.codec``'s ``project`` renders a model by
+#: ``model_dump()``, so a version 11 hub emits the member on every egress
+#: confirmation and a version 10 client fails with ``extra_forbidden`` on it. Both
+#: delivery routes are affected for 10's reason and by 10's route — a
+#: ``Confirmation`` reaches a client on ``TurnOutcome.step.confirmation``
+#: (``converse``, ``converse_streaming``) and as the element type of
+#: ``pending_confirmations``.
+#:
+#: **Nothing else under** ``wire/`` **changes for it**, as at 8 and at 10 and for
+#: the same reason: the connect exchange gains no member, no frame's encoding
+#: changes, no :class:`FrameKind` is added, and the promoted surface's method set is
+#: untouched. A result payload takes the shape of the method's own declared return
+#: annotation (ADR-0085 §10), so the member crosses without a second declaration and
+#: nothing transcribes it into a wire-side schema.
+PROTOCOL_VERSION: Final[int] = 11
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

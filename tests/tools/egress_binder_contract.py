@@ -232,7 +232,7 @@ REFUSES: Final = (
 
 def _no_provenance() -> CarriedProvenance:
     """A carrier over an empty mapping, passed deliberately (ADR-0152 §1)."""
-    return CarriedProvenance(spans={})
+    return CarriedProvenance(spans={}, planned_with_external_content=False)
 
 
 class EgressBinderContract(ABC):
@@ -1149,7 +1149,8 @@ class EgressBinderContract(ABC):
             SEND_EMAIL,
             parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
             provenance=CarriedProvenance(
-                spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED}
+                spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
+                planned_with_external_content=False,
             ),
         )
 
@@ -1177,7 +1178,8 @@ class EgressBinderContract(ABC):
                 provenance=CarriedProvenance(
                     spans={
                         EgressSpanLocator(argument="attachment"): DiscloserProvenance.USER_AUTHORED
-                    }
+                    },
+                    planned_with_external_content=False,
                 ),
             )
 
@@ -1244,7 +1246,8 @@ class EgressBinderContract(ABC):
         self.register_egress(binder, SEND_EMAIL)
         recipient: Mapping[str, FrozenJson] = {"to": ["a@example.com"], "subject": "s"}
         user_authored = CarriedProvenance(
-            spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED}
+            spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
+            planned_with_external_content=False,
         )
 
         bound = await binder.bind(
@@ -1441,7 +1444,8 @@ class EgressBinderContract(ABC):
         """
         self.register_egress(binder, SEND_EMAIL)
         carrier = CarriedProvenance(
-            spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED}
+            spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
+            planned_with_external_content=False,
         )
         held = self.suspend_next_read(binder)
 
@@ -1542,7 +1546,7 @@ class EgressBinderContract(ABC):
         the way in and was corrupted afterwards.
         """
         tool = self._bypass_subject(binder, registered=registered)
-        carrier = CarriedProvenance(spans={})
+        carrier = CarriedProvenance(spans={}, planned_with_external_content=False)
         object.__setattr__(carrier, "spans", {object(): object()})
 
         with pytest.raises(EgressBindingError) as raised:
@@ -1835,7 +1839,8 @@ class EgressBinderContract(ABC):
             SEND_EMAIL,
             parameters=parameters,
             provenance=CarriedProvenance(
-                spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED}
+                spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
+                planned_with_external_content=False,
             ),
         )
         assert first is not None

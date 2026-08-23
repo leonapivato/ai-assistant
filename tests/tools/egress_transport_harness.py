@@ -489,6 +489,7 @@ def binding(  # noqa: PLR0913 — one keyword per fact a ruling fixes; grouping 
         spans=tuple(spans),
         account=BoundAccount(identity=identity, reference=reference),
         transport_endpoint=endpoint,
+        planned_with_external_content=False,
     )
 
 

@@ -432,7 +432,15 @@ class FakeEgressBinder:
         declared, named = self._declaration(checked)
         self._refuse_undescribed(checked, named, arguments)
         account = await self._account(checked, registration)
-        binding = self._derive(checked, declared, arguments, account, registration, carried.spans)
+        binding = self._derive(
+            checked,
+            declared,
+            arguments,
+            account,
+            registration,
+            carried.spans,
+            carried.planned_with_external_content,
+        )
         self._refuse_unlocated(binding, carried.spans)
         return self._pair(binding, checked, arguments)
 
@@ -473,7 +481,20 @@ class FakeEgressBinder:
             EgressSpanLocator(argument=span.argument, index=span.index): span.provenance
             for span in was.spans
         }
-        binding = self._derive(checked, declared, arguments, account, registration, carried)
+        # ADR-0181 §3's fifth clause: the second thing ``rebind`` takes from
+        # ``approved``, transcribed rather than re-derived for the reason it takes
+        # each span's provenance — this member holds no selection set, and a
+        # re-derived False would compare unequal to every approved binding carrying
+        # True and refuse the very call the user approved.
+        binding = self._derive(
+            checked,
+            declared,
+            arguments,
+            account,
+            registration,
+            carried,
+            was.planned_with_external_content,
+        )
         if binding != was:
             msg = (
                 f"{checked.id}: the binding derived for this resumed call is not the one "
@@ -681,8 +702,15 @@ class FakeEgressBinder:
         account: BoundAccount,
         registration: _Registration,
         provenance: Mapping[EgressSpanLocator, DiscloserProvenance],
+        planned_with_external_content: bool,
     ) -> EgressBinding:
-        """Derive every field of the binding from the declaration and the arguments."""
+        """Derive every field of the binding from the declaration and the arguments.
+
+        Two members are **carried** rather than derived and both arrive resolved:
+        each span's ``provenance`` (ADR-0146 §2) and the call's
+        ``planned_with_external_content`` (ADR-0181 §3, §4). Nothing here computes,
+        infers or defaults either.
+        """
         spans: list[EgressSpan] = []
         for argument in sorted(parameters):
             value = parameters[argument]
@@ -717,6 +745,7 @@ class FakeEgressBinder:
                 spans=tuple(spans),
                 account=account,
                 transport_endpoint=registration.transport_endpoint,
+                planned_with_external_content=planned_with_external_content,
             )
         except ValidationError as exc:
             msg = f"{tool.id}: the spans derived for this call do not form a well-formed binding"

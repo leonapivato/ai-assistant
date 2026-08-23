@@ -466,7 +466,14 @@ class EgressBindingSeam:
         declaration = self._declaration(checked)
         self._refuse_undescribed_keys(declaration, arguments)
         account = await self._connectable_account(registration)
-        binding = self._derived(declaration, arguments, account, registration, carried.spans)
+        binding = self._derived(
+            declaration,
+            arguments,
+            account,
+            registration,
+            carried.spans,
+            carried.planned_with_external_content,
+        )
         self._refuse_unlocated_provenance(binding, carried.spans)
         return self._returned(binding, checked, arguments)
 
@@ -507,7 +514,19 @@ class EgressBindingSeam:
         self._refuse_undescribed_keys(declaration, arguments)
         account = await self._connectable_account(registration)
         binding = self._derived(
-            declaration, arguments, account, registration, self._approved_provenance(was)
+            declaration,
+            arguments,
+            account,
+            registration,
+            self._approved_provenance(was),
+            # ADR-0181 §3's fifth clause: **transcribed** from ``approved``, never
+            # re-derived. This member receives no selection set, so a re-derivation
+            # would answer False, compare unequal to every approved binding carrying
+            # True, and refuse every resumed egress call planned over external
+            # material — the call the user was asked about and approved. That is
+            # ADR-0152 §7's own argument for transcribing the provenance, arriving
+            # at the second field and narrowing its count to exactly two.
+            was.planned_with_external_content,
         )
         if binding != was:
             msg = (
@@ -650,13 +669,14 @@ class EgressBindingSeam:
             )
             raise _refuse(msg) from exc
 
-    def _derived(
+    def _derived(  # noqa: PLR0913 — one parameter per input the derivation reads; ADR-0148 §6 fixes the set
         self,
         declaration: EgressDeclaration,
         parameters: Mapping[str, FrozenJson],
         account: BoundAccount,
         registration: EgressRegistration,
         provenance: Mapping[EgressSpanLocator, DiscloserProvenance],
+        planned_with_external_content: bool,
         /,
     ) -> EgressBinding:
         """Derive the whole binding from the declaration and the arguments.
@@ -664,6 +684,15 @@ class EgressBindingSeam:
         Runs **after** the awaited read, so it is the step the suspension window
         would otherwise reach — and every value it reads is a detached copy
         (ADR-0152 §1, §5).
+
+        **Two of the binding's members are carried rather than derived**, and both
+        arrive here already resolved by the member that called this: each span's
+        ``provenance`` (ADR-0146 §2, ADR-0152 §7) and the call's
+        ``planned_with_external_content`` (ADR-0181 §3, §4). Nothing here computes,
+        infers, defaults or amends either — in particular, no origin is recovered by
+        reading an argument's value, its field or its shape, which is ADR-0146 §2's
+        forbidden inference on the first axis and ADR-0181 §4's second clause on the
+        second.
 
         Raises:
             EgressBindingError: If a destination-bearing argument's value is not a
@@ -682,6 +711,7 @@ class EgressBindingSeam:
                 spans=tuple(spans),
                 account=account,
                 transport_endpoint=registration.transport_endpoint,
+                planned_with_external_content=planned_with_external_content,
             )
         except ValidationError as exc:
             msg = (
@@ -899,11 +929,17 @@ class EgressBindingSeam:
     ) -> Mapping[EgressSpanLocator, DiscloserProvenance]:
         """The approved binding's provenance, keyed by locator (ADR-0152 §7).
 
-        The **one** thing ``rebind`` takes from ``approved``. Transcribing it is
-        forced: a recorded origin is a fact about an act that happened before the
-        confirmation was parked, plausibly before a restart, and a member that
-        re-derived it would describe every span as ``SYSTEM_SELECTED`` and refuse
-        every resumed call whose user typed anything.
+        The **first of the two** things ``rebind`` takes from ``approved``, the
+        second being ``planned_with_external_content`` (ADR-0181 §3's fifth clause,
+        which narrows ADR-0152 §7's count from exactly one to exactly two and
+        narrows nothing else in it: everything else is still re-derived and the
+        equality refusal is unchanged). Transcribing it is forced: a recorded origin
+        is a fact about an act that happened before the confirmation was parked,
+        plausibly before a restart, and a member that re-derived it would describe
+        every span as ``SYSTEM_SELECTED`` and refuse every resumed call whose user
+        typed anything. The second is transcribed for the same reason one field
+        over, and has no accessor of its own because it is a single scalar read
+        straight off the approved binding rather than a mapping to rebuild.
         """
         return {
             EgressSpanLocator(argument=span.argument, index=span.index): span.provenance

@@ -93,6 +93,44 @@ _UNKNOWN_COST_FLOOR = _Rule(
 #: threshold is the user's, a floor is the contract's (ADR-0036 §1).
 _FLOORS = (_DISCLOSURE_FLOOR, _UNKNOWN_COST_FLOOR)
 
+#: ADR-0181 §5's ground, worded at the strength the recorded predicate carries
+#: (§2's second clause, §6's second and sixth): a statement about the **selection
+#: this system made**, naming no source and no kind of source, and never a
+#: detection, a score, a risk level or a claim that the call is malicious.
+_PLANNED_OVER_EXTERNAL = (
+    "the material selected into the model call that produced this request included "
+    "a record resting on recorded external content"
+)
+
+
+def _planned_with_external_content(request: ActionRequest) -> bool:
+    """ADR-0181 §5's antecedent, read off the request's own binding.
+
+    **Not a** :class:`_Rule`, and the difference is the whole reason it is a
+    function here. Every rule in the table is a monotone step function of one field
+    of the *declaration*, which is what lets the table be combined by maximum and
+    checked without knowing an implementation's thresholds; this reads a fact about
+    the **request**, which no ``ToolDefinition`` carries and no declaration can
+    claim (ADR-0181 §4's first clause). Folding it into ``_Rule`` would widen every
+    clause's input for one clause's benefit and put a request-level fact where a
+    reviewer reads only declaration-level ones.
+
+    It is monotone all the same, in the only sense that matters here: it is a step
+    function of one field, it is combined into the same maximum, and it can only
+    make the outcome more restrictive — so the class docstring's guarantee that no
+    setting of the knobs produces a non-conforming policy is untouched by it.
+
+    Args:
+        request: The action being ruled on.
+
+    Returns:
+        Whether its binding records that the call was planned over material
+        including a record resting on recorded external content. ``False`` for a
+        call carrying no binding at all, which is not an egress call.
+    """
+    binding = request.egress_binding
+    return binding is not None and binding.planned_with_external_content
+
 
 class ThresholdActionPolicy:
     """An ``ActionPolicy`` combining user thresholds with the contract's floors.
@@ -107,15 +145,29 @@ class ThresholdActionPolicy:
     * ``reversibility`` at or above ``confirm_at_reversibility`` — ``CONFIRM``.
     * ``risk_level`` at or above ``deny_at_risk`` — ``DENY``.
     * ``reversibility`` at or above ``deny_at_reversibility`` — ``DENY``.
+    * an ``egress_binding`` carrying ``planned_with_external_content`` —
+      ``CONFIRM``. Not configurable, and the one clause reading the *request*
+      rather than the declaration (ADR-0181 §5).
     * nothing applies — ``ALLOW``.
 
     **The thresholds cannot configure it out of conformance.** Each clause is a
-    monotone step function of one declared field and the combination is a
-    maximum, so every setting of the four knobs yields a monotone policy; the
-    two floors are module constants no argument reaches. A policy configurable
-    into violating its own conformance suite would be a trap for the user it is
-    meant to protect, and ADR-0036 §1 records the shape as the reason it is not
-    one.
+    monotone step function of one field and the combination is a maximum, so every
+    setting of the four knobs yields a monotone policy; the floors are module
+    constants no argument reaches. A policy configurable into violating its own
+    conformance suite would be a trap for the user it is meant to protect, and
+    ADR-0036 §1 records the shape as the reason it is not one.
+
+    **The egress clause is a floor and reaches ADR-0181 §5's ceiling rather than
+    stating a preference.** Today it can never be the clause that decides an
+    outcome — every egress call at the designated seam already reaches
+    ``_DISCLOSURE_FLOOR``, and ADR-0154 §4 closes standing authorisation for all of
+    them — so it is stated for ADR-0098 §3's reason rather than because a live
+    subject needs it: an actuator rule is free now and expensive later, and the lane
+    that opens standing authorisation for egress will be doing it at the moment
+    nobody wants to carve an exception back out. It refuses nothing that would
+    otherwise run: the call is still put to the user, with the fact in front of them
+    (ADR-0181 §6), which is the containment #668 asks for rather than a silent
+    decline the user learns nothing from.
 
     The defaults are deliberately unremarkable and are **not** a decision the
     contract makes for the user (ADR-0021 §5): confirm at or above ``MEDIUM``
@@ -180,10 +232,22 @@ class ThresholdActionPolicy:
     async def decide(self, request: ActionRequest) -> PermissionRuling:
         """Rule on ``request`` by the table in the class docstring.
 
-        Reads only ``request.tool``. ``parameters`` is carried on the request
-        for the invocation contract's future per-call gating (ADR-0021 §3) and
-        no rule here consults it, so nothing derived from a payload reaches the
-        ``reason`` a user is shown.
+        Reads ``request.tool`` and — for ADR-0181 §5's clause alone —
+        ``request.egress_binding.planned_with_external_content``. ``parameters`` is
+        carried on the request for the invocation contract's future per-call gating
+        (ADR-0021 §3) and no rule here consults it, so nothing derived from a
+        payload reaches the ``reason`` a user is shown. Neither does the egress
+        clause: its ground names the selection this system made and quotes nothing
+        of the call.
+
+        **It returns no ``ALLOW`` on a request whose binding carries
+        ``planned_with_external_content``** (ADR-0181 §5's third clause). ADR-0148
+        §3's route (a) is unavailable to this member by construction — it holds no
+        ``AuditTrail`` and no resolution about the request exists yet — so the
+        obligation is discharged by returning ``CONFIRM``. Nothing is acquired to
+        look for a route (a): no trail read, no store handle, no grant seam, the
+        last of which ADR-0097 §7 forbids outright. A request whose binding carries
+        ``False``, or which carries none, is judged on the ordinary path.
 
         Returns:
             The ruling. ``authorised_by`` is always unset: standing grants are
@@ -192,6 +256,8 @@ class ThresholdActionPolicy:
         """
         tool = request.tool
         grounds = self._grounds(tool)
+        if _planned_with_external_content(request):
+            grounds.append((PermissionOutcome.CONFIRM, _PLANNED_OVER_EXTERNAL))
         if not grounds:
             return PermissionRuling(
                 outcome=PermissionOutcome.ALLOW,
@@ -222,6 +288,16 @@ class ThresholdActionPolicy:
         The complementary staleness check — refusing a confirmation answered
         long after it was asked — is deliberately absent, because it needs a
         clock the policy is contracted not to have (ADR-0036 §1).
+
+        **ADR-0181 §5's fourth clause is discharged by the unconditional refusal
+        above and adds no branch here.** Where ``confirmed.egress_binding`` carries
+        ``planned_with_external_content``, an ``ALLOW`` requires ``approved`` to be
+        true — and ``approved`` being anything but ``True`` already yields ``DENY``
+        for every ``confirmed``, egress or not. The approving case gains nothing,
+        because the user's answer about that call **is** ADR-0148 §3's route (a),
+        the one route §5's second clause leaves open. Re-applying the ``decide``
+        clause here would refuse every approval of exactly the calls §6 exists to
+        put to the user, which is the failure §5's sixth clause names.
 
         **Only ``True`` is consent.** ``approved`` is annotated ``bool`` and
         mypy runs strict over `src` and `tests`, so a caller passing anything

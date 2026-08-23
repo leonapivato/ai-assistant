@@ -41,6 +41,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
 )
 from ai_assistant.orchestration import StepExecutor, StepRunner
+from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
@@ -349,7 +350,9 @@ async def test_a_non_egress_call_produces_the_durable_state_it_did_before_this_s
     states = []
     for harness in (with_seam, without_seam):
         state = await _an_execution(harness.plans, _step())
-        outcomes.append(await harness.runner.run(state, STEP, timeout=PATIENT))
+        outcomes.append(
+            await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
+        )
         states.append(await _stored(harness.plans, state))
 
     assert [outcome.disposition for outcome in outcomes] == [Disposition.EXECUTED] * 2
@@ -386,7 +389,7 @@ async def test_the_request_is_built_from_what_the_seam_returned_and_not_from_wha
     held = watcher.inner.suspend_next_read()
 
     async with held_at_its_first_await(
-        held, harness.runner.run(state, STEP, timeout=PATIENT)
+        held, harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
     ) as task:
         plan = plans.handed_out
         assert plan is not None
@@ -422,7 +425,7 @@ async def test_the_rebuilt_request_is_built_from_what_rebind_returned() -> None:
     trail = _LeakyTrail()
     harness = _Harness(tool=tool, binder=watcher, plans=plans, trail=trail)
     state = await _an_execution(harness.plans, _step())
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
     assert parked.disposition is Disposition.AWAITING_CONFIRMATION
     held = watcher.inner.suspend_next_read()
 
@@ -490,7 +493,7 @@ async def test_a_refused_binding_is_egress_unbindable_and_commits_nothing() -> N
     state = await _an_execution(harness.plans, _step())
     before = await _stored(harness.plans, state)
 
-    result = await harness.runner.run(state, STEP, timeout=PATIENT)
+    result = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
 
     assert result.disposition is Disposition.EGRESS_UNBINDABLE
     assert result.decision_id is None
@@ -515,7 +518,7 @@ async def test_a_resumed_call_whose_binding_moved_is_refused_before_the_second_r
     binder = _bound_binder(tool)
     harness = _Harness(tool=tool, binder=binder)
     state = await _an_execution(harness.plans, _step())
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
     assert parked.disposition is Disposition.AWAITING_CONFIRMATION
     binder.set_connection(REFERENCE, identity="somebody-else@example.com")
 
@@ -557,7 +560,7 @@ async def test_a_forged_canonical_form_in_the_parked_row_is_refused_before_resol
     trail = _TamperedTrail()
     harness = _Harness(tool=tool, binder=binder, trail=trail)
     state = await _an_execution(harness.plans, _step())
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
     assert parked.disposition is Disposition.AWAITING_CONFIRMATION
     trail.forge = str(parked.decision_id)
 
@@ -590,7 +593,7 @@ async def test_a_store_outage_on_the_resuming_path_propagates_too() -> None:
     binder = _bound_binder(tool)
     harness = _Harness(tool=tool, binder=binder)
     state = await _an_execution(harness.plans, _step())
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
     assert parked.disposition is Disposition.AWAITING_CONFIRMATION
     before = await _stored(harness.plans, state)
     binder.fail_next_read()
@@ -626,7 +629,7 @@ async def test_a_store_outage_propagates_rather_than_becoming_a_disposition() ->
     binder.fail_next_read()
 
     with pytest.raises(ConnectionStoreError):
-        await harness.runner.run(state, STEP, timeout=PATIENT)
+        await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
 
     assert await harness.trail.get("d-1") is None
     assert harness.invoker.invocations == []
@@ -647,7 +650,7 @@ async def test_the_recorded_decision_holds_the_binding_the_seam_derived() -> Non
     harness = _Harness(tool=tool, binder=binder)
     state = await _an_execution(harness.plans, _step())
 
-    parked = await harness.runner.run(state, STEP, timeout=PATIENT)
+    parked = await harness.runner.run(state, STEP, timeout=PATIENT, origin=NOTHING_EXTERNAL)
 
     assert parked.decision_id is not None
     recorded = await harness.trail.get(parked.decision_id)

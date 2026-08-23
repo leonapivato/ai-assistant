@@ -122,7 +122,15 @@ def _confirmation(
         else parameters,
         reason="this discloses data off-device",
         token=ContinuationToken(handle=handle),
-        egress=(ConfirmationEgress(account_identity=identity, spans=spans) if egress else None),
+        egress=(
+            ConfirmationEgress(
+                account_identity=identity,
+                spans=spans,
+                planned_with_external_content=False,
+            )
+            if egress
+            else None
+        ),
     )
 
 
