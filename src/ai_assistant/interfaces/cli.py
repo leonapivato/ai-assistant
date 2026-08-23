@@ -126,6 +126,40 @@ shell history, a process listing or an argv-reading log; ``--credential-stdin``
 is the scriptable door, and it strips the line terminator alone because ADR-0125
 §3 makes two spellings of a secret two different secrets.
 
+``decisions`` and ``export-decisions`` are the audit surface — the two engine
+operations ADR-0186 §1 promotes and no third (§9). They are the first door onto
+the permission trail: ADR-0021 §4 assigns ``export`` the discharge of ADR-0004
+§6's portability obligation for this store, and until these landed it was
+discharged to nobody a user could reach (#1485). They are **not** the grant
+surface and answer none of its questions: ``assistant granted`` says what may be
+reached, and a row here says what was ruled about one act.
+
+Three obligations land on *this module*, and each is a sentence a person reads.
+**A row is rendered whole or not at all** (ADR-0186 §7): nothing here truncates,
+summarises, samples or counts in place of any part of one, so a narrow terminal
+gets fewer rows rather than shorter ones. **The call's origin is rendered in
+three states** — the material this system selected included a record marked as
+resting on recorded external content, it did not, or the origin was **never
+recorded** — the third distinct from the other two and never shown as ``False``,
+as "no", or as an absence (ADR-0184 §2, ADR-0186 §7). And **a row is never
+rendered as a live permission, a transmission, or a question still open**
+(ADR-0186 §8): nothing here composes a
+:class:`~ai_assistant.core.types.Confirmation`, offers an approval control,
+computes ``authorises``, or says a call went anywhere. ``resume`` is where a
+parked question is answered, and it is a different surface.
+
+**The export is one JSON document on standard output and nothing else on that
+stream** (ADR-0186 §9): the array of the decisions' own
+``model_dump(mode="json")`` projections, faithful, with no key added, removed,
+renamed or annotated — so it re-validates as ``tuple[PermissionDecision, ...]``,
+and a row recorded before ADR-0181 §3 carries no ``planned_with_external_content``
+key at all, the absence being the state. Diagnostics and errors go to standard
+error. There is deliberately no ``--output``: a path, an overwrite policy and a
+partial-write story in an adapter are decisions about the user's data made in the
+wrong layer (golden rule 3). The bare name ``export`` stays **reserved** for
+ADR-0004 §6's whole-installation artifact, which neither of these discharges
+(#1502).
+
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
 
@@ -134,13 +168,14 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
+import json
 import math
 import re
 import shlex
 import sys
 from datetime import UTC, datetime, time, timedelta
 from enum import Enum
-from typing import TYPE_CHECKING, Final, NamedTuple, assert_never, final
+from typing import TYPE_CHECKING, Final, NamedTuple, TextIO, assert_never, final
 
 import typer
 from pydantic import SecretStr
@@ -164,6 +199,7 @@ from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
+    DEFAULT_PAGE_SIZE,
     SECRET_VALUE_MAX_BYTES,
     AnswerKind,
     BeliefBand,
@@ -179,6 +215,8 @@ from ai_assistant.core.types import (
     NotificationDispositionKind,
     NotificationPreferences,
     NotificationReach,
+    OriginUnrecordedBinding,
+    PermissionOutcome,
     ProvisioningState,
     QuestionState,
     QueueOutcome,
@@ -214,6 +252,7 @@ if TYPE_CHECKING:
         AnswerOutcome,
         Belief,
         BeliefSummary,
+        CanonicalDestination,
         Confirmation,
         ConfirmationDestination,
         ConfirmationEgress,
@@ -221,6 +260,8 @@ if TYPE_CHECKING:
         ConnectionAct,
         ConversationDigest,
         ConversationSummary,
+        DestinationProtocol,
+        EgressBinding,
         EgressSpan,
         GrantableSource,
         HeldNotification,
@@ -229,6 +270,7 @@ if TYPE_CHECKING:
         NotificationCandidate,
         ObservationReport,
         ObservedProposal,
+        PermissionDecision,
         Question,
         QueuedQuestion,
         SourceGrant,
@@ -258,6 +300,18 @@ device_app = typer.Typer(
 )
 app.add_typer(device_app, name="device")
 console = Console()
+
+#: Where a diagnostic goes when standard output is carrying an **artifact**
+#: (ADR-0186 §9). ``export-decisions`` writes one JSON document to standard output
+#: "and nothing else on that stream", so its error boundary cannot use
+#: :data:`console` — a hub that is not reachable would otherwise put a sentence
+#: where a user's shell expects the export. Every other command on this surface
+#: keeps writing to :data:`console`, because a terminal reading a listing is not a
+#: pipe reading a document.
+#:
+#: Neither console is given a ``file``, so each follows ``sys.stdout`` and
+#: ``sys.stderr`` as they stand when it prints rather than as they stood at import.
+error_console = Console(stderr=True)
 
 #: Exit codes (ADR-0042 §7: "setting a meaningful exit code").
 _EXIT_OK = 0
@@ -1974,6 +2028,71 @@ def connection_log(
     raise typer.Exit(code)
 
 
+@app.command()
+def decisions(
+    limit: int = typer.Option(
+        DEFAULT_PAGE_SIZE,
+        "--limit",
+        callback=_positive_page_argument,
+        help="How many rulings to show at most (at least 1).",
+    ),
+) -> None:
+    """Show what I was allowed to do, what I was refused, and what I asked you about.
+
+    One row per **ruling**, newest ruling first. This is the record the permission
+    layer wrote as it decided, and nothing is ever edited or removed from it: a
+    question and the answer to it are two rows, not one row that changed.
+
+    **A row says a ruling was made and nothing more.** It does not say the ruling
+    still stands, that a grant is current, that an account is still connected, or
+    that the tool is still registered under the identifier printed here. It does
+    not say the call ever ran, either — this trail bounds what was *decided*, not
+    what was done, so nothing here is a receipt.
+
+    **A question with no answer on this page is a fact about the page.** The answer
+    may simply be outside it; it is never read as a refusal, an approval, an expiry
+    or a wait. Raise ``--limit`` to see further back.
+
+    **Where a ruling was taken over an outbound call** the row also carries the
+    connected account, the recipients the ruling was taken over, the description of
+    what would have been transmitted, and whether the material this assistant
+    selected into the call included a record marked as resting on recorded external
+    content — in three states, the third being that the origin was never recorded
+    at all, on a row written before that was kept. The payload itself is not in the
+    record and is not shown: what binds it is a digest.
+
+    Answering a parked question is ``assistant resume``, never this.
+    """
+    code = asyncio.run(_list_decisions(limit=limit))
+    raise typer.Exit(code)
+
+
+@app.command("export-decisions")
+def export_decisions() -> None:
+    """Write the whole permission trail to standard output, as one JSON document.
+
+    Every ruling, not a page of them, and in ``assistant decisions``' order. This is
+    the portability half: it is your record of what this assistant was permitted to
+    do, in a form another program can read, and it is the whole of it or an error —
+    nothing here truncates or samples an export without saying so.
+
+    **The document is a faithful copy.** No key is added, renamed or annotated for
+    presentation, so it validates back into exactly the rulings it came from. One
+    consequence is worth knowing: on a ruling recorded before this assistant kept
+    the call's origin, the origin key is simply **not there**, and that absence is
+    the fact. ``assistant decisions`` is where that state is put into words.
+
+    **Only the document goes to standard output** — every message, warning and
+    error goes to standard error — so ``assistant export-decisions > trail.json``
+    writes an artifact and nothing else. There is no ``--output``: your shell
+    already decides where a stream goes, and better than I would.
+
+    This exports **one** store, and is not the whole-installation export.
+    """
+    code = asyncio.run(_export_decisions())
+    raise typer.Exit(code)
+
+
 @device_app.command("enrol")
 def device_enrol(
     hub_identity: str = typer.Argument(
@@ -3119,6 +3238,52 @@ async def _list_connection_acts(*, limit: int) -> int:
     return await _drive_connection_acts(engine, limit=limit)
 
 
+async def _list_decisions(*, limit: int) -> int:
+    """Obtain a client, read the bounded listing, and render it (ADR-0186 §9).
+
+    :func:`_list_connection_acts`' shape over the other append-only record. The
+    error boundary is this surface's usual one and writes to :data:`console`,
+    because a listing is prose on a terminal — it is ``export-decisions`` alone
+    whose standard output is an artifact.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_decisions(engine, limit=limit)
+
+
+async def _export_decisions() -> int:
+    """Obtain a client, read the whole trail, and write the artifact (ADR-0186 §9).
+
+    **Standard output is claimed for the document before anything else runs**, and
+    the stream this command was handed is kept so the artifact can still reach it.
+    Everything the command does in between — the settings load, the logging
+    configuration, the probe, the call — prints to standard error instead, whatever
+    it prints and whether or not this module wrote it. §9's clause is about the
+    *stream* rather than about this function's own politeness: "one JSON document
+    written to standard output … and nothing else on that stream", and a redirect
+    is the only way to say that about code this adapter does not own.
+
+    It is not defensive about a hazard that does not exist yet, either: `structlog`
+    is configured with a ``PrintLoggerFactory``, whose default file is
+    ``sys.stdout``, so the first log line emitted anywhere on the client path would
+    land in the middle of a user's export. Nothing on that path logs today, which is
+    exactly the state that changes without anyone thinking about this command.
+    """
+    artifact = sys.stdout
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            engine = await _open_engine()
+        except (AssistantError, TransportError) as exc:
+            _render_error(exc, to_stderr=True)
+            return _EXIT_ERROR
+
+        return await _drive_export_decisions(engine, artifact=artifact)
+
+
 async def _forget_belief(belief_id: str, *, assume_yes: bool) -> int:
     """Load settings, build the engine, run the deletion ceremony, and close it.
 
@@ -4014,6 +4179,68 @@ async def _drive_connection_acts(engine: AssistantEngine, *, limit: int) -> int:
         return _EXIT_ERROR
     _render_connection_acts(acts, limit=limit)
     return _EXIT_OK
+
+
+async def _drive_decisions(engine: AssistantEngine, *, limit: int) -> int:
+    """Read the bounded listing and render it in the operation's own order.
+
+    The order is the **engine's** guarantee (ADR-0186 §2) — ``decided_at``
+    descending, ties broken by ``id`` ascending — so nothing here sorts, and
+    nothing here filters: a consumer wanting a subset selects it from what the
+    operation returned, and an adapter selecting for the user would be the business
+    logic golden rule 3 keeps out of this layer.
+    """
+    try:
+        recorded = await engine.recent_decisions(limit=limit)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_decisions(recorded, limit=limit)
+    return _EXIT_OK
+
+
+async def _drive_export_decisions(engine: AssistantEngine, *, artifact: TextIO) -> int:
+    """Read the whole trail and write ADR-0186 §9's document to ``artifact``.
+
+    **Whole or nothing.** ``export_decisions`` raises rather than truncating when
+    the trail outgrows the contract limit (ADR-0085 §8c), and that refusal is
+    rendered as an error on standard error with **no** document written — a partial
+    artifact that looked complete is the one outcome §9 rules out, and it is the one
+    a helpful adapter would produce.
+    """
+    try:
+        recorded = await engine.export_decisions()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc, to_stderr=True)
+        return _EXIT_ERROR
+    artifact.write(_decisions_artifact(recorded))
+    artifact.flush()
+    return _EXIT_OK
+
+
+def _decisions_artifact(recorded: tuple[PermissionDecision, ...]) -> str:
+    """ADR-0186 §9's document: the decisions' own JSON projections, and nothing else.
+
+    **Faithful, which is a statement about keys.** Each row is its own
+    ``model_dump(mode="json")`` and this adds no key, removes none, renames none,
+    reorders none for presentation and annotates none — so the array re-validates
+    as ``tuple[PermissionDecision, ...]``, whose models set ``extra="forbid"``. A
+    friendly ``"origin": "not recorded"`` marker beside the members would make the
+    export fail its own re-validation and stop being an export; the *words* for that
+    state are :func:`_recorded_origin_line`'s job on the listing, not this one's
+    (ADR-0184 §3, ADR-0186 §9).
+
+    **Indentation is not a key.** The whitespace is chosen so a person can read what
+    they exported, and it changes no member, no order and no value; ``json.dumps``
+    emits the array in the order the operation returned, which is ADR-0186 §2's.
+
+    Args:
+        recorded: Every decision the trail holds, in the operation's order.
+
+    Returns:
+        One JSON document, newline-terminated so it is a well-formed text stream.
+    """
+    return json.dumps([decision.model_dump(mode="json") for decision in recorded], indent=2) + "\n"
 
 
 def _partial_reference(exc: BaseException) -> str | None:
@@ -6579,8 +6806,35 @@ def _egress_destination_line(member: ConfirmationDestination) -> str:
     """
     if member.account_identity is not None:
         return f"the connected account {_safe(member.account_identity)}"
-    protocol = "" if member.protocol is None else member.protocol.value
-    return f"{_safe(member.canonical or '')} [dim]({_safe(protocol)})[/]"
+    return _recipient_line(member.protocol, member.canonical)
+
+
+def _recipient_line(protocol: DestinationProtocol | None, canonical: str | None) -> str:
+    """The selected-recipient arm of a canonical destination set member.
+
+    Shared by the confirmation's set and the recorded binding's, because ADR-0186
+    §7 renders a history row's recipients under **ADR-0178 §7's** obligations rather
+    than a second set of its own: "a second, differently worded floor would be a
+    second vocabulary to keep in step with the first, and the failure would be a
+    history that renders a disclosure the card showed, or shows one it did not". One
+    function is that argument made structural — the two surfaces cannot drift
+    because there is nothing to drift.
+
+    The two member types differ only in their **account** arm, which is why the
+    account is each caller's and the recipient is this function's:
+    :class:`~ai_assistant.core.types.ConfirmationDestination` carries the account's
+    identity where :class:`~ai_assistant.core.types.CanonicalDestination` carries
+    the whole account (ADR-0178 §3).
+
+    Args:
+        protocol: The member's protocol, as the value carries it.
+        canonical: The member's canonical form, as `core` derived it.
+
+    Returns:
+        The line for one selected recipient, neutralised for this terminal.
+    """
+    named = "" if protocol is None else protocol.value
+    return f"{_safe(canonical or '')} [dim]({_safe(named)})[/]"
 
 
 def _egress_span_line(span: EgressSpan) -> str:
@@ -6650,7 +6904,28 @@ def _egress_origin_line(egress: ConfirmationEgress) -> str:
     Returns:
         The sentence rendered beside the floor, for whichever state the call carries.
     """
-    if egress.planned_with_external_content:
+    return _origin_line(planned_with_external_content=egress.planned_with_external_content)
+
+
+def _origin_line(*, planned_with_external_content: bool) -> str:
+    """The two **recorded** origin states, in words (ADR-0181 §6).
+
+    Split out of :func:`_egress_origin_line` so a history row reaches the same two
+    sentences (ADR-0186 §7): the third state is
+    :func:`_recorded_origin_line`'s, and it is distinct from these because the
+    *fact* is distinct, not because a second surface worded the first two
+    differently. Everything :func:`_egress_origin_line` documents about the two arms
+    — that neither names a source, that the ``False`` arm is a self-contained
+    sentence and not an assurance, and that neither is a detection — holds here
+    unchanged, because these are those sentences.
+
+    Args:
+        planned_with_external_content: The value the binding records.
+
+    Returns:
+        The sentence for whichever of the two recorded states the call carries.
+    """
+    if planned_with_external_content:
         return (
             "material this assistant selected, which includes a record marked as "
             "resting on recorded external content"
@@ -6750,6 +7025,244 @@ def _confirm(_confirmation: Confirmation) -> bool:
     action before prompting, so rendering here too would show it twice (I/O; §6).
     """
     return typer.confirm("Proceed?", default=False)
+
+
+# --- rendering the audit trail (ADR-0186 §7, §8) ----------------------------
+# A history row is not a question, and that difference is the whole of this
+# block. ADR-0178 §7's content obligations are **borrowed** rather than restated,
+# so the same helpers render the same facts here as on a confirmation card; what
+# is added is the two things a record needs that a question does not — a third
+# origin state (ADR-0184 §2), and a bar on presenting a ruling as an event.
+
+
+def _decision_headline(outcome: PermissionOutcome) -> str:
+    """What the ruling said, in one word (ADR-0186 §7, §8).
+
+    **Past tense, and about the ruling rather than about the call.** §8's third
+    clause bars presenting a decision as a transmission — the trail "bounds
+    resolutions and not executions", so a resolved ``ALLOW`` says a call was
+    permitted and says nothing about whether, or how many times, it ran. "Sent"
+    beside an ``ALLOW`` is the specific regression this wording exists against, and
+    it is the one a status column reaches for first.
+
+    **A ``CONFIRM`` is a question that was asked, and is never resolved by this
+    line** (§7's fifth clause). Whether it was answered is a *different row*, which
+    may lie outside a bounded page, so nothing here renders one as denied, as
+    allowed, as expired or as awaiting anything.
+
+    Total over the enum through :func:`~typing.assert_never`, so a fourth outcome
+    would fail the type check rather than render as an empty headline.
+    """
+    match outcome:
+        case PermissionOutcome.ALLOW:
+            return "[green]allowed[/]"
+        case PermissionOutcome.DENY:
+            return "[red]refused[/]"
+        case PermissionOutcome.CONFIRM:
+            return "[yellow]asked[/] [dim](a question put to you)[/]"
+    assert_never(outcome)
+
+
+def _recorded_origin_line(binding: EgressBinding | OriginUnrecordedBinding) -> str:
+    """The call's origin in **three** states, none rendered as any other (ADR-0186 §7).
+
+    The two recorded states are :func:`_origin_line`'s, unchanged — a history row
+    says the same thing about a recorded origin that the confirmation card said.
+    The third is this function's whole reason to exist.
+
+    **The third state is a rendered state and not a rendered absence**, which is
+    ADR-0184 §2's second test read at the surface. The reason
+    :class:`~ai_assistant.core.types.OriginUnrecordedBinding` carries the account,
+    the occurrences and the payload description instead of being a marker is that
+    the row's facts are the user's to read; a surface that then left the origin
+    blank would have thrown away the one thing the value was minted to say. So it
+    is refused as ``False``, as "no", as an empty value, as an omission, and as
+    anything a reader could mistake for either of the other two — it states what
+    happened to the *record*, which is the only honest subject available.
+
+    **Rendered in all three states, for ADR-0181 §6's reason**: a fact shown only
+    when it is alarming is one a user learns to read as an alarm, and its absence as
+    clearance. None of the three is a detection, a score, a risk level or a claim
+    that the call was malicious (ADR-0181 §7, ADR-0186 §8).
+
+    Args:
+        binding: The binding the ruling was taken over, as the row records it.
+
+    Returns:
+        The sentence for whichever of the three states this row is in.
+    """
+    if isinstance(binding, OriginUnrecordedBinding):
+        return (
+            "not recorded — this ruling was made before this assistant kept the "
+            "origin of a call, so the record states nothing either way about the "
+            "material it selected"
+        )
+    return _origin_line(planned_with_external_content=binding.planned_with_external_content)
+
+
+def _recorded_destination_line(member: CanonicalDestination) -> str:
+    """One member of a recorded binding's canonical destination set (ADR-0186 §7).
+
+    :func:`_egress_destination_line` over the type a **binding**'s own derived set
+    carries. The set is read from
+    :attr:`~ai_assistant.core.types.EgressBinding.canonical_destination_set` — as
+    `core` derived it — and this adapter deduplicates nothing, orders nothing and
+    infers nothing, because a second derivation of one fact is business logic in an
+    adapter (golden rule 3) and would put a recipient on screen the ruling was not
+    taken over.
+
+    **The account arm names the identity and never the reference.**
+    :class:`~ai_assistant.core.types.CanonicalDestination` carries the whole
+    :class:`~ai_assistant.core.types.BoundAccount`, and ADR-0148 §6 says the
+    connection reference "is not something an account can be recognised by" and is
+    never shown to the user. So the reduction ADR-0178 §3 performs for a
+    confirmation is performed here too, by this renderer rather than by a type,
+    and for the same reason.
+    """
+    if member.account is not None:
+        return f"the connected account {_safe(member.account.identity)}"
+    return _recipient_line(member.protocol, member.canonical)
+
+
+def _render_recorded_egress(binding: EgressBinding | OriginUnrecordedBinding) -> None:
+    """ADR-0178 §7's content obligations over a recorded binding, in full (ADR-0186 §7).
+
+    :func:`_render_confirmation_egress`'s facts in its order — the connected
+    account's identity, the call's origin, the canonical destination set in both
+    forms, and the payload description — because they *are* the same facts:
+    ADR-0178 §5 builds a ``ConfirmationEgress`` from the recorded decision, so a
+    second wording here would be a second vocabulary to keep in step with the first.
+
+    **The labels are the one thing that changes, and the change is §8's third
+    clause.** A card says where a call is going, because it has not gone; a row says
+    what a ruling was taken over, because the trail bounds resolutions and not
+    executions and no row knows whether anything ran. "Goes to" on a history row
+    would be a transmission claim in two words.
+
+    **Every span, none omitted, none reordered, and none truncated** (§7's
+    last-but-one clause): a surface that cannot render a row whole renders fewer
+    rows, not partial ones, so there is no elision here and no count standing in for
+    an occurrence.
+    """
+    console.print(f"  [bold]Account:[/] {_safe(binding.account.identity)}")
+    console.print(f"  [bold]Planned over:[/] {_recorded_origin_line(binding)}")
+    console.print("  Ruled over these recipients:")
+    for member in binding.canonical_destination_set:
+        console.print(f"    {_recorded_destination_line(member)}")
+    console.print("  Payload described as:")
+    if not binding.spans:
+        console.print("    [dim](the payload description names no span)[/]")
+    for span in binding.spans:
+        console.print(f"    {_egress_span_line(span)}")
+
+
+def _render_decision(decision: PermissionDecision) -> None:
+    """One recorded ruling, whole (ADR-0186 §7).
+
+    **What is rendered is §7's enumeration and the two identifiers that make it
+    legible.** The clause requires the ruling's outcome, its reason, the instant it
+    was decided, and the recorded declaration's own identifier and capability — read
+    from the row and never from a registry, because ADR-0021 §1 embeds the
+    declaration verbatim so that "the trail stays readable without the registry".
+    The decision's own id is rendered beside them because §7's resolution clause
+    obliges an answer to *name* the question it answers, and an id nothing prints is
+    a name nothing can be found by.
+
+    **What is deliberately not rendered is as load-bearing.**
+    :attr:`~ai_assistant.core.types.ToolDefinition.reads`, ``writes`` and
+    ``discloses`` are absent, and their absence is §8's fifth clause rather than an
+    oversight: they are ceilings on what a tool *may* reach, not per-call
+    measurements (ADR-0016 §3), and a tier reach printed beside a recipient list
+    would assert the measurement ADR-0016 §3 declines to offer. Nothing here
+    computes, displays or implies
+    :meth:`~ai_assistant.core.types.PermissionDecision.authorises` either (§8's
+    second clause), and no answer, approve or deny control appears on a row (§8's
+    last): ``pending_confirmations`` and ``resume`` are where a question is
+    answered, and ADR-0184 §8's bar on a confirmation shape for an unrecorded
+    origin binds here as it binds everywhere.
+
+    **The digest is a digest.** It is never labelled as, rendered as or expanded
+    into the payload (§8's fourth clause) — what it does is bind the arguments the
+    ruling was taken over, which is exactly what the record holds and exactly what
+    the line says.
+
+    **A ``None`` binding asserts nothing** (§7's fourth clause). No recipient, no
+    account and no origin is rendered, and none is denied: ``None`` means the
+    request was not an egress call (ADR-0150 §1) and continues to mean exactly that.
+
+    Every value is inserted as data and neutralised for this terminal (§7's last
+    clause, ADR-0042 §4). Being read from an append-only store relaxes nothing:
+    ``reason`` is policy-authored text, a ``supplied`` destination form is a string
+    a model produced, and ``argument`` is a caller-influenced key (ADR-0150 §13).
+    """
+    console.print(
+        f"  {_decision_headline(decision.ruling.outcome)} "
+        f"[dim]{_when(decision.decided_at)}[/] [dim]{_safe(decision.id)}[/]"
+    )
+    console.print(
+        f"  [bold]Tool:[/] {_safe(decision.tool.id)} "
+        f"[dim](capability {_safe(decision.tool.capability)})[/]"
+    )
+    console.print(f"  [bold]Why:[/] {_safe(decision.ruling.reason)}")
+    console.print(
+        f"  [bold]Digest:[/] {_safe(decision.parameters_digest)} "
+        "[dim](binds the arguments this ruling was taken over; they are not "
+        "themselves in the record)[/]"
+    )
+    if decision.resolves is not None:
+        console.print(f"  [bold]Answers the question:[/] {_safe(decision.resolves)}")
+    if decision.egress_binding is not None:
+        _render_recorded_egress(decision.egress_binding)
+    console.print()
+
+
+def _render_decisions(recorded: tuple[PermissionDecision, ...], *, limit: int) -> None:
+    """The bounded listing, and the three things the page itself has to say.
+
+    **Order is the engine's claim about when a ruling was made, and about nothing
+    else** (ADR-0186 §2). It is not insertion order, the two disagree whenever rows
+    are appended out of order, and no position here is a statement about when
+    anything was *done*.
+
+    **Liveness is not derivable from history** (§8's first clause). A row states
+    that a ruling was made — never that it still stands, that a grant is current,
+    that an account is connected, or that a definition is still registered under the
+    identifier the row records. That sentence is printed rather than assumed,
+    because the reader who most needs it is the one treating this list as a
+    permissions screen.
+
+    **A page's silence is a fact about the page** (§7's fifth clause). A resolution
+    may lie outside a bounded page, so an unresolved ``CONFIRM`` on screen is never
+    rendered as denied, as allowed, as expired or as awaiting anything, and the
+    footer says so in the one place a reader would otherwise infer it.
+
+    Args:
+        recorded: The page, in the operation's order.
+        limit: The bound that was asked for, so a full page can say it is one.
+    """
+    if not recorded:
+        console.print("[yellow]Nothing recorded.[/] No ruling has been made yet.")
+        return
+    console.print(f"[bold]{len(recorded)}[/] ruling(s), newest ruling first:\n")
+    for decision in recorded:
+        _render_decision(decision)
+    if len(recorded) == limit:
+        console.print(
+            f"[dim]Showing {limit}. Ask for more with --limit; there is no total "
+            "count, and 'assistant export-decisions' writes the whole record.[/]"
+        )
+    console.print(
+        "\n[dim]Each row is a ruling that was made. It does not say the ruling still "
+        "stands, that a grant is current, that an account is still connected, or that "
+        "the tool is still registered under the identifier above — and it does not say "
+        "the call ever ran: this record bounds what was decided, not what was carried "
+        "out.[/]"
+    )
+    console.print(
+        "[dim]A question and the answer to it are two rows. An answer can fall outside "
+        "this page, so a question with nothing answering it here is a fact about the "
+        "page and not about the question.[/]"
+    )
 
 
 # --- rendering the connection surface (ADR-0151 §4, §5, §7, §8, §9) ----------
@@ -7209,7 +7722,7 @@ def _render_nothing_removed(reference: str) -> None:
     )
 
 
-def _render_error(exc: Exception) -> None:
+def _render_error(exc: Exception, *, to_stderr: bool = False) -> None:
     """Render an error for the terminal, without leaking a traceback.
 
     Accepts any ``Exception`` — an :class:`AssistantError` the hub declined a
@@ -7225,11 +7738,23 @@ def _render_error(exc: Exception) -> None:
     survives to the user rather than being flattened into one message". A user who
     reads "Error:" for a hub that is not running looks for a fault in their
     request; the hub simply is not there.
+
+    **The stream is a parameter because one command's standard output is an
+    artifact** (ADR-0186 §9). ``export-decisions`` writes one JSON document and
+    "nothing else on that stream", so its failures are the one case on this surface
+    where an error message on standard output would corrupt the answer rather than
+    explain it. Every other caller takes the default and writes where it always did.
+
+    Args:
+        exc: The failure to report.
+        to_stderr: Whether to write to standard error instead of standard output.
+            Set by the export path alone.
     """
+    target = error_console if to_stderr else console
     if isinstance(exc, TransportError):
-        console.print(f"[red]The assistant hub is not reachable:[/] {_safe(str(exc))}")
+        target.print(f"[red]The assistant hub is not reachable:[/] {_safe(str(exc))}")
         return
-    console.print(f"[red]Error:[/] {_safe('; '.join(_leaf_messages(exc)))}")
+    target.print(f"[red]Error:[/] {_safe('; '.join(_leaf_messages(exc)))}")
 
 
 def _leaf_messages(exc: BaseException) -> list[str]:
