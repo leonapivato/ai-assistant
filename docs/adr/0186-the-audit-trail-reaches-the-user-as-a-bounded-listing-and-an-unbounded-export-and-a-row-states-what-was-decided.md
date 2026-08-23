@@ -374,8 +374,9 @@ same assets for no gain this milestone can measure.
 > **Normative.** Where the row's `egress_binding` is an `EgressBinding` or an
 > `OriginUnrecordedBinding`, the surface renders ADR-0178 §7's content obligations over
 > it, unchanged and in full: the `account_identity`; every occurrence the `spans` carry,
-> each with the argument it was selected by, whole, none omitted, none truncated
-> silently and none ordered so as to hide one; both destination forms for the
+> each by the argument it was selected by, its position, its provenance and its extent,
+> and its tier where it states one — whole, none omitted, none truncated silently and
+> none ordered so as to hide one; both destination forms for the
 > occurrences that carry a destination and for those only; the canonical destination set
 > **as `core` derived it**, never inferred by the surface and never accepted from the
 > wire as a materialised value; and the payload description. Where the set is the
@@ -609,15 +610,26 @@ differently while both looking correct".
 > recipient, account or origin is rendered; and for an unresolved `CONFIRM`, that it is
 > rendered as neither allowed nor denied.
 
-> **Normative.** The consumer lane ships a rendering test for §7's **second** clause
+> **Normative.** The consumer lane ships a rendering test for §7's first two clauses
 > over **one** row whose binding carries, together: a span with a destination, a span
-> with **none**, and two spans naming one recipient by two arguments. It asserts the
-> account identity; each span's own argument, position, provenance and extent; both
-> destination forms for the span that carries one and neither for the span that does
-> not; the `core`-derived canonical set read from the value rather than recomputed; the
-> payload description; and the row's outcome, reason, instant and recorded tool
-> identifier. A listing that rendered only the deduplicated set would pass every other
-> test in this section.
+> with **none**, a span stating a `tier`, and two spans naming one recipient by two
+> arguments. It asserts, by enumeration rather than by sampling — the row's outcome, its
+> reason, the instant it was decided, and the recorded `ToolDefinition`'s identifier
+> **and** its capability; the `account_identity`; for **every** span its `argument`, its
+> `index`, its `provenance` and its `extent`, and its `tier` for the span that states
+> one; both destination forms for the span that carries a destination and **neither**
+> form for the span that does not; the `core`-derived canonical set, read from the value
+> rather than recomputed; and the payload description. It asserts in the opposite
+> direction too: that a value carrying markup for the target is neutralised on render
+> (ADR-0042 §4).
+
+**The enumeration is written out because the two rounds that produced it each found one
+more member.** A listing rendering only the deduplicated destination set passes an
+origin-state test, a non-egress test and an export round-trip; one rendering every span
+but not its `tier`, or the tool's identifier but not its `capability`, passes a test
+that names the members it happens to check. Naming every member §7's first two clauses
+require is what makes the obligation checkable by reading the clause against the
+assertions rather than by judging whether enough was asserted.
 
 - **#1485 closes against the consumer lane**, because that is where the trail first
   becomes drivable by a user, which is the gap the issue records.
