@@ -36,6 +36,18 @@
   licensed the one edit made while that ADR stood `Proposed`, and licenses no
   other. ADR-0070 §1's no-rewrite rule now protects ADR-0094's text, and any
   further correction to it is an appended dated note.
+- Note (2026-08-23): **§6's third bullet is discharged —
+  [ADR-0183](0183-the-adversary-writes-the-source-and-a-reader-derives-no-standing-from-what-it-reads.md)
+  is the threat model for the seam.** That bullet recorded that "ADR-0093's §7
+  defences are resource-exhaustion-only and it states no adversary", filed it as
+  **#641**, and noted it was "parked by the project owner rather than decided
+  here". The park is spent: #1427's ruling 2 dispatched it as milestone 23's
+  sibling ADR, and ADR-0181 §9 routed #641's three remaining questions to it under
+  the split ADR-0098 §10 had already adjudicated. **No clause of this ADR
+  changes** — §1's substitution rule, §2's placement, §3's refusal to lower the
+  contract's weight, §4's boundary, §5's list of what it does not touch in
+  ADR-0093, and §6's other three bullets all bind as written. This is ADR-0070
+  §1's appended dated note; the `Status` line is unchanged. Refs #641, #1427.
 
 ## Context
 
