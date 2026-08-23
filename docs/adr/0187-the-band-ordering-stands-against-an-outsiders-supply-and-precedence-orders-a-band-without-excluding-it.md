@@ -378,29 +378,57 @@ foreclosed is only the wrong answer — a floor obtained by over-requesting agai
 estimate of how many records to expect from each band, which is the headroom bet
 ADR-0113 §8 declines and ADR-0112 §7 gates.
 
-### 5. The milestone-23 observation is evidence about the selection, not about the ordering
+### 5. The milestone-23 observation is about the selection, and §4's floor moves it the other way
 
-> **Normative.** No lane, ADR or QA run may cite #1484's item-2 observation — that
-> a send's `planned_with_external_content` reads `True` whenever the store holds an
-> attested record — as evidence about band precedence or about §4's floor. It is a
-> property of the turn's selection, and neither the ordering nor the composition
-> changes it in either direction.
+> **Normative.** #1508's question — what it means that a send's
+> `planned_with_external_content` reads `True` on every card in a deployment with a
+> granted source — is not decided here. No lane may cite §4's floor as a remedy for
+> it, and no lane may cite #1484's item-2 observation as evidence about which band
+> outranks which.
 
-ADR-0181 §2 defines the fact as a disjunction over the turn's selection. One
-attested record anywhere in that selection sets it, `MemoryStore.search` applies no
-relevance threshold (ADR-0128 §1 added none), and `assemble_by_band` reads the
-`ATTESTED` band on every turn. So the value would read `True` under a reversed
-ordering, under a per-band share, and under §4's floor alike — the floor changes how
-*few* derived records a turn can hold, and nothing about whether an attested one is
-present.
+> **Normative.** §4's floor makes that value read `True` **more** often rather than
+> less: where a higher-precedence band would have filled the budget and the
+> `ATTESTED` band would never have been read at all, the floor puts an attested
+> record in the selection and ADR-0181 §2's disjunction is then true of it. The lane
+> implementing §4 states that effect rather than discovering it.
 
-Saying this plainly matters because the observation is the most vivid thing in the
-record and it is about a neighbouring seam. What it is evidence *for* is ADR-0181's
-own revisit trigger, which its Consequences state as "the first evidence that users
-approve egress confirmations without reading them", and which nothing on GitHub
-owned. It is filed as **#1508** rather than folded here: it would be decided by a
-similarity floor on retrieval, by a change to what the line says, or by neither, and
-each of those is a different lane's.
+ADR-0181 §2 defines the fact as a disjunction over the turn's selection, so what
+sets it is an attested record's **presence** in that selection and never its rank
+within it. Two things decide presence. The first is whether the store holds an
+eligible attested record for the query at all, and here there is no filter to fail:
+`MemoryStore.search` applies no relevance threshold, ADR-0128 §1 having moved every
+eligibility predicate before the ranking cut and added none. The second is whether
+the budget reaches the `ATTESTED` band, and that is the composition's — today a
+store with thirty eligible assertions fills `RETRIEVAL_LIMIT` from `ASSERTED` and
+`assemble_by_band` breaks before the attested read is issued, so the value reads
+`False`. Not because nothing external is held: because the budget ran out above it.
+
+That cuts three ways and each is worth stating.
+
+**It is a cost of §4, named rather than left to be found.** A floor that guarantees
+the attested band a slot guarantees the disjunction along with it, wherever the
+store holds an eligible attested record.
+
+**It is not a defence of the ordering.** A reordering *can* move the value — a
+reversal that let a large `DERIVED` band exhaust the budget would suppress the
+attested read exactly as an asserted flood does today — so a claim that band
+precedence never touches it would be false. What is true is narrower and is what §5
+rules: the value is a property of presence, presence is decided by the budget and by
+the absent threshold, and no reordering makes an eligible attested record stop being
+selected in the ordinary case where the budget reaches its band. #1484's observation
+was taken on such a store and is evidence about the missing threshold and about
+ADR-0181's own revisit trigger — "the first evidence that users approve egress
+confirmations without reading them" — and not about which band outranks which.
+
+**And it is not a reason to hold §4.** A `False` bought by never reading the band
+the fact is about is not the disclosure discriminating; it is the disclosure being
+accurate about a selection that omitted the material for an unrelated reason. §4
+makes the value a more faithful report of what the turn was planned over, which is
+what ADR-0181 §2 asks of it.
+
+#1508 is filed rather than folded here: it would be answered by a relevance
+threshold on retrieval, by a change to what ADR-0181 §6's line says or when it is
+shown, or by neither, and each of those is a different lane's.
 
 ### 6. The quantity is #1447's, and this ADR bounds the composition rather than the supply
 
@@ -563,14 +591,19 @@ than it holds; none acquires an exception and none loses one.
 - **The assembler acquires an obligation and a follow-on lane** (§4, §4d). It is
   small, it needs no contract surface, and it is the first bound the system has on
   what an outsider's supply can do to the composition of a turn.
-- **A ratified decision now exists where a docstring was carrying one.**
-  `assemble_by_band`'s one-budget policy was the consumer lane's to take under
-  ADR-0113 §6 and it was taken well; §4 ratifies its shape and adds the one
-  constraint the lane had no input to consider. The next lane that touches the
-  budget reads an ADR rather than reconstructing an argument from a comment.
+- **The budget stops being carried by a docstring.** `assemble_by_band`'s
+  one-budget policy was the consumer lane's to take under ADR-0113 §6 and it was
+  taken well; on acceptance §4 affirms its shape and adds the one constraint the
+  lane had no input to consider. The next lane that touches the budget reads a
+  decision rather than reconstructing an argument from a comment.
 - **The disclosure-noise observation gets an owner** (#1508) instead of living in a
   closed QA issue, and gets it without being mistaken for a retrieval-ordering
   defect (§5).
+- **The egress disclosure fires more often** (§5). §4's floor puts an attested
+  record in the selection where a full higher band would previously have suppressed
+  the read, so `planned_with_external_content` reads `True` in cases that used to
+  read `False`. That is the fact reporting the selection more faithfully rather than
+  a regression, and it makes #1508 slightly more pressing rather than less.
 - **What does not get better.** A turn's context can still be dominated by material
   an outsider chose; §4 bounds the derived band's exclusion and bounds nothing else.
   The supply itself is #1447's, and this ADR deliberately does not let the floor be
