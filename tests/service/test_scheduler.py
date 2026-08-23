@@ -42,6 +42,7 @@ from ai_assistant.core.config import EmbedderKind, Settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.core.protocols import AssistantEngine
 from ai_assistant.core.types import GrantScope
+from ai_assistant.orchestration.consolidation import ConsolidationReport
 from ai_assistant.orchestration.engine import ENGINE_SHUTTING_DOWN, Engine
 from ai_assistant.readers import CALENDAR_READER_NAME, EMAIL_READER_NAME
 from ai_assistant.service.scheduler import Job, Scheduler, jobs_for
@@ -935,49 +936,132 @@ async def test_a_job_calling_a_closing_engine_gets_the_shared_message(tmp_path: 
     assert isinstance(engine, Engine)
 
 
-async def test_consolidation_is_not_armable_while_its_in_chunk_deadline_is_open(
+async def test_the_consolidation_job_is_absent_until_an_operator_arms_it(
     tmp_path: Path,
 ) -> None:
-    """ADR-0111 §4: the arming path is withheld, not merely defaulted off (#820).
+    """ADR-0111 §11 and §4, from both sides — and the pair is the unit (#820, #1487).
 
-    §4's second clause makes a per-operation deadline "a precondition of being
-    chunked at all", and a consolidation chunk's writes reach the ``Embedder``
-    through ``MemoryStore.write_atomic`` with no deadline. A disabled default is
-    ADR-0083 §7's instrument for a job that *may* be armed; §4's bar is stricter —
-    the configuration must not be reachable — so there is no row and no setting.
+    §4's second clause made a per-operation deadline "a precondition of being
+    chunked at all", and a chunk's writes reached the ``Embedder`` through
+    ``MemoryStore.write_atomic`` with none — so until ADR-0118 the configuration was
+    withheld rather than defaulted off, which is a stricter bar than ADR-0083 §7's
+    disabled default. That deadline landed, and §11 leaves the arming itself to "an
+    implementation lane's act against this text once ratified".
 
-    Asserted rather than left to prose, because the lane that closes #820 adds both
-    back and this is what tells it the pair is the unit: a row without the setting
-    arms nothing, and a setting without the row is a config field that lies.
+    Both directions are asserted because honouring one alone is a plausible mistake
+    in either: a row without the setting arms nothing, and a setting without the row
+    is a config field that lies — which is the state #1487 found live, where the
+    stage was wired, the operation callable, and no path in a running hub reached
+    it.
+
+    **The row is last, and that is asserted rather than incidental.** Every job is
+    due at the first tick and this is the one bounded by a budget rather than by its
+    backlog, so a position earlier in the table would put up to one
+    ``scheduler_run_budget`` between a boot and the retention purge that follows it.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        assert "consolidation" not in {job.name for job in jobs_for(engine, Settings())}
-        assert not hasattr(Settings(), "consolidation_interval")
+        assert Settings().consolidation_interval is None
+        unarmed = jobs_for(engine, Settings())
+        assert "consolidation" not in {job.name for job in unarmed}
+
+        armed = jobs_for(engine, Settings(consolidation_interval=timedelta(hours=6)))
+        assert [job.name for job in armed] == [
+            "retention_purge",
+            "conversation_sweep",
+            "notification_reconsider",
+            "consolidation",
+        ]
+        assert armed[-1].interval == timedelta(hours=6)
+        # By identity, not by name: ADR-0083 §8's "every job is a bound public
+        # engine method", and ADR-0111 §1's cursor stays below the façade because
+        # the body takes no argument and this row neither reads it nor passes it.
+        assert armed[-1].run == engine.consolidate
     finally:
         await engine.aclose()
 
 
-async def test_the_consolidation_engine_operation_runs_against_an_empty_store(
+async def test_the_consolidation_job_can_be_disabled_but_never_by_zero(
     tmp_path: Path,
 ) -> None:
-    """The composition wiring, exercised rather than assumed.
+    """ADR-0083 §7's convention, inherited unchanged by ADR-0111 §11's new row.
 
-    ``Engine.consolidate`` refuses when no stage is wired (ADR-0022 §4a's shape),
-    so a composition root that failed to build one would raise here rather than
-    report an empty success. Called on the façade rather than through ``jobs_for``,
-    because no row arms it yet — which is exactly what makes this the case that
-    keeps the wiring honest in the meantime. An empty store needs no model call, so
-    this stays offline and deterministic while crossing every seam the job uses.
+    "Off" and "as fast as possible" cannot be confused by a value. The hazard is
+    the loop's for every row — a completion-scheduled job with a zero interval is
+    due again the instant it finishes — and it is worse for this one than for the
+    purge that clause was written against, because a run of this job spends a model
+    call per chunk rather than only a transaction.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
-        report = await engine.consolidate()
+        disabled = jobs_for(engine, Settings(consolidation_interval=None))
 
-        assert report.exhausted is True
-        assert report.examined == 0
+        assert "consolidation" not in {job.name for job in disabled}
     finally:
         await engine.aclose()
+
+    with pytest.raises(ValidationError):
+        Settings(consolidation_interval=timedelta(0))
+
+
+async def test_the_armed_consolidation_row_runs_on_the_real_loop(
+    tmp_path: Path,
+) -> None:
+    """#1487's gap closed end to end: the loop reaches ``Engine.consolidate``.
+
+    The composition root has always built the stage and the façade has always
+    exposed the operation — ``Engine.consolidate`` refuses when no stage is wired
+    (ADR-0022 §4a's shape), so a root that failed to build one raises here rather
+    than reporting an empty success. What nothing exercised is the leg between: that
+    a hub whose operator set an interval actually runs it. That is the whole of
+    #1487, whose finding was that in a deployed hub this producer could not run at
+    all, so the property it is measured on held vacuously.
+
+    Driven through the row ``jobs_for`` builds rather than through a hand-made
+    :class:`Job`, so the thing under test is the table's own body. Two ticks are
+    awaited, and the signal is raised only once the body has returned, for
+    ``test_the_armed_job_ingests_a_granted_source_and_reports_completion``'s reason
+    exactly.
+
+    An empty store needs no model call — ``walk_records`` answers with no position
+    and the run is exhausted before a chunk exists — so this stays offline and
+    deterministic while crossing every seam the job uses.
+    """
+    settings = Settings(embedder=EmbedderKind.HASHING, consolidation_interval=_TICK)
+    engine = build_engine(settings, data_dir=tmp_path)
+    armed = next(job for job in jobs_for(engine, settings) if job.name == "consolidation")
+    twice = asyncio.Event()
+    reports: list[ConsolidationReport] = []
+    attempts = 0
+
+    async def counting() -> object:
+        nonlocal attempts
+        try:
+            report = await armed.run()
+        finally:
+            attempts += 1
+            if attempts >= 2:
+                twice.set()
+        assert isinstance(report, ConsolidationReport)
+        reports.append(report)
+        return report
+
+    try:
+        with structlog.testing.capture_logs() as captured:
+            await _drive(Scheduler([_job("consolidation", counting)]), until=twice)
+    finally:
+        await engine.aclose()
+
+    assert not [entry for entry in captured if entry["event"] == "hub_scheduler_job_failed"], (
+        _events(captured)
+    )
+    completed = [entry for entry in captured if entry["event"] == "hub_scheduler_job_completed"]
+    assert len(completed) >= 2, _events(captured)
+    assert {entry["job"] for entry in completed} == {"consolidation"}
+    # The run's own disposition, so a job that was absorbed as a no-op cannot pass
+    # for one that walked: exhausted, over nothing.
+    assert reports[0].exhausted is True
+    assert reports[0].examined == 0
 
 
 def _producer_settings(tmp_path: Path, *, interval: timedelta | None) -> Settings:

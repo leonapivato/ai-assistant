@@ -937,26 +937,44 @@ class Settings(BaseSettings):
             "(ADR-0083 §7, §13); set a duration to enable it."
         ),
     )
-    # **Leg 7's consolidation job has no interval, and its absence is the
-    # decision.** ADR-0111 §4's second clause makes a per-operation deadline "a
+    # **Leg 7's consolidation job, and the precondition its absence used to
+    # enforce.** ADR-0111 §4's second clause makes a per-operation deadline "a
     # precondition of being chunked at all", and its prose is explicit that this
     # "must be checked rather than assumed": "a job whose chunk reaches an
     # operation with no deadline is not a job that may be chunked under this ADR,
     # and its lane owes that operation a deadline before it may be scheduled."
+    # Until that deadline existed the field was withheld rather than shipped with a
+    # `None` default, because a disabled default is ADR-0083 §7's instrument for a
+    # job that *may* be armed, while §4's bar is stricter: the configuration must
+    # not be reachable at all.
     #
-    # A consolidation chunk's model call is bounded by `model_timeout_seconds`, but
-    # its writes reach the `Embedder` through `MemoryStore.write_atomic`, and that
-    # runs in a worker thread with no deadline — so a hung backend holds ADR-0083
-    # §7's serial loop past any run budget. Shipping the field with a `None` default
-    # would leave that configuration one setting away, which is the arming path §4
-    # forbids rather than the disabled default ADR-0083 §7 permits.
+    # **The check now comes out bounded, which is what admits the field.** A
+    # chunk's model call is bounded by `model_timeout_seconds`; its writes reach
+    # the `Embedder` through `MemoryStore.write_atomic`, and that seam carries
+    # `embedding_timeout_seconds` since ADR-0118 — applied by the composition root
+    # at the single wiring point every consumer goes through (§2), so no unbounded
+    # embedder is wired into anything the hub can reach. That was #820, and closing
+    # it is what ADR-0111 §11 left to "an implementation lane's act against this
+    # text once ratified".
     #
-    # The job itself lands: `Engine.consolidate` and its stage are wired and
-    # tested. What is withheld is the way to schedule it. **#820 owns the deadline,
-    # and the lane that closes it adds this field back** — which is ADR-0111 §11's
-    # "enabling any job the scheduler ships disabled is an implementation lane's act
-    # against this text once ratified", with the precondition made structural rather
-    # than documentary.
+    # **Disabled by default, and for none of observation's reasons.** Observation
+    # ships off because it has no durable cursor, so a periodic run re-reads the
+    # same window and buys repeated cost with no new coverage; consolidation has
+    # one — ADR-0111 §1's walk position, advanced strictly after each chunk's
+    # effects — so an armed run resumes rather than repeats. What the default
+    # expresses instead is that this job spends a model call per chunk and is the
+    # first *chunked* job on ADR-0083 §7's serial loop, so arming it is a decision
+    # about cost and about a sibling's worst-case delay (one run budget plus one
+    # chunk) that a fresh install must not make by omission.
+    consolidation_interval: _OptionalDuration = Field(
+        default=None,
+        gt=timedelta(0),
+        description=(
+            "How often the hub distils stored records into durable beliefs, one bounded "
+            "run per tick (ADR-0083 §7, ADR-0111 §4). Disabled by default; set a "
+            "duration to enable it, and 'none' to disable it again. Never 0."
+        ),
+    )
 
     # --- What bounds one chunked run (ADR-0111 §4) -----------------------
     # Two bounds doing different jobs, neither substituting for the other. The
