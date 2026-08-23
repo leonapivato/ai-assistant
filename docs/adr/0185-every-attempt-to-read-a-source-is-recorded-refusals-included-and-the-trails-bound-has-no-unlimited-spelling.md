@@ -169,9 +169,12 @@ whether a source may be read.
 > source for one use: the act that begins when the driver asks `SourceGrants.live`
 > and ends when the driver has taken one of the six outcomes below. A driver writes
 > exactly one record per attempt it takes to an outcome, whether or not anything was
-> opened, and never a second. The attempt's recorded instant is the one §12 fixes —
-> when that first call **answered**, not when it was made, because `live()` may
-> suspend.
+> opened, and never a second.
+
+> **Normative.** The record carries **no instant for the attempt's beginning**. The
+> one instant it holds is `checked_at`, which §12 fixes as the moment the first
+> grant check **resolved** — `live()` may suspend, so the two differ, and no
+> consumer reads `checked_at` as the instant the driver asked.
 
 > **Normative.** Every attempt that reaches an outcome reaches exactly one of
 > `ReadOutcome`'s six members: `COMPLETED`, `REFUSED`, `UNANSWERED`, `FAILED`,
@@ -587,8 +590,8 @@ in Alternatives considered.
 > conditioned on a record's `source`, `use`, `outcome`, `grant` or `produced`.
 
 > **Normative.** "Earliest-recorded" is the order of `record` calls, and never
-> `started_at`. `recent` returns records in reverse order of recording. No
-> implementation derives either order by comparing `started_at` values.
+> `checked_at`. `recent` returns records in reverse order of recording. No
+> implementation derives either order by comparing `checked_at` values.
 
 **The cap is a row count rather than a duration, and that is the whole point.** Every
 other retention figure in `Settings` is a duration, and each governs a store whose
@@ -625,14 +628,14 @@ oldest-first horizon removes nothing anybody chose. It is also ADR-0004 §6's ow
 provision, which requires "retention rules (e.g. TTLs, size caps) so data does not
 accumulate indefinitely" — a sentence written about exactly this hazard.
 
-**Ordering by recording rather than by `started_at` is where the first
+**Ordering by recording rather than by `checked_at` is where the first
 implementation would go wrong, and ADR-0097 §4 supplies the reason in reverse.**
 That section deliberately refused a timestamp invariant because `decided_at` is
 caller-supplied and the store reads no clock, so "a host clock corrected backwards
 … makes every truthfully-timestamped revocation refusable"; it then refused a
 monotonic sequence on the ground that "no decision here rests on order". Here a
 decision *does* rest on order — the prune — so the same premises reach the opposite
-conclusion. A prune keyed on `started_at` after a backwards clock correction deletes
+conclusion. A prune keyed on `checked_at` after a backwards clock correction deletes
 the rows it just wrote, and the trail loses precisely the recent history it exists
 for. Recording order is available without new state: ADR-0083 §10 makes the hub "the
 only process that opens the … databases", so the sequence of `record` calls is
@@ -768,8 +771,8 @@ alone, origin included
 > answers the other's half.
 
 > **Normative.** "Reconstructible" means, for a read, that the trail alone yields
-> the source's declared identity, the use, the instant the attempt started, its
-> outcome, whether the source was opened where §1 determines it, the grant it ran
+> the source's declared identity, the use, the instant its grant check resolved,
+> its outcome, whether the source was opened where §1 determines it, the grant it ran
 > under where there was one, and how many items the reading carried. It does **not**
 > mean the content of the read, and no lane may report the milestone met on the
 > strength of a trail that carries any. It also does not mean what the *use* did
@@ -825,7 +828,7 @@ no key, and the exit test does not ask them to.
 > attempts, fewer than the cap, across all three uses and both readers, including at
 > least one of each of `ReadOutcome`'s six members, and reconstructs each one from
 > `export()` alone with no other store consulted. Every driver runs on a controlled
-> clock, and the arm asserts each record's `started_at` against the instant that
+> clock, and the arm asserts each record's `checked_at` against the instant that
 > clock served when the first `live()` answered — on a `live()` made to suspend
 > across a clock tick, so a lane that read the clock before the call fails here, and
 > on a read whose bytes are acquired later, so a lane that reached for
@@ -915,11 +918,15 @@ unexercised while the milestone closed on four green figures.
       nothing is normalised; `Identifier` is deliberately **not** used, and #667 is
       the open divergence that choice inherits.
     - `use: GrantScope` — which of the three uses the attempt was for.
-    - `started_at: UtcInstant` — the instant the attempt started, read from the
-      driver's injected clock immediately after the first `live()` answers or raises
-      and before `Reader.read()`. ADR-0097 §5 makes the answer and the start of the
-      read one synchronous step, so one instant is truthful for both. Timezone-aware
-      and refused naive.
+    - `checked_at: UtcInstant` — the instant the first grant check **resolved**, by
+      answering or by raising, read from the driver's injected clock immediately
+      after that and before `Reader.read()`. ADR-0097 §5 makes the answer and the
+      start of the read one synchronous step, so one instant is truthful for the
+      resolution and for the read's start alike. Timezone-aware and refused naive.
+      **Named for what it records rather than for the attempt**, because the two are
+      not the same instant: an attempt begins when the driver asks, `live()` may
+      suspend, and a field called `started_at` would then be a claim about a moment
+      the record does not hold.
     - `outcome: ReadOutcome` — §1's ruling, one of six.
     - `grant: DurableIdentifier | None` — required with no default; the
       `SourceGrant.id` the attempt ran under, `None` exactly on `REFUSED` and
@@ -995,10 +1002,10 @@ unexercised while the milestone closed on four green figures.
 > **Normative.** Every driving site takes an **injected clock** as a required
 > constructor argument with no default, stored as `checked_clock(now, owner=…)` on
 > ADR-0026 §2's rule, as `ClockContextSource` and `UpcomingEventStage` already store
-> theirs. No implementation reads a module clock, and none derives `started_at` from
+> theirs. No implementation reads a module clock, and none derives `checked_at` from
 > `SourceReading.read_at`.
 
-> **Normative.** `started_at` is read from that clock **immediately after the first
+> **Normative.** `checked_at` is read from that clock **immediately after the first
 > `live()` call answers or raises**, and on the authorised path immediately before
 > `Reader.read()`. Reading a clock is synchronous, so it stands inside the one step
 > ADR-0097 §5 requires of the answer and the read rather than adding an `await`
@@ -1024,7 +1031,7 @@ collaborators. For the first two a lane reaching for `datetime.now()` at the cal
 site is the path of least resistance, and it would make §11's deterministic arms
 untestable.
 
-> **Normative.** This clause does not touch ADR-0132 §4. `started_at` is **not** the
+> **Normative.** This clause does not touch ADR-0132 §4. `checked_at` is **not** the
 > instant a candidate was noticed; it anchors no selection, no validation and no
 > expiry, and `UpcomingEventStage` continues to anchor everything §4 governs on the
 > reading's own `read_at`. No lane cites this ADR toward a second anchor in the
@@ -1110,7 +1117,7 @@ widely?
 - **ADR-0132 §4.** §12 requires `UpcomingEventStage` to read the clock it already
   holds, once, for an audit stamp. §4's clause is about "the instant a candidate was
   **noticed**" and about selection and validation being "evaluated against one
-  instant, not two"; `started_at` is none of those three, and §12 states that
+  instant, not two"; `checked_at` is none of those three, and §12 states that
   normatively. A reader holding only ADR-0132 acts identically: anchor everything §4
   governs on `read_at`. What moves is a *test* standing in for that clause through a
   zero-call counter, which §12 names and tells the lane how to tighten. No record is
