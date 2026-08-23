@@ -101,6 +101,21 @@ const TERMINAL_KINDS = new Set(["outcome", "fault"]);
 // what was wrong was the sentence, and this is the correction.
 let conversationId = storedConversation();
 
+// How many times the selection has been changed by anything other than a turn's own
+// answer. A turn carries the count it was sent under, and the conversation the hub
+// names is adopted only if that count still stands.
+//
+// **Without it the owner's act loses a race to a slow answer.** Ask under `C`, then
+// press "Start a new conversation" while that request is still out: the selection
+// clears, the answer arrives, and `renderOutcome` puts `C` back — so the next question
+// continues the thread the owner had just, explicitly, left. The Ask button is
+// disabled for the duration and this control is not, deliberately: leaving a thread is
+// not something to make the owner wait for. Adversarial review found it on round 4.
+//
+// It is the questions listing's own device (`runs`) and the confirmations listing's
+// (`pendingRun`), at the third place in this file where two acts race over one value.
+let chose = 0;
+
 // Whether a delivery stream is open. One at a time: a second would be a second poll
 // the hub would close under ADR-0131 §2, and the gateway holds one poll however
 // many streams watch it (ADR-0175 §4).
@@ -137,7 +152,7 @@ function forgetHeaderHalf() {
   // The conversation goes with the session, in one place rather than at each of the
   // callers: a thread carried into a session the owner started afresh would be this
   // page continuing something the hub was never asked to continue.
-  setConversation(null);
+  changeConversation(null);
 }
 
 function storedConversation() {
@@ -153,6 +168,15 @@ function storedConversation() {
 // **"None yet" is said rather than left blank.** The hint used to be empty until a
 // turn came back, and an empty line is what left the owner unable to tell a fresh
 // thread from a continued one on the phone.
+// Every route that changes the selection **except** a turn's own answer: the owner
+// leaving a thread or continuing one, a session starting or ending, and a selection
+// the gateway has told this page is stale. Each of them outranks an answer that was
+// already in flight, and bumping the count in one place is what says so.
+function changeConversation(id) {
+  chose += 1;
+  setConversation(id);
+}
+
 function setConversation(id) {
   conversationId = id;
   try {
@@ -187,7 +211,7 @@ function setConversation(id) {
 // would drop the owner's thread on any refusal at all.
 function startFresh() {
   fault(null, "console");
-  setConversation(null);
+  changeConversation(null);
   el("utterance").focus();
 }
 
@@ -471,7 +495,7 @@ function refused(panelId, body, status) {
 // it.
 function conversationLost(body, sent) {
   if (body.fault === "no-such-conversation" && conversationId !== null && sent === conversationId) {
-    setConversation(null);
+    changeConversation(null);
   }
 }
 
@@ -503,7 +527,7 @@ async function* streamValues(response) {
   }
 }
 
-function renderOutcome(outcome) {
+function renderOutcome(outcome, chosenAt) {
   const body = el("answer-body");
   clearNode(body);
   if (outcome.capture_degraded) {
@@ -539,7 +563,11 @@ function renderOutcome(outcome) {
   // conversation), and the last known id is then kept rather than cleared: the
   // hub decides which conversation a turn ran under, and forgetting one on an
   // answer that names none would silently start a new one on the next question.
-  if (outcome.conversation_id) {
+  // `chose === chosenAt` is the owner not having chosen since this turn was sent.
+  // Where they have, the hub's answer is still rendered whole — it is only the
+  // *selection* that is not moved, because moving it would undo an act the owner took
+  // after asking.
+  if (outcome.conversation_id && chose === chosenAt) {
     setConversation(outcome.conversation_id);
   }
   show("answer", true);
@@ -895,6 +923,9 @@ async function answerConfirmation(token, approved) {
   // Claimed before the first `await`, so two clicks in one turn of the event loop —
   // the two rows of one park, or one row twice — cannot both get past the guard.
   spent.add(token);
+  // A resumed park answers with a turn outcome exactly as an ask does, so it carries
+  // the same count for the same reason.
+  const chosenAt = chose;
   let body = null;
   try {
     body = await relay(half, "/confirmation/resume", { token, approved }, "confirmations");
@@ -911,7 +942,7 @@ async function answerConfirmation(token, approved) {
     spent.delete(token);
     return;
   }
-  renderOutcome(body.outcome);
+  renderOutcome(body.outcome, chosenAt);
   // Read again, and **after** the guard on this token has done its work rather than
   // inside it: this is the best-effort tidy-up of what is left on screen, and no other
   // park's answer waits on it.
@@ -940,7 +971,7 @@ async function startSession(event) {
     return;
   }
   el("bootstrap-value").value = "";
-  setConversation(null);
+  changeConversation(null);
   if (!rememberHeaderHalf(body.header_half)) {
     fault("This browser will not store the session, so it cannot hold one.", "bootstrap");
     return;
@@ -982,6 +1013,9 @@ async function ask(event) {
   }
   const button = el("ask-button");
   button.disabled = true;
+  // Read before the request goes out, so that what is compared on the way back is the
+  // selection this turn was sent under and not the one it is landing into.
+  const chosenAt = chose;
   try {
     const asked = { utterance: el("utterance").value };
     if (conversationId !== null) {
@@ -997,9 +1031,9 @@ async function ask(event) {
     // ADR-0173 §7 refuses the same fallback one layer in. A second attempt is the
     // owner asking again, visibly.
     if (el("stream-answer").checked) {
-      await askStreaming(half, asked);
+      await askStreaming(half, asked, chosenAt);
     } else {
-      await askWhole(half, asked);
+      await askWhole(half, asked, chosenAt);
     }
   } catch (_) {
     // `fetch` rejects when the connection itself failed — the gateway is gone,
@@ -1011,7 +1045,7 @@ async function ask(event) {
   }
 }
 
-async function askWhole(half, asked) {
+async function askWhole(half, asked, chosenAt) {
   const response = await fetch("/ask", {
     method: "POST",
     headers: admitted(half, true),
@@ -1019,7 +1053,7 @@ async function askWhole(half, asked) {
   });
   const body = await readBody(response);
   if (response.ok) {
-    renderOutcome(body.outcome);
+    renderOutcome(body.outcome, chosenAt);
     return;
   }
   show("answer", false);
@@ -1036,7 +1070,7 @@ async function askWhole(half, asked) {
 // sequence and the terminal reply disagree, what stands is the terminal reply. No
 // accumulated chunk sequence is kept, and none is treated as the record of what the
 // assistant said.
-async function askStreaming(half, asked) {
+async function askStreaming(half, asked, chosenAt) {
   const response = await fetch("/ask/stream", {
     method: "POST",
     headers: admitted(half, true),
@@ -1095,7 +1129,7 @@ async function askStreaming(half, asked) {
     refused("console", terminal, response.status);
     return;
   }
-  renderOutcome(terminal.outcome);
+  renderOutcome(terminal.outcome, chosenAt);
 }
 
 // --- notifications, in the open page and by no other means (ADR-0175 §9) -----
@@ -1360,7 +1394,7 @@ function renderConversation(list, summary) {
   resume.type = "button";
   resume.textContent = "Continue";
   resume.addEventListener("click", () => {
-    setConversation(summary.id);
+    changeConversation(summary.id);
     el("utterance").focus();
   });
   const forget = document.createElement("button");
@@ -1404,7 +1438,7 @@ async function forgetConversation(id) {
       return;
     }
     if (conversationId === id) {
-      setConversation(null);
+      changeConversation(null);
     }
     await listConversations();
   } catch (_) {
