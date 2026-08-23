@@ -181,8 +181,13 @@ terminal running the gateway or any other on that machine:
 kill -SIGUSR1 3941204
 ```
 
-The process id is on the last line of every disclosure the gateway makes. A fresh
-value appears on the gateway's own terminal:
+The process id is on the last line of every disclosure the gateway makes — and
+that line is also the gateway's offer to do this at all. A gateway that could not
+install the act prints no such line and says so at start; sending the signal to
+one of those can stop it and end every session with it, so if the line is absent,
+do not. [`first-run.md`](first-run.md)'s *When it does not work* is that case.
+
+A fresh value appears on the gateway's own terminal:
 
 ```text
 Assistant gateway listening on http://127.0.0.1:8422,

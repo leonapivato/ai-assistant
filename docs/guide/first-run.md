@@ -211,6 +211,14 @@ Nothing restarts and nothing is logged out: a browser that already has a session
 keeps it. That is also how a **second** browser joins a running gateway, which is
 the last step of [`phone.md`](phone.md).
 
+> **Send it only when the gateway offered it.** `For another value: kill -SIGUSR1
+> …` is printed by a gateway that can perform the act, and left out entirely by
+> one that cannot — the line is the offer, and its absence is the refusal
+> (ADR-0182 §1). Such a gateway also says so at start, in a note that tells you
+> whether `SIGUSR1` is now harmless or would **stop the gateway and end every
+> session with it**. So: no line, no signal. Restart it instead, and see *When it
+> does not work* below.
+
 Three things about that act, and none of them is incidental.
 
 - **It is a signal, not a command and not a URL.** Every process on this machine
@@ -265,7 +273,7 @@ Reloading the page does **not** end a session. The browser holds the session
 across a reload, so a refresh costs you nothing. **Closing the browser** is a
 different matter: half of the session is a cookie that does not outlive the
 browser, so the next launch needs a fresh bootstrap value even if the gateway
-never stopped. Again: the signal, not a restart.
+never stopped. Again: step 7's mint act, not a restart.
 
 ## Stopping
 
@@ -299,16 +307,20 @@ gateway prints its own. (Once you have done [`phone.md`](phone.md) the wording
 changes a little, because there are then two listeners on that port and either
 could be the one refused.)
 
-**`This gateway could not install the mint act …`**, printed at start. It is
-serving normally and every browser it admits is fine, but `kill -SIGUSR1` will
-not get you a second value — restarting it is how you get one. Read the whole
-line: it says whether `SIGUSR1` has been made safe to send (set to ignored) or
-whether sending it would stop the gateway.
+**`This gateway could not install the mint act …`**, printed at start, and no
+`For another value:` on its disclosures. It is serving normally and every browser
+it admits is fine, but it can mint nothing further — **restarting it is the only
+way to another bootstrap value**, and that ends every session it is holding. Read
+the whole line before you do anything else: it says either that `SIGUSR1` has been
+made harmless, or that sending it would stop the gateway and end every session
+with it. In the second case do not send it. This is rare and is not about your
+configuration — it is the gateway being started somewhere it could not take a
+signal disposition.
 
 **Nothing happens in the browser and the page keeps showing *Start a
 session*.** The value was already spent, its ten minutes ran out, a later mint
 replaced it, or the gateway was restarted after it printed. The gateway will not
-say which — a failed exchange discloses only that it failed. Send `SIGUSR1` and
-use the value it prints then.
+say which — a failed exchange discloses only that it failed. Mint a fresh value
+as in step 7 and use that one.
 
 Next, if you want the same page on a phone: [`phone.md`](phone.md).
