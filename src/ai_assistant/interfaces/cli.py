@@ -2257,19 +2257,29 @@ async def _run_the_gateway(settings: Settings, engine: AssistantEngine) -> None:
     first-run path (#1436).
 
     **The errno is carried into the message rather than replaced by it**, for the
-    reason it was left raw. The address comes with it, from the operating system's
-    own text, because this adapter cannot tell which of the two listeners refused —
-    both bind ``gateway_port`` (ADR-0174 §2 gives the remote one no port of its
-    own), and only the bind knows which one got there. The port is named from the
-    settings as well, so that it is stated even where an errno's text does not
-    carry it.
+    reason it was left raw, and the address comes with it from the operating
+    system's own text: this adapter cannot tell which of the two listeners refused,
+    since both bind ``gateway_port`` (ADR-0174 §2 gives the remote one no port of
+    its own) and only the bind knows which one got there.
+
+    **What it must not do is name a cause it cannot see**, which is why the catch
+    is wide and the *claim* is narrow. The bind is not the only thing under this
+    ``await`` that raises ``OSError``: ``run_gateway`` reads the front-end bundle
+    off the installed distribution (``packaged_bundle``), may stat an overlay
+    agent's socket, and the remote listener probes an ephemeral port before it
+    binds ``gateway_port`` at all. Adversarial review found on the first round that
+    calling all of those "could not bind port 8422" points an operator at the wrong
+    subsystem and at a setting that is not the cause. Narrowing the catch would
+    take a distinction only ``interfaces/gateway/server.py`` can draw, so
+    :func:`_listener_refused` states the port and the remedy for the one errno that
+    *is* about the port, and reports the rest as what they are.
 
     Args:
         settings: The loaded configuration.
         engine: The hub, as the promoted ``AssistantEngine``.
 
     Raises:
-        ConfigurationError: If a listener could not be bound. The category is this
+        ConfigurationError: If the gateway could not start. The category is this
             adapter's boundary rather than a claim that a setting is malformed —
             the same conversion :func:`_disclose_bootstrap` already makes of the
             ``OSError`` from a standard output that will not take the value.
@@ -2282,36 +2292,44 @@ async def _run_the_gateway(settings: Settings, engine: AssistantEngine) -> None:
             report=_report_gateway_note,
         )
     except OSError as exc:
-        raise _listener_refused(exc, port=settings.gateway_port) from exc
+        raise _gateway_did_not_start(exc, port=settings.gateway_port) from exc
 
 
-def _listener_refused(exc: OSError, *, port: int) -> ConfigurationError:
-    """One line for a gateway listener the operating system would not give us.
+def _gateway_did_not_start(exc: OSError, *, port: int) -> ConfigurationError:
+    """One line for a gateway the operating system would not let start.
 
-    The in-use case gets the act that fixes it, because it is the one a stranger
-    following ``docs/guide/first-run.md`` actually hits — most often a gateway they
-    forgot was running. Every other errno gets no advice invented for it: the
-    kernel's own refusal is the fact, and pointing at a setting that is not the
-    cause would be worse than pointing at nothing.
+    A taken port is the case a stranger following ``docs/guide/first-run.md``
+    actually hits — most often a gateway they forgot was running — and
+    ``EADDRINUSE`` is the one errno that says so by itself, whichever listener
+    raised it. Only that branch names ``gateway_port`` and the act that frees it.
+
+    Everything else gets the kernel's own refusal and nothing invented on top,
+    because this boundary cannot see which part of the start failed (see
+    :func:`_run_the_gateway`): naming the port for an unreadable asset bundle or an
+    agent socket would be a confident answer to a question that was not asked.
 
     Args:
-        exc: What the bind raised.
-        port: ``gateway_port``, named whether or not ``exc`` carries it.
+        exc: What the start raised.
+        port: ``gateway_port``, named only where the errno is about a port.
 
     Returns:
         The error :func:`_serve_gateway`'s boundary renders and exits non-zero on.
     """
-    advice = (
-        "something else already holds it — most often another gateway — so stop that, "
-        "or set ASSISTANT_GATEWAY_PORT to a free port"
-        if exc.errno == errno.EADDRINUSE
-        else "that is the operating system's own refusal rather than a setting this "
-        "system checks, so the errno above is what to act on"
-    )
+    if exc.errno == errno.EADDRINUSE:
+        cause = (
+            f"could not bind port {port}: {exc}. something else already holds it — most "
+            f"often another gateway — so stop that, or set ASSISTANT_GATEWAY_PORT to a "
+            f"free port"
+        )
+    else:
+        cause = (
+            f"could not start: {exc}. that is the operating system's own refusal rather "
+            f"than a setting this system checks, so the errno above is what to act on"
+        )
     msg = (
-        f"the gateway could not bind port {port}, so it is not serving and admitted no "
-        f"browser: {exc}. {advice}. Any bootstrap value it printed above is already "
-        f"dead — it ceased with this process (ADR-0182 §2)"
+        f"the gateway {cause}. It is not serving and admitted no browser, and any "
+        f"bootstrap value it printed above is already dead — it ceased with this "
+        f"process (ADR-0182 §2)"
     )
     return ConfigurationError(msg)
 
