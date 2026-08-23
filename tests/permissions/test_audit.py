@@ -1256,7 +1256,7 @@ async def test_a_base_exception_from_the_worker_reaches_the_caller() -> None:
         await _run_to_completion(aborts)
 
 
-# --- ADR-0181's dated record: a row recorded before the origin field ----------
+# --- A row recorded before ADR-0181's origin field ----------------------------
 # Kept in one block so a rebase across another lane's edits moves it whole.
 
 
@@ -1312,14 +1312,17 @@ async def _record_as_legacy(trail: SqliteAuditTrail, recorded: PermissionDecisio
 async def test_a_row_recorded_before_the_origin_field_still_decodes(
     ephemeral: SqliteAuditTrail,
 ) -> None:
-    """ADR-0181's dated record, first arm: legible history rather than a trail that fails whole.
+    """First arm: legible history rather than a trail that fails whole.
 
     ``EgressBinding`` is a stored member of ``PermissionDecision`` and ADR-0181 §3
     makes ``planned_with_external_content`` required with no default, so a row
     written before that field existed no longer satisfies the model. Reported as
     corruption it would take the whole trail down for one row — ``export`` is a
-    single ``AuditError`` away from unreadable — which is why the record decided the
-    row decodes.
+    single ``AuditError`` away from unreadable — which is why this store reads it
+    instead. How a store reads a row it cannot fully validate is the store's own,
+    argued in ``permissions/audit.py`` beside its neighbouring rule for a corrupted
+    row and pinned here; ADR-0181 settles only that the missing value may not be
+    supplied.
 
     The binding is **omitted** from the projection, and that is forced rather than
     chosen: no ``EgressBinding`` value can be built without inventing the field, and
@@ -1341,7 +1344,7 @@ async def test_a_row_recorded_before_the_origin_field_still_decodes(
 async def test_a_park_rebuilt_from_a_row_without_an_origin_is_refused_by_name(
     ephemeral: SqliteAuditTrail,
 ) -> None:
-    """ADR-0181's dated record, second arm: an unresumable park, refused under its name.
+    """Second arm: an unresumable park, refused under its name.
 
     ``pending_confirmation`` is the one reader whose answer a caller *rebuilds a
     park from*, so it is where unresumability is enforced. Handing the decoded row
@@ -1370,7 +1373,7 @@ async def test_a_park_rebuilt_from_a_row_without_an_origin_is_refused_by_name(
 async def test_a_row_carrying_the_origin_round_trips_unchanged(
     ephemeral: SqliteAuditTrail,
 ) -> None:
-    """ADR-0181's dated record, third arm: nothing changes for a row written by this build.
+    """Third arm: nothing changes for a row written by this build.
 
     The branch above is reached only by the one legacy shape, so a current row
     decodes with its binding whole **and** its park is still answerable. Without
