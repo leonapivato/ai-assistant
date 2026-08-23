@@ -2184,6 +2184,51 @@ def test_a_non_positive_reconciler_bound_is_rejected_at_load(bound: int) -> None
         Settings(reconciler_max_conflicts=bound)
 
 
+def test_the_read_trail_cap_defaults_to_two_hundred_thousand_rows() -> None:
+    """ADR-0185 §6's figure, named in the ADR rather than left to this lane.
+
+    §6 states it and its arithmetic: "the default is **200,000 rows**, and the
+    admissible range is every strictly positive integer below ``2**63``". At
+    ADR-0139 §6's five-minute read interval that is about 1.9 years of one
+    ``(source, use)`` stream, or about 7 months if four such streams ran at that
+    cadence — long enough that a revocation made last year is still answerable, and
+    bounded whatever happens.
+
+    Pinned because the *magnitude* is the decision: a cap two orders of magnitude
+    lower would answer "was this source read after I revoked it" for a fortnight and
+    then silently stop, which is the failure ADR-0139 §6's growth-bound clause was
+    written to prevent from the other direction.
+    """
+    assert Settings().source_read_trail_max_rows == 200_000
+
+
+@pytest.mark.parametrize("cap", [0, -1])
+def test_a_read_trail_cap_with_no_meaning_is_refused_at_load(cap: int) -> None:
+    """ADR-0185 §6: no sentinel, no ``none``, no zero, no negative.
+
+    **The absence of an unlimited spelling is the mechanism** that discharges
+    ADR-0139 §6's growth-bound clause — a figure this store accepted ``'none'`` for
+    would be "append and see" with a config key. Refused **at load** rather than at
+    the first prune, on ADR-0077 §1's rule as ADR-0093 §5 quotes it: "A setting the
+    store read would refuse must fail at load, not at the first observation."
+    """
+    with pytest.raises(ValidationError):
+        Settings(source_read_trail_max_rows=cap)
+
+
+def test_the_read_trail_cap_has_no_unlimited_spelling() -> None:
+    """``'none'`` is the escape ``trace_retention`` and ``notification_retention`` offer.
+
+    It is deliberately not offered here (ADR-0185 §6), and the refusal is asserted
+    rather than argued: the two neighbours accept it, so a reader could reasonably
+    assume this one does too, and a lane adding a ``BeforeValidator`` that mapped it
+    to ``None`` would reintroduce the unbounded Tier 1 store ADR-0097 §12 objected
+    to without touching a single normative sentence.
+    """
+    with pytest.raises(ValidationError):
+        Settings(source_read_trail_max_rows="none")  # type: ignore[arg-type]  # the subject
+
+
 def test_a_boolean_reconciler_bound_is_rejected_at_load() -> None:
     """``bool`` is an ``int`` subclass, and every bound the field carries admits the 1.
 

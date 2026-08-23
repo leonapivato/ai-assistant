@@ -18,6 +18,7 @@ implementation exhibits any of them.
 from __future__ import annotations
 
 import ast
+import contextlib
 import inspect
 import textwrap
 from datetime import UTC, datetime, timedelta
@@ -31,11 +32,12 @@ from ai_assistant.context import (
     ClockContextSource,
     ContextSource,
 )
-from ai_assistant.core.errors import ContextError, GrantError
+from ai_assistant.core.errors import ContextError, GrantError, ReaderError, ReadTrailError
 from ai_assistant.core.types import (
     CalendarFacet,
     ContextFacet,
     GrantScope,
+    ReadOutcome,
     SourceGrant,
     SourceReading,
 )
@@ -536,3 +538,108 @@ async def test_the_rest_of_the_context_survives_a_failing_calendar() -> None:
 
     assert context.now == _NOW
     assert context.calendar is None
+
+
+# --- ADR-0185 §5: the attempt is recorded, before the facet is contributed ----
+
+
+@pytest.mark.parametrize(
+    ("outcome", "arrange"),
+    [
+        pytest.param(ReadOutcome.COMPLETED, "granted", id="completed"),
+        pytest.param(ReadOutcome.REFUSED, "ungranted", id="refused"),
+        pytest.param(ReadOutcome.UNANSWERED, "unanswerable", id="unanswered"),
+        pytest.param(ReadOutcome.FAILED, "failing", id="failed"),
+        pytest.param(ReadOutcome.DISCARDED, "revoked-mid-read", id="discarded"),
+    ],
+)
+async def test_every_attempt_leaves_one_row_naming_its_outcome(
+    outcome: ReadOutcome, arrange: str
+) -> None:
+    """ADR-0185 §1: one row per attempt, whatever became of it.
+
+    The ``FACET`` path is the one ADR-0139 §6's Context quotes to show what was
+    missing: this module's own comment used to say that a reading discarded across a
+    revocation left nothing behind. The ``DISCARDED`` case below is that comment
+    made false.
+    """
+    reader = _reader(_facet()) if arrange != "failing" else _reader(failure=OSError("gone"))
+    recorder = FakeSourceReadRecorder()
+
+    with contextlib.suppress(GrantError, ReaderError):
+        await _source(reader, _arranged(arrange), recorder).contribute()
+
+    (row,) = recorder.written
+    assert row.outcome is outcome
+    assert row.source == reader.name
+    assert row.use is GrantScope.FACET
+
+
+def _arranged(arrange: str) -> FakeSourceGrants:
+    """The grant seam each of the five arrangements needs."""
+    if arrange == "ungranted":
+        return FakeSourceGrants()
+    granted = _granted()
+    if arrange == "unanswerable":
+        granted.fail_live()
+    elif arrange == "revoked-mid-read":
+        granted.revoke_after(1)
+    return granted
+
+
+async def test_the_row_is_written_before_the_facet_is_contributed() -> None:
+    """ADR-0185 §5's ordering clause, and its fail-closed consequence.
+
+    "Where the recorder raises, the driver discards the reading: … no facet is
+    contributed, and the ``ReadTrailError`` is reported to the driver's own failure
+    posture (ADR-0008 §4 on the facet side)." So the fault reaches the assembler,
+    which degrades this one source and leaves the field absent — the same end every
+    optional-source fault has, which is exactly what ADR-0096 §4 requires of it.
+    """
+    recorder = FakeSourceReadRecorder()
+    recorder.fail_record()
+
+    with pytest.raises(ReadTrailError):
+        await _source(_reader(_facet()), _granted(), recorder).contribute()
+
+    provider = AssemblingContextProvider(
+        [
+            ClockContextSource(now=lambda: _NOW),
+            _source(_reader(_facet()), _granted(), recorder),
+        ],
+    )
+    context = await provider.assemble()
+
+    assert context.calendar is None
+    assert context.now == _NOW
+
+
+async def test_the_recorded_instant_is_the_clock_and_never_the_reading() -> None:
+    """ADR-0185 §12: ``checked_at`` is the injected clock's, read after the check.
+
+    Never :attr:`SourceReading.read_at`, which ADR-0093 §10 captures "at the moment
+    the source's bytes are acquired" — later than the instant this record is about,
+    and absent altogether on a refused attempt.
+    """
+    recorder = FakeSourceReadRecorder()
+
+    await _source(_reader(_facet()), _granted(), recorder).contribute()
+
+    (row,) = recorder.written
+    assert row.checked_at == _CHECKED_AT
+    assert row.checked_at != _READ_AT
+
+
+async def test_the_count_is_the_facet_the_reading_carried() -> None:
+    """ADR-0185 §2: ``produced`` counts "its proposals, and its facet where it carried one".
+
+    A facet-only reading is the case that would be silently zero if a driver counted
+    proposals alone — and a zero on a ``COMPLETED`` row means the source had nothing,
+    which is a different statement about the read.
+    """
+    recorder = FakeSourceReadRecorder()
+
+    await _source(_reader(_facet(), proposals=[]), _granted(), recorder).contribute()
+
+    (row,) = recorder.written
+    assert row.produced == 1

@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import contextlib
 import inspect
 import textwrap
 from datetime import UTC, datetime
@@ -30,9 +31,10 @@ from ai_assistant.core.errors import (
     GrantError,
     MemoryStoreError,
     ReaderError,
+    ReadTrailError,
     SourceNotGrantedError,
 )
-from ai_assistant.core.types import DataTier, GrantScope, MemoryDecisionKind
+from ai_assistant.core.types import DataTier, GrantScope, MemoryDecisionKind, ReadOutcome
 from ai_assistant.orchestration import IngestionStage, MemoryWriteStage
 from ai_assistant.testing import (
     FakeDeferralStore,
@@ -742,3 +744,112 @@ def test_no_await_stands_between_the_check_and_the_read() -> None:
         "_record",
         "write_reading",
     ]
+
+
+# --- ADR-0185 §5: the attempt is recorded, before the reading is used --------
+
+
+@pytest.mark.parametrize(
+    ("outcome", "arrange"),
+    [
+        pytest.param(ReadOutcome.COMPLETED, "granted", id="completed"),
+        pytest.param(ReadOutcome.REFUSED, "ungranted", id="refused"),
+        pytest.param(ReadOutcome.UNANSWERED, "unanswerable", id="unanswered"),
+        pytest.param(ReadOutcome.FAILED, "failing", id="failed"),
+        pytest.param(ReadOutcome.DISCARDED, "revoked-mid-read", id="discarded"),
+    ],
+)
+async def test_every_attempt_leaves_one_row_naming_its_outcome(
+    outcome: ReadOutcome, arrange: str
+) -> None:
+    """ADR-0185 §1: one row per attempt, whatever became of it.
+
+    The five ``IngestionStage`` can reach on its own; ``UNCONFIRMED`` needs a grant
+    seam that answers once and then raises, which the canonical fake cannot script
+    and which the exit arms drive through their own gate. Each row names the reader's
+    declared identity, the use the gate was asked about, and the outcome — the three
+    fields ADR-0185 §10 makes a read reconstructible from.
+    """
+    harness = Harness(
+        reader=FakeReader(_proposals(2), read_at=_AT)
+        if arrange != "failing"
+        else FakeReader(failure=OSError("gone")),
+        grants=_arranged(arrange),
+    )
+
+    with contextlib.suppress(GrantError, ReaderError, SourceNotGrantedError):
+        await harness.stage.ingest()
+
+    (row,) = harness.reads.written
+    assert row.outcome is outcome
+    assert row.source == harness.reader.name
+    assert row.use is GrantScope.INGEST
+
+
+def _arranged(arrange: str) -> SourceGrants:
+    """The grant seam each of the five arrangements needs."""
+    if arrange == "ungranted":
+        return FakeSourceGrants()
+    granted = FakeSourceGrants([source_grant(DEFAULT_READER_NAME)])
+    if arrange == "unanswerable":
+        granted.fail_live()
+    elif arrange == "revoked-mid-read":
+        granted.revoke_after(1)
+    return granted
+
+
+async def test_the_row_is_written_before_the_reading_reaches_the_write_stage() -> None:
+    """ADR-0185 §5's ordering clause, and its fail-closed consequence.
+
+    "A driver records the attempt **before** it uses what the read returned. Where
+    the recorder raises, the driver discards the reading: nothing is proposed … and
+    the ``ReadTrailError`` is reported to the driver's own failure posture."
+
+    ADR-0004 §7 conditions *access* on a record of it, so a stage that kept what it
+    read when it could not record the reading has kept Tier 1 data outside the trail
+    its charter puts it in. The assertion is over **memory**, not over the trail:
+    §5's guarantee is about the effects of an unrecorded read.
+    """
+    harness = Harness(reader=FakeReader(_proposals(3), read_at=_AT))
+    harness.reads.fail_record()
+
+    with pytest.raises(ReadTrailError):
+        await harness.stage.ingest()
+
+    assert not (await harness.memory.search("reported thing", limit=10)).records
+
+
+async def test_the_recorded_instant_is_the_clock_and_never_the_reading() -> None:
+    """ADR-0185 §12: ``checked_at`` is read from the injected clock, after the check.
+
+    "No implementation reads a module clock, and none derives ``checked_at`` from
+    ``SourceReading.read_at``." That instant is captured "at the moment the source's
+    bytes are acquired", which is *later* than the instant this record is about — and
+    a refused attempt has no reading to take it from at all.
+    """
+    harness = Harness(reader=FakeReader(_proposals(1), read_at=_AT))
+
+    await harness.stage.ingest()
+
+    (row,) = harness.reads.written
+    assert row.checked_at == _CHECKED_AT
+    assert row.checked_at != _AT
+
+
+async def test_the_count_is_what_the_reading_carried() -> None:
+    """ADR-0185 §2: ``produced`` is the reading's items, not the policy's rulings.
+
+    "It is a property of what the source returned and states nothing about what the
+    use did with it" — so a reading of three proposals the policy rejects outright
+    still records three, which is what makes the row a statement about the *access*.
+    """
+    harness = Harness(
+        reader=FakeReader(_proposals(3), read_at=_AT),
+        policy=FakeMemoryPolicy(MemoryDecisionKind.REJECT),
+    )
+
+    report = await harness.stage.ingest()
+
+    (row,) = harness.reads.written
+    assert row.produced == 3
+    assert report.stored == 0
