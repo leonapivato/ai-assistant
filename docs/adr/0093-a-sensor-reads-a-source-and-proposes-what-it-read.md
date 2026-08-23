@@ -1,6 +1,6 @@
 # 93. A sensor reads a source and proposes what it read; the clock bounds the read, so nothing needs a cursor
 
-- Status: Partially superseded by ADR-0095 (the contract's name and the package its concretes live in) and ADR-0110 (§4's second sentence: an entry absent from a reading that declares the coverage it exhausted)
+- Status: Partially superseded by ADR-0095 (the contract's name and the package its concretes live in) and ADR-0110 (§4's second sentence: an entry absent from a reading that declares the coverage it exhausted) and ADR-0190 (§7's non-configurable-identity clause: a source configured after the first of its type carries a minted discriminator, and the declared name is no longer every source's identity)
 - Date: 2026-08-02
 - Partially superseded: 2026-08-02 by ADR-0095 — **two decisions are replaced and
   nothing else is.** The contract below named `Sensor` is named `Reader`;
@@ -94,6 +94,50 @@
   one is §1's own rule that an amendment *adds* and does not overwrite. The
   earlier note is a dated record of the moment it was written and is left standing
   exactly as written, as is every sentence below both notes. Refs #639, #633.
+- Partially superseded: 2026-08-24 by
+  [ADR-0190](0190-a-configured-source-may-carry-a-minted-discriminator-in-the-identity-its-reader-declares.md)
+  — **§7's non-configurable-identity clause is replaced in one respect, and §7's
+  other rulings, §7a and §7b stand.** §7 rules that a sensor's identity "is
+  **declared by the sensor** and is not a configurable value"; ADR-0190 §1 admits
+  the one shape ADR-0189 §6 specifies, and nothing wider — the **first** source of
+  a reader type a deployment configures may hold that type's bare declared name,
+  and every source of that type configured **after** it carries a discriminator
+  the deployment mints (128 bits, 32 lowercase hexadecimal characters, assigned
+  once at configuration, never changed, never re-used). The **type-name half stays
+  the sensor's**, declared and not configurable; what a deployment supplies is the
+  instance-distinguishing part alone. §7's last sentence, "The calendar sensor's
+  identity is `"calendar"`", is narrowed with it: it holds for the first configured
+  calendar of a deployment that assigned it, and no longer for a `CalendarReader`
+  as such.
+
+  **Everything else §7 decides stands**, and ADR-0190 §2 enumerates it: §7's three
+  surviving identity properties — a stable Tier 2 name, never derived from the
+  source's location or contents, no path, filename, address or account identifier
+  as one **or as any part of one** — bind a discriminated identity exactly as they
+  bind a bare one, and are what makes a minted value admissible rather than an
+  exception to them; and the one-source-by-explicit-`Settings`-fields rule, the
+  interval convention, disabled-by-default, the shape-versus-existence validation
+  split, the non-blocking open, the byte cap on the read itself, the
+  whole-read-off-the-loop rule, the terminable worker, the deadline, the
+  one-outstanding-worker reservation, the no-configurable-display-label clause and
+  "configuration is not a grant" are untouched. §7a's nine figures and its note
+  that the identity is deliberately not among them stay true of the one configured
+  source §7a describes; §7b is untouched; and **§11's registry deferral stands
+  with its trigger unfired** — ADR-0190 removes a gate and builds nothing.
+
+  This is ADR-0070 §1's appended dated note; no ratified text below is rewritten.
+  The `Status` line above gains ADR-0190's pair beside ADR-0095's and ADR-0110's
+  rather than replacing either, in the accumulating form ADR-0070 §4 and
+  `docs/adr/template.md` require, and the scope names no `ADR-NNNN` token. No
+  amendment qualifier is written on that line: ADR-0082 §2 rules that a line led by
+  `Partially superseded by` carries the record in the note alone, and a partial
+  supersession pair is one of ADR-0070 §4's canonical status tokens rather than a
+  qualifier — the same reading the ADR-0110 note above took on this same line.
+  ADR-0190 lands **in the same change as this note**, so this note never names an
+  ADR that does not exist. It deliberately says nothing about whether ADR-0190
+  stands `Proposed` or `Accepted`: the note above drew that distinction and then
+  needed a second note to close it, and there is nothing here for a later note to
+  correct. Refs #1515, #1501, ADR-0189 §6, ADR-0189 §12.
 - **Decides a `core` contract and implements none of it.** Golden rule 5 and
   ADR-0015 §5 put a contract ADR in its own PR, merged before anything implements
   against it. The Protocol, its shared conformance suite and its canonical fake in
