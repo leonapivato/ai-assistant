@@ -114,8 +114,8 @@ socket:
 
 ```text
 audit.db  connections.db  conversations.db  deferrals.db  grants.db
-memory.db  notifications.db  outbox.db  plans.db  traces.db
-hub.lock  hub.sock
+memory.db  notifications.db  outbox.db  plans.db  reads.db
+traces.db  hub.lock  hub.sock
 ```
 
 All of them are `0600`. `hub.lock` is what stops a second hub taking the same
