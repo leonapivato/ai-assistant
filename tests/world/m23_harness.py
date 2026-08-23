@@ -83,10 +83,11 @@ nobody reads it as a finding.
 from __future__ import annotations
 
 import json
+import warnings
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import TYPE_CHECKING, Final, Protocol, cast
+from typing import TYPE_CHECKING, Final, Protocol
 
 from pydantic import SecretStr
 
@@ -146,8 +147,6 @@ from ai_assistant.tools.egress_binder import EgressBindingSeam
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from pathlib import Path
-
-    import pytest
 
     from ai_assistant.core.protocols import ActionPolicy
     from ai_assistant.core.types import MemoryRecord
@@ -781,32 +780,56 @@ def is_forbidden_belief(record: MemoryRecord, *, confirmed_ids: frozenset[str]) 
 # --- reporting --------------------------------------------------------------
 
 
-class _LineWriter(Protocol):
-    """The one method this module needs from pytest's terminal reporter."""
-
-    def write_line(self, line: str, **markup: bool) -> None:
-        """Write one line straight to the terminal, outside pytest's capture."""
+#: Prefixes every reported row, so the figures are self-describing in a warnings
+#: summary and greppable in a CI log.
+FIGURE_BANNER: Final = "ADR-0181 §8 — milestone 23 exit figures"
 
 
-def report(config: pytest.Config, lines: Sequence[str]) -> None:
-    """Write the arm's figures to the terminal, past pytest's output capture.
+def report(lines: Sequence[str]) -> None:
+    """Emit an arm's figures so that the run the gate actually performs shows them.
 
-    ADR-0181 §8 requires that all four figures are *produced* by the run, and a
-    figure that surfaces only on failure is not produced. The idiom is
-    ``tests/memory/aged_store.py``'s, for the reason that module gives: a
-    measurement's rows belong on the terminal rather than in a ``print`` a passing
-    run swallows. A session running without a terminal reporter (``-p no:terminal``,
-    and an xdist worker) simply gets no rows; the assertions are unaffected.
+    ADR-0181 §8 requires all four figures with their denominators, and forbids
+    reporting the milestone met "on a run that did not produce all four figures".
+    So *which channel* is a correctness question rather than a presentation one,
+    and the gate decides it: ``.github/workflows/gate.yml`` runs
+    ``uv run pytest -n auto`` and ``just test-fast`` is xdist too, so the ordinary
+    gate is a parallel run.
+
+    **Which is why this is a warning and not a write to the terminal reporter.** An
+    earlier revision used the terminal reporter, in
+    ``tests/memory/aged_store.py``'s idiom — and that idiom is right for what that
+    module is, an instrument an operator opts into with ``--aged-store-scale``. It
+    is wrong here: an xdist **worker** has no terminal reporter, so under the gate
+    every row was dropped and each arm passed reporting nothing at all.
+    Adversarial review found it on round 7, and running ``pytest tests/world -n
+    auto`` shows it in one line — eighteen passes and not a figure among them.
+    Warnings, by contrast, travel back to the controller in the test report and are
+    rendered in the warnings summary under xdist and serial alike.
+
+    **One warning per arm rather than one per row**, so three lands in the summary
+    rather than fifteen; the rows ride as one multi-line message under
+    :data:`FIGURE_BANNER`.
+
+    **The category is the stdlib ``UserWarning`` and may not be a class defined
+    here.** A custom subclass fails the gate outright, and not by dropping a row:
+    xdist serialises a warning by module and class name and the **controller**
+    re-imports it (``xdist/workermanage.py``'s ``unserialize_warning_message``).
+    This module reaches ``sys.path`` only through pytest's prepend import mode in a
+    *worker*, so the controller raises ``ModuleNotFoundError: No module named
+    'm23_harness'`` inside its own result loop — an ``INTERNALERROR`` that takes the
+    whole run down, not just this file. It was written that way first and the
+    parallel run said so immediately.
+
+    **If a later revision sets ``filterwarnings = ["error"]``, exempt this class.**
+    Nothing in ``pyproject.toml`` sets it today. Were it set, these calls would
+    raise and the arms would fail loudly — which is the safe direction, and the
+    reason this is left plain rather than defended with a local filter that would
+    hide the rows from pytest's own recorder.
 
     Args:
-        config: The session's config, which holds the reporter plugin.
-        lines: The rows to write, in order.
+        lines: The rows to report, in order.
     """
-    writer = cast("_LineWriter | None", config.pluginmanager.get_plugin("terminalreporter"))
-    if writer is None:
-        return
-    for line in lines:
-        writer.write_line(line)
+    warnings.warn("\n".join([FIGURE_BANNER, *lines]), UserWarning, stacklevel=2)
 
 
 def rate(hits: int, total: int) -> str:

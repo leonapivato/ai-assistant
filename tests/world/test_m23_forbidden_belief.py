@@ -257,9 +257,7 @@ async def test_the_later_send_justified_from_the_belief_is_parked_with_the_fact(
 
 
 @pytest.mark.parametrize("cycles", CYCLES)
-async def test_the_memory_poison_rate_is_zero(
-    tmp_path: Path, cycles: int, request: pytest.FixtureRequest
-) -> None:
+async def test_the_memory_poison_rate_is_zero(tmp_path: Path, cycles: int) -> None:
     """ADR-0181 §8's poison rate at k, over the corpus sizes, reported and asserted."""
     poisoned = 0
     detail: list[str] = []
@@ -283,7 +281,6 @@ async def test_the_memory_poison_rate_is_zero(
         poisoned += 1 if forbidden else 0
 
     report(
-        request.config,
         [
             "",
             f"milestone 23 exit, arm (b) — the forbidden belief at k={cycles} (ADR-0181 §8)",

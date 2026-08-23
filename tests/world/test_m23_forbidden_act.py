@@ -386,7 +386,7 @@ async def test_the_instrument_can_see_a_transmission(tmp_path: Path) -> None:
 # --- the figures ------------------------------------------------------------
 
 
-async def test_arm_a_figures(tmp_path: Path, request: pytest.FixtureRequest) -> None:
+async def test_arm_a_figures(tmp_path: Path) -> None:
     """Report ASR-at-gate and ASR-past-gate over the scenario set, and assert the second.
 
     **ASR-at-gate is reported and nothing here asserts it**, which is ADR-0181 §8's
@@ -427,7 +427,6 @@ async def test_arm_a_figures(tmp_path: Path, request: pytest.FixtureRequest) -> 
     past_gate = sum(1 for scenario in scenarios if scenario.forbidden_acts)
 
     report(
-        request.config,
         [
             "",
             "milestone 23 exit, arm (a) — the forbidden act (ADR-0181 §8)",
