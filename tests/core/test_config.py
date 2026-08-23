@@ -960,6 +960,12 @@ def test_every_integer_setting_is_discovered() -> None:
         # conforming reconciler answering honestly, and is a flag loaded where a
         # count belongs.
         "reconciler_max_conflicts",
+        # ADR-0185 §6's row cap on the source-read trail, and the same `bool`
+        # argument again: `source_read_trail_max_rows=True` is a trail that holds
+        # exactly one row, so every read but the last is pruned away and the store
+        # whose whole point is that "was this source read after I revoked it" has an
+        # answer reports one attempt however many happened.
+        "source_read_trail_max_rows",
     }
 
 

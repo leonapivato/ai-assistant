@@ -65,6 +65,15 @@ from ai_assistant.testing.readers import (
     FakeReader,
     attested_proposal,
 )
+from ai_assistant.testing.reads import (
+    DEFAULT_CHECKED_AT,
+    DEFAULT_GRANT_ID,
+    DEFAULT_MAX_ROWS,
+    DEFAULT_READ_SOURCE,
+    FakeSourceReadRecorder,
+    FakeSourceReadTrail,
+    source_read_record,
+)
 from ai_assistant.testing.secrets import (
     DEFAULT_INSTALLATION,
     OTHER_INSTALLATION,
@@ -96,13 +105,17 @@ from ai_assistant.testing.writer import FakeMemoryWriter
 __all__ = [
     "DEFAULT_BATCH_ISSUER",
     "DEFAULT_BATCH_REPLY",
+    "DEFAULT_CHECKED_AT",
     "DEFAULT_DECIDED_AT",
     "DEFAULT_GRANTED_SOURCE",
+    "DEFAULT_GRANT_ID",
     "DEFAULT_INSTALLATION",
     "DEFAULT_MAX_BATCH_SIZE",
     "DEFAULT_MAX_PROPOSALS",
+    "DEFAULT_MAX_ROWS",
     "DEFAULT_OCCURRED_AT",
     "DEFAULT_READER_NAME",
+    "DEFAULT_READ_SOURCE",
     "DEFAULT_STREAM_DELTAS",
     "DEFAULT_STREAM_REPLY",
     "OTHER_INSTALLATION",
@@ -140,6 +153,8 @@ __all__ = [
     "FakeSecrets",
     "FakeSourceGrantStore",
     "FakeSourceGrants",
+    "FakeSourceReadRecorder",
+    "FakeSourceReadTrail",
     "FakeStreamingCompleter",
     "FakeToolImplementation",
     "FakeToolInvoker",
@@ -161,5 +176,6 @@ __all__ = [
     "evaluation_trace",
     "revocation_of",
     "source_grant",
+    "source_read_record",
     "succeeds",
 ]

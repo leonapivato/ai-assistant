@@ -42,6 +42,7 @@ from ai_assistant.testing import (
     FakeDeferralStore,
     FakeReader,
     FakeSourceGrants,
+    FakeSourceReadRecorder,
     source_grant,
 )
 
@@ -260,6 +261,8 @@ async def test_the_ingestion_stage_forwards_the_readers_own_reading(
         # concrete class, so this is the one place a structural double needs saying.
         writes=writes,  # type: ignore[arg-type]  # structural write stage
         grants=FakeSourceGrants([source_grant(scripted.name)]),
+        reads=FakeSourceReadRecorder(),
+        now=lambda: _AT,
     )
 
     await stage.ingest()

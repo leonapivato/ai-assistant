@@ -41,6 +41,7 @@ from ai_assistant.testing import (
     FakeMemoryWriter,
     FakeReader,
     FakeSourceGrants,
+    FakeSourceReadRecorder,
     attested_proposal,
     source_grant,
 )
@@ -62,6 +63,13 @@ if TYPE_CHECKING:
 #: producer's and the store's is ours, and a test that shared one number could not
 #: tell a report echoing the reading from a report echoing the clock.
 _AT = datetime(2026, 3, 4, 10, 0, tzinfo=UTC)
+
+#: The instant the stage's own injected clock serves, and a third distinct number.
+#: ADR-0185 §12 forbids deriving ``checked_at`` from ``SourceReading.read_at`` and
+#: requires it to be read after the first grant check *resolves*, so a case can only
+#: tell a conforming stage from one that reached for the reading's stamp — or for a
+#: store fake's clock — while all three instants differ.
+_CHECKED_AT = datetime(2026, 3, 4, 9, 55, tzinfo=UTC)
 
 
 class _FailingWriter:
@@ -119,6 +127,62 @@ def _awaited_names(func: Callable[..., object]) -> list[str]:
     return [name for _, _, name in sorted(found)]
 
 
+def _leaves_the_function(body: list[ast.stmt]) -> bool:
+    """Whether ``body`` always leaves — its last statement raises or returns."""
+    return bool(body) and isinstance(body[-1], ast.Raise | ast.Return)
+
+
+def _fall_through_awaits(body: list[ast.stmt]) -> list[str]:
+    """The awaited attribute names on the path that reaches the end of ``body``.
+
+    ADR-0185 §5 put four recorder ``await``s into this driver on branches that
+    **raise or return**, so a flat source-order list can no longer say what
+    ADR-0097 §5a's first clause is about. This walks the statements that a single
+    authorised pass actually executes: a ``try`` body counts, its handler counts
+    only where the handler falls through, and an ``if`` branch counts only where it
+    does not leave. What comes back is the sequence the event loop sees on the path
+    where a read really happens — so "no ``await`` between the ``live()`` answer and
+    ``read()``" is readable as two adjacent entries rather than argued from prose.
+    """
+    names: list[str] = []
+    for statement in body:
+        if isinstance(statement, ast.Try):
+            names += _fall_through_awaits(statement.body)
+            names += _fall_through_awaits(statement.orelse)
+            for handler in statement.handlers:
+                if not _leaves_the_function(handler.body):
+                    names += _fall_through_awaits(handler.body)
+            names += _fall_through_awaits(statement.finalbody)
+        elif isinstance(statement, ast.If):
+            if not _leaves_the_function(statement.body):
+                names += _fall_through_awaits(statement.body)
+            if not _leaves_the_function(statement.orelse):
+                names += _fall_through_awaits(statement.orelse)
+        else:
+            names += _awaits_within(statement)
+    return names
+
+
+def _awaits_within(node: ast.stmt) -> list[str]:
+    """Every awaited attribute name inside one statement, in source order."""
+    found: list[tuple[int, int, str]] = []
+    for child in ast.walk(node):
+        if not isinstance(child, ast.Await):
+            continue
+        call = child.value
+        if isinstance(call, ast.Call) and isinstance(call.func, ast.Attribute):
+            found.append((child.lineno, child.col_offset, call.func.attr))
+    return [name for _, _, name in sorted(found)]
+
+
+def _awaited_on_the_authorised_path(func: Callable[..., object]) -> list[str]:
+    """The awaits one authorised, uninterrupted pass through ``func`` performs."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(func)))
+    definition = tree.body[0]
+    assert isinstance(definition, ast.AsyncFunctionDef)
+    return _fall_through_awaits(definition.body)
+
+
 class _FailsOnTheRecheck:
     """A ``SourceGrants`` that answers once and raises from every later ``live``.
 
@@ -149,6 +213,7 @@ class Harness:
         writer: MemoryWriter | None = None,
         policy: FakeMemoryPolicy | None = None,
         grants: SourceGrants | None = None,
+        reads: FakeSourceReadRecorder | None = None,
     ) -> None:
         self.now: datetime = _AT
         self.memory = FakeMemoryStore(now=lambda: self.now)
@@ -172,7 +237,18 @@ class Harness:
         self.grants: SourceGrants = (
             grants if grants is not None else FakeSourceGrants([source_grant(self.reader.name)])
         )
-        self.stage = IngestionStage(reader=self.reader, writes=self.writes, grants=self.grants)
+        # ADR-0185 §5's recorder, held here so a case can read back the row the
+        # stage wrote. The clock it is given is deliberately **not** the reading's
+        # `read_at`: §12 forbids deriving `checked_at` from it, so two instants that
+        # agreed would make the two spellings indistinguishable.
+        self.reads = reads if reads is not None else FakeSourceReadRecorder()
+        self.stage = IngestionStage(
+            reader=self.reader,
+            writes=self.writes,
+            grants=self.grants,
+            reads=self.reads,
+            now=lambda: _CHECKED_AT,
+        )
 
 
 def _proposals(count: int, *, name: str = DEFAULT_READER_NAME) -> list[MemoryUpdateProposal]:
@@ -386,6 +462,8 @@ async def test_a_deferral_the_full_queue_refuses_is_still_counted_as_deferred() 
         reader=harness.reader,
         writes=MemoryWriteStage(writer=harness.writer, deferrals=harness.deferrals),
         grants=harness.grants,
+        reads=harness.reads,
+        now=lambda: _CHECKED_AT,
     )
 
     report = await stage.ingest()
@@ -436,7 +514,11 @@ async def test_a_writer_failure_leaves_the_earlier_proposals_applied() -> None:
     failing = _FailingWriter(harness.real_writer, fail_on=2)
     harness.writes = MemoryWriteStage(writer=failing, deferrals=harness.deferrals)
     stage = IngestionStage(
-        reader=FakeReader(_proposals(3)), writes=harness.writes, grants=harness.grants
+        reader=FakeReader(_proposals(3)),
+        writes=harness.writes,
+        grants=harness.grants,
+        reads=harness.reads,
+        now=lambda: _CHECKED_AT,
     )
 
     with pytest.raises(MemoryStoreError):
@@ -641,4 +723,22 @@ def test_no_await_stands_between_the_check_and_the_read() -> None:
     has already been accepted, so the writes happen on the strength of a read this
     stage was permitted to take.
     """
-    assert _awaited_names(IngestionStage.ingest) == ["live", "read", "live", "write_reading"]
+    assert _awaited_names(IngestionStage.ingest) == [
+        "live",
+        "_record",  # UNANSWERED — the branch re-raises
+        "_record",  # REFUSED — the branch raises
+        "read",
+        "_record",  # FAILED — the branch re-raises
+        "live",
+        "_record",  # UNCONFIRMED — the branch re-raises
+        "_record",  # DISCARDED — the branch raises
+        "_record",  # COMPLETED — before the reading is written (ADR-0185 §5)
+        "write_reading",
+    ]
+    assert _awaited_on_the_authorised_path(IngestionStage.ingest) == [
+        "live",
+        "read",
+        "live",
+        "_record",
+        "write_reading",
+    ]

@@ -81,6 +81,7 @@ from ai_assistant.orchestration.payloads import ENVELOPE_RESERVE_BYTES
 from ai_assistant.permissions import (
     SqliteAuditTrail,
     SqliteSourceGrantStore,
+    SqliteSourceReadTrail,
     ThresholdActionPolicy,
 )
 from ai_assistant.planning import ModelBackedPlanner, SqlitePlanStore
@@ -670,6 +671,32 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # anything done here — "what the driver cannot do is *name* ``record``".
         grants = SqliteSourceGrantStore(path=directory / "grants.db")
         opened.append(grants.close)
+        # ADR-0185's source-read trail — the **eleventh** connection-owning store
+        # and the tenth that is Tier 1, holding what this system *read* where the
+        # store above holds what the user *authorised*. ADR-0139 §6 is explicit that
+        # the second does not discharge ADR-0004 §7's recording half for the first:
+        # "granting is not access". ADR-0083 ruling 4's exclusivity needs nothing new
+        # for it, on ADR-0102 §12's reasoning: it is inside the directory the
+        # instance lock already covers, opened by the same process, and closed in the
+        # same ordered shutdown.
+        #
+        # **One object, passed three times** (ADR-0185 §4): as a
+        # `SourceReadRecorder` to each of the three drivers. Structural typing is
+        # what makes that sound, and the narrowing is the *annotation on the
+        # driver's constructor* rather than anything done here — what a driver
+        # cannot do is name `recent`, which is what keeps ADR-0093 §5's forbidden
+        # cursor out of a sensor's reach. The wide `SourceReadTrail` seam has no
+        # holder yet: the surface that reaches the user is ADR-0186's, and ADR-0185
+        # §12 puts it in its own lane.
+        #
+        # **The cap is the user's configuration and reaches the constructor**, where
+        # it is validated once and read once (ADR-0185 §6). It is a row count rather
+        # than a duration because this store's inflow is a *timer*, and there is no
+        # unlimited spelling for it at either end.
+        reads = SqliteSourceReadTrail(
+            path=directory / "reads.db", max_rows=settings.source_read_trail_max_rows
+        )
+        opened.append(reads.close)
         # The held notifications (ADR-0130 §7, §9). The **eighth**
         # connection-owning store and the seventh that is Tier 1: a candidate
         # carries free text a producer wrote to be shown to a person, so it lives
@@ -789,12 +816,20 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 *(
                     []
                     if facet_reader is None
-                    else [CalendarContextSource(reader=facet_reader, grants=grants)]
+                    else [
+                        CalendarContextSource(
+                            reader=facet_reader, grants=grants, reads=reads, now=_utcnow
+                        )
+                    ]
                 ),
                 *(
                     []
                     if email_facet_reader is None
-                    else [EmailContextSource(reader=email_facet_reader, grants=grants)]
+                    else [
+                        EmailContextSource(
+                            reader=email_facet_reader, grants=grants, reads=reads, now=_utcnow
+                        )
+                    ]
                 ),
             ]
         )
@@ -1099,7 +1134,13 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             calendar_ingestion=(
                 None
                 if ingestion_reader is None
-                else IngestionStage(reader=ingestion_reader, writes=writes, grants=grants)
+                else IngestionStage(
+                    reader=ingestion_reader,
+                    writes=writes,
+                    grants=grants,
+                    reads=reads,
+                    now=_utcnow,
+                )
             ),
             # ADR-0140's ingestion, and the **second source's** stage rather than a
             # second use of the first (ADR-0142 §3). It is a second construction of
@@ -1128,7 +1169,13 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             email_ingestion=(
                 None
                 if email_ingestion_reader is None
-                else IngestionStage(reader=email_ingestion_reader, writes=writes, grants=grants)
+                else IngestionStage(
+                    reader=email_ingestion_reader,
+                    writes=writes,
+                    grants=grants,
+                    reads=reads,
+                    now=_utcnow,
+                )
             ),
             # Leg 10's upcoming-event producer (ADR-0132). **The first holder of
             # ADR-0130 §3's seam**, and the reason `notification_writer` above
@@ -1155,6 +1202,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                     reader=upcoming_reader,
                     grants=grants,
                     writer=notification_writer,
+                    reads=reads,
                     # §1 enumerates a clock among the producer's collaborators, so
                     # it is injected here rather than reached for — the same seam
                     # the grant operations above take, and for ADR-0026's reason.
@@ -1314,6 +1362,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 # The grant store joins the same ordered shutdown as the other five
                 # Tier 1 stores (ADR-0083 ruling 4, ADR-0102 §7).
                 _as_async(grants.close),
+                # And the read trail immediately after it, which is the one ordering
+                # worth naming between the two: a driver holds both, and closing the
+                # recorder first would leave a gated read able to open a source it
+                # could no longer record (ADR-0185 §5). Nothing else constrains it —
+                # no store reads this one and it reads none.
+                _as_async(reads.close),
                 # And the notification store, on the same ordering and for the
                 # same reason (ADR-0130 §9). It is closed **before** the trace
                 # store because it emits nothing into one; what it must outlive is

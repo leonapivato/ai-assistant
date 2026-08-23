@@ -14,9 +14,18 @@ only when — a live grant covers that read. ``EmailContextSource`` is the secon
 from ``_GrantedFacetSource``, which owns ADR-0097 §5a's gate once and takes the
 ``CurrentContext`` field and the facet type it accepts from the concrete class.
 
-Nothing concrete is imported. The reader and the grant seam arrive by injection
-and are seen only through their Protocols (CLAUDE.md golden rule 1), which
-``lint-imports`` enforces literally: no subsystem may import
+**And every attempt to read is recorded** (ADR-0185 §5). This adapter is the
+driver for :attr:`~ai_assistant.core.types.GrantScope.FACET`, so it holds the
+``SourceReadRecorder`` and a clock beside its gate, and writes one row per attempt
+— refused, unanswerable, failed, discarded, unconfirmed or completed — **before**
+it contributes anything. The `FACET` path is the one ADR-0139 §6's Context quotes:
+this module used to say, in its own comment, that a reading discarded across a
+revocation left nothing behind, and that comment is what ADR-0185 exists to make
+false.
+
+Nothing concrete is imported. The reader, the grant seam and the recorder arrive
+by injection and are seen only through their Protocols (CLAUDE.md golden rule 1),
+which ``lint-imports`` enforces literally: no subsystem may import
 ``ai_assistant.readers`` or ``ai_assistant.permissions``.
 """
 
@@ -24,15 +33,18 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar, Protocol, runtime_checkable
+from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
-from ai_assistant.core.errors import ConfigurationError, ContextError
+from ai_assistant.core.errors import ConfigurationError, ContextError, GrantError, ReaderError
 from ai_assistant.core.types import (
     CalendarFacet,
     ContextFacet,
     EmailFacet,
     GrantScope,
+    ReadOutcome,
+    SourceReadRecord,
     TimeOfDay,
 )
 
@@ -40,7 +52,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.protocols import Reader, SourceGrants
+    from ai_assistant.core.protocols import Reader, SourceGrants, SourceReadRecorder
+    from ai_assistant.core.types import SourceReading
 
 
 def _utcnow() -> datetime:
@@ -81,6 +94,22 @@ class ContextSource(Protocol):
     async def contribute(self) -> Mapping[str, object]:
         """Return this source's partial set of ``CurrentContext`` fields."""
         ...
+
+
+def _produced_by(reading: SourceReading) -> int:
+    """How many items ``reading`` carried — its proposals, and its facet if it had one.
+
+    ADR-0185 §2's ``produced``: "the number of items the **reading** carried — its
+    proposals, and its facet where it carried one". A count and never a thing, and
+    a property of what the source returned rather than of what the use did with it.
+    A ``COMPLETED`` zero is a **successful** read of a source that had nothing
+    (ADR-0093 §8).
+
+    Written out here rather than shared with `orchestration`'s two drivers: golden
+    rule 1 forbids one subsystem importing another's module, and a home in ``core``
+    would be a concrete helper on the contract surface.
+    """
+    return len(reading.proposals) + (0 if reading.facet is None else 1)
 
 
 def _time_of_day(hour: int) -> TimeOfDay:
@@ -264,8 +293,15 @@ class _GrantedFacetSource:
     _facet_type: ClassVar[type[ContextFacet]]
     """The one facet type admissible in :attr:`_field`; any other is a wiring bug."""
 
-    def __init__(self, *, reader: Reader, grants: SourceGrants) -> None:
-        """Wire the source from an injected reader and the grant query seam.
+    def __init__(
+        self,
+        *,
+        reader: Reader,
+        grants: SourceGrants,
+        reads: SourceReadRecorder,
+        now: Clock,
+    ) -> None:
+        """Wire the source from a reader, the grant query seam, the recorder and a clock.
 
         Args:
             reader: The producer, holding its own source and its own bound
@@ -279,9 +315,27 @@ class _GrantedFacetSource:
                 by review. Narrow by type as well as by name — a source that could
                 *record* a grant is a source that could authorise its own read, and
                 ``mypy --strict`` refuses to let this one name ``record`` at all.
+            reads: The **write** seam of the read trail, and never a
+                ``SourceReadTrail`` (ADR-0185 §4, §5). Required with no default, on
+                the grant seam's own pattern: a composition that omits the recorder
+                does not type-check, so "every attempt is recorded" is a mechanism
+                rather than a habit. Narrow by type for the *opposite* reason to
+                ``grants``' — a source that could **read** the trail is a source
+                that could ask "when did I last read this, and what did it produce"
+                and skip, which is exactly the cursor ADR-0093 §5 forbids a sensor's
+                bound to be derived from. ``mypy --strict`` refuses to let this one
+                name ``recent``.
+            now: The clock ``checked_at`` is read from, wrapped through
+                :func:`~ai_assistant.core.clock.checked_clock` on ADR-0026 §2's
+                rule. Required with no default (ADR-0185 §12): this adapter held no
+                clock before, and a lane reaching for ``datetime.now()`` at the call
+                site is the path of least resistance that would make §11's
+                deterministic arms untestable.
         """
         self._reader = reader
         self._grants = grants
+        self._reads = reads
+        self._now = checked_clock(now, owner=type(self).__name__)
 
     @property
     def name(self) -> str:
@@ -329,6 +383,14 @@ class _GrantedFacetSource:
         different facts for an operator reading the assembler's log; both end at an
         absent facet, as every optional-source fault does (ADR-0097 §5a).
 
+        **Every attempt leaves one row, and the row is written before the facet is
+        contributed** (ADR-0185 §1, §5). All six of ``ReadOutcome``'s members are
+        reachable here, refusals included — a revoked-but-configured source is the
+        case ADR-0097 §5 named and the one the trail most exists for. Where the
+        recorder raises, the reading is **discarded**: nothing is contributed, and
+        the ``ReadTrailError`` reaches this source's own failure posture, which
+        ADR-0008 §4 makes an absent facet like every other optional-source fault.
+
         Returns:
             ``{self._field: facet}`` when a granted read carried a facet of
             :attr:`_facet_type`, and ``{}`` otherwise — no grant, a grant withdrawn
@@ -343,22 +405,64 @@ class _GrantedFacetSource:
                 error for. It is raised *instead of* contributing, under either
                 this source's field or any other (ADR-0096 §5, ADR-0140 §13).
             GrantError: If the grant store could not answer, before or after the
-                read. Propagated, never converted (above).
+                read. Propagated, never converted (above), and recorded first — as
+                ``UNANSWERED`` before the read and ``UNCONFIRMED`` after it, which
+                ADR-0185 §1 keeps distinct from their answered twins because "there
+                was no live grant" and "we could not find out" are different facts
+                about the user's authorisation.
+            ReadTrailError: If the attempt could not be recorded. Propagated, and
+                nothing is contributed (ADR-0185 §5).
             ReaderError: As the reader raises. Propagated for the same reason: the
                 assembler degrades this source and logs the class, and converting
                 it here would tell an operator the wrong thing about where the
                 fault lives.
+            ClockReadingError: If the injected clock's reading is not a conforming
+                one. A wiring bug, and it degrades this one source like any other
+                fault here (ADR-0026 §4).
         """
         source = self._reader.name
         # The check and the start of the read are one synchronous step: nothing
-        # between this `await` returning and `read()` being called may suspend.
-        if await self._grants.live(source=source, use=GrantScope.FACET) is None:
+        # between this `await` returning and `read()` being called may suspend, and
+        # ADR-0185 §5 puts no recorder `await` in that gap either. Reading the clock
+        # is synchronous, so `checked_at` is captured *inside* the one step.
+        try:
+            granted = await self._grants.live(source=source, use=GrantScope.FACET)
+        except GrantError:
+            # §12: the clock is read immediately after the first check resolves —
+            # "by answering or by raising". A `live()` that suspended and then
+            # raised must not be stamped with an instant from before the call.
+            await self._record(source, self._now(), ReadOutcome.UNANSWERED, None, 0)
+            raise
+        checked_at = self._now()
+        if granted is None:
+            await self._record(source, checked_at, ReadOutcome.REFUSED, None, 0)
             return {}
-        reading = await self._reader.read()
-        # The revocation that landed while the read ran wins: the reading is
-        # discarded whole, and nothing records that it happened.
-        if await self._grants.live(source=source, use=GrantScope.FACET) is None:
+        try:
+            reading = await self._reader.read()
+        except ReaderError:
+            # §1: the read was attempted and raised, and whether the source was
+            # opened is *not determinable* — a reader can refuse before starting
+            # work at all or fail with the bytes in hand, and both cross the seam as
+            # `ReaderError` because ADR-0093 §8 requires it. The row says so by
+            # saying nothing more.
+            await self._record(source, checked_at, ReadOutcome.FAILED, granted.id, 0)
+            raise
+        produced = _produced_by(reading)
+        try:
+            still_granted = await self._grants.live(source=source, use=GrantScope.FACET)
+        except GrantError:
+            await self._record(source, checked_at, ReadOutcome.UNCONFIRMED, granted.id, produced)
+            raise
+        if still_granted is None:
+            # The revocation that landed while the read ran wins: the reading is
+            # discarded whole — and since ADR-0185 the trail records that it
+            # happened, which is ADR-0097 §5a's residual moving from invisible to
+            # recorded.
+            await self._record(source, checked_at, ReadOutcome.DISCARDED, granted.id, produced)
             return {}
+        # Written **before** the reading is used (ADR-0185 §5). `COMPLETED` says the
+        # gate ruled the reading admissible and claims nothing about the use.
+        await self._record(source, checked_at, ReadOutcome.COMPLETED, granted.id, produced)
         # Widened deliberately: `SourceReading.facet` is a union of every concrete
         # facet type (ADR-0096 §5), and this source accepts one member of it. The
         # guard below is what turns the rest into a wiring bug rather than a
@@ -374,6 +478,47 @@ class _GrantedFacetSource:
             )
             raise ContextError(msg)
         return {self._field: facet}
+
+    async def _record(
+        self,
+        source: str,
+        checked_at: datetime,
+        outcome: ReadOutcome,
+        grant: str | None,
+        produced: int,
+    ) -> None:
+        """Append one row for this attempt (ADR-0185 §1, §5).
+
+        The id is minted **here**, by the caller, because ADR-0021 §3 rules that a
+        store neither mints ids nor reads a clock — the same division ``SourceGrant``
+        and ``PermissionDecision`` already keep. It is a fresh ``uuid4`` rather than
+        anything derived from the attempt: two attempts at the same instant for the
+        same source and use are two rows, and a derived id would fold them.
+
+        Args:
+            source: The reader's declared identity, byte for byte (ADR-0185 §2).
+            checked_at: The instant the **first** grant check resolved, whichever
+                outcome this row carries — one attempt, one instant.
+            outcome: How the attempt ended.
+            grant: The grant it ran under, or ``None`` on the two outcomes decided
+                before anything was opened.
+            produced: How many items the reading carried; zero where there is none.
+
+        Raises:
+            ReadTrailError: If the trail refuses the record or cannot be written.
+                Propagated, and the caller contributes nothing.
+        """
+        await self._reads.record(
+            SourceReadRecord(
+                id=uuid4().hex,
+                source=source,
+                use=GrantScope.FACET,
+                checked_at=checked_at,
+                outcome=outcome,
+                grant=grant,
+                produced=produced,
+            )
+        )
 
 
 class CalendarContextSource(_GrantedFacetSource):

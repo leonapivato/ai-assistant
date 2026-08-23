@@ -1304,11 +1304,22 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
 
     Asserted as a file on disk rather than through the object graph, because the
     claim ADR-0102 §12's normative clause makes is about the *directory* — the hub
-    owns eight databases exclusively (ADR-0083 ruling 4), and the sixth obeys that
-    ruling by living inside the directory the instance lock already covers.
+    owns **eleven** databases exclusively (ADR-0083 ruling 4), and the sixth obeys
+    that ruling by living inside the directory the instance lock already covers.
     ADR-0130 §9's notification store is the eighth and obeys it for the same
     reason: inside the directory the instance lock already covers, opened by the
-    same process, closed in the same ordered shutdown.
+    same process, closed in the same ordered shutdown. ADR-0185 §4's read trail is
+    the eleventh, on the same terms.
+
+    **The count in this docstring said "eight" while the list below named ten**,
+    which is exactly the hazard ADR-0123's Context records — "the count in the most
+    authoritative document about the data directory is already wrong by two, and
+    nothing detected it" — and it is wider than that ADR knew. ADR-0185 §12 obliges
+    a lane adding a database to correct every count it touches rather than add to
+    the drift, so the figure above is corrected here. The prose counts in
+    ``service/`` and ``interfaces/`` are outside this lane's fence and are filed as
+    an issue rather than swept in; the **list** below is the assertion that cannot
+    drift, which is why it, and not a number, is what this test turns on.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
@@ -1331,6 +1342,10 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
             # the same free text a producer wrote to be shown to a person.
             "outbox.db",
             "plans.db",
+            # ADR-0185 §4's source-read trail, the eleventh and the tenth that is
+            # Tier 1: a row names the source a read was about and the grant it ran
+            # under, which is the record of an access to the user's own data.
+            "reads.db",
             "traces.db",
         ]
         assert stat.S_IMODE((tmp_path / "grants.db").stat().st_mode) == 0o600

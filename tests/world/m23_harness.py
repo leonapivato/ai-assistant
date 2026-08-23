@@ -131,6 +131,7 @@ from ai_assistant.testing import (
     FakePlanStore,
     FakeSourceGrants,
     FakeSourceGrantStore,
+    FakeSourceReadRecorder,
     FakeStreamingCompleter,
     FakeTraceRetention,
     FakeTraceSink,
@@ -556,6 +557,8 @@ def build_world(
         reader=reader,
         writes=writes,
         grants=FakeSourceGrants([source_grant(CALENDAR_READER_NAME)]),
+        reads=FakeSourceReadRecorder(),
+        now=lambda: NOW,
     )
 
     connector = Connector()
