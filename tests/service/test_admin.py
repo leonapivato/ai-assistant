@@ -27,7 +27,7 @@ from ai_assistant.service.enrolment import (
 )
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
-from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME
+from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, SOCKET_FILENAME
 from ai_assistant.wire.credential import is_well_formed, verifier_for
 from ai_assistant.wire.framing import read_frame, write_frame
 
@@ -419,7 +419,7 @@ async def test_a_hub_that_goes_away_mid_act_is_reported_rather_than_raised(
 
     server = await asyncio.start_unix_server(_hang_up, path=str(socket))
     try:
-        code = await _perform(socket, {"act": "list"})
+        code = await _perform(socket, {"act": "list"}, loopback=tmp_path / SOCKET_FILENAME)
     finally:
         server.close()
         await server.wait_closed()
@@ -449,7 +449,7 @@ async def test_a_reply_that_does_not_decode_is_reported_rather_than_raised(
 
     server = await asyncio.start_unix_server(_gibberish, path=str(socket))
     try:
-        code = await _perform(socket, {"act": "list"})
+        code = await _perform(socket, {"act": "list"}, loopback=tmp_path / SOCKET_FILENAME)
     finally:
         server.close()
         await server.wait_closed()
@@ -460,10 +460,56 @@ async def test_a_device_command_that_finds_no_hub_says_where_it_looked(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Device acts are the running hub's, so "no hub" is the expected answer when it
-    is stopped — and it names the socket and the command that starts one."""
-    code = await _perform(tmp_path / ADMIN_SOCKET_FILENAME, {"act": "list"})
+    is stopped — and it names the socket and the command that starts one.
+
+    Neither socket exists here, which is the state a stopped hub leaves: ADR-0083
+    §4 unlinks the loopback socket at the start of phase A, so nothing answers on
+    either door and the advice to start one is the right advice.
+    """
+    code = await _perform(
+        tmp_path / ADMIN_SOCKET_FILENAME,
+        {"act": "list"},
+        loopback=tmp_path / SOCKET_FILENAME,
+    )
     assert code == EXIT_RESTART
-    assert "ai-assistant-hub" in capsys.readouterr().err
+    printed = capsys.readouterr().err
+    assert "no hub is listening" in printed
+    assert "ai-assistant-hub" in printed
+
+
+async def test_a_device_command_on_a_hub_with_no_remote_listener_says_that_instead(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The other state an absent control socket can be, told apart rather than
+    guessed at (#1441).
+
+    ADR-0124 §2 binds the control socket only where the remote listener is
+    configured on, and binds the loopback socket "whether or not the remote
+    listener is" — so a hub answering on ADR-0084 §1's socket with no ``admin.sock``
+    beside it is a running hub with no remote listener, and the fix is a setting
+    rather than a start. The message must not send the owner to start the hub that
+    is answering the probe, and the code must not say "come back": running this
+    again, unchanged, never succeeds.
+    """
+
+    async def _accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        del reader
+        writer.close()
+
+    loopback = tmp_path / SOCKET_FILENAME
+    server = await asyncio.start_unix_server(_accept, path=str(loopback))
+    try:
+        code = await _perform(tmp_path / ADMIN_SOCKET_FILENAME, {"act": "list"}, loopback=loopback)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert code == EXIT_DEPLOYMENT
+    printed = capsys.readouterr().err
+    assert "ASSISTANT_HUB_REMOTE_ADDRESS" in printed
+    assert str(loopback) in printed
+    assert "no hub is listening" not in printed
+    assert "start it with 'ai-assistant-hub'" not in printed
 
 
 async def test_a_client_that_hangs_up_mid_act_does_not_fault_the_hub(tmp_path: Path) -> None:

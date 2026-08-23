@@ -50,6 +50,7 @@ failed and what the drain had already done.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import os
 import signal
@@ -81,7 +82,7 @@ from ai_assistant.service.scheduler import Scheduler, jobs_for
 from ai_assistant.service.transport import ConnectionBudget, DeliverySlots, Listener
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Sequence
     from pathlib import Path
 
     from ai_assistant.core.config import Settings
@@ -284,7 +285,53 @@ class _Remote:
     admin: AdminListener
 
 
-def main() -> int:
+#: What ``ai-assistant-hub --help`` prints, in the shape the rest of the family
+#: uses (``ai-assistant-device``, ``ai-assistant-reembed``, and the five others).
+_DESCRIPTION = """
+Run the assistant hub: the one resident process that owns a data directory.
+
+It stays in the foreground and writes its log to standard output, so a terminal
+or a supervisor owns its lifetime. SIGTERM and Ctrl-C both mean drain and stop,
+identically. Exactly one hub runs per data directory: a second start finds the
+instance lock held, says so, and exits restartably rather than opening the same
+stores twice.
+
+It takes no arguments. Everything it reads is configuration — the ASSISTANT_*
+environment and this deployment's .env file, with ASSISTANT_DATA_DIR naming the
+directory it owns — so an option here would be a setting with two homes, and a
+flag that lost to the environment without saying so.
+"""
+
+
+def _parse_args(argv: Sequence[str] | None) -> None:
+    """Read the command line, which accepts nothing at all beyond ``--help``.
+
+    **The parser exists because it refuses, not because it collects** (#1437).
+    The hub is configured entirely through ``ASSISTANT_*`` and ``.env``, so there
+    is nothing for a flag to carry; what there was, before this, was a ``main``
+    that parsed nothing — so ``ai-assistant-hub --help`` started a hub, and
+    ``ai-assistant-hub --data-dir /somewhere`` started one against whatever the
+    environment said while appearing to have been told otherwise. Argparse's
+    default refusal of an unrecognised argument is the fix for the second, and is
+    the half that matters.
+
+    Args:
+        argv: The arguments, or ``None`` to read the process's.
+
+    Raises:
+        SystemExit: On ``--help`` (code 0) and on any argument at all (code 2),
+            which is argparse's contract and is what keeps both off the path that
+            opens a data directory.
+    """
+    parser = argparse.ArgumentParser(
+        prog="ai-assistant-hub",
+        description=_DESCRIPTION,
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.parse_args(argv)
+
+
+def main(argv: Sequence[str] | None = None) -> int:
     """Start the hub, run it, and return the process's exit code.
 
     The console script's entry point. It is a *second* console script rather than
@@ -293,16 +340,26 @@ def main() -> int:
     have to import ``service``, and ADR-0083 §8 forbids anything importing
     ``service`` at all.
 
+    **The command line is read before anything else**, ahead of ADR-0083 §3's step
+    1 — which is not a reordering of the startup sequence but a gate in front of
+    it. ``--help`` must answer on a deployment whose configuration does not load,
+    and must not take the instance lock of a hub that is already serving; both
+    follow from refusing before a data directory is named.
+
     The first startup step happens here rather than in :func:`serve` because it
     has to: **loading settings is step 1**, and until it succeeds there is no log
     level to configure logging with. A settings failure is a deployment fault, so
     it is reported and the process stays down (ADR-0083 §3 step 1, §5).
+
+    Args:
+        argv: The arguments, or ``None`` to read the process's.
 
     Returns:
         The process exit code — one of :data:`~ai_assistant.service.exits.EXIT_OK`,
         :data:`~ai_assistant.service.exits.EXIT_RESTART` or
         :data:`~ai_assistant.service.exits.EXIT_DEPLOYMENT`.
     """
+    _parse_args(argv)
     try:
         settings = load_settings()
     except ConfigurationError as exc:

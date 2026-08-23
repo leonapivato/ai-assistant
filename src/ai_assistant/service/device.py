@@ -32,7 +32,7 @@ from ai_assistant.core.config import load_settings
 from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.service.admin import ADMIN_FRAME_BYTES, ADMIN_TIMEOUT, ENROL, LIST, REVOKE
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
-from ai_assistant.wire.address import admin_socket_path
+from ai_assistant.wire.address import admin_socket_path, socket_path
 from ai_assistant.wire.errors import TransportError
 from ai_assistant.wire.framing import read_frame, write_frame
 
@@ -94,15 +94,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     request: dict[str, Any] = {"act": arguments.act}
     if arguments.act in (ENROL, REVOKE):
         request["identity"] = arguments.identity
-    return asyncio.run(_perform(admin_socket_path(settings.data_dir), request))
+    data_dir = settings.data_dir
+    return asyncio.run(
+        _perform(
+            admin_socket_path(data_dir),
+            request,
+            loopback=socket_path(data_dir),
+        )
+    )
 
 
-async def _perform(socket: Path, request: dict[str, Any]) -> int:
+async def _perform(socket: Path, request: dict[str, Any], *, loopback: Path) -> int:
     """Send one act to the hub and render its answer.
 
     Args:
         socket: The hub's control socket.
         request: The act.
+        loopback: ADR-0084 §1's socket, which an absent control socket is
+            diagnosed against — see :func:`_report_no_control_socket`.
 
     Returns:
         The process exit code.
@@ -110,13 +119,7 @@ async def _perform(socket: Path, request: dict[str, Any]) -> int:
     try:
         reader, writer = await asyncio.open_unix_connection(str(socket))
     except FileNotFoundError, ConnectionRefusedError:
-        print(
-            f"device: no hub is listening at {socket}. Device acts are performed by the "
-            f"running hub, because revoking a device closes the connections it holds; "
-            f"start it with 'ai-assistant-hub' and try again.",
-            file=sys.stderr,
-        )
-        return EXIT_RESTART
+        return await _report_no_control_socket(socket, loopback)
     except OSError as exc:
         print(f"device: cannot reach the hub at {socket}: {exc}", file=sys.stderr)
         return EXIT_RESTART
@@ -147,6 +150,86 @@ async def _perform(socket: Path, request: dict[str, Any]) -> int:
         with contextlib.suppress(OSError):
             await writer.wait_closed()
     return _render(reply, request["act"])
+
+
+async def _report_no_control_socket(socket: Path, loopback: Path) -> int:
+    """Say which of the two states an absent control socket is, rather than assuming.
+
+    **The socket's absence is ambiguous and the two states want opposite acts**
+    (#1441). ADR-0124 §2 binds the control socket only where the remote listener is
+    configured on — "a hub with no remote-listener configuration binds only
+    ADR-0084 §1's loopback socket, and the loopback socket is bound whether or not
+    the remote listener is" — so a missing ``admin.sock`` means either that no hub
+    is running, or that one is running and was never configured to admit devices.
+    Reporting the first for both sent an owner to start a hub that was already
+    serving, where the advice either contended for the instance lock or did
+    nothing and produced the identical message on the next try.
+
+    **The same clause supplies the discriminator.** The loopback socket is bound
+    "whether or not the remote listener is", so a hub answering there and no
+    control socket beside it is exactly the second state, with nothing inferred.
+    The instance lock would have been the weaker probe: it is held by the offline
+    tools too (``ai-assistant-reembed`` and the rest), so contention names a
+    directory in use rather than a hub that is serving.
+
+    Args:
+        socket: The control socket that was not there.
+        loopback: ADR-0084 §1's socket, in the same data directory.
+
+    Returns:
+        The process exit code.
+    """
+    if await _hub_is_serving(loopback):
+        # A deployment fault rather than a restartable one, by
+        # :func:`~ai_assistant.service.exits.classify`'s own question: running this
+        # again, unchanged, never succeeds. Nothing is contended and nothing is
+        # draining — the hub is up and is configured not to admit devices, and only
+        # a human changing that configuration moves it.
+        print(
+            f"device: a hub is running here — it answers at {loopback} — but it bound no "
+            f"control socket at {socket}, because it has no remote listener configured. "
+            f"Devices are enrolled in order to arrive on that listener, so a hub without "
+            f"one has no device acts to perform; set ASSISTANT_HUB_REMOTE_ADDRESS, "
+            f"restart the hub, and try again.",
+            file=sys.stderr,
+        )
+        return EXIT_DEPLOYMENT
+    print(
+        f"device: no hub is listening at {socket}. Device acts are performed by the "
+        f"running hub, because revoking a device closes the connections it holds; "
+        f"start it with 'ai-assistant-hub' and try again.",
+        file=sys.stderr,
+    )
+    return EXIT_RESTART
+
+
+async def _hub_is_serving(loopback: Path) -> bool:
+    """Whether a hub is accepting on ADR-0084 §1's socket, asked and answered at once.
+
+    The connection carries no frame and is closed immediately: this is a liveness
+    probe on the door, not a request, and the hub treats a peer that hangs up
+    before the handshake as the ordinary ending rather than a fault
+    (``service/transport.py``). It is bounded by :data:`ADMIN_TIMEOUT` for the same
+    reason every other local exchange here is — a wedged hub must not turn a
+    diagnostic into a hang.
+
+    Args:
+        loopback: Where the hub listens, given the directory it owns.
+
+    Returns:
+        ``True`` if something accepted, ``False`` on any refusal, absence or stall.
+        A ``False`` from a stall is deliberate: a hub that cannot accept inside the
+        timeout is not one this command can perform an act against either.
+    """
+    try:
+        async with asyncio.timeout(ADMIN_TIMEOUT.total_seconds()):
+            _, writer = await asyncio.open_unix_connection(str(loopback))
+    except TimeoutError, OSError:
+        return False
+    writer.close()
+    with contextlib.suppress(OSError):
+        await writer.wait_closed()
+    return True
 
 
 def _render(reply: Any, act: str) -> int:
