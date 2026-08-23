@@ -1515,6 +1515,30 @@ async def test_a_hub_with_no_remote_configuration_removes_a_control_socket_it_wi
     assert not stale.exists()
 
 
+async def test_a_hub_does_not_delete_something_at_that_path_that_is_not_a_socket(
+    settings: Settings, wired: dict[str, list[Any]], engine: FakeEngine
+) -> None:
+    """The cleanup above removes a socket, and only a socket.
+
+    It is opportunistic — nothing depends on it — so it has no standing to delete a
+    file it did not create, and that makes it deliberately stricter than
+    ``AdminListener.start``'s unconditional unlink, which *must* clear the path in
+    order to bind and reports at the bind if it could not. The occupant is left
+    exactly where it is and said out loud; ``ai-assistant-device`` diagnoses the same
+    state in its own words rather than calling it a hub that is still starting.
+    """
+    occupied = settings.data_dir / ADMIN_SOCKET_FILENAME
+    occupied.parent.mkdir(parents=True, exist_ok=True)
+    occupied.write_text("something an operator put here", encoding="utf-8")
+    engine.on_start = _stop_after_start()
+
+    with structlog.testing.capture_logs() as captured:
+        assert await hub.serve(settings) == EXIT_OK
+
+    assert occupied.read_text(encoding="utf-8") == "something an operator put here"
+    assert "hub_admin_socket_path_occupied" in _events(captured)
+
+
 async def test_a_configured_hub_that_cannot_ask_its_agent_stays_down(
     settings: Settings,
     wired: dict[str, list[Any]],
