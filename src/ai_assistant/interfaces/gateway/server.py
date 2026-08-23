@@ -1979,6 +1979,24 @@ class Gateway:
     def _delivery_stream(self, handle: SessionHandle) -> Response | _Streamed:
         """Open one delivery stream, and the poll with the first (ADR-0175 §4).
 
+        **Every delivery stream begins by disclosing the cadence it will be written
+        at** (#1442). §4 obliges a write on every open delivery stream "at least once
+        per ``gateway_notification_budget``", and §8 owns that figure — so silence
+        past a multiple of it is the one thing the keep-alive exists to expose. The
+        browser could not observe that, because the figure is gateway configuration
+        and no value it read carried one: a ``fetch`` that never settled left the page
+        reading "Watching for notifications" with its own control hidden, and ADR-0182
+        §7's announced re-arm could not fire, because §7 re-establishes a stream "only
+        while it holds none".
+
+        **On the stream rather than on the exchange, and the ADRs decide which.**
+        ADR-0168 §5 has the bootstrap exchange "return nothing but the two session
+        values §6 requires", so that body is closed to it; ADR-0175 §2 makes "the exact
+        framing of a value on a stream" this lane's, which is what this is. It adds no
+        request class and no ADR-0177 §6 operation — the stream exists and the page
+        already reads its values — and it is restated on every stream, so a browser
+        never bounds one on a figure some earlier gateway process was configured with.
+
         Returns:
             The stream, or the ceiling refusal where the poll's own hub connection
             would take ``gateway_max_hub_connections`` past its bound (§7).
@@ -1989,7 +2007,12 @@ class Gateway:
         return _Streamed(
             handle=handle,
             head=StreamHead(content_type=streams.MEDIA_TYPE),
-            body=partial(write_stream, stream=opened, frame=_frame),
+            body=partial(
+                write_stream,
+                stream=opened,
+                frame=_frame,
+                opening=streams.opened(self._settings.gateway_notification_budget),
+            ),
             release=partial(self._deliveries.close, opened),
             delivery=opened,
         )

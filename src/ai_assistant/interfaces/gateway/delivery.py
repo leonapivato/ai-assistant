@@ -385,6 +385,7 @@ async def write_stream(
     stream: DeliveryStream,
     *,
     frame: Callable[[Mapping[str, Any]], bytes],
+    opening: Mapping[str, Any],
 ) -> None:
     """Write one delivery stream's values until it ends or is abandoned (§4).
 
@@ -394,11 +395,22 @@ async def write_stream(
     reclaims the connection; without the race the abandonment clause would be a
     decision the gateway made and could not act on.
 
+    **The opening value is written here rather than offered to the stream**, and the
+    difference is §4's one-pending rule. :meth:`DeliveryStream.offer` refuses while a
+    write is outstanding — that refusal *is* the abandonment clause — so a gateway
+    that offered an opening value would race the first delivery against it and could
+    abandon a stream on its own first write. Written straight to the connection ahead
+    of the iteration, it costs the stream's pending slot nothing and cannot be the
+    value a delivery is dropped behind.
+
     Args:
         writer: The connection's writer, already carrying the stream's head.
         stream: The stream to drain.
         frame: How one value becomes bytes on the wire.
+        opening: The value every delivery stream begins with (#1442) — ``streams``'
+            ``OPEN``, carrying the cadence §4 obliges a write within.
     """
+    writer.write(frame(opening))
     async for value in stream.values():
         writer.write(frame(value))
         drained = asyncio.ensure_future(writer.drain())

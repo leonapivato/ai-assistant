@@ -42,12 +42,41 @@
 // owner brings the page back to the foreground or the device's network returns, and
 // **says in the page that it did and why**. That costs nothing: an abandoned delivery
 // stream costs the browser "a reconnect — which is free, because a session outlives
-// its connections" (ADR-0175 §4). There is no `setTimeout` and no `setInterval` here.
+// its connections" (ADR-0175 §4).
+//
+// **There is one clock here and it opens nothing** (#1442). `setInterval` does not
+// appear at all, and the single `setTimeout` bounds how long a delivery stream may
+// say *nothing* before this page abandons it — it ends a stream, restores the
+// owner's own control, and re-establishes nothing. ADR-0182 §7 forbids re-arming "on
+// a timer, on a schedule, or on the failure itself", and re-arming is exactly what
+// this clock does not do: after it fires the page holds no stream, and what opens
+// the next one is one of §7's two events or the owner's click.
 
 "use strict";
 
 const STORAGE_KEY = "assistant.session.header-half";
 const CONVERSATION_KEY = "assistant.session.conversation-id";
+
+// The cadence a delivery stream is written at, as the gateway last disclosed it — a
+// whole number of microseconds, spelled as a decimal string (#1442, ADR-0175 §4, §8).
+//
+// **Held here rather than only in page state, because a stream is armed before it can
+// disclose anything.** The figure arrives as the first value on a delivery stream, so
+// it bounds *that* stream from the moment it lands — but the failure this exists for
+// is a `fetch` that never settles at all, on which no value can arrive, and the first
+// thing `showConsole` does on load is open one. Remembering the last figure this
+// origin disclosed is what bounds the stream a reloaded page opens, and a reload is
+// exactly what an owner does when the notifications panel has stuck. What is left
+// unbounded is the first delivery stream a browser ever opens here and nothing after
+// it, which is stated rather than smoothed over (#1442's own residual).
+//
+// **It is not a session value, and it is not tied to one.** It admits nothing, is
+// spendable against nothing, and ADR-0172 §1's closed class of three values a browser
+// holds is untouched. It is a fact about the gateway at this origin rather than about
+// the session that happened to be current, so `forgetHeaderHalf` does not take it: a
+// session ends whenever the gateway process does, and the cadence a new process
+// discloses replaces this on the next stream that opens.
+const CADENCE_KEY = "assistant.session.notification-cadence";
 const SESSION_HEADER = "X-Assistant-Session";
 
 // Which stream values end a stream (ADR-0175 §2). A reader that reached one has the
@@ -116,6 +145,22 @@ let conversationId = storedConversation();
 // (`pendingRun`), at the third place in this file where two acts race over one value.
 let chose = 0;
 
+// How many disclosed cadences of silence end a delivery stream (#1442).
+//
+// **Derived rather than chosen, which is why there is no second figure to configure.**
+// ADR-0175 §4 obliges the gateway to write on every open delivery stream "at least
+// once per `gateway_notification_budget`" — a delivery where its poll returned one,
+// and otherwise a value carrying nothing but its own kind — so one missed write is
+// within what jitter, a slow overlay hop and a backgrounded tab's throttled timers can
+// each produce on a stream that is perfectly alive. Three is the smallest multiple
+// that survives one late write and still bounds detection to a minute at ADR-0175 §8's
+// twenty-second default. It is a front-end constant and not a `Settings` field on
+// purpose: ADR-0168 §12 leaves the page's own behaviour to the lane that ships it,
+// because the page and the gateway version in one distribution, and a second
+// configurable duration would be a number that can disagree with the one §8 names —
+// which is §8's own argument against a separate heartbeat interval.
+const SILENT_CADENCES = 3;
+
 // Whether a delivery stream is open. One at a time: a second would be a second poll
 // the hub would close under ADR-0131 §2, and the gateway holds one poll however
 // many streams watch it (ADR-0175 §4).
@@ -141,6 +186,47 @@ function rememberHeaderHalf(value) {
   } catch (_) {
     return false;
   }
+}
+
+// The last cadence this origin disclosed, in milliseconds, or `null` where this browser
+// holds none it can use — a browser that has never opened a delivery stream here, or one
+// that will not store.
+function notificationCadence() {
+  try {
+    return usableCadence(window.localStorage.getItem(CADENCE_KEY));
+  } catch (_) {
+    return null;
+  }
+}
+
+// Take the figure a stream just disclosed: store it for the next stream this origin
+// opens, and hand back the milliseconds this one is bounded by. A value this page
+// cannot use is `null` rather than a guess — the stream then runs unbounded exactly as
+// it did before this existed, which is the honest outcome for a gateway that disclosed
+// something unreadable, and it is not written over a figure that *was* readable.
+function adoptCadence(microseconds) {
+  const value = usableCadence(microseconds);
+  if (value === null) {
+    return notificationCadence();
+  }
+  try {
+    window.localStorage.setItem(CADENCE_KEY, microseconds);
+  } catch (_) {
+    // A browser that will not store still bounds this stream; what it loses is the
+    // bound on the first stream a reloaded page opens.
+  }
+  return value;
+}
+
+// One decimal string of microseconds, as milliseconds, or `null` where it is not a
+// figure a deadline can be derived from. The guard is on the *value* rather than on
+// the member's presence: `""`, `"0"` and anything unparseable would each arm a timer
+// that fired at once or never.
+function usableCadence(microseconds) {
+  const value = Number(microseconds);
+  return typeof microseconds === "string" && Number.isFinite(value) && value > 0
+    ? value / 1000
+    : null;
 }
 
 function forgetHeaderHalf() {
@@ -476,6 +562,26 @@ const ANSWER_STREAM_CUT =
   "The connection carrying that answer ended before the gateway finished it. What had " +
   "been written is not the answer and was not kept, so it has been cleared rather " +
   "than left on screen looking like one. A cut stream is asked again, not resumed.";
+
+// A delivery stream this page abandoned because it went quiet, which is an ending the
+// gateway did not name and could not: the whole condition is that nothing arrived
+// (#1442). It is stated as what it is rather than folded into the cut above — a body
+// that ended is the connection going away, and a body that is still open and silent is
+// not, however alike they look from the panel.
+const DELIVERY_STREAM_SILENT =
+  "The connection carrying notifications stopped saying anything, so this browser " +
+  "abandoned it and stopped watching. The gateway writes on an open delivery stream " +
+  "at least once per gateway_notification_budget even when it has nothing to deliver, " +
+  "so a stream silent for several of those is one something has happened to rather " +
+  "than a quiet assistant. Nothing the hub still holds was lost: it is polled only " +
+  "while a browser is watching. Start watching again.";
+
+// The same ending, in the line that carries the control back. Written from the
+// multiple rather than around it, so the number in the sentence cannot drift from the
+// number the deadline is armed with.
+const WENT_SILENT =
+  `Nothing arrived on that stream — not even the gateway's keep-alive — for ` +
+  `${SILENT_CADENCES} times the cadence it disclosed, so it was abandoned.`;
 
 const DELIVERY_STREAM_CUT =
   "The connection carrying notifications ended before the gateway finished it, so " +
@@ -1242,8 +1348,9 @@ function deliveryState(text) {
 // permission is conditional and a lane that met four of five would read as compliant:
 //
 //   1. **Only a delivery stream, and only on an event** — `visibilitychange` and
-//      `online`, never a timer, a schedule, or the failure itself. There is no
-//      `setTimeout` and no `setInterval` in this file.
+//      `online`, never a timer, a schedule, or the failure itself. `rearm` is reached
+//      from those two listeners and from `watchDeliveries`' own `finally`, and from
+//      nowhere else; no clock in this file calls it and none opens a stream.
 //   2. **The attempt and its outcome are both announced**, at the surface the stream
 //      feeds rather than at the page's foot: the attempt in `#delivery-state`, the
 //      outcome either as the stream running on or as `stopWatching` plus a condition
@@ -1312,9 +1419,17 @@ function rearm(because) {
   watchDeliveries(`${because} ${NOTHING_REPLAYED}`);
 }
 
-function stopWatching() {
+// **`because` is the reason this browser stopped, said in the one line that also
+// restores the owner's control** — `deliveryState` un-hides `#watch-button` whenever
+// `watching` is false, so the sentence and the way back arrive together. Every ending
+// the gateway named is explained in the notifications panel beside it; this argument
+// is for the one ending the gateway did not name, because the page reached it on its
+// own (#1442). Omitting it leaves the line as it was before that case existed.
+function stopWatching(because) {
   watching = false;
-  deliveryState("Not watching for notifications.");
+  deliveryState(
+    because ? `Not watching for notifications. ${because}` : "Not watching for notifications."
+  );
 }
 
 function renderNotification(value) {
@@ -1387,9 +1502,77 @@ async function watchDeliveries(because) {
 // The read itself, split out so that the `finally` above wraps the whole of a
 // stream's life — its opening, its ending, and the reporting of that ending — rather
 // than one `try` inside another. Nothing else calls it.
+//
+// **The deadline is the one clock in this file, and what it does is end a stream**
+// (#1442). `fetch` has no deadline of its own, so a socket that dies without settling
+// — a phone whose network went away without an RST, a black-holed connection — left
+// this `await` pending for ever: `watching` stayed true, the panel went on reading
+// "Watching for notifications", `deliveryState` kept `#watch-button` hidden because
+// that is what `watching` means, and reloading the page was the only way back.
+// ADR-0182 §7's announced re-arm could not fire either, because §7 re-establishes a
+// stream "only while it holds none" and this page believed it held one.
+//
+// **What makes a silent stream distinguishable from a quiet one is the gateway's own
+// obligation.** ADR-0175 §4 has it write on every open delivery stream at least once
+// per `gateway_notification_budget` — "a delivery where the poll returned one, and
+// otherwise a value carrying nothing but its own kind" — and §4 spends that keep-alive
+// precisely to make "the liveness of the gateway, of its hub connection and of the
+// browser's own socket observable at a bounded cadence". So silence past a multiple of
+// the disclosed figure is not an assistant with nothing to say; it is the one thing
+// the keep-alive exists to expose, observed at the end it was written for.
+//
+// **The gateway discloses the cadence as the first value on the stream** — `open`,
+// carrying `keep_alive_microseconds`. ADR-0175 §2 leaves "the exact framing of a value
+// on a stream" to this lane, and ADR-0168 §5 closes the other candidate in terms: the
+// bootstrap exchange "returns nothing but the two session values §6 requires", so the
+// figure may not ride that body. It is remembered for this origin, because the failure
+// above is a `fetch` that never settles *at all* — no head, no value, nothing to read a
+// cadence out of — and `showConsole` opens a stream on load, before any other request.
+// So a stream is armed at once from the last figure this origin disclosed, and from the
+// arriving one the moment it lands.
+//
+// **The residual is stated rather than smoothed over.** A browser that has never opened
+// a delivery stream at this origin holds no figure, so its first stream is unbounded
+// until its first value arrives — and if none ever does, that one stream stalls exactly
+// as every stream did before this existed. Every stream after it is bounded, the first
+// after a reload included.
+//
+// **The deadline is restarted by every value that arrives, keep-alive included**, so
+// what it measures is silence and never the stream's total life: a stream delivering
+// notifications for a week is never abandoned by it.
+//
+// **And it re-establishes nothing, which is the clause ADR-0182 §7 turns on.** §7
+// forbids re-arming "on a timer, on a schedule, or on the failure itself" and forbids
+// converting an event-driven re-arm into a retry loop. This ends a stream, says so in
+// the page, and hands the owner back the control §7's last paragraph calls "one
+// control" that "removes the class". What opens the next stream is one of §7's two
+// events or the owner's click, exactly as before — and where an event arrived while
+// this stream was still pending, `watchDeliveries`' `finally` spends the one reason it
+// held, once, which is the owner's own act being honoured rather than a loop.
 async function readDeliveries(half) {
+  const reader = new AbortController();
+  let cadence = notificationCadence();
+  let silent = false;
+  let deadline = null;
+  // Restarted by every value the stream delivers, so the bound is on silence — and
+  // armed only where a cadence is actually known, because a deadline derived from
+  // nothing is a figure this page would have made up.
+  const heard = () => {
+    window.clearTimeout(deadline);
+    deadline =
+      cadence === null
+        ? null
+        : window.setTimeout(() => {
+            silent = true;
+            reader.abort();
+          }, cadence * SILENT_CADENCES);
+  };
+  heard();
   try {
-    const response = await fetch("/deliveries", { headers: admitted(half, false) });
+    const response = await fetch("/deliveries", {
+      headers: admitted(half, false),
+      signal: reader.signal,
+    });
     if (!response.ok) {
       const body = await readBody(response);
       stopWatching();
@@ -1398,6 +1581,14 @@ async function readDeliveries(half) {
     }
     let terminal = null;
     for await (const value of streamValues(response)) {
+      if (value.kind === "open") {
+        // The cadence this stream will be written at, adopted before the deadline is
+        // restarted below, so this stream is bounded by its own gateway's figure and
+        // not by whatever an earlier one disclosed. Remembered for the next stream
+        // this origin opens, which is the one that cannot be told.
+        cadence = adoptCadence(value.keep_alive_microseconds);
+      }
+      heard();
       if (value.kind === "notification") {
         renderNotification(value);
       } else if (TERMINAL_KINDS.has(value.kind)) {
@@ -1406,7 +1597,8 @@ async function readDeliveries(half) {
       }
       // `alive` is the keep-alive and needs no rendering: what it proves is that
       // the gateway, its hub connection and this socket are all still there, which
-      // the absence of an ending already says.
+      // the absence of an ending already says. It restarts the deadline above and
+      // that is the whole of its effect here — which is what §4 spends it on.
     }
     stopWatching();
     if (terminal === null) {
@@ -1415,8 +1607,18 @@ async function readDeliveries(half) {
       report("notifications", terminal, describeDeliveryEnd(terminal, response.status));
     }
   } catch (_) {
-    stopWatching();
-    fault(GATEWAY_GONE, "notifications");
+    // An abort this page asked for is not the gateway having gone, and saying it was
+    // would be a wrong explanation rather than a missing one: the gateway may be
+    // perfectly alive at the other end of a socket that stopped carrying.
+    if (silent) {
+      stopWatching(WENT_SILENT);
+      fault(DELIVERY_STREAM_SILENT, "notifications");
+    } else {
+      stopWatching();
+      fault(GATEWAY_GONE, "notifications");
+    }
+  } finally {
+    window.clearTimeout(deadline);
   }
 }
 

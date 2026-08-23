@@ -926,8 +926,16 @@ def test_the_page_says_whether_it_is_watching_rather_than_retrying_unseen() -> N
 
     assert "watch-button" in document
     assert "delivery-state" in document
-    assert "setTimeout" not in script
+    # No repeating clock at all, and the one `setTimeout` in the file opens nothing:
+    # it ends a stream that has stopped saying anything (#1442) and hands the control
+    # back. A timer that *retried* would be ADR-0168 §9's failure in the page's
+    # clothes; a timer that stops waiting on a socket nothing is coming out of is the
+    # opposite — it is what makes the visible control reachable again.
     assert "setInterval" not in script
+    calls = _timeouts(script)
+    assert len(calls) == 1
+    for opener in ("fetch(", "watchDeliveries(", "rearm(", "readDeliveries("):
+        assert opener not in calls[0], opener
 
 
 def test_the_delivery_stream_is_re_armed_on_two_events_and_on_no_timer() -> None:
@@ -950,8 +958,133 @@ def test_the_delivery_stream_is_re_armed_on_two_events_and_on_no_timer() -> None
     assert 'document.addEventListener("visibilitychange"' in script
     assert 'window.addEventListener("online", () => rearm(NETWORK_BACK));' in script
     assert 'document.visibilityState === "visible"' in script
-    assert "setTimeout" not in script
+    # The timers stay out of the re-arm, which is the clause rather than the proxy.
+    # ADR-0182 §7 forbids re-establishing "on a timer, on a schedule, or on the failure
+    # itself", so what is pinned is where a re-arm can come from: the two events, and
+    # the one reason `watchDeliveries` held while a stream was still pending. The
+    # page's own clock (#1442) is not among them and calls nothing that opens a stream.
     assert "setInterval" not in script
+    assert sorted(re.findall(r"(?<![\w.])(?<!function )rearm\(\w+\)", script)) == [
+        "rearm(CAME_BACK)",
+        "rearm(NETWORK_BACK)",
+        "rearm(held)",
+    ]
+    assert "rearm(" not in _timeouts(script)[0]
+
+
+def test_a_delivery_stream_that_stops_saying_anything_is_abandoned_on_a_bound() -> None:
+    """Issue #1442. ``fetch`` has no deadline of its own, so a socket that died without
+    settling left ``watching`` true for ever — the panel read "Watching for
+    notifications", ``deliveryState`` kept ``#watch-button`` hidden because that is what
+    ``watching`` means, and ADR-0182 §7's announced re-arm could not fire either,
+    because §7 re-establishes a stream "only while it holds none".
+
+    **The bound is on silence and it comes from the gateway's own obligation.**
+    ADR-0175 §4 has the gateway write on every open delivery stream "at least once per
+    ``gateway_notification_budget``" — a delivery where its poll returned one, "and
+    otherwise a value carrying nothing but its own kind" — spent so that "the liveness
+    of the gateway, of its hub connection and of the browser's own socket" is
+    "observable at a bounded cadence". Silence past a multiple of that is the thing the
+    keep-alive exists to expose, observed at the end it was written for.
+
+    **The figure arrives as the stream's first value** (``open``, carrying
+    ``keep_alive_microseconds``), and is remembered for the next stream this origin
+    opens — because the first failure the issue names is a ``fetch`` that never settles
+    at all, on which no value can arrive, and ``showConsole`` opens a stream on load
+    before any other request. What that leaves unbounded is the first delivery stream a
+    browser ever opens at an origin and nothing after it.
+    """
+    script = _code("app.js")
+    read = _functions(script)["readDeliveries"]
+    watch = _functions(script)["watchDeliveries"]
+    calls = _timeouts(script)
+
+    assert len(calls) == 1
+    # Derived from what the gateway disclosed, and from no figure of this page's own: a
+    # literal here would be a second claim about the cadence, which is ADR-0175 §8's own
+    # argument against a separate heartbeat interval.
+    assert calls[0].rstrip().endswith("cadence * SILENT_CADENCES")
+    assert not re.search(r",\s*[\d.]", calls[0])
+    assert "const SILENT_CADENCES = 3;" in script
+    assert "let cadence = notificationCadence();" in read
+    # The figure comes from the gateway, and a stream is bounded by its own gateway's
+    # rather than by whatever an earlier one disclosed.
+    assert "cadence = adoptCadence(value.keep_alive_microseconds);" in read
+    delivered = read[read.index("for await (const value of streamValues(response)) {") :]
+    assert delivered.index("adoptCadence(") < delivered.index("heard();")
+    # A cadence this page has none of arms nothing, rather than a figure it made up.
+    assert "cadence === null" in read
+    # Armed before the request goes out, and restarted by every value that arrives —
+    # keep-alive included — so what it measures is silence and never the stream's life.
+    assert read.index("heard();") < read.index("await fetch(")
+    assert "signal: reader.signal," in read
+    assert delivered.index("heard();") < delivered.index('if (value.kind === "notification")')
+    assert "watching" in watch
+
+
+def test_a_stream_abandoned_for_silence_says_so_and_hands_the_control_back() -> None:
+    """ADR-0182 §7's announcement rule reaching the ending this page reached on its own.
+
+    §7 conditions the page's own motion on the owner being able to see it, and an
+    ending nobody caused is the one most in need of words: the gateway named no
+    condition, because the whole condition is that nothing arrived. ``deliveryState``
+    un-hides ``#watch-button`` whenever ``watching`` is false, so the sentence and the
+    way back arrive in one line.
+
+    **It is not "the gateway did not answer".** An abort this page asked for is its own
+    condition — the gateway may be perfectly alive at the other end of a socket that
+    stopped carrying — and reporting it as a gateway that had gone would be a wrong
+    explanation rather than a missing one, which is ADR-0168 §9's distinction lost at
+    the last hop.
+    """
+    script = _code("app.js")
+    read = _functions(script)["readDeliveries"]
+
+    assert "stopWatching(WENT_SILENT);" in read
+    assert 'fault(DELIVERY_STREAM_SILENT, "notifications");' in read
+    assert 'el("watch-button").hidden = watching;' in _functions(script)["deliveryState"]
+    # The sentence is built from the multiple, so the number in it cannot drift from the
+    # number the deadline is armed with.
+    assert "${SILENT_CADENCES} times the cadence it disclosed" in script
+    # A third ending and not a re-wording of the second: a body that ended is the
+    # connection going away, and a body still open and silent is not.
+    assert "stopped saying anything" in script
+    assert script.count("ended before the gateway finished it") == 2
+    assert read.index("if (silent) {") < read.index("fault(GATEWAY_GONE,")
+
+
+def test_the_page_remembers_the_cadence_this_origin_last_disclosed() -> None:
+    """The figure is gateway configuration (ADR-0175 §8) and no value the page read
+    carried it, which is why #1442 could not be fixed in the page alone.
+
+    **Remembered rather than only held in page state**, because ``showConsole`` opens a
+    delivery stream on load, before any other request — so a page that had only the
+    arriving figure would open one unbounded stream on every reload, and a reload is
+    exactly what an owner does when the notifications panel has stuck.
+
+    **It is not a session value and is not tied to one.** It admits nothing and is
+    spendable against nothing, so ADR-0172 §1's closed class of three values a browser
+    holds is untouched; and it is a fact about the gateway at this origin rather than
+    about the session that happened to be current, so ``forgetHeaderHalf`` does not take
+    it — a session ends whenever the gateway process does, and the next stream that
+    opens replaces the figure anyway.
+
+    **The exchange carries nothing of it**, which is ADR-0168 §5: the bootstrap exchange
+    "returns nothing but the two session values §6 requires".
+    """
+    script = _code("app.js")
+    functions = _functions(script)
+
+    assert 'const CADENCE_KEY = "assistant.session.notification-cadence";' in script
+    assert "window.localStorage.setItem(CADENCE_KEY, microseconds);" in functions["adoptCadence"]
+    assert "usableCadence(window.localStorage.getItem(CADENCE_KEY))" in script
+    assert "CADENCE_KEY" not in functions["forgetHeaderHalf"]
+    assert "CADENCE_KEY" not in functions["startSession"]
+    # A figure no deadline can be derived from is `null` rather than a guess, and it
+    # does not overwrite one that was readable.
+    assert 'typeof microseconds === "string"' in functions["usableCadence"]
+    assert "Number.isFinite(value) && value > 0" in functions["usableCadence"]
+    assert "return notificationCadence();" in functions["adoptCadence"]
 
 
 def test_a_re_arm_happens_only_where_there_is_a_session_and_no_open_stream() -> None:
@@ -1493,6 +1626,27 @@ def _catch_blocks(script: str) -> list[str]:
             index += 1
         blocks.append(script[opened.end() : index])
     return blocks
+
+
+def _timeouts(script: str) -> list[str]:
+    """The argument text of every ``setTimeout`` call, brackets matched.
+
+    ``_fault_calls``' device for the same reason: the arguments span a callback body
+    and an arithmetic expression across several lines, and a regular expression that
+    read either would read a truncated one of the other. What the checks below ask of
+    it is what the one clock in the page *does* and what its delay is *derived from* —
+    neither of which counting occurrences can answer.
+    """
+    calls = []
+    for opened in re.finditer(r"\bsetTimeout\(", script):
+        depth, index = 0, opened.end() - 1
+        while index < len(script):
+            depth += {"(": 1, ")": -1}.get(script[index], 0)
+            if depth == 0:
+                break
+            index += 1
+        calls.append(script[opened.end() : index])
+    return calls
 
 
 def _declaration(script: str, name: str) -> str:
