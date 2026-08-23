@@ -108,9 +108,10 @@ _MARKER_COMMIT_PREFIX = "commit="
 #: A marker written before this recipe existed: the bare sha, on a line of its own.
 _BARE_COMMIT = re.compile(r"[0-9a-fA-F]{7,40}")
 #: What the remote read prints around the marker's own bytes, so the login
-#: shell's banner cannot be parsed as marker content. See :func:`marker_body`.
-_MARKER_BEGIN = "MARKER_BEGIN"
-_MARKER_END = "MARKER_END"
+#: shell's banner cannot be parsed as marker content. Each carries the run's own
+#: token, so the pair is not a shape a banner can imitate. See :func:`marker_body`.
+_MARKER_BEGIN = "MARKER_BEGIN_"
+_MARKER_END = "MARKER_END_"
 #: The only pre-slash segments left unquoted for the shell: `~` and `~username`.
 _TILDE_SEGMENT = re.compile(r"~[A-Za-z0-9_][A-Za-z0-9_.-]*|~")
 
@@ -298,7 +299,7 @@ def lockfile_uncommitted(repo: Path) -> bool:
     return bool(_git("status", "--porcelain", "--", "uv.lock", repo=repo))
 
 
-def marker_body(output: str) -> str:
+def marker_body(output: str, token: str) -> str:
     """Cut the marker file's own bytes out of the remote read's output.
 
     The read runs in a **login** shell, which prints whatever its profile and
@@ -310,20 +311,25 @@ def marker_body(output: str) -> str:
     and could call ``--no-deps`` safe on a box with no deployed state at all.
 
     So the remote command brackets ``cat`` with two lines of its own, and only
-    what lies between them is marker. Anything else — no brackets, because the
-    command never ran; a marker somehow containing the closing line — yields less
-    content rather than more, which reads as *unknown* rather than as clean.
+    what lies between them is marker. The brackets carry this run's token, so
+    they are not a shape a banner can be written to imitate either — a fixed pair
+    could simply be printed by the profile, ahead of the command that emits the
+    real ones, and it is the *first* pair that would be read. Anything else — no
+    brackets, because the command never ran; a marker somehow containing the
+    closing line — yields less content rather than more, which reads as *unknown*
+    rather than as clean.
 
     Args:
         output: The remote read's standard output, banner and all.
+        token: The per-run token the brackets carry, from :attr:`Plan.token`.
 
     Returns:
         The marker's own text, or ``""`` when the brackets are not both present.
     """
     lines = output.splitlines()
     try:
-        start = lines.index(_MARKER_BEGIN)
-        end = lines.index(_MARKER_END, start)
+        start = lines.index(f"{_MARKER_BEGIN}{token}")
+        end = lines.index(f"{_MARKER_END}{token}", start)
     except ValueError:
         return ""
     body = "\n".join(lines[start + 1 : end]).strip()
@@ -559,13 +565,15 @@ class Plan:
 
         Returns:
             The remote command line. It tolerates an absent marker, and brackets
-            whatever ``cat`` produced so the login shell's banner cannot be read
-            as marker content (:func:`marker_body`). The bare ``echo`` between
-            them guarantees the closing bracket its own line, because a marker
-            written by hand need not end in a newline.
+            whatever ``cat`` produced — with this run's token, so a banner can
+            neither be mistaken for marker content nor written to imitate the
+            brackets (:func:`marker_body`). The bare ``echo`` between them
+            guarantees the closing bracket its own line, because a marker written
+            by hand need not end in a newline.
         """
         marker = remote_path(self.args.marker)
-        inner = f"echo {_MARKER_BEGIN}; cat {marker} 2>/dev/null; echo; echo {_MARKER_END}"
+        begin, end = f"{_MARKER_BEGIN}{self.token}", f"{_MARKER_END}{self.token}"
+        inner = f"echo {begin}; cat {marker} 2>/dev/null; echo; echo {end}"
         return as_service_user(inner, self.args.user)
 
     def read_version(self) -> str:
@@ -878,7 +886,8 @@ def _check_drift(plan: Plan, repo: Path, commit: str) -> str:
             "it. Commit the lockfile, or re-run with --with-deps."
         )
     marker = marker_body(
-        _run_local(ssh_command(plan.args.host, plan.args.ssh_user, plan.read_marker()))
+        _run_local(ssh_command(plan.args.host, plan.args.ssh_user, plan.read_marker())),
+        plan.token,
     )
     deployed = marker_commit(marker)
     if deployed is None:
@@ -1189,7 +1198,7 @@ def _install_and_verify(plan: Plan, commit: str, before_marker: str, before_vers
     _assert_active(plan)
     _wait_for_ready(plan, invocation)
 
-    after_marker = marker_body(_run_local(ssh(plan.read_marker())))
+    after_marker = marker_body(_run_local(ssh(plan.read_marker())), plan.token)
     after_version = _run_local(ssh(plan.read_version())).strip()
     print("--- before ---")
     print(f"version: {before_version}")
