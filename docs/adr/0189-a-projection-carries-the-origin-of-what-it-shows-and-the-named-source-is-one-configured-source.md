@@ -55,7 +55,7 @@ stops identifying the source by elimination."
 The surfaces say so themselves. `interfaces/cli.py`'s `_why` renders an attested
 belief as *"a source you connected reported it — neither your word nor my
 inference. I recorded which source, and when it said so, but cannot show them here
-…"*, and the browser's `whyHeld` in `gateway/assets/app.js` says the same thing in
+…"*, and the browser's `whyHeld` in `interfaces/gateway/assets/app.js` says the same thing in
 the same words. Both sentences are true. Both were written as a statement of a
 limitation with a tracker attached (**#1276**), and both stop being adequate at the
 moment "which source" has more than one answer.
@@ -494,7 +494,7 @@ the store-side prohibition stands unweakened and the client-side permission is s
 rather than left to collide with it.
 
 **What the two live surfaces owe changes, and both currently say they cannot.**
-`interfaces/cli.py`'s `_why` and `gateway/assets/app.js`'s `whyHeld` each tell the
+`interfaces/cli.py`'s `_why` and `interfaces/gateway/assets/app.js`'s `whyHeld` each tell the
 user the source was recorded and cannot be shown. Under §2 it can be. Rewriting
 those two sentences is §9's obligation on the implementing lane, and closing #1276
 is what it amounts to.
@@ -812,25 +812,37 @@ ahead of a trigger without guessing at a shape it has no producer for.
 
 > **Normative.** The surface lane rewrites the attested explanation on both live
 > surfaces — `_why` in `interfaces/cli.py` and `whyHeld` in
-> `gateway/assets/app.js` — so that each names the source and the report instant
+> `interfaces/gateway/assets/app.js` — so that each names the source and the report instant
 > under §4, and neither continues to state that it cannot show them. It renders a
 > retirement under §4's three retirement clauses, taking all three arms — attested,
 > asserted-or-derived, and no longer held — at `_render_retirements` in
-> `interfaces/cli.py` and `renderRetirements` in `gateway/assets/app.js`. Its tests
+> `interfaces/cli.py` and `renderRetirements` in `interfaces/gateway/assets/app.js`. Its tests
 > assert the rendering, not only that a field is present.
 
 > **Normative.** The same lane renders an **attested question** under §4's first
 > clause, at `_render_question` in `interfaces/cli.py` and `renderQuestion` in
-> `gateway/assets/app.js`. §4 binds every surface that renders an attested belief,
+> `interfaces/gateway/assets/app.js`. §4 binds every surface that renders an attested belief,
 > question or retirement, and a question is the projection the first attested
 > proposals actually reach; a lane that updated only the belief explanation would
 > leave the surface §4 was written for unchanged.
 
 > **Normative.** For each of those four rendering paths, the surface lane ships a
-> test over an **attested** subject asserting that the source identity and the
-> source-clock instant both reach the rendered output, and a test over an attested
-> retirement whose retired record no longer resolves asserting the *no longer held*
-> arm. A test asserting only that a field is populated does not satisfy either.
+> test over an **attested, resolved** subject asserting that the source identity and
+> the source-clock instant both reach the rendered output. A test asserting only that
+> a field is populated does not satisfy it.
+
+> **Normative.** For each of the **two retirement paths**, the surface lane
+> additionally ships a test over an **unresolved** retirement — `warrant` and
+> `content` both `None` — asserting that the output renders *no longer held* and
+> states no band, no origin and no source.
+
+**Those are two tests rather than one, because the state the single test would have
+named cannot exist.** An earlier draft asked for "a test over an attested retirement
+whose retired record no longer resolves", and §2 makes `warrant` and `content` `None`
+together for exactly that record — so an unresolved retirement is in no band, carries
+no attestation, and there is no attested tombstone to construct. Adversarial review
+found it on round 5. The attribution arm and the tombstone arm are different subjects
+and get a test each.
 
 > **Normative.** Every value these fields carry is inserted into a surface's output
 > as **data**, neutralised for that target on render (ADR-0042 §4, ADR-0098 §7's
