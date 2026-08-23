@@ -57,6 +57,12 @@ DEFAULT_CHECKED_AT: Final = datetime(2026, 7, 20, 12, 0, tzinfo=UTC)
 #: store holds is legible history rather than corruption.
 DEFAULT_GRANT_ID: Final = "grant-1"
 
+#: The exclusive upper bound ADR-0185 §6 puts on the cap — "every strictly positive
+#: integer below ``2**63``", which is ``Settings``' own ``lt=2**63``. A list could
+#: hold more; the durable store cannot bind more, and a fake that diverged here would
+#: admit a configuration no deployment can produce.
+MAX_ROWS_EXCLUSIVE: Final = 2**63
+
 #: The cap both fakes hold when a caller states none — ``Settings``' own default
 #: (ADR-0185 §6), so an unconfigured fake behaves like an unconfigured deployment
 #: and a test that wants the prune has to ask for it.
@@ -161,12 +167,28 @@ class _ReadLog:
                 zero, which is at capacity before its first append.
 
         Raises:
-            ValueError: If ``max_rows`` is not strictly positive.
+            TypeError: If ``max_rows`` is not exactly an ``int``. ``bool`` is an
+                ``int``, so ``True`` would otherwise be a cap of one — a flag loaded
+                where a count belongs, which is what ``Settings``' own
+                ``_exactly_an_integer`` refuses at load.
+            ValueError: If ``max_rows`` is not strictly positive, or is not below
+                ``2**63``. The upper bound is ADR-0185 §6's admissible range, and the
+                fake refuses it though a list could hold it: a canonical fake that
+                admitted a cap the durable store cannot bind would let a consumer's
+                test pass against a configuration no deployment can produce, which is
+                the trade ``FakeReader`` already names.
         """
-        if max_rows <= 0:
+        if type(max_rows) is not int:
             msg = (
-                f"the read trail's cap must be strictly positive, got {max_rows}; there "
-                f"is no unlimited spelling and no zero (ADR-0185 §6)"
+                f"the read trail's cap must be exactly an int, got {max_rows!r} of type "
+                f"{type(max_rows).__name__}; a bool passes every comparison below while "
+                f"meaning a cap of one (ADR-0185 §6)"
+            )
+            raise TypeError(msg)
+        if not 0 < max_rows < MAX_ROWS_EXCLUSIVE:
+            msg = (
+                f"the read trail's cap must be strictly positive and below 2**63, got "
+                f"{max_rows}; there is no unlimited spelling and no zero (ADR-0185 §6)"
             )
             raise ValueError(msg)
         self._max_rows = max_rows
@@ -458,6 +480,7 @@ __all__ = [
     "DEFAULT_GRANT_ID",
     "DEFAULT_MAX_ROWS",
     "DEFAULT_READ_SOURCE",
+    "MAX_ROWS_EXCLUSIVE",
     "FakeSourceReadRecorder",
     "FakeSourceReadTrail",
     "source_read_record",
