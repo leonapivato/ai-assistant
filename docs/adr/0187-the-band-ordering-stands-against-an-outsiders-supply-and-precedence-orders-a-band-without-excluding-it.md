@@ -279,9 +279,10 @@ that was still missing is §4.
 > a band from it. Where the budget admits at least as many records as there are
 > bands in `BAND_PRECEDENCE`, **no band's read may be skipped, or bounded to zero,
 > because a higher-precedence band's supply exhausted the budget**, and a band whose
-> own read returns a record holds **at least one** of them in the composed context.
-> Precedence governs every other slot and every within-band order exactly as
-> ADR-0072 §5 rules it.
+> own read returns a record that ADR-0113 §5's cross-call deduplication does not
+> remove holds **at least one** such record in the composed context. Precedence
+> governs every other slot and every within-band order exactly as ADR-0072 §5 rules
+> it.
 
 > **Normative.** Where a reservation must be taken from a band that would otherwise
 > have held the slot, it is taken from the **lowest-precedence band holding more
@@ -550,8 +551,10 @@ owed.**
 **ADR-0113 §5 and §6 — nothing owed, and §5 is retained rather than worked
 around.** §5's cross-call deduplication rule is untouched and §4's floor composes
 with it unchanged: a record already held is still skipped, and a band whose only
-returned record was deduplicated has nothing left to hold its floor with and obliges
-no further read. §5's *other* half — that the three calls see no common snapshot, so
+returned record was deduplicated has nothing left to hold its floor with — which
+§4's first clause states in its own words rather than leaving to this paragraph,
+because unmarked prose may not except a marked clause (ADR-0089 §3). Such a band
+obliges no further read. §5's *other* half — that the three calls see no common snapshot, so
 a record a concurrent fold moves between bands may be missed — is retained
 explicitly by §4's no-snapshot clause, which is why the floor is written over what each
 band's own read returns rather than over what the store holds. An earlier draft
