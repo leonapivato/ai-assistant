@@ -226,6 +226,19 @@ opener and no second door.
 > reader that stopped at the first bad line would discard the events a later run
 > appended after it.
 
+> **Normative.** The run identifier is **minted fresh for each run and is unique
+> within the file**. It is random rather than derived — not the instant, not the store
+> path, not the target model id, and not a counter read back out of the file — and no
+> writer reuses one, including on a resumed migration, which is a new run and a new
+> egress.
+
+> **Normative.** A reader joins a `sealed` event to an `opened` event only on an
+> identifier carrying **exactly one `opened` and at most one `sealed`**. An identifier
+> carrying anything else — two `opened` events, two `sealed` events, or a `sealed`
+> with no `opened` — is ambiguous, and every run it names reads as **unsealed** under
+> §5. A reader never resolves an ambiguity in the direction of completion, and never
+> discards one of the events to make the join work.
+
 > **Normative.** Nothing prunes it. It has no row cap, no retention duration and no
 > eviction rule, and no lane adds one on the strength of ADR-0185 §6. The user's
 > ADR-0004 §6 erasure right over it is deletion of the whole file, which is
@@ -249,6 +262,19 @@ died mid-write. Appending the newline first costs one byte and confines the dama
 the line that was actually torn. The same reasoning is why a reader must keep going
 past a bad line: the damaged region is always the *tail as it stood at the time*, and
 everything appended after it is intact.
+
+**The identifier is the join, so uniqueness is a property of the record and not a
+detail of the writer.** The lock serialises runs but does nothing about *sequential*
+reuse: a run killed after its `opened` event, followed by a later run that minted the
+same identifier, would give a reader one identifier with two `opened` events and one
+`sealed`, and the tempting repair — join the seal to the nearest `opened` — would mark
+the killed run complete with the later run's counts. That is the single worst thing
+this record can say, because it converts an egress whose extent is unknown into one
+reported as finished. Deriving the identifier from the clock or the store path is the
+same hazard wearing a plausible disguise, which is why the clause forbids derivation
+rather than merely asking for uniqueness. Refusing to join an ambiguous identifier
+costs a reader the outcome of runs it cannot safely pair and loses no egress: every
+`opened` event still stands, and §5's unsealed reading is exactly the honest one.
 
 **Two events rather than one mutable object, and the reason is the same one that
 makes this a file.** A record that had to be *revised* at the end of the run would
