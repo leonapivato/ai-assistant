@@ -157,59 +157,96 @@ default here and the right one there.
 ## Decision
 
 We will record every **attempt** to read a source — completed, refused,
-unanswerable, failed or discarded alike — as one append-only row in a new Tier 1
-store of its own, written by the same driver that held the grant gate, bounded by a
-`Settings` figure that has no unlimited spelling and is refused at load, pruned only
-oldest-first and only by age, and never consulted by anything to decide whether a
-source may be read.
+unanswerable, failed, discarded or unconfirmed alike — as one append-only row in a
+new Tier 1 store of its own, written by the same driver that held the grant gate,
+bounded by a `Settings` figure that has no unlimited spelling and is refused at
+load, pruned only oldest-recorded-first, and never consulted by anything to decide
+whether a source may be read.
 
-### 1. The unit is a read **attempt**, and its five outcomes are total
+### 1. The unit is a read **attempt**, and its six outcomes are total
 
 > **Normative.** The unit of record is one **attempt** by a driver to read one
-> source for one use: the act that begins when the driver asks
-> `SourceGrants.live` and ends when the driver has either used what the read
-> returned or discarded it. Exactly one record is written per attempt, whether or
-> not anything was opened.
+> source for one use: the act that begins when the driver asks `SourceGrants.live`
+> and ends when the driver has taken one of the six outcomes below. A driver writes
+> exactly one record per attempt it takes to an outcome, whether or not anything was
+> opened, and never a second.
 
-> **Normative.** Every attempt has exactly one outcome, drawn from `ReadOutcome`'s
-> five members: `COMPLETED`, `REFUSED`, `UNANSWERED`, `FAILED`, `DISCARDED`. The
-> five are mutually exclusive and total over the outcomes ADR-0097 §5 and ADR-0093
-> §8 already rule for a gated read; no implementation invents a sixth and none
-> records an attempt with no outcome.
+> **Normative.** Every attempt that reaches an outcome reaches exactly one of
+> `ReadOutcome`'s six members: `COMPLETED`, `REFUSED`, `UNANSWERED`, `FAILED`,
+> `DISCARDED`, `UNCONFIRMED`. The six are mutually exclusive and total over the
+> outcomes ADR-0097 §5 and ADR-0093 §8 already rule for a gated read; no
+> implementation invents a seventh and none records an attempt with no outcome.
 
-The five, each pinned to the ratified clause that creates it:
+> **Normative.** A **cancellation delivered from outside** ends an attempt without
+> an outcome. It is delivered onward unchanged, is never converted into an outcome,
+> and the driver awaits no recorder on that path; the attempt is not recorded. This
+> is `core/protocols.py`'s cancellation clause and ADR-0093 §8's carve-out applied
+> to the recording seam, and it is the one case in which an attempt begins and no
+> row follows by design (§5 governs the other, which is a fault rather than a
+> design).
 
-- **`COMPLETED`** — a live grant covered the read at the instant it started, the
-  read returned, the grant was still live at the re-check, and what it returned
-  reached its use.
-- **`REFUSED`** — `live()` answered `None`. Nothing was opened: "the source is not
-  resolved, not opened and not parsed" (ADR-0097 §5).
-- **`UNANSWERED`** — `live()` raised `GrantError`, so the driver could not tell
-  whether a grant existed and failed closed (ADR-0097 §5). Nothing was opened.
-- **`FAILED`** — the read was authorised and raised, under ADR-0093 §8: "A read
-  that cannot complete may not return what it managed to gather."
-- **`DISCARDED`** — the read was authorised, returned, and its grant had gone by the
-  re-check, so the reading was "discarded whole" (ADR-0097 §5).
+> **Normative.** Whether the source was opened is a **total function of `outcome`**
+> and is not a field. `REFUSED` and `UNANSWERED` mean nothing was opened —
+> "the source is not resolved, not opened and not parsed" (ADR-0097 §5). `FAILED`,
+> `DISCARDED`, `UNCONFIRMED` and `COMPLETED` mean the read ran. No implementation
+> records that fact a second time.
 
-**`UNANSWERED` is separated from `REFUSED` because collapsing them would put a false
-claim in the trail.** "There was no live grant" and "we could not find out whether
-there was one" are different facts about the user's authorisation, and a store whose
-premise is that its records are not fabricated may not spell the second as the first.
-The distinction is also the one an operator acts on: a `REFUSED` run means grant it
-or unconfigure it, and an `UNANSWERED` run means the grant store is broken.
+The six, each pinned to the ratified clause that creates it. Two are decided at the
+gate before the read, and neither opens anything:
 
-**`DISCARDED` is the row this ADR most exists for.** ADR-0097 §5a states the residual
-it cannot close — "a read already in flight completes" — and accepts it because
-"nothing is stored, nothing reaches a prompt, nothing leaves the device". What it
-could not say was that the read left any trace. Now it does, and the residual moves
-from invisible to recorded.
+- **`REFUSED`** — the first `live()` answered `None`. Nothing was opened.
+- **`UNANSWERED`** — the first `live()` raised `GrantError`, so the driver could not
+  tell whether a grant existed and failed closed (ADR-0097 §5).
+
+Four follow a read that actually ran:
+
+- **`FAILED`** — the read raised, under ADR-0093 §8: "A read that cannot complete
+  may not return what it managed to gather."
+- **`DISCARDED`** — the read returned and the re-check answered `None`, so the
+  reading was "discarded whole" (ADR-0097 §5).
+- **`UNCONFIRMED`** — the read returned and the re-check raised `GrantError`, so the
+  reading was discarded "exactly as a withdrawn grant is" (ADR-0097 §5).
+- **`COMPLETED`** — the read returned and the re-check confirmed the grant, so the
+  reading was handed to its use.
+
+**`COMPLETED` is a fact about the read and its gate, and it deliberately claims
+nothing about the use.** It says the reading was handed over; whether the use then
+kept, rejected or failed on what it was handed is `MemoryPolicy`'s subject, or the
+facet adapter's, and their own records answer it. Claiming more would be
+unrecordable as well as untrue: §5 requires the row to be written **before** the use
+runs, so an outcome defined by the use's success could not be known when the row is
+written, and amending the row afterwards is the mutation §6 forbids.
+
+**The two unanswerable outcomes are separated from their answered twins because
+collapsing them would put a false claim in the trail.** "There was no live grant"
+and "we could not find out whether there was one" are different facts about the
+user's authorisation, and a store whose premise is that its records are not
+fabricated may not spell the second as the first. ADR-0097 §5 requires exactly this
+distinction to survive elsewhere in its own words — "A store fault and a withdrawn
+grant are different facts and an operator must be able to tell them apart" — and a
+trail that conflated them would take back at the record what that clause holds at
+the error.
+
+**Six members rather than four is the cost of that, and it is the right cost.** The
+alternative considered was four, with `DISCARDED` covering both post-read cases on
+the strength of ADR-0097 §5's "discarded exactly as a withdrawn grant is". That
+sentence is about what the driver *does* — and it is why `UNCONFIRMED`'s `produced`
+and `grant` invariants are `DISCARDED`'s exactly — but the sentence immediately after
+it is the one about telling the two apart, and the trail is where telling them apart
+is now possible for the first time.
+
+**`DISCARDED` and `UNCONFIRMED` are the rows this ADR most exists for.** ADR-0097
+§5a states the residual it cannot close — "a read already in flight completes" — and
+accepts it because "nothing is stored, nothing reaches a prompt, nothing leaves the
+device". What it could not say was that the read left any trace. Now it does, and
+the residual moves from invisible to recorded.
 
 ### 2. The record: seven fields, two construction invariants, and no content
 
 > **Normative.** `core/types.py` gains one frozen model, `SourceReadRecord`, with
 > exactly the fields §12 enumerates, and one `StrEnum`, `ReadOutcome`, with exactly
-> the five members §1 names. `ReadOutcome` is **not ordered**, for `GrantScope`'s
-> reason (ADR-0097 §10): five outcomes of a read are not ranked, and an order would
+> the six members §1 names. `ReadOutcome` is **not ordered**, for `GrantScope`'s
+> reason (ADR-0097 §10): six outcomes of a read are not ranked, and an order would
 > invite a comparison that means nothing.
 
 > **Normative.** A `SourceReadRecord` carries **no source content, no entry, no
@@ -220,18 +257,22 @@ from invisible to recorded.
 > grant on.
 
 > **Normative.** What a read produced is recorded as a **count and never as a
-> thing**: `produced` is the number of items the read delivered to its use, and no
-> field names, identifies or describes any of them.
+> thing**: `produced` is the number of items the **reading** carried — its
+> proposals, and its facet where it carried one — and no field names, identifies or
+> describes any of them. It is a property of what the source returned and states
+> nothing about what the use did with it.
 
 > **Normative.** `grant` names the `SourceGrant.id` of the live grant the attempt
-> ran under, and is `None` exactly when no grant was found — that is, on `REFUSED`
-> and `UNANSWERED` and on no other outcome. Construction refuses a record breaching
-> that correspondence.
+> ran under, and is `None` exactly when no grant was found at the first check — that
+> is, on `REFUSED` and `UNANSWERED` and on no other outcome. Construction refuses a
+> record breaching that correspondence.
 
-> **Normative.** `produced` is zero on every outcome but `COMPLETED`, and
-> construction refuses a record breaching that. A `COMPLETED` record may carry zero,
-> which means the read succeeded and delivered nothing — ADR-0093 §8's rule that an
-> empty reading "is a **successful** reading", carried onto the record.
+> **Normative.** `produced` is zero on `REFUSED`, `UNANSWERED` and `FAILED`, and
+> construction refuses a record breaching that: no reading exists in any of the
+> three. `COMPLETED`, `DISCARDED` and `UNCONFIRMED` may carry any count from zero
+> up. A `COMPLETED` zero means the read succeeded and the source had nothing —
+> ADR-0093 §8's rule that an empty reading "is a **successful** reading", carried
+> onto the record.
 
 **The `grant` pointer is the consumer ADR-0097 §10 wrote `live` for.** That section
 chose to return the record rather than a boolean "so a caller can name what
@@ -246,13 +287,18 @@ carries no belief ids (§14 defers those with their trigger), so belief → gran
 still only resolvable through ADR-0097 §1's belief → source → that source's grant
 history. What this ADR adds is read → grant, which is a relation that did not exist.
 
-**Two invariants rather than five fields' worth of prose**, and they are checked at
-construction for `SourceGrant`'s reason: a record corrupted past its own model would
-be stored and then make every later read of the trail incoherent. Together they make
-the five outcomes structurally discriminable — `grant is None` partitions
-{`REFUSED`, `UNANSWERED`} from the rest, and `produced > 0` is available only to
-`COMPLETED` — so a reader of the trail can tell the states apart without trusting the
-writer's discipline.
+**A non-zero `produced` on a `DISCARDED` or `UNCONFIRMED` row is the point, not an
+oversight.** "This read across your revocation carried fourteen proposals that were
+dropped" is a materially different audit fact from "it carried none", and both are
+known at the moment the row is written. Zeroing them to keep the invariant tidy
+would throw away the most informative thing those rows have to say.
+
+**Two invariants rather than prose**, and they are checked at construction for
+`SourceGrant`'s reason: a record corrupted past its own model would be stored and
+then make every later read of the trail incoherent. Together with §1's opened-ness
+clause they let a reader of the trail place a row without trusting the writer's
+discipline — `grant is None` partitions {`REFUSED`, `UNANSWERED`} from the rest, and
+`produced > 0` is available only to the three outcomes in which a reading exists.
 
 **No `finished_at` and no duration.** One instant is what makes an attempt
 reconstructible against a grant history; how long a read took is a performance fact
@@ -359,14 +405,20 @@ substitutable at a glance.
 > **Normative.** No `await` on the recorder may stand between the `live()` answer a
 > driver gates on and its call to `Reader.read()`. ADR-0097 §5's clause that "the
 > check and the start of the read are one synchronous step" is unchanged, and the
-> record for a `COMPLETED`, `FAILED` or `DISCARDED` attempt is written after `read()`
-> has returned or raised.
+> record for any attempt whose read ran is written after `read()` has returned or
+> raised and after the re-check has ruled.
 
 > **Normative.** A driver records the attempt **before** it uses what the read
-> returned. Where the record cannot be written, the driver discards the reading:
-> nothing is proposed, no facet is contributed, no candidate is concluded, and the
+> returned. Where the recorder raises, the driver discards the reading: nothing is
+> proposed, no facet is contributed, no candidate is concluded, and the
 > `ReadTrailError` is reported to the driver's own failure posture (ADR-0008 §4 on
 > the facet side, ADR-0083 §7 on the scheduled side).
+
+> **Normative.** That path leaves the attempt **unrecorded**, and no clause of this
+> ADR claims otherwise: §1's obligation is on the driver to write one row per
+> attempt, not a guarantee that a row exists for every read that ever ran. What is
+> guaranteed instead is the consequence — **nothing durable, nothing in a prompt and
+> nothing in a notification comes of a read the trail does not hold.**
 
 **Fail-closed here is not decoration; it is what makes ADR-0004 §7 a rule rather
 than a hope.** The charter conditions *access* on a record of it, and a system that
@@ -376,16 +428,29 @@ reaches for in the neighbouring case: ADR-0097 §5's re-check discards a reading
 grant has gone, and ADR-0097 §5a accepts the residual — bytes read into a worker's
 memory and dropped — as small "in exactly the way this subject makes it small".
 
-**The residual is the same one and is stated rather than glossed.** A read whose
-record could not be written still *happened*: the file was opened on the worker
-ADR-0093 §7 gives the reader, and no clause here can un-read it. What the rule
-guarantees is that nothing durable, nothing in a prompt and nothing in a notification
-comes of a read the trail does not hold.
+**The residual is the same one, and the reason it cannot be closed is worth stating
+rather than hiding.** A read whose record could not be written still *happened*: the
+file was opened on the worker ADR-0093 §7 gives the reader, and no clause here can
+un-read it. Nor can the failure record itself: the only durable place a recorder
+fault could be written is the recorder that just failed. So the guarantee available
+is over the *effects* of the read and not over the existence of its row, which is the
+same shape of honesty ADR-0097 §5a takes about its own in-flight case. An operator
+still learns of it, through the driver's failure posture — a logged fault under
+ADR-0083 §7 for a scheduled read, an absent facet under ADR-0008 §4 — which is a
+signal rather than a record and is not offered as one.
 
 **Ordering matters and is fixed in one direction only.** The record is written after
-the read returns because a single row must carry the outcome, and an outcome is not
+the re-check because a single row must carry the outcome, and the outcome is not
 known before. Writing a row first and amending it after would be the mutation §6
 forbids, in the store whose value is that it is not mutated.
+
+**The cancellation carve-out is §1's, and it lands here.** A driver whose
+`live()` or `read()` is cancelled from outside delivers the cancellation onward
+unchanged and does **not** await the recorder on the way out — awaiting anything on a
+cancellation path is the conversion `core/protocols.py`'s preamble forbids, and
+ADR-0093 §8 spells out the harm in this subject's own terms: both consumers would
+treat a caller's own cancellation as a degraded source, on a shutdown (ADR-0083 §4)
+that was working correctly. The attempt leaves no row, and nothing came of it.
 
 ### 6. The bound: a row cap with no unlimited spelling, pruned oldest-first
 
@@ -586,9 +651,11 @@ alone, origin included
 
 > **Normative.** "Reconstructible" means, for a read, that the trail alone yields
 > the source's declared identity, the use, the instant the attempt started, its
-> outcome, the grant it ran under where there was one, and how many items it
-> delivered. It does **not** mean the content of the read, and no lane may report
-> the milestone met on the strength of a trail that carries any.
+> outcome, whether the source was opened (§1), the grant it ran under where there
+> was one, and how many items the reading carried. It does **not** mean the content
+> of the read, and no lane may report the milestone met on the strength of a trail
+> that carries any. It also does not mean what the *use* did with what it was
+> handed: that is memory's record and the notification store's, not this trail's.
 
 **The second clause is a narrowing of the ruled text, and it is declared rather than
 glossed** — the discipline ADR-0181 §8 used on milestone 23's arm (a). Read at full
@@ -605,6 +672,15 @@ cap are gone. That is the cost of the bound ADR-0139 §6 requires, and there is 
 arrangement that has both. `export()` therefore delivers the horizon rather than the
 history, and ADR-0004 §6's export right is satisfied to that extent and no further.
 
+**A third narrowing, and it is the one a lane must not read past.** Two attempts
+leave no row at all, by §1 and §5: one cancelled from outside, and one whose recorder
+raised. Neither is a read the trail can reconstruct, and neither is offered as one —
+what §5 guarantees about the second is that nothing came of it, and a cancellation
+under §1 is a shutdown rather than a read. So the exit's "every read" is measured in
+§11 over attempts the harness drove **to an outcome with a recorder that answered**,
+which is what an arm can actually assert, and the two excluded cases are asserted for
+their own property instead (arm (e)).
+
 **Where "origin included" lands is §3 on the read side and ADR-0181 §2 with ADR-0184
 §2 on the egress side**, and the two are different kinds of answer for the reason §3
 gives. Nothing joins them: a read row and an egress row about the same content share
@@ -612,22 +688,28 @@ no key, and the exit test does not ask them to.
 
 ### 11. The pre-registered exit arms for milestone 24's read half
 
-> **Normative.** The read half of milestone 24's exit is pre-registered as the four
-> arms and the four figures below. No lane substitutes an arm, drops a figure, or
-> reports the read half met on a run that did not produce all four figures.
+> **Normative.** The read half of milestone 24's exit is pre-registered as the five
+> arms and the five figures below. No lane substitutes an arm, drops a figure, or
+> reports the read half met on a run that did not produce all five figures.
 > The egress half (#747) and band precedence (#663) are pre-registered by their own
 > lanes and are not this ADR's.
 
+> **Normative.** Each figure is measured over **its own arm's run and no other**,
+> and each arm's run is stated with its denominator. No figure is computed across
+> arms: arms (a) and (b) drive fewer attempts than `source_read_trail_max_rows` so
+> that nothing is pruned under them, and arm (d) deliberately drives more, so a
+> completeness figure taken over arm (d) would count the prune as a loss.
+
 > **Normative.** **Arm (a) — completeness.** A run drives a known number of read
-> attempts across all three uses and both readers, including at least one of each
-> of `ReadOutcome`'s five members, and reconstructs each one from `export()` alone
-> with no other store consulted.
+> attempts, fewer than the cap, across all three uses and both readers, including at
+> least one of each of `ReadOutcome`'s six members, and reconstructs each one from
+> `export()` alone with no other store consulted.
 
 > **Normative.** **Arm (b) — the revocation question.** A run grants a source,
 > drives reads, revokes it, and lets the driver run again; the trail alone must
-> answer "was this source read after I revoked it", distinguishing an attempt that
-> was refused from one that completed and from one that was discarded at the
-> re-check.
+> answer "was this source read after I revoked it", telling an attempt that was
+> refused from one that completed, from one discarded at the re-check, and from one
+> whose re-check could not be answered.
 
 > **Normative.** **Arm (c) — no content.** The source is seeded with a distinctive
 > marker string in its entries, its path and its configured location, and every
@@ -637,14 +719,24 @@ no key, and the exit test does not ask them to.
 > `source_read_trail_max_rows` and asserts that the row count never exceeds the cap
 > and that the survivors are the most recently recorded.
 
-> **Normative.** The four figures, each reported with its denominator:
-> **unrecorded-read count** — attempts driven minus records exported; **misattributed
-> outcome count** — records whose outcome does not match the attempt the harness
-> drove; **content-leak count** — records containing any byte of arm (c)'s marker;
-> and **overflow count** — rows held beyond the cap. All four are **zero by
+> **Normative.** **Arm (e) — the two attempts that leave no row.** A run drives one
+> attempt whose recorder raises and one cancelled from outside, and asserts of each
+> that nothing was proposed, no facet was contributed and no candidate was
+> concluded; the cancelled one additionally asserts that the cancellation propagated
+> unconverted. Neither is counted against arm (a)'s completeness figure, because
+> §1 and §5 rule that neither is recorded.
+
+> **Normative.** The five figures, each reported with its denominator:
+> **unrecorded-read count** — over arm (a)'s run, attempts driven minus records
+> exported; **misattributed outcome count** — over arm (a)'s and arm (b)'s runs,
+> records whose outcome does not match the attempt the harness drove;
+> **content-leak count** — over arm (c)'s run, records containing any byte of the
+> marker; **overflow count** — over arm (d)'s run, rows held beyond the cap; and
+> **leaked-product count** — over arm (e)'s run, proposals, facets or candidates
+> that reached a consumer from an unrecorded attempt. All five are **zero by
 > construction** under §1, §2, §5 and §6 and are measured rather than asserted.
 
-> **Normative.** A non-zero figure on any of the four is a **breach of a ratified
+> **Normative.** A non-zero figure on any of the five is a **breach of a ratified
 > clause** and not a threshold to tune. The lane reports it, opens the issue, and
 > does not close the milestone on it.
 
@@ -659,17 +751,25 @@ a failure class stringified into a record, a path arriving inside an exception
 message, exactly the mistake ADR-0093 §8 documents at length. A marker search over
 every exported field fails on it mechanically.
 
-**Arm (a)'s five-member requirement is deliberate.** `UNANSWERED` and `DISCARDED` are
-the two outcomes no ordinary run produces, and they are the two this ADR adds the
-most value by recording; an exit test that never drove them would leave them
-unexercised in the state that matters.
+**Arm (a)'s six-member requirement is deliberate.** `UNANSWERED`, `DISCARDED` and
+`UNCONFIRMED` are the three outcomes no ordinary run produces, and they are the three
+this ADR adds the most value by recording; an exit test that never drove them would
+leave them unexercised in the state that matters. Driving them needs a grant seam
+that can be made to answer `None` and to raise on demand, which
+`ai_assistant.testing`'s `FakeSourceGrants` is for.
+
+**Arm (e) exists because the honest answer to "is every read recorded" is "no, and
+here is what holds instead".** §5's guarantee is over the *effects* of an unrecorded
+read, and an exit test that only counted rows would never touch it — leaving the one
+clause that carries the fail-closed property unexercised while the milestone closed
+on four green figures.
 
 ### 12. The contract surface owed, and what the implementing lane owes
 
 **New surface in `core` — a breaking change (golden rule 5):**
 
 - **`core/types.py`** gains **two** types:
-  - **`ReadOutcome`**, a `StrEnum` with exactly the five members §1 names. A
+  - **`ReadOutcome`**, a `StrEnum` with exactly the six members §1 names. A
     `StrEnum` for `GrantScope`'s reason — a stable, serialisable, user-facing
     vocabulary — and not ordered.
   - **`SourceReadRecord`**, a frozen pydantic model (ADR-0068) because it crosses a
@@ -682,15 +782,15 @@ unexercised in the state that matters.
       refused by the type.
     - `use: GrantScope` — which of the three uses the attempt was for.
     - `started_at: UtcInstant` — the instant the attempt started, which is the
-      instant the grant check ruled: ADR-0097 §5 makes the check and the start of
-      the read one synchronous step, so one instant is truthful for both.
+      instant the first grant check ruled: ADR-0097 §5 makes the check and the start
+      of the read one synchronous step, so one instant is truthful for both.
       Timezone-aware and refused naive.
-    - `outcome: ReadOutcome` — §1's ruling.
+    - `outcome: ReadOutcome` — §1's ruling, one of six.
     - `grant: DurableIdentifier | None` — required with no default; the
       `SourceGrant.id` the attempt ran under, `None` exactly on `REFUSED` and
       `UNANSWERED` (§2).
-    - `produced: int` — required with no default, at least zero, and zero on every
-      outcome but `COMPLETED` (§2).
+    - `produced: int` — required with no default, at least zero, the number of items
+      the reading carried, and zero on `REFUSED`, `UNANSWERED` and `FAILED` (§2).
 
   > **Normative.** `grant` and `produced` are **required with no default**, so a
   > caller states both rather than inheriting a value it did not mean. Any field a
@@ -824,6 +924,16 @@ supplies no obligation of its own (ADR-0089 §3).
   should be decided with it rather than before it.
 - **Splitting `ReadTrailError`.** Fires when a caller's recourse differs by cause —
   the first consumer that retries one class and not the other. Additive later.
+- **A durable record that the recorder itself failed**, which §5 states plainly is
+  unavailable: the only durable place to write it is the store that just refused the
+  write. Fires with a second, independent durable sink whose whole purpose is
+  recording that the first was unreachable — a decision with a cost and a consumer
+  neither of which exists, and not one to reach for by adding a table to the store it
+  is supposed to be independent of.
+- **Recording a cancelled attempt.** §1 excludes it because a driver may await
+  nothing on a cancellation path. Fires with a mechanism for durable, non-awaiting
+  recording, which nothing in this tree has and which ADR-0083 §4's shutdown design
+  is the reason nobody wants.
 - **A retention duration beside the row cap.** Fires when a deployment needs an *age*
   bound rather than a *size* one — the likeliest being a legal or policy retention
   ceiling, which is a different obligation from ADR-0097 §12's.
@@ -846,7 +956,7 @@ durable and exportable rather than a log line nobody kept. ADR-0004 §7's record
 half exists for source access for the first time. ADR-0097 §5a's in-flight residual
 stops being invisible: a `DISCARDED` row says it happened. `SourceGrants.live`'s
 record-returning shape acquires the consumer ADR-0097 §10 wrote it for. And milestone
-24's read half becomes measurable by four figures that are zero by construction.
+24's read half becomes measurable by five figures that are zero by construction.
 
 **Harder.** Three drivers gain a required constructor argument and a fail-closed
 path, so a composition that forgets one stops type-checking rather than silently
@@ -889,6 +999,24 @@ lands on exactly the question §7 exists to answer.
 **Record only the reads that produced something.** Refused in §7: a store with a
 selection policy answers "what happened" with "what we kept", and the reads worth
 recording are precisely the ones that produced nothing.
+
+**Four outcomes rather than six, with `DISCARDED` covering both post-read cases and
+`UNANSWERED` covering both unanswerable ones.** Refused in §1. The four-member form
+is what ADR-0097 §5's "discarded exactly as a withdrawn grant is" suggests, and it is
+wrong on that section's very next sentence: "A store fault and a withdrawn grant are
+different facts and an operator must be able to tell them apart." Folding
+`UNANSWERED` into `REFUSED` is worse still — it would put the claim *there was no
+live grant* into a store whose premise is that its records are not fabricated.
+
+**A boolean `opened` field beside the outcome.** Refused in §1: it is a total
+function of `outcome`, so it would be the second spelling of a fact already recorded
+(ADR-0106 §2), and a stored derivation is one that can disagree with what it derives
+from.
+
+**Define `produced` as what the *use* consumed rather than what the reading
+carried.** Refused in §2. It is not knowable when §5 requires the row to be written,
+it differs per use in a way no single integer expresses, and it would make the trail
+a partial account of memory's decisions rather than a complete account of the read.
 
 **Bound the store with a duration instead of a row count.** Refused in §6: this
 store's inflow is a timer, so a duration leaves its size a function of read cadence,
