@@ -569,7 +569,7 @@ def test_a_row_renders_every_member_seven_names(
     # The ruling itself: outcome, reason, instant, and the declaration's two names.
     assert "allowed" in rendered
     assert "within policy" in rendered
-    assert "2026-03-01 09:00 UTC" in rendered
+    assert "2026-03-01 09:00:00.000000 UTC" in rendered
     assert "smtp-relay" in rendered
     assert "capability send_email" in rendered
 
@@ -601,6 +601,40 @@ def test_a_row_renders_every_member_seven_names(
     for member in members:
         assert member.canonical is not None
         assert f"{member.canonical} (smtp)" in rendered
+
+
+def test_two_rulings_a_second_apart_render_as_two_instants(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§7: "the instant it was decided", and §7's bar on truncating part of a row.
+
+    The rest of this surface renders an instant to the minute, which is the right
+    grain for context — when a belief was last revised, when a question stops being
+    answerable. A **record** cannot afford it, and the pair this catches is the one a
+    reader most needs told apart: a ``CONFIRM`` and the ``ALLOW`` answering it are
+    typically seconds apart, so at ``%H:%M`` the two rows carry one instant printed
+    twice. That is a history internally consistent and chronologically false, which
+    is the reading ADR-0021 §4 wrote its ordering rule against, and it hides
+    ADR-0186 §2's own ordering key.
+
+    Three rows, pairwise distinct at three different grains — a minute apart, a
+    second apart, and a microsecond apart — so a renderer that keeps seconds but
+    drops the fraction fails here too rather than passing a coarser version of the
+    same case.
+    """
+    rendered = _listing(
+        output,
+        monkeypatch,
+        _decision("d-3", at=_AT.replace(second=59, microsecond=500_000)),
+        _decision("d-2", at=_AT.replace(second=59)),
+        _decision("d-1", at=_AT.replace(second=1)),
+    )
+    stamps = re.findall(r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d{6} UTC", rendered)
+    assert len(stamps) == 3
+    assert len(set(stamps)) == 3
+    assert "2026-03-01 09:00:59.500000 UTC" in stamps
+    assert "2026-03-01 09:00:59.000000 UTC" in stamps
+    assert "2026-03-01 09:00:01.000000 UTC" in stamps
 
 
 def test_a_value_carrying_markup_is_neutralised_on_render(

@@ -5674,6 +5674,38 @@ def _when(instant: datetime) -> str:
     return instant.astimezone(UTC).strftime("%Y-%m-%d %H:%M UTC")
 
 
+def _decided_at(instant: datetime) -> str:
+    """:func:`_when` at the precision a **record** owes (ADR-0186 §7).
+
+    Every other instant on this surface is context for a value the user is reading
+    now — when a belief was last revised, when a question stops being answerable —
+    and a minute is the right grain for those. A recorded ruling's instant is a
+    different kind of fact: §7 requires "the instant it was decided" rendered as part
+    of the row, and §7's last-but-one clause forbids a surface omitting, truncating
+    or summarising "any part of what it renders".
+
+    **Minute precision is a truncation, and it collapses exactly the rows a reader
+    most needs told apart.** A ``CONFIRM`` and the ``ALLOW`` that answers it are
+    typically seconds apart, so at ``%H:%M`` the pair renders as one instant twice —
+    a history that is internally consistent and chronologically false, which is the
+    reading ADR-0021 §4 wrote its ordering rule against. ADR-0186 §2's order is by
+    ``decided_at`` descending with an ``id`` tie-break, and a rendering that cannot
+    show why two adjacent rows are in the order they are in has hidden the ordering
+    key.
+
+    **Always six fractional digits, never "only when interesting."** A stable width
+    keeps a column readable and keeps the value comparable between two rows; a
+    fraction shown only when non-zero is the shape ADR-0181 §6 argues against for a
+    different fact — a reader learns to treat its presence as significant and its
+    absence as sameness. ``datetime`` resolves to the microsecond, so this is the
+    whole of the value.
+
+    A pure formatting of a value that arrived on the record — no clock is read here,
+    and none may be (golden rule 3).
+    """
+    return instant.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S.%f UTC")
+
+
 def _elision_ceiling(elided: int) -> str:
     """The ceiling ADR-0107 §5 owes beside a rendered citation count, or nothing.
 
@@ -7197,7 +7229,7 @@ def _render_decision(decision: PermissionDecision) -> None:
     """
     console.print(
         f"  {_decision_headline(decision.ruling.outcome)} "
-        f"[dim]{_when(decision.decided_at)}[/] [dim]{_safe(decision.id)}[/]"
+        f"[dim]{_decided_at(decision.decided_at)}[/] [dim]{_safe(decision.id)}[/]"
     )
     console.print(
         f"  [bold]Tool:[/] {_safe(decision.tool.id)} "
