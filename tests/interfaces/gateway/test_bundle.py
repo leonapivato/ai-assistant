@@ -1111,6 +1111,10 @@ def test_a_delivery_stream_that_stops_saying_anything_is_abandoned_on_a_bound() 
     # own delay is a segment of the wait to it — never a figure of this page's own.
     assert "arm(performance.now() + cadence * SILENT_CADENCES);" in read
     assert calls[0].rstrip().endswith("Math.min(at - performance.now(), TIMER_SEGMENT)")
+    # No arm carries an inline figure. The claim about *this* bound is the line above —
+    # it is the cadence the gateway stated and nothing else — and #1474's head bound is
+    # a page figure on purpose, which is why it is a named constant with its argument
+    # attached rather than a number sitting in a call.
     assert not re.search(r"arm\(performance\.now\(\) \+ [\d.]", read)
     assert "const SILENT_CADENCES = 3;" in script
     # Read off the head of the stream it bounds, and armed before a value is read.
@@ -1259,12 +1263,139 @@ def test_a_head_that_states_no_usable_cadence_leaves_the_stream_unbounded() -> N
 
     # One source for the figure, and no second one to fall back to: the declaration and
     # the single assignment off this stream's head, and nothing else writes to it.
-    assert read.count("cadence =") == 2
+    #
+    # The trailing space is what makes this a count of *writes*: ``cadence ===`` is a
+    # comparison, and #1474's abort handler reads the field to tell "never opened" from
+    # "went quiet". Counting it as an assignment would have this test fail on a change
+    # that writes nothing, which is the assertion drifting off its own claim.
+    assert read.count("cadence = ") == 2
     assert "cadence = usableCadence(response.headers.get(KEEP_ALIVE_HEADER));" in read
     assert "let cadence = null;" in read
     # `null` is a figure it refuses rather than one it inspects for presence.
     assert usable.rstrip().endswith(": null;\n}")
     assert 'typeof microseconds === "string"' in usable
+
+
+def test_a_delivery_request_that_never_produced_a_head_is_abandoned_too() -> None:
+    """Issue #1474, the residual #1473 stated rather than left to be discovered.
+
+    The cadence deadline is armed off the stream's own head, so a ``fetch`` black-holed
+    before a single byte comes back has nothing to arm it from — and that request hung
+    for ever: ``watching`` stayed true, ``deliveryState`` kept ``#watch-button`` hidden
+    because that is what ``watching`` means, and ADR-0182 §7's announced re-arm could not
+    fire, because §7 re-establishes a stream "only while it holds none".
+
+    **The issue states the case as a browser's *first* stream at an origin, and that
+    premise does not hold at ``origin/main``.** It rests on the figure being remembered
+    per origin, which
+    ``test_the_cadence_is_read_off_the_streams_own_head_and_kept_nowhere`` pins as
+    emphatically not the design: nothing about the cadence is stored, and ``cadence`` is
+    a local of ``readDeliveries``. So every head-less stream is the case — including the
+    re-arm a backgrounded phone makes on ``visibilitychange`` into a network that is
+    still gone, which is the failure ADR-0182 §7 exists for.
+
+    **The bound is the page's own, and that is not a lapse from the rule above it.**
+    ``usableCadence``'s rule — believe the figure the gateway stated, substitute nothing
+    — governs a figure the gateway uttered. ADR-0175 §4's write obligation is over "every
+    **open** delivery stream", so a request with no head is one the gateway has said
+    nothing about at all, and there is no figure to be held to. Deriving one from an
+    earlier stream would be that substitution, and would leave a browser's first stream
+    unbounded regardless.
+    """
+    script = _code("app.js")
+    read = _functions(script)["readDeliveries"]
+
+    # A named constant carrying its own argument, in the unit its name states.
+    assert "const HEAD_DEADLINE_MILLISECONDS = 30000;" in script
+    # Armed before the request goes out, so it covers the whole interval a `fetch` can
+    # hang in — including a connection that is never made at all.
+    assert "arm(performance.now() + HEAD_DEADLINE_MILLISECONDS);" in read
+    assert read.index("arm(performance.now() + HEAD_DEADLINE_MILLISECONDS);") < read.index(
+        'await fetch("/deliveries"'
+    )
+    # And spent the moment the head lands, whatever it says: before the refusal path
+    # reads a body, and before an unusable cadence would leave it standing.
+    after = read[read.index('await fetch("/deliveries"') :]
+    assert after.index("hush();") < after.index("if (!response.ok) {")
+    hush = read[read.index("const hush = () => {") :]
+    assert hush[: hush.index("};")].count("window.clearTimeout(deadline);") == 1
+    # The ending is the abort this page already had, so nothing new reaches the socket.
+    assert "reader.abort();" in read
+    # It opens nothing. ADR-0182 §7 forbids re-establishing "on a timer", and the timer
+    # roster above pins that over the whole file; this is the same claim for the one
+    # call site #1474 adds.
+    assert "watchDeliveries" not in read
+
+
+def test_a_stream_that_never_opened_is_not_reported_as_one_that_went_quiet() -> None:
+    """Issue #1474's second half. ``WENT_SILENT`` says nothing arrived "for
+    ``SILENT_CADENCES`` times the keep-alive cadence this gateway stated when it opened
+    the stream", and a gateway that never sent a head stated no cadence and opened no
+    stream this page saw — so reporting the new ending in that sentence would be a wrong
+    explanation rather than a missing one, which is the distinction ``readDeliveries``'
+    own ``catch`` was written to keep (ADR-0168 §9 at the last hop).
+
+    Three endings the page can reach on its own, then: a stream that never opened, one
+    that opened and went quiet, and a connection that failed. Each says which it was and
+    each hands ``#watch-button`` back, because ``deliveryState`` un-hides it whenever
+    ``watching`` is false.
+    """
+    script = _code("app.js")
+    read = _functions(script)["readDeliveries"]
+
+    assert "stopWatching(NO_HEAD);" in read
+    assert 'fault(DELIVERY_STREAM_STALLED, "notifications");' in read
+    # Ordered ahead of the silence branch, because a head that never arrived leaves no
+    # cadence and would otherwise fall through to a sentence about one.
+    assert read.index("if (stalled) {") < read.index("if (silent) {")
+    assert read.index("if (silent) {") < read.index("fault(GATEWAY_GONE,")
+    # Which branch is taken is read off `cadence` itself rather than off a second flag
+    # set somewhere it could be set wrongly: it is null exactly while no head has landed.
+    assert "if (cadence === null) {" in read
+    assert read.index("if (cadence === null) {") < read.index("stalled = true;")
+    assert read.index("stalled = true;") < read.index("silent = true;")
+    # The sentence is built from the figure, so it cannot drift from the deadline — the
+    # device ``WENT_SILENT`` already uses for the other bound.
+    assert "${HEAD_DEADLINE_MILLISECONDS / 1000} seconds" in script
+    # And it is its own wording rather than a second reader of an existing one.
+    assert "head of the stream — so this browser abandoned it" in script
+    assert script.count("Start watching again.") == 3
+
+
+def test_the_page_holds_a_stream_from_the_request_and_not_from_its_first_value() -> None:
+    """The reading of ADR-0182 §7's third clause that #1474 asks a taker for, pinned
+    where a change of mind would have to pass it.
+
+    §7 permits a re-establishment "only while it holds none — one the gateway ended with
+    ADR-0175 §4's terminal value, or one whose connection failed", so a ``fetch`` still
+    pending has reached neither of the two endings §7 admits and is not "none". The
+    clause's own ground says the same: it exists because §4 writes each delivery "to
+    **every** delivery stream open at the moment it returned" and because each stream
+    "holds a connection against ``gateway_max_browser_connections``" — both counted at
+    the *gateway*. A page whose head was black-holed on the way back cannot tell whether
+    the gateway opened a stream for it, so a page that read "holds" as "has read a value
+    from" would open a second while the gateway held two, defeating the clause precisely
+    where nothing can observe it.
+
+    #1474 floats that redefinition as the clean closure and it is refused. What #1474's
+    failure actually needs is a bound on how long the holding may last with nothing
+    arriving, which §7's third clause says nothing about: it is a rule about concurrency,
+    not about duration.
+    """
+    script = _code("app.js")
+    watch = _functions(script)["watchDeliveries"]
+    rearm = _functions(script)["rearm"]
+
+    # Held from before the request, not from its first value.
+    assert watch.index("watching = true;") < watch.index("await readDeliveries(half);")
+    # And the two gates that spend it are the same fact, so nothing opens a second.
+    assert "if (half === null || watching) {" in watch
+    assert "if (watching) {" in rearm
+    # `watching` goes false in exactly one place, and it is the one that hands the
+    # control back — so a stream cannot be released without the owner being told.
+    assert len(re.findall(r"(?<!let )watching = false;", script)) == 1
+    assert "watching = false;" in _functions(script)["stopWatching"]
+    assert 'el("watch-button").hidden = watching;' in _functions(script)["deliveryState"]
 
 
 def test_a_re_arm_happens_only_where_there_is_a_session_and_no_open_stream() -> None:

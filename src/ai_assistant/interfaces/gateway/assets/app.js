@@ -178,9 +178,60 @@ const SILENT_CADENCES = 3;
 // is not a second claim about the cadence.
 const TIMER_SEGMENT = 2147483647;
 
+// How long a delivery request may be outstanding with **no head at all** before this
+// page abandons it (#1474). It is the one duration in this file that comes from nowhere
+// but the page, and it is owed a harder argument than the multiple above for exactly
+// that reason.
+//
+// **No figure of the gateway's reaches this interval, because ADR-0175 §4's obligation
+// begins at an open stream.** §4 has the gateway write on "every **open** delivery
+// stream" at least once per `gateway_notification_budget`; a request whose head has not
+// arrived is not a stream the gateway has said anything about, so there is no disclosed
+// figure to derive from and none to hold it to. That is why `usableCadence`'s rule —
+// believe what the gateway stated, substitute nothing — does not govern here: it is
+// about a figure the gateway uttered, and here it has uttered none. Deriving one from
+// an earlier stream's head would be exactly the substitution that rule refuses, and it
+// would leave #1474's own case unbounded anyway, because that browser has no earlier
+// stream.
+//
+// **What it bounds is a round trip and an in-process table read, and nothing else.**
+// `server.py` writes `render_stream_head` and drains it *before* it awaits the body, and
+// `_deliveries` builds that head from `DeliveryFanOut.open()` and a settings field — so
+// a healthy head waits on no poll, no hub, no model and no assistant. Both ends of
+// ADR-0174's split are near by construction: the loopback listener is the same machine,
+// and the remote listener is one overlay hop to a device on the owner's own tailnet.
+// Thirty seconds is orders of magnitude above either in health, and it sits under the
+// minute `SILENT_CADENCES` bounds the other half of this failure to at ADR-0175 §8's
+// twenty-second default — so a head that never came never strands the owner longer than
+// a body that went quiet.
+//
+// A front-end constant and not a `Settings` field, for `SILENT_CADENCES`' reason:
+// ADR-0168 §12 leaves the page's own behaviour to the lane that ships it, and this
+// figure paces nothing the gateway does, so it is not a second number that can disagree
+// with the one ADR-0175 §8 names. It is stated in milliseconds and says so in its name,
+// which is `KEEP_ALIVE_HEADER`'s own principle one surface out: a bare number whose unit
+// lives only in a comment is the one thing a reader misreads silently.
+const HEAD_DEADLINE_MILLISECONDS = 30000;
+
 // Whether a delivery stream is open. One at a time: a second would be a second poll
 // the hub would close under ADR-0131 §2, and the gateway holds one poll however
 // many streams watch it (ADR-0175 §4).
+//
+// **A request that has produced no value is held, and that is a reading of ADR-0182 §7
+// rather than an implementation convenience** (#1474). §7's third clause permits a
+// re-establishment "only while it holds none — one the gateway ended with ADR-0175 §4's
+// terminal value, or one whose connection failed", and a `fetch` still pending has
+// reached neither of the two endings §7 admits, so on §7's own text it is not none. The
+// clause's ground says the same thing louder: it exists because §4 writes each delivery
+// "to **every** delivery stream open at the moment it returned" and because each stream
+// "holds a connection against `gateway_max_browser_connections`", and both of those are
+// counted at the *gateway*. A page whose head was black-holed on the way back cannot
+// tell that the gateway did not open a stream for it — so a page that read "holds" as
+// "has read a value from" would open a second while the gateway held two, defeating the
+// clause exactly where nothing can observe it. #1474 floats that redefinition and it is
+// refused here on those grounds. What is bounded instead is how long the holding may
+// last with nothing arriving, which §7's third clause says nothing about: it is a rule
+// about concurrency, not about duration.
 let watching = false;
 
 const el = (id) => document.getElementById(id);
@@ -600,6 +651,27 @@ const WENT_SILENT =
   `Nothing arrived on that stream — not even the gateway's keep-alive — for ` +
   `${SILENT_CADENCES} times the keep-alive cadence this gateway stated when it opened ` +
   `the stream, so it was abandoned.`;
+
+// A delivery stream this page abandoned before it ever had one: the request went out
+// and nothing came back at all, not even the head (#1474). Stated apart from the
+// silence above because the evidence behind the two is different — a stream that went
+// quiet broke a cadence the gateway had stated in its own head, and this one broke
+// nothing the gateway ever said, because nothing arrived to say it in. Folding them
+// into one sentence would tell an owner the gateway had promised something it had not.
+const DELIVERY_STREAM_STALLED =
+  "The request for notifications went out and nothing came back at all — not even the " +
+  "head of the stream — so this browser abandoned it and stopped watching. That is a " +
+  "request that was sent and never answered rather than a gateway that refused, and " +
+  "the gateway may be perfectly alive at the other end of it: what this browser can " +
+  "say is that nothing arrived. Nothing the hub still holds was lost: it is polled " +
+  "only while a browser is watching. Start watching again.";
+
+// The same ending, in the line that carries the control back. Written from the figure
+// rather than around it, exactly as WENT_SILENT is, so the number in the sentence
+// cannot drift from the number the deadline is armed with.
+const NO_HEAD =
+  `That stream was never opened: nothing answered the request for ` +
+  `${HEAD_DEADLINE_MILLISECONDS / 1000} seconds, so it was abandoned.`;
 
 const DELIVERY_STREAM_CUT =
   "The connection carrying notifications ended before the gateway finished it, so " +
@@ -1590,12 +1662,32 @@ async function watchDeliveries(because) {
 // any figure this page kept, which is why nothing here is remembered between streams
 // and no reconfigured gateway can be held to a figure it never uttered.
 //
-// **The residual is stated rather than smoothed over.** The head is what carries the
-// figure, so a `fetch` that never settles *at all* — no head, nothing to read a cadence
-// out of — arms nothing, and that one stream stalls exactly as every stream did before
-// this existed. What is bounded is every stream whose head arrived and whose body then
-// went quiet, which is the failure the keep-alive exists to expose. The other half
-// wants a bound that does not come from the gateway at all, and is filed (#1474).
+// **And a `fetch` that never settles at all is bounded too, by the page's own figure**
+// (#1474). The head is what carries the cadence, so a request black-holed before a
+// single byte comes back has nothing to arm a cadence deadline from — and that left one
+// stream stalling exactly as every stream did before any of this existed, with
+// `watching` true, the button hidden and §7's re-arm unreachable. #1474 states that
+// case as a browser's *first* stream at an origin, on the premise that the figure is
+// remembered per origin. It is not: `KEEP_ALIVE_HEADER` below is emphatic that nothing
+// about the cadence is kept between streams, and `cadence` is a local of this function.
+// So the case is every head-less stream, first or thousandth — including the re-arm a
+// backgrounded phone makes on `visibilitychange` into a network that is still gone,
+// which is the very failure ADR-0182 §7 exists for. `HEAD_DEADLINE_MILLISECONDS` carries
+// the argument for bounding it from the page rather than from the gateway.
+//
+// **Two bounds, one timer, and which one fell due is read off `cadence`.** The head's
+// bound is armed before the request goes out and spent the moment the head lands,
+// whatever it says; the cadence's bound is armed from that head and restarted by every
+// value. `cadence` is null exactly while no head has landed — it has one assignment and
+// `heard` arms nothing until it is not null — so the abort handler needs no second flag
+// to tell "never opened" from "went quiet", and the two cannot disagree about which
+// happened.
+//
+// **The residual that survives is the one ADR-0175 §8 requires to survive.** A head that
+// states no usable cadence still leaves that stream's *body* unbounded, because a
+// gateway entitled to a month of silence and saying so is believed rather than
+// second-guessed. That is deliberate and is not what #1474 is about: the head arrived,
+// so this page knows a stream exists.
 //
 // **The deadline is restarted by every value that arrives, keep-alive included**, so
 // what it measures is silence and never the stream's total life: a stream delivering
@@ -1615,6 +1707,8 @@ async function readDeliveries(half) {
   // stream: see `KEEP_ALIVE_HEADER`.
   let cadence = null;
   let silent = false;
+  // The head never arrived, which is its own ending and not the one above (#1474).
+  let stalled = false;
   let deadline = null;
   // One deadline, held as the **instant** it falls due and armed in segments no longer
   // than `setTimeout` can express. A single call cannot carry a delay past a signed
@@ -1640,27 +1734,50 @@ async function readDeliveries(half) {
           arm(at);
           return;
         }
-        silent = true;
+        // Which of the two bounds fell due is which figure armed it, and `cadence` is
+        // already the record of that: null exactly while no head has landed. So the two
+        // endings are told apart from the state that decides them rather than from a
+        // second flag that could be set in the wrong place.
+        if (cadence === null) {
+          stalled = true;
+        } else {
+          silent = true;
+        }
         reader.abort();
       },
       Math.min(at - performance.now(), TIMER_SEGMENT)
     );
   };
+  // Disarming is its own act because the head's bound is spent the moment the head
+  // lands, whatever the head says — before the refusal path below reads a body, which
+  // would otherwise run under a deadline meant for the head's arrival and report a
+  // refusal the gateway did answer as a request nothing answered.
+  const hush = () => {
+    window.clearTimeout(deadline);
+    deadline = null;
+  };
   // Restarted by every value the stream delivers, so the bound is on silence — and
   // armed only where a cadence is actually known, because a deadline derived from
   // nothing is a figure this page would have made up.
   const heard = () => {
-    window.clearTimeout(deadline);
-    deadline = null;
+    hush();
     if (cadence !== null) {
       arm(performance.now() + cadence * SILENT_CADENCES);
     }
   };
+  // The head's own bound, armed before the request goes out so that it covers the whole
+  // interval a `fetch` can hang in (#1474). Like every other segment this arms, it ends
+  // a stream and opens none: ADR-0182 §7 forbids re-establishing "on a timer", and
+  // nothing reached from here re-establishes anything.
+  arm(performance.now() + HEAD_DEADLINE_MILLISECONDS);
   try {
     const response = await fetch("/deliveries", {
       headers: admitted(half, false),
       signal: reader.signal,
     });
+    // The head has landed, so the bound on its arrival is spent — here rather than
+    // below, so that neither a refusal's body nor an unusable cadence leaves it armed.
+    hush();
     if (!response.ok) {
       const body = await readBody(response);
       stopWatching();
@@ -1697,8 +1814,14 @@ async function readDeliveries(half) {
   } catch (_) {
     // An abort this page asked for is not the gateway having gone, and saying it was
     // would be a wrong explanation rather than a missing one: the gateway may be
-    // perfectly alive at the other end of a socket that stopped carrying.
-    if (silent) {
+    // perfectly alive at the other end of a socket that stopped carrying. The two
+    // aborts are kept apart from each other for the same reason — a stream that went
+    // quiet broke a cadence the gateway stated, and one that never had a head broke
+    // nothing the gateway ever said, so WENT_SILENT's sentence would be false of it.
+    if (stalled) {
+      stopWatching(NO_HEAD);
+      fault(DELIVERY_STREAM_STALLED, "notifications");
+    } else if (silent) {
       stopWatching(WENT_SILENT);
       fault(DELIVERY_STREAM_SILENT, "notifications");
     } else {
