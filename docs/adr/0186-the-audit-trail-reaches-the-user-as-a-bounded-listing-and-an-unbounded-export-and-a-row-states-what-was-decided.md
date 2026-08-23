@@ -609,6 +609,16 @@ differently while both looking correct".
 > recipient, account or origin is rendered; and for an unresolved `CONFIRM`, that it is
 > rendered as neither allowed nor denied.
 
+> **Normative.** The consumer lane ships a rendering test for §7's **second** clause
+> over **one** row whose binding carries, together: a span with a destination, a span
+> with **none**, and two spans naming one recipient by two arguments. It asserts the
+> account identity; each span's own argument, position, provenance and extent; both
+> destination forms for the span that carries one and neither for the span that does
+> not; the `core`-derived canonical set read from the value rather than recomputed; the
+> payload description; and the row's outcome, reason, instant and recorded tool
+> identifier. A listing that rendered only the deduplicated set would pass every other
+> test in this section.
+
 - **#1485 closes against the consumer lane**, because that is where the trail first
   becomes drivable by a user, which is the gap the issue records.
 
