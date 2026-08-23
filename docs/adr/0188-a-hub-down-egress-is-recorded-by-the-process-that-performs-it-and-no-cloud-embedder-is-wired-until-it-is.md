@@ -1,4 +1,4 @@
-# 188. A hub-down egress is recorded by the process that performs it, in a file the hub does not own, and no cloud embedder is wired until it is
+# 188. A hub-down egress is recorded by the process that performs it, in a record the hub does not own, and no cloud embedder is wired until it is
 
 - Status: Proposed
 - Date: 2026-08-23
@@ -92,10 +92,9 @@ unaffected by which way it goes.
 - `memory/reembed.py`'s `Reembedder` receives an `Embedder` and cannot tell what
   it is. That is ADR-0104 §4's own sentence — "`memory/` receives an `Embedder`
   and cannot tell, and must not be asked to guess" — and it decides §2 below.
-- **`SourceReadTrail` and `SourceReadRecord` are ADR-0185's owed contract surface
-  and are not in the tree yet** (ADR-0185 §12; the implementing lane is in flight).
-  This ADR cites them as the ratified decision they are, and no clause here depends
-  on their existing.
+- **`SourceReadTrail`, `SourceReadRecorder` and `SourceReadRecord` are in the tree**,
+  in `core/protocols.py` and `core/types.py` — ADR-0185 §12's contract surface, landed.
+  This ADR cites them for what ADR-0185 decided about them and adds nothing to either.
 - **Nothing in the tree folds an artifact left by another process into a store at
   startup.** `Engine.start`'s reconciliations are store-to-store within the one
   process, the offline restore tool publishes a whole staged directory by rename,
@@ -200,105 +199,77 @@ databases the hub owns, and §3 makes it not a database at all. The migration
 already opens the memory store under ADR-0083 §10's discharge; this adds no second
 opener and no second door.
 
-### 3. The record is a file, deliberately, and not a store
+### 3. The record is a durable artifact the hub does not own, and this ADR rules its properties rather than its encoding
 
-> **Normative.** The record lives in a single append-only, line-delimited file in
-> the data directory, beside the databases and not among them —
-> `<data_dir>/offline-egress.jsonl` — with owner-only permissions. It is not a
-> SQLite database, gains no Protocol, no `core/` type and no conformance suite, and
-> nothing in `src/ai_assistant/` imports it to read.
+> **Normative.** The record lives in a durable artifact in the data directory, with
+> owner-only permissions. It is **not one of the hub's databases**, is not opened by
+> the hub, and gains no Protocol, no `core/` type and no conformance suite; nothing
+> under `src/ai_assistant/` imports it in order to read it.
 
-> **Normative.** The file holds **events**, one per line. A run contributes an
-> `opened` event and, if it reaches its exit, a `sealed` event; the two carry the
-> same run identifier and **together are that run's record**. A line once written is
-> never rewritten, truncated or removed, and nothing in the file is amended in place
-> — the seal is a second line, not an edit of the first.
+> **Normative.** It is **append-only and never amended in place**. What is written
+> is never rewritten, truncated or removed, and a fact established after a run has
+> begun — its outcome — is *added* to the artifact rather than edited over what was
+> already there.
 
-> **Normative.** Every event is written as one line **terminated by a newline**, and
-> the flush follows the newline rather than preceding it. A writer whose file does not
-> already end at a line boundary appends a newline **before** its own event, so a torn
-> tail left by an earlier process becomes a line of its own and can never share a
-> physical line with the event being appended.
+> **Normative.** It is **legible without this system**: an operator or a user can
+> read it with ordinary tools, and copying the artifact is what satisfies ADR-0004
+> §6's export right for these acts until §7's surface exists.
 
-> **Normative.** A reader treats a line as an event only if it is newline-terminated
-> and well-formed. Every other line is ignored **without abandoning the rest of the
-> file**: a malformed line is one lost event, never a reason to stop reading, and a
-> reader that stopped at the first bad line would discard the events a later run
-> appended after it.
-
-> **Normative.** The run identifier is **minted fresh for each run and is unique
-> within the file**. It is random rather than derived — not the instant, not the store
-> path, not the target model id, and not a counter read back out of the file — and no
-> writer reuses one, including on a resumed migration, which is a new run and a new
-> egress.
-
-> **Normative.** A reader joins a `sealed` event to an `opened` event only on an
-> identifier carrying **exactly one `opened` and at most one `sealed`**. An identifier
-> carrying anything else — two `opened` events, two `sealed` events, or a `sealed`
-> with no `opened` — is ambiguous, and every run it names reads as **unsealed** under
-> §5. A reader never resolves an ambiguity in the direction of completion, and never
-> discards one of the events to make the join work.
-
-> **Normative.** Nothing prunes it. It has no row cap, no retention duration and no
+> **Normative.** **Nothing prunes it.** It has no cap, no retention duration and no
 > eviction rule, and no lane adds one on the strength of ADR-0185 §6. The user's
-> ADR-0004 §6 erasure right over it is deletion of the whole file, which is
-> ADR-0021 §4's shape read one file over: the user may burn the book; nobody may
+> ADR-0004 §6 erasure right over it is erasure of the whole artifact, which is
+> ADR-0021 §4's shape read one artifact over: the user may burn the book; nobody may
 > tear out a page.
+
+> **Normative.** **The encoding is not ruled here.** The artifact's serialisation
+> format, its framing and recovery rules, how a run is identified, and how a reader
+> pairs a run's facts are the **implementation lane's** — the lane §8's gate fires.
+> That lane may decide them in any way that satisfies §§3–5, and it records its
+> choices in its own document. No lane cites this ADR for or against a particular
+> encoding.
+
+> **Normative.** A later lane may **add** to what the artifact carries, on ADR-0008
+> §1's additive pattern, so that an artifact written by an earlier version stays
+> readable by a later reader. No lane removes, renames or repurposes a fact §4
+> requires.
 
 **A database would have to be the hub's, and that is the thing that cannot be.**
 ADR-0083 ruling 4 says the hub owns its databases exclusively and no other process
 opens them. A record written while the hub is stopped, by a process that is not
 the hub, cannot live in a store held to that rule without an exception to it — and
 the exception would be granted for a store whose only writer is the exempt process,
-which is a store the rule was never about. A file sidesteps the question rather
-than arguing it.
+which is a store the rule was never about. An artifact outside that set sidesteps the
+question rather than arguing it.
 
-**The framing rule exists because a torn tail is the expected failure of this
-format, not an exotic one.** A power cut during the seal can leave a partial object
-with no newline; the next run's `opened` event, appended straight after those bytes,
-would then be part of the same physical line and would be lost with it — a durable,
-flushed record of an egress that really happened, discarded because an earlier run
-died mid-write. Appending the newline first costs one byte and confines the damage to
-the line that was actually torn. The same reasoning is why a reader must keep going
-past a bad line: the damaged region is always the *tail as it stood at the time*, and
-everything appended after it is intact.
+**Why the encoding is the lane's and not this ADR's, said plainly because the first
+draft of this section did the opposite.** The clauses above are the ones a later
+reader could *disobey to the system's detriment*: an artifact the hub owns
+reintroduces §2's ownership problem, one that is amended in place stops being an
+audit record, one that is pruned loses the act it existed to hold. A serialisation
+format is not that kind of thing. It is a correctness problem with a compiler and a
+test suite waiting for it — the lane §8 fires has both, and this document has
+neither. ADR-0089 §1's line is between a clause a reader could disobey and a detail
+that merely describes; a framing rule written here would be reviewed as prose,
+carried for years, and could be wrong in ways nothing would ever catch, whereas the
+same rule written in the lane is executed on every run.
 
-**The identifier is the join, so uniqueness is a property of the record and not a
-detail of the writer.** The lock serialises runs but does nothing about *sequential*
-reuse: a run killed after its `opened` event, followed by a later run that minted the
-same identifier, would give a reader one identifier with two `opened` events and one
-`sealed`, and the tempting repair — join the seal to the nearest `opened` — would mark
-the killed run complete with the later run's counts. That is the single worst thing
-this record can say, because it converts an egress whose extent is unknown into one
-reported as finished. Deriving the identifier from the clock or the store path is the
-same hazard wearing a plausible disguise, which is why the clause forbids derivation
-rather than merely asking for uniqueness. Refusing to join an ambiguous identifier
-costs a reader the outcome of runs it cannot safely pair and loses no egress: every
-`opened` event still stands, and §5's unsealed reading is exactly the honest one.
+**The arithmetic is why so little machinery is needed, and it belongs here rather
+than in the encoding.** There is exactly one writer, it holds an exclusive lock for
+the whole of its run, and the number of records an installation accumulates over its
+lifetime is the number of times an operator deliberately re-embedded to a cloud
+target — a handful, not a stream. `AuditTrail`'s atomic write-once check exists
+because two concurrent resolutions can race (ADR-0021 §4); there is no second writer
+here to race with. ADR-0185 §6's row cap exists because reads arrive on an interval;
+these do not arrive at all unless a human types a flag. A store would buy a bound
+nothing needs, a query nothing asks, and a database ADR-0123's counting hazard would
+then have to count.
 
-**Two events rather than one mutable object, and the reason is the same one that
-makes this a file.** A record that had to be *revised* at the end of the run would
-need either an in-place rewrite — which is the property an audit record exists to
-deny, and which a crash between the read and the write can lose entirely — or a
-store that can update a row, which §2's ownership problem forbids. Appending a
-second line costs neither, and it makes §5's hard case self-describing rather than
-inferred: a run identifier with an `opened` line and no `sealed` one **is** the
-unsealed record, legible to anyone reading the file with no schema to consult.
-
-**The arithmetic supports it and is worth stating.** There is exactly one writer,
-it holds an exclusive lock for the whole of its run, and the number of events an
-installation accumulates over its lifetime is at most twice the number of times an
-operator deliberately re-embedded to a cloud target — a handful, not a stream. `AuditTrail`'s
-atomic write-once check exists because two concurrent resolutions can race
-(ADR-0021 §4); there is no second writer here to race with. ADR-0185 §6's row cap
-exists because reads arrive on an interval; these do not arrive at all unless a
-human types a flag. A store would buy a bound nothing needs, a query nothing asks,
-and a database ADR-0123's counting hazard would then have to count.
-
-**Line-delimited and human-readable, because for now the file *is* the surface.**
-§7 defers a rendered surface; until one exists, the record has to be legible to the
-operator who wrote it and copyable by the user exercising ADR-0004 §6's export
-right. A line per event in a text file satisfies both without a mechanism.
+**The additive clause is ADR-0185 §12's, read one artifact over.** There a later
+ADR's addition to `SourceReadRecord` must be "optional with a default … a required
+addition would make every stored row fail". The same holds here for a stronger
+reason: these artifacts are written by a tool an operator runs by hand, months or
+years apart, so an installation's oldest record may predate the reader by several
+versions. Growth has to be the cheap direction.
 
 ### 4. What the record carries, and what "reconstructible" means for an act performed while the hub is down
 
@@ -307,24 +278,28 @@ right. A line per event in a text file satisfies both without a mechanism.
 > hub**. No clause of this ADR makes reconstructibility depend on a later process
 > running, on the hub starting again, or on any store being opened.
 
-> **Normative.** The `opened` event carries, and yields from itself alone: the run
-> identifier; the configured target — the `EmbedderKind` member, the target
-> `model_id` and the recipient the configuration names; the source store's path and
-> its recorded `model_id`; the authorisation — that an operator passed
-> `--upload-entire-memory-store` at a command line — and the instant it was taken;
-> the counts ADR-0104 §4's disclosure had already stated, being the records in the
-> store and the records still outstanding; and the instant at which sending was
-> entered.
+> **Normative.** A run's record yields, from the artifact alone, these
+> **authorisation facts**: the configured target — the `EmbedderKind` member, the
+> target `model_id` and the recipient the configuration names; the source store's
+> path and its recorded `model_id`; that an operator passed
+> `--upload-entire-memory-store` at a command line, and the instant that
+> authorisation was taken; the counts ADR-0104 §4's disclosure had already stated,
+> being the records in the store and the records still outstanding; and the instant
+> at which sending was entered.
 
-> **Normative.** The `sealed` event carries the same run identifier, the outcome,
-> the count actually embedded, the count carried over from an earlier run, and the
-> instant of the seal. It restates nothing the `opened` event already carries; a
-> reader joins the two on the run identifier.
+> **Normative.** It yields these **outcome facts** for a run that reached its exit:
+> the outcome, the count actually embedded, the count carried over from an earlier
+> run, and the instant the outcome was recorded.
 
-> **Normative.** The `opened` event asserts that the sending was **entered**, never
-> that any byte reached the recipient, and no lane, surface or measurement reads it
-> as the latter. Whether a first request left, arrived, or failed inside the
-> embedder is not determinable from this side, and the record does not claim it.
+> **Normative.** The authorisation facts assert that sending was **entered**, never
+> that any byte reached the recipient, and no lane, surface or measurement reads them
+> as the latter. Whether a first request left, arrived, or failed inside the embedder
+> is not determinable from this side, and the record does not claim it.
+
+> **Normative.** A run's two sets of facts are **attributable to that run and to no
+> other**, and a reader can tell one run's record from another's. How that is
+> achieved is §3's encoding question and belongs to the implementation lane; that it
+> holds is required here, and §5 rules what a reader does when it does not.
 
 > **Normative.** The record carries **no content**. Not a memory record, not its
 > text, not a vector, not a digest of one, not an identifier of one. ADR-0004 §5,
@@ -351,53 +326,44 @@ ADR-0181 §8 used before it. Reconstructibility here does not include what was s
 what the recipient did with it, which is outside anything this system observes.
 
 **The unit is a run, not a migration.** ADR-0104 §2 makes the migration resumable,
-so a second invocation sends only the records still outstanding. Each invocation
-that enters sending is its own egress and gets its own run identifier and its own
-pair of events, carrying its own counts. Folding two runs into one record would
-misstate both.
+so a second invocation sends only the records still outstanding. Each invocation that
+enters sending is its own egress and gets its own record, carrying its own counts.
+Folding two runs into one record would misstate both — which is why attributability
+is a required property and not an encoding nicety: the failure it prevents is a
+killed run being credited with a later run's outcome, and that converts an egress
+whose extent is unknown into one reported as finished.
 
-### 5. Write-ahead, then seal; an unsealed record is not an absent one
+### 5. Write-ahead, and an incomplete record never reads as a finished one
 
-> **Normative.** The `opened` event is appended and flushed to durable storage
-> **before the first record leaves the device**. The append is not conditional on
-> the run succeeding, on any send succeeding, or on the seal ever being reached.
+> **Normative.** §4's **authorisation facts are durable before the first record
+> leaves the device**. Making them durable is not conditional on the run succeeding,
+> on any send succeeding, or on the outcome ever being recorded.
 
-> **Normative.** An `opened` event that cannot be appended and flushed **refuses the
-> run**, before anything leaves the device, with a diagnostic naming the file and the
-> underlying failure. No lane makes the write best-effort, warns and proceeds, or
-> falls back to a second location: an egress this system cannot record is an egress
-> it does not perform.
+> **Normative.** If those facts cannot be made durable, the run is **refused**,
+> before anything leaves the device, with a diagnostic naming the artifact and the
+> underlying failure. No lane makes that write best-effort, warns and proceeds, or
+> falls back to a second location: **an egress this system cannot record is an egress
+> it does not perform.**
 
-> **Normative.** The `sealed` event is appended at exit on every path the process
-> survives — a completed run, a failure raised out of the embedder or the store, and
-> a `KeyboardInterrupt`.
+> **Normative.** §4's **outcome facts are recorded at exit**, on every path the
+> process survives — a completed run, a failure raised out of the embedder or the
+> store, and a `KeyboardInterrupt`.
 
-> **Normative.** "Sealed" and "unsealed" are properties of **the file**, never of
-> what the writing process knew or intended. A run is sealed when the file holds a
-> complete, well-formed `sealed` line carrying that run's identifier, and unsealed
-> otherwise. A line that is not newline-terminated or not well-formed is not an event
-> under §3's framing rule: a reader ignores it, and the run it would have belonged to
-> is unsealed.
+> **Normative.** A run's record is **read off the artifact and never off what the
+> writing process knew or intended**. A record that is incomplete, ambiguous,
+> duplicated, or unreadable in any part **never reads as a completed run and never
+> reads as a settled extent**. It reads as *authorised, sending entered, extent
+> undeterminable*, and that reading does not vary with **why** it is incomplete.
 
-> **Normative.** A run is therefore left unsealed by a path that ends the process
-> without running its exit — `SIGKILL`, a power cut, a kernel panic — and by a seal
-> that could not be appended at all or reached the file only in part. A failure to
-> append is reported to the operator on standard error, naming the file.
+> **Normative.** No lane, no surface and no exit measurement treats an incomplete
+> record as the absence of an act, and none infers the extent from the authorisation
+> facts' counts, which state what was **authorised** and not what was sent.
 
-> **Normative.** A seal that was appended but whose durability the filesystem will
-> not confirm **is a seal**. The run reads as sealed, and the operator is warned on
-> standard error that the line may not survive a power loss until the filesystem next
-> syncs — ADR-0104 §3's shape for a swap that happened but could not be flushed, and
-> the same words it already prints. Neither that warning nor a failed append turns a
-> migration that completed into one that failed: the record's durability and the run's
-> outcome are separate facts.
-
-> **Normative.** A run whose `opened` event stands with no `sealed` event
-> reconstructs as *authorised, sending entered, extent undeterminable* — never as no
-> egress, and never as a completed one, **and this reading does not vary with why the
-> seal is missing**. No lane, no surface and no exit measurement treats a missing seal
-> as the absence of an act, and none infers the extent from the `opened` event's
-> disclosed counts, which state what was *authorised* and not what was sent.
+> **Normative.** Where the outcome facts cannot be made durable after the egress has
+> already happened, the run is **not** aborted and the migration's own outcome is
+> unaffected; the failure is reported to the operator on standard error. The record's
+> durability and the run's outcome are separate facts — ADR-0104 §3's shape for a swap
+> that happened but could not be flushed.
 
 **The order is the whole of it.** A record written at the commit point records
 nothing when the run is killed halfway, which is the case that matters most: an
@@ -407,35 +373,35 @@ exactly this point — `service/reembed.py`'s `_run_locked` prints the store, th
 models and the counts and only then calls `Reembedder.run` — so the write-ahead
 point is a moment the design already has, not one this ADR invents.
 
-**The two write failures are treated differently, and the asymmetry is the whole
-design rather than an inconsistency.** A failed `opened` write happens while nothing
-has left the device, so refusing costs the operator a retry and loses nothing — the
+**The two write failures are treated differently, and the asymmetry is the design
+rather than an inconsistency.** A failed authorisation write happens while nothing has
+left the device, so refusing costs the operator a retry and loses nothing — the
 migration is resumable by ADR-0104 §2, and the disclosure has already told them what
-they were authorising. A failed `sealed` write happens after records have been sent,
-where there is nothing left to refuse: the egress is in the past, and aborting the
-process would only discard the run's remaining work. What is available in the second
-case is to say so, which the clause requires, and to leave the record in the one state
-that is true — unsealed, meaning the extent is not known from the file. Treating a
-seal failure as fatal would trade a recoverable ignorance for an unrecoverable one.
+they were authorising. A failed outcome write happens after records have been sent,
+where there is nothing left to refuse: the egress is in the past, and aborting would
+only discard the run's remaining work. What is available in the second case is to say
+so, which the clause requires, and to leave the record in the one state that is true —
+incomplete, meaning the extent is not established. Treating it as fatal would trade a
+recoverable ignorance for an unrecoverable one.
 
-**Sealedness is read off the file and not off the process's belief, which is what
-keeps the two answers from disagreeing.** A `sealed` line that was appended but not
-confirmed durable is *in the file*, so a reader joins it to its `opened` line and gets
-the outcome and the counts; calling that run unsealed because the writer's `fsync`
-returned an error would give one answer to the process and a different one to anyone
-who opened the file a second later. The warning is about the future — the line may not
-survive a power loss — and if it does not survive, the file after the restart holds no
-seal and the run is unsealed then, by the same rule, with no reinterpretation
-required. Requiring completeness and well-formedness is what makes that rule total: a
-torn final line from an interrupted write is not half a seal, it is not an event at
-all.
+**One reading rule covers every way a record can fall short, and that is deliberate.**
+The interesting failures are not one failure: a process killed before its outcome was
+written, an outcome that could not be written, a partial write torn by a power cut,
+two runs whose facts cannot be told apart. An earlier draft of this ADR answered each
+separately and got a different answer each time — which is what happens when the rule
+is stated over the *mechanism* rather than over the *claim*. Stated over the claim it
+is one sentence, and it is total: if the artifact does not establish that a run
+finished and how much it sent, then no reader may say it did. Nothing here needs to
+enumerate the ways that can happen, and a lane that finds a new one has already been
+told the answer.
 
-**A seal that cannot be written is why the unsealed reading may not be refined.**
-It would be tempting to let a surface say "this run completed, we merely failed to
-record it", on the strength of the process having reached its exit. Nothing durable
-supports that sentence: the claim would rest on a report printed to a terminal, which
-is exactly the substitute for a record that Alternatives refuses ADR-0104 §4's
-disclosure for. So the file's reading is fixed by what the file holds.
+**The unfinished reading may not be refined by anything outside the artifact.** It
+would be tempting to let a surface say "this run completed, we merely failed to record
+it", on the strength of the process having reached its exit. Nothing durable supports
+that sentence: the claim would rest on a report printed to a terminal, which is
+exactly the substitute for a record that Alternatives refuses ADR-0104 §4's disclosure
+for. So the reading is fixed by what the artifact holds, and the conservative
+direction is the only one available.
 
 **Stating the indeterminacy rather than resolving it is ADR-0185 §1's move.** There,
 a `FAILED` read leaves opened-ness undeterminable and §10 excludes it from the
@@ -485,10 +451,10 @@ is to merge the two lists — at which point either this record is rendered as a
 ruling, which is false, or the rulings are rendered as transmissions, which §8
 forbids.
 
-**Deferring the surface leaves nothing unreachable.** §3's file is in the data
-directory, is human-readable, and is copied by the same act that exports it, so
-ADR-0004 §6 is satisfied for this record to the same extent it is for the file's
-neighbours. What a rendered surface would add is convenience, and it should be
+**Deferring the surface leaves nothing unreachable.** §3's artifact is in the data
+directory, is legible without this system, and is copied by the same act that exports
+it, so ADR-0004 §6 is satisfied for this record to the same extent it is for the
+artifact's neighbours. What a rendered surface would add is convenience, and it should be
 designed together with whatever else the milestone-24 exit ruling and #1503 leave
 standing, rather than ahead of them.
 
@@ -611,15 +577,23 @@ adversarial lens alone.
 
 **Easier.** ADR-0104's named residue closes, and it closes in the direction that
 costs nothing today: #747's question has an answer, and the answer is enforced by a
-gate rather than by an intention. The implementing lane, when a cloud `Embedder`
-arrives, inherits a decided shape instead of re-deriving one under time pressure
-beside a feature. And "what left this machine, and on whose say-so" acquires an
-answer for the one act in the system for which the permission layer is structurally
-unable to give one.
+gate rather than by an intention. And "what left this machine, and on whose say-so"
+acquires an answer for the one act in the system for which the permission layer is
+structurally unable to give one.
 
-**Harder.** The data directory gains a file that is not a database and is not the
-hub's, which is a second kind of durable artefact for an operator to know about and
-for any future backup or export tooling to remember. A future surface that wants to
+**What the implementing lane inherits, and what is left to it.** It inherits the
+decisions — who writes the record (§2), that the hub neither owns nor ingests it (§2,
+§3), what it must yield (§4), the write-ahead order and its fail-closed refusal (§5),
+the one reading rule for an incomplete record (§5), the bars on any surface (§7), and
+the gate it is fired by (§8). It decides the encoding: the serialisation, the framing
+and recovery rules, how a run is identified, and how a reader pairs a run's facts. It
+inherits, in other words, everything a compiler cannot check and decides everything a
+compiler can — which is the division §3 argues for and the reason this ADR is shorter
+than its first draft.
+
+**Harder.** The data directory gains a durable artifact that is not a database and is
+not the hub's, which is a second kind of thing for an operator to know about and for
+any future backup or export tooling to remember. A future surface that wants to
 show the user "everything that left" now has two sources with different shapes and
 no join between them — the same shapelessness ADR-0185 §10 already recorded between
 a read row and an egress row, arriving a third time. And §2's second clause is a
@@ -632,7 +606,7 @@ flag twice.
 gate and the moment every clause here stops being hypothetical. A second offline
 tool — ADR-0083 §10 says the re-embedding migration is "the first and for now the
 only one" — which would make this a class rather than a case, and at which point the
-file's shape deserves to be decided for the class. A consumer that needs to *read*
+artifact's shape deserves to be decided for the class. A consumer that needs to *read*
 this record programmatically, which is when §3's "no Protocol" trade goes the other
 way. And either resolution of #1503, which would give the corpus a second answer to
 "what records an execution" and is where the two should be reconciled.
@@ -670,13 +644,13 @@ escapes the audit obligation *by being performed at the right moment*, which is 
 exception shaped like an incentive. ADR-0004 §7 is better served by an act that
 records itself than by a clause saying it need not.
 
-**A durable store of its own — a twelfth database in the data directory — with a
+**A durable store of its own — another database in the data directory — with a
 Protocol, a conformance suite and a canonical
 fake.** Refused for now, and §3 gives the arithmetic: one writer under an exclusive
-lock, no reader, no query, no bound, and a handful of events in a lifetime. A
+lock, no reader, no query, no bound, and a handful of records in a lifetime. A
 Protocol with no consumer is machinery ahead of demand, it is a `core/protocols.py`
 change owing its own ADR under golden rule 5, and it reintroduces the ownership
-problem the file exists to sidestep. The trigger is named in Consequences: the first
+problem the artifact exists to sidestep. The trigger is named in Consequences: the first
 consumer that must read this record programmatically.
 
 **Refuse the cloud target permanently and delete ADR-0104 §4's authorised path.**
