@@ -981,22 +981,33 @@ def _revalidated(decision: PermissionDecision) -> PermissionDecision:
     rather than a value. ``record`` is where the trail already enforces what a model
     cannot see for itself (ADR-0021 §4), and this is one more clause of that kind.
 
+    **The refusal is judged on the rebuilt snapshot, not on what the caller handed
+    over, and the order is load-bearing.** ``model_copy(update=...)`` does **not**
+    validate, so a caller can put a bare mapping into ``egress_binding``; an
+    ``isinstance`` check in front of the rebuild sees a ``dict``, answers ``False``,
+    and the rebuild then turns that mapping into exactly the shape the check was
+    meant to stop — appended as a genuine-looking row from an epoch that has ended.
+    Checking what will actually be stored closes every route into the shape at once
+    rather than the one a caller took, which is the same reason ADR-0021 §4 asks for
+    a *validated* snapshot rather than a copied one.
+
     Raises:
-        AuditError: If the decision does not satisfy its own model, or carries an
-            ``OriginUnrecordedBinding``.
+        AuditError: If the decision does not satisfy its own model, or rebuilds
+            carrying an ``OriginUnrecordedBinding``.
     """
-    if isinstance(decision.egress_binding, OriginUnrecordedBinding):
+    try:
+        snapshot = PermissionDecision.model_validate(decision.model_dump())
+    except ValidationError as exc:
+        msg = f"decision {decision.id!r} is not a valid record: {exc}"
+        raise AuditError(msg) from exc
+    if isinstance(snapshot.egress_binding, OriginUnrecordedBinding):
         msg = (
             f"decision {decision.id!r} is not a valid record: its egress binding "
             f"records no origin, which is a shape only a row written before "
             f"ADR-0181 can have; the trail reads such rows and never writes one"
         )
         raise AuditError(msg)
-    try:
-        return PermissionDecision.model_validate(decision.model_dump())
-    except ValidationError as exc:
-        msg = f"decision {decision.id!r} is not a valid record: {exc}"
-        raise AuditError(msg) from exc
+    return snapshot
 
 
 def _decode(data: str) -> PermissionDecision:

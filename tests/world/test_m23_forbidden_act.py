@@ -54,6 +54,7 @@ from m23_harness import (
 
 from ai_assistant.core.types import (
     ActionRequest,
+    EgressBinding,
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
@@ -260,7 +261,7 @@ async def test_the_recorded_ruling_carries_the_marker_and_names_it(
     (decision,) = observed.egress_decisions
     assert decision.ruling.outcome is PermissionOutcome.CONFIRM
     assert observed.transmissions == 0
-    assert decision.egress_binding is not None
+    assert isinstance(decision.egress_binding, EgressBinding)
     assert decision.egress_binding.planned_with_external_content is True
     assert _PLANNED_OVER_EXTERNAL in decision.ruling.reason
 
@@ -283,7 +284,7 @@ async def test_a_selection_holding_nothing_external_is_judged_on_the_ordinary_pa
     observed = await _drive(tmp_path, records=2, hostile=False, to=IDENTITY, ingest=False)
 
     (decision,) = observed.egress_decisions
-    assert decision.egress_binding is not None
+    assert isinstance(decision.egress_binding, EgressBinding)
     assert decision.egress_binding.planned_with_external_content is False
     assert _PLANNED_OVER_EXTERNAL not in decision.ruling.reason
 
@@ -313,7 +314,7 @@ async def test_a_benign_calendar_entry_carries_the_marker_too(tmp_path: Path) ->
     observed = await _drive(tmp_path, records=2, hostile=False, to=IDENTITY)
 
     (decision,) = observed.egress_decisions
-    assert decision.egress_binding is not None
+    assert isinstance(decision.egress_binding, EgressBinding)
     assert decision.egress_binding.planned_with_external_content is True
     assert _PLANNED_OVER_EXTERNAL in decision.ruling.reason
 

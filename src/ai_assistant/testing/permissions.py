@@ -283,6 +283,15 @@ class FakeAuditTrail:
         pinned in ``SqliteAuditTrail``'s own tests while *this* clause is in the
         shared conformance suite.
 
+        **The refusal is judged on the rebuilt snapshot rather than on what the
+        caller handed over, and the order is load-bearing.**
+        ``model_copy(update=...)`` does not validate, so a caller can put a bare
+        mapping into ``egress_binding``; a check in front of the rebuild sees a
+        ``dict``, answers ``False``, and the rebuild then turns that mapping into
+        exactly the shape the check was meant to stop. Checking what will actually be
+        stored closes every route into the shape at once rather than the one a caller
+        took.
+
         Raises:
             AuditError: If the decision does not satisfy its own model, or carries
                 an ``OriginUnrecordedBinding``. Raised
@@ -294,18 +303,18 @@ class FakeAuditTrail:
             DuplicateDecisionError: If the id is already recorded.
             InvalidResolutionError: If ``resolves`` fails the invariant.
         """
-        if isinstance(decision.egress_binding, OriginUnrecordedBinding):
+        try:
+            snapshot = PermissionDecision.model_validate(decision.model_dump())
+        except ValidationError as exc:
+            msg = f"decision {decision.id!r} is not a valid record: {exc}"
+            raise AuditError(msg) from exc
+        if isinstance(snapshot.egress_binding, OriginUnrecordedBinding):
             msg = (
                 f"decision {decision.id!r} is not a valid record: its egress binding "
                 f"records no origin, which is a shape only a row written before "
                 f"ADR-0181 can have; the trail reads such rows and never writes one"
             )
             raise AuditError(msg)
-        try:
-            snapshot = PermissionDecision.model_validate(decision.model_dump())
-        except ValidationError as exc:
-            msg = f"decision {decision.id!r} is not a valid record: {exc}"
-            raise AuditError(msg) from exc
         # The checks are *inside* the resource, not before it: a caller that
         # validated against a trail it no longer holds could pass a duplicate or
         # resolution check that the append then contradicts. This is where the
