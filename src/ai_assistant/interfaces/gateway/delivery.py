@@ -395,13 +395,23 @@ async def write_stream(
     reclaims the connection; without the race the abandonment clause would be a
     decision the gateway made and could not act on.
 
-    **The opening value is written here rather than offered to the stream**, and the
-    difference is §4's one-pending rule. :meth:`DeliveryStream.offer` refuses while a
-    write is outstanding — that refusal *is* the abandonment clause — so a gateway
-    that offered an opening value would race the first delivery against it and could
-    abandon a stream on its own first write. Written straight to the connection ahead
-    of the iteration, it costs the stream's pending slot nothing and cannot be the
-    value a delivery is dropped behind.
+    **The opening value is written under the same race as every other**, which is what
+    adversarial review blocked an earlier draft for not doing. That draft wrote it and
+    entered the loop, so a delivery arriving before it reached the peer was written on
+    top of it — two values outstanding on one connection, where §4 requires that "a
+    write that has not completed when the next value is due on that stream is abandoned
+    and the stream is ended". Here at most one value is ever unflushed: the opening
+    write is drained, or the stream is abandoned, before anything else is written.
+
+    **It is not offered into the pending slot, and that is a correction of the
+    correction.** Seeding the slot at :meth:`DeliveryFanOut.open` is the literal reading
+    of "at most one value pending per stream", and it abandons *freshly opened* streams:
+    the slot is filled before the connection handler has been scheduled, so a delivery
+    returning in that window meets a full slot and ends a stream that has read nothing.
+    §4's abandonment is for "a browser that stops reading", not for one the event loop
+    has not reached yet, and a second tab opened while notifications are flowing hit it
+    every time. Draining outside the slot keeps both clauses: one value pending, one
+    value in flight, nothing queued behind either.
 
     Args:
         writer: The connection's writer, already carrying the stream's head.
@@ -410,18 +420,36 @@ async def write_stream(
         opening: The value every delivery stream begins with (#1442) — ``streams``'
             ``OPEN``, carrying the cadence §4 obliges a write within.
     """
-    writer.write(frame(opening))
+    if not await _write(writer, stream, frame(opening)):
+        return
     async for value in stream.values():
-        writer.write(frame(value))
-        drained = asyncio.ensure_future(writer.drain())
-        abandoned = asyncio.ensure_future(stream.abandoned.wait())
-        try:
-            await asyncio.wait({drained, abandoned}, return_when=asyncio.FIRST_COMPLETED)
-            if not drained.done():
-                return
-            await drained
-        finally:
-            for pending in (drained, abandoned):
-                pending.cancel()
-                with contextlib.suppress(asyncio.CancelledError, ConnectionError, OSError):
-                    await pending
+        if not await _write(writer, stream, frame(value)):
+            return
+
+
+async def _write(writer: asyncio.StreamWriter, stream: DeliveryStream, payload: bytes) -> bool:
+    """Write one framed value and wait for it to reach the peer, or give up (§4).
+
+    Args:
+        writer: The connection's writer.
+        stream: The stream being written, for the abandonment signal.
+        payload: The framed value.
+
+    Returns:
+        Whether the write reached the peer. ``False`` where the stream was abandoned
+        first, which the caller answers by ending the stream.
+    """
+    writer.write(payload)
+    drained = asyncio.ensure_future(writer.drain())
+    abandoned = asyncio.ensure_future(stream.abandoned.wait())
+    try:
+        await asyncio.wait({drained, abandoned}, return_when=asyncio.FIRST_COMPLETED)
+        if not drained.done():
+            return False
+        await drained
+        return True
+    finally:
+        for pending in (drained, abandoned):
+            pending.cancel()
+            with contextlib.suppress(asyncio.CancelledError, ConnectionError, OSError):
+                await pending

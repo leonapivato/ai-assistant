@@ -1989,6 +1989,11 @@ class Gateway:
         §7's announced re-arm could not fire, because §7 re-establishes a stream "only
         while it holds none".
 
+        **Written under §4's own abandonment race**, so at most one value is ever
+        unflushed on the connection —
+        :func:`~ai_assistant.interfaces.gateway.delivery.write_stream` carries the
+        reasoning and the two drafts it corrects.
+
         **On the stream rather than on the exchange, and the ADRs decide which.**
         ADR-0168 §5 has the bootstrap exchange "return nothing but the two session
         values §6 requires", so that body is closed to it; ADR-0175 §2 makes "the exact
