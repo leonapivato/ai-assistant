@@ -45,9 +45,29 @@ _OFF_ORIGIN = re.compile(r"""(?:src|href|@import|url\()\s*=?\s*['"(]?(?:https?:)
 _MARKUP_SINKS = ("innerHTML", "outerHTML", "insertAdjacentHTML", "document.write", "eval(")
 
 
+#: The smallest target a finger hits reliably, and the floor every control on the page
+#: is held to (#1429). Written as the literal the stylesheet carries, because what is
+#: being pinned is the declaration and not an arithmetic on it.
+_TOUCH_FLOOR: Final = "min-height: 44px;"
+
+#: The one width below which the narrow layout applies (#1429).
+_NARROW: Final = "@media (max-width: 480px) {"
+
+
 def _asset(name: str) -> str:
     """One shipped file, as text."""
     return (_ASSETS / name).read_text(encoding="utf-8")
+
+
+def _rule(stylesheet: str, selector: str) -> str:
+    """The declarations of one rule, by the exact selector text that opens it.
+
+    Enough to ask what a *particular* selector declares, which searching the whole
+    sheet cannot: a `min-height` counted anywhere would be satisfied by any other
+    rule having one.
+    """
+    opened = stylesheet.index(f"\n{selector} {{") + len(selector) + 4
+    return stylesheet[opened : stylesheet.index("\n}", opened)]
 
 
 def _markup(name: str) -> str:
@@ -182,6 +202,163 @@ def test_an_unbreakable_token_wraps_instead_of_running_off_the_page() -> None:
 
     assert declarations is not None
     assert "overflow-wrap: anywhere;" in declarations.group(1)
+
+
+def test_a_checkbox_is_not_stretched_to_the_width_of_its_container() -> None:
+    """Issue #1440, and the rule that caused it.
+
+    ``input, textarea { width: 100% }`` had no type filter, so every checkbox on the
+    page was stretched to its container — measured 656.6px inside a 44rem shell. A
+    ``.choice`` is a flex row, so a box that wide took the whole line and the label it
+    belongs to wrapped underneath it: the box rendered above its own words, on every
+    checkbox row, at every width.
+
+    Pinned as *what the selector excludes* rather than as the presence of a narrower
+    rule somewhere: a later `width` on `input` with the filter dropped again is the
+    regression, and only the selector catches it.
+    """
+    stylesheet = _asset("app.css")
+
+    assert 'input:not([type="checkbox"]):not([type="radio"]),\ntextarea {' in stylesheet
+    # And the box has a width of its own rather than merely being spared one, so it is
+    # not left to whatever a flex row would negotiate for an item with no basis.
+    box = _rule(stylesheet, 'input[type="checkbox"]')
+    assert "width: 1.15rem;" in box
+    assert "flex: none;" in box
+    # The tuning panel's three-type patch is the same bug patched three types at a time
+    # in one panel. It stays — those are text fields and do want the field's rule, only
+    # not its width — but it is no longer what keeps a checkbox off the whole line.
+    assert '#tuning-body input[type="number"] {' in stylesheet
+
+
+def test_a_checkbox_and_the_words_beside_it_are_one_element() -> None:
+    """#1440's other half, and #1429's touch floor at the one control that cannot be
+    given a 44px box.
+
+    Flat, a box and its ``<label>`` are two items of a wrapping flex row, so a narrow
+    viewport may put the words on the line below the box — and the beliefs panel offers
+    three pairs in one row, where a wrap between the third box and its own name is a
+    band filtered by a label the owner read against the wrong box (ADR-0130 §6's three
+    levels). Nested, the pair is one item and cannot be split.
+
+    It is also what makes the target 44px while the box stays 1.15rem: a label's
+    tappable area is the label, so the strip toggles the box.
+    """
+    document = _markup("index.html")
+    script = _code("app.js")
+    stylesheet = _asset("app.css")
+
+    assert _TOUCH_FLOOR in _rule(stylesheet, ".check")
+    # Every checkbox in the document, and there is no other way to write one: a box
+    # outside a `.check` label is the shape this test exists to keep off the page.
+    boxes = re.findall(r'<input\s+type="checkbox"[^>]*id="([a-z-]+)"', document)
+    assert set(boxes) == {"stream-answer", "band-asserted", "band-derived", "band-attested"}
+    for box in boxes:
+        pair = re.search(
+            rf'<label class="check" for="{box}">\s*<input\s+type="checkbox" id="{box}"',
+            document,
+        )
+        assert pair is not None, box
+    # And the one place the script builds a checkbox row — the grant scope form, which
+    # offers the whole use vocabulary every time (ADR-0139 §3).
+    scope = _functions(script)["offerScope"]
+    assert 'text.className = "check";' in scope
+    assert "text.appendChild(box);" in scope
+    assert "text.appendChild(document.createTextNode(use.label));" in scope
+
+
+def test_every_control_on_the_page_meets_the_touch_floor() -> None:
+    """#1429: 44px, at the four rules every control on this page comes through.
+
+    ``button`` is the load-bearing one. Every button on the surface is built through it
+    — the panel openers in the document, and the ones a listing builds beside a row: a
+    belief's Forget, a notification's Dismiss and Forget, a question's Accept and
+    Reject, a confirmation's Yes and No, the fault slot's Dismiss and "Start a new
+    conversation". None of them has a size rule of its own, which is the point: there
+    is no button that can be added to this page without the floor.
+
+    ``select`` had no rule at all before this and took the browser's own font, which on
+    iOS is under 16px — the size at which Safari zooms the page on focus and leaves it
+    zoomed. It is the same fault as the touch one, one sense over.
+    """
+    stylesheet = _asset("app.css")
+
+    for selector in ("button", "select", ".check", ".panel-index a"):
+        assert _TOUCH_FLOOR in _rule(stylesheet, selector), selector
+    # `inline-flex` is what makes a floor centre its label rather than pin it to the top
+    # of a taller box, and the `max-width` is what keeps a long label inside the page:
+    # a button that cannot exceed its container wraps between its words instead of
+    # pushing the document sideways.
+    button = _rule(stylesheet, "button")
+    assert "display: inline-flex;" in button
+    assert "max-width: 100%;" in button
+    # And the field's font is inherited rather than named, so it is the body's 16px.
+    assert "font: inherit;" in _rule(stylesheet, "select")
+
+
+def test_the_page_has_one_layout_for_a_phone() -> None:
+    """#1429: a narrow layout at 480px and below, driven at 390x844.
+
+    One breakpoint, because there is one question here — what the 44rem column's
+    gutters and a panel's inset are worth on a 390px screen — and every width below it
+    answers the same way.
+
+    What is asserted is as much what the block does *not* do. Nothing in it hides,
+    shortens, clamps or scrolls a panel's content: on a surface whose ADRs spend clause
+    after clause on an answer being shown whole (ADR-0139 §3's third clause, ADR-0177
+    §6, ADR-0178 §7's "none omitted, none truncated silently"), a responsive rule that
+    clipped a confirmation's recipients to fit a phone would breach them from the
+    stylesheet, and pass every other check in this file.
+    """
+    stylesheet = _asset("app.css")
+
+    assert _NARROW in stylesheet
+    narrow = stylesheet[stylesheet.index(_NARROW) : stylesheet.rindex("\n}")]
+    assert ".shell {" in narrow
+    assert ".panel {" in narrow
+    for forbidden in ("display: none", "max-height", "overflow: hidden", "line-clamp"):
+        assert forbidden not in narrow, forbidden
+    # The dark-scheme block is still the only *other* media query, so this one is the
+    # single breakpoint it claims to be rather than the first of a family.
+    assert stylesheet.count("@media") == 2
+
+
+def test_the_page_indexes_the_panels_that_are_open() -> None:
+    """#1429: the thirteen control panels reachable on a phone without scrolling past
+    all of them.
+
+    A phone shows about a third of one panel, and this page grows a panel every time a
+    listing is read, so by the fourth read the answer to the control the owner pressed
+    is a thousand pixels below the button that asked for it.
+
+    The index is rebuilt from ``show``, which is the one place a panel's visibility
+    changes, so it cannot disagree with the page — there is no second record of what is
+    open — and each name is read off that panel's own heading, so a panel added later
+    is indexed without this file or the script learning its name.
+
+    #1429 offers collapsing the panels as the alternative; it was not taken, and the
+    check that it was not is above: a surface that can show only the panel it last
+    opened decides which question the owner is looking at, on the page whose ADRs
+    forbid one answer standing in for another (ADR-0139 §1, ADR-0177 §6).
+    """
+    script = _code("app.js")
+    document = _markup("index.html")
+
+    assert '<nav id="panel-index" class="panel-index"' in document
+    assert "indexPanels();" in _functions(script)["show"]
+    building = _functions(script)["indexPanels"]
+    assert 'document.querySelectorAll("section.panel")' in building
+    assert "!panel.hidden" in building
+    assert "panel.firstElementChild.textContent" in building
+    # Never a link to the panel the reader is on: bootstrap is shown exactly when
+    # nothing else is, and an index of one entry is a second heading rather than
+    # navigation.
+    assert 'panel.id !== "bootstrap"' in building
+    assert "nav.hidden = open.length < PANEL_INDEX_FLOOR;" in building
+    assert "const PANEL_INDEX_FLOOR = 2;" in script
+    # It navigates by fragment: no timer, no request, and nothing that could become one.
+    assert "link.href = `#${panel.id}`;" in building
+    assert "scrollIntoView" not in script
 
 
 def test_the_header_half_is_held_in_origin_scoped_storage_shared_across_tabs() -> None:

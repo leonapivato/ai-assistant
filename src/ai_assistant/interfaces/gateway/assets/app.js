@@ -217,6 +217,53 @@ function startFresh() {
 
 function show(id, visible) {
   el(id).hidden = !visible;
+  indexPanels();
+}
+
+// --- the index of what is on screen (#1429) ----------------------------------
+//
+// **A phone is about a third of one panel tall, and this page grows a panel every time
+// a listing is read.** By the fourth read the answer to the control the owner pressed
+// is a thousand pixels below the button that asked for it, and the only way to any of
+// the thirteen is to scroll past all of them.
+//
+// **Rebuilt from `show`, which is the one place a panel's visibility changes.** So the
+// index cannot disagree with the page: there is no second record of what is open, and
+// a panel added later is indexed without this function learning its name.
+//
+// **Each name is the panel's own heading**, read off the document rather than held in
+// a table here, for the reason the confirmation prompt has no template: a second place
+// a panel is called something is a place for one of the two to go stale.
+//
+// **It adds nothing and hides nothing.** The alternative #1429 offers — collapsing the
+// panels and keeping one open — was not taken: a surface that can show only the panel
+// it last opened decides for the owner which question they are looking at, and this is
+// the page whose ADRs spend clause after clause on one answer never standing in for
+// another (ADR-0139 §1, ADR-0177 §6). A long page with an index is the weaker claim
+// and the correct one. Nothing here is a timer and nothing here is a request: an
+// in-page link is the browser scrolling the document it already has.
+//
+// **The floor is two.** An index listing the one panel it sits under is not navigation,
+// it is a second heading for it.
+const PANEL_INDEX_FLOOR = 2;
+
+function indexPanels() {
+  const nav = el("panel-index");
+  clearNode(nav);
+  const open = [...document.querySelectorAll("section.panel")].filter(
+    // The bootstrap panel is never indexed: it is on screen exactly when nothing else
+    // is, so a link to it could only ever point at the page the reader is already on.
+    (panel) => !panel.hidden && panel.id !== "bootstrap"
+  );
+  open.forEach((panel) => {
+    const link = document.createElement("a");
+    link.href = `#${panel.id}`;
+    // The heading, which `faultSlot` inserts *after*, so this stays the heading even
+    // in a panel that is carrying a fault.
+    link.textContent = panel.firstElementChild.textContent;
+    nav.appendChild(link);
+  });
+  nav.hidden = open.length < PANEL_INDEX_FLOOR;
 }
 
 // --- where a fault is written (#1429) ----------------------------------------
@@ -1694,10 +1741,15 @@ function offerScope(item, source, label, live) {
     const box = document.createElement("input");
     box.type = "checkbox";
     box.id = `use-${source.source}-${use.value}`;
+    // The box goes *inside* its label, as it does in the document (#1440): the pair is
+    // one flex item that a narrow viewport cannot split, and the tap target becomes the
+    // whole strip rather than a 1.15rem square. Still one text node and still never
+    // markup — `use.label` is this file's own vocabulary either way.
     const text = document.createElement("label");
+    text.className = "check";
     text.htmlFor = box.id;
-    text.textContent = use.label;
-    row.appendChild(box);
+    text.appendChild(box);
+    text.appendChild(document.createTextNode(use.label));
     row.appendChild(text);
     form.appendChild(row);
     return { box, value: use.value };
