@@ -151,9 +151,11 @@ read off `main` and each is load-bearing for a clause below.
   than a coincidence.
 - **Four assemblers put a stored record into a model prompt, and they do not agree
   with each other.** `orchestration/composing.py`, `orchestration/consolidation.py`
-  and `planning/planner.py` each render a record's content through their own
-  `_quoted_span` — `json.dumps` at its default `ensure_ascii=True` — and each emits
-  a band-derived stance (`"a source the user connected reported"`). Composing and
+  and `planning/planner.py` each escape a record's content with `json.dumps` at its
+  default `ensure_ascii=True` before it reaches a model — composing and the planner
+  through a `_quoted_span` helper each declares for itself, consolidation by calling
+  `json.dumps` directly on the budget-truncated content — and each emits a
+  band-derived stance (`"a source the user connected reported"`). Composing and
   consolidation additionally build a `standing` term read from
   `rests_on_recorded_external_content(provenance)`; the planner's `standing` is
   `f"{band.value}, confidence {provenance.confidence:.2f}"` and consults that
@@ -690,7 +692,7 @@ non-conforming "whatever labels it emits" — and which
 `orchestration/consolidation.py`'s own `_render` docstring argues against in exactly
 these terms one subsystem over. **This ADR records that as an uncovered ADR-0098 §2
 nonconformance and does not repair it**: `memory/` is another subsystem, the repair
-is the `_quoted_span` transform its neighbours already carry, and the lane is filed
+is the `json.dumps` escaping its neighbours already carry, and the lane is filed
 as **#1454**. Adversarial review found it on round 2.
 
 **Two things that are *not* claimed by that finding.** `learning/observer.py`
@@ -950,7 +952,9 @@ obligation (ADR-0089 §3).
   ADR-0098 §2 nonconformance reachable from this seam, filed as **#1454**. It does
   not fire "with a lane" — it is owed now, and it is deferred here only in the sense
   that this is an ADR-only lane in another subsystem. The repair is the
-  `_quoted_span` transform its three neighbours already carry.
+  `json.dumps` escaping its three neighbours already carry — through a
+  `_quoted_span` helper in composing and the planner, and called directly in
+  consolidation.
 - **The `DERIVED` origin term `planning/planner.py` omits** (§8). Filed as
   **#1453**. Milder than #1454 and a different question — the marking rather than
   the escaping — and it turns on ADR-0098 §2's reach over a system-authored span
