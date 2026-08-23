@@ -169,7 +169,9 @@ whether a source may be read.
 > source for one use: the act that begins when the driver asks `SourceGrants.live`
 > and ends when the driver has taken one of the six outcomes below. A driver writes
 > exactly one record per attempt it takes to an outcome, whether or not anything was
-> opened, and never a second.
+> opened, and never a second. The attempt's recorded instant is the one §12 fixes —
+> when that first call **answered**, not when it was made, because `live()` may
+> suspend.
 
 > **Normative.** Every attempt that reaches an outcome reaches exactly one of
 > `ReadOutcome`'s six members: `COMPLETED`, `REFUSED`, `UNANSWERED`, `FAILED`,
@@ -804,8 +806,10 @@ no key, and the exit test does not ask them to.
 > least one of each of `ReadOutcome`'s six members, and reconstructs each one from
 > `export()` alone with no other store consulted. Every driver runs on a controlled
 > clock, and the arm asserts each record's `started_at` against the instant that
-> clock served before its first `live()` call — including on a read whose bytes are
-> acquired later, so a lane that reached for `SourceReading.read_at` fails here.
+> clock served when the first `live()` answered — on a `live()` made to suspend
+> across a clock tick, so a lane that read the clock before the call fails here, and
+> on a read whose bytes are acquired later, so a lane that reached for
+> `SourceReading.read_at` fails here too.
 
 > **Normative.** **Arm (b) — the revocation question.** A run grants a source,
 > drives reads, revokes it, and lets the driver run again; the trail alone must
@@ -888,9 +892,10 @@ unexercised while the milestone closed on four green figures.
       the open divergence that choice inherits.
     - `use: GrantScope` — which of the three uses the attempt was for.
     - `started_at: UtcInstant` — the instant the attempt started, read from the
-      driver's injected clock immediately before the first `live()` call. ADR-0097
-      §5 makes the check and the start of the read one synchronous step, so one
-      instant is truthful for both. Timezone-aware and refused naive.
+      driver's injected clock immediately after the first `live()` answers or raises
+      and before `Reader.read()`. ADR-0097 §5 makes the answer and the start of the
+      read one synchronous step, so one instant is truthful for both. Timezone-aware
+      and refused naive.
     - `outcome: ReadOutcome` — §1's ruling, one of six.
     - `grant: DurableIdentifier | None` — required with no default; the
       `SourceGrant.id` the attempt ran under, `None` exactly on `REFUSED` and
@@ -964,20 +969,53 @@ unexercised while the milestone closed on four green figures.
     no sentinel and no unlimited spelling (§6).
 
 > **Normative.** Every driving site takes an **injected clock** as a required
-> constructor argument with no default, guarded by
-> `core/clock.py`'s `checked_clock` as `ClockContextSource` and
-> `orchestration/grants.py` already guard theirs, and reads `started_at` from it
-> **immediately before the first `live()` call**. No implementation reads a module
-> clock, and none derives `started_at` from `SourceReading.read_at`.
+> constructor argument with no default, stored as `checked_clock(now, owner=…)` on
+> ADR-0026 §2's rule, as `ClockContextSource` and `UpcomingEventStage` already store
+> theirs. No implementation reads a module clock, and none derives `started_at` from
+> `SourceReading.read_at`.
 
-**That clause exists because none of the three sites holds a clock today** —
+> **Normative.** `started_at` is read from that clock **immediately after the first
+> `live()` call answers or raises**, and on the authorised path immediately before
+> `Reader.read()`. Reading a clock is synchronous, so it stands inside the one step
+> ADR-0097 §5 requires of the answer and the read rather than adding an `await`
+> between them.
+
+**Capturing after the answer rather than before the call is the whole of it**, and
+the difference is not cosmetic. `live()` is `async` and may suspend — on the grant
+store's lock, on the hub's loop — so a clock read taken before the call can predate
+the very grant act that decided the outcome. A `REFUSED` row stamped before the
+revocation that caused it, or a `COMPLETED` row stamped before the grant that
+authorised it, is a row that cannot be reconstructed against the grant history, which
+is what §11 arm (b) exists to check and what §2's `grant` pointer exists to enable.
+
+**`SourceReading.read_at` is not the value either.** ADR-0093 §10 captures it "at the
+moment the source's bytes are acquired", which is later than the instant this record
+is about, and `REFUSED` and `UNANSWERED` have no reading to take it from at all.
+
+**Two of the three sites hold no clock today and one already does.**
 `IngestionStage.__init__` takes a reader, a write stage and a grant seam;
-`_GrantedFacetSource.__init__` takes a reader and a grant seam — so a lane reaching
-for `datetime.now()` at the call site is the path of least resistance, and it would
-make §11's deterministic arms untestable. `SourceReading.read_at` is not the value
-either: ADR-0093 §10 captures it "at the moment the source's bytes are acquired",
-which is after the instant this record is about, and `REFUSED` and `UNANSWERED`
-have no reading to take it from at all.
+`_GrantedFacetSource.__init__` takes a reader and a grant seam; `UpcomingEventStage`
+takes `now: Clock` already, because ADR-0132 §1 enumerates a clock among its
+collaborators. For the first two a lane reaching for `datetime.now()` at the call
+site is the path of least resistance, and it would make §11's deterministic arms
+untestable.
+
+> **Normative.** This clause does not touch ADR-0132 §4. `started_at` is **not** the
+> instant a candidate was noticed; it anchors no selection, no validation and no
+> expiry, and `UpcomingEventStage` continues to anchor everything §4 governs on the
+> reading's own `read_at`. No lane cites this ADR toward a second anchor in the
+> notification path, and ADR-0132 is neither amended nor superseded here.
+
+**The one thing the implementing lane must move is a proxy, and it is named so the
+lane does not discover it as a red gate.** `tests/orchestration/test_upcoming.py`'s
+`test_the_clock_it_holds_is_never_read` asserts `harness.clock.calls == 0`, standing
+in for §4's anchor rule; a clock read taken for an audit stamp makes that count one
+without touching the rule. Its own docstring says the counter "is the weaker half of
+the assertion" and that the strong half is what the producer *concluded*. So the
+lane keeps the strong half exactly as it is and replaces the zero with a count of
+one, asserted together with the candidate's noticed instant still equalling
+`read_at` — which pins §4 more tightly than a zero ever did, because it fails both
+on a producer that anchors on the clock and on one that reads it twice.
 
 > **Normative.** The implementing lane ships both triads and the store in one change
 > with its primary producer, under ADR-0137 §2's contract-seam exception; it wires
@@ -1000,7 +1038,7 @@ have no reading to take it from at all.
 **This ADR amends no clause of any earlier ADR, and supersedes none.** It is a
 **stacked addition** in ADR-0082 §1's sense: "Adding an obligation that contradicts
 no sentence the earlier ADR wrote … is recorded in the ADR that makes it, and nowhere
-else." The four candidates, each tested by ADR-0070 §1's question — would a reader
+else." The five candidates, each tested by ADR-0070 §1's question — would a reader
 holding only the earlier ADR now act differently, or read one of its clauses more
 widely?
 
@@ -1045,6 +1083,14 @@ widely?
   not know of. Restating an obligation over a new subject adds one; it does not widen
   the original, which is about a sensor's bound and stays exactly that. No record is
   owed.
+- **ADR-0132 §4.** §12 requires `UpcomingEventStage` to read the clock it already
+  holds, once, for an audit stamp. §4's clause is about "the instant a candidate was
+  **noticed**" and about selection and validation being "evaluated against one
+  instant, not two"; `started_at` is none of those three, and §12 states that
+  normatively. A reader holding only ADR-0132 acts identically: anchor everything §4
+  governs on `read_at`. What moves is a *test* standing in for that clause through a
+  zero-call counter, which §12 names and tells the lane how to tighten. No record is
+  owed on ADR-0132, and a proxy assertion is not a clause.
 
 **Under ADR-0089 §1 this ADR is marked**, and the marks are the whole of its
 obligations: unmarked text here is read to determine what a marked clause means and
