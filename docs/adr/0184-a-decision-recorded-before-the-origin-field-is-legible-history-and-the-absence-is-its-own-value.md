@@ -519,8 +519,8 @@ that `PermissionDecision` gains exactly one field for the binding, "named `egres
 "typed `EgressBinding | None`", "defaulting to `None`". §2 above changes the type of that
 one field on that one model and nothing else, so a reader holding only ADR-0150 would read
 the annotation and act differently — ADR-0070 §1's test for a supersession rather than an
-amendment. The scope is stated on ADR-0150's Status line beside ADR-0178's existing entry,
-and in a dated header note, as ADR-0181 recorded its two count-supersessions.
+amendment. The scope is stated on ADR-0150's Status line beside ADR-0178's existing entry, and
+in a dated header note appended after ADR-0178's record, whole and contiguous.
 
 **Everything else in ADR-0150 §1 stands whole, and each is worth naming because each could
 be misread as breached.**
@@ -546,26 +546,25 @@ than a decoding policy. A reader holding only ADR-0181 would look for the repres
 and not find it, which is ADR-0082 §1's test for an owed record; but that reader would act
 **identically** on every clause ADR-0181 states — §3's required-no-default and its four
 model clauses, §4's discard-not-merge, §5's two ruling points, §10's test obligations — so
-under ADR-0070 §1 it is an amendment. A dated header note is appended to ADR-0181 in this
-change.
+under ADR-0070 §1 it is an amendment, recorded as a dated header note appended to
+ADR-0181.
 
-**Both records are written in this change and take effect on merge, which is the only
-sequence this project's mechanism admits.** ADR-0165 §5 constrains the ratifying commit
-to a single changed line — one ADR's `- Status: Proposed` becoming `- Status: Accepted`
-and no other byte — so a record on another ADR cannot ride in it, and `just ready`
-refuses while an ADR the PR touches still reads `Proposed`, so there is no
-post-ratification change in the workflow to defer a record to either. Every cross-ADR
-record in this corpus is therefore written while its deciding ADR still reads
-`Proposed`: ADR-0181's authoring commit wrote its records on ADR-0178, ADR-0152,
-ADR-0150, ADR-0106 and ADR-0154 — ADR-0178's Status line named ADR-0181 in that same
-commit — and its ratifying commit came afterwards. ADR-0070 §1 permits a Status-line
-edit "recording a supersession that has landed", and its stated condition is that the
-superseding ADR *exists* rather than that it was ratified in an earlier change; the
-edit it forbids is "flipping a live decision to `Superseded` with no such ADR", which
-is not this. Nothing intermediate is published: a reader meets ADR-0150's Status line
-and this ADR's `Accepted` status at the same instant, and ADR-0015 §5's rule — that
-this ADR is ratified before anything **implements** against it — is untouched, since
-the implementation lane is briefed after this merges.
+**Both records are made on ratification, in this PR's own ratification commit, and
+that commit therefore pays its round.** ADR-0165 §2 exempts exactly one commit shape
+from a fresh review — one ADR's `- Status: Proposed` becoming `- Status: Accepted`
+and no other byte — and §2's own text says what an author who needs more does: one who
+must restamp the date "writes it in the flip commit and pays the round, exactly as an
+author who writes a ratification note does". This flip carries more, so it is
+reviewed rather than exempt, and `just ship` refuses it until a review covers the
+flipped tree. The records wait for ADR-0165 §9's reason, which is the one that
+decides it rather than the mechanism: writing "Partially superseded by ADR-0184" on
+ADR-0150's Status line while this ADR still reads `Proposed` is a claim that a
+supersession has happened when it has not — ADR-0019 §1's "claim that some piece of
+work is finished". ADR-0026 §6 set the form, ADR-0027 §7 followed it and ADR-0165 §9
+followed both. Nor are they deferred to the implementation lane: a record is decision
+bookkeeping and travels with the decision, and an ADR-0150 that still told its reader
+`PermissionDecision.egress_binding` is typed `EgressBinding | None`, after this
+merged, would be false for as long as that lane took.
 
 **No record is owed on ADR-0021, ADR-0044, ADR-0049, ADR-0148, ADR-0152 or ADR-0178.**
 ADR-0021 §4's append-only rule is *used* here and not narrowed — §4 above obeys it rather
