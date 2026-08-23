@@ -230,12 +230,13 @@ class _ScriptedDecisionEngine(FakeAssistantEngine):
 def output(monkeypatch: pytest.MonkeyPatch) -> StringIO:
     """Redirect the CLI's Rich console to a buffer and return it.
 
-    Wide, because ADR-0186 §7 obliges the *content* of a row and none of its clauses
-    says anything about a line break; :func:`_flat` removes the wrapping that is
-    left.
+    **Wide enough that nothing wraps**, which is not merely convenient: ADR-0186
+    §11's enumerating clause is about what one *span's* line carries, and a wrapped
+    line cannot be told from two lines. :func:`_flat` is still what the prose cases
+    assert through, because none of §7's clauses says anything about a line break.
     """
     buffer = StringIO()
-    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=120))
+    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=400))
     return buffer
 
 
@@ -577,30 +578,51 @@ def test_a_row_renders_every_member_seven_names(
     assert "work@example.com" in rendered
     assert "conn-0001" not in rendered
 
-    # Every span: argument, index, provenance and extent, and the one tier.
-    assert "bcc — to alice@example.com" in rendered
-    assert "body — names no destination" in rendered
-    assert "subject — names no destination" in rendered
-    assert "to[0] — to alice@example.com" in rendered
-    assert "to[1] — to bob@example.com" in rendered
-    assert rendered.count("you composed it") == 2
-    assert rendered.count("this system selected it") == 3
-    for extent in (17, 42, 9, 15):
-        assert f"{extent} code points" in rendered
-    assert "tier personal" in rendered
+    # Every span, member by member and **on that span's own line**. Asserted per
+    # line rather than per screen because two spans may legitimately agree on a
+    # member — `bcc` and `to[0]` both describe a 17-code-point occurrence of one
+    # recipient — so a whole-screen `"17 code points" in rendered` is satisfied by
+    # either of them and passes while the other's extent goes unrendered.
+    lines = [line.strip() for line in output.getvalue().splitlines()]
+    for key, members in (
+        ("bcc", ("as supplied: Alice@Example.com", "you composed it", "17 code points")),
+        ("body", ("names no destination", "you composed it", "42 code points")),
+        (
+            "subject",
+            ("names no destination", "this system selected it", "9 code points", "tier personal"),
+        ),
+        ("to[0]", ("as supplied: Alice@Example.com", "this system selected it", "17 code points")),
+        ("to[1]", ("as supplied: bob@example.com", "this system selected it", "15 code points")),
+    ):
+        matching = [line for line in lines if line.startswith(f"{key} — ")]
+        assert len(matching) == 1, key
+        for member in members:
+            assert member in matching[0], (key, member)
 
-    # Both forms where the occurrence carries one, and neither where it does not.
-    assert rendered.count("as supplied: Alice@Example.com") == 2
-    assert "as supplied: bob@example.com" in rendered
-    assert "body — names no destination; you composed it; 42 code points" in rendered
-    assert "subject — names no destination; this system selected it; 9 code points" in rendered
+        # Both destination forms where the occurrence carries one, and **neither**
+        # where it does not — checked on the line, so a stray recipient leaking onto
+        # a destination-less span's line fails rather than being absorbed by the
+        # screen's other four.
+        if "names no destination" in matching[0]:
+            assert "as supplied" not in matching[0], key
+            assert "@example.com" not in matching[0], key
+        else:
+            assert "to alice@example.com (smtp)" in matching[0] or (
+                "to bob@example.com (smtp)" in matching[0]
+            ), key
+
+    # One line per span and no sixth, and the tier on the one span that states one.
+    assert len([line for line in lines if "code points" in line]) == len(binding.spans)
+    assert [line for line in lines if "tier " in line] == [
+        line for line in lines if line.startswith("subject — ")
+    ]
 
     # The canonical set as `core` derived it: two members from three occurrences.
-    members = binding.canonical_destination_set
-    assert len(members) == 2
-    for member in members:
-        assert member.canonical is not None
-        assert f"{member.canonical} (smtp)" in rendered
+    derived = binding.canonical_destination_set
+    assert len(derived) == 2
+    for recipient in derived:
+        assert recipient.canonical is not None
+        assert f"{recipient.canonical} (smtp)" in rendered
 
 
 def test_two_rulings_a_second_apart_render_as_two_instants(
