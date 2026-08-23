@@ -213,11 +213,27 @@ value is an act that produces the thing which admits a browser to the device's
 whole authority, so putting it behind the port would hand every local process the
 ability to cause one — and if the value came back in the response, the ability to
 *hold* one. Signal delivery is the operating system's own access control on this
-question: `kill(2)` succeeds for the owner's own uid and for root, which is the
-same standing ADR-0168 §5's exposure argument already assumes ("a place they
-already have the standing to read the process's own memory from"). A process with
-that standing can read the gateway's memory outright and needs no mint act; a
-process without it cannot perform one.
+question: `kill(2)` succeeds for the owner's own uid and for root, and nothing that
+merely reaches the port has it — so a process without that standing cannot perform
+the act at all.
+
+**What signal permission is not is proof of authority to read the gateway's
+memory, and an earlier draft claimed they were the same standing.** They are not:
+a host with ptrace restrictions denies a same-uid sibling `/proc/<pid>/mem` while
+still permitting it `kill(2)`, so ADR-0168 §5's exposure argument ("a place they
+already have the standing to read the process's own memory from") is a **narrower**
+population than the one the act admits. Adversarial review found it on the tenth
+round. The claim the argument actually needs is the other one, and it is stronger: a
+process that can signal the gateway can also **terminate** it, and terminating it
+ends every live session and every outstanding value at once (ADR-0168 §4) — strictly
+more damage than replacing one unexchanged value. So the act hands a hostile same-uid
+process no capability it lacks. It cannot obtain a value either, because disclosure
+reaches the gateway's own standard output and nowhere else: it can cause a mint it
+cannot read, which admits no browser. What it can do is deny the owner a usable value
+by minting under them and drive the gateway's output volume — a nuisance dominated by
+the `SIGKILL` the same process already has, which is why this decision buys no rate
+bound to answer it. Where an owner needs a boundary inside their own uid, that is a
+question about running the gateway as its own user and is not decided here.
 
 **It is also stronger than "loopback-only", not merely different.** ADR-0174 §3
 splits the two listeners and requires the gateway to obtain a browsing device's
@@ -909,9 +925,11 @@ differently, or read one of its clauses more widely than it now holds?
   is unchanged, and ADR-0070 §1's test is about what a reader acts on: a reader
   holding only §6 writes an unbounded mint record, which is what §1 above wants them
   to write. The ground is now §1's rather than §5's — a mint requires standing at the
-  machine that runs the gateway, and a process with that standing can read the
-  gateway's memory outright, so it is not the population §6's rate bound exists to
-  bound ("a caller able to drive a refusal cannot drive a record per attempt"). The
+  machine that runs the gateway, and a process with that standing can **terminate**
+  the gateway outright, so it is not the population §6's rate bound exists to
+  bound ("a caller able to drive a refusal cannot drive a record per attempt"). §1
+  above records why that is the right ground and why the memory-read equivalence an
+  earlier draft used is not. The
   ground is restated here so that two conforming gateways do not diverge on it, and
   it is one of the four costs §1 weighs against the loopback path, which **would**
   have obliged the supersession.
