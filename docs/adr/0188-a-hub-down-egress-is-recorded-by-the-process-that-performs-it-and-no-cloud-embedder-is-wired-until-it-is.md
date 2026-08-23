@@ -214,6 +214,18 @@ opener and no second door.
 > never rewritten, truncated or removed, and nothing in the file is amended in place
 > — the seal is a second line, not an edit of the first.
 
+> **Normative.** Every event is written as one line **terminated by a newline**, and
+> the flush follows the newline rather than preceding it. A writer whose file does not
+> already end at a line boundary appends a newline **before** its own event, so a torn
+> tail left by an earlier process becomes a line of its own and can never share a
+> physical line with the event being appended.
+
+> **Normative.** A reader treats a line as an event only if it is newline-terminated
+> and well-formed. Every other line is ignored **without abandoning the rest of the
+> file**: a malformed line is one lost event, never a reason to stop reading, and a
+> reader that stopped at the first bad line would discard the events a later run
+> appended after it.
+
 > **Normative.** Nothing prunes it. It has no row cap, no retention duration and no
 > eviction rule, and no lane adds one on the strength of ADR-0185 §6. The user's
 > ADR-0004 §6 erasure right over it is deletion of the whole file, which is
@@ -227,6 +239,16 @@ the hub, cannot live in a store held to that rule without an exception to it —
 the exception would be granted for a store whose only writer is the exempt process,
 which is a store the rule was never about. A file sidesteps the question rather
 than arguing it.
+
+**The framing rule exists because a torn tail is the expected failure of this
+format, not an exotic one.** A power cut during the seal can leave a partial object
+with no newline; the next run's `opened` event, appended straight after those bytes,
+would then be part of the same physical line and would be lost with it — a durable,
+flushed record of an egress that really happened, discarded because an earlier run
+died mid-write. Appending the newline first costs one byte and confines the damage to
+the line that was actually torn. The same reasoning is why a reader must keep going
+past a bad line: the damaged region is always the *tail as it stood at the time*, and
+everything appended after it is intact.
 
 **Two events rather than one mutable object, and the reason is the same one that
 makes this a file.** A record that had to be *revised* at the end of the run would
@@ -327,8 +349,9 @@ misstate both.
 > **Normative.** "Sealed" and "unsealed" are properties of **the file**, never of
 > what the writing process knew or intended. A run is sealed when the file holds a
 > complete, well-formed `sealed` line carrying that run's identifier, and unsealed
-> otherwise. A line that is incomplete or malformed is not an event: a reader ignores
-> it, and the run it would have belonged to is unsealed.
+> otherwise. A line that is not newline-terminated or not well-formed is not an event
+> under §3's framing rule: a reader ignores it, and the run it would have belonged to
+> is unsealed.
 
 > **Normative.** A run is therefore left unsealed by a path that ends the process
 > without running its exit — `SIGKILL`, a power cut, a kernel panic — and by a seal
