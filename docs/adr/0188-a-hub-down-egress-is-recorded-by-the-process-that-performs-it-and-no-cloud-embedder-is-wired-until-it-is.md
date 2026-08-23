@@ -462,18 +462,22 @@ differently or read one of its clauses more widely.
   merely joined by another obligation stated elsewhere", which is ADR-0082 §1's own
   description of a stacked addition, and no record is owed.
 
-  **This is deliberately not declared a partial supersession, and the label would be
-  wrong twice over.** ADR-0070 §3's shape requires that a *part of the earlier
-  decision be replaced*, and §8 replaces nothing: the allow-list mechanism, the
-  refusal, the exhaustive construction, the flag and the disclosure all continue to
-  operate. ADR-0082 §1 is explicit that "the test controls, not the label", so
-  marking ADR-0104 `Partially superseded` while every clause of it still binds would
-  put a wrong record on a live decision. And it could not be written from this PR in
-  any case: ADR-0070 §1 permits recording "a supersession **that has landed**" and
-  says in terms that "flipping a live decision to `Superseded` with no such ADR is
-  not a status change but an unrecorded decision change, and is not permitted" — an
-  ADR standing `Proposed` on an unmerged branch has landed nowhere and binds no
-  reader.
+  **This is deliberately not declared a partial supersession.** ADR-0070 §3's shape
+  requires that a *part of the earlier decision be replaced*, and §8 replaces
+  nothing: the allow-list mechanism, the refusal, the exhaustive construction, the
+  flag and the disclosure all continue to operate exactly as ratified, and §8 above
+  says so in terms. ADR-0082 §1 is explicit that "the test controls, not the label",
+  so marking ADR-0104 `Partially superseded` while every clause of it still binds
+  would put a wrong record on a live decision — which is the failure ADR-0082 §1
+  names, arriving from the cautious direction rather than the careless one.
+
+  **The absence of a record here is a finding, not a deferral.** Were one owed, it
+  would be written in this change and not left for ratification: ADR-0184 §11 puts a
+  record in the commit that authors the clause it records, because "a record and the
+  clause it records are one judgement", and ADR-0186 §13 works that placement rule
+  through for a case where it came out the other way. So a reader should take this
+  section's conclusion as load-bearing — the test was applied to a named sentence and
+  came out "stacked addition" — rather than as a step this lane postponed.
 
   The Consequences bullet #747 quotes describes a state and imposes nothing —
   ADR-0104 is a marked ADR, and ADR-0089 §3 is that unmarked text supplies no
