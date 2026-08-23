@@ -471,6 +471,11 @@ class World:
         consolidations: A factory for a consolidation stage over a named walk.
         trail: The audit trail every ruling is recorded in, and where a forbidden
             act would be visible under ADR-0021 §4.
+        planner_model: The provider replaying the planner's transcript, kept so an
+            arm can assert the planted content actually reached the prompt whose
+            reply it is replaying. A constant transcript stipulates the causal
+            chain; the recorded call is what demonstrates it.
+        consolidation_model: The same, for the consolidation stage's transcript.
         connector: The socket that must never be opened.
         source: The ``.ics`` file :func:`plant` rewrites per cycle.
     """
@@ -481,6 +486,8 @@ class World:
     ingestion: IngestionStage
     consolidations: _Consolidations
     trail: FakeAuditTrail
+    planner_model: FakeModelProvider
+    consolidation_model: FakeModelProvider
     connector: Connector
     source: Path
 
@@ -561,12 +568,13 @@ def build_world(tmp_path: Path, *, plan: str, consolidation: str) -> World:
     )
 
     goals = count(1)
+    planner_model = FakeModelProvider(plan)
     loop = LearningLoop(
         context=FakeContextProvider(),
         memory=store,
         writes=writes,
         planner=ModelBackedPlanner(
-            FakeModelProvider(plan), now=lambda: NOW, id_factory=lambda: f"p-{next(goals)}"
+            planner_model, now=lambda: NOW, id_factory=lambda: f"p-{next(goals)}"
         ),
         feedback=FakeFeedbackProcessor(),
         now=lambda: NOW,
@@ -613,12 +621,16 @@ def build_world(tmp_path: Path, *, plan: str, consolidation: str) -> World:
     )
 
     ids = count(1)
+    # **One provider across every cycle**, so ``calls`` is the whole record of what
+    # this system put in front of the consolidator over a run rather than the last
+    # cycle's alone.
+    consolidation_model = FakeModelProvider(consolidation)
 
     def consolidations(walk: str) -> ConsolidationStage:
         return ConsolidationStage(
             memory=store,
             writes=writes,
-            model=FakeModelProvider(consolidation),
+            model=consolidation_model,
             now=lambda: NOW,
             id_factory=lambda: f"c-{next(ids)}",
             walk=walk,
@@ -631,6 +643,8 @@ def build_world(tmp_path: Path, *, plan: str, consolidation: str) -> World:
         ingestion=ingestion,
         consolidations=consolidations,
         trail=trail,
+        planner_model=planner_model,
+        consolidation_model=consolidation_model,
         connector=connector,
         source=source,
     )
@@ -662,6 +676,32 @@ async def seed_user_belief(store: InMemoryMemoryStore) -> str:
             ),
         )
     )
+
+
+def carried_the_injection(model: FakeModelProvider) -> bool:
+    """Whether the planted hostile content reached a prompt this provider answered.
+
+    **A replaying fake answers the same way whatever it is shown**, so an arm that
+    only reads the reply has stipulated the causal chain rather than demonstrated
+    it: a regression dropping the retrieved records from the prompt would leave
+    every assertion about parking and about the ceiling standing, while nothing
+    hostile had reached a model at all. This is the check that closes that, and it
+    is why :class:`World` keeps the providers.
+
+    The needle is :data:`ATTACKER` and not the whole instruction, because both
+    assemblers put a span through a deterministic encoding before it reaches the
+    prompt — ADR-0098 §2's requirement, and the reason ``planning._quoted_span``
+    and ``consolidation._render`` both exist — so the instruction's own quotation
+    mark is escaped in transit. The address carries no character either encoding
+    touches.
+
+    Args:
+        model: The provider whose recorded calls to read.
+
+    Returns:
+        Whether any message of any recorded call carried the planted address.
+    """
+    return any(ATTACKER in message.content for call in model.calls for message in call.messages)
 
 
 # --- the predicates the two arms are stated over ----------------------------

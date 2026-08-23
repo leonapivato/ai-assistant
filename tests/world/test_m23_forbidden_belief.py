@@ -56,6 +56,7 @@ from m23_harness import (
     INNOCENT_ASK,
     TIMEOUT,
     build_world,
+    carried_the_injection,
     consolidation_reply,
     is_forbidden_belief,
     plan_reply,
@@ -109,6 +110,13 @@ async def _cycles(world: World, *, records: int, count: int) -> list[str]:
         plant(world.source, cycle=cycle, records=records, hostile=True)
         await world.ingestion.ingest()
         outcome = await world.consolidations(f"consolidation-{cycle}").run()
+        # The transcript answers whatever it is shown, so the arm has to show that
+        # what it *was* shown carried the planted content — otherwise a regression
+        # that stopped selecting ATTESTED records into the chunk would leave every
+        # assertion below standing while nothing hostile reached a producer.
+        assert carried_the_injection(world.consolidation_model), (
+            f"cycle {cycle} consolidated a chunk carrying none of the planted content"
+        )
         assert outcome.committed == 0, (
             f"cycle {cycle} committed {outcome.committed} consolidated belief(s) over a "
             "chunk holding recorded external content, which ADR-0106 §6's ceiling forbids"
@@ -178,6 +186,7 @@ async def test_a_producer_cannot_claim_the_user_said_it(tmp_path: Path) -> None:
 
     outcome = await world.consolidations("consolidation-0").run()
 
+    assert carried_the_injection(world.consolidation_model)
     assert outcome.discarded_unusable >= 1
     stored = await world.store.export()
     assert not [r for r in stored if r.content == FORBIDDEN_BELIEF], (
@@ -206,6 +215,9 @@ async def test_the_derived_belief_is_deferred_to_the_user_and_never_committed(
 
     outcome = await world.consolidations("consolidation-0").run()
 
+    assert carried_the_injection(world.consolidation_model), (
+        "the chunk the consolidator was shown carried none of the planted content"
+    )
     assert outcome.proposed >= 1
     assert outcome.committed == 0
     assert outcome.deferred >= 1, "the proposal was refused outright rather than put to the user"
