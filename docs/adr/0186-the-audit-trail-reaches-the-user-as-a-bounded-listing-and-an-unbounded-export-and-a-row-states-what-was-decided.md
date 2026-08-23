@@ -3,7 +3,12 @@
 - Status: Proposed
 - Date: 2026-08-23
 
-- **Decides `core/protocols.py` surface.** Two methods on the `AssistantEngine`
+- **Decides `core/protocols.py` surface, and it is a breaking change.** Golden rule 5
+  makes a Protocol change one and asks that it be flagged: `AssistantEngine` gains two
+  members, so **every structural implementation of it must grow both** — the engine in
+  `orchestration`, the canonical fake in `ai_assistant.testing` and `HubClient` in
+  `wire` — and an implementation that does not stops satisfying the Protocol. Two
+  methods on the `AssistantEngine`
   Protocol — one bounded listing, one whole-trail export — with the paging shape,
   the ordering, the transports that carry them and the rendering floor every surface
   that reads them owes. It adds no Protocol, no `core/types.py` model, no enum and no
@@ -603,13 +608,25 @@ going red the day it lands.
 
 > **Normative.** `AssistantEngineContract` gains, for both operations: §2's **order**,
 > asserted over rows sharing a `decided_at` so the `id` tie-break is exercised rather
-> than assumed, and over a trail whose insertion order differs from its `decided_at`
-> order; §2's **prefix** property, `recent_decisions(limit=n)` equal to the first `n` of
+> than assumed, over a trail whose insertion order differs from its `decided_at` order,
+> **and over an `AuditTrail` double whose `export` returns a conforming but deliberately
+> unordered result** — the case that separates an engine which sorts from one which
+> relays, and the only one of the three that does; §2's **prefix** property, `recent_decisions(limit=n)` equal to the first `n` of
 > `export_decisions()` over a trail of more than `n` rows; §3's **local refusal** of
 > `limit` for a `bool`, for a non-integer, for zero, for a negative value and at
 > `2**63`, each before any I/O; and §3's **oversized result**, refused coming back
 > exactly as an oversized argument is refused going in, which is the suite's own fifth
 > clause applied to the largest result this surface can produce.
+
+**The unordered double is not a contrived fixture, it is the only fixture that tests
+the clause.** `AuditTrail.export`'s Protocol docstring states no order — which is why §2
+puts the obligation on the engine — but both shipped implementations promise `recent`'s
+order in their own docstrings ("Return every recorded decision, in the same order as
+`recent`", in `permissions/audit.py` and in `testing/permissions.py` alike). So a test
+driven through either of them passes for an engine that writes `tuple(await
+trail.export())` and never sorts, and the day a conforming trail returns insertion order
+the exports are wrong and the prefix guarantee is gone. Adversarial review found it; the
+double exercises the contract's freedom rather than the implementations' habit.
 
 **The prefix case is the one nothing else would catch.** An implementation that sorted
 its listing and relayed an unordered export would pass every construction test, every
