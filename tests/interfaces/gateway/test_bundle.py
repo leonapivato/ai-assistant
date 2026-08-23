@@ -1084,7 +1084,9 @@ def test_the_page_remembers_the_cadence_this_origin_last_disclosed() -> None:
     # does not overwrite one that was readable.
     assert 'typeof microseconds !== "string"' in functions["usableCadence"]
     assert "!Number.isFinite(value) || value <= 0" in functions["usableCadence"]
-    assert "return notificationCadence();" in functions["adoptCadence"]
+    # And a stream is bounded by what *it* disclosed: no fallback to the remembered
+    # figure, which would hold a gateway to a budget it never uttered.
+    assert "notificationCadence()" not in functions["adoptCadence"]
 
 
 def test_a_cadence_the_browsers_own_timer_cannot_express_bounds_nothing() -> None:
@@ -1129,13 +1131,43 @@ def test_a_remembered_cadence_a_stream_never_confirmed_is_dropped() -> None:
     read = _functions(_code("app.js"))["readDeliveries"]
 
     assert "let disclosed = false;" in read
-    assert "disclosed = true;" in read
+    # *Usably* disclosed: a stream that said nothing this page can time has told it
+    # nothing, and an `open` carrying `"0"` must not preserve a stale bound for ever.
+    assert "disclosed = cadence !== null;" in read
     assert "if (!disclosed) {" in read
     assert read.index("if (!disclosed) {") < read.index("stopWatching(WENT_SILENT);")
     assert "forgetCadence();" in read
     # And only on the ending this page reached itself — a stream the gateway ended, or
     # one whose connection failed, says nothing about the figure.
     assert read.index("if (silent) {") < read.index("if (!disclosed) {")
+
+
+def test_a_stream_is_bounded_by_what_it_disclosed_and_by_nothing_else() -> None:
+    """Adversarial review, round 2, and it is the same mistake in two places.
+
+    An earlier draft fell back to the remembered figure where the disclosed one was
+    unusable — reasoning that an unreadable value should not overwrite a readable one.
+    What that does is hold a gateway *entitled* to a thirty-day budget, disclosing it
+    honestly, to the twenty seconds some earlier process was configured with; and
+    because the stream counted as disclosed, the abort path kept the stale figure and
+    every later stream repeated the false timeout.
+
+    So an unusable disclosure leaves the stream unbounded, exactly as every stream was
+    before the deadline existed, and it does not count as a disclosure. A gateway that
+    says it may be silent for a month is believed rather than second-guessed against a
+    figure it never uttered.
+    """
+    script = _code("app.js")
+    adopt = _functions(script)["adoptCadence"]
+    read = _functions(script)["readDeliveries"]
+
+    # No fallback: the remembered figure bounds the pre-opening window and nothing else.
+    assert "notificationCadence()" not in adopt
+    assert "return value;" in adopt
+    # The stream takes whatever `adoptCadence` returned, `null` included.
+    assert "cadence = adoptCadence(value.keep_alive_microseconds);" in read
+    assert "disclosed = cadence !== null;" in read
+    assert read.index("cadence = adoptCadence(") < read.index("disclosed = cadence !== null;")
 
 
 def test_a_re_arm_happens_only_where_there_is_a_session_and_no_open_stream() -> None:
