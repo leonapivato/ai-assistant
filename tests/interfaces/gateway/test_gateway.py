@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any
 
 import pytest
+from gateway_mint import bootstrap_value
 from gateway_timing import Clock, Timers
 
 from ai_assistant.core.config import Settings
@@ -257,7 +258,7 @@ async def harness() -> AsyncIterator[Harness]:
 
 async def _start_session(harness: Harness) -> tuple[str, str]:
     """Run the bootstrap exchange and return the two halves a browser then holds."""
-    value = harness.gateway.mint_bootstrap()
+    value = bootstrap_value(harness.gateway)
     body = json.dumps({"bootstrap_value": value}).encode()
     answer = await harness.send(
         f"POST /session HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}\n"
@@ -350,7 +351,7 @@ async def test_the_exchange_mints_a_session_and_discloses_both_halves(
     harness: Harness,
 ) -> None:
     """ "It returns nothing but the two session values §6 requires"."""
-    value = harness.gateway.mint_bootstrap()
+    value = bootstrap_value(harness.gateway)
     body = json.dumps({"bootstrap_value": value}).encode()
 
     answer = await harness.send(
@@ -375,7 +376,7 @@ async def test_the_exchange_response_is_the_only_one_that_sets_a_cookie(
     persistent expiry — none of which the guarantee rests on, because "a session's
     lifetime is decided by the gateway alone".
     """
-    value = harness.gateway.mint_bootstrap()
+    value = bootstrap_value(harness.gateway)
     body = json.dumps({"bootstrap_value": value}).encode()
 
     answer = await harness.send(
@@ -395,7 +396,7 @@ async def test_the_exchange_response_is_the_only_one_that_sets_a_cookie(
 async def test_a_failed_exchange_discloses_only_that_it_failed(harness: Harness) -> None:
     """§5: "never whether the value was well-formed, whether one is still
     outstanding, or whether a session already exists"."""
-    harness.gateway.mint_bootstrap()
+    bootstrap_value(harness.gateway)
     body = json.dumps({"bootstrap_value": "wrong"}).encode()
 
     answer = await harness.send(
@@ -408,9 +409,13 @@ async def test_a_failed_exchange_discloses_only_that_it_failed(harness: Harness)
 
 
 async def test_the_bootstrap_value_is_exchangeable_exactly_once(harness: Harness) -> None:
-    """§5: "The exchange consumes it, and after it the gateway mints no further
-    session until its process is restarted"."""
-    value = harness.gateway.mint_bootstrap()
+    """§5's single use, which is ADR-0182 §2's first cessation event.
+
+    ADR-0182 §9 supersedes only §5's *second* sentence — "mints no further session
+    until its process is restarted" — and states that "the single-use half is
+    untouched and applied", which is what this holds.
+    """
+    value = bootstrap_value(harness.gateway)
     body = json.dumps({"bootstrap_value": value}).encode()
     head = f"POST /session HTTP/1.1\nHost: {{host}}\nContent-Length: {len(body)}"
     assert (await harness.send(head, body)).status == 200
@@ -421,15 +426,33 @@ async def test_the_bootstrap_value_is_exchangeable_exactly_once(harness: Harness
     assert second.payload == {"fault": "bootstrap-exchange-failed"}
 
 
-async def test_a_gateway_mints_one_bootstrap_value_per_process_life(
+async def test_a_fresh_mint_replaces_the_outstanding_value_rather_than_being_refused(
     harness: Harness,
 ) -> None:
-    """ "A gateway process mints one **bootstrap value** at start" — one, and the
-    single-use exposure argument rests on it."""
-    harness.gateway.mint_bootstrap()
+    """ADR-0182 §2's third cessation event, at the door the browser uses.
 
-    with pytest.raises(RuntimeError, match="one bootstrap value"):
-        harness.gateway.mint_bootstrap()
+    "Replacement rather than refusal, because the owner's mental model is the
+    screen in front of them": a gateway that refused while a value stood "would
+    make the act fail in the case an owner most often reaches it in — they minted,
+    mistyped, and want another", so "the value on the screen is always the value
+    that works".
+    """
+    first = bootstrap_value(harness.gateway)
+    second = bootstrap_value(harness.gateway)
+
+    stale = json.dumps({"bootstrap_value": first}).encode()
+    fresh = json.dumps({"bootstrap_value": second}).encode()
+    refused = await harness.send(
+        f"POST /session HTTP/1.1\nHost: {{host}}\nContent-Length: {len(stale)}", stale
+    )
+    admitted = await harness.send(
+        f"POST /session HTTP/1.1\nHost: {{host}}\nContent-Length: {len(fresh)}", fresh
+    )
+
+    assert first != second
+    assert refused.status == 400
+    assert refused.payload == {"fault": "bootstrap-exchange-failed"}
+    assert admitted.status == 200
 
 
 # --- The exit test: an `ask` round-trips from a browser (#1230) ---

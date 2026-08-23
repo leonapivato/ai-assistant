@@ -99,9 +99,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import errno
-import hmac
 import json
+import os
 import re
+import signal
 import socket
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -182,12 +183,12 @@ from ai_assistant.interfaces.gateway.records import (
 )
 from ai_assistant.interfaces.gateway.sessions import (
     Admission,
+    BootstrapMint,
     Cancellable,
     Defer,
     SessionHandle,
     SessionTable,
     mint_value,
-    verifier,
 )
 from ai_assistant.wire.errors import OverlayIdentityUnavailableError, TransportError
 from ai_assistant.wire.overlay import (
@@ -642,21 +643,86 @@ class _Connection:
     device: str | None = None
 
 
-@dataclass
-class _Bootstrap:
-    """The one value a gateway process mints, and whether it is still good.
+@dataclass(frozen=True)
+class MintAct:
+    """How the owner mints a further bootstrap value at a running gateway.
+
+    "The mint act is the delivery of ``SIGUSR1`` to the gateway process, and it is
+    the whole of the act" (ADR-0182 §1), and every disclosure of a gateway that can
+    perform it "names the act and the gateway's own process id, so that the act is
+    discoverable from the disclosure rather than from a document".
+
+    **A gateway that cannot perform the act discloses no instance of this**, which
+    is why the field on :class:`Disclosure` is nullable: §1 forbids a gateway that
+    could not make ``SIGUSR1`` safe from naming the act at all, because "an
+    advertisement the gateway cannot make safe is an instruction to kill it".
 
     Attributes:
-        verifier: A digest of the disclosed value, compared in constant time. The
-            value itself is not retained here for the reason a session half is
-            not (ADR-0168 §4).
-        spent: Whether it has been exchanged for a session. "The exchange consumes
-            it, and after it the gateway mints no further session until its
-            process is restarted" (ADR-0168 §5).
+        signal: The signal's name, as an owner types it.
+        pid: The gateway's own process id — a Tier 2 fact about itself, and not a
+            record, so ADR-0168 §6's enumeration is not engaged.
     """
 
-    verifier: bytes
-    spent: bool = False
+    signal: str
+    pid: int
+
+
+@dataclass(frozen=True)
+class Disclosure:
+    """One bootstrap value and everything the owner is handed beside it.
+
+    ADR-0168 §5 fixes the channel — "once, on the gateway's own standard output,
+    and nowhere else" — and ADR-0182 adds two things to what travels with the
+    value: §1's act and process id, and §4's live session count and ceiling
+    "**as information and not a refusal**, so that an owner minting into a full
+    table learns it where they are standing".
+
+    **The count is advisory and nothing turns on it**, which §4 says is what makes
+    it safe to state: "it is a fact about the instant it was written and no act of
+    the gateway turns on it". The mint act in particular "makes **no** decision
+    that depends on the live session count".
+
+    Attributes:
+        value: The value to disclose, exactly once.
+        origins: Every origin a browser can reach this gateway at.
+        live_sessions: How many sessions were live when this was written.
+        max_sessions: ``gateway_max_sessions``, the ceiling the *exchange* enforces.
+        mint_act: How to mint another, or ``None`` on a gateway that could not
+            install the disposition (ADR-0182 §1).
+    """
+
+    value: str
+    origins: tuple[str, ...]
+    live_sessions: int
+    max_sessions: int
+    mint_act: MintAct | None
+
+
+class Note(StrEnum):
+    """What a gateway tells its owner about the mint act, in words the CLI writes.
+
+    Three conditions ADR-0182 §1 obliges a gateway to report, carried as an
+    enumeration rather than as prose because golden rule 3 keeps the rendering in
+    the interface: the gateway decides *which* condition holds and the adapter
+    decides how it reads, exactly as ADR-0042 §7 has an error cross the boundary
+    rendered.
+    """
+
+    MINT_ACT_IGNORED = "mint-act-ignored"
+    """The disposition could not be installed, so the act is unavailable — and
+    ``SIGUSR1`` has been set to **ignored**, "because the signal's default action is
+    to terminate, and a process holding live sessions may not be left killable by
+    the one signal its own disclosure names"."""
+
+    MINT_ACT_UNSAFE = "mint-act-unsafe"
+    """Neither could be done, so the gateway "reports at start that the mint act is
+    unavailable **and that the signal is unsafe to send**, and names the act in no
+    disclosure"."""
+
+    MINT_NOT_DISCLOSED = "mint-not-disclosed"
+    """A later mint could not be disclosed, so it "is **not** minted": the candidate
+    was destroyed, any previously outstanding value is "exactly as it was — still
+    outstanding, still on its own clock", and the gateway keeps serving."""
 
 
 @dataclass(eq=False)
@@ -830,7 +896,9 @@ class Gateway:
             acquire=self._take_hub_slot,
             release=self._give_hub_slot,
         )
-        self._bootstrap: _Bootstrap | None = None
+        self._bootstrap = BootstrapMint(
+            ttl=settings.gateway_bootstrap_ttl, defer=defer, mint_value=mint_value
+        )
         self._authority = _authority(_LOOPBACK, settings.gateway_port)
         self._origin = f"http://{self._authority}"
         self._agent = agent
@@ -927,25 +995,56 @@ class Gateway:
         remote = sorted(self._remote_authorities)
         return (self._origin, *(f"http://{one}" for one in remote))
 
-    def mint_bootstrap(self) -> str:
-        """Mint the one bootstrap value of this process's life (ADR-0168 §5).
+    def mint_bootstrap(
+        self, disclose: Callable[[Disclosure], None], *, act: MintAct | None
+    ) -> None:
+        """Mint a candidate, disclose it, and promote it — in that order (ADR-0182 §1).
 
-        Returns:
-            The value to disclose, exactly once, on standard output. The caller
-            discloses it; a gateway that cannot "does not start, and reports why",
-            which is why the disclosure happens before anything is bound.
+        "The mint act is **ordered**, and the order is part of the rule: the gateway
+        mints a candidate, discloses it, and only on a **successful** disclosure does
+        that candidate become the outstanding value of §2 and the previously
+        outstanding value cease."
+
+        **The order is here rather than at the two call sites**, because getting it
+        wrong is the failure §1 was amended on its third round to remove: replacing
+        before disclosing "left the owner with **no** usable value after a failure
+        they did not cause", and replacing after disclosing "left the old value
+        live". One method that cannot be called out of order is what stops the start
+        path and the signal path diverging on it.
+
+        **Nothing here reads the live session count as an input.** §4: "The mint act
+        makes **no** decision that depends on the live session count. It is not
+        refused at the ceiling, it mints and discloses exactly as §1 requires
+        whatever the count is." The count below is written *into* the disclosure and
+        is not consulted.
+
+        Args:
+            disclose: How the value reaches the owner. Raising from it is what makes
+                the candidate one the gateway "cannot disclose".
+            act: The mint act to name, or ``None`` where this gateway could not
+                install the disposition — in which case §1 requires the act named in
+                no disclosure.
 
         Raises:
-            RuntimeError: If a value has already been minted. One per process life
-                is the rule the single-use argument rests on, and a second mint
-                would quietly widen it.
+            Exception: Whatever ``disclose`` raised, after the candidate has been
+                destroyed. The caller decides what that means: at start it is
+                ADR-0168 §5's "does not start, and reports why"; at a later mint it
+                is ADR-0182 §1's report-and-keep-serving.
         """
-        if self._bootstrap is not None:
-            msg = "a gateway process mints one bootstrap value (ADR-0168 §5)"
-            raise RuntimeError(msg)
-        value = self._mint_value()
-        self._bootstrap = _Bootstrap(verifier=verifier(value))
-        return value
+        candidate = self._bootstrap.mint()
+        disclosure = Disclosure(
+            value=candidate.value,
+            origins=self.origins,
+            live_sessions=len(self._sessions),
+            max_sessions=self._settings.gateway_max_sessions,
+            mint_act=act,
+        )
+        try:
+            disclose(disclosure)
+        except BaseException:
+            self._bootstrap.discard(candidate)
+            raise
+        self._bootstrap.promote(candidate)
 
     async def start(self) -> asyncio.Server:
         """Bind the loopback listener (ADR-0168 §2, §9).
@@ -1106,8 +1205,14 @@ class Gateway:
         with it (ADR-0175 §7); the fan-out is then shut down for the streams no
         session held — there are none, but a shutdown that depended on that would be
         one more invariant to keep true.
+
+        **The outstanding bootstrap value goes with them**, which is ADR-0182 §2's
+        fourth cessation event: "the end of the gateway process (ADR-0168 §4)". A
+        process on the way down leaves no timer armed and nothing that could admit
+        a browser to a gateway that is no longer there.
         """
         self._sessions.clear()
+        self._bootstrap.clear()
         self._deliveries.shutdown()
         self._records.flush()
 
@@ -1522,9 +1627,23 @@ class Gateway:
         already exists", so every way of failing returns the same refusal on the
         same condition.
 
-        The value is consumed by the mint it produced rather than by the attempt:
-        an exchange refused at ADR-0168 §4's ceiling yielded no session, and §5
-        makes the value "exchangeable for exactly one **session**".
+        **The value is consumed by the exchange rather than by the session it
+        produced**, which ADR-0182 §4 reverses from this method's first reading. An
+        exchange refused at ``gateway_max_sessions`` has "the value the exchange
+        carried… consumed exactly as a spent value is, so a refused exchange is not
+        a value the caller may present again" — because "the alternative leaves a
+        live ticket outstanding after a failure the caller can drive, which turns
+        the ceiling into a way to keep a value alive".
+
+        **The ceiling is enforced here and nowhere else**, on §4's own ground: the
+        exchange "is the only act that raises the live session count", so "there is
+        exactly one place to check and one place to test, and no ordering between
+        minting and exchanging can produce a state the text does not describe".
+
+        **An undisclosed candidate is refused here by construction** (ADR-0182 §2):
+        :meth:`~ai_assistant.interfaces.gateway.sessions.BootstrapMint.spend`
+        compares against the outstanding value alone, and a candidate no disclosure
+        has promoted is not one.
 
         **On the remote listener this is reached only from a listed device**, and
         :meth:`_respond` is where that is decided — one line earlier, so an unlisted
@@ -1542,13 +1661,7 @@ class Gateway:
             The two session values, or the refusal.
         """
         presented = _string(_payload(request), "bootstrap_value")
-        held = self._bootstrap
-        if (
-            presented is None
-            or held is None
-            or held.spent
-            or not hmac.compare_digest(verifier(presented), held.verifier)
-        ):
+        if presented is None or not self._bootstrap.spend(presented):
             return self._refuse(
                 RequestClass.BOOTSTRAP, RefusalCondition.BOOTSTRAP_EXCHANGE_FAILED, connection
             )
@@ -1557,7 +1670,6 @@ class Gateway:
             return self._refuse(
                 RequestClass.BOOTSTRAP, RefusalCondition.SESSION_CEILING, connection
             )
-        held.spent = True
         self._records.session_minted(device=connection.device)
         return Response(
             200,
@@ -3996,19 +4108,141 @@ def utcnow() -> datetime:
     return datetime.now(UTC)
 
 
+#: The name of the signal ADR-0182 §1 makes "the whole of the act", written out
+#: because the disclosure hands it to an owner to type. ``SIGHUP`` is deliberately
+#: not it: ``service/hub.py`` already installs that as the ignored signal on
+#: ADR-0083 §13's "a restart is the reload", "and a terminal hangup delivers it,
+#: which would mint a live admission ticket every time an owner closed a window".
+_MINT_SIGNAL: Final = "SIGUSR1"
+
+
+def _mint_on_the_act(
+    gateway: Gateway,
+    disclose: Callable[[Disclosure], None],
+    report: Callable[[Note], None],
+    act: MintAct,
+) -> None:
+    """Perform one mint act, and survive a disclosure that fails (ADR-0182 §1).
+
+    "A failed later mint does not stop the gateway, and the asymmetry with §5 is
+    deliberate": §5's refusal to start "protects an owner from a gateway answering
+    a port with a value nobody can present", where here "sessions are already live,
+    and stopping would end all of them to punish a convenience act that failed".
+
+    The two exceptions caught are the two a discloser has: the
+    :class:`AssistantError` this system's own adapter raises when standard output
+    refuses a write, and the raw ``OSError`` a plainer one would let through.
+    Anything else is a fault in the composition rather than in the owner's terminal,
+    and it reaches the loop's exception handler rather than being reported as a
+    disclosure that failed.
+
+    Args:
+        gateway: The running gateway.
+        disclose: How the value reaches the owner.
+        report: How the failure reaches them instead.
+        act: The act to name in the disclosure — this one, since a gateway that
+            could not install it never reaches here.
+    """
+    try:
+        gateway.mint_bootstrap(disclose, act=act)
+    except AssistantError, OSError:
+        report(Note.MINT_NOT_DISCLOSED)
+
+
+def _install_the_mint_act(
+    *,
+    gateway: Gateway,
+    disclose: Callable[[Disclosure], None],
+    report: Callable[[Note], None],
+) -> MintAct | None:
+    """Install ADR-0182 §1's disposition, or degrade in the two ways §1 names.
+
+    **Called before the start disclosure and not at the listener**, which §1 orders
+    that way for a reason adversarial review found on its eleventh round:
+    ``run_gateway`` "mints and discloses before it serves, so a disposition
+    installed when the listener starts would leave a window in which the start
+    disclosure has already named a process id and a signal the gateway would still
+    die of".
+
+    **Ignoring is the first fallback because the default action is to terminate.**
+    "A gateway that cannot install it **starts anyway** rather than refusing to
+    serve" — but it "sets ``SIGUSR1`` to **ignored** if it can, because the signal's
+    default action is to terminate, and a process holding live sessions may not be
+    left killable by the one signal its own disclosure names". Where even that
+    fails, §1 has the gateway report the signal unsafe and "name the act in no
+    disclosure", which is what returning ``None`` makes true of every disclosure
+    that follows.
+
+    **``add_signal_handler`` fails for reasons that are not about the platform**,
+    "a loop composed off the main thread being the ordinary one", which is why the
+    fallbacks are reached by ordinary exceptions rather than by a platform test.
+    ``AttributeError`` is in both tuples for the narrower case of a platform with no
+    such signal at all — one this system runs no hub on (§1), reported under the
+    same note because a signal that cannot be delivered is not one to send either.
+
+    Args:
+        gateway: The gateway the act mints at.
+        disclose: How a minted value reaches the owner.
+        report: How an unavailable act reaches them, at start.
+
+    Returns:
+        The act to name in every disclosure, or ``None`` where there is none to
+        name.
+    """
+    act = MintAct(signal=_MINT_SIGNAL, pid=os.getpid())
+    handler = partial(_mint_on_the_act, gateway, disclose, report, act)
+    try:
+        asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1, handler)
+    except AttributeError, NotImplementedError, OSError, RuntimeError, ValueError:
+        pass
+    else:
+        return act
+    try:
+        signal.signal(signal.SIGUSR1, signal.SIG_IGN)
+    except AttributeError, OSError, ValueError:
+        report(Note.MINT_ACT_UNSAFE)
+    else:
+        report(Note.MINT_ACT_IGNORED)
+    return None
+
+
+def _release_the_mint_act(act: MintAct | None) -> None:
+    """Drop the disposition once the listener is down (ADR-0182 §1).
+
+    §1 has the gateway hold it "until its listener is shut down", so it is released
+    here rather than left to the process exit — and only where one was installed,
+    since restoring the default on the degraded path would re-arm the very
+    termination the ignore was there to prevent.
+
+    Args:
+        act: What :func:`_install_the_mint_act` returned.
+    """
+    if act is None:
+        return
+    with contextlib.suppress(NotImplementedError, RuntimeError, ValueError):
+        asyncio.get_running_loop().remove_signal_handler(signal.SIGUSR1)
+
+
 async def run_gateway(
     *,
     settings: Settings,
     engine: AssistantEngine,
-    disclose: Callable[[str, str], None],
+    disclose: Callable[[Disclosure], None],
+    report: Callable[[Note], None],
     now: Callable[[], datetime] = utcnow,
 ) -> None:
-    """Mint, disclose, then serve — in that order, which ADR-0168 §5 fixes.
+    """Install the act, mint, disclose, then serve — the order ADR-0182 §1 fixes.
 
     "A gateway that cannot disclose its bootstrap value does not start, and
     reports why", so the disclosure happens **before** the listener is bound: a
     gateway that bound first and then failed to print would be answering a port
     with a value nobody can present.
+
+    **The mint act's disposition is installed before that disclosure**, because
+    ADR-0182 §1 orders it against the disclosure rather than against the listener:
+    every disclosure of a gateway that can perform the act names the act and this
+    process's id, and one named before the disposition exists is an instruction to
+    send a signal whose default action would end the process.
 
     **Every origin is disclosed, not just the loopback one** (ADR-0174). The owner
     reads the value off this terminal and carries it to another device, and the
@@ -4029,9 +4263,15 @@ async def run_gateway(
         settings: The loaded configuration.
         engine: The hub, as the promoted ``AssistantEngine``. Built by whoever
             composes this process — the gateway builds no engine (ADR-0168 §1).
-        disclose: How the bootstrap value and the origins reach the owner. Raising
-            from it is what stops the gateway starting.
-        now: The clock.
+        disclose: How a bootstrap value and everything beside it reach the owner.
+            Raising from it is what stops the gateway starting — and, at a later
+            mint act, what ADR-0182 §1 has the gateway report and keep serving
+            through.
+        report: How the conditions of ADR-0182 §1 that carry no value reach the
+            owner: an unavailable mint act at start, and a later mint that could
+            not be disclosed.
+        now: The clock. It decides sessions and records; ADR-0182 §3's bound is on
+            the deferral seam's monotonic time and reads nothing from here.
 
     Raises:
         AssistantError: If the bootstrap value cannot be disclosed, if the overlay
@@ -4046,8 +4286,12 @@ async def run_gateway(
         bundle=packaged_bundle(),
         agent=_agent_for(settings),
     )
-    disclose(gateway.mint_bootstrap(), ", ".join(gateway.origins))
-    await gateway.serve()
+    act = _install_the_mint_act(gateway=gateway, disclose=disclose, report=report)
+    try:
+        gateway.mint_bootstrap(disclose, act=act)
+        await gateway.serve()
+    finally:
+        _release_the_mint_act(act)
 
 
 def _agent_for(settings: Settings) -> OverlayAgent | None:

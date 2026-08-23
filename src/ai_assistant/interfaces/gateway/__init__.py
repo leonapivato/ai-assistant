@@ -10,6 +10,13 @@ live, and a gateway has no reason to import ``service``.
 
 from __future__ import annotations
 
-from ai_assistant.interfaces.gateway.server import Gateway, packaged_bundle, run_gateway
+from ai_assistant.interfaces.gateway.server import (
+    Disclosure,
+    Gateway,
+    MintAct,
+    Note,
+    packaged_bundle,
+    run_gateway,
+)
 
-__all__ = ["Gateway", "packaged_bundle", "run_gateway"]
+__all__ = ["Disclosure", "Gateway", "MintAct", "Note", "packaged_bundle", "run_gateway"]

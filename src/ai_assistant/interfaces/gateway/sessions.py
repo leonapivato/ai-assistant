@@ -1,4 +1,7 @@
-"""The gateway's own admission record for one browser (ADR-0168 §4, §5, §6).
+"""The gateway's own admission record for one browser, and the value that buys one.
+
+ADR-0168 §4, §5 and §6 rule the session; ADR-0182 rules the bootstrap value beside
+it — one outstanding at a time, ceasing on four events and no fifth.
 
 A **web session** is "the gateway's own admission record for one browser… not an
 enrolment (ADR-0124 §5), not a grant (ADR-0097), not a principal (ADR-0099 §1),
@@ -381,3 +384,173 @@ class SessionTable:
         if session.timer is not None:
             session.timer.cancel()
         self._announce(key)
+
+
+@dataclass(frozen=True)
+class BootstrapCandidate:
+    """A value the gateway has generated and not yet disclosed (ADR-0182 §1, §2).
+
+    "An undisclosed **candidate** is not a value (§3), it admits nothing, and no
+    exchange accepts one before the disclosure that promotes it." It exists as its
+    own type because §1 fixes the order — mint, disclose, and only on a
+    **successful** disclosure promote — so there is an interval in which the
+    gateway holds a candidate beside a still-outstanding value, and giving the two
+    different types is what stops that interval being two values standing.
+
+    Attributes:
+        value: The bytes to disclose, held in the clear because disclosing them is
+            the only thing this object is for. It is dropped at the promotion,
+            after which the mint retains a verifier alone.
+    """
+
+    value: str
+
+
+class BootstrapMint:
+    """The one bootstrap value that admits, and the four ways it ceases (ADR-0182 §2).
+
+    "At most **one** unexchanged bootstrap value **admits** at a time", and it
+    ceases "on the first of four events, and there is no fifth: its exchange
+    (ADR-0168 §5's single use), ``gateway_bootstrap_ttl``'s expiry (§3), its
+    replacement by a fresh mint, and the end of the gateway process (ADR-0168 §4)".
+    Each of the four is one method here — :meth:`spend`, the timer :meth:`promote`
+    arms, :meth:`promote` itself, and :meth:`clear` — and nothing else in this class
+    clears the outstanding value, which is what makes "no fifth" a property of the
+    code rather than a claim about it.
+
+    **The clock is the deferral seam and nothing else, which is how §3's monotonic
+    requirement is met.** §3 requires the bound "measured on a **monotonic**
+    elapsed-time source — one the system clock being moved in either direction does
+    not affect — and a value that has ceased… destroyed continuously, through the
+    deferral seam ADR-0168 §4's own continuous destruction already uses". So this
+    class reads no clock at all: the value's whole life is one scheduled callback,
+    and the production seam schedules it on ``loop.call_later``, whose delays run on
+    the event loop's monotonic time. There is deliberately no ``now`` beside it —
+    a second source is what lets the two disagree, which is the divergence #1439
+    records of :class:`SessionTable` and which §3 says in terms this figure does not
+    inherit.
+    """
+
+    def __init__(
+        self,
+        *,
+        ttl: timedelta,
+        defer: Defer,
+        mint_value: Callable[[], str] = mint_value,
+    ) -> None:
+        """Build a mint holding no candidate and no outstanding value.
+
+        Args:
+            ttl: ``gateway_bootstrap_ttl`` — how long a disclosed value admits,
+                from the disclosure that promoted it (ADR-0182 §3).
+            defer: How the value's death is scheduled. The same seam a session's is
+                scheduled on, and here it is the *only* time source.
+            mint_value: The entropy source, injected for the reason
+                :class:`SessionTable`'s is. The default is the operating system's.
+        """
+        self._ttl = ttl
+        self._defer = defer
+        self._mint_value = mint_value
+        self._candidate: BootstrapCandidate | None = None
+        self._outstanding: bytes | None = None
+        self._timer: Cancellable | None = None
+
+    def mint(self) -> BootstrapCandidate:
+        """Generate a candidate, which admits nothing until it is disclosed.
+
+        "Nothing about a previously outstanding value changes before that point"
+        (ADR-0182 §1), so this touches neither the outstanding value nor its clock.
+
+        Returns:
+            The candidate to disclose, and then to :meth:`promote` or
+            :meth:`discard`.
+        """
+        self._candidate = BootstrapCandidate(value=self._mint_value())
+        return self._candidate
+
+    def promote(self, candidate: BootstrapCandidate) -> None:
+        """The disclosure succeeded: this value admits, and the previous one ceases.
+
+        Two of ADR-0182's clauses meet here and neither survives being separated.
+        §2's third cessation event — "its replacement by a fresh mint" — is the
+        previous value ending at this instant and not at the mint that preceded it.
+        And §3's clock "runs from the **successful disclosure** that promotes a
+        candidate… and from no other", because "the write is the act that can
+        block, so a gateway whose standard output is back-pressured could generate a
+        candidate, block for longer than the whole bound, and then promote a value
+        already past its clock".
+
+        Args:
+            candidate: The candidate the caller has just disclosed.
+        """
+        self._candidate = None
+        self._cease()
+        self._outstanding = verifier(candidate.value)
+        self._timer = self._defer(self._ttl.total_seconds(), self._expire)
+
+    def discard(self, candidate: BootstrapCandidate) -> None:
+        """The disclosure failed: destroy the candidate and touch nothing else.
+
+        "A value the gateway cannot disclose is **not minted**: the gateway destroys
+        the candidate, reports the failure, leaves any previously outstanding value
+        exactly as it was — still outstanding, still on its own clock" (ADR-0182 §1).
+        The outstanding value and its timer are therefore not named below.
+
+        Args:
+            candidate: The candidate that was not disclosed. A candidate that is no
+                longer the held one has already been dropped, and dropping the held
+                one in its place would destroy a value this call is not about.
+        """
+        if self._candidate is candidate:
+            self._candidate = None
+
+    def spend(self, presented: str) -> bool:
+        """The exchange — ADR-0182 §2's first cessation event, and ADR-0168 §5's.
+
+        **A match consumes the value here rather than at the session it produces**,
+        which is ADR-0182 §4: an exchange refused at ``gateway_max_sessions`` has
+        "the value the exchange carried… consumed exactly as a spent value is, so a
+        refused exchange is not a value the caller may present again". A failure to
+        match consumes nothing, because there was nothing this caller held to
+        consume.
+
+        Args:
+            presented: The value the exchange carried.
+
+        Returns:
+            Whether an outstanding value verified it. What the caller then does
+            with the session does not reach the value again.
+        """
+        held = self._outstanding
+        if held is None or not hmac.compare_digest(verifier(presented), held):
+            return False
+        self._cease()
+        return True
+
+    def clear(self) -> None:
+        """ADR-0182 §2's fourth cessation event: the gateway process is ending.
+
+        ADR-0168 §4's "every session ends when the gateway process ends" applied to
+        the value beside them, so a process on the way down leaves no timer armed
+        and no verifier behind — and no candidate either, which is the one piece of
+        state here that never became a value.
+        """
+        self._candidate = None
+        self._cease()
+
+    def _expire(self) -> None:
+        """ADR-0182 §2's second cessation event: ``gateway_bootstrap_ttl`` elapsed.
+
+        Reached only from the timer :meth:`promote` armed, which is what makes the
+        destruction continuous — "rather than at a checkpoint or on the next
+        exchange that happens to arrive" (§2).
+        """
+        self._outstanding = None
+        self._timer = None
+
+    def _cease(self) -> None:
+        """Destroy the outstanding value and disarm the clock that would have."""
+        self._outstanding = None
+        if self._timer is not None:
+            self._timer.cancel()
+            self._timer = None
