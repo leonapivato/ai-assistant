@@ -24,33 +24,6 @@
   rule for a corrupted or downgraded row already is — no ADR states that one
   either, and ADR-0049 §1 cites it as behaviour established there rather than
   deciding it. Filed as #1451.
-- **Note (2026-08-23): the question the note above declines is answered by
-  ADR-0184, and no clause of this ADR moves.** That note routes "how a *store* reads
-  a row it cannot fully validate" to `SqliteAuditTrail` and files it as #1451. The
-  routing holds for the class it names — whether an unreadable row raises, and with
-  what message, is a decoding policy the module owns — and does not reach the
-  pre-ADR-0181 egress row, for one reason ADR-0184's Context sets out: `permissions`
-  has no vocabulary in which to hand such a row back. Every `AuditTrail` read is
-  annotated `PermissionDecision`, that type is `core`'s, and the three answers the
-  module could give alone are each closed — `egress_binding=None` by ADR-0150 §1's
-  second clause, a supplied value by §3 and §4 here, and a type minted in
-  `permissions` by golden rule 1. So the remedy is a `core` surface, which golden rule
-  5 puts in an ADR of its own, ratified before anything implements against it. That is
-  ADR-0184: it adds `OriginUnrecordedBinding` and widens
-  `PermissionDecision.egress_binding` alone, so that `get`, `recent`, `export` and
-  `resolution_of` return such a row as history (#1465). This note is written in
-  ADR-0184's own change and takes effect with it on merge, which is the sequence
-  ADR-0181's five records used (ADR-0184 §11's last paragraph).
-  **This note decides nothing and adds no obligation**, and a reader acts identically
-  on every clause here before and after it. §3's required-with-no-default and its four
-  model clauses, §4's discard-not-merge, §5's two ruling points and §10's test
-  obligations are used by ADR-0184 exactly as ratified: `EgressBinding` gains and
-  loses nothing, `ActionRequest.egress_binding` stays narrow so no live builder
-  acquires a way to not answer, `ConfirmationEgress` is untouched, and
-  `PermissionDecision.authorises` answers `False` for such a row — which is what §3's
-  fourth clause already made it do. Under ADR-0070 §1 this is an amendment
-  reconciling this ADR with a decision that postdates it. Filed as #1465; #1451
-  closes with ADR-0184's implementation lane.
 - **Decides `core/types.py` surface and one `core/protocols.py` obligation.** One
   boolean field, added to three existing models, and one behavioural clause on
   `ActionPolicy` with no signature change — the shape ADR-0106 §10 used for
