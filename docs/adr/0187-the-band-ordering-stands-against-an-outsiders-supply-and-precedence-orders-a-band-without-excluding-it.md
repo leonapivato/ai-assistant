@@ -168,12 +168,19 @@ protective half does exactly what it was ruled to do under the adversarial input
 and this is the first thing to state because it is the part at risk of being lost in
 the argument. `ASSERTED` is read first, so what a source supplies is read into
 whatever the user's own band leaves. **The outsider's quantity buys them nothing
-against it**: thirty thousand entries reach the composed context on exactly the same
-terms as one, because the asserted band is filled before the attested band is read
-at all. The band an outsider can write into sits **below** the band the supersession
-law protects, and every mechanism that keeps it there — ADR-0072 §2's refusal to
-fold `EXTERNAL` into `ASSERTED`, ADR-0183 §3's refusal to let content buy a band —
-holds under supply as well as under content.
+against that band**: a source holding thirty thousand entries takes no asserted slot
+that a source holding one would not take, because the asserted band is filled before
+the attested band is read at all. The band an outsider can write into sits **below**
+the band the supersession law protects, and every mechanism that keeps it there —
+ADR-0072 §2's refusal to fold `EXTERNAL` into `ASSERTED`, ADR-0183 §3's refusal to
+let content buy a band — holds under supply as well as under content.
+
+**That is the whole of what volume cannot buy, and the rest it can.** Every slot the
+asserted band does not use and §4's floor does not reserve is the attested band's to
+fill, and thirty thousand entries fill twenty-nine of thirty where one entry fills
+one. §4 declines a per-band cap that would bound it (its no-larger-share clause), so
+the occupation is real and is named in the honest-cost paragraph below. No ordering
+of the three bands removes it: whichever band is second takes what the first leaves.
 
 **One assertion is displaced, and it is §4's doing rather than the outsider's.**
 Under §4's floor a band whose read returns a record keeps one slot, so on a store
@@ -181,7 +188,7 @@ whose assertions would otherwise fill the budget the attested band holds one rec
 and the asserted band holds one fewer. That is stated rather than glossed, and three
 things bound it. The cost is **one slot**, not a share: it is the same whether the
 source holds one entry or thirty thousand, which is precisely the property that
-makes volume worthless here. It is **the floor's cost and not the ordering's** — the
+makes volume worthless against the asserted band. It is **the floor's cost and not the ordering's** — the
 same slot is owed to `DERIVED` on a store dominated by assertions, with no outsider
 anywhere in the picture. And it is **the price of the fact that the band is
 represented at all**, which is what a reader of the prompt would otherwise have to
