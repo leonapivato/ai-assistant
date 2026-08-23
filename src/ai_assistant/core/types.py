@@ -8260,6 +8260,279 @@ class SourceGrant(BaseModel):
     )
 
 
+class ReadOutcome(StrEnum):
+    """How one attempt to read a source ended (ADR-0185 §1).
+
+    **Six members, and they are total over the outcomes the ratified gate can
+    produce.** ADR-0097 §5 and ADR-0093 §8 between them decide every way a gated
+    read can end, and each member below is pinned to one of those clauses: two are
+    decided at the check *before* the read and open nothing, and four follow a call
+    to :meth:`~ai_assistant.core.protocols.Reader.read`. No implementation invents
+    a seventh, and no attempt is recorded with no outcome.
+
+    **Whether the source was opened is a function of this field and is not
+    recorded a second time** (ADR-0185 §1). :attr:`REFUSED` and :attr:`UNANSWERED`
+    mean the driver never called ``read()``, so "the source is not resolved, not
+    opened and not parsed"; :attr:`COMPLETED`, :attr:`DISCARDED` and
+    :attr:`UNCONFIRMED` mean a reading exists, so it was. On :attr:`FAILED` it is
+    **not determinable**, and no consumer may infer it in either direction — a
+    reader can refuse before starting work at all (``OneWorker``'s outstanding
+    reservation: "Nothing is started") or fail with the bytes already in hand, and
+    both cross the seam as ``ReaderError`` because ADR-0093 §8 requires it. A
+    boolean ``opened`` beside this field was refused for that reason and for
+    ADR-0106 §2's: it would be the second spelling of a fact already recorded.
+
+    **Not ordered**, for :class:`GrantScope`'s reason (ADR-0097 §10): six outcomes
+    of a read are not ranked, and an order would invite a comparison that means
+    nothing. So this is a plain ``StrEnum``, :class:`DataTier`'s shape.
+
+    **The two unanswerable outcomes are separate from their answered twins**
+    (ADR-0185 §1). "There was no live grant" and "we could not find out whether
+    there was one" are different facts about the user's authorisation, and ADR-0097
+    §5 already requires that distinction to survive elsewhere: "A store fault and a
+    withdrawn grant are different facts and an operator must be able to tell them
+    apart." Folding :attr:`UNANSWERED` into :attr:`REFUSED` would put the claim
+    *there was no live grant* into a store whose premise is that its records are
+    not fabricated.
+
+    **A cancellation delivered from outside is not a member and never becomes
+    one** (ADR-0185 §1). It ends an attempt without an outcome, is delivered onward
+    unchanged, and the driver starts no recorder call on that path — this module's
+    cancellation clause and ADR-0093 §8's carve-out applied to the recording seam.
+    """
+
+    COMPLETED = "completed"
+    """The read returned and the re-check confirmed the grant.
+
+    The reading was **admitted** for its use. It claims nothing whatever about the
+    use itself — not that the use ran, and not that the reading reached it. ADR-0185
+    §5 requires the row to be written *before* the use runs, so an outcome defined
+    by the handoff could not be known when the row is written; what the use then did
+    is ``MemoryPolicy``'s subject or the facet adapter's, and their own records
+    answer it.
+    """
+
+    REFUSED = "refused"
+    """The first ``live()`` answered ``None``, so nothing was opened (ADR-0097 §5)."""
+
+    UNANSWERED = "unanswered"
+    """The first ``live()`` raised ``GrantError``, so the driver failed closed.
+
+    The read was not attempted: the driver could not tell whether a grant existed
+    (ADR-0097 §5). Nothing was opened.
+    """
+
+    FAILED = "failed"
+    """The read was attempted and raised (ADR-0093 §8).
+
+    "A read that cannot complete may not return what it managed to gather", so no
+    reading exists. Whether the source was opened is not determinable from the
+    record; see the class docstring.
+    """
+
+    DISCARDED = "discarded"
+    """The read returned and the re-check answered ``None``.
+
+    The reading was "discarded whole" (ADR-0097 §5). Together with
+    :attr:`UNCONFIRMED` this is the row ADR-0185 most exists for: ADR-0097 §5a's
+    residual — "a read already in flight completes" — stops being invisible.
+    """
+
+    UNCONFIRMED = "unconfirmed"
+    """The read returned and the re-check raised ``GrantError``.
+
+    The reading was discarded "exactly as a withdrawn grant is" (ADR-0097 §5), which
+    is why this member's ``grant`` and ``produced`` invariants are
+    :attr:`DISCARDED`'s exactly. It is a separate member because the sentence after
+    that one is the one about telling the two apart.
+    """
+
+
+#: The outcomes decided at the first grant check, before anything is opened. A
+#: record carries no ``grant`` on exactly these two and carries one on every other
+#: (ADR-0185 §2), which is what lets a reader of the trail partition a row without
+#: trusting the writer's discipline.
+_UNGRANTED_OUTCOMES: frozenset[ReadOutcome] = frozenset(
+    {ReadOutcome.REFUSED, ReadOutcome.UNANSWERED}
+)
+
+#: The outcomes on which no reading exists, so nothing was produced (ADR-0185 §2).
+#: The two above, plus :attr:`ReadOutcome.FAILED`, where ADR-0093 §8 forbids
+#: returning "what it managed to gather".
+_READINGLESS_OUTCOMES: frozenset[ReadOutcome] = _UNGRANTED_OUTCOMES | {ReadOutcome.FAILED}
+
+
+class SourceReadRecord(BaseModel):
+    """One recorded attempt to read one source for one use (ADR-0185 §1, §2).
+
+    The row a :class:`~ai_assistant.core.protocols.SourceReadRecorder` appends and a
+    :class:`~ai_assistant.core.protocols.SourceReadTrail` hands back. The unit is an
+    **attempt** — the act that begins when a driver asks ``SourceGrants.live`` and
+    ends when it has taken one of :class:`ReadOutcome`'s six outcomes — so a
+    refusal, a failure and a discarded reading each leave exactly one row, as a
+    completed read does. A driver writes one record per attempt it takes to an
+    outcome and never a second.
+
+    **It carries no source content, no entry, no path and no configured location**,
+    and no string derived from any of them (ADR-0004 §5, ADR-0093 §8, ADR-0139 §6).
+    :attr:`source` is the reader's *declared identity* and nothing else, and
+    :attr:`produced` is a count rather than a thing. That prohibition is the kind a
+    diff satisfies and a later field quietly breaks — a failure class stringified
+    into a record, a path arriving inside an exception message — so ADR-0185 §11
+    arm (c) searches every exported field for a marker seeded into the source rather
+    than leaving it to review.
+
+    **Frozen and boundary-crossing** (ADR-0068, ``CLAUDE.md``). ``frozen=True``
+    refuses ``record.outcome = …`` and does *not* refuse
+    ``record.__dict__["outcome"] = …``, which is why the store's obligation is a
+    detached, validated snapshot on both paths rather than a reliance on this
+    config — :class:`SourceGrant`'s posture exactly.
+
+    **Two construction invariants rather than prose**, checked here for
+    :class:`SourceGrant`'s reason: a record corrupted past its own model would be
+    stored and then make every later read of the trail incoherent. Together with
+    :class:`ReadOutcome`'s opened-ness rule they let a reader of the trail place a
+    row without trusting the writer — ``grant is None`` partitions ``{REFUSED,
+    UNANSWERED}`` from the rest, and a non-zero :attr:`produced` is available only
+    to the three outcomes in which a reading exists.
+
+    **No ``finished_at`` and no duration.** One instant is what makes an attempt
+    reconstructible against a grant history; how long a read took is a performance
+    fact with no consumer today, and ADR-0045 §1 and ADR-0028 §7 rule that a field
+    with no consumer is surface. ADR-0185 §14 defers it.
+
+    **Any field a later ADR adds is optional with a default** (ADR-0185 §12), on
+    ADR-0008 §1's additive pattern: a required addition would make every stored row
+    fail validation, which is the failure ADR-0184 records and repairs.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: DurableIdentifier = Field(
+        description=(
+            "This record's own id, minted by the caller that records it, as "
+            ":attr:`PermissionDecision.id` and :attr:`SourceGrant.id` are — a store "
+            "neither mints ids nor reads a clock (ADR-0021 §3)."
+        )
+    )
+    source: NonBlankEncodableText = Field(
+        description=(
+            "The reader's declared identity — the value "
+            ":attr:`~ai_assistant.core.protocols.Reader.name` returns, stored **byte "
+            "for byte** (ADR-0185 §2). It is **Tier 2 / operational** and must stay "
+            "that way: ADR-0093 §7 makes a reader's identity declared rather than "
+            "configured, so a path, filename, address or account identifier may never "
+            "be used as one. :data:`NonBlankEncodableText` and deliberately **not** "
+            ":data:`Identifier`: this is a *faithful copy*, and ADR-0096 §2 rules that "
+            'one "may tighten only in ways that reject". A stripping type would let '
+            "the trail name a source the reader is not called, which is the one thing "
+            "an audit record may not do. The divergence from "
+            ":attr:`SourceGrant.source`, which does strip, is #667's to close."
+        )
+    )
+    use: GrantScope = Field(
+        description=(
+            "Which of the three uses the attempt was for. A read is attempted for one "
+            "use at a time and the three are independent (ADR-0133 §2), so this names "
+            "the use the gate was asked about rather than what the grant covered."
+        )
+    )
+    checked_at: UtcInstant = Field(
+        description=(
+            "The instant the **first grant check resolved** — by answering or by "
+            "raising — read from the driver's injected clock immediately after that "
+            "and before ``Reader.read()`` (ADR-0185 §12). ADR-0097 §5 makes the answer "
+            "and the start of the read one synchronous step, so one instant is "
+            "truthful for the resolution and for the read's start alike. **Named for "
+            "what it records rather than for the attempt**: an attempt begins when the "
+            "driver asks, ``live()`` may suspend, and a field called ``started_at`` "
+            "would be a claim about a moment this record does not hold. It is never "
+            "derived from :attr:`SourceReading.read_at`, which ADR-0093 §10 captures "
+            "later and which a refused attempt has no reading to take from at all. "
+            "Timezone-aware, stored as UTC; naive is refused."
+        )
+    )
+    outcome: ReadOutcome = Field(
+        description=(
+            "How the attempt ended — one of six, mutually exclusive and total "
+            "(ADR-0185 §1). It also determines whether the source was opened for five "
+            "of the six; see :class:`ReadOutcome`."
+        )
+    )
+    grant: DurableIdentifier | None = Field(
+        description=(
+            "The :attr:`SourceGrant.id` the attempt ran under, or ``None`` exactly on "
+            "``REFUSED`` and ``UNANSWERED`` (ADR-0185 §2). **Required with no "
+            "default**, so a caller states it rather than inheriting a value it did "
+            "not mean. This is the consumer ADR-0097 §10 wrote ``live`` for — it "
+            'returns the record rather than a boolean "so a caller can name what '
+            'authorised the read" — and the driver already holds it, so the pointer '
+            "costs no second query. **The pointer is one-way**: nothing joins back, "
+            "and a ``grant`` that no longer resolves after a ``clear()`` is legible "
+            "history in ADR-0184's sense rather than corruption. No implementation may "
+            "treat it as a defect, repair it, or drop the row (ADR-0185 §8)."
+        )
+    )
+    produced: int = Field(
+        ge=0,
+        description=(
+            "How many items the **reading** carried — its proposals, and its facet "
+            "where it carried one. A count and never a thing: no field names, "
+            "identifies or describes any of them (ADR-0185 §2). It is a property of "
+            "what the source returned and states nothing about what the use did with "
+            "it. **Required with no default**, and zero on ``REFUSED``, ``UNANSWERED`` "
+            "and ``FAILED`` because no reading exists in any of the three. A "
+            "``COMPLETED`` zero means the read succeeded and the source had nothing, "
+            "which ADR-0093 §8 makes a **successful** reading; a non-zero count on a "
+            "``DISCARDED`` or ``UNCONFIRMED`` row is the point rather than an "
+            'oversight, because "this read across your revocation carried fourteen '
+            'proposals that were dropped" is a materially different audit fact from '
+            '"it carried none".'
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _grant_matches_outcome(self) -> SourceReadRecord:
+        """Refuse a record whose ``grant`` disagrees with its ``outcome`` (ADR-0185 §2).
+
+        The correspondence is exact in both directions: a grant was found at the
+        first check on four of the six outcomes and was not found on the other two,
+        so a ``REFUSED`` row citing a grant claims an authorisation the driver never
+        had, and a ``COMPLETED`` row citing none loses the pointer the whole field
+        exists for.
+        """
+        ungranted = self.outcome in _UNGRANTED_OUTCOMES
+        if ungranted and self.grant is not None:
+            msg = (
+                f"a {self.outcome.value!r} attempt found no live grant at its first "
+                f"check, so it names none; got grant={self.grant!r} (ADR-0185 §2)"
+            )
+            raise ValueError(msg)
+        if not ungranted and self.grant is None:
+            msg = (
+                f"a {self.outcome.value!r} attempt ran under a live grant and must name "
+                f"it; got grant=None (ADR-0185 §2)"
+            )
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
+    def _produced_matches_outcome(self) -> SourceReadRecord:
+        """Refuse a non-zero ``produced`` where no reading exists (ADR-0185 §2).
+
+        ``REFUSED`` and ``UNANSWERED`` never called ``read()`` and ``FAILED``'s read
+        raised, so on all three there is nothing a count could be *of*. The other
+        three carry a reading and may state any count from zero up.
+        """
+        if self.outcome in _READINGLESS_OUTCOMES and self.produced != 0:
+            msg = (
+                f"a {self.outcome.value!r} attempt carries no reading, so it produced "
+                f"nothing; got produced={self.produced} (ADR-0185 §2)"
+            )
+            raise ValueError(msg)
+        return self
+
+
 # --- the invocation seam: result, failure, authorised call (ADR-0029) --------
 # Failure is *returned* as data, never raised, because `INDETERMINATE` cannot
 # be an exception. An unauthorised `ToolCall` is unconstructable.

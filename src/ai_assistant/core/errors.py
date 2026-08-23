@@ -897,6 +897,45 @@ class UngrantableSourceError(AssistantError):
     """
 
 
+class ReadTrailError(AssistantError):
+    """The source-read trail could not be written or read (ADR-0185 §12).
+
+    Raised by a :class:`~ai_assistant.core.protocols.SourceReadRecorder` or a
+    :class:`~ai_assistant.core.protocols.SourceReadTrail` when the store refuses a
+    record — a duplicate id, or a record that does not satisfy its own model — or
+    when the backend cannot be read or written at all.
+
+    **One class rather than two**, unlike :class:`AuditError`'s split into
+    :class:`DuplicateDecisionError` and :class:`InvalidResolutionError`, and unlike
+    :class:`GrantError`/:class:`InvalidGrantError`. ADR-0185 §5 makes the driver's
+    recourse identical however the write failed: **discard the reading** — nothing
+    is proposed, no facet is contributed, no candidate is concluded. A caller that
+    could tell a broken store from a duplicate id would do nothing different with
+    the answer, so a family would be two names for one response. ADR-0185 §14 defers
+    the split with the condition that fires it: the first consumer that retries one
+    class and not the other.
+
+    **A driver that cannot record fails closed, and that is what this error means
+    to its catcher** (ADR-0185 §5). ADR-0004 §7 conditions *access* to Tier 0/1 data
+    on a record of it, so a system that kept what it read when it could not record
+    the reading would have kept Tier 1 data outside the trail its charter puts it
+    in. The attempt is then left **unrecorded** — ADR-0185 §5a names that path
+    explicitly and rules it a place the mechanism does not reach rather than a place
+    the obligation does not apply — and what is guaranteed instead is the
+    consequence: nothing durable, nothing in a prompt and nothing in a notification
+    comes of a read the trail does not hold. No lane may cite that path as authority
+    to leave a source access unrecorded.
+
+    **Nothing durable records that the recorder itself failed**, and ADR-0185 §5
+    says so plainly: the only durable place such a note could be written is the
+    store that just refused the write. An operator learns of it through the driver's
+    own failure posture — a logged fault under ADR-0083 §7 for a scheduled read, an
+    absent facet under ADR-0008 §4 — which is a signal rather than a record and is
+    not offered as one. ADR-0185 §14 defers the second, independent sink that would
+    close it.
+    """
+
+
 class PlanningError(AssistantError):
     """A request could not be turned into an executable plan.
 
