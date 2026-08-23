@@ -19,10 +19,23 @@
 
       <section id="bootstrap" class="panel" hidden>
         <h2>Start a session</h2>
+        <!--
+          Why this form is on screen, when it is on screen because a session ended
+          rather than because there never was one (ADR-0182 §6). It is a hint and not
+          a fault, deliberately and normatively: "A browser presenting a header half
+          the gateway does not admit is shown the bootstrap entry, presented as
+          re-entry rather than as a fault. It is not rendered in the page's fault
+          surface." A session that ended at its own timeout ended legitimately, and
+          putting that in the slot reserved for things that went wrong teaches an
+          owner to read that slot as noise.
+
+          Empty here and filled by `app.js`, because it says which of two things
+          happened and the document knows neither.
+        -->
+        <p class="hint" id="reentry"></p>
         <p class="hint">
-          This browser holds no session yet. Paste the value the gateway printed
-          when it started. It is good once, and every session ends when the
-          gateway process does.
+          Paste a bootstrap value. It is good once — the gateway prints one when it
+          starts, and prints another whenever you mint one at the machine it runs on.
         </p>
         <form id="bootstrap-form">
           <label for="bootstrap-value">Bootstrap value</label>
@@ -83,6 +96,48 @@
         <button type="button" id="conversations-button">Conversations</button>
         <button type="button" id="confirmations-button">What is waiting for your answer</button>
       </section>
+
+      <!--
+        The three conditions of the session this page is running under (ADR-0182 §6):
+        "The page states, in the page and without requiring an interaction to reveal
+        it, three conditions of the session it is running under."
+
+        **Here, and not in the bootstrap panel**, because the clause is about the
+        session the page is *running under* — so the audience is an owner with a live
+        session, and the bootstrap panel is on screen exactly when there is none. This
+        block sits between the two and is shown under whichever of them is up.
+
+        **Not hidden, and reached by no script.** These are three sentences about how
+        any session at this gateway ends; none of them is a value, a state or a thing
+        the page has read. A block the script revealed would be one an owner whose
+        script failed never sees, and "without requiring an interaction" is a floor
+        rather than a description of a click.
+
+        **No signal is named here, and that is ADR-0182 §1 rather than an omission.**
+        §1's mint act is the delivery of a signal whose default action terminates the
+        process, and a gateway that could install neither the disposition nor an
+        ignore "names the act in no disclosure" — a state this page cannot see from
+        the browser. So the page says a value is minted at the machine the gateway
+        runs on and stops there; the first-run guide states the act itself (§10).
+      -->
+      <div class="session-conditions">
+        <p class="hint">
+          Every session ends when the gateway process does. A session is held in that
+          process's memory and written down nowhere, so a gateway that starts again
+          has no memory of this one.
+        </p>
+        <p class="hint">
+          A session also ends on its own: at <code>gateway_session_ttl</code> from when
+          it started, and after <code>gateway_session_idle_timeout</code> with no
+          request the gateway admitted. Watching for notifications is not such a
+          request, so a page left open and asked nothing expires on time.
+        </p>
+        <p class="hint">
+          Closing the browser may end it and may not — that depends on a setting of
+          your browser's that the gateway cannot see. Either way the way back is a
+          fresh bootstrap value, minted at the machine the gateway runs on.
+        </p>
+      </div>
 
       <!--
         The index of what is on screen (#1429), built by `app.js` from the open panels'

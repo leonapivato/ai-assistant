@@ -60,6 +60,16 @@ def _asset(name: str) -> str:
     return (_ASSETS / name).read_text(encoding="utf-8")
 
 
+def _style(name: str) -> str:
+    """One shipped stylesheet with its comments removed.
+
+    For :func:`_code`'s reason: the comments in that file *name* the declarations it
+    must not carry — `display: none`, a clamped line count — so a check reading the
+    whole file would fail on the prose explaining the rule it enforces.
+    """
+    return re.sub(r"/\*.*?\*/", "", _asset(name), flags=re.DOTALL)
+
+
 def _rule(stylesheet: str, selector: str) -> str:
     """The declarations of one rule, by the exact selector text that opens it.
 
@@ -311,7 +321,7 @@ def test_the_page_has_one_layout_for_a_phone() -> None:
     clipped a confirmation's recipients to fit a phone would breach them from the
     stylesheet, and pass every other check in this file.
     """
-    stylesheet = _asset("app.css")
+    stylesheet = _style("app.css")
 
     assert _NARROW in stylesheet
     narrow = stylesheet[stylesheet.index(_NARROW) : stylesheet.rindex("\n}")]
@@ -398,6 +408,105 @@ def test_every_refusal_a_browser_can_provoke_is_a_condition_the_page_reads() -> 
     # consumed", so nothing was spent and nothing needs re-minting.
     assert "gateway_remote_browser_devices" in faults
     assert "The value you pasted was not read, so it is still good." in faults
+
+
+def test_the_page_states_the_three_conditions_of_the_session_it_runs_under() -> None:
+    """ADR-0182 §6: "The page states, in the page and without requiring an interaction
+    to reveal it, three conditions of the session it is running under."
+
+    They are in the document rather than written by the script, and outside every
+    ``hidden`` panel, which is what makes "without requiring an interaction" a floor
+    rather than a description of a click: none of the three is a value, a state or
+    anything the page has read, so a block a script had to reveal would be one an owner
+    whose script failed never sees.
+
+    It sits between the bootstrap panel and the console because §6's clause is about
+    the session the page "is running under" — the audience is an owner holding one, and
+    the bootstrap panel is on screen exactly when there is none.
+    """
+    document = _asset("index.html")
+    opened = document.index('<div class="session-conditions">')
+    # Collapsed, because the sentences are wrapped to the file's column width and a
+    # check reading them line by line would pin where the wrapping happens to fall.
+    conditions = " ".join(document[opened : document.index("</div>", opened)].split())
+
+    # 1. The process bound (ADR-0168 §4, kept by ADR-0182 §5).
+    assert "Every session ends when the gateway process does." in conditions
+    # 2. Both bounds, named as the settings they are, and the clause that surprises —
+    #    a stream carries no request, so watching does not refresh the idle timeout
+    #    (ADR-0175 §7).
+    assert "<code>gateway_session_ttl</code>" in conditions
+    assert "<code>gateway_session_idle_timeout</code>" in conditions
+    assert "Watching for notifications is not such a request" in conditions
+    # 3. The one ADR-0168 §6 corrected itself about: the cookie is a session cookie and
+    #    a browser that restores its previous session carries it across a close, so
+    #    closing the browser *may* end the session. §6 requires the page to be honest
+    #    that the gateway cannot see which.
+    assert "may end it and may not" in conditions
+    assert "minted at the machine the gateway runs on" in conditions
+    # And it is reached by no script and hidden at no width — including by a rule that
+    # names nothing, since `display: none` appears nowhere in the sheet at all.
+    assert "session-conditions" not in _code("app.js")
+    assert "display: none" not in _style("app.css")
+
+
+def test_the_page_names_no_signal() -> None:
+    """ADR-0182 §1, which is why the sentence above stops at "at the machine the
+    gateway runs on".
+
+    The mint act is the delivery of `SIGUSR1`, whose default action terminates the
+    process — and a gateway that could install neither the disposition nor an ignore
+    "names the act in no disclosure ... No lane may read the disclosure clause below as
+    obliging a gateway to advertise a signal that would end every live session". Which
+    of those states a gateway is in is not visible from a browser, so a page that named
+    the signal would be advertising it on the one deployment where sending it is fatal.
+
+    §10 puts the act in the first-run guide instead, where the gateway's own start
+    disclosure is beside it.
+    """
+    for name in ("index.html", "app.js", "app.css"):
+        assert "SIGUSR1" not in _asset(name), name
+
+
+def test_a_session_that_ended_is_re_entry_and_not_a_fault() -> None:
+    """ADR-0182 §6: "A browser presenting a header half the gateway does not admit is
+    shown the bootstrap entry, presented as re-entry rather than as a fault. It is not
+    rendered in the page's fault surface."
+
+    A session that ran out its idle timeout ended exactly as the sentences above say
+    sessions end. #1429's survey found one fault slot at the foot of a thirteen-panel
+    page and lane 3 moved the slots beside their panels; putting a legitimate ending in
+    any of them is the same lesson one layer on — an owner who is shown ordinary
+    endings in the slot kept for things that went wrong learns to stop reading it.
+
+    The condition the gateway named is carried into the hint rather than dropped. §6
+    does not oblige the page to distinguish which condition ended the session, but
+    where the gateway did name one, trading the words for the placement would be one
+    silence swapped for another.
+    """
+    script = _code("app.js")
+    document = _markup("index.html")
+    lost = _functions(script)["sessionLost"]
+
+    assert '<p class="hint" id="reentry"></p>' in document
+    assert "const RE_ENTRY =" in script
+    assert "showBootstrap(said ? `${RE_ENTRY} ${said}` : RE_ENTRY);" in lost
+    # Nothing on this path reaches the fault surface — not in `sessionLost`, and not in
+    # either caller that used to write the bootstrap slot itself.
+    assert "fault(" not in lost
+    reporting = _functions(script)["report"]
+    assert "if (sessionLost(body, message)) {" in reporting
+    assert reporting.index("return;") < reporting.index("fault(message, panelId);")
+    assert "sessionLost(body, describe(body, response.status));" in _functions(script)["act"]
+    # The bootstrap panel keeps its fault slot, and it is right that it does: a refused
+    # *exchange* is a fault about the value that was typed, which is not this clause.
+    assert (
+        'fault(describe(body, response.status), "bootstrap");' in _functions(script)["startSession"]
+    )
+    # An explanation is cleared when it stops being true and not by the next click: every
+    # act guards a missing half by calling `showBootstrap` with nothing.
+    assert "if (because !== undefined) {" in _functions(script)["showBootstrap"]
+    assert 'el("reentry").textContent = "";' in _functions(script)["showConsole"]
 
 
 def test_the_header_half_is_held_in_origin_scoped_storage_shared_across_tabs() -> None:
@@ -1310,11 +1419,14 @@ _FAULT_PANELS: Final = frozenset(
 #: The five ``fault`` calls that do **not** name a panel with a literal, which are the
 #: machinery's own: the two that clear the page-foot slot, the two that clear a built
 #: one — its dismiss control, and the sweep a session start or end makes over all of
-#: them — and the one place a panel is chosen at run time. That last is a condition
-#: that ended the session, reported in the bootstrap panel because `sessionLost` has
-#: just hidden every other one.
+#: them — and `report`, which is handed the panel its caller named.
+#:
+#: There is no run-time choice of panel here any more. A condition that ended the
+#: session used to be sent to the bootstrap panel's fault slot by a ternary in this
+#: position; ADR-0182 §6 makes it re-entry instead — "not rendered in the page's fault
+#: surface" — so it leaves `report` before `fault` is reached at all.
 _UNNAMED_FAULTS: Final = (
-    'message, lost ? "bootstrap" : panelId',
+    "message, panelId",
     "null",
     "null",
     "null, panelId",

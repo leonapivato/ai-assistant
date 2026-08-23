@@ -287,6 +287,30 @@ button[disabled] {
 }
 
 /*
+ * The three standing conditions of a session (ADR-0182 §6). Quiet, because they are
+ * true all the time and are not an event — but never `display: none` at any width and
+ * never behind a control, which §6 forbids in the same sentence that requires them:
+ * "in the page and without requiring an interaction to reveal it".
+ */
+.session-conditions {
+  margin: 0 0 1.2rem;
+}
+
+.session-conditions p {
+  margin: 0 0 0.4rem;
+}
+
+/*
+ * A setting's name, marked as one. `monospace` is a generic family the browser
+ * resolves out of its own installed faces — ADR-0168 §10 forbids fetching a font, not
+ * asking for the one the reader already has.
+ */
+code {
+  font-family: monospace;
+  font-size: 0.95em;
+}
+
+/*
  * The index of what is on screen (#1429). A phone shows about a third of one panel at
  * a time, and this page grows a panel every time a listing is read — so by the fourth
  * read the control the owner just pressed has put its answer a thousand pixels below

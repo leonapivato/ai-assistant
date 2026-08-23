@@ -385,8 +385,11 @@ async function readBody(response) {
 // on both — so §9's distinction survives to what the owner reads rather than
 // stopping at a status code a stream cannot revise.
 const FAULTS = {
-  "no-live-session":
-    "This browser has no live session. Start one with the value the gateway printed.",
+  // The remedy is no longer here: under ADR-0182 §1 a value is printed at start **and**
+  // whenever the owner mints one, so "the value the gateway printed" had become the
+  // wrong half of a sentence — and §6 gives re-entry its own words, which say what to
+  // do. This states the condition and stops.
+  "no-live-session": "This browser has no live session.",
   "cookie-half-mismatch":
     "Another local service replaced this gateway's cookie, so the two halves of " +
     "the session no longer match. Restart the gateway and start a session again.",
@@ -525,14 +528,18 @@ function describeDeliveryEnd(value, status) {
 
 // One condition, reported where the act that raised it is.
 //
-// **A condition that ended the session is reported in the bootstrap panel instead**,
-// because `sessionLost` has just hidden every other one. Writing it into the panel the
-// act belonged to would put the reason behind `hidden` and leave the owner looking at
-// a bootstrap form that appeared for no stated reason — ADR-0168 §9's distinction
-// arriving as silence at the last hop.
+// **A condition that ended the session is re-entry and takes that path instead**, and
+// no fault is written for it at all (ADR-0182 §6). `sessionLost` has just hidden every
+// other panel, so writing it into the panel the act belonged to would put the reason
+// behind `hidden` — ADR-0168 §9's distinction arriving as silence at the last hop —
+// and writing it into the bootstrap panel's fault slot, which is what this did before
+// §6 was ratified, puts a legitimate ending in the surface kept for things that went
+// wrong. The message goes with it either way; only the slot changes.
 function report(panelId, body, message) {
-  const lost = sessionLost(body);
-  fault(message, lost ? "bootstrap" : panelId);
+  if (sessionLost(body, message)) {
+    return;
+  }
+  fault(message, panelId);
 }
 
 function refused(panelId, body, status) {
@@ -1052,14 +1059,33 @@ function admitted(half, extra) {
   return headers;
 }
 
-// A refusal that means this browser's session is gone. Forgetting the half and
-// showing the bootstrap panel is the only thing a page can do about either, and
-// doing it in one place keeps the two conditions from drifting apart.
-function sessionLost(body) {
+// **Re-entry, and it is not a fault** (ADR-0182 §6). A refusal that means this
+// browser's session is gone: forgetting the half and showing the bootstrap panel is
+// the only thing a page can do about either, and doing it in one place keeps the two
+// conditions from drifting apart.
+//
+// §6 rules where it is said as well as that it is said — "shown the bootstrap entry,
+// presented as re-entry rather than as a fault. It is not rendered in the page's fault
+// surface" — so this writes the panel's own hint and nothing here reaches `fault`. A
+// session that ran out its idle timeout ended exactly as this page says sessions end;
+// rendering that in the slot kept for things that went wrong is how an owner learns to
+// stop reading the slot.
+//
+// **`said` is the condition the gateway named, restated rather than dropped.** §6 does
+// not oblige the page to distinguish which condition ended the session and the gateway
+// does not always let it — but where there are words, losing them to satisfy a clause
+// about *where* a sentence goes would be trading one silence for another. It joins the
+// re-entry sentence in the hint, so §6's placement holds and nothing is lost.
+const RE_ENTRY =
+  "That session has ended, so this browser was asked to start a new one. Nothing was " +
+  "lost: a conversation belongs to the hub and outlives every session. Paste a fresh " +
+  "bootstrap value to carry on.";
+
+function sessionLost(body, said) {
   if (body.fault === "no-live-session" || body.fault === "cookie-half-mismatch") {
     forgetHeaderHalf();
     stopWatching();
-    showBootstrap();
+    showBootstrap(said ? `${RE_ENTRY} ${said}` : RE_ENTRY);
     return true;
   }
   return false;
@@ -1600,12 +1626,11 @@ async function act(half, path, payload) {
     // is reported as one of exactly three, "and never as either of the other two".
     return { outcome: LANDED, body };
   }
-  if (sessionLost(body)) {
-    // The act log has just been hidden with the rest of the console, so the condition
-    // is restated beside the only act left to take. `reportAct` still writes its own
-    // line below, and it is about what the act did rather than about the session.
-    fault(describe(body, response.status), "bootstrap");
-  }
+  // The act log has just been hidden with the rest of the console, so the condition is
+  // restated beside the only act left to take — as re-entry rather than as a fault
+  // (ADR-0182 §6), which is the one thing that changed here. `reportAct` still writes
+  // its own line below, and it is about what the act did rather than about the session.
+  sessionLost(body, describe(body, response.status));
   // A refusal whose condition this page cannot read is a refusal it cannot classify,
   // and ADR-0139 §4's third outcome is what an unclassifiable one is. The reachable
   // case is a response cut after its headers: the status may be the `502` the gateway
@@ -3902,8 +3927,16 @@ const CONTROL_PANELS = [
   "observation",
 ];
 
-function showBootstrap() {
+// `because` is the re-entry sentence (ADR-0182 §6), and **omitting it leaves whatever
+// is there alone** rather than clearing it. Every act on this page guards on a missing
+// header half by calling this with nothing, so a sentence cleared by the next click
+// would be an explanation the owner had one click to read. It is cleared where it stops
+// being true: when a session starts.
+function showBootstrap(because) {
   clearFaults();
+  if (because !== undefined) {
+    el("reentry").textContent = because;
+  }
   show("bootstrap", true);
   show("console", false);
   show("conversations", false);
@@ -3913,6 +3946,9 @@ function showBootstrap() {
 
 function showConsole() {
   clearFaults();
+  // The re-entry sentence stops being true the moment a session exists, and this is the
+  // one place that is so.
+  el("reentry").textContent = "";
   show("bootstrap", false);
   show("console", true);
   // Which conversation the next question lands in, said before the first one is asked
