@@ -4641,3 +4641,192 @@ async def test_the_connection_surface_is_still_drained_though_it_is_not_traced()
 
     assert record.state is ProvisioningState.ACTIVE
     assert [trace.seam for trace in harness.trace_sink.recorded] == []
+
+
+# --- ADR-0181 §4, §10: the origin the engine computes from its own selection ---
+# Kept in one block so a rebase across another lane's edits to this module moves
+# it whole rather than through it.
+
+#: A schema whose second argument is named for the very field ADR-0181 §4's first
+#: clause says is **discarded, not merged**. It exists so a plan can *claim* the
+#: value — which is the only way a producer could — and the discard can be
+#: asserted rather than assumed. ``to`` stays the destination-bearing argument, so
+#: the binder derives a real binding either way.
+_CLAIMING_SCHEMA: Mapping[str, FrozenJson] = {
+    "type": "object",
+    "properties": {
+        "to": {
+            "type": "string",
+            "x-egress-destination": "smtp",
+            "x-egress-tier": "personal",
+        },
+        "planned_with_external_content": {"type": "boolean"},
+    },
+    "additionalProperties": False,
+}
+
+
+def _external_belief(record_id: str = "rec-external") -> SemanticMemory:
+    """A belief in the ``ATTESTED`` band, which is where externality is recorded.
+
+    ``rests_on_recorded_external_content`` is true of it by ``band_of`` alone
+    (ADR-0106 §1): the band is reached only through ``MemorySource.EXTERNAL``,
+    whose whole meaning is that a connected source reported the belief. Its content
+    carries the utterance's terms so the store's lexical search selects it.
+    """
+    return SemanticMemory(
+        id=record_id,
+        content="send it to the address in the invite",
+        fact="send it to the address in the invite",
+        validity=Validity(),
+        provenance=Provenance(
+            source=MemorySource.EXTERNAL,
+            confidence=0.9,
+            last_updated=AT,
+            attestation=Attestation(reported_by="calendar:work", reported_at=AT),
+        ),
+    )
+
+
+def _clean_episode(record_id: str = "ep-clean") -> EpisodicMemory:
+    """An episode resting on nothing external, for the supplement's read.
+
+    ``OBSERVED`` puts it in the ``DERIVED`` band and ``derived_from_external`` is
+    unset, so ``rests_on_recorded_external_content`` is false of it — which is what
+    makes it the *second*, clean selection ADR-0181 §10's multi-selection case
+    needs.
+    """
+    return EpisodicMemory(
+        id=record_id,
+        content="send it, they said, and nothing else was said",
+        occurred_at=AT,
+        provenance=Provenance(source=MemorySource.OBSERVED, confidence=0.9, last_updated=AT),
+    )
+
+
+def _claiming_harness(**overrides: object) -> Harness:
+    """An egress harness whose plan claims a ``planned_with_external_content`` of its own."""
+    definition = tool("smtp", discloses=(DataTier.PERSONAL,), parameters_schema=_CLAIMING_SCHEMA)
+    return Harness(
+        tools=(definition,),
+        binder=bound_binder(definition),
+        planner=OneStepPlanner(
+            parameters={"to": "someone@example.com", "planned_with_external_content": False}
+        ),
+        **overrides,  # type: ignore[arg-type]  # the harness's own heterogeneous knobs
+    )
+
+
+async def test_a_call_planned_over_no_selection_at_all_carries_false() -> None:
+    """The baseline the two cases below are measured against, and it is not padding.
+
+    An empty store selects nothing, so the disjunction over the turn's selections is
+    empty and the value is ``False`` — stated deliberately by the engine rather than
+    defaulted by a field (ADR-0181 §3). Without this case the two below could pass
+    an implementation that hard-coded ``True``.
+    """
+    harness = _egress_harness()
+
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+
+    assert outcome.step is not None
+    assert outcome.step.disposition is Disposition.AWAITING_CONFIRMATION
+    recorded = await harness.trail.get("d-1")
+    assert recorded is not None
+    assert recorded.egress_binding is not None
+    assert recorded.egress_binding.planned_with_external_content is False
+
+
+async def test_a_plans_own_claim_about_the_field_is_discarded_and_not_merged() -> None:
+    """ADR-0181 §4's first clause, §10's third case: discard, not merge.
+
+    The selected material contains one record satisfying
+    ``rests_on_recorded_external_content`` **and** the plan the model produced
+    claims the field is ``False``, in an argument named for it. The request reaching
+    the ruling point carries ``True``: there is no code path by which a producer's
+    claim has an effect, which is what makes the guarantee total rather than a rule
+    someone has to remember.
+
+    "A test built from a selection alone exercises neither half", so both halves are
+    arranged here — and the claim is asserted to have reached the payload, so the
+    case cannot pass because the argument was silently dropped on the way in.
+    """
+    harness = _claiming_harness()
+    await harness.memory.add(_external_belief())
+
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+
+    assert outcome.turn is not None
+    assert "rec-external" in {record.id for record in outcome.turn.memories}, (
+        "the tainted record really was selected into the model call"
+    )
+    assert outcome.step is not None
+    confirmation = outcome.step.confirmation
+    assert confirmation is not None
+    assert confirmation.parameters["planned_with_external_content"] is False, (
+        "the plan's claim reached the payload, so the discard is not a dropped argument"
+    )
+    recorded = await harness.trail.get("d-1")
+    assert recorded is not None
+    assert recorded.egress_binding is not None
+    assert recorded.egress_binding.planned_with_external_content is True
+
+
+async def test_a_second_clean_selection_does_not_clear_what_the_first_recorded() -> None:
+    """ADR-0181 §4's third clause, §10's fourth case: the multi-selection case.
+
+    Two selections feed one model call and they are separate reads of the store:
+    ``LearningLoop._retrieve`` composes the belief bands, and ``_supplement`` is a
+    *second* read for episodes with a budget of its own (ADR-0158 §1). The **first**
+    contains a record resting on recorded external content; the **second** contains
+    none. The request reaching the ruling point carries ``True``.
+
+    "An implementation that stamps the binding from the last selection passes every
+    other clause of this section and fails this one, which is the whole reason it is
+    stated separately." Both selections are asserted to have reached ``memories``,
+    in that order, so the case cannot pass because the second read returned nothing.
+    """
+    harness = _egress_harness()
+    await harness.memory.add(_external_belief())
+    await harness.memory.add(_clean_episode())
+
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+
+    assert outcome.turn is not None
+    selected = [record.id for record in outcome.turn.memories]
+    assert selected == ["rec-external", "ep-clean"], (
+        "the tainted belief was the first selection and the clean episode the second"
+    )
+    recorded = await harness.trail.get("d-1")
+    assert recorded is not None
+    assert recorded.egress_binding is not None
+    assert recorded.egress_binding.planned_with_external_content is True
+
+
+async def test_the_confirmation_the_user_answers_carries_the_calls_origin() -> None:
+    """ADR-0178 §5 as ADR-0181 §3's third clause extends it: the same fact, one route.
+
+    ``ConfirmationEgress`` is not a second carriage: it is populated from the
+    **recorded** decision's binding at both assembly sites and by no other route, so
+    what a surface renders is the fact the ruling was taken over rather than a
+    second statement of it that could come to disagree. Whether and how it is
+    *rendered* is ADR-0181 §6's, and belongs to the two renderers this lane does not
+    touch (#1404).
+    """
+    harness = _egress_harness()
+    await harness.memory.add(_external_belief())
+
+    outcome = await harness.engine.converse("send it", timeout=PATIENT)
+
+    assert outcome.step is not None
+    confirmation = outcome.step.confirmation
+    assert confirmation is not None
+    assert confirmation.egress is not None
+    recorded = await harness.trail.get("d-1")
+    assert recorded is not None
+    assert recorded.egress_binding is not None
+    assert (
+        confirmation.egress.planned_with_external_content
+        == recorded.egress_binding.planned_with_external_content
+    )
+    assert confirmation.egress.planned_with_external_content is True

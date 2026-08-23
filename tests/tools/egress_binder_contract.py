@@ -1851,6 +1851,100 @@ class EgressBinderContract(ABC):
         located = {(span.argument, span.index): span.provenance for span in again.binding.spans}
         assert located[("body", None)] is DiscloserProvenance.USER_AUTHORED
 
+    # --- ADR-0181 §3, §4: the call-level origin, carried and transcribed --------
+
+    @pytest.mark.parametrize("selected_external", [True, False])
+    async def test_the_binding_carries_the_carriers_planned_with_external_content(
+        self, binder: EgressBinder, selected_external: bool
+    ) -> None:
+        """ADR-0181 §3's second clause, §10's second case: carried, unchanged.
+
+        Both states, because the ``False`` half is what fails a seam that derived a
+        value of its own rather than taking the caller's — such a seam would answer
+        ``False`` here and pass the ``True`` case by accident of its own default.
+        The seam derives nothing for this field: ADR-0181 §4's second clause forbids
+        recovering it from an argument's value, its field or its shape, and the
+        arguments below are identical across the two runs.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+
+        bound = await binder.bind(
+            SEND_EMAIL,
+            parameters={"to": ["a@example.com"], "subject": "s", "body": "b"},
+            provenance=CarriedProvenance(spans={}, planned_with_external_content=selected_external),
+        )
+
+        assert bound is not None
+        assert bound.binding.planned_with_external_content is selected_external
+
+    async def test_rebind_transcribes_planned_with_external_content_from_approved(
+        self, binder: EgressBinder
+    ) -> None:
+        """ADR-0181 §3's fifth and sixth clauses: the **second** thing taken from ``approved``.
+
+        ``rebind`` receives no carrier and no selection set — the selection happened
+        before the confirmation was parked, plausibly before a restart — so a member
+        that re-derived this field would answer ``False``, compare unequal to the
+        approved binding, and refuse the very call the user was asked about and
+        approved. The equality assertion below is what makes that visible: it is the
+        refusal ADR-0152 §7 already states, reached through this field alone.
+
+        This narrows ADR-0152 §7's count from exactly one to exactly two and narrows
+        nothing else in it: everything else is still re-derived, and the resumed
+        binding still has to equal the approved one whole.
+        """
+        self.register_egress(binder, SEND_EMAIL)
+        parameters: dict[str, FrozenJson] = {
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body": "b",
+        }
+        first = await binder.bind(
+            SEND_EMAIL,
+            parameters=parameters,
+            provenance=CarriedProvenance(spans={}, planned_with_external_content=True),
+        )
+        assert first is not None
+        assert first.binding.planned_with_external_content is True
+
+        again = await binder.rebind(SEND_EMAIL, parameters=parameters, approved=first.binding)
+
+        assert again is not None
+        assert again.binding.planned_with_external_content is True
+        assert again.binding == first.binding, (
+            "the re-derived binding equals the approved one, so ADR-0152 §7's "
+            "equality refusal does not fire on the field ADR-0181 §3 adds"
+        )
+
+    async def test_rebind_answers_false_where_the_approved_binding_said_false(
+        self, binder: EgressBinder
+    ) -> None:
+        """The other half of the transcription, so it is not a constant ``True``.
+
+        A seam that hard-coded the resuming answer would pass the case above and
+        fail this one, and would then authorise a resumed call whose recorded origin
+        disagrees with what the approver was shown (ADR-0181 §6's fourth clause
+        renders the fact in both states).
+        """
+        self.register_egress(binder, SEND_EMAIL)
+        parameters: dict[str, FrozenJson] = {
+            "to": ["a@example.com"],
+            "subject": "s",
+            "body": "b",
+        }
+        first = await binder.bind(
+            SEND_EMAIL,
+            parameters=parameters,
+            provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
+        )
+        assert first is not None
+
+        again = await binder.rebind(SEND_EMAIL, parameters=parameters, approved=first.binding)
+
+        assert again is not None
+        assert again.binding.planned_with_external_content is False
+        assert again.binding == first.binding
+
     async def test_rebind_refuses_a_reference_that_went_pending_while_parked(
         self, binder: EgressBinder
     ) -> None:

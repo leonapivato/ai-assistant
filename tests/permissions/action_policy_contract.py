@@ -29,8 +29,10 @@ import pytest
 from permission_builders import action, decision, ruling, tool
 
 from ai_assistant.core.types import (
+    BoundAccount,
     CostBasis,
     DataTier,
+    EgressBinding,
     PermissionOutcome,
     Reversibility,
     RiskLevel,
@@ -77,6 +79,27 @@ _COST_BASES = (CostBasis.FREE, CostBasis.UNKNOWN)
 def _name_tiers(tiers: tuple[DataTier, ...]) -> str:
     """Name a parametrised case after the tiers it discloses."""
     return "+".join(tiers) or "nothing"
+
+
+def _planned_over_external(*, marked: bool) -> EgressBinding:
+    """A whole binding differing from its twin in ``planned_with_external_content`` alone.
+
+    Built here rather than in ``permission_builders`` because only this suite rules
+    over it: ADR-0181 §5's obligation is the ``ActionPolicy`` contract's, and the
+    trail's suite has no clause that reads the field. Everything else is the least
+    that makes a well-formed binding — no described span, one account, one endpoint
+    — which keeps it constructible over ``action()``'s empty ``parameters`` and,
+    more to the point, leaves nothing but this field for a refusal to be about.
+    An empty description is not a non-egress marker: the binding still names an
+    account and still derives a non-empty canonical set (ADR-0148 §2's third
+    clause), and ``egress_binding is None`` is the discriminator (ADR-0178 §4).
+    """
+    return EgressBinding(
+        spans=(),
+        account=BoundAccount(identity="work@example.com", reference="conn-0001"),
+        transport_endpoint="test://endpoint/one",
+        planned_with_external_content=marked,
+    )
 
 
 @dataclass(frozen=True)
@@ -433,3 +456,112 @@ class ActionPolicyContract:
         resolved = await policy.resolve(never_asked, approved=True)
 
         assert resolved.outcome is not PermissionOutcome.ALLOW
+
+    # --- ADR-0181 §5: the lineage gate, on each member separately --------------
+
+    async def test_decide_returns_no_allow_on_a_call_planned_over_external_content(
+        self, policy: ActionPolicy
+    ) -> None:
+        """ADR-0181 §5's second and third clauses, §10's fifth: ``decide``'s half.
+
+        The declaration is the *least* severe one this suite can build — ``LOW``
+        risk, ``REVERSIBLE``, disclosing nothing, at a known cost — so every other
+        clause of every policy here reaches ``ALLOW`` on it. Nothing but the
+        binding's ``planned_with_external_content`` can produce the refusal, which
+        is what makes this a test of the clause rather than of a threshold.
+
+        ``decide`` holds an ``ActionRequest`` and no ``AuditTrail``, so ADR-0148
+        §3's route (a) — a decision of the user about *this* request — is
+        unavailable to it by construction, and the obligation is discharged by
+        returning no ``ALLOW`` at all. It is **not** a refusal to perform the call:
+        ``CONFIRM`` satisfies the clause, and ADR-0181's Alternatives refuse an
+        outright ``DENY`` on the ground that a silently declined call teaches the
+        user nothing.
+        """
+        ruled = await policy.decide(action(egress_binding=_planned_over_external(marked=True)))
+
+        assert ruled.outcome is not PermissionOutcome.ALLOW
+        assert ruled.authorised_by is None
+
+    async def test_decide_judges_a_call_planned_over_nothing_external_on_the_ordinary_path(
+        self, policy: ActionPolicy
+    ) -> None:
+        """ADR-0181 §10's second clause: the boundary, asserted as well as the subject.
+
+        A request whose binding carries ``False`` is not refused by §5's clause. It
+        may still be confirmed or denied by a policy's own rules — the suite fixes a
+        shape, not a threshold — so what is asserted is that the *reason* is not this
+        one: the same declaration, ruled with the marker set and unset, must not
+        produce the same answer for a policy that would otherwise allow it.
+
+        Without this half, a policy returning ``CONFIRM`` for every request would
+        pass the case above while reading nothing at all.
+        """
+        clean = await policy.decide(action(egress_binding=_planned_over_external(marked=False)))
+        marked = await policy.decide(action(egress_binding=_planned_over_external(marked=True)))
+        unbound = await policy.decide(action())
+
+        assert clean.outcome == unbound.outcome, (
+            "a binding carrying False is judged exactly as a call with no binding is"
+        )
+        if clean.outcome is PermissionOutcome.ALLOW:
+            assert marked.outcome is not PermissionOutcome.ALLOW
+
+    async def test_resolve_returns_no_allow_when_a_marked_confirmation_was_declined(
+        self, policy: ActionPolicy
+    ) -> None:
+        """ADR-0181 §5's fourth clause, §10's fifth: ``resolve``'s half.
+
+        Stated over exactly the two facts this member receives — the recorded
+        decision and the user's answer — because it holds **no request**. Where
+        ``confirmed.egress_binding`` carries the marker, an ``ALLOW`` requires
+        ``approved`` to be true; ``approved`` being false yields ``DENY`` as
+        ADR-0021 already requires, and this is that obligation asserted on the path
+        where the marker is present.
+
+        A suite exercising ``decide`` alone would pass an implementation that
+        relaxed the rule here — the path where an approval exists is exactly the one
+        route (a) leaves open, and it is the one an implementation is most likely to
+        widen by accident.
+        """
+        marked = decision(
+            "d-marked",
+            request=action(egress_binding=_planned_over_external(marked=True)),
+            ruled=ruling(PermissionOutcome.CONFIRM),
+        )
+
+        resolved = await policy.resolve(marked, approved=False)
+
+        assert resolved.outcome is PermissionOutcome.DENY
+        assert resolved.authorised_by is None
+
+    async def test_resolve_still_honours_an_approval_of_a_marked_confirmation(
+        self, policy: ActionPolicy
+    ) -> None:
+        """The boundary on ``resolve``, and the failure ADR-0181 §5's sixth clause names.
+
+        The user's answer about *this* call **is** ADR-0148 §3's route (a), the one
+        route §5's second clause leaves open, so approving a marked confirmation is
+        not refused by anything this ADR adds. An implementation that re-applied
+        ``decide``'s clause here would refuse every approval of exactly the calls §6
+        exists to put to the user — "the fix a lane would otherwise reach for is to
+        stop comparing".
+
+        A policy may still refuse on rules of its own, so what is asserted is that
+        the marker alone does not change the answer.
+        """
+        marked = decision(
+            "d-marked",
+            request=action(egress_binding=_planned_over_external(marked=True)),
+            ruled=ruling(PermissionOutcome.CONFIRM),
+        )
+        clean = decision(
+            "d-clean",
+            request=action(egress_binding=_planned_over_external(marked=False)),
+            ruled=ruling(PermissionOutcome.CONFIRM),
+        )
+
+        answered = await policy.resolve(marked, approved=True)
+        baseline = await policy.resolve(clean, approved=True)
+
+        assert answered.outcome is baseline.outcome
