@@ -713,13 +713,25 @@ def carried_the_injection(model: FakeModelProvider, *, since: int = 0) -> bool:
     mark is escaped in transit. The address carries no character either encoding
     touches.
 
+    **``since`` is not a convenience.** One provider serves every cycle of arm (b),
+    so a scan over *all* recorded calls would let cycle 0's prompt vouch for cycle
+    9's: a regression that stopped selecting ``ATTESTED`` records into the chunk
+    after the first cycle would leave nine cycles unexamined while the check kept
+    passing. A caller marks the call count before the work and passes it here, so
+    the answer is about the calls that work actually made.
+
     Args:
         model: The provider whose recorded calls to read.
+        since: Ignore calls recorded before this index, which a caller reads off
+            ``len(model.calls)`` immediately before the work it is asking about.
 
     Returns:
-        Whether any message of any recorded call carried the planted address.
+        Whether any message of a call recorded at or after ``since`` carried the
+        planted address.
     """
-    return any(ATTACKER in message.content for call in model.calls for message in call.messages)
+    return any(
+        ATTACKER in message.content for call in model.calls[since:] for message in call.messages
+    )
 
 
 # --- the predicates the two arms are stated over ----------------------------
