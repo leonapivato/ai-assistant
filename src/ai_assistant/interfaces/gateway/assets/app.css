@@ -49,6 +49,37 @@ body {
   overflow-wrap: anywhere;
 }
 
+/*
+ * **The attribute that hides a control, made to actually hide it** (issue #1475, and
+ * #1472 which is the same fault seen from the re-arm path).
+ *
+ * `[hidden] { display: none }` is a *user agent* rule, and every rule in this file is
+ * an *author* rule — author origin beats user agent origin whatever the selectors say.
+ * So `button { display: inline-flex }` below silently un-hid every button on the page:
+ * `el("watch-button").hidden = true` set the attribute and changed nothing on screen,
+ * leaving an inert "Watch for notifications" sitting under the line that says watching
+ * is already happening. It reached `.panel-index` too — the panel index is a `nav` that
+ * ships `hidden` and takes `display: flex`, so the index rendered below its own floor
+ * of two open panels.
+ *
+ * **Written for the attribute rather than for `button`**, because the defect is not
+ * about buttons: it is about an author `display` beating the attribute, and this file
+ * declares one for seven selectors. A `button[hidden]` rule would fix the two controls
+ * that were noticed and leave the `nav` — and every class rule added later — carrying
+ * the same fault.
+ *
+ * **`!important` rather than source order.** An attribute selector is one class worth
+ * of specificity, which is exactly what `.panel-index`, `.choice`, `.check` and
+ * `.conversation-row` are: last-in-the-file would win today and lose to the next class
+ * rule anybody adds, which is precisely how this happened. Important-author beats every
+ * ordinary declaration in any origin, so the rule cannot be taken back by accident.
+ * This is the sheet's one `display: none` and it hides only what carries the attribute
+ * — nothing here is hidden at a width, by a class, or from a script's reach.
+ */
+[hidden] {
+  display: none !important;
+}
+
 .shell {
   max-width: 44rem;
   margin: 0 auto;
