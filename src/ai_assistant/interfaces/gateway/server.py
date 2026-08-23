@@ -451,6 +451,12 @@ _REFUSAL_STATUS: Final[Mapping[RefusalCondition, tuple[int, str]]] = {
     RefusalCondition.ORIGIN_NOT_OWN: (403, "Forbidden"),
     RefusalCondition.NO_LIVE_SESSION: (401, "Unauthorized"),
     RefusalCondition.COOKIE_HALF_MISMATCH: (409, "Conflict"),
+    # Recorded but never written back: ADR-0182 §4 has the browser told only that
+    # the exchange failed, so :meth:`Gateway._refuse` answers this one as
+    # ``BOOTSTRAP_EXCHANGE_FAILED``. The entry stays so the table is total over the
+    # enumeration — a condition missing from it would be a ``KeyError`` in the one
+    # place a gateway must not raise — and it is what a future refusal on the
+    # ceiling at some other door would answer with.
     RefusalCondition.SESSION_CEILING: (429, "Too Many Requests"),
     RefusalCondition.BOOTSTRAP_EXCHANGE_FAILED: (400, "Bad Request"),
     # ADR-0174 §4. `403` rather than `401`, and the distinction is the one the two
@@ -1668,7 +1674,10 @@ class Gateway:
         values = self._sessions.mint()
         if values is None:
             return self._refuse(
-                RequestClass.BOOTSTRAP, RefusalCondition.SESSION_CEILING, connection
+                RequestClass.BOOTSTRAP,
+                RefusalCondition.SESSION_CEILING,
+                connection,
+                answered_as=RefusalCondition.BOOTSTRAP_EXCHANGE_FAILED,
             )
         self._records.session_minted(device=connection.device)
         return Response(
@@ -2663,7 +2672,12 @@ class Gateway:
         return _rendered({"acts": [_connection_act_view(one) for one in acts]})
 
     def _refuse(
-        self, request_class: RequestClass, condition: RefusalCondition, connection: _Connection
+        self,
+        request_class: RequestClass,
+        condition: RefusalCondition,
+        connection: _Connection,
+        *,
+        answered_as: RefusalCondition | None = None,
     ) -> Response:
         """Record one refusal and answer it (ADR-0168 §3, §6, §8; ADR-0174 §3).
 
@@ -2681,18 +2695,32 @@ class Gateway:
         response — the device already knows who it is, and the enumeration governs
         the record rather than what is written back.
 
+        **The record and the response are the same condition everywhere but one
+        place**, and ADR-0182 §4 is that place: a ceiling refusal is recorded as the
+        ceiling, because "that record is the owner's channel for the fact the
+        browser is not told", and answered as an ordinary failed exchange, because
+        "ADR-0168 §5's disclosure rule governs the response, so a ceiling refusal is
+        indistinguishable to the browser from every other failed exchange". Splitting
+        them differently "would hand any local process a probe for how many browsers
+        the owner has admitted". The split is a keyword rather than a table because
+        there is one condition it applies to and the caller is the one place that
+        knows why.
+
         Args:
             request_class: Which of ADR-0168 §6's four kinds the request was.
-            condition: The single condition it was refused on.
+            condition: The single condition it was refused on, and the one recorded.
             connection: The connection it arrived on, for the identity the record
                 carries.
+            answered_as: The condition to *answer* with, where §4 requires the
+                browser told less than the record says. Defaults to the recorded one.
 
         Returns:
             The refusal to write.
         """
         self._records.refused(request_class, condition, device=connection.device)
-        status, reason = _REFUSAL_STATUS[condition]
-        return _fault(status, reason, condition.value)
+        answered = condition if answered_as is None else answered_as
+        status, reason = _REFUSAL_STATUS[answered]
+        return _fault(status, reason, answered.value)
 
 
 class _Refused(Exception):  # noqa: N818 — it is not an error, it is the answer

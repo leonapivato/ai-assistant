@@ -1,15 +1,22 @@
-"""ADR-0168 §8's ten figures, ADR-0175 §8's eleventh, and ADR-0174 §8's three fields.
+"""ADR-0168 §8's ten figures, two later ones, and ADR-0174 §8's three fields.
 
 The generic guards in ``test_config.py`` already hold every one of these to "a
 flag is not a count", "a flag is not a duration" and its own default; what is
 here is the part those cannot reach — each field's own range, and the two
 cross-field refusals §8 states.
 
-**The block is now eleven figures and the count tripwire says which ADR bought
+**The block is now twelve figures and the count tripwire says which ADR bought
 which.** ADR-0168 §8 named ten and ADR-0172's opening bullet "adds no eleventh";
 ADR-0175 §8 is the decision that does, on §8's own ground — "a 'bounded default'
 with no figure is two conforming stores handing the same continuation different
-history". A twelfth is still a figure no ADR names.
+history". ADR-0182 §3 buys the twelfth on the same ground, for a bound #1329 found
+had no figure at all. A thirteenth is still a figure no ADR names.
+
+**§8's table is not an exclusive enumeration, which is why the twelfth owes it no
+supersession.** ADR-0182 §9 works that through: the table "carries no clause saying
+the gateway has these fields and no others", and "the corpus has already settled
+this in practice twice without a record" — ADR-0174 §8's three fields and ADR-0175
+§8's one.
 
 **ADR-0174 §8's three are held apart, because none of them is a figure.** "Three
 fields are the whole of what this boundary adds and none of them is a budget: one
@@ -45,6 +52,12 @@ _GATEWAY_FIELDS = (
     # range in ADR-0168 §8's own terms — "refused at settings load unless it is
     # strictly positive… not nullable and takes no value meaning 'off'".
     "gateway_notification_budget",
+    # ADR-0182 §3's one figure, joined here for the reason ADR-0175 §8's was: §3
+    # states its range in ADR-0168 §8's own terms — "refused at settings load unless
+    # it is strictly positive, in the ``gt=timedelta(0)`` form… not nullable and
+    # takes no value meaning 'off'" — and joining this tuple is what subjects it to
+    # every guard below.
+    "gateway_bootstrap_ttl",
 )
 
 #: ADR-0174 §8's table, which is three fields and no figure: one switch and two
@@ -73,6 +86,7 @@ def test_the_figures_are_all_present_with_their_adrs_defaults() -> None:
     assert settings.gateway_max_browser_connections == 64
     assert settings.gateway_max_pending_connections == 8
     assert settings.gateway_notification_budget == timedelta(seconds=20)
+    assert settings.gateway_bootstrap_ttl == timedelta(minutes=10)
 
 
 def test_the_figures_are_exactly_the_ones_an_adr_names() -> None:
@@ -80,8 +94,8 @@ def test_the_figures_are_exactly_the_ones_an_adr_names() -> None:
     underdetermination ADR-0168 §8 opens by refusing.
 
     Ten figures from ADR-0168 §8, none from ADR-0172 ("adds no eleventh"), the
-    eleventh from ADR-0175 §8, and ADR-0174 §8's three non-figures. Discovering a
-    fifteenth here is cheaper than in review.
+    eleventh from ADR-0175 §8, the twelfth from ADR-0182 §3, and ADR-0174 §8's
+    three non-figures. Discovering a sixteenth here is cheaper than in review.
     """
     named = {name for name in Settings.model_fields if name.startswith("gateway_")}
 
@@ -151,13 +165,19 @@ def test_every_integer_figure_is_refused_unless_strictly_positive(name: str, val
         "gateway_session_idle_timeout",
         "gateway_record_interval",
         "gateway_read_timeout",
+        "gateway_bootstrap_ttl",
     ],
 )
 @pytest.mark.parametrize("value", [timedelta(0), timedelta(seconds=-1)])
 def test_every_duration_figure_is_refused_unless_strictly_positive(
     name: str, value: timedelta
 ) -> None:
-    """The ``gt=timedelta(0)`` half of §8's rule, for the four durations."""
+    """The ``gt=timedelta(0)`` half of §8's rule, for the five durations.
+
+    ADR-0182 §3 restates it for the fifth in the same words — "refused at settings
+    load unless it is strictly positive, in the ``gt=timedelta(0)`` form ADR-0083 §7
+    adopted and ADR-0168 §8 applied".
+    """
     with pytest.raises(ValidationError):
         Settings(**{name: value})  # type: ignore[arg-type] # the point of the case
 
