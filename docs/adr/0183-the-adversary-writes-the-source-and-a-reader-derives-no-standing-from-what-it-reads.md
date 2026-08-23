@@ -35,6 +35,12 @@
 - **Adds no classifier and no detector, and forecloses one** (§9). #1427's ruling
   4 defers "any classifier-based defence" out of milestone 23; ADR-0098 §6 already
   forbids buying a bound from one. Nothing here is bought from one.
+- **Names one live ADR-0098 §2 nonconformance that writing it found, and repairs
+  none of it.** `memory/_reconciler.py`'s `_render` interpolates a record's content
+  raw into a container the content can forge, and a reader's proposal and a stored
+  reader belief both reach it on the ordinary ingest path. It is **#1454**, and it
+  is `memory/`'s to fix — this is an ADR-only lane and the repair is another
+  subsystem's. §8 and §9 record it; nothing in this ADR claims it is closed.
 
 ## Context
 
@@ -143,16 +149,20 @@ read off `main` and each is load-bearing for a clause below.
   `f"the {self.name} source reported this entry"` — or "…this message" — over a
   declared, Tier 2, constant identity. That is a property worth keeping rather
   than a coincidence.
-- **Three assemblers put a stored record into a prompt, all three escape, and two
-  of the three carry an origin term.** `orchestration/composing.py`,
-  `orchestration/consolidation.py` and `planning/planner.py` each render a record
-  through their own `_quoted_span` — `json.dumps` at its default
-  `ensure_ascii=True` — and each emits a band-derived stance
-  (`"a source the user connected reported"`). Composing and consolidation
-  additionally build a `standing` term read from
-  `rests_on_recorded_external_content(provenance)`; `planning/planner.py`'s
-  `standing` is `f"{band.value}, confidence {provenance.confidence:.2f}"` and
-  consults that predicate nowhere. §8 states what follows and what does not.
+- **Four assemblers put a stored record into a model prompt, and they do not agree
+  with each other.** `orchestration/composing.py`, `orchestration/consolidation.py`
+  and `planning/planner.py` each render a record's content through their own
+  `_quoted_span` — `json.dumps` at its default `ensure_ascii=True` — and each emits
+  a band-derived stance (`"a source the user connected reported"`). Composing and
+  consolidation additionally build a `standing` term read from
+  `rests_on_recorded_external_content(provenance)`; the planner's `standing` is
+  `f"{band.value}, confidence {provenance.confidence:.2f}"` and consults that
+  predicate nowhere. **`memory/_reconciler.py`'s `_render` escapes nothing**: it
+  interpolates `record.content` and each `conflict.content` raw into a container
+  delimited by `PROPOSED BELIEF` / `STORED BELIEF <id>` / `kind:` lines, which a
+  span carrying a newline can produce. `learning/observer.py` interpolates raw too
+  and is out of this seam's reach, because its payload is episodes and a reader may
+  not propose one (ADR-0093 §4). §8 states what follows.
 - **Both readers state `sensitivity=DataTier.PERSONAL` uniformly**, per source
   rather than per record, and each says in its own comment why: for the calendar
   because `PERSONAL` "is correct for a calendar and must not be *assumed* correct
@@ -624,6 +634,14 @@ matters.
 > account rather than the source's, and a reader that interpolated source text into
 > it would destroy that distinction with nothing to signal it had.
 
+> **Normative.** This seam **guarantees nothing about how a consumer downstream of
+> it renders what it produced**, and no ADR, lane or surface may state that it does.
+> Each assembler's conformance with ADR-0098 §2, and each surface's with §7, is
+> that component's own and is established there or not at all. An enumeration of
+> conforming consumers made in this ADR is a record of what one lane found at one
+> commit, never a property of the seam and never a warrant for a consumer nobody
+> checked.
+
 **The failure this closes is a plausible-looking optimisation, not a mistake anyone
 has made.** Both readers wrap external text in quotation marks —
 `Calendar entry "{title}"…`, `Email from "{sender}" with subject "{subject}"…` — and
@@ -649,14 +667,43 @@ and the clauses above are what make the answer not matter to a consumer. A rule 
 said "readers strip control characters" would leave the quotation mark and would
 teach a consumer that reader output is safe, which is the worse of the two errors.
 
-**The prompt assemblers are not the exposed consumer here, and saying so keeps the
-residual narrow.** All three of them — `orchestration/composing.py`,
-`orchestration/consolidation.py` and `planning/planner.py` — pass a record's content
-through `json.dumps` at `ensure_ascii=True` before it reaches a model, so ADR-0098
-§2's deterministic construction holds wherever a stored belief becomes a prompt. What
-is exposed is everything *else* that reads a stored belief: an inspection surface, an
-export, a log line, a client rendering. Those owe ADR-0098 §7, and this section is
-what tells them the reader's punctuation is not a help.
+**The seam guarantees nothing downstream, and an earlier draft of this section
+claimed it did.** That draft said ADR-0098 §2's deterministic construction "holds
+wherever a stored belief becomes a prompt" over an inventory of two assemblers, then
+of three. Both were wrong, and the second was wrong in the way that matters: it was
+an exhaustive claim about other subsystems' code made from inside a threat model of
+this one. The clause above is stated instead, because it is the thing this seam can
+actually promise — that its output is external content and confers nothing — and it
+does not go stale when a fifth assembler is written.
+
+**What the enumeration found, recorded because a threat model that looked and said
+nothing would be worse than one that did not look.** Three assemblers escape a
+record's content with `json.dumps` at `ensure_ascii=True` and mark it from held data.
+**`memory/_reconciler.py`'s `_render` does neither**, and it is reachable from this
+seam on the ordinary path: `_may_reconcile` invokes a reconciler exactly when the
+proposal is not `USER_ASSERTED`, no conflict member is, and the proposal clears the
+admissibility floor — and a reader's proposal and a stored reader belief are both
+`EXTERNAL`, so both sides hold. A `SUMMARY` carrying a line break therefore reaches a
+container delimited by `STORED BELIEF <id>` lines with nothing between it and the
+delimiter, which is the construction ADR-0098 §2's second clause names as
+non-conforming "whatever labels it emits" — and which
+`orchestration/consolidation.py`'s own `_render` docstring argues against in exactly
+these terms one subsystem over. **This ADR records that as an uncovered ADR-0098 §2
+nonconformance and does not repair it**: `memory/` is another subsystem, the repair
+is the `_quoted_span` transform its neighbours already carry, and the lane is filed
+as **#1454**. Adversarial review found it on round 2.
+
+**Two things that are *not* claimed by that finding.** `learning/observer.py`
+interpolates raw as well and ADR-0098 §2 names it, but its payload is episodes and
+ADR-0093 §4 forbids a reader an `EpisodicMemory`, so it is a different origin class
+and not this seam's. And the divergence recorded below about a `DERIVED` record's
+origin term is a separate, milder question from this one; #1454 is the escaping and
+#1453 is the marking.
+
+**What is exposed downstream besides a prompt** is everything else that reads a
+stored belief: an inspection surface, an export, a log line, a client rendering.
+Those owe ADR-0098 §7, and this section is what tells them the reader's punctuation
+is not a help.
 
 **One divergence among the three is recorded rather than ruled, because ruling it is
 not this ADR's.** For an `ATTESTED` record all three convey externality the same way,
@@ -720,14 +767,12 @@ vigilance, and listing them is what makes the third list credible.
   superseding, and `MemoryIngestor`'s own fold guard raises rather than folding an
   `EXTERNAL` record onto a `USER_ASSERTED` one — a writer-side floor that holds
   whatever policy a deployment injects.
-- **A span reaches a model call escaped and labelled.** All three assemblers that
-  put a stored record into a prompt — `orchestration/composing.py`,
-  `orchestration/consolidation.py`, `planning/planner.py` — render its content
-  through `json.dumps` and emit a band-derived stance, so ADR-0098 §2's two
-  properties hold for an attested record at every one of them: a deterministic
-  transform, and a marking derived from held data rather than from the text. The
-  one place they diverge is a `DERIVED` record's origin term, which is a band this
-  seam does not produce; §8 records it and #1453 carries it.
+- **A reader's own output confers nothing on a consumer, and no consumer inherits a
+  defence from this seam.** §8's fourth clause, which is a property of the seam
+  rather than a finding about anyone's code: what a span becomes at a model call or
+  on a surface is each consumer's own conformance with ADR-0098 §2 or §7,
+  established there and not here. What that conformance actually is on `main` is in
+  the third list below, because it is not uniform.
 - **No episode, and no absence proposed.** ADR-0093 §4, and the `Reader` Protocol's
   own docstring. The narrow absence path ADR-0110 opened is opt-in in both halves
   and confined to the source's own records (§6).
@@ -770,6 +815,13 @@ the quantitative bounds at this seam. Each is per read (§7).
   author within a source at all.
 - **An adversarial omission** (§6).
 - **What a source can cause this system to store, cumulatively** (§7).
+- **Whether every consumer of a stored belief conforms to ADR-0098 §2 or §7.** It
+  is not this seam's property to have (§8's fourth clause), and on `main` it is not
+  uniform: of the four assemblers that render a stored record into a model prompt,
+  three escape its content with `json.dumps` and mark it from held data, and
+  `memory/_reconciler.py` does neither — reachably from this seam, on the ordinary
+  ingest path. **That is an uncovered ADR-0098 §2 nonconformance, stated as one**,
+  and it is #1454's to repair, not this ADR's (§8, §13).
 
 ### 10. #1431 and #1432 are routed, not discharged, and each gets one input
 
@@ -894,6 +946,15 @@ obligation (ADR-0089 §3).
   nothing equivalent, with no clause stating which is right. Fires with the lane
   that rules on it; filed as **#1449**. §8's clauses are what make the
   answer safe to defer.
+- **Repairing `memory/_reconciler.py`'s raw interpolation** (§8, §9). An uncovered
+  ADR-0098 §2 nonconformance reachable from this seam, filed as **#1454**. It does
+  not fire "with a lane" — it is owed now, and it is deferred here only in the sense
+  that this is an ADR-only lane in another subsystem. The repair is the
+  `_quoted_span` transform its three neighbours already carry.
+- **The `DERIVED` origin term `planning/planner.py` omits** (§8). Filed as
+  **#1453**. Milder than #1454 and a different question — the marking rather than
+  the escaping — and it turns on ADR-0098 §2's reach over a system-authored span
+  whose warrant is external, which this ADR does not settle.
 - **Reporting an adversarial omission** (§6). A retirement this seam warrants
   reaches no surface for the same reason a refused proposal does not — `Engine.ingest`'s
   result reaches no adapter. Fires with **#659**, which owns the channel, and not
