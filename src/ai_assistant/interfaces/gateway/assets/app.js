@@ -206,11 +206,6 @@ function notificationCadence() {
   }
 }
 
-// Take the figure a stream just disclosed: store it for the next stream this origin
-// opens, and hand back the milliseconds this one is bounded by. A value this page
-// cannot use is `null` rather than a guess — the stream then runs unbounded exactly as
-// it did before this existed, which is the honest outcome for a gateway that disclosed
-// something unreadable, and it is not written over a figure that *was* readable.
 // Drop the remembered figure. Called where a stream was abandoned **before** it
 // disclosed anything of its own: the stored cadence was then the only thing that bound
 // it, and it was not confirmed. Keeping it would be the trap adversarial review found
@@ -228,16 +223,32 @@ function forgetCadence() {
   }
 }
 
+// Take the figure a stream just disclosed: store it for the next stream this origin
+// opens, and hand back the milliseconds *this* one is bounded by.
+//
+// **A stream is bounded by what it disclosed and by nothing else.** An earlier draft
+// fell back to the remembered figure where the disclosed one was unusable, reasoning
+// that an unreadable value should not overwrite a readable one — and adversarial review
+// found on round 2 what that actually does: a gateway entitled to a thirty-day budget,
+// disclosing it honestly, would be held to the twenty seconds some earlier process was
+// configured with, and every stream after it would repeat the false timeout. So an
+// unusable disclosure returns `null` and the stream runs unbounded, exactly as every
+// stream did before this existed. That is the conservative direction — a gateway that
+// says it may be silent for a month is believed rather than second-guessed against a
+// figure it never uttered.
+//
+// The remembered figure is not cleared here and does not need to be: it bounds only the
+// window *before* an `open` value arrives, where a too-small one is caught by
+// `forgetCadence` and a too-large one is merely a looser bound.
 function adoptCadence(microseconds) {
   const value = usableCadence(microseconds);
-  if (value === null) {
-    return notificationCadence();
-  }
-  try {
-    window.localStorage.setItem(CADENCE_KEY, microseconds);
-  } catch (_) {
-    // A browser that will not store still bounds this stream; what it loses is the
-    // bound on the first stream a reloaded page opens.
+  if (value !== null) {
+    try {
+      window.localStorage.setItem(CADENCE_KEY, microseconds);
+    } catch (_) {
+      // A browser that will not store still bounds this stream; what it loses is the
+      // bound on the first stream a reloaded page opens.
+    }
   }
   return value;
 }
@@ -1625,12 +1636,16 @@ async function readDeliveries(half) {
     let terminal = null;
     for await (const value of streamValues(response)) {
       if (value.kind === "open") {
-        disclosed = true;
         // The cadence this stream will be written at, adopted before the deadline is
         // restarted below, so this stream is bounded by its own gateway's figure and
         // not by whatever an earlier one disclosed. Remembered for the next stream
         // this origin opens, which is the one that cannot be told.
         cadence = adoptCadence(value.keep_alive_microseconds);
+        // Disclosed means *usably* disclosed, and the distinction is what stops an
+        // `open` value carrying `"0"` or nothing from preserving a stale bound for
+        // ever (adversarial review, round 2). A stream that said nothing this page can
+        // time has told it nothing, and is treated as one that said nothing at all.
+        disclosed = cadence !== null;
       }
       heard();
       if (value.kind === "notification") {
