@@ -165,8 +165,22 @@ def test_a_degenerate_saturated_interval_declares_no_coverage(tmp_path: Path) ->
             ),
             "a negative duration",
         ),
+        (
+            vevent(
+                # A zone the parser could not resolve, which `icalendar` reports
+                # only by handing back a naive value — indistinguishable from
+                # floating time until the declaration beside it is read (#1491).
+                # The entry is skipped rather than localised in `Settings.timezone`,
+                # so it is one more entry the source holds and this read did not
+                # account for. `test_calendar_tzid.py` owns the shape itself.
+                "DTSTART;TZID=../../../../etc/passwd:20260803T120000",
+                "SUMMARY:a zone that does not resolve",
+                uid="bad",
+            ),
+            "a DTSTART naming an unresolvable zone",
+        ),
     ],
-    ids=["no-dtstart", "bad-rrule", "negative-duration"],
+    ids=["no-dtstart", "bad-rrule", "negative-duration", "unresolvable-tzid"],
 )
 async def test_a_component_this_reader_cannot_reduce_withholds_the_coverage(
     tmp_path: Path, skipped: str, why: str
