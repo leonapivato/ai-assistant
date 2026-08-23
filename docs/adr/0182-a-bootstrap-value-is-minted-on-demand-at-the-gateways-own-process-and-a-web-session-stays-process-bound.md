@@ -149,8 +149,20 @@ motion.
 
 > **Normative.** The mint act is the delivery of `SIGUSR1` to the gateway process,
 > and it is the whole of the act. The gateway installs that disposition for the
-> life of its listener, and a gateway that cannot install it starts anyway and
-> reports at start that the act is unavailable, rather than refusing to serve.
+> life of its listener.
+
+> **Normative.** A gateway that cannot install it **starts anyway** rather than
+> refusing to serve, and before it serves it does two things. It sets `SIGUSR1` to
+> **ignored** if it can — because the signal's default action on this platform is to
+> terminate, and a process holding live sessions may not be left killable by the one
+> signal its own disclosure names. And it reports at start that the mint act is
+> unavailable, naming which of the two states the signal is in.
+
+> **Normative.** A gateway that can do **neither** — neither install the disposition
+> nor set the signal to ignored — reports at start that the mint act is unavailable
+> **and that the signal is unsafe to send**, and names the act in no disclosure. No
+> lane may read the disclosure clause below as obliging a gateway to advertise a
+> signal that would end every live session.
 
 > **Normative.** A minted value is disclosed exactly as ADR-0168 §5 requires of the
 > first — once, on the gateway's own standard output, and nowhere else: not in a
@@ -171,9 +183,9 @@ motion.
 > binds the value minted at start and is untouched; it does not reach a later mint,
 > and no lane may read it as obliging a gateway to stop.
 
-> **Normative.** Every disclosure names the mint act and the gateway's own process
-> id, so that the act is discoverable from the disclosure rather than from a
-> document.
+> **Normative.** Every disclosure of a gateway on which the mint act is available
+> names the act and the gateway's own process id, so that the act is discoverable
+> from the disclosure rather than from a document.
 
 > **Normative.** The clause above is robustness and **not a platform claim**.
 > This system's resident processes already require a platform with `AF_UNIX`
@@ -232,6 +244,21 @@ its own standard output; adding the act and its own process id costs one line an
 means the most recent disclosure always carries the recipe. Its process id is a
 Tier 2 fact about itself, and nothing in ADR-0168 §6's record enumeration is
 engaged, because a disclosure is not a record.
+
+**Starting anyway is not enough on its own, because the default action for
+`SIGUSR1` is to terminate.** An earlier draft said only that a gateway which cannot
+install the disposition starts and reports the act unavailable. Adversarial review
+found on the ninth round that this leaves the signal at its POSIX default: the
+gateway serves, its disclosure and the first-run guide name a process id and a
+signal, and delivering that signal ends every live session instead of reporting that
+the act is unavailable — the worst available outcome for an owner following the
+document. `add_signal_handler` fails for reasons that are not about the platform at
+all, a loop composed off the main thread being the ordinary one, so the paragraph
+below about platforms does not reach this case. Ignoring the signal is what
+ADR-0083 §4's own principle asks for — "a signal that silently does nothing is worse
+than one that is documented as doing nothing", so the gateway documents it at start
+— and where even that is unavailable the honest move is to stop naming the act,
+because an advertisement the gateway cannot make safe is an instruction to kill it.
 
 **The degradation clause is not the seam by which a second act arrives, and it is
 worth being blunt about that.** Adversarial review read it as leaving milestone 16's
@@ -1004,6 +1031,10 @@ outstanding value still admits after such a failure — the ordering §1 fixes, 
 one an implementation is most likely to get backwards — and that the gateway keeps
 serving; that an exchange presenting an undisclosed candidate is refused, which is
 what makes §2's admission invariant true across the interval §1's order creates;
+that a gateway which could not install the mint disposition leaves `SIGUSR1`
+non-terminating and says so at start, or — where it could not do that either —
+names the act in no disclosure, which is the path a lane is most likely to leave
+untested because it never runs on the developer's own machine;
 and that `gateway_bootstrap_ttl` is refused at load on a non-positive value,
 in the `gt=timedelta(0)` form. The monotonic clause of §3 is pinned the way the
 session bounds already are — by driving the injected deferral seam rather than by
