@@ -584,32 +584,56 @@ def test_a_row_renders_every_member_seven_names(
     # recipient — so a whole-screen `"17 code points" in rendered` is satisfied by
     # either of them and passes while the other's extent goes unrendered.
     lines = [line.strip() for line in output.getvalue().splitlines()]
+    # **Both** destination forms are named per span rather than accepted as "one of
+    # the recipients on screen": a renderer that carried each span's supplied form
+    # through but canonicalised every one of them to Alice would leave `to[1]`
+    # reading "to alice@example.com … as supplied: bob@example.com", and a
+    # whole-screen check still finds Bob in the canonical set and passes.
     for key, members in (
-        ("bcc", ("as supplied: Alice@Example.com", "you composed it", "17 code points")),
+        (
+            "bcc",
+            (
+                "to alice@example.com (smtp)",
+                "as supplied: Alice@Example.com",
+                "you composed it",
+                "17 code points",
+            ),
+        ),
         ("body", ("names no destination", "you composed it", "42 code points")),
         (
             "subject",
             ("names no destination", "this system selected it", "9 code points", "tier personal"),
         ),
-        ("to[0]", ("as supplied: Alice@Example.com", "this system selected it", "17 code points")),
-        ("to[1]", ("as supplied: bob@example.com", "this system selected it", "15 code points")),
+        (
+            "to[0]",
+            (
+                "to alice@example.com (smtp)",
+                "as supplied: Alice@Example.com",
+                "this system selected it",
+                "17 code points",
+            ),
+        ),
+        (
+            "to[1]",
+            (
+                "to bob@example.com (smtp)",
+                "as supplied: bob@example.com",
+                "this system selected it",
+                "15 code points",
+            ),
+        ),
     ):
         matching = [line for line in lines if line.startswith(f"{key} — ")]
         assert len(matching) == 1, key
         for member in members:
             assert member in matching[0], (key, member)
 
-        # Both destination forms where the occurrence carries one, and **neither**
-        # where it does not — checked on the line, so a stray recipient leaking onto
-        # a destination-less span's line fails rather than being absorbed by the
-        # screen's other four.
+        # **Neither** form on a span that carries no destination — checked on the
+        # line, so a stray recipient leaking onto it fails rather than being absorbed
+        # by the screen's other four.
         if "names no destination" in matching[0]:
             assert "as supplied" not in matching[0], key
             assert "@example.com" not in matching[0], key
-        else:
-            assert "to alice@example.com (smtp)" in matching[0] or (
-                "to bob@example.com (smtp)" in matching[0]
-            ), key
 
     # One line per span and no sixth, and the tier on the one span that states one.
     assert len([line for line in lines if "code points" in line]) == len(binding.spans)
