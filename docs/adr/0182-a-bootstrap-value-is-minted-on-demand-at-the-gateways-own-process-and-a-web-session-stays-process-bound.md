@@ -148,12 +148,14 @@ motion.
 > requires of the first.
 
 > **Normative.** The mint act is the delivery of `SIGUSR1` to the gateway process,
-> and it is the whole of the act. The gateway installs that disposition for the
-> life of its listener.
+> and it is the whole of the act. The gateway installs that disposition **before
+> any disclosure names the act or the gateway's process id** — so before the value
+> minted at start is disclosed, which `run_gateway` discloses before it serves —
+> and holds it until its listener is shut down.
 
 > **Normative.** A gateway that cannot install it **starts anyway** rather than
-> refusing to serve, and before it serves it does two things. It sets `SIGUSR1` to
-> **ignored** if it can — because the signal's default action on this platform is to
+> refusing to serve, and does two things before it discloses anything. It sets
+> `SIGUSR1` to **ignored** if it can — because the signal's default action is to
 > terminate, and a process holding live sessions may not be left killable by the one
 > signal its own disclosure names. And it reports at start that the mint act is
 > unavailable, naming which of the two states the signal is in.
@@ -275,6 +277,11 @@ ADR-0083 §4's own principle asks for — "a signal that silently does nothing i
 than one that is documented as doing nothing", so the gateway documents it at start
 — and where even that is unavailable the honest move is to stop naming the act,
 because an advertisement the gateway cannot make safe is an instruction to kill it.
+Both rules are ordered against the disclosure rather than against the listener for
+the same reason, which adversarial review found separately on the eleventh round:
+`run_gateway` mints and discloses before it serves, so a disposition installed when
+the listener starts would leave a window in which the start disclosure has already
+named a process id and a signal the gateway would still die of.
 
 **The degradation clause is not the seam by which a second act arrives, and it is
 worth being blunt about that.** Adversarial review read it as leaving milestone 16's
@@ -1052,7 +1059,10 @@ what makes §2's admission invariant true across the interval §1's order create
 that a gateway which could not install the mint disposition leaves `SIGUSR1`
 non-terminating and says so at start, or — where it could not do that either —
 names the act in no disclosure, which is the path a lane is most likely to leave
-untested because it never runs on the developer's own machine;
+untested because it never runs on the developer's own machine; that no disclosure
+naming the act precedes the disposition, the start disclosure included, since
+`run_gateway` discloses before it serves and a listener-scoped install would
+otherwise open a window in which the act the disclosure names kills the gateway;
 and that `gateway_bootstrap_ttl` is refused at load on a non-positive value,
 in the `gt=timedelta(0)` form. The monotonic clause of §3 is pinned the way the
 session bounds already are — by driving the injected deferral seam rather than by
