@@ -729,6 +729,45 @@ async def test_a_forged_belief_line_inside_a_members_id_opens_no_belief() -> Non
     )
 
 
+async def test_an_id_needing_an_escape_is_labelled_from_the_value_not_the_display() -> None:
+    """The protocol boundary the id's quoting creates, pinned on both sides.
+
+    An id is shown as a JSON string, so a member whose id contains a quotation mark
+    is displayed with that mark escaped. What the envelope asks back is the **value**
+    — the id itself — and a reply carrying it is installed. `_render`'s own tests
+    read the prompt; this one reads the report, which is the only place the
+    round-trip is observable.
+    """
+    awkward = 'a"b'
+    model = _answering({awkward: "adds"})
+
+    report = await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+        _proposal(_record("new", "Jon eats early")), [_record(awkward, "Jon eats late")]
+    )
+
+    assert json.dumps(awkward) in _user_turn(model)  # displayed escaped …
+    assert report.relations == {awkward: ConflictRelation.ADDS}  # … and read as itself
+
+
+async def test_an_id_returned_with_its_display_quotes_is_discarded() -> None:
+    """And the failure direction is the safe one, which is why the envelope says so.
+
+    A model that echoed the *display* token rather than the value would name an id
+    `consulted` does not hold. ADR-0159 §3's filter drops it, so the member is left
+    unlabelled — the absence of a statement — rather than mislabelled. Pinned here
+    because the envelope's wording is what keeps a model off this path, and a
+    wording is not a guarantee.
+    """
+    model = _answering({'"a"': "contradicts"})
+
+    report = await ModelBackedReconciler(model=model, route=_ROUTE).reconcile(
+        _proposal(_record("new", "Jon eats early")), [_record("a", "Jon eats late")]
+    )
+
+    assert report.relations == {}
+    assert report.outcomes == frozenset({ReconcilerOutcome.ANSWERED})
+
+
 @pytest.mark.parametrize(
     "span",
     [
