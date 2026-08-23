@@ -597,7 +597,7 @@ one "would put a newline inside a quoted span"; the calendar path strips only
 leading and trailing whitespace, so an adversary-chosen `SUMMARY` carrying an
 embedded newline reaches a stored belief's `content` verbatim. Neither touches a
 quotation mark. Nothing in the corpus says which of the two behaviours is required,
-and this ADR does not decide it: the divergence is filed as an issue by this lane,
+and this ADR does not decide it: the divergence is filed as **#1449**,
 and the clauses above are what make the answer not matter to a consumer. A rule that
 said "readers strip control characters" would leave the quotation mark and would
 teach a consumer that reader output is safe, which is the worse of the two errors.
@@ -814,8 +814,7 @@ obligation (ADR-0089 §3).
 
 - **A cumulative bound on what a source can cause this system to store** (§7).
   Fires with the `memory/` lane that decides the `ATTESTED` band's lifecycle —
-  retention by count, a per-source quota, or an eviction rule. Filed as an issue by
-  this lane. It is not a reader's to add: a reader that refused to propose because
+  retention by count, a per-source quota, or an eviction rule. Filed as **#1447**. It is not a reader's to add: a reader that refused to propose because
   the store was large would be making a store's policy decision inside a producer,
   which the `Reader` Protocol denies it in as many words.
 - **How a parser over adversary-chosen bytes is declared and pinned** (§5).
@@ -823,11 +822,11 @@ obligation (ADR-0089 §3).
   `icalendar` is declared as a range, and `dateutil` — whose `rrulestr` expands an
   adversary-chosen `RRULE` — is imported directly by `readers/_occurrences.py` and
   declared in no runtime dependency at all. Fires with a dependency-policy decision
-  about a second axis for pinning; filed as an issue by this lane.
+  about a second axis for pinning; filed as **#1448**.
 - **Which neutralisation, if any, a reader owes over the text it composes** (§8).
   `EmailReader` strips CR/LF from a header value and the calendar path strips
   nothing equivalent, with no clause stating which is right. Fires with the lane
-  that rules on it; filed as an issue by this lane. §8's clauses are what make the
+  that rules on it; filed as **#1449**. §8's clauses are what make the
   answer safe to defer.
 - **Reporting an adversarial omission** (§6). A retirement this seam warrants
   reaches no surface for the same reason a refused proposal does not — `Engine.ingest`'s
