@@ -1,6 +1,6 @@
 # 186. The audit trail reaches the user as a bounded listing and an unbounded export, and a row states what was decided rather than what happened
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-23
 
 - **Decides `core/protocols.py` surface, and it is a breaking change.** Golden rule 5
