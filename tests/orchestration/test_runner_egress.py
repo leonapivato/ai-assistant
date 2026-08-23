@@ -41,7 +41,7 @@ from ai_assistant.core.types import (
     ToolDefinition,
 )
 from ai_assistant.orchestration import StepExecutor, StepRunner
-from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
+from ai_assistant.orchestration.origin import NOTHING_EXTERNAL, SelectionOrigin
 from ai_assistant.testing import (
     FakeActionPolicy,
     FakeAuditTrail,
@@ -665,3 +665,97 @@ async def test_the_recorded_decision_holds_the_binding_the_seam_derived() -> Non
         "Alice@example.com"
     ]
     assert {span.provenance for span in binding.spans} == {DiscloserProvenance.SYSTEM_SELECTED}
+
+
+# --- ADR-0181 §3, §4, §10: the origin, stamped and transcribed ----------------
+
+
+@pytest.mark.parametrize("selected_external", [True, False])
+async def test_the_request_carries_the_origin_the_runner_was_given(
+    *, selected_external: bool
+) -> None:
+    """ADR-0181 §4, §10's second case: stamped onto the carrier, carried to the ruling.
+
+    The stage's whole obligation on the ``bind`` path, asserted where it can be
+    seen: the value the caller states reaches the request the policy rules on,
+    unchanged, and reaches the *recorded* decision with it (ADR-0148 §6's
+    transcription, which this field rides for free because it is a member of the
+    binding).
+
+    Both states, and the arguments are byte-identical across the two runs — which
+    is what makes the assertion about the caller's value rather than about
+    anything the stage could have recovered from the payload. ADR-0181 §4's second
+    clause forbids recovering it from an argument's value, its field or its shape,
+    and a stage that did would answer the same on both runs.
+    """
+    tool = _tool(egress=True)
+    harness = _Harness(tool=tool, binder=_bound_binder(tool))
+    state = await _an_execution(harness.plans, _step())
+
+    parked = await harness.runner.run(
+        state,
+        STEP,
+        timeout=PATIENT,
+        origin=SelectionOrigin(planned_with_external_content=selected_external),
+    )
+
+    assert parked.disposition is Disposition.AWAITING_CONFIRMATION
+    policy = harness.policy
+    assert isinstance(policy, _RecordingPolicy)
+    ruled = policy.decided[0].egress_binding
+    assert ruled is not None
+    assert ruled.planned_with_external_content is selected_external
+    assert parked.decision_id is not None
+    recorded = await harness.trail.get(parked.decision_id)
+    assert recorded is not None
+    assert recorded.egress_binding is not None
+    assert recorded.egress_binding.planned_with_external_content is selected_external
+
+
+async def test_a_parked_call_planned_over_external_content_resumes_and_executes() -> None:
+    """ADR-0181 §10's sixth case: the resume round-trip, end to end.
+
+    The one case that fails an implementation that **re-derived** the field on the
+    resuming path rather than transcribing it from ``approved`` (ADR-0181 §3's
+    fifth and sixth clauses). Such an implementation passes every other clause of
+    §10 and then refuses exactly the call the user was asked about and approved:
+    ``rebind`` holds no selection set, so it would answer ``False``, the re-derived
+    binding would compare unequal to the parked one, and ADR-0152 §7's equality
+    refusal would fire as ``EGRESS_UNBINDABLE``.
+
+    Three things are asserted rather than one, because they are three claims: that
+    ``rebind`` transcribed the field, that the re-derived binding compares **equal**
+    to the approved one, and that the call reached execution. The runner is given
+    no ``origin`` on the resuming path at all — ``resume`` takes none, which is the
+    structural half of "not re-derived, not defaulted, not omitted".
+    """
+    tool = _tool(egress=True)
+    binder = _WatchingBinder(_bound_binder(tool))
+    harness = _Harness(tool=tool, binder=binder)
+    state = await _an_execution(harness.plans, _step())
+    parked = await harness.runner.run(
+        state, STEP, timeout=PATIENT, origin=SelectionOrigin(planned_with_external_content=True)
+    )
+    assert parked.disposition is Disposition.AWAITING_CONFIRMATION
+    assert parked.decision_id is not None
+    approved = await harness.trail.get(parked.decision_id)
+    assert approved is not None
+    assert approved.egress_binding is not None
+    assert approved.egress_binding.planned_with_external_content is True
+
+    resumed = await harness.runner.resume(
+        parked.state,
+        STEP,
+        confirmation_id=str(parked.decision_id),
+        approved=True,
+        timeout=PATIENT,
+    )
+
+    assert resumed.disposition is Disposition.EXECUTED, (
+        "a re-derived field would have made the binding compare unequal and refused this"
+    )
+    rebound = binder.returned[-1]
+    assert rebound is not None
+    assert rebound.binding.planned_with_external_content is True
+    assert rebound.binding == approved.egress_binding
+    assert len(harness.invoker.invocations) == 1

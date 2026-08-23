@@ -156,19 +156,32 @@ def test_the_egress_member_carries_no_default_so_every_site_states_it() -> None:
 
 
 def test_confirmation_egress_refuses_an_extra_member_and_a_missing_one() -> None:
-    """ADR-0178 §2: exactly two fields, both required with no default."""
-    assert set(ConfirmationEgress.model_fields) == {"account_identity", "spans"}
+    """ADR-0178 §2 as ADR-0181 §3 narrows it: exactly **three** fields, all required.
+
+    The count moves by one and nothing else in §2 does (ADR-0181 §11): the third
+    member is ``planned_with_external_content``, populated from the recorded
+    decision's binding at both assembly sites and by no other route, and it carries
+    no second copy of anything §2 already refuses.
+    """
+    assert set(ConfirmationEgress.model_fields) == {
+        "account_identity",
+        "spans",
+        "planned_with_external_content",
+    }
     assert all(field.is_required() for field in ConfirmationEgress.model_fields.values())
     with pytest.raises(ValidationError, match=r"extra_forbidden|Extra inputs"):
         ConfirmationEgress(
             account_identity=IDENTITY,
             spans=(),
+            planned_with_external_content=False,
             transport_endpoint=ENDPOINT,  # type: ignore[call-arg]  # the point of the case
         )
     with pytest.raises(ValidationError, match="spans"):
-        ConfirmationEgress(account_identity=IDENTITY)  # type: ignore[call-arg]  # ditto
+        ConfirmationEgress(  # type: ignore[call-arg]  # ditto
+            account_identity=IDENTITY, planned_with_external_content=False
+        )
     with pytest.raises(ValidationError, match="account_identity"):
-        ConfirmationEgress(spans=())  # type: ignore[call-arg]  # ditto
+        ConfirmationEgress(spans=(), planned_with_external_content=False)  # type: ignore[call-arg]  # ditto
 
 
 def test_the_spans_are_the_bindings_own_value_member_for_member() -> None:
@@ -193,6 +206,12 @@ def test_the_spans_are_the_bindings_own_value_member_for_member() -> None:
 
 def test_neither_new_type_names_or_types_a_barred_value() -> None:
     """ADR-0178 §2, over ``model_fields``, so a seventh field cannot arrive unnoticed.
+
+    **ADR-0181 §3's third clause moves the roster by one and leaves this assertion's
+    subject exactly where it was** (§10's last bullet): the field it adds is named
+    and typed for none of a connection reference, a transport endpoint, a
+    ``BoundAccount`` or a ``SecretName``, so it is walked here like every other and
+    the barred set is unchanged.
 
     A connection reference, a credential slot, a ``SecretName``, a keyring string
     and a transport endpoint are barred, and **no field is added through which

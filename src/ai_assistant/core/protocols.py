@@ -2699,10 +2699,18 @@ class EgressBinder(Protocol):
     **Nothing about the binding is accepted; all of it is derived.** Neither
     member takes a destination, a canonical form, a span, an extent, a tier or a
     binding, and there is no argument through which one could be supplied
-    (ADR-0152 §5). The one thing that cannot be derived is a span's recorded
-    origin, which is **carried** (ADR-0146 §2): on :meth:`bind` in
-    :class:`~ai_assistant.core.types.CarriedProvenance`, and on :meth:`rebind`
-    transcribed from the approved binding.
+    (ADR-0152 §5). **Two** things cannot be derived and are therefore **carried**,
+    both of them on :meth:`bind` in
+    :class:`~ai_assistant.core.types.CarriedProvenance` and both of them on
+    :meth:`rebind` transcribed from the approved binding: a span's recorded origin
+    (ADR-0146 §2), and the call's ``planned_with_external_content`` (ADR-0181 §3,
+    §4). They answer different questions — *who disclosed this span* and *did this
+    system's selection rest on recorded external content* — and no component reads
+    one axis as an answer on the other (ADR-0181 §1's third clause). What makes the
+    second uncarryable-by-derivation is the same thing that makes the first so: it
+    is a fact about an act performed **before** this seam was reached, and no
+    inspection of an argument's value, field or shape may recover it (ADR-0146 §2,
+    ADR-0181 §4's second clause).
 
     **A third Protocol rather than a member on** :class:`ToolRegistry`. ADR-0029
     §1's argument for splitting :class:`ToolInvoker` off transfers: a binder is a

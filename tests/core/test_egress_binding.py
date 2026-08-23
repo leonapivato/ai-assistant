@@ -217,6 +217,11 @@ def test_every_field_of_a_binding_is_required(omitted: str) -> None:
         "spans": (_span("body", extent=2),),
         "account": _ACCOUNT,
         "transport_endpoint": _ENDPOINT,
+        # ADR-0181 §3's second clause adds a fourth, on the same terms and for the
+        # same reason: the safe-looking default is a claim about a selection the
+        # defaulting producer never made. The parametrisation reads
+        # ``model_fields``, so this case covers it without naming it.
+        "planned_with_external_content": False,
     }
     assert EgressBinding(**whole)  # type: ignore[arg-type]  # heterogeneous test kwargs
 

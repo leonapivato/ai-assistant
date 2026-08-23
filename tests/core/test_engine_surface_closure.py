@@ -412,6 +412,15 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     move, so the version goes to 10 against thirty-two methods, and ADR-0178 §6 states
     the bump in the deciding ADR rather than leaving a lane to discover it here.
 
+    **ADR-0181 §3 is under the second limb too**, and moves only the version.
+    ``ConfirmationEgress`` gains ``planned_with_external_content``, **required with
+    no default**, so it bites in both directions: a version 11 client decoding a
+    version 10 hub's confirmation fails ``missing``, and a version 10 client decoding
+    a version 11 hub's fails ``extra_forbidden`` on the member it does not declare.
+    The promoted method set does not move, so the version goes to 11 against
+    thirty-two methods, and ADR-0181's Consequences state the bump in the deciding
+    ADR rather than leaving a lane to discover it here.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -420,7 +429,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (32, 10), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (32, 11), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"
