@@ -1,6 +1,6 @@
 # 188. A hub-down egress is recorded by the process that performs it, in a record the hub does not own, and no cloud embedder is wired until it is
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-23
 
 ## Context
