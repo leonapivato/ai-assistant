@@ -269,7 +269,11 @@ async def test_a_send_with_no_connected_account_is_refused_not_answered_none() -
     seam = _seam(None, registry)
 
     with pytest.raises(EgressBindingError, match="mis-registered"):
-        await seam.bind(SEND_EMAIL, parameters=arguments(), provenance=CarriedProvenance(spans={}))
+        await seam.bind(
+            SEND_EMAIL,
+            parameters=arguments(),
+            provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
+        )
 
 
 async def _never_called(parameters: object, *, idempotency_key: object) -> None:
@@ -331,7 +335,9 @@ async def test_an_authorised_call_reaches_the_transport_and_the_message_goes_out
 
     parameters = arguments()
     bound = await seam.bind(
-        SEND_EMAIL, parameters=parameters, provenance=CarriedProvenance(spans={})
+        SEND_EMAIL,
+        parameters=parameters,
+        provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
     )
     assert bound is not None
 
@@ -385,7 +391,9 @@ async def test_the_singular_phrasing_validates_binds_and_reaches_the_wire() -> N
     assert parameter_violations(SEND_EMAIL.parameters_schema, parameters) == ()
 
     bound = await seam.bind(
-        SEND_EMAIL, parameters=parameters, provenance=CarriedProvenance(spans={})
+        SEND_EMAIL,
+        parameters=parameters,
+        provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
     )
     assert bound is not None
     recipients = [span for span in bound.binding.spans if span.destination is not None]
@@ -416,7 +424,9 @@ async def test_a_transport_refusal_comes_back_as_a_classified_failure_not_an_esc
 
     parameters = arguments()
     bound = await seam.bind(
-        SEND_EMAIL, parameters=parameters, provenance=CarriedProvenance(spans={})
+        SEND_EMAIL,
+        parameters=parameters,
+        provenance=CarriedProvenance(spans={}, planned_with_external_content=False),
     )
     assert bound is not None
     moved = bound.binding.model_copy(update={"transport_endpoint": "smtps://elsewhere.invalid:465"})
@@ -476,6 +486,7 @@ async def test_an_ordinary_callable_reached_with_a_binding_is_refused() -> None:
             spans=(),
             account=BoundAccount(identity=IDENTITY, reference=REFERENCE),
             transport_endpoint=ENDPOINT,
+            planned_with_external_content=False,
         ),
     )
     decision = PermissionDecision.from_request(

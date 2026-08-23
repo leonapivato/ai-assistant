@@ -140,6 +140,7 @@ def test_an_egress_confirmation_survives_the_round_trip_a_client_actually_makes(
         reason="this discloses data off-device",
         token=ContinuationToken(handle="tok"),
         egress=ConfirmationEgress(
+            planned_with_external_content=False,
             account_identity="work@example.com",
             spans=(
                 EgressSpan(

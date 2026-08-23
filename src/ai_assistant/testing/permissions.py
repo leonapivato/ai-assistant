@@ -46,6 +46,14 @@ if TYPE_CHECKING:
 #: Reported when a policy is asked to resolve something nobody was ever shown.
 _NOT_A_CONFIRMATION = "fake: the decision resolved was not a CONFIRM, so it authorises nothing"
 
+#: ADR-0181 §5's ground, worded as the section's second clause allows: a statement
+#: about the **selection this system made**, never a detection, a score, or a claim
+#: that any argument or destination of the call came from external content.
+_PLANNED_OVER_EXTERNAL = (
+    "the material selected into the model call that produced this request included "
+    "a record resting on recorded external content"
+)
+
 
 class FakeActionPolicy:
     """A conservative, monotone ``ActionPolicy`` test double.
@@ -66,6 +74,10 @@ class FakeActionPolicy:
       *any* tier rather than a list of them.
     * an ``UNKNOWN`` cost — ``CONFIRM``. ADR-0016 §4's fail-closed clause.
     * ``risk_level`` at or above ``deny_at``, when one is configured — ``DENY``.
+    * an ``egress_binding`` carrying ``planned_with_external_content`` —
+      ``CONFIRM``. ADR-0181 §5's floor, over a fact about the **request** rather
+      than about the declaration, and the one clause here that reads anything but
+      ``request.tool``.
 
     Each clause is a monotone step function of one declared field, and the
     maximum of monotone functions is monotone, so no configuration of the knobs
@@ -99,7 +111,17 @@ class FakeActionPolicy:
         self.resolutions: list[tuple[PermissionDecision, bool]] = []
 
     async def decide(self, request: ActionRequest) -> PermissionRuling:
-        """Rule on ``request`` by the thresholds and floors in the class docstring."""
+        """Rule on ``request`` by the thresholds and floors in the class docstring.
+
+        The last clause is ADR-0181 §5's and is not configurable: a request whose
+        binding carries ``planned_with_external_content`` gets no ``ALLOW``, because
+        ADR-0148 §3's route (a) — the user's own answer about *this* request — is
+        unavailable to a member holding no resolution. It is monotone like the rest
+        (a step function of one field of the request, combined by maximum), so the
+        knobs still cannot configure this fake out of conformance. A request whose
+        binding carries ``False``, or which carries no binding, is judged on the
+        ordinary path.
+        """
         self.requests.append(request.model_copy(deep=True))
         tool = request.tool
 
@@ -117,6 +139,9 @@ class FakeActionPolicy:
             grounds.append((PermissionOutcome.CONFIRM, "its cost is undeclared"))
         if self.deny_at is not None and tool.risk_level >= self.deny_at:
             grounds.append((PermissionOutcome.DENY, f"risk is {tool.risk_level}"))
+        binding = request.egress_binding
+        if binding is not None and binding.planned_with_external_content:
+            grounds.append((PermissionOutcome.CONFIRM, _PLANNED_OVER_EXTERNAL))
 
         outcome = max(outcome for outcome, _ in grounds)
         reasons = [reason for ruled, reason in grounds if ruled is outcome]
@@ -128,6 +153,14 @@ class FakeActionPolicy:
         A refusal is honoured unconditionally, and a ``confirmed`` that was never
         a ``CONFIRM`` cannot mint an authorisation — both obligations of
         ADR-0021 §3 rather than choices this fake makes.
+
+        **ADR-0181 §5's fourth clause is discharged by the first of those**, not by
+        a clause of its own: where ``confirmed.egress_binding`` carries
+        ``planned_with_external_content``, an ``ALLOW`` requires ``approved`` to be
+        true, and ``approved`` being false already yields ``DENY`` for every
+        ``confirmed``. Nothing is added for the approving case, because the user's
+        answer about that call **is** route (a) — the one route §5's second clause
+        leaves open.
         """
         self.resolutions.append((confirmed.model_copy(deep=True), approved))
 

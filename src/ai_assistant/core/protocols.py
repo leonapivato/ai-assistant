@@ -2894,10 +2894,17 @@ class EgressBinder(Protocol):
                 Nothing is amended, defaulted into them or substituted for them:
                 what comes back on the egress path is the **same** mapping the
                 binding was derived under, carried on the returned value.
-            provenance: The recorded origin of each span the caller holds one for,
-                as a validating carrier rather than a bare mapping. No default: a
-                caller holding none constructs one over an empty mapping and passes
-                it deliberately (ADR-0150 §5).
+            provenance: What the caller carries across this seam that the seam
+                cannot derive, as a validating carrier rather than a bare mapping:
+                the recorded origin of each span it holds one for, and the call's
+                ``planned_with_external_content`` (ADR-0181 §3, §4). Neither has a
+                default — a caller holding no span origins constructs the carrier
+                over an empty mapping, and a caller holding no selection states
+                ``False`` deliberately (ADR-0150 §5, ADR-0181 §3). The seam
+                **carries** the second onto the binding unchanged and derives
+                nothing for it: no component invents it where a caller did not
+                supply it, and none infers it from an argument's value, field or
+                shape (ADR-0181 §4's second clause).
 
         Returns:
             The derived binding beside the **detached** ``tool`` and
@@ -2969,16 +2976,29 @@ class EgressBinder(Protocol):
         ADR-0148 §1 that request must carry the whole binding before that ruling
         too, and this is where it is obtained.
 
-        **Everything is re-derived except the provenance**, which is taken from
-        ``approved``, matched to the derived span by
-        :class:`~ai_assistant.core.types.EgressSpanLocator`. Nothing else in
-        ``approved`` is read into the result. Transcribing the provenance is
-        forced: a recorded origin is a fact about an act that happened before the
-        confirmation was parked, plausibly before a restart, so a member that took
-        a fresh ``provenance`` argument would receive an empty one, describe every
-        span as ``SYSTEM_SELECTED``, and compare unequal to an approved binding
-        whose spans said ``USER_AUTHORED`` — refusing every resumed call whose user
-        typed anything.
+        **Everything is re-derived except two things, both taken from
+        ``approved``**: each span's provenance, matched to the derived span by
+        :class:`~ai_assistant.core.types.EgressSpanLocator`, and the binding's
+        ``planned_with_external_content``. Nothing else in ``approved`` is read into
+        the result. Transcribing the provenance is forced: a recorded origin is a
+        fact about an act that happened before the confirmation was parked,
+        plausibly before a restart, so a member that took a fresh ``provenance``
+        argument would receive an empty one, describe every span as
+        ``SYSTEM_SELECTED``, and compare unequal to an approved binding whose spans
+        said ``USER_AUTHORED`` — refusing every resumed call whose user typed
+        anything.
+
+        **The second is transcribed for the same reason, arriving at a second
+        field** (ADR-0181 §3's fifth and sixth clauses, which narrow ADR-0152 §7's
+        count from exactly one to exactly two and narrow nothing else in it). The
+        fact is about a **selection** this system made before the confirmation was
+        parked, and ``rebind`` receives no selection set to recompute it from. A
+        member that re-derived it would answer ``False``, compare unequal to every
+        approved binding carrying ``True``, and refuse every resumed egress call
+        planned over external material — which is precisely the call the user was
+        asked about and approved. It is **not** re-derived, **not** defaulted and
+        **not** omitted, and the fix a lane would otherwise reach for is to stop
+        comparing.
 
         **Re-deriving and comparing uses ADR-0148 §6's determinism clause rather
         than working around it.** That clause forbids a binding being derived
@@ -3079,6 +3099,24 @@ class ActionPolicy(Protocol):
     * **An ``UNKNOWN`` cost is never auto-granted.** ADR-0016 §4 ratified
       ``UNKNOWN`` as "the author does not know — policy must fail closed", and
       this is where that clause acquires an enforcer.
+    * **A call planned over recorded external content is never ``ALLOW``ed except
+      on a decision of the user about that call** (ADR-0181 §5). No ruling this
+      contract returns is ``ALLOW`` on a request whose ``egress_binding`` carries
+      ``planned_with_external_content``, except under ADR-0148 §3's route (a) — the
+      user's own answer about **that** request. No standing user policy and no
+      standing grant covers such a call, whatever a later ADR permits for calls
+      that do not carry it, and ADR-0154 §4's standing-authorisation floor is
+      unchanged and unlifted by it.
+
+    **That obligation binds** :meth:`decide` **and** :meth:`resolve` **separately,
+    and each over the facts its own member receives**, which is why it is stated
+    on both below rather than once here. No implementation discharges it on one
+    member and not the other, and none reads ``decide``'s unavailability of route
+    (a) as licence to relax the rule on ``resolve``. It is not a refusal: the call
+    is still put to the user, with the fact in front of them (ADR-0181 §6), which is
+    the containment #668 asks for. And no implementation acquires a trail read, a
+    store handle or a grant seam in order to discharge it — ADR-0097 §7 forbids the
+    last of those outright.
 
     Within those floors an implementation may be arbitrarily permissive: a
     policy returning ``CONFIRM`` for everything and one returning ``ALLOW`` for
@@ -3096,6 +3134,16 @@ class ActionPolicy(Protocol):
         authorisation source — today that is *every* policy, since standing
         grants are deferred, so no conforming implementation can invent an
         authorisation while ruling on a fresh request.
+
+        **It returns no ``ALLOW`` at all on a request whose ``egress_binding``
+        carries ``planned_with_external_content``** (ADR-0181 §5's third clause).
+        This member holds an ``ActionRequest`` and no ``AuditTrail``, so ADR-0148
+        §3's route (a) — a decision of the user about *this* request — is
+        unavailable to it by construction: no resolution about the request exists
+        yet, and the obligation is therefore discharged by returning ``CONFIRM`` or
+        ``DENY``. The boundary is part of the rule: a request whose binding carries
+        ``False``, and a request carrying no binding at all, are judged on the
+        ordinary path and are not refused by it.
 
         Args:
             request: The self-contained action to rule on, carrying the tool
@@ -3136,6 +3184,18 @@ class ActionPolicy(Protocol):
         * **A ``confirmed`` whose ruling was not ``CONFIRM`` must not produce an
           ``ALLOW``**, so this cannot mint an authorisation out of a decision
           nobody was ever shown.
+        * **Where ``confirmed.egress_binding`` carries
+          ``planned_with_external_content``, an ``ALLOW`` requires ``approved`` to
+          be true** (ADR-0181 §5's fourth clause). This member holds the recorded
+          decision and the user's answer and **no request**, so its obligation is
+          stated over exactly those two; ``approved`` being false yields ``DENY``
+          as the first obligation above already requires, and the clause adds no
+          new refusal to the approving path — the user's answer about that call
+          *is* route (a). Nothing here obliges this member to compare a binding
+          against a request, and no lane widens this Protocol to let it: that
+          comparison exists one seam out, on
+          :meth:`~ai_assistant.core.types.PermissionDecision.authorises`, over the
+          binding as one whole.
 
         A resolving ``ALLOW`` sets ``authorised_by`` to ``confirmed.id`` — this
         is the one path that may set it, and what it sets is verifiable, since

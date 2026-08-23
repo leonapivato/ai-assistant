@@ -172,6 +172,7 @@ def _binding() -> EgressBinding:
         ),
         account=BoundAccount(identity="work@example.com", reference="conn-0001"),
         transport_endpoint="test://endpoint/one",
+        planned_with_external_content=False,
     )
 
 

@@ -60,7 +60,12 @@ _TOOL = ToolDefinition(
 )
 
 
-def _binding(*, argument: str = "to", index: int | None = 0) -> EgressBinding:
+def _binding(
+    *,
+    argument: str = "to",
+    index: int | None = 0,
+    planned_with_external_content: bool = False,
+) -> EgressBinding:
     """A one-span binding whose span sits at ``(argument, index)``."""
     return EgressBinding(
         spans=(
@@ -79,6 +84,7 @@ def _binding(*, argument: str = "to", index: int | None = 0) -> EgressBinding:
         ),
         account=BoundAccount(identity="work@example.com", reference="conn-0001"),
         transport_endpoint="test://endpoint",
+        planned_with_external_content=planned_with_external_content,
     )
 
 
@@ -163,7 +169,10 @@ def test_a_locator_built_by_model_construct_does_not_survive_revalidation() -> N
     forged = EgressSpanLocator.model_construct(argument=object(), index="nine")
 
     with pytest.raises(ValidationError):
-        CarriedProvenance(spans={forged: DiscloserProvenance.SYSTEM_SELECTED})
+        CarriedProvenance(
+            spans={forged: DiscloserProvenance.SYSTEM_SELECTED},
+            planned_with_external_content=False,
+        )
 
 
 # --- ADR-0152 §1: the carrier ------------------------------------------------
@@ -178,13 +187,19 @@ def test_a_carrier_refuses_a_key_that_is_not_a_well_formed_locator() -> None:
     model that validates on construction (ADR-0150 §8).
     """
     with pytest.raises(ValidationError):
-        CarriedProvenance(spans={object(): DiscloserProvenance.USER_AUTHORED})  # type: ignore[dict-item]  # the bypass under test
+        CarriedProvenance(
+            spans={object(): DiscloserProvenance.USER_AUTHORED},  # type: ignore[dict-item]  # the bypass under test
+            planned_with_external_content=False,
+        )
 
 
 def test_a_carrier_refuses_a_value_that_is_not_a_discloser_provenance() -> None:
     """ADR-0152 §1, §13: one of ADR-0146 §1's two members, and no third."""
     with pytest.raises(ValidationError):
-        CarriedProvenance(spans={EgressSpanLocator(argument="to"): "hearsay"})  # type: ignore[dict-item]  # the bypass under test
+        CarriedProvenance(
+            spans={EgressSpanLocator(argument="to"): "hearsay"},  # type: ignore[dict-item]  # the bypass under test
+            planned_with_external_content=False,
+        )
 
 
 def test_a_carrier_does_not_change_when_the_caller_mutates_what_it_passed() -> None:
@@ -196,7 +211,7 @@ def test_a_carrier_does_not_change_when_the_caller_mutates_what_it_passed() -> N
     which is precisely the window the detachment closes.
     """
     caller_holds = {EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED}
-    carrier = CarriedProvenance(spans=caller_holds)
+    carrier = CarriedProvenance(spans=caller_holds, planned_with_external_content=False)
 
     caller_holds[EgressSpanLocator(argument="to")] = DiscloserProvenance.SYSTEM_SELECTED
     caller_holds[EgressSpanLocator(argument="body")] = DiscloserProvenance.SYSTEM_SELECTED
@@ -217,7 +232,7 @@ def test_a_carrier_omitting_spans_is_refused() -> None:
 
 def test_a_carrier_over_an_empty_mapping_is_well_formed() -> None:
     """ADR-0152 §1: the deliberate empty carrier, which is today's every call (§5)."""
-    carrier = CarriedProvenance(spans={})
+    carrier = CarriedProvenance(spans={}, planned_with_external_content=False)
 
     assert len(carrier.spans) == 0
     assert dict(carrier.spans) == {}
@@ -231,7 +246,8 @@ def test_a_carriers_mapping_refuses_mutation_and_survives_a_round_trip() -> None
     ``model_copy(deep=True)``.
     """
     carrier = CarriedProvenance(
-        spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED}
+        spans={EgressSpanLocator(argument="body"): DiscloserProvenance.USER_AUTHORED},
+        planned_with_external_content=False,
     )
 
     with pytest.raises(TypeError):

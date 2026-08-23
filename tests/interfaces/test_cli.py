@@ -417,7 +417,9 @@ def _egress_confirmation(*spans: EgressSpan, identity: str = _EGRESS_IDENTITY) -
         parameters={"to": "Alice@Example.ORG", "body": "hello"},
         reason="this discloses data off-device",
         token=ContinuationToken(handle="tok"),
-        egress=ConfirmationEgress(account_identity=identity, spans=spans),
+        egress=ConfirmationEgress(
+            account_identity=identity, spans=spans, planned_with_external_content=False
+        ),
     )
 
 

@@ -6335,7 +6335,7 @@ class ConfirmationDestination(BaseModel):
     derived property (:attr:`ConfirmationEgress.canonical_destination_set`), and
     that property is never stored and never transmitted — a pydantic property is
     not a field, so ``model_dump`` does not reach it and no peer ever receives one.
-    ``PROTOCOL_VERSION`` 10 does not describe this model. The declaration is
+    ``PROTOCOL_VERSION`` does not describe this model. The declaration is
     binding as a `core` → `interfaces` **consumer contract** — the names
     ``interfaces/cli.py`` reads — and is not an interoperability surface: two
     conforming peers exchange spans and an account identity and each derives its
@@ -6500,6 +6500,14 @@ class EgressBinding(BaseModel):
     is no partially populated binding, and ``None`` on a request or a decision
     means the request is not an egress call.
 
+    **``planned_with_external_content`` rides here rather than beside the binding**
+    (ADR-0181 §3). One carriage, for ADR-0150 §1's reason: the binding is the thing
+    bound, the thing :meth:`PermissionDecision.authorises` compares and the thing
+    transcribed into the record, and a second carriage would have to be joined to it
+    by something. It is on the binding rather than on a span because ADR-0181 §2
+    rules the fact a property of the **call**; a call-level fact on a span would look
+    like a span-level claim, which that section's third clause refuses to mint.
+
     **This value does not carry ``parameters``, and no lane gives it a copy so
     that it can check them here.** That is the state stated twice this decision
     is named against. The three structural invariants below are facts about this
@@ -6531,6 +6539,21 @@ class EgressBinding(BaseModel):
             "host, port and path **not at all**, and that absence is not "
             "permission: what the endpoint must be, and what a redirect may do, is "
             "issue #83's and is decided neither here nor by ADR-0148 §6."
+        )
+    )
+    planned_with_external_content: bool = Field(
+        description=(
+            "The value the seam was handed on "
+            ":attr:`CarriedProvenance.planned_with_external_content`, unchanged "
+            "(ADR-0181 §3). Fixed in the :class:`ActionRequest` before the ruling "
+            "and transcribed verbatim into the recorded decision, exactly as every "
+            "other member of the binding is (ADR-0148 §6). **Required with no "
+            "default**, like every field ADR-0150 §2 names, and for the reason "
+            "ADR-0181 §3 gives: a defaulted False would state that no external "
+            "material was selected, on behalf of a lane that made no selection. "
+            "``rebind`` **transcribes** it from the approved binding rather than "
+            "re-deriving it, which is the second of the two things ADR-0152 §7's "
+            "count now admits (ADR-0181 §3's fifth clause)."
         )
     )
 
@@ -6702,6 +6725,19 @@ class ConfirmationEgress(BaseModel):
     *floor*. One value is either whole or absent, and the absent case is a fact
     about the call rather than a state to reason about (:attr:`Confirmation.egress`).
 
+    **Three fields since ADR-0181 §3, not two.** ADR-0178 §2's "exactly two
+    fields" is narrowed by a count and by nothing else (ADR-0181 §11):
+    ``planned_with_external_content`` is the recorded decision's own value, reaching
+    a surface by ADR-0178 §5's transcription rather than as a second carriage of it
+    (ADR-0150 §1). It is a fact about the **call** — that the material this system
+    selected into the model call which produced the request did, or did not, include
+    a record marked as resting on recorded external content — and never a fact about
+    a span, a destination or an argument (ADR-0181 §2's third clause). What ADR-0178
+    §10's roster test asserts is untouched by it: the field is named and typed for
+    none of a connection reference, a transport endpoint, a
+    :class:`BoundAccount` or a :class:`SecretName`, so the roster moves by one and
+    the assertion's subject does not.
+
     **``spans`` is the binding's own value and not a second description derived
     beside it.** No lane builds a parallel span type for a confirmation, re-derives
     a description from ``parameters``, filters, reorders, truncates or summarises
@@ -6785,6 +6821,20 @@ class ConfirmationEgress(BaseModel):
             ":attr:`EgressBinding.spans` and for the same reason: a defaulted "
             "description would let a producer omit the field and get an empty "
             "payload description rather than having to state one."
+        )
+    )
+    planned_with_external_content: bool = Field(
+        description=(
+            "The recorded decision's "
+            ":attr:`EgressBinding.planned_with_external_content`, populated from "
+            ":attr:`PermissionDecision.egress_binding` at both assembly sites and "
+            "by no other route (ADR-0178 §5, ADR-0181 §3). **Required with no "
+            "default**, like the two members above. It carries no second copy of "
+            "anything else, mints no type, and is not a "
+            ":class:`ConfirmationDestination`. A surface renders it as a statement "
+            "about **the call** and in **both** states — never as a per-span claim, "
+            "a detection, a score, a risk level, or, when False, an assurance that "
+            "no external content was involved (ADR-0181 §6, §7)."
         )
     )
 
@@ -7186,6 +7236,22 @@ class CarriedProvenance(BaseModel):
             "absent from it is SYSTEM_SELECTED, written by the seam that builds "
             "the span rather than defaulted by a field (ADR-0146 §2). Required "
             "with no default."
+        )
+    )
+    planned_with_external_content: bool = Field(
+        description=(
+            "Whether the material the caller **selected** into the model call that "
+            "produced this request's arguments included a record satisfying "
+            "``rests_on_recorded_external_content`` (ADR-0181 §2, §3) — the "
+            "disjunction of that predicate over the selected records, computed by "
+            "whoever made the selection. A value a model, a tool, a declaration or "
+            "a plan emitted for it is discarded rather than merged (ADR-0181 §4). "
+            "**Required with no default**: the safe-looking default is False, which "
+            "reads as *nothing external was in front of the model* — a claim about "
+            "a selection the defaulting lane never made — so a caller holding no "
+            "selection passes False deliberately, in code a reviewer can see. It is "
+            "**not** a claim that any argument, destination or span was influenced "
+            "by external content, nor that any was not (ADR-0098 §5, ADR-0106 §1)."
         )
     )
 
@@ -7760,6 +7826,17 @@ class PermissionDecision(BaseModel):
         approved the first. ADR-0148 §2's fourth clause requires both forms in the
         record precisely because they are different facts; a comparison that saw
         only the set would record one and bind the other.
+
+        **``planned_with_external_content`` is compared by that same conjunct and
+        by nothing added for it** (ADR-0181 §3's fourth clause). It is a member of
+        the binding, the comparison is of the whole value, and no lane compares it
+        separately, exempts it from the comparison, or re-derives it after the
+        ruling: a resumed call whose rebuilt binding disagrees on it is refused
+        exactly as one disagreeing on any other member is. That is also why
+        ``EgressBinder.rebind`` **transcribes** the field from the approved binding
+        (ADR-0181 §3's fifth and sixth clauses) — a ``rebind`` that re-derived it
+        would receive no selection set, answer ``False``, and refuse every resumed
+        egress call the user was asked about and approved.
 
         The conjunct is ``None``-safe in **both** directions and neither is an
         exemption. Only one of the two is obvious: a request with a binding

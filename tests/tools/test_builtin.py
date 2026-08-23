@@ -39,6 +39,7 @@ from ai_assistant.orchestration import (
     StepExecutor,
     StepRunner,
 )
+from ai_assistant.orchestration.origin import NOTHING_EXTERNAL
 from ai_assistant.testing import FakeActionPolicy, FakeAuditTrail, FakeMemoryStore, FakePlanStore
 from ai_assistant.tools import (
     CURRENT_TIME,
@@ -284,7 +285,7 @@ async def test_a_plan_naming_report_current_time_executes_end_to_end() -> None:
     step = PlanStep(id="step-1", intent="what time is it", capability="report_current_time")
     state = await _execution_for(plans, step)
 
-    disposition = await runner.run(state, "step-1", timeout=PATIENT)
+    disposition = await runner.run(state, "step-1", timeout=PATIENT, origin=NOTHING_EXTERNAL)
 
     assert disposition.disposition is Disposition.EXECUTED
     assert disposition.tool_id == "current_time"
@@ -347,7 +348,7 @@ async def test_an_unexpected_argument_never_reaches_the_tool() -> None:
     # selection stage turns the refusal into a disposition rather than letting
     # `ActionRequest`'s validator raise out of `run` (#1115, ADR-0145 §4, §7).
     # Everything below it is the durable fact and held under both.
-    result = await runner.run(state, "step-1", timeout=PATIENT)
+    result = await runner.run(state, "step-1", timeout=PATIENT, origin=NOTHING_EXTERNAL)
 
     assert result.disposition is Disposition.INVALID_PARAMETERS
     assert spy.calls == 0  # the callable is never reached (ADR-0145 §3)
@@ -382,7 +383,7 @@ async def test_a_plan_naming_recall_memory_executes_end_to_end() -> None:
     )
     state = await _execution_for(plans, step)
 
-    disposition = await runner.run(state, "step-1", timeout=PATIENT)
+    disposition = await runner.run(state, "step-1", timeout=PATIENT, origin=NOTHING_EXTERNAL)
 
     assert disposition.disposition is Disposition.EXECUTED
     assert disposition.tool_id == "recall_memory"

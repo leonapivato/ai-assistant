@@ -127,6 +127,7 @@ from ai_assistant.core.types import (
     secret_value,
 )
 from ai_assistant.orchestration.notifications import hand_off
+from ai_assistant.orchestration.origin import SelectionOrigin
 from ai_assistant.orchestration.payloads import (
     DEFAULT_MAX_PAYLOAD_BYTES,
     JSON_STRING_QUOTE_BYTES,
@@ -746,13 +747,22 @@ def _confirmation_egress(recorded: PermissionDecision) -> ConfirmationEgress | N
     from anything the runner still holds would be a second source that could
     differ from the authorised one.
 
-    **Two fields off a value already in hand, and nothing else.** It derives no
+    **Three fields off a value already in hand, and nothing else.** It derives no
     binding, reads no connection record, opens no store, calls no seam and reads no
     clock — which is what keeps :meth:`Engine._confirmation`'s standing guarantee
     true (#287): everything that could raise still happens before ``run`` commits
     ``AWAITING_APPROVAL``, and this raises nothing. The account's ``reference`` and
     the binding's ``transport_endpoint`` are the two fields deliberately left
     behind (ADR-0178 §2), so nothing this returns can carry them to an adapter.
+
+    **The third is ``planned_with_external_content``** (ADR-0181 §3's third clause),
+    populated from the recorded decision's ``egress_binding`` here and by no other
+    route — which is what makes it the *same fact* reaching a surface rather than a
+    second statement of it (ADR-0150 §1, ADR-0178 §5). What a surface then owes for
+    it is ADR-0181 §6's, and this function asserts none of it: it renders as a
+    statement about the **call**, in **both** states, beside the occurrences rather
+    than in place of any of them, and never as a per-span claim, a detection, a
+    score, a risk level or — when ``False`` — an assurance.
 
     **The same function serves both assembly sites**, which is how ADR-0178 §5's
     fourth clause is discharged rather than hoped for: a recovered confirmation
@@ -772,7 +782,11 @@ def _confirmation_egress(recorded: PermissionDecision) -> ConfirmationEgress | N
     binding = recorded.egress_binding
     if binding is None:
         return None
-    return ConfirmationEgress(account_identity=binding.account.identity, spans=binding.spans)
+    return ConfirmationEgress(
+        account_identity=binding.account.identity,
+        spans=binding.spans,
+        planned_with_external_content=binding.planned_with_external_content,
+    )
 
 
 def belief_from_record(record: MemoryRecord, evidence: tuple[Evidence, ...] = ()) -> Belief:
@@ -4433,7 +4447,18 @@ class Engine:
             await self._plans.save_goal(turn.goal)
             await self._plans.save_plan(turn.plan)
             state = await self._plans.start_execution(turn.plan.id)
-            disposition = await self._runner.run(state, first.id, timeout=timeout)
+            # ADR-0181 §2, §4: the origin the authoriser evaluates, computed here
+            # from the selection this system actually made rather than read off
+            # anything the planner emitted. ``turn.memories`` **is** that selection,
+            # carried on the turn as data: ``LearningLoop.respond`` assembles it as
+            # the conversation's recent turns, then the relevance-retrieved beliefs,
+            # then the episodic supplement — three reads — and hands exactly it to
+            # the planner. So one argument here is already the disjunction over
+            # every selection that fed this step (§4's third clause), and a lane
+            # adding a second model call over a second selection adds an argument
+            # rather than replacing this one.
+            origin = SelectionOrigin.over(turn.memories)
+            disposition = await self._runner.run(state, first.id, timeout=timeout, origin=origin)
             step = self._step_outcome(turn, disposition, step_id=first.id, handle=handle)
         finally:
             # The reservation held the slot across the awaits. It is now either in

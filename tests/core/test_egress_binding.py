@@ -121,9 +121,18 @@ def _span(argument: str, **overrides: object) -> EgressSpan:
     return EgressSpan(**fields)  # type: ignore[arg-type]  # heterogeneous test kwargs
 
 
-def _binding(*spans: EgressSpan, account: BoundAccount = _ACCOUNT) -> EgressBinding:
+def _binding(
+    *spans: EgressSpan,
+    account: BoundAccount = _ACCOUNT,
+    planned_with_external_content: bool = False,
+) -> EgressBinding:
     """A binding over ``spans``, bound to ``account`` and one endpoint."""
-    return EgressBinding(spans=spans, account=account, transport_endpoint=_ENDPOINT)
+    return EgressBinding(
+        spans=spans,
+        account=account,
+        transport_endpoint=_ENDPOINT,
+        planned_with_external_content=planned_with_external_content,
+    )
 
 
 def _request(

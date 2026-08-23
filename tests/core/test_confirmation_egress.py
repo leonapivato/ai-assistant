@@ -89,14 +89,23 @@ def _span(  # noqa: PLR0913 — one keyword per field of the span being built
     )
 
 
-def _binding(*spans: EgressSpan) -> EgressBinding:
+def _binding(*spans: EgressSpan, planned_with_external_content: bool = False) -> EgressBinding:
     """A whole binding over ``spans``, against one active account."""
-    return EgressBinding(spans=spans, account=_account(), transport_endpoint=ENDPOINT)
+    return EgressBinding(
+        spans=spans,
+        account=_account(),
+        transport_endpoint=ENDPOINT,
+        planned_with_external_content=planned_with_external_content,
+    )
 
 
 def _reduced(binding: EgressBinding) -> ConfirmationEgress:
-    """The member the engine builds from ``binding`` — identity and spans, nothing else."""
-    return ConfirmationEgress(account_identity=binding.account.identity, spans=binding.spans)
+    """The member the engine builds from ``binding`` — the three fields, nothing else."""
+    return ConfirmationEgress(
+        account_identity=binding.account.identity,
+        spans=binding.spans,
+        planned_with_external_content=binding.planned_with_external_content,
+    )
 
 
 # --- §1: the sixth member, required ------------------------------------------
@@ -233,7 +242,9 @@ def test_the_account_identity_must_render_as_something() -> None:
     """
     for invisible in ("", "   ", "\u200b"):
         with pytest.raises(ValidationError):
-            ConfirmationEgress(account_identity=invisible, spans=())
+            ConfirmationEgress(
+                account_identity=invisible, spans=(), planned_with_external_content=False
+            )
 
 
 def test_the_account_identity_survives_byte_for_byte() -> None:
@@ -245,7 +256,10 @@ def test_the_account_identity_survives_byte_for_byte() -> None:
     the ruling and transmission.
     """
     awkward = " \u00a0Work Account\t(Personal)  "
-    assert ConfirmationEgress(account_identity=awkward, spans=()).account_identity == awkward
+    reduced = ConfirmationEgress(
+        account_identity=awkward, spans=(), planned_with_external_content=False
+    )
+    assert reduced.account_identity == awkward
 
 
 # --- §3: the derived set, and the correspondence that would otherwise rot -----
@@ -320,7 +334,7 @@ def test_the_derived_set_is_a_property_and_never_a_field() -> None:
 
     A stored set is a second representation of one fact, and because a property is
     not a pydantic field nothing about it reaches a frame either — which is what
-    keeps ``PROTOCOL_VERSION`` 10 a statement about ``Confirmation.egress`` alone.
+    keeps ``PROTOCOL_VERSION`` a statement about ``Confirmation.egress`` alone.
     """
     assert "canonical_destination_set" not in ConfirmationEgress.model_fields
     assert "canonical_destination_set" not in _reduced(_binding()).model_dump()
@@ -328,6 +342,7 @@ def test_the_derived_set_is_a_property_and_never_a_field() -> None:
         ConfirmationEgress(
             account_identity=IDENTITY,
             spans=(),
+            planned_with_external_content=False,
             canonical_destination_set=(),  # type: ignore[call-arg]  # the point of the case
         )
 
@@ -381,6 +396,8 @@ def test_an_empty_span_tuple_is_a_description_and_not_a_non_egress_marker() -> N
     what makes it not a non-egress marker is that it still names an account and
     still derives a non-empty set.
     """
-    egress = ConfirmationEgress(account_identity=IDENTITY, spans=())
+    egress = ConfirmationEgress(
+        account_identity=IDENTITY, spans=(), planned_with_external_content=False
+    )
     assert egress.canonical_destination_set == (ConfirmationDestination(account_identity=IDENTITY),)
     assert egress is not None
