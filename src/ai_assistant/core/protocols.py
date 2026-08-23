@@ -180,6 +180,7 @@ if TYPE_CHECKING:
         SecretValue,
         SourceGrant,
         SourceReading,
+        SourceReadRecord,
         StepTransition,
         ToolCall,
         ToolDefinition,
@@ -3843,6 +3844,220 @@ class SourceGrantStore(Protocol):
 
         Raises:
             GrantError: If the store cannot be written.
+        """
+        ...
+
+
+@runtime_checkable
+class SourceReadRecorder(Protocol):
+    """Records that a source was read, and can answer nothing (ADR-0185 §4).
+
+    The **write** half of the read seam. Anything that drives a reader holds this
+    and only this — `orchestration`'s ingestion stage for
+    :attr:`~ai_assistant.core.types.GrantScope.INGEST`, `context`'s reader adapter
+    for :attr:`~ai_assistant.core.types.GrantScope.FACET`, and `orchestration`'s
+    upcoming-event producer for
+    :attr:`~ai_assistant.core.types.GrantScope.NOTIFY` — as a **required
+    constructor argument with no default**, so a composition that omits the
+    recorder does not type-check (ADR-0185 §5), on ADR-0097 §5's pattern for the
+    gate itself.
+
+    **The split from :class:`SourceReadTrail` is ADR-0097 §3's move, buying a
+    different guarantee.** There ``record`` was removed from the driver's type so a
+    scheduler job could not mint its own authorisation. Here the driver *must*
+    write, so the capability removed is the other one — the ability to **read** the
+    trail — and what that forecloses is the cursor ADR-0093 §5 forbids by name:
+
+        A sensor's bound is a function of the clock, its configuration and the
+        source's own content, and of nothing else. It may not be derived from
+        durable state recording what previous runs read.
+
+    A read trail is precisely durable state recording what previous runs read. A
+    driver handed a queryable one is a driver that can ask "when did I last read
+    this, and what did it produce" and skip, back off, or resume — the cursor
+    ADR-0093 §5 removed, arriving through a store built for another purpose.
+    Removing ``recent`` and ``export`` from the type the driver names makes that a
+    ``mypy --strict`` failure instead of a review note.
+
+    **It is a static guarantee and is stated as one**, exactly as
+    :class:`SourceGrants` states its own. Structural typing means a concrete store
+    satisfies both Protocols, so a composition root passes one object to a driver
+    and to the hub's read-trail operations alike; what the driver cannot do is
+    *name* ``recent``.
+
+    **The two names are deliberately not close**, which is the opposite of
+    :class:`SourceGrants`/:class:`SourceGrantStore`'s choice and right for the
+    opposite reason (ADR-0185 §4). There the pair was named alike because the narrow
+    seam is the safe one and the widening had to be visible at a constructor; here
+    the *wide* seam is the dangerous one — handing a driver a
+    :class:`SourceReadTrail` is handing it ADR-0093 §5's forbidden cursor — so the
+    two should not be substitutable at a glance.
+
+    **Never the liveness authority** (ADR-0185 §8). No read record is ever consulted
+    to decide whether a source is granted, what a grant's scope is, or what a
+    source's grant history is; :meth:`SourceGrants.live` remains the only answer to
+    whether a read may happen. And the grant-management surface does not report
+    reads: this ADR adds no member to :class:`SourceGrants` or
+    :class:`SourceGrantStore`, and no client presents a read, a read count or a
+    last-read instant beside a standing grant.
+
+    Cancelling :meth:`record` is governed by this module's cancellation clause
+    (ADR-0060), and the consequence is stated rather than left to be derived:
+    **whether a cancelled attempt left a row is indeterminate where the
+    cancellation landed inside a call already in flight**, because "a cancelled
+    write may or may not have committed. The caller may assume neither." No
+    component may assume either way, and no consumer reads the **absence** of a row
+    as evidence that a read did not happen (ADR-0185 §1, §5a).
+    """
+
+    async def record(self, read: SourceReadRecord) -> str:
+        """Append ``read`` to the trail and return its id.
+
+        **Write-once**: re-recording an id already present raises rather than
+        overwriting, for :meth:`AuditTrail.record`'s reason — a trail that upserts
+        is one where history can be rewritten by replaying a write.
+
+        **Atomic** over the duplicate check, the append and ADR-0185 §6's prune, for
+        ADR-0021 §4's reason: without atomicity the single-write guarantee is a
+        race, and a prune that is not in the same transaction leaves a window in
+        which the store is over its cap.
+
+        **Stores a detached, validated snapshot**, recursively over reachable
+        mutable state, on :meth:`AuditTrail.record`'s reasoning: ``frozen=True``
+        refuses ``read.outcome = …`` and not ``read.__dict__["outcome"] = …``, so a
+        store retaining the caller's object would let an appended row be rewritten
+        after the fact.
+
+        **Called after the outcome is known, and before the reading is used**
+        (ADR-0185 §5). No ``await`` on a recorder may stand between the ``live()``
+        answer a driver gates on and its call to :meth:`Reader.read` — ADR-0097 §5's
+        clause that "the check and the start of the read are one synchronous step"
+        is unchanged — so the record for any attempt whose read ran is written after
+        ``read()`` has returned or raised and after the re-check has ruled. Where
+        this raises, the driver **discards the reading**: nothing is proposed, no
+        facet is contributed, no candidate is concluded.
+
+        Raises:
+            ReadTrailError: If the record is not a valid one, if its id is already
+                recorded, or if the store cannot be written. One class for all
+                three, because the driver's recourse is identical (ADR-0185 §12).
+        """
+        ...
+
+
+@runtime_checkable
+class SourceReadTrail(Protocol):
+    """The append-only record of every attempt to read a source (ADR-0185 §4).
+
+    A Tier 1 local store, by ADR-0004 §7's own words as :class:`AuditTrail` already
+    is, so ADR-0155 §1's residency clause governs it: implementations persist
+    **locally only**, the file lives under ``Settings.data_dir`` and is created
+    owner-only (ADR-0004 §4, ADR-0084 §9), and the hub owns it exclusively as it
+    owns every other database in that directory (ADR-0083 §1, §10).
+
+    **The wide seam, and the one nothing but the hub's read-trail operations
+    holds.** It carries :meth:`SourceReadRecorder.record` with exactly the semantics
+    stated there, so one ``permissions/`` class satisfies both Protocols
+    structurally — the arrangement ``SqliteSourceGrantStore`` already has for
+    :class:`SourceGrants` and :class:`SourceGrantStore`. This Protocol deliberately
+    does **not** inherit :class:`SourceReadRecorder`: nothing in this file needs it
+    to, and keeping them unrelated is what stops a driver's annotation from being
+    widened by an ``isinstance`` habit.
+
+    **Every query returns a detached snapshot** — the list, the records in it, and
+    everything mutable those reach (ADR-0018 §3, ADR-0021 §4).
+
+    **There is no ``update``, no ``get(id)``, no ``delete(id)``, no query by source
+    and no count** (ADR-0185 §12). A selective delete is the page torn out of the
+    book (ADR-0021 §4). A ``get`` has no consumer: nothing looks a read up by id. A
+    per-source query and a count are the surface ADR's to ask for if it needs them,
+    and adding them here would be surface with no consumer (ADR-0045 §1, ADR-0028
+    §7); both are additive later.
+
+    **The store has a horizon, and it is uniform** (ADR-0185 §6). It holds at most
+    ``Settings.source_read_trail_max_rows`` records; when an append would exceed
+    that, the **earliest-recorded** rows are deleted until it does not, atomically
+    with the append. "Earliest-recorded" is the order of :meth:`record` calls and
+    never :attr:`~ai_assistant.core.types.SourceReadRecord.checked_at` — that
+    instant is caller-supplied, and a prune keyed on it after a backwards clock
+    correction deletes the rows it just wrote. The only deletions the store performs
+    are that prune and :meth:`clear`; no record is ever updated, no record is deleted
+    individually, and no prune may be conditioned on a record's ``source``, ``use``,
+    ``outcome``, ``grant`` or ``produced``. A uniform, content-blind, oldest-first
+    horizon removes nothing anybody chose, which is why it does not tear a page out
+    of the book, and it is ADR-0004 §6's own provision for size caps.
+
+    **No bound, no schedule, no cursor and no skip decision is derived from this
+    store** (ADR-0185 §8). ADR-0093 §5's clause binds it by name.
+
+    Cancelling any method here is governed by this module's cancellation clause
+    (ADR-0060); see :class:`SourceReadRecorder` for what that means for a row.
+    """
+
+    async def record(self, read: SourceReadRecord) -> str:
+        """Append ``read`` to the trail and return its id.
+
+        Exactly :meth:`SourceReadRecorder.record`'s semantics — write-once, atomic
+        over the duplicate check, the append and the prune, storing a detached and
+        validated snapshot.
+
+        Raises:
+            ReadTrailError: If the record is not a valid one, if its id is already
+                recorded, or if the store cannot be written.
+        """
+        ...
+
+    async def recent(self, *, limit: int = 50) -> list[SourceReadRecord]:
+        """Return the most recently recorded attempts, newest-recorded first.
+
+        Ordered by **recording order**, reversed — never by ``checked_at``, and no
+        implementation derives the order by comparing ``checked_at`` values
+        (ADR-0185 §6). That is a departure from :meth:`AuditTrail.recent`, which
+        orders by ``decided_at``, and it is deliberate: a decision is minted by a
+        user act, a read is minted by a timer, and here a decision *does* rest on
+        order — the prune — so the same premises ADR-0097 §4 reasons from reach the
+        opposite conclusion.
+
+        Bounded because every read of a Tier 1 store in this corpus is (ADR-0021 §4,
+        ADR-0073 §2), and this store's row count grows with read *cadence*.
+
+        Args:
+            limit: Maximum number of records to return; must be strictly positive.
+
+        Raises:
+            ValueError: If ``limit`` is not strictly positive. Raised rather than
+                clamped or passed through, for :meth:`AuditTrail.recent`'s reason —
+                a store issuing ``LIMIT ?`` against SQLite turns ``limit=-1`` into
+                no limit at all, so the one call offering a bounded read becomes the
+                unbounded read it exists to avoid.
+            ReadTrailError: If the trail cannot be read.
+        """
+        ...
+
+    async def export(self) -> list[SourceReadRecord]:
+        """Return every record the store holds, in recording order (ADR-0004 §6).
+
+        The user's export right, on ``AuditTrail.export``'s shape. **It delivers the
+        horizon rather than the history** (ADR-0185 §10): the store prunes, so this
+        reconstructs every attempt it still holds and reads older than the
+        configured cap are gone. That is the declared cost of the bound ADR-0139 §6
+        required, and no lane may report it as a complete history.
+
+        Raises:
+            ReadTrailError: If the trail cannot be read.
+        """
+        ...
+
+    async def clear(self) -> int:
+        """Delete every record, returning the number removed.
+
+        Wholesale erasure only, for :meth:`AuditTrail.clear`'s reason: it destroys
+        the trail visibly and completely, which is what a data-rights operation
+        should look like, where a selective delete would be indistinguishable from
+        tampering (ADR-0004 §6, ADR-0021 §4).
+
+        Raises:
+            ReadTrailError: If the trail cannot be cleared.
         """
         ...
 

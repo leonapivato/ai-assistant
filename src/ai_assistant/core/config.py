@@ -2998,6 +2998,55 @@ class Settings(BaseSettings):
         ),
     )
 
+    # --- The source-read trail (ADR-0185 §6) ------------------------------
+    # The one figure this store takes, and the **only** bound it has: a row cap,
+    # deliberately not a duration. Every other retention figure here is a duration,
+    # and each governs a store whose inflow is bounded by something else — a user
+    # act, a conversation, a measurement window. This store's inflow is a *timer*,
+    # so a duration bound would leave its size a function of read cadence, which is
+    # precisely the quantity ADR-0139 §6's arithmetic is about: "A calendar read on
+    # a five-minute interval is on the order of a hundred thousand rows a year, for
+    # a deployment with one source." A row cap bounds the store no matter how fast
+    # the timer runs. ADR-0185 §14 defers an age bound *beside* it, with the
+    # condition that fires one.
+    #
+    # **There is no unlimited spelling, and the absence is the mechanism** (§6). No
+    # sentinel, no ``none``, no zero, no negative — so no deployment can configure
+    # the unbounded Tier 1 store ADR-0097 §12 objected to. `notification_queue_limit`
+    # already carries the property in its own description and is the right precedent;
+    # `trace_retention` and `notification_retention` both accept ``'none'``, and a
+    # figure this store accepted ``'none'`` for would be "append and see" with a
+    # config key. It is refused **at load** rather than at the first prune, which is
+    # ADR-0077 §1's rule as ADR-0093 §5 quotes it: "A setting the store read would
+    # refuse must fail at load, not at the first observation."
+    #
+    # **The figures are ADR-0185 §6's own**, named there rather than left to the
+    # lane: 200,000 rows by default, and every strictly positive integer below
+    # ``2**63`` admissible — `notification_queue_limit`'s form, which keeps a
+    # configured value inside the domain a store's own count can hold. At ADR-0139
+    # §6's five-minute figure that is about 1.9 years of one ``(source, use)``
+    # stream, or about 7 months if four such streams ran at that cadence: long
+    # enough that a revocation made last year is still answerable, and bounded
+    # whatever happens.
+    #
+    # The store evicts the **earliest-recorded** rows when an append would exceed
+    # this, which is the opposite of `notification_queue_limit`'s choice and right
+    # for the opposite reason (§6): a notification queue holds candidates that have
+    # not happened yet, so dropping the newest loses least, while an audit trail
+    # holds acts that already happened — and a store that refused new rows when full
+    # would, under §5's fail-closed rule, stop the assistant reading sources at all
+    # because a log filled up.
+    source_read_trail_max_rows: _IntegerSetting = Field(
+        default=200_000,
+        gt=0,
+        lt=2**63,
+        description=(
+            "The most source-read records the trail holds; beyond it the earliest "
+            "recorded are pruned rather than a new one refused (ADR-0185 §6). Positive, "
+            "with no unlimited spelling."
+        ),
+    )
+
     @field_validator("send_email_connection", "send_email_endpoint")
     @classmethod
     def _is_not_blank(cls, value: str | None) -> str | None:
