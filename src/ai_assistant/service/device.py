@@ -33,10 +33,12 @@ from ai_assistant.core.errors import ConfigurationError
 from ai_assistant.service.admin import ADMIN_FRAME_BYTES, ADMIN_TIMEOUT, ENROL, LIST, REVOKE
 from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.wire.address import admin_socket_path, socket_path
-from ai_assistant.wire.errors import TransportError
+from ai_assistant.wire.errors import ProtocolError, TransportError
 from ai_assistant.wire.framing import read_frame, write_frame
+from ai_assistant.wire.peer import check_peer_is_self
 
 if TYPE_CHECKING:
+    import socket
     from collections.abc import Sequence
     from pathlib import Path
 
@@ -243,7 +245,7 @@ async def _report_no_control_socket(socket: Path, loopback: Path, *, bound: bool
 
 
 async def _hub_is_serving(loopback: Path) -> bool:
-    """Whether a hub is accepting on ADR-0084 §1's socket, asked and answered at once.
+    """Whether *this user's* hub is accepting on ADR-0084 §1's socket.
 
     The connection carries no frame and is closed immediately: this is a liveness
     probe on the door, not a request, and the hub treats a peer that hangs up
@@ -252,22 +254,44 @@ async def _hub_is_serving(loopback: Path) -> bool:
     reason every other local exchange here is — a wedged hub must not turn a
     diagnostic into a hang.
 
+    **The peer is authenticated from the kernel before the probe counts as
+    evidence** (``wire/peer.py``, ADR-0084 §1). Nothing is sent either way, so the
+    clause's own "before sending anything" is not what compels it here; the reason
+    is that the answer this function's name promises is a claim about *the hub*, and
+    a filesystem path is not proof of who is behind it — §1 names bind mounts, ACLs
+    and symlinked ancestors as the topology a path check walks wrong. Left
+    unauthenticated, another user's process bound at that path would be enough to
+    tell an owner their perfectly good remote configuration was missing, and to say
+    it with the fatal exit code.
+
     Args:
         loopback: Where the hub listens, given the directory it owns.
 
     Returns:
-        ``True`` if something accepted, ``False`` on any refusal, absence or stall.
-        A ``False`` from a stall is deliberate: a hub that cannot accept inside the
-        timeout is not one this command can perform an act against either.
+        ``True`` only if something accepted *and* runs as this user; ``False`` on a
+        refusal, an absence, a stall, a foreign peer, or a platform that cannot say
+        whose peer it is. Every one of those failing to ``False`` is the fail-closed
+        direction ADR-0084 §1 fixes, and it costs nothing here: ``False`` selects
+        the message that names the socket and says to start the hub, which is
+        correct advice in each case — a hub that starts takes the instance lock and
+        rebinds this socket over whatever was squatting on it.
     """
     try:
         async with asyncio.timeout(ADMIN_TIMEOUT.total_seconds()):
             _, writer = await asyncio.open_unix_connection(str(loopback))
     except TimeoutError, OSError:
         return False
-    writer.close()
-    with contextlib.suppress(OSError):
-        await writer.wait_closed()
+    try:
+        raw: socket.socket | None = writer.get_extra_info("socket")
+        if raw is None:  # pragma: no cover — asyncio always supplies one here
+            return False
+        check_peer_is_self(raw)
+    except ProtocolError:
+        return False
+    finally:
+        writer.close()
+        with contextlib.suppress(OSError):
+            await writer.wait_closed()
     return True
 
 
