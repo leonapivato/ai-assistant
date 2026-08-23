@@ -39,6 +39,8 @@ from ai_assistant.service.configuration import (
     CALENDAR_READER_ARMED,
     CALENDAR_READER_SECONDS,
     CONFLICT_SEARCH_LIMIT,
+    CONSOLIDATION_ARMED,
+    CONSOLIDATION_SECONDS,
     CONVERSATION_SWEEP_ARMED,
     CONVERSATION_SWEEP_SECONDS,
     EMAIL_READER_ARMED,
@@ -179,7 +181,11 @@ async def test_the_declared_allowlist_is_exactly_what_two_deployments_produce(
     The armed deployment arms **both** ingestion sources, which is the shape
     ADR-0142 §1 requires of anything that enumerates them: a fixture arming only
     the calendar is what let ``email_reader_interval``'s absence from the list
-    survive to be found live (#1083).
+    survive to be found live (#1083). It arms **consolidation** for the same
+    reason and against the same failure: that job ships disabled, so a fixture
+    leaving it off would exercise only its ``armed`` half and let its
+    ``_seconds`` key be declared-but-unreachable — the state this test's other
+    direction exists to refuse (#1494).
     """
     armed = Settings(
         data_dir=tmp_path / "armed",
@@ -188,12 +194,14 @@ async def test_the_declared_allowlist_is_exactly_what_two_deployments_produce(
         email_source_path=tmp_path / "mail.mbox",
         email_reader_interval=timedelta(minutes=25),
         observation_interval=timedelta(hours=6),
+        consolidation_interval=timedelta(hours=12),
     )
     disarmed = Settings(
         data_dir=tmp_path / "disarmed",
         retention_purge_interval=None,
         conversation_sweep_interval=None,
         observation_interval=None,
+        consolidation_interval=None,
         episode_retention=None,
         trace_retention=None,
         notification_retention=None,
@@ -223,6 +231,11 @@ async def test_a_default_deployment_records_its_effective_figures(settings: Sett
         OBSERVATION_ARMED: False,
         CALENDAR_READER_ARMED: False,
         EMAIL_READER_ARMED: False,
+        # Off on a fresh install (ADR-0083 §7, ADR-0111 §11), and recorded as off
+        # rather than absent — which is the whole point of the pair for this
+        # field, because the shipped default is the *baseline* half of #829's
+        # before-and-after.
+        CONSOLIDATION_ARMED: False,
         SCHEDULER_RUN_BUDGET_SECONDS: timedelta(minutes=5).total_seconds(),
         SCHEDULER_CHUNK_SIZE: 50,
         OBSERVATION_BATCH_SIZE: 20,
@@ -364,11 +377,17 @@ async def test_an_armed_observation_job_dates_the_arming(tmp_path: Path) -> None
     """#829's requirement, in the shape this seam gives it.
 
     ADR-0119 §9 is #829 requirement 2's carrier — "the arming moment is stamped
-    somewhere telemetry can see" — and the live analogue of the consolidation
-    arming #829 anticipates is the observation job, which ships disabled. A
-    restart after arming therefore writes a trace that differs from the previous
-    one in exactly the two keys that moved, which is what makes the before/after
-    datable by diffing consecutive configuration traces.
+    somewhere telemetry can see" — and observation is one of the two jobs on §7's
+    table that ships disabled. A restart after arming therefore writes a trace
+    that differs from the previous one in exactly the two keys that moved, which
+    is what makes the before/after datable by diffing consecutive configuration
+    traces.
+
+    The other one is consolidation, and it is the arming §9's prose names; the
+    test below is this one with that field's name in it. Both are kept, because
+    the property is per field: a pair that reached the list and a ``_pair`` call
+    that was never made look identical from any deployment that does not arm the
+    field in question.
     """
     before = dict((await _recorded(Settings(data_dir=tmp_path / "hub-data"))).metrics)
     after = dict(
@@ -383,6 +402,57 @@ async def test_an_armed_observation_job_dates_the_arming(tmp_path: Path) -> None
     assert OBSERVATION_SECONDS not in before
     assert after[OBSERVATION_ARMED] is True
     assert after[OBSERVATION_SECONDS] == timedelta(hours=6).total_seconds()
+
+
+async def test_an_armed_consolidation_job_dates_the_arming_9_was_written_for(
+    tmp_path: Path,
+) -> None:
+    """#829 requirement 2 on the field ADR-0119 §9 names, not on its analogue.
+
+    §9's prose states the act its carrier exists to date in as many words: "The
+    arming act itself is an operator changing ``consolidation_interval`` from
+    ``None`` to a duration and restarting the hub (#829's third requirement,
+    ADR-0111 §11's 'an implementation lane's act against this text once
+    ratified')." Until that setting existed there was nothing to name, so the list
+    carried the observation pair above and described it as the closest analogue.
+    The setting exists now, and this is the property §9 was written for.
+
+    **It is worth its own case rather than a line on the union test**, because
+    that test asserts a *set of keys* and would stay green if both keys were
+    declared and the value under them never moved. What #829 needs is the
+    before/after difference: a measure computed across the restart that armed this
+    job is two populations reported as one, and diffing consecutive configuration
+    traces is the only thing that says where the boundary falls.
+
+    Both halves of the pair are asserted in both directions, for
+    ``test_a_disabled_job_is_recorded_as_off_and_not_as_absent``'s reason: §3 makes
+    an absent key mean *not observed*, so "off" has to be a recorded ``False``
+    rather than a missing entry, or a hub with this job disabled is
+    indistinguishable from one built before the setting existed.
+    """
+    before = dict((await _recorded(Settings(data_dir=tmp_path / "hub-data"))).metrics)
+    after = dict(
+        (
+            await _recorded(
+                Settings(
+                    data_dir=tmp_path / "hub-data",
+                    consolidation_interval=timedelta(hours=12),
+                )
+            )
+        ).metrics
+    )
+
+    assert before[CONSOLIDATION_ARMED] is False
+    assert CONSOLIDATION_SECONDS not in before
+    assert after[CONSOLIDATION_ARMED] is True
+    assert after[CONSOLIDATION_SECONDS] == timedelta(hours=12).total_seconds()
+    # Exactly the two keys that moved, which is what makes the diff a *date* rather
+    # than a diff: anything else changing between two startups of one deployment
+    # would leave a reader unable to attribute the boundary to this arming.
+    assert {key for key in after if after.get(key) != before.get(key)} == {
+        CONSOLIDATION_ARMED,
+        CONSOLIDATION_SECONDS,
+    }
 
 
 async def test_the_two_notification_nullables_take_the_word_their_null_means(
