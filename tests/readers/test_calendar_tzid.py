@@ -331,6 +331,143 @@ async def test_an_unresolvable_zone_on_a_recurrence_id_suppresses_the_series(
     assert reading.coverage is None
 
 
+# --- an override that cannot be read suppresses rather than vanishes ---------
+
+#: An hourly master over the window, with a correction to its second occurrence.
+#: The correction here is a **cancellation**, which is the shape that makes the
+#: failure legible: if the override is dropped, the source's "this one is off"
+#: becomes "this one is on", from bytes that said the opposite.
+_HOURLY: Final = vevent(
+    f"DTSTART:{utc(NOW)}",
+    "DURATION:PT30M",
+    "RRULE:FREQ=HOURLY;COUNT=2",
+    "SUMMARY:hourly",
+    uid="series",
+)
+
+#: What the master's *first* occurrence renders as — the one no override touches,
+#: and so the one that must survive every case below.
+_FIRST: Final = 'Calendar entry "hourly", on 2026-08-03 from 12:00 to 12:30 (UTC).'
+
+
+@pytest.mark.parametrize(
+    ("lines", "why"),
+    [
+        (
+            ("DTSTART;TZID=Mars/Olympus:20260803T130000", "DURATION:PT30M"),
+            "an unresolvable zone on the override's own DTSTART",
+        ),
+        (
+            (f"DTSTART:{utc(NOW + timedelta(hours=1))}", "DTEND;TZID=Mars/Olympus:20260803T133000"),
+            "an unresolvable zone on the override's own DTEND",
+        ),
+        (
+            ("DURATION:PT30M",),
+            "no usable DTSTART (this shape predates #1491 and is fixed by the same rule)",
+        ),
+        (
+            (f"DTSTART:{utc(NOW + timedelta(hours=1))}", f"DTEND:{utc(NOW)}"),
+            "a negative duration (predates #1491)",
+        ),
+        (
+            (
+                f"DTSTART:{utc(NOW + timedelta(hours=1))}",
+                "DURATION:PT30M",
+                "RRULE:FREQ=DAILY;BYSETPOS=0",
+            ),
+            "an RRULE dateutil refuses (predates #1491)",
+        ),
+    ],
+    ids=["bad-dtstart-zone", "bad-dtend-zone", "no-dtstart", "negative-duration", "bad-rrule"],
+)
+async def test_an_unreadable_override_suppresses_rather_than_un_cancelling(
+    tmp_path: Path, lines: tuple[str, ...], why: str
+) -> None:
+    """Dropping an override proposes the correction's own stale occurrence as current.
+
+    §7b names this outcome directly and calls it worse than omission: "an override
+    is a **correction**, so getting its scope wrong does not merely omit
+    information, it proposes stale information as current". Here the correction is
+    a cancellation, so a dropped override does not lose an occurrence — it
+    *resurrects* one, from a source that said it was off.
+
+    Adversarial review found it on round 1 against the first case. The last three
+    are the same hole reached without any ``TZID`` at all: they were open before
+    #1491 and are closed by the same rule, which is why they are pinned beside it
+    rather than left to be rediscovered.
+    """
+    override = vevent(
+        f"RECURRENCE-ID:{utc(NOW + timedelta(hours=1))}",
+        *lines,
+        "STATUS:CANCELLED",
+        "SUMMARY:called off",
+        uid="series",
+    )
+
+    reading = await _read(tmp_path, _HOURLY, override)
+
+    assert summaries(reading.proposals) == [_FIRST], why
+    assert reading.coverage is None, "a correction the read could not apply (ADR-0117 §5)"
+
+
+async def test_an_unreadable_thisandfuture_override_suppresses_from_its_own_key(
+    tmp_path: Path,
+) -> None:
+    """The range form suppresses that occurrence *and every later one*, not the series.
+
+    §7b's fallback — "where the affected extent is itself unknown, the whole series
+    is suppressed" — is for an override whose ``RECURRENCE-ID`` cannot be read.
+    Here it can: the extent is known even though the replacement values are not, so
+    suppressing the whole series would discard occurrences the correction never
+    reached. The 11:00 occurrence stands.
+    """
+    master = vevent(
+        f"DTSTART:{utc(NOW - timedelta(hours=1))}",
+        "DURATION:PT30M",
+        "RRULE:FREQ=HOURLY;COUNT=3",
+        "SUMMARY:hourly",
+        uid="ranged",
+    )
+    override = vevent(
+        f"RECURRENCE-ID;RANGE=THISANDFUTURE:{utc(NOW)}",
+        "DTSTART;TZID=Mars/Olympus:20260803T120000",
+        "DURATION:PT30M",
+        "SUMMARY:moved somewhere unreadable",
+        uid="ranged",
+    )
+
+    reading = await _read(tmp_path, master, override)
+
+    assert summaries(reading.proposals) == [
+        'Calendar entry "hourly", on 2026-08-03 from 11:00 to 11:30 (UTC).'
+    ]
+    assert reading.coverage is None
+
+
+async def test_a_master_that_cannot_be_read_is_still_skipped_outright(
+    tmp_path: Path,
+) -> None:
+    """The other half of the rule, asserted so the suppression cannot swallow it.
+
+    A master carries no correction, so there is nothing for it to suppress and
+    §7b's plain skip is the whole answer. A change that turned *every* unreadable
+    component into a suppressing entry would leave a master's group with no master,
+    which `_resolve` fails closed on — the same visible outcome by an argument that
+    does not hold.
+    """
+    unreadable = vevent(
+        "DTSTART;TZID=Mars/Olympus:20260803T120000",
+        "DURATION:PT30M",
+        "SUMMARY:no zone",
+        uid="lonely",
+    )
+
+    reading = await _read(tmp_path, _GOOD, unreadable)
+
+    assert summaries(reading.proposals) == [_GOOD_RENDERED]
+    assert reading.coverage is None
+
+
 # --- and what must keep working ----------------------------------------------
 
 
