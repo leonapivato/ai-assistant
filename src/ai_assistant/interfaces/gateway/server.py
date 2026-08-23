@@ -3655,11 +3655,26 @@ def _egress_view(egress: ConfirmationEgress) -> dict[str, Any]:
     of the set and **two** disclosures. A surface showing only the set has hidden a
     disclosure; one showing only the occurrences has shown a list the user must
     deduplicate in their head.
+
+    **``planned_with_external_content`` is ADR-0181 §6's addition beside that floor,
+    and is not a fourth member of it.** §6 extends ADR-0178 §7's first clause "by one
+    fact and changes none of its others", so the three above keep their meaning, their
+    derivation and their order, and this crosses alongside them. It crosses at all
+    because the page cannot obtain it by any other route: ADR-0178 §3 forbids a
+    surface inferring a fact with a rule of its own or reimplementing one in another
+    language, so the value the ruling was taken over is read here, in this process,
+    off the model `core` built, and the page renders what it was handed (#1445).
+
+    **It is one boolean and it is not a verdict.** Nothing here scores, ranks or
+    thresholds it, and no key beside it says what the page should conclude — the
+    wording is the page's to render in both states (§6's fourth clause), and §7's
+    first clause bars any surface from presenting it as a detection.
     """
     return {
         "account_identity": egress.account_identity,
         "destinations": [_destination_view(one) for one in egress.canonical_destination_set],
         "spans": [_span_view(one) for one in egress.spans],
+        "planned_with_external_content": egress.planned_with_external_content,
     }
 
 
