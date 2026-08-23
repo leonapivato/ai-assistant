@@ -54,6 +54,7 @@ import argparse
 import asyncio
 import os
 import signal
+import stat
 import sys
 import time
 from contextlib import contextmanager
@@ -732,6 +733,60 @@ async def _start_and_run(settings: Settings, stop: asyncio.Event, shutdown: _Shu
     return EXIT_OK
 
 
+def _clear_unserved_admin_socket(data_dir: Path) -> None:
+    """Remove a control socket this hub will not serve (#1441).
+
+    **A socket file nothing accepts on is not inert.** Connecting to it is
+    *refused* rather than finding nothing, and that difference is the whole of how
+    ``ai-assistant-device`` tells "the hub has not opened this door yet" from "this
+    hub has no such door". A remotely-configured hub that was killed leaves one
+    behind; started again with the configuration removed, nothing unlinks it,
+    because the only unlink lives in the
+    :meth:`~ai_assistant.service.admin.AdminListener.start` this hub never reaches —
+    and the first answer is then true forever, on a deployment where retrying can
+    never succeed.
+
+    Removing it is safe here for exactly the reason that unlink is safe there:
+    ADR-0083 §1's instance lock has been held since §3's step 2, so nothing else
+    owns this directory. ADR-0124 §2 is not engaged — its clause governs what a hub
+    with no remote-listener configuration *binds*, and this hub still binds only
+    ADR-0084 §1's loopback socket.
+
+    **Only a socket is removed, and that is deliberately stricter than
+    ``AdminListener.start``'s unconditional unlink.** That one *must* clear the path
+    in order to bind, and it reports at the bind if it could not; this one is
+    opportunistic — nothing depends on it — so it has no standing to delete
+    something it did not create. Anything else at the path is left exactly where it
+    is and said out loud, which is also the state ``ai-assistant-device`` now
+    diagnoses in its own words.
+
+    Args:
+        data_dir: The directory this hub owns.
+
+    Raises:
+        OSError: If the entry cannot be removed. Left to propagate, as that unlink's
+            does: ADR-0083 §3 step 3 wants a filesystem access fault to be a
+            stay-down exit wherever in startup it surfaces.
+    """
+    path = admin_socket_path(data_dir)
+    try:
+        occupant = path.lstat().st_mode
+    except FileNotFoundError:
+        return
+    if stat.S_ISSOCK(occupant):
+        path.unlink(missing_ok=True)
+        return
+    _log.warning(
+        "hub_admin_socket_path_occupied",
+        path=str(path),
+        detail=(
+            "something that is not a socket occupies the control socket's path; it is "
+            "left untouched, and a remote listener configured later cannot bind there "
+            "until it is removed"
+        ),
+    )
+
+
 async def _build_remote(
     engine: Engine,
     settings: Settings,
@@ -759,9 +814,9 @@ async def _build_remote(
 
     Returns:
         The apparatus, or ``None`` on a hub with no remote-listener configuration —
-        having first removed any control socket a previous, remotely-configured hub
-        left behind, so that this socket's presence always means *this* hub bound
-        it (#1441; see the comment at the early return).
+        having first removed any control *socket* a previous, remotely-configured hub
+        left behind, so that a socket at that path always means *this* hub bound it
+        (#1441; :func:`_clear_unserved_admin_socket`).
 
     Raises:
         ConfigurationError: If the overlay agent cannot say what this machine is,
@@ -773,19 +828,7 @@ async def _build_remote(
             configuration they set (ADR-0083 §5, ruling 4).
     """
     if settings.hub_remote_address is None:
-        # **A control socket left behind by a previous, remotely-configured hub is
-        # removed rather than left lying** (#1441). This hub does not serve that
-        # door, and a socket file nothing accepts on is not inert: it answers
-        # `ai-assistant-device` with a refusal rather than an absence, which is the
-        # one signal that tells "the hub has not opened this door yet" from "this
-        # hub has no such door" — and left in place it makes the first answer true
-        # forever. `AdminListener.start` already unlinks a stale socket on the path
-        # where it binds one, for the same reason and under the same guarantee: the
-        # instance lock has been held since ADR-0083 §3's step 2, so nothing else
-        # owns this directory. An `OSError` propagates, as that unlink's does —
-        # ADR-0083 §3 step 3 wants a filesystem access fault to be a stay-down exit
-        # wherever in startup it surfaces.
-        admin_socket_path(data_dir).unlink(missing_ok=True)
+        _clear_unserved_admin_socket(data_dir)
         return None
     agent = local_agent(settings.hub_overlay_agent_socket)
     try:
