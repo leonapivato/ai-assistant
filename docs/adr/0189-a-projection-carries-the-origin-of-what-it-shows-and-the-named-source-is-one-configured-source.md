@@ -405,18 +405,31 @@ re-deriving it is how the second half gets dropped.
 > identify the author within a source, and a surface that rendered `reported_by` as
 > though it named a person would assert what this system does not hold.
 
-> **Normative.** A surface rendering a belief, question or retirement whose
-> `rests_on_recorded_external_content` is `True` and whose band is `DERIVED`
-> conveys that the warrant came from outside. It does **not** present the record's
+> **Normative.** A surface conveys that a warrant came from outside where the
+> projected record's band is `DERIVED` and its externality answer is `True` — read
+> from `rests_on_recorded_external_content` beside `band` on a `Belief`,
+> `BeliefSummary` or `Question`, and from
+> `retirement.warrant.rests_on_recorded_external_content` beside
+> `retirement.warrant.band` on a `Retirement`. It does **not** present the record's
 > own content as third-party text on that ground: the content is a sentence this
 > system's model wrote, and ADR-0098 §1 decides externality by the recorded origin
 > of the text.
 
 > **Normative.** ADR-0098 §7's first two clauses are unchanged and are now
-> satisfiable where they were not. A `Retirement`'s `content` is a span this system
-> may not have authored, and a surface presenting it presents it as third-party
-> content under §7 — which, until `Retirement` carried an origin, no surface could
-> do from what it held.
+> satisfiable where they were not. A surface presents a `Retirement`'s `content` as
+> third-party content **exactly when** `retirement.warrant` is present and
+> `retirement.warrant.band` is `ATTESTED`.
+
+> **Normative.** Where `retirement.warrant` is present and its band is `ASSERTED` or
+> `DERIVED`, the `content` is **not** third-party and no surface presents it as such:
+> an asserted retirement is the user's own word (ADR-0038 §1a) and a derived one is
+> this system's own sentence. The clause above governs the text; the clause before it
+> governs the warrant, and neither answers for the other.
+
+> **Normative.** Where `retirement.warrant` is `None` the retired record no longer
+> resolves — `content` is `None` too (§2) — and the surface renders it as *no longer
+> held* (ADR-0045 §6) and asserts nothing about its band, its origin or its source.
+> It renders no third state as `False` and no absence as a value.
 
 > **Normative.** Nothing this section adds is a ranking, ordering or filtering
 > input. Naming a source does not reorder a listing, does not change a band's
@@ -432,14 +445,33 @@ otherwise: "Promising the finer attribution and delivering the coarser one is wo
 than promising the coarser one, because a user who reads 'someone sent you' will
 read the name they are shown as that someone."
 
-**The third clause is where ADR-0098 §7's own round-6 mistake would recur, so it is
-written as a prohibition rather than as an invitation.** That lane accepted a
-finding requiring an externality marker to propagate into the projection, and
-architecture review then found the clause "incoherent, against this ADR's own §1",
-because "A derived proposal's content is a sentence *our* model wrote; the
-attacker's text is nowhere in it." The marker §2 projects is a fact about the
-*warrant*, and a surface that read it as a fact about the *text* would misattribute
-the assistant's own words. The clause above says which one it is.
+**The warrant clause is where ADR-0098 §7's own round-6 mistake would recur, so it is
+written as a prohibition rather than as an invitation.** That lane accepted a finding
+requiring an externality marker to propagate into the projection, and architecture
+review then found the clause "incoherent, against this ADR's own §1", because "A
+derived proposal's content is a sentence *our* model wrote; the attacker's text is
+nowhere in it." The marker §2 projects is a fact about the *warrant*, and a surface
+that read it as a fact about the *text* would misattribute the assistant's own words.
+The clause says which one it is.
+
+**And this document made the same mistake one clause later, which is why the
+third-party rule is now conditional on the band.** An earlier draft ruled that a
+surface "presents [a `Retirement`'s `content`] as third-party content under §7",
+without qualification — so a retirement of the user's own assertion would have been
+rendered as somebody else's words, and a retirement of this system's own inference
+likewise. ADR-0098 §7's first clause is scoped to "every span **its projection
+identifies as external**", and once `warrant` carries the retired record's band the
+projection identifies exactly one of the three that way. Architecture review found it
+on round 3. It is recorded rather than quietly fixed for the reason ADR-0098 §7
+records its own: reaching one layer past what the data supports is a property of
+writing about this subject, and a paragraph warning about it in the abstract does not
+stop the next paragraph doing it.
+
+**Reading the two facts through `warrant` rather than off the `Retirement` is stated
+because an earlier draft did not state it.** `Retirement` carries no `band` and no
+`rests_on_recorded_external_content` of its own — §2 puts both inside `warrant` — so a
+clause naming them bare was not implementable as written. Adversarial review found it
+on round 3, and the access path is now spelled in the clauses themselves.
 
 **What the two live surfaces owe changes, and both currently say they cannot.**
 `interfaces/cli.py`'s `_why` and `gateway/assets/app.js`'s `whyHeld` each tell the
@@ -520,7 +552,9 @@ irreversibly get wrong.
 
 > **Normative.** No component re-uses an identity. Retiring a configured source does
 > not release its identity for a later one, and no deployment re-assigns a bare
-> declared name it has spent.
+> declared name it has spent. **This is a rule about assignment and not a uniqueness
+> proof**: a fresh draw equal to a retired identity is not excluded by it, and §12
+> defers that residual.
 
 > **Normative.** The seam is `Reader.name` and there is no other. ADR-0097 §1 rules
 > that "A grant's subject is a **reader's declared identity** — the value
@@ -760,8 +794,9 @@ ahead of a trigger without guessing at a shape it has no producer for.
 > surfaces — `_why` in `interfaces/cli.py` and `whyHeld` in
 > `gateway/assets/app.js` — so that each names the source and the report instant
 > under §4, and neither continues to state that it cannot show them. It renders a
-> retirement's origin under §4's fourth clause. Its tests assert the rendering, not
-> only that a field is present.
+> retirement under §4's three retirement clauses, taking all three arms — attested,
+> asserted-or-derived, and no longer held. Its tests assert the rendering, not only
+> that a field is present.
 
 > **Normative.** Every value these fields carry is inserted into a surface's output
 > as **data**, neutralised for that target on render (ADR-0042 §4, ADR-0098 §7's
