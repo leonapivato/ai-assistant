@@ -175,7 +175,8 @@ Same panel, same field, same rule: good once, and good for ten minutes.
 
 The value the gateway printed at start has almost certainly gone to the laptop's
 browser already, and it is spent. So mint another one — at the **laptop**, in the
-terminal running the gateway or any other on that machine:
+terminal running the gateway or any other on that machine, as the user that
+started it:
 
 ```bash
 kill -SIGUSR1 3941204
