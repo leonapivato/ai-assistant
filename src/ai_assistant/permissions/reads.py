@@ -152,6 +152,13 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
 #: unbounded, so ``recent`` clamps to this before binding ``LIMIT``.
 _MAX_SQLITE_INT = 2**63 - 1
 
+#: The exclusive upper bound ADR-0185 §6 puts on the cap — "every strictly positive
+#: integer below ``2**63``", which is ``Settings``' own ``lt=2**63`` and is exactly
+#: the width SQLite can bind. Restated here because the cap is bound as the prune's
+#: ``OFFSET`` on **every** append, so a wider one is a store that raises
+#: ``OverflowError`` out of its own error boundary on the first record.
+_MAX_ROWS_EXCLUSIVE = 2**63
+
 #: The only on-disk schema this code understands, recorded in ``meta`` so a future
 #: schema change has a marker to migrate *from*.
 _SCHEMA_VERSION = 1
@@ -248,19 +255,45 @@ class SqliteSourceReadTrail:
                 argument (ADR-0185 §6).
 
         Raises:
-            ValueError: If ``max_rows`` is not strictly positive. ``Settings``
-                refuses it at load; this is the same rule restated where the
-                invariant is actually *used*, exactly as ``UpcomingEventStage``
-                restates its lead window's. A trail built in a test or from a future
-                configuration that reads no setting must not be able to hold a cap
-                that is at capacity before its first append. There is no unlimited
-                spelling and none is accepted here either.
+            TypeError: If ``max_rows`` is not exactly an ``int``. ``bool`` is an
+                ``int`` in Python, so ``max_rows=True`` would otherwise be a trail
+                that holds **one** row — every read but the last pruned away, and a
+                store whose whole point is that "was this source read after I revoked
+                it" has an answer reporting one attempt however many happened. It is
+                the flag-where-a-count-belongs hazard ``Settings``' own
+                ``_exactly_an_integer`` refuses at load, restated here.
+            ValueError: If ``max_rows`` is not strictly positive, or is not below
+                ``2**63``. ``Settings`` refuses both at load; this is the same rule
+                restated where the invariant is actually *used*, exactly as
+                ``UpcomingEventStage`` restates its lead window's. A trail built in a
+                test or from a future configuration that reads no setting must not be
+                able to hold a cap that is at capacity before its first append, and
+                must not be able to hold one **wider than SQLite can bind**: the cap
+                is bound as the prune's ``OFFSET``, and a Python int past that width
+                raises ``OverflowError`` — neither ``ValueError`` nor
+                ``ReadTrailError``, so it would leave this layer's error boundary
+                through a hole, on the first ``record`` rather than at construction.
+                There is no unlimited spelling and none is accepted here either.
             ReadTrailError: If the database cannot be opened or initialised.
         """
-        if max_rows <= 0:
+        # **The type check is what makes the range check mean anything**, and it is
+        # `UpcomingEventStage`'s argument for `lead` applied to a count: `bool` is an
+        # `int`, so `True` passes every comparison below while meaning a cap of one.
+        if type(max_rows) is not int:
             msg = (
-                f"the read trail's cap must be strictly positive, got {max_rows}; there is "
-                f"no unlimited spelling, no sentinel and no zero (ADR-0185 §6)"
+                f"the read trail's cap must be exactly an int, got {max_rows!r} of type "
+                f"{type(max_rows).__name__}; a bool passes every comparison below while "
+                f"meaning a cap of one (ADR-0185 §6)"
+            )
+            raise TypeError(msg)
+        # Clamping is not available here, and that is the difference from `recent`: a
+        # bound above any possible row count is what a caller *asked for* there, while
+        # a cap this store cannot bind is a configuration it cannot honour at all.
+        if not 0 < max_rows < _MAX_ROWS_EXCLUSIVE:
+            msg = (
+                f"the read trail's cap must be strictly positive and below 2**63, got "
+                f"{max_rows}; there is no unlimited spelling, no sentinel and no zero, "
+                f"and a wider cap is one the backing store cannot bind (ADR-0185 §6)"
             )
             raise ValueError(msg)
         self._max_rows = max_rows

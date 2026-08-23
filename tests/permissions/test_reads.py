@@ -357,3 +357,34 @@ async def test_closing_twice_is_not_an_error() -> None:
 
     trail.close()
     trail.close()
+
+
+async def test_a_cap_at_the_widest_bindable_value_still_records() -> None:
+    """The refusal's boundary is in the right place, which a refusal alone cannot show.
+
+    ADR-0185 §6's admissible range is "every strictly positive integer **below**
+    ``2**63``", so ``2**63 - 1`` is admissible and must actually work: the cap is
+    bound as the prune's ``OFFSET`` on every append, so a store that refused one step
+    too early would be rejecting a configuration the ADR permits, and one that
+    refused one step too late would raise ``OverflowError`` out of its own error
+    boundary. Only driving a record at the edge distinguishes the three.
+    """
+    trail = SqliteSourceReadTrail(path=":memory:", max_rows=2**63 - 1)
+    try:
+        assert await trail.record(source_read_record(record_id="r-1")) == "r-1"
+        assert [row.id for row in await trail.export()] == ["r-1"]
+    finally:
+        trail.close()
+
+
+@pytest.mark.parametrize("cap", [1.0, "5"], ids=["a float", "a string"])
+def test_a_cap_that_is_not_an_integer_at_all_is_refused(cap: object) -> None:
+    """The exact-type guard, beyond the ``bool`` case the shared suite drives.
+
+    ``Settings`` refuses these at load through ``_exactly_an_integer``; this store
+    holds the figure and restates the rule where it is used, so a trail built from a
+    configuration that reads no setting — a test, a future composition — cannot hold
+    a cap the comparisons below would answer nonsense for.
+    """
+    with pytest.raises(TypeError, match="exactly an int"):
+        SqliteSourceReadTrail(path=":memory:", max_rows=cap)  # type: ignore[arg-type]  # the subject

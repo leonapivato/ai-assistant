@@ -683,6 +683,37 @@ class SourceReadTrailContract(SourceReadRecorderContract):
             async with self.bounded(cap):
                 pass  # pragma: no cover — construction is the subject
 
+    async def test_a_cap_wider_than_the_admissible_range_is_refused(self) -> None:
+        """ADR-0185 §6's other edge: "every strictly positive integer **below** 2**63".
+
+        That is ``Settings``' own ``lt=2**63``, and it is not decoration. A durable
+        store binds the cap as its prune's ``OFFSET`` on every append, and a Python
+        int past that width raises ``OverflowError`` — neither ``ValueError`` nor
+        ``ReadTrailError``, so it leaves the implementation's error boundary through
+        a hole, on the **first record** rather than at construction. Refused where
+        the invariant is used, on ``UpcomingEventStage``'s pattern for its lead
+        window, so a trail built from a configuration that reads no setting cannot
+        hold a cap it could not honour.
+        """
+        with pytest.raises(ValueError, match=r"2\*\*63"):
+            async with self.bounded(2**63):
+                pass  # pragma: no cover — construction is the subject
+
+    async def test_a_cap_that_is_not_exactly_an_integer_is_refused(self) -> None:
+        """``bool`` is an ``int``, so ``True`` is a cap of **one** (ADR-0185 §6).
+
+        A trail holding one row prunes every read but the last, so the store whose
+        whole point is that "was this source read after I revoked it" has an answer
+        would report one attempt however many happened — a flag loaded where a count
+        belongs, which ``Settings``' own ``_exactly_an_integer`` refuses at load and
+        which ``tests/core/test_config.py``'s integer roster acknowledges by name.
+        Requiring the exact type *is* the guarantee, exactly as it is for
+        ``UpcomingEventStage``'s lead window.
+        """
+        with pytest.raises(TypeError, match="exactly an int"):
+            async with self.bounded(True):
+                pass  # pragma: no cover — construction is the subject
+
     # --- erasure -----------------------------------------------------------
 
     async def test_clear_erases_everything_and_reports_how_much(
