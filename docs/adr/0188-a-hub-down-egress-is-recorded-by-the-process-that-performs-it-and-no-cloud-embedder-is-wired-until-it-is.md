@@ -206,10 +206,11 @@ opener and no second door.
 > the hub, and gains no Protocol, no `core/` type and no conformance suite; nothing
 > under `src/ai_assistant/` imports it in order to read it.
 
-> **Normative.** It is **append-only and never amended in place**. What is written
-> is never rewritten, truncated or removed, and a fact established after a run has
-> begun — its outcome — is *added* to the artifact rather than edited over what was
-> already there.
+> **Normative.** It is **append-only and never amended in place**. What is written is
+> never rewritten, never truncated, and never removed in part; a fact established
+> after a run has begun — its outcome — is *added* to the artifact rather than edited
+> over what was already there. The **only** removal permitted is the user's erasure of
+> the artifact as a whole, below.
 
 > **Normative.** It is **legible without this system**: an operator or a user can
 > read it with ordinary tools, and copying the artifact is what satisfies ADR-0004
@@ -217,9 +218,11 @@ opener and no second door.
 
 > **Normative.** **Nothing prunes it.** It has no cap, no retention duration and no
 > eviction rule, and no lane adds one on the strength of ADR-0185 §6. The user's
-> ADR-0004 §6 erasure right over it is erasure of the whole artifact, which is
-> ADR-0021 §4's shape read one artifact over: the user may burn the book; nobody may
-> tear out a page.
+> ADR-0004 §6 erasure right over it is exercised on the **whole artifact and only on
+> the whole artifact** — all of it goes or none of it does, at the user's direction and
+> never at the system's. That is the one exception to the no-removal clause above, and
+> it is ADR-0021 §4's shape read one artifact over: the user may burn the book; nobody
+> may tear out a page.
 
 > **Normative.** **The encoding is not ruled here.** The artifact's serialisation
 > format, its framing and recovery rules, how a run is identified, and how a reader
@@ -274,9 +277,17 @@ versions. Growth has to be the cheap direction.
 ### 4. What the record carries, and what "reconstructible" means for an act performed while the hub is down
 
 > **Normative.** "Reconstructible", for an act performed while the hub is stopped,
-> means the record is **complete at the moment of the act and readable without the
-> hub**. No clause of this ADR makes reconstructibility depend on a later process
-> running, on the hub starting again, or on any store being opened.
+> means the record is **written by the actor at the act and readable without the
+> hub**: the authorisation facts below are complete and durable before the first
+> record leaves the device, and the outcome facts complete the run's record where the
+> process survived to write them (§5). No clause of this ADR makes reconstructibility
+> depend on a later process running, on the hub starting again, or on any store being
+> opened.
+
+> **Normative.** A run's record is **complete** only when both sets of facts are
+> durably recorded. Where the process did not survive to record the outcome facts, the
+> record is incomplete and §5's reading governs it — which is a reconstruction of what
+> is knowable about the act, not a failure of this clause.
 
 > **Normative.** A run's record yields, from the artifact alone, these
 > **authorisation facts**: the configured target — the `EmbedderKind` member, the
