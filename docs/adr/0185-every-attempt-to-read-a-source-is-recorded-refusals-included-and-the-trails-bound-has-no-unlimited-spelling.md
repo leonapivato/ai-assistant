@@ -179,11 +179,21 @@ whether a source may be read.
 
 > **Normative.** A **cancellation delivered from outside** ends an attempt without
 > an outcome. It is delivered onward unchanged, is never converted into an outcome,
-> and the driver awaits no recorder on that path; the attempt is not recorded. This
-> is `core/protocols.py`'s cancellation clause and ADR-0093 §8's carve-out applied
-> to the recording seam, and it is the one case in which an attempt begins and no
-> row follows by design (§5 governs the other, which is a fault rather than a
-> design).
+> and the driver starts no new recorder call on that path. This is
+> `core/protocols.py`'s cancellation clause and ADR-0093 §8's carve-out applied to
+> the recording seam.
+
+> **Normative.** Whether a cancelled attempt left a row is **indeterminate where
+> the cancellation landed inside a recorder call already in flight**, and no
+> component may assume either way: ADR-0060's clause that "a cancelled write may or
+> may not have committed. The caller may assume neither" binds this seam as it binds
+> every other. Where the cancellation landed before any recorder call began, no row
+> exists.
+
+> **Normative.** No consumer reads the **absence** of a row as evidence that a read
+> did not happen. The trail states what it holds, and §5 and the clause above name
+> the paths on which a read can have run with no row; §6's horizon is a third. No
+> surface may present a source with no rows as a source that was never read.
 
 > **Normative.** Whether the source was opened is a **total function of `outcome`**
 > and is not a field. `REFUSED` and `UNANSWERED` mean nothing was opened —
@@ -420,37 +430,93 @@ substitutable at a glance.
 > guaranteed instead is the consequence — **nothing durable, nothing in a prompt and
 > nothing in a notification comes of a read the trail does not hold.**
 
-**Fail-closed here is not decoration; it is what makes ADR-0004 §7 a rule rather
-than a hope.** The charter conditions *access* on a record of it, and a system that
-keeps what it read when it could not record the reading has kept Tier 1 data outside
-the trail its charter puts it in. Discarding is also the act the corpus already
-reaches for in the neighbouring case: ADR-0097 §5's re-check discards a reading whose
-grant has gone, and ADR-0097 §5a accepts the residual — bytes read into a worker's
-memory and dropped — as small "in exactly the way this subject makes it small".
+#### 5a. Two paths on which a read can run unrecorded, and what they are not
 
-**The residual is the same one, and the reason it cannot be closed is worth stating
-rather than hiding.** A read whose record could not be written still *happened*: the
-file was opened on the worker ADR-0093 §7 gives the reader, and no clause here can
-un-read it. Nor can the failure record itself: the only durable place a recorder
-fault could be written is the recorder that just failed. So the guarantee available
-is over the *effects* of the read and not over the existence of its row, which is the
-same shape of honesty ADR-0097 §5a takes about its own in-flight case. An operator
-still learns of it, through the driver's failure posture — a logged fault under
-ADR-0083 §7 for a scheduled read, an absent facet under ADR-0008 §4 — which is a
+Naming them together, in one place, so no reader has to assemble them and no lane can
+cite one as licence:
+
+1. **The recorder raised** (§5). The read ran; the row was attempted and refused.
+2. **A cancellation landed after the read began** (§1). Where it landed inside a
+   recorder call already in flight, whether the row exists is indeterminate under
+   ADR-0060; where it landed earlier, no row exists.
+
+> **Normative.** Neither path is an **exception** to ADR-0004 §7. This ADR amends,
+> narrows and supersedes nothing of that section: its requirement that access to
+> Tier 0/1 data be recorded in an audit trail stands at exactly the width it has
+> always had, and the two paths above are places the mechanism does not reach rather
+> than places the obligation does not apply.
+
+> **Normative.** No lane, ADR or implementation cites this ADR as authority to leave
+> a source access unrecorded, and none cites either path as a precedent for skipping
+> a record it could have written. Closing either needs a mechanism, not a permission.
+
+**Why that is the honest classification and not a dodge.** ADR-0004 §7 states an
+obligation on the design, and no store in this tree makes an obligation of that kind
+unconditional under fault. `AuditTrail.record` raises too, and
+`orchestration/runner.py` answers it the same way this ADR answers its own — the act
+does not proceed, the `AuditError` propagates — and ADR-0021 declared no supersession
+of §7 for it. Every partial supersession ADR-0004's Status line actually records
+against §7 — ADR-0124's, ADR-0126's, ADR-0172's — is of its **gating** clause, and
+each is a whole act or context in which the gate structurally *cannot* run.
+ADR-0126 §11 makes the distinction in its own title: "ADR-0004 §7's gate cannot reach
+this act, so it is superseded for it rather than left engaged and unmet." Here the
+recording half **does** reach the act, on every path but two faults. §7 is engaged and
+met, and where the mechanism fails it is engaged and unmet — which is a defect to
+close, not a decision to record on ADR-0004.
+
+**Fail-closed is what keeps the unmet case from also being an undetected one.** The
+charter conditions *access* on a record of it, and a system that keeps what it read
+when it could not record the reading has kept Tier 1 data outside the trail its
+charter puts it in. Discarding is the act the corpus already reaches for in the
+neighbouring case: ADR-0097 §5's re-check discards a reading whose grant has gone, and
+ADR-0097 §5a accepts the residual — bytes read into a worker's memory and dropped —
+as small "in exactly the way this subject makes it small".
+
+**Why path 1 cannot be closed here.** A read whose record could not be written still
+*happened*: the file was opened on the worker ADR-0093 §7 gives the reader, and no
+clause here can un-read it. Nor can the failure record itself — the only durable place
+a recorder fault could be written is the recorder that just failed, which §14 defers
+with the condition that would fire a second, independent sink. So the guarantee
+available is over the *effects* of the read rather than the existence of its row,
+which is the same shape of honesty ADR-0097 §5a takes about its own in-flight case. An
+operator still learns of it through the driver's failure posture — a logged fault
+under ADR-0083 §7 for a scheduled read, an absent facet under ADR-0008 §4 — which is a
 signal rather than a record and is not offered as one.
+
+**Recording the row *before* the read, which would close path 1 completely, is not
+available.** It would put an `await` between the `live()` answer and `Reader.read()`,
+and ADR-0097 §5 forbids exactly that: "the check and the start of the read are one
+synchronous step". Moving it before `live()` instead buys a two-row protocol with a
+correlation id, doubles the store for the refusals that never open anything, and is
+weighed in Alternatives considered.
 
 **Ordering matters and is fixed in one direction only.** The record is written after
 the re-check because a single row must carry the outcome, and the outcome is not
 known before. Writing a row first and amending it after would be the mutation §6
 forbids, in the store whose value is that it is not mutated.
 
-**The cancellation carve-out is §1's, and it lands here.** A driver whose
-`live()` or `read()` is cancelled from outside delivers the cancellation onward
-unchanged and does **not** await the recorder on the way out — awaiting anything on a
-cancellation path is the conversion `core/protocols.py`'s preamble forbids, and
-ADR-0093 §8 spells out the harm in this subject's own terms: both consumers would
-treat a caller's own cancellation as a degraded source, on a shutdown (ADR-0083 §4)
-that was working correctly. The attempt leaves no row, and nothing came of it.
+**Why path 2 is stated three ways rather than one.** A cancellation can land in three
+places, and only two of them are the same. Before `read()` is called nothing was
+opened, so there is no access to record and ADR-0004 §7 does not reach it. During
+`read()` the source may have been opened by the worker ADR-0093 §7 abandons, and no
+row is written: the driver starts no recorder call on the way out. Inside a recorder
+call already in flight the row **may or may not exist**, because ADR-0060 rules that
+"a cancelled write may or may not have committed. The caller may assume neither, and
+in particular may not assume the write did not land" — so the trail may hold a
+perfectly good row for an attempt whose driver never learned it landed, and nothing
+may treat that row as spurious or the absence of one as proof.
+
+**Why the driver does not start a fresh recorder call on the way out.** ADR-0060's
+preamble does permit a bounded deferral to make resources safe, so a shielded write
+is not forbidden outright — it is refused on the grounds ADR-0093 §8 and ADR-0083 §4
+give. A cancellation in this system is a shutdown or an abandoned assembly rather than
+an event about the source, and ADR-0093 §8 spells out the harm of treating it as one:
+both consumers would treat "a caller's own cancellation as a degraded source, on a
+shutdown (ADR-0083 §4) that was working correctly". Adding an await to the teardown
+path to record a non-event is the trade ADR-0083 §4 designed against, and the read a
+deadline abandons is *not* in this class anyway — `calendar_read_timeout` raises
+`ReaderError` rather than cancelling, which is a `FAILED` row like any other. Refused
+in Alternatives considered.
 
 ### 6. The bound: a row cap with no unlimited spelling, pruned oldest-first
 
@@ -672,14 +738,15 @@ cap are gone. That is the cost of the bound ADR-0139 §6 requires, and there is 
 arrangement that has both. `export()` therefore delivers the horizon rather than the
 history, and ADR-0004 §6's export right is satisfied to that extent and no further.
 
-**A third narrowing, and it is the one a lane must not read past.** Two attempts
-leave no row at all, by §1 and §5: one cancelled from outside, and one whose recorder
-raised. Neither is a read the trail can reconstruct, and neither is offered as one —
-what §5 guarantees about the second is that nothing came of it, and a cancellation
-under §1 is a shutdown rather than a read. So the exit's "every read" is measured in
-§11 over attempts the harness drove **to an outcome with a recorder that answered**,
-which is what an arm can actually assert, and the two excluded cases are asserted for
-their own property instead (arm (e)).
+**A third narrowing, and it is the one a lane must not read past.** §5a names two
+paths on which a read can run with no row — a recorder that raised, and a
+cancellation after the read began — and neither is a read the trail can be relied on
+to reconstruct. What holds on both is the consequence rather than the record: nothing
+came of them. So the exit's "every read" is measured in §11 over attempts the harness
+drove **to an outcome with a recorder that answered**, which is what an arm can
+actually assert, and §5a's paths are asserted for their own property instead (arm
+(e)). Neither narrowing is an exception to ADR-0004 §7, which §5a rules on
+normatively.
 
 **Where "origin included" lands is §3 on the read side and ADR-0181 §2 with ADR-0184
 §2 on the egress side**, and the two are different kinds of answer for the reason §3
@@ -719,12 +786,15 @@ no key, and the exit test does not ask them to.
 > `source_read_trail_max_rows` and asserts that the row count never exceeds the cap
 > and that the survivors are the most recently recorded.
 
-> **Normative.** **Arm (e) — the two attempts that leave no row.** A run drives one
-> attempt whose recorder raises and one cancelled from outside, and asserts of each
-> that nothing was proposed, no facet was contributed and no candidate was
-> concluded; the cancelled one additionally asserts that the cancellation propagated
-> unconverted. Neither is counted against arm (a)'s completeness figure, because
-> §1 and §5 rule that neither is recorded.
+> **Normative.** **Arm (e) — the two attempts §5a names.** A run drives one attempt
+> whose recorder raises, one cancelled while `read()` is outstanding, and one
+> cancelled inside a recorder call already in flight. It asserts of each that
+> nothing was proposed, no facet was contributed and no candidate was concluded, and
+> of the two cancelled ones that the cancellation propagated unconverted. **It
+> asserts nothing about whether a row exists** for the third: ADR-0060 makes that
+> indeterminate, and an arm that pinned it either way would pin what the contract
+> refuses to promise. None of the three is counted against arm (a)'s completeness
+> figure.
 
 > **Normative.** The five figures, each reported with its denominator:
 > **unrecorded-read count** — over arm (a)'s run, attempts driven minus records
@@ -758,11 +828,11 @@ leave them unexercised in the state that matters. Driving them needs a grant sea
 that can be made to answer `None` and to raise on demand, which
 `ai_assistant.testing`'s `FakeSourceGrants` is for.
 
-**Arm (e) exists because the honest answer to "is every read recorded" is "no, and
-here is what holds instead".** §5's guarantee is over the *effects* of an unrecorded
-read, and an exit test that only counted rows would never touch it — leaving the one
-clause that carries the fail-closed property unexercised while the milestone closed
-on four green figures.
+**Arm (e) exists because the honest answer to "is every read recorded" is "on every
+path but the two §5a names, and here is what holds on those".** §5's guarantee is over
+the *effects* of an unrecorded read, and an exit test that only counted rows would
+never touch it — leaving the one clause that carries the fail-closed property
+unexercised while the milestone closed on four green figures.
 
 ### 12. The contract surface owed, and what the implementing lane owes
 
@@ -897,8 +967,28 @@ widely?
   is owed on ADR-0097.
 - **ADR-0004 §7.** This ADR builds the recording half for one subject. §7's sentence
   is unchanged, and a reader of it acts identically: access is gated and recorded.
-  What changes is that for source access the second half now has an implementation
-  to point at. No record is owed.
+  What changes is that for source access the second half now has an implementation to
+  point at. No record is owed.
+
+  **This was put to the ADR-0070 §1 test directly, because §5a names two paths on
+  which a read can run with no row, and a reviewer read that as a scoped exception.**
+  It is not one, on three grounds, and §5a's clause states the conclusion normatively
+  so that no later lane has to re-derive it. *First*, nothing in this ADR permits an
+  implementation to skip a record: a reader holding only ADR-0004 §7 would build gate
+  plus record, which is exactly what §5 requires, and would read no clause of §7 more
+  narrowly afterwards. *Second*, an obligation that a mechanism can fail to meet
+  under fault is not thereby narrowed — `AuditTrail.record` raises too, and
+  `orchestration/runner.py` answers with the same posture §5 takes here while
+  ADR-0021 declared no supersession of §7 for it. Holding otherwise would make every
+  audit obligation in the corpus retroactively superseded by its own error class.
+  *Third*, the shape the corpus actually uses for a genuine exception is visibly
+  different: every partial supersession ADR-0004's Status line records against §7 —
+  ADR-0124's, ADR-0126's, ADR-0172's — is of its **gating** clause, and each names a
+  whole act or context in which the gate structurally cannot run. ADR-0126 §11 states
+  the discriminator in its own title: the gate "cannot reach this act, so it is
+  superseded for it rather than left engaged and unmet". §7's recording half reaches
+  this act. Where the mechanism fails, §7 is engaged and unmet, which is a defect
+  ADR-0004 keeps the standing to name.
 - **ADR-0093 §5.** §8 above restates its no-cursor clause about a store ADR-0093 did
   not know of. Restating an obligation over a new subject adds one; it does not widen
   the original, which is about a sensor's bound and stays exactly that. No record is
@@ -930,10 +1020,9 @@ supplies no obligation of its own (ADR-0089 §3).
   recording that the first was unreachable — a decision with a cost and a consumer
   neither of which exists, and not one to reach for by adding a table to the store it
   is supposed to be independent of.
-- **Recording a cancelled attempt.** §1 excludes it because a driver may await
-  nothing on a cancellation path. Fires with a mechanism for durable, non-awaiting
-  recording, which nothing in this tree has and which ADR-0083 §4's shutdown design
-  is the reason nobody wants.
+- **Recording a cancelled attempt** (§5a's path 2). Fires with a mechanism for
+  durable recording that costs the teardown path nothing — nothing in this tree has
+  one, and ADR-0083 §4's shutdown design is why a shielded write is not it.
 - **A retention duration beside the row cap.** Fires when a deployment needs an *age*
   bound rather than a *size* one — the likeliest being a legal or policy retention
   ceiling, which is a different obligation from ADR-0097 §12's.
@@ -953,7 +1042,9 @@ supplies no obligation of its own (ADR-0089 §3).
 
 **Easier.** "Was this source read after I revoked it" acquires an answer, and it is
 durable and exportable rather than a log line nobody kept. ADR-0004 §7's recording
-half exists for source access for the first time. ADR-0097 §5a's in-flight residual
+half acquires a mechanism for source access for the first time — met on every path
+but the two §5a names, and neither of those is an exception to it. ADR-0097 §5a's
+in-flight residual
 stops being invisible: a `DISCARDED` row says it happened. `SourceGrants.live`'s
 record-returning shape acquires the consumer ADR-0097 §10 wrote it for. And milestone
 24's read half becomes measurable by five figures that are zero by construction.
@@ -1017,6 +1108,31 @@ from.
 carried.** Refused in §2. It is not knowable when §5 requires the row to be written,
 it differs per use in a way no single integer expresses, and it would make the trail
 a partial account of memory's decisions rather than a complete account of the read.
+
+**Declare a partial supersession of ADR-0004 §7 for the two paths §5a names.**
+Refused in §5a and argued in §13. It would be the wrong record on ADR-0070 §1's test
+— nothing in §7 is read more narrowly afterwards — and it would set a precedent that
+an obligation is superseded wherever its mechanism has an error path, which is every
+audit obligation in this corpus including ADR-0021's own. The three supersessions
+ADR-0004's Status line actually records against §7 are of its *gating* clause and
+each names a context the gate cannot structurally reach; §5a's paths are faults in a
+mechanism that does reach.
+
+**Write the row before the read, so no access can precede its record.** Refused in
+§5a: an `await` there is what ADR-0097 §5 forbids between the `live()` answer and
+`Reader.read()`. Moving the pre-row ahead of `live()` avoids that clause and costs a
+two-row protocol with a correlation id, a second write on the hot path, a doubled
+store — the 105,120 yearly refusals that open nothing would each cost two rows — and
+a new class of half-recorded attempt whose outcome row never arrived. It buys a
+narrower version of the same residual rather than none.
+
+**Shield the recorder write across an external cancellation.** Refused in §5a.
+ADR-0060's preamble permits a bounded deferral, so this is available rather than
+forbidden; it is declined because a cancellation here is a shutdown or an abandoned
+assembly rather than an event about the source (ADR-0093 §8), and adding an await to
+ADR-0083 §4's teardown path to record a non-event is the trade that design was made
+against. The read a *deadline* abandons is not in this class: it raises `ReaderError`
+and lands as a `FAILED` row.
 
 **Bound the store with a duration instead of a row count.** Refused in §6: this
 store's inflow is a timer, so a duration leaves its size a function of read cadence,
