@@ -59,7 +59,7 @@ know it.
 socket **only when the remote listener is on**, because enrolling devices is
 only meaningful when there is a door for them to arrive at — so
 `ai-assistant-device` does not work on a hub that has not been through this
-step, and today it misdiagnoses that as the hub not running (#1441).
+step, and says so rather than reporting the hub as not running.
 
 ## 2. Enrol the client, at the hub
 
@@ -194,11 +194,11 @@ variables win, always.
 
 **`device: no hub is listening at …/admin.sock`.** It talks to the hub's admin
 socket in the data directory, so it must run on the hub's machine, in a
-directory whose `.env` names that data directory, with the hub running. And the
-hub must have been through step 1: that socket is bound only when the remote
-listener is configured on, so a running hub with no `ASSISTANT_HUB_REMOTE_ADDRESS`
-produces this same message (#1441) and starting the hub again — which is what
-the message suggests — does not help.
+directory whose `.env` names that data directory, with the hub running. If the
+hub *is* running you get the other message instead — *“a hub is running here …
+but it bound no control socket … because it has no remote listener
+configured”* — which means the hub has not been through step 1: that socket is
+bound only when the remote listener is configured on.
 
 **The client is enrolled but nothing works after a machine rename.** The
 identity is the overlay's stable node identifier, not a name or an address, so

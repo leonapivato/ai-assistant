@@ -1363,12 +1363,70 @@ def test_main_reports_a_settings_failure_as_a_deployment_fault(
 
     monkeypatch.setattr(hub, "load_settings", _load)
 
-    code = hub.main()
+    # An explicit empty command line, not the process's: ``argv=None`` reads
+    # ``sys.argv``, which under pytest is pytest's own arguments.
+    code = hub.main([])
 
     assert code == EXIT_DEPLOYMENT
     stderr = capsys.readouterr().err
     assert "unknown log level" in stderr
     assert "will not be fixed by restarting" in stderr
+
+
+# --- The command line, which exists in order to refuse (#1437) ---------------
+
+
+def test_help_prints_and_exits_without_reaching_a_data_directory(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``--help`` is help, not a start (#1437).
+
+    Before this, ``main`` parsed nothing, so ``ai-assistant-hub --help`` started a
+    hub — on a machine already running one it contended for the instance lock and
+    said so, and on one that was not it simply ran in the foreground. The parser
+    is in front of ADR-0083 §3's step 1 rather than inside it, so the assertion
+    that matters is the negative one: settings were never loaded, which is the
+    step that names a data directory at all.
+    """
+
+    def _never() -> Settings:  # pragma: no cover — reaching it is the failure
+        msg = "settings were loaded, so --help was on the path that starts a hub"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(hub, "load_settings", _never)
+
+    with pytest.raises(SystemExit) as raised:
+        hub.main(["--help"])
+
+    assert raised.value.code == 0
+    printed = capsys.readouterr().out
+    assert "ai-assistant-hub" in printed
+    assert "ASSISTANT_DATA_DIR" in printed
+
+
+def test_an_argument_the_hub_does_not_take_is_refused_rather_than_ignored(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The half of #1437 that is a behaviour change rather than a convenience.
+
+    ``ai-assistant-hub --data-dir /somewhere`` used to run against whatever the
+    environment said while appearing to have been told otherwise — a flag silently
+    losing to a setting. The hub takes its configuration from ``ASSISTANT_*`` and
+    ``.env`` and takes nothing from the command line, so the parser's whole job is
+    to say so at the point the mistake is made.
+    """
+
+    def _never() -> Settings:  # pragma: no cover — reaching it is the failure
+        msg = "settings were loaded, so an unknown flag started a hub"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(hub, "load_settings", _never)
+
+    with pytest.raises(SystemExit) as raised:
+        hub.main(["--data-dir", "/somewhere"])
+
+    assert raised.value.code == 2
+    assert "--data-dir" in capsys.readouterr().err
 
 
 # --- ADR-0124 §2: the remote listener is off unless it is configured on ------
