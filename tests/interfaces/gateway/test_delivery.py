@@ -10,14 +10,13 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
 from ai_assistant.core.errors import NotificationBudgetError, NotificationOutboxError
 from ai_assistant.core.types import DataTier, NotificationCandidate, NotificationDelivery
-from ai_assistant.interfaces.gateway import streams
-from ai_assistant.interfaces.gateway.delivery import DeliveryFanOut, DeliveryStream, write_stream
+from ai_assistant.interfaces.gateway.delivery import DeliveryFanOut, DeliveryStream
 from ai_assistant.testing import FakeAssistantEngine
 from ai_assistant.wire.errors import HubUnavailableError
 
@@ -181,107 +180,6 @@ async def test_an_abandoned_stream_says_so_to_whoever_is_writing_on_it() -> None
 
     assert stream.abandoned.is_set()
     assert stream.offer({"kind": "alive"}) is False
-
-
-class _Blocked:
-    """A connection whose peer has stopped reading: writes land, drains never return.
-
-    Exactly the shape §4's abandonment clause is written about — "a browser that has
-    stopped reading fills the socket's window and a bare ``drain`` on it never
-    returns" — and the one a loopback socket cannot produce, because the kernel's own
-    buffer absorbs everything a test writes.
-    """
-
-    def __init__(self) -> None:
-        """Take nothing and hold every write."""
-        self.written: list[str] = []
-
-    def write(self, payload: bytes) -> None:
-        """Accept a write, as a transport with buffer left does."""
-        self.written.append(payload.decode("utf-8").strip())
-
-    async def drain(self) -> None:
-        """Never return, as a drain on a peer that has stopped reading does not."""
-        await asyncio.Event().wait()
-
-
-async def test_the_opening_write_is_drained_before_any_other_value_is_written() -> None:
-    """§4, and the clause adversarial review blocked an earlier draft of this lane for.
-
-    "A write that has not completed when the next value is due on that stream is
-    abandoned and the stream is ended", and the gateway "holds at most one value
-    pending per stream and queues nothing behind one". The draft wrote the opening
-    value and entered the loop, so a delivery arriving before it reached the peer was
-    written on top of it — two values outstanding on one connection.
-
-    Here the opening write is raced against abandonment like every other, so a delivery
-    due while it is still in flight waits in the **pending slot** and never reaches the
-    wire. One value pending, one in flight, nothing queued behind either.
-
-    **It is not seeded into the slot instead**, which is the other draft: filling the
-    slot at :meth:`DeliveryFanOut.open` ends freshly opened streams, because the slot
-    is full before the connection handler has been scheduled and a delivery returning
-    in that window meets it. §4's abandonment is for a browser that stops reading, not
-    for one the event loop has not reached.
-    """
-    stream = DeliveryStream()
-    writer = _Blocked()
-    writing = asyncio.ensure_future(
-        write_stream(
-            cast("asyncio.StreamWriter", writer),
-            stream,
-            frame=streams.encode,
-            opening={"kind": "open"},
-        )
-    )
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-
-    # A delivery is due while the opening write is still outstanding. The slot is
-    # empty, so it is taken rather than refused — and it does not reach the wire.
-    assert stream.offer({"kind": "notification"}) is True
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-    assert writer.written == ['{"kind": "open"}']
-
-    # And abandonment is what ends it, on the clause's own terms.
-    stream.abandon()
-    await writing
-
-    assert writer.written == ['{"kind": "open"}']
-
-
-async def test_a_stream_whose_opening_write_stalls_is_abandoned_by_the_next_value() -> None:
-    """The abandonment actually arrives, rather than being a decision nobody carries out.
-
-    A browser that has not taken its opening value holds the slot from the moment the
-    first delivery lands in it, so the *second* value due meets a full slot, the fan-out
-    abandons the stream, and the writer's race completes. That is the same schedule
-    every other stalled write is abandoned on — one value later — and it is what keeps
-    a stopped browser from delaying another's delivery.
-    """
-    stream = DeliveryStream()
-    writer = _Blocked()
-    writing = asyncio.ensure_future(
-        write_stream(
-            cast("asyncio.StreamWriter", writer),
-            stream,
-            frame=streams.encode,
-            opening={"kind": "open"},
-        )
-    )
-    await asyncio.sleep(0)
-    await asyncio.sleep(0)
-
-    assert stream.offer({"kind": "notification"}) is True
-    # The fan-out's own rule: a refused offer is an abandoned stream.
-    if not stream.offer({"kind": "alive"}):
-        stream.abandon()
-
-    await writing
-
-    assert stream.abandoned.is_set()
-    assert writer.written == ['{"kind": "open"}']
 
 
 # --- §4: one delivery, every open stream -------------------------------------

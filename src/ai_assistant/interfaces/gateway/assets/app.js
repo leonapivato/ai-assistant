@@ -57,26 +57,26 @@
 const STORAGE_KEY = "assistant.session.header-half";
 const CONVERSATION_KEY = "assistant.session.conversation-id";
 
-// The cadence a delivery stream is written at, as the gateway last disclosed it — a
-// whole number of microseconds, spelled as a decimal string (#1442, ADR-0175 §4, §8).
+// The response header a delivery stream states its own keep-alive cadence in, as a
+// decimal count of microseconds (#1442, ADR-0175 §4, §8).
 //
-// **Held here rather than only in page state, because a stream is armed before it can
-// disclose anything.** The figure arrives as the first value on a delivery stream, so
-// it bounds *that* stream from the moment it lands — but the failure this exists for
-// is a `fetch` that never settles at all, on which no value can arrive, and the first
-// thing `showConsole` does on load is open one. Remembering the last figure this
-// origin disclosed is what bounds the stream a reloaded page opens, and a reload is
-// exactly what an owner does when the notifications panel has stuck. What is left
-// unbounded is the first delivery stream a browser ever opens here and nothing after
-// it, which is stated rather than smoothed over (#1442's own residual).
+// **Read off the head, so nothing has to be remembered between streams.** The figure
+// is a fact about the gateway process serving *this* stream, and the head is the part
+// of a streamed response that exists before the body does — `fetch` settles with the
+// headers in hand and not one value read. So a stream is bounded by what its own
+// gateway said, from before its first value, and a gateway reconfigured between two
+// streams is never held to the figure the earlier one served.
 //
-// **It is not a session value, and it is not tied to one.** It admits nothing, is
-// spendable against nothing, and ADR-0172 §1's closed class of three values a browser
-// holds is untouched. It is a fact about the gateway at this origin rather than about
-// the session that happened to be current, so `forgetHeaderHalf` does not take it: a
-// session ends whenever the gateway process does, and the cadence a new process
-// discloses replaces this on the next stream that opens.
-const CADENCE_KEY = "assistant.session.notification-cadence";
+// **It is not a session value and is stored nowhere.** It admits nothing and is
+// spendable against nothing, so ADR-0172 §1's closed class of three values a browser
+// holds is untouched — and it is not in `localStorage` at all, which is what keeps a
+// stale figure from bounding a stream that never uttered it.
+//
+// Same-origin, so every response header is readable here without the gateway exposing
+// any: ADR-0168 §6 admits a request only with both halves of a web session, and the
+// header half travels "only as a request header the front end sets", which no
+// cross-origin page can do.
+const KEEP_ALIVE_HEADER = "X-Assistant-Keep-Alive-Microseconds";
 const SESSION_HEADER = "X-Assistant-Session";
 
 // Which stream values end a stream (ADR-0175 §2). A reader that reached one has the
@@ -205,68 +205,20 @@ function rememberHeaderHalf(value) {
   }
 }
 
-// The last cadence this origin disclosed, in milliseconds, or `null` where this browser
-// holds none it can use — a browser that has never opened a delivery stream here, or one
-// that will not store.
-function notificationCadence() {
-  try {
-    return usableCadence(window.localStorage.getItem(CADENCE_KEY));
-  } catch (_) {
-    return null;
-  }
-}
-
-// Drop the remembered figure. Called where a stream was abandoned **before** it
-// disclosed anything of its own: the stored cadence was then the only thing that bound
-// it, and it was not confirmed. Keeping it would be the trap adversarial review found
-// on round 1 — a gateway reconfigured from a short budget to a long one is bounded by
-// the short one it no longer serves, and every attempt is abandoned before its `open`
-// value can arrive, so the page can never learn the figure that would have let it
-// stay. Forgetting is what makes that self-healing in one further attempt: the next
-// stream is unbounded, so it survives long enough to disclose, and is bounded by its
-// own gateway's figure from then on.
-function forgetCadence() {
-  try {
-    window.localStorage.removeItem(CADENCE_KEY);
-  } catch (_) {
-    // A browser that will not store has nothing to forget.
-  }
-}
-
-// Take the figure a stream just disclosed: store it for the next stream this origin
-// opens, and hand back the milliseconds *this* one is bounded by.
+// One decimal count of microseconds, as milliseconds, or `null` where it is not a
+// figure a deadline can be derived from. `Headers.get` answers `null` for a header
+// that was not sent, and the guard is on the *value* rather than on its presence:
+// `""`, `"0"` and anything unparseable would each arm a timer that fired at once or
+// never.
 //
-// **A stream is bounded by what it disclosed and by nothing else.** An earlier draft
-// fell back to the remembered figure where the disclosed one was unusable, reasoning
-// that an unreadable value should not overwrite a readable one — and adversarial review
-// found on round 2 what that actually does: a gateway entitled to a thirty-day budget,
-// disclosing it honestly, would be held to the twenty seconds some earlier process was
-// configured with, and every stream after it would repeat the false timeout. So an
-// unusable disclosure returns `null` and the stream runs unbounded, exactly as every
-// stream did before this existed. That is the conservative direction — a gateway that
+// **A header this page cannot use leaves the stream unbounded**, exactly as every
+// stream was before the deadline existed, and no other figure is substituted. That is
+// the conservative direction and adversarial review settled it in act one: falling
+// back to some earlier figure holds a gateway *entitled* to a thirty-day budget, and
+// disclosing it honestly, to the twenty seconds a differently configured process
+// served — and then repeats the false timeout on every stream after it. A gateway that
 // says it may be silent for a month is believed rather than second-guessed against a
 // figure it never uttered.
-//
-// The remembered figure is not cleared here and does not need to be: it bounds only the
-// window *before* an `open` value arrives, where a too-small one is caught by
-// `forgetCadence` and a too-large one is merely a looser bound.
-function adoptCadence(microseconds) {
-  const value = usableCadence(microseconds);
-  if (value !== null) {
-    try {
-      window.localStorage.setItem(CADENCE_KEY, microseconds);
-    } catch (_) {
-      // A browser that will not store still bounds this stream; what it loses is the
-      // bound on the first stream a reloaded page opens.
-    }
-  }
-  return value;
-}
-
-// One decimal string of microseconds, as milliseconds, or `null` where it is not a
-// figure a deadline can be derived from. The guard is on the *value* rather than on
-// the member's presence: `""`, `"0"` and anything unparseable would each arm a timer
-// that fired at once or never.
 //
 // **Every strictly positive figure is usable, however large**, because the deadline is
 // armed in segments (`TIMER_SEGMENT`) rather than in one `setTimeout` call. `Infinity`
@@ -635,8 +587,8 @@ const DELIVERY_STREAM_SILENT =
 // number the deadline is armed with.
 const WENT_SILENT =
   `Nothing arrived on that stream — not even the gateway's keep-alive — for ` +
-  `${SILENT_CADENCES} times the keep-alive cadence this gateway last disclosed, so it ` +
-  `was abandoned.`;
+  `${SILENT_CADENCES} times the keep-alive cadence this gateway stated when it opened ` +
+  `the stream, so it was abandoned.`;
 
 const DELIVERY_STREAM_CUT =
   "The connection carrying notifications ended before the gateway finished it, so " +
@@ -1576,21 +1528,25 @@ async function watchDeliveries(because) {
 // the disclosed figure is not an assistant with nothing to say; it is the one thing
 // the keep-alive exists to expose, observed at the end it was written for.
 //
-// **The gateway discloses the cadence as the first value on the stream** — `open`,
-// carrying `keep_alive_microseconds`. ADR-0175 §2 leaves "the exact framing of a value
-// on a stream" to this lane, and ADR-0168 §5 closes the other candidate in terms: the
-// bootstrap exchange "returns nothing but the two session values §6 requires", so the
-// figure may not ride that body. It is remembered for this origin, because the failure
-// above is a `fetch` that never settles *at all* — no head, no value, nothing to read a
-// cadence out of — and `showConsole` opens a stream on load, before any other request.
-// So a stream is armed at once from the last figure this origin disclosed, and from the
-// arriving one the moment it lands.
+// **The gateway states the cadence in the stream's own head** — the
+// `X-Assistant-Keep-Alive-Microseconds` response header. ADR-0175 §2 leaves the
+// framing to this lane and ADR-0168 §5 closes the other candidate in terms (the
+// bootstrap exchange "returns nothing but the two session values §6 requires"), so the
+// choice was between a header and an opening value on the body. The header wins on the
+// clause that governs values: §4 holds "at most one value pending per stream" and ends
+// one whose write has not completed when the next is due, which is a rule about a
+// browser that stopped reading and not about a preamble. A header is in hand the
+// instant `fetch` settles, before a single value is read, so it takes no place in the
+// ordering and cannot be abandoned — and the deadline is armed from it rather than from
+// any figure this page kept, which is why nothing here is remembered between streams
+// and no reconfigured gateway can be held to a figure it never uttered.
 //
-// **The residual is stated rather than smoothed over.** A browser that has never opened
-// a delivery stream at this origin holds no figure, so its first stream is unbounded
-// until its first value arrives — and if none ever does, that one stream stalls exactly
-// as every stream did before this existed. Every stream after it is bounded, the first
-// after a reload included.
+// **The residual is stated rather than smoothed over.** The head is what carries the
+// figure, so a `fetch` that never settles *at all* — no head, nothing to read a cadence
+// out of — arms nothing, and that one stream stalls exactly as every stream did before
+// this existed. What is bounded is every stream whose head arrived and whose body then
+// went quiet, which is the failure the keep-alive exists to expose. The other half
+// wants a bound that does not come from the gateway at all, and is filed (#1474).
 //
 // **The deadline is restarted by every value that arrives, keep-alive included**, so
 // what it measures is silence and never the stream's total life: a stream delivering
@@ -1606,8 +1562,9 @@ async function watchDeliveries(because) {
 // held, once, which is the owner's own act being honoured rather than a loop.
 async function readDeliveries(half) {
   const reader = new AbortController();
-  let cadence = notificationCadence();
-  let disclosed = false;
+  // Null until this stream's head says otherwise, and never carried over from another
+  // stream: see `KEEP_ALIVE_HEADER`.
+  let cadence = null;
   let silent = false;
   let deadline = null;
   // One deadline, held as the **instant** it falls due and armed in segments no longer
@@ -1650,7 +1607,6 @@ async function readDeliveries(half) {
       arm(performance.now() + cadence * SILENT_CADENCES);
     }
   };
-  heard();
   try {
     const response = await fetch("/deliveries", {
       headers: admitted(half, false),
@@ -1662,20 +1618,15 @@ async function readDeliveries(half) {
       refused("notifications", body, response.status);
       return;
     }
+    // The cadence *this* stream will be written at, off this stream's own head — armed
+    // before the first value is read, so the bound covers the silence that begins the
+    // moment the head arrives, and derived from what the gateway said rather than from
+    // any figure of this page's. A head that carried none, or one no deadline can be
+    // computed from, leaves this stream unbounded: `usableCadence` has the reason.
+    cadence = usableCadence(response.headers.get(KEEP_ALIVE_HEADER));
+    heard();
     let terminal = null;
     for await (const value of streamValues(response)) {
-      if (value.kind === "open") {
-        // The cadence this stream will be written at, adopted before the deadline is
-        // restarted below, so this stream is bounded by its own gateway's figure and
-        // not by whatever an earlier one disclosed. Remembered for the next stream
-        // this origin opens, which is the one that cannot be told.
-        cadence = adoptCadence(value.keep_alive_microseconds);
-        // Disclosed means *usably* disclosed, and the distinction is what stops an
-        // `open` value carrying `"0"` or nothing from preserving a stale bound for
-        // ever (adversarial review, round 2). A stream that said nothing this page can
-        // time has told it nothing, and is treated as one that said nothing at all.
-        disclosed = cadence !== null;
-      }
       heard();
       if (value.kind === "notification") {
         renderNotification(value);
@@ -1699,11 +1650,6 @@ async function readDeliveries(half) {
     // would be a wrong explanation rather than a missing one: the gateway may be
     // perfectly alive at the other end of a socket that stopped carrying.
     if (silent) {
-      if (!disclosed) {
-        // Bounded by a remembered figure this stream never confirmed, so the figure is
-        // dropped rather than used again — see `forgetCadence`.
-        forgetCadence();
-      }
       stopWatching(WENT_SILENT);
       fault(DELIVERY_STREAM_SILENT, "notifications");
     } else {

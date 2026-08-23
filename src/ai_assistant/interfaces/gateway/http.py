@@ -196,8 +196,23 @@ class StreamHead:
     HTTP's own; a body that stops without either is the transport failure the front
     end reports as one.
 
+    **A stream may state facts about itself in its own head**, which is what
+    ``headers`` is for. A head is the one part of a streamed response that exists
+    *before* the body does — the reader has it the moment ``fetch`` settles, with no
+    value read and no framing to agree on — so a fact about how the stream will be
+    written belongs there rather than in a value on it. The alternative was tried:
+    carrying the same fact as an opening value makes it a value, and ADR-0175 §4's
+    "at most one value pending per stream… a write that has not completed when the
+    next value is due is abandoned" then governs it, which is a rule about deliveries
+    being applied to a preamble that is not one.
+
     Attributes:
         content_type: The media type the stream is served with.
+        headers: Any further header lines this stream's head carries, in order, as
+            name and value. Empty for every stream but one: the headers ADR-0168 §6
+            requires of *every* response are built by :func:`render_stream_head` and
+            are not restated here, and a handler that wants a common header on one
+            response has misread which of the two it needs.
         status: The status line's code. Always a success: everything decidable
             before the engine is reached — an unadmitted request, a malformed body,
             a ceiling — is an ordinary :class:`Response` with its own status, and a
@@ -210,6 +225,7 @@ class StreamHead:
     """
 
     content_type: str
+    headers: tuple[tuple[str, str], ...] = ()
     status: int = 200
     reason: str = "OK"
     close: bool = False
@@ -479,8 +495,14 @@ def render_stream_head(head: StreamHead, *, policy: str) -> bytes:
     built here rather than by each handler — with ``Transfer-Encoding: chunked`` in
     place of the ``Content-Length`` a stream cannot state.
 
+    The stream's own headers follow those and precede the transfer and connection
+    lines, so a header a handler added can neither displace one §6 requires nor
+    change how the body is framed: :class:`StreamHead` is frozen and this order is
+    fixed here rather than at any call site.
+
     Args:
-        head: What is being streamed, and whether the connection survives it.
+        head: What is being streamed, its own headers, and whether the connection
+            survives it.
         policy: The content security policy value.
 
     Returns:
@@ -489,6 +511,7 @@ def render_stream_head(head: StreamHead, *, policy: str) -> bytes:
     return _head(
         [
             *_status_and_common(head.status, head.reason, head.content_type, policy),
+            *(f"{name}: {value}" for name, value in head.headers),
             "Transfer-Encoding: chunked",
             f"Connection: {'close' if head.close else 'keep-alive'}",
         ]
