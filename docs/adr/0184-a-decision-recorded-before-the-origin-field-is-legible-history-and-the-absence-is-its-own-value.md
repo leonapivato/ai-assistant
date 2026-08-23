@@ -472,10 +472,15 @@ sibling and a version, in its own text, with two data points instead of one.
 > `OriginUnrecordedBinding.canonical_destination_set` equals `EgressBinding`'s member for
 > member and in order — for spans carrying several destinations, for an aliased pair that
 > deduplicates, and for spans carrying **none**, where both are exactly the account
-> (ADR-0148 §2's third clause). §2's shared base makes the two one function rather than two;
-> this is the test that fails an implementation which declared it twice, and without it a
-> legacy row could export the wrong recipients or omit the account fallback while passing
-> every construction, roster and discrimination test above.
+> (ADR-0148 §2's third clause). Without it a legacy row could export the wrong recipients,
+> or omit the account fallback, while passing every construction, roster and discrimination
+> test above.
+
+> **Normative.** The lane asserts §2's shared base **structurally** as well: that
+> `canonical_destination_set` resolves to the base for both models, and that neither model
+> declares it. Correspondence over any finite set of inputs is satisfied by a correct second
+> copy just as well as by one function, so the value test does not guard the declared-once
+> clause and is not asked to.
 
 > **Normative.** The lane ships the discrimination tests of §3 **over a real
 > `SqliteAuditTrail`**, seeding the row by writing the JSON into the `data` column
