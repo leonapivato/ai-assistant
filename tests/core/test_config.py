@@ -1174,6 +1174,14 @@ def test_every_duration_setting_is_discovered() -> None:
         "retention_purge_interval",
         "conversation_sweep_interval",
         "observation_interval",
+        # ADR-0111 §11's arming of leg 7's chunked walk, acknowledged here for the
+        # reason the three above are: joining this tuple is what subjects it to the
+        # parametrised guards below. It follows ADR-0083 §7's convention exactly —
+        # disabled is `None`, never `0` — and the `bool` guard bites hardest here of
+        # any interval on that table, because this is the one job whose run costs a
+        # model call per chunk: `True` would arm a second-by-second walk that spends
+        # the deployment's provider budget rather than merely churning SQLite.
+        "consolidation_interval",
         # ADR-0130 §5's reconsideration interval, a fourth row on ADR-0083 §7's
         # table and subject to its convention unchanged — finite and strictly
         # positive, or `None` for disabled and never `0`. It is the one job on
