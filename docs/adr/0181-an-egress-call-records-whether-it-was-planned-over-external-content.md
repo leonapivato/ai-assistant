@@ -2,6 +2,32 @@
 
 - Status: Accepted
 - Date: 2026-08-23
+- **Note (2026-08-23): §12's condition "the first deployment holding a
+  pre-ADR-0181 egress row" has fired, and this records what was decided. No clause
+  of this ADR changes.** `EgressBinding` is a **stored** member of
+  `PermissionDecision`, so §3's "required with no default" reaches rows the audit
+  trail already holds: a row written before this ADR carries an `egress_binding`
+  without the field, and `SqliteAuditTrail` rebuilds one with
+  `model_validate_json`. The implementation lane found it and could not answer it
+  from §3 and §4 alone, because every repair those two clauses leave available is a
+  fabrication: a default is forbidden by §3 in terms, a migration backfilling
+  `False` is the same fabrication one layer down and is forbidden by §4's second
+  clause ("no seam invents it where a caller did not supply it"), and `True`
+  fabricates in the other direction. **Decided: such a row is legible history and
+  an unresumable park.** It decodes, so a trail holding one stays readable rather
+  than failing whole; its binding is omitted from that projection, because no
+  `EgressBinding` value can be built without inventing the field; and every path
+  that would rebuild a park from it refuses under the named condition
+  `origin-unrecorded`, never `ALLOW`. Nothing is written, so the step stays durably
+  `AWAITING_APPROVAL` and the row on disk is untouched — the park is unanswerable,
+  not erased. **This follows §4 rather than qualifying it**: the origin of such a
+  call was never recorded, §2's fact may not be invented, and a call whose origin
+  cannot be established is exactly the call §5's second clause says no standing
+  authorisation covers. The omission fails closed at every seam that could act on
+  it, by machinery already in place: `PermissionDecision.authorises` compares
+  `egress_binding` whole and is `None`-safe in both directions (§3's fourth clause),
+  so such a decision authorises no egress request. Filed as #1451, closed by the
+  lane that implements this ADR.
 - **Decides `core/types.py` surface and one `core/protocols.py` obligation.** One
   boolean field, added to three existing models, and one behavioural clause on
   `ActionPolicy` with no signature change — the shape ADR-0106 §10 used for
