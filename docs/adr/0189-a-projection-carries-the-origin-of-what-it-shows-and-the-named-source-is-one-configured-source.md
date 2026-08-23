@@ -1,6 +1,6 @@
 # 189. A projection carries the origin of what it shows, and the named source is one configured source rather than a reader
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-24
 
 ## Context
