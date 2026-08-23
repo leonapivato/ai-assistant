@@ -25,6 +25,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import stat
 import sys
 from typing import TYPE_CHECKING, Any
 
@@ -215,6 +216,19 @@ async def _report_no_control_socket(socket: Path, loopback: Path, *, bound: bool
         )
         return EXIT_RESTART
     if bound:
+        if not _is_socket(socket):
+            # A refusal does not mean "a socket that is not serving": connecting to
+            # a *regular file* — or a directory — at that path refuses with the same
+            # errno. Nothing about that resolves by waiting, so it must not be
+            # dressed as the startup instant below.
+            print(
+                f"device: a hub is running here — it answers at {loopback} — but {socket} "
+                f"is not a socket, so nothing can be reached through it. Remove whatever "
+                f"is at that path; the hub binds its control socket there on the next "
+                f"start, when a remote listener is configured.",
+                file=sys.stderr,
+            )
+            return EXIT_DEPLOYMENT
         # Restartable, and by the same question as everything else here: the hub is
         # opening its doors and the next attempt succeeds. It stays true because the
         # hub removes a control socket it does not serve (``hub.py``'s
@@ -242,6 +256,28 @@ async def _report_no_control_socket(socket: Path, loopback: Path, *, bound: bool
         file=sys.stderr,
     )
     return EXIT_DEPLOYMENT
+
+
+def _is_socket(path: Path) -> bool:
+    """Whether what is literally at ``path`` is a socket.
+
+    ``lstat`` rather than :meth:`~pathlib.Path.is_socket`, on both counts: the
+    question is what occupies this path, so a symbolic link is answered as a link
+    and not as its target; and a failure to read it must not answer "no".
+
+    Args:
+        path: The control socket's path.
+
+    Returns:
+        ``True`` if a socket is there, and ``True`` when the path cannot be read at
+        all — which is the restartable direction, and the honest one: something that
+        vanished between the connect and this call is answered by the next attempt,
+        not by an operator being told to go and remove it.
+    """
+    try:
+        return stat.S_ISSOCK(path.lstat().st_mode)
+    except OSError:
+        return True
 
 
 async def _hub_is_serving(loopback: Path) -> bool:
@@ -286,7 +322,13 @@ async def _hub_is_serving(loopback: Path) -> bool:
         if raw is None:  # pragma: no cover — asyncio always supplies one here
             return False
         check_peer_is_self(raw)
-    except ProtocolError:
+    except ProtocolError, OSError:
+        # ``OSError`` as well as ``ProtocolError``: the uid is read with
+        # ``getsockopt``, which can fail on a connection the peer has already torn
+        # down, and it is read *after* the connect — outside the handler above. The
+        # docstring's promise is ``False`` whenever peer identity cannot be
+        # established, and a traceback out of a diagnostic is what ADR-0083's ruling
+        # 4 asks a sentence and an exit code in place of.
         return False
     finally:
         writer.close()

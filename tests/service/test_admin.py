@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import errno
 import json
 import stat
 from datetime import UTC, datetime, timedelta
@@ -602,6 +603,72 @@ async def test_a_loopback_peer_that_is_not_this_user_is_not_evidence_of_a_hub(
     # Emphatically not the fatal branch: an unauthenticated peer must not be able to
     # tell an owner that their remote configuration is missing.
     assert "ASSISTANT_HUB_REMOTE_ADDRESS" not in printed
+
+
+async def test_a_kernel_failure_reading_peer_credentials_fails_closed_not_loudly(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The peer check's other failure mode, which is an ``OSError`` and not a
+    ``ProtocolError``.
+
+    The uid is read with ``getsockopt`` — after the connect, so outside the handler
+    that guards it — and it can fail on a connection the peer has already torn down.
+    The probe promises ``False`` whenever peer identity cannot be established, and a
+    traceback out of a diagnostic is exactly what ADR-0083's ruling 4 asks a sentence
+    and an exit code in place of.
+    """
+
+    async def _accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        del reader
+        writer.close()
+
+    def _kernel_said_no(sock: object) -> None:
+        del sock
+        raise OSError(errno.ENOTCONN, "Transport endpoint is not connected")
+
+    monkeypatch.setattr(device, "check_peer_is_self", _kernel_said_no)
+
+    loopback = tmp_path / SOCKET_FILENAME
+    server = await asyncio.start_unix_server(_accept, path=str(loopback))
+    try:
+        code = await _perform(tmp_path / ADMIN_SOCKET_FILENAME, {"act": "list"}, loopback=loopback)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert code == EXIT_RESTART
+    assert "no hub is listening" in capsys.readouterr().err
+
+
+async def test_something_that_is_not_a_socket_at_the_control_path_is_not_called_transient(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A refusal does not mean "a socket that is not serving yet".
+
+    Connecting to an ordinary *file* at that path — or a directory — refuses with
+    the same ``ECONNREFUSED`` a bound-but-not-yet-serving socket does. Nothing about
+    that resolves by waiting, so reporting it as the hub's startup instant would
+    hand an owner advice that can never work.
+    """
+
+    async def _accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        del reader
+        writer.close()
+
+    loopback = tmp_path / SOCKET_FILENAME
+    control = tmp_path / ADMIN_SOCKET_FILENAME
+    control.write_text("not a socket", encoding="utf-8")
+    server = await asyncio.start_unix_server(_accept, path=str(loopback))
+    try:
+        code = await _perform(control, {"act": "list"}, loopback=loopback)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert code == EXIT_DEPLOYMENT
+    printed = capsys.readouterr().err
+    assert "is not a socket" in printed
+    assert "not answering yet" not in printed
 
 
 async def test_a_client_that_hangs_up_mid_act_does_not_fault_the_hub(tmp_path: Path) -> None:
