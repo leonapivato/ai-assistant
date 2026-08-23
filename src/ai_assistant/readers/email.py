@@ -384,6 +384,7 @@ from ai_assistant.core.types import (
 # **shared rather than copied** on purpose: ADR-0093 §7b and ADR-0140 §3 state the
 # same saturation rule for two readers, and two implementations of one clamp are
 # two chances to disagree about where the bound is.
+from ai_assistant.readers._compose import one_line
 from ai_assistant.readers._occurrences import UTC_MAX, UTC_MIN, saturating_add
 from ai_assistant.readers._source import OneWorker, acquire
 
@@ -1013,7 +1014,7 @@ def _optional_header(message: Message, name: str) -> str:
 
 
 def _unfolded(value: object) -> str:
-    """One raw header value as a single-line ``str``.
+    r"""One raw header value as a single-line ``str``.
 
     Two coercions, and each closes something a header can actually do.
 
@@ -1030,9 +1031,20 @@ def _unfolded(value: object) -> str:
     break-only removal matters beyond tidiness: a header value carrying a bare
     line break is a fetcher fault §4 names, and one reaching a rendered belief
     would put a newline inside a quoted span.
+
+    **The removal is :func:`~ai_assistant.readers._compose.one_line`'s and not
+    this function's own**, which is #1449's answer: RFC 5322 unfolding and the
+    shape rule both readers now apply are the same removal, so this reader states
+    it once in the shared place rather than twice in two spellings. The set is
+    wider than the ``\r``/``\n`` pair this line used to remove — ``U+0085`` and
+    ``U+2028``/``U+2029`` are line boundaries a header value can carry too — and
+    the widening changes nothing for a folded header, because unfolding deletes
+    the break and keeps the whitespace either way. What it is **not** is a
+    neutralisation a consumer may rely on: ADR-0183 §8 binds unchanged and the
+    module's docstring says so at length.
     """
     text = value if isinstance(value, str) else str(value)
-    return text.replace("\r", "").replace("\n", "")
+    return one_line(text)
 
 
 def _delivery_instant(value: str) -> datetime | None:
