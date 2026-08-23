@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 
+from ai_assistant.service import device
 from ai_assistant.service.admin import ADMIN_FRAME_BYTES, ADMIN_TIMEOUT, AdminListener
 from ai_assistant.service.device import _perform, _render
 from ai_assistant.service.enrolment import (
@@ -29,6 +30,7 @@ from ai_assistant.service.exits import EXIT_DEPLOYMENT, EXIT_OK, EXIT_RESTART
 from ai_assistant.service.overlay import MAX_OVERLAY_IDENTITY_BYTES
 from ai_assistant.wire.address import ADMIN_SOCKET_FILENAME, SOCKET_FILENAME
 from ai_assistant.wire.credential import is_well_formed, verifier_for
+from ai_assistant.wire.errors import ProtocolError
 from ai_assistant.wire.framing import read_frame, write_frame
 
 if TYPE_CHECKING:
@@ -553,6 +555,53 @@ async def test_a_control_socket_bound_but_not_yet_serving_is_restartable_not_fat
     assert "try again" in printed
     # Not the fatal message: the deployment is not misconfigured, it is starting.
     assert "it bound no control socket" not in printed
+
+
+async def test_a_loopback_peer_that_is_not_this_user_is_not_evidence_of_a_hub(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The probe authenticates its peer from the kernel before it counts as evidence.
+
+    ADR-0084 §1: filesystem checks "are a walk over topology the operator controls,
+    and a walk can be wrong — a bind mount, an ACL, a symlinked ancestor", so a
+    client reads the peer's credentials rather than inferring from the path. Nothing
+    is sent on this probe, so §1's "before sending anything" is not what compels the
+    check here; the point is that the fatal branch tells an owner their remote
+    configuration is missing, and another user's process bound at that path must not
+    be able to say that on the hub's behalf.
+
+    Both limbs of ``check_peer_is_self`` raise ``ProtocolError`` — a foreign uid, and
+    a platform exposing no peer-credential call at all — and §1 fixes the direction
+    for both: fail closed. Here that costs nothing, because the message it falls
+    back to says to start the hub, and a hub that starts takes the instance lock and
+    rebinds this socket over whatever was squatting on it.
+    """
+
+    async def _accept(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        del reader
+        writer.close()
+
+    def _foreign(sock: object) -> None:
+        del sock
+        msg = "the process listening on this socket runs as uid 4242, not as uid 1000"
+        raise ProtocolError(msg)
+
+    monkeypatch.setattr(device, "check_peer_is_self", _foreign)
+
+    loopback = tmp_path / SOCKET_FILENAME
+    server = await asyncio.start_unix_server(_accept, path=str(loopback))
+    try:
+        code = await _perform(tmp_path / ADMIN_SOCKET_FILENAME, {"act": "list"}, loopback=loopback)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert code == EXIT_RESTART
+    printed = capsys.readouterr().err
+    assert "no hub is listening" in printed
+    # Emphatically not the fatal branch: an unauthenticated peer must not be able to
+    # tell an owner that their remote configuration is missing.
+    assert "ASSISTANT_HUB_REMOTE_ADDRESS" not in printed
 
 
 async def test_a_client_that_hangs_up_mid_act_does_not_fault_the_hub(tmp_path: Path) -> None:
