@@ -79,10 +79,27 @@ label {
   margin-bottom: 0.35rem;
 }
 
-input,
+/*
+ * Text entry — and `input` is filtered by type here, which is issue #1440. The rule
+ * was written for the bootstrap value and the tuning figures, and with no filter its
+ * `width: 100%` stretched every **checkbox** on the page to the width of its container
+ * (measured 656.6px inside a 44rem shell). A `.choice` row is a flex line, so a box
+ * that wide filled it and pushed the label onto the next one: the box rendered above
+ * its own label, on every checkbox row, at every width. A box is not a text field and
+ * takes none of this rule — not the width, not the border, not the padding.
+ *
+ * `:not(...):not(...)` rather than one `:not(a, b)` because the list form is Selectors
+ * 4 and this file is served to whatever browser the owner has.
+ *
+ * `min-height: 44px` is the touch floor (#1429). `font: inherit` is 16px and is load
+ * bearing on the phone as well as here: iOS Safari zooms the page when a field smaller
+ * than 16px takes focus, and does not zoom back out.
+ */
+input:not([type="checkbox"]):not([type="radio"]),
 textarea {
   width: 100%;
   box-sizing: border-box;
+  min-height: 44px;
   font: inherit;
   color: inherit;
   background: transparent;
@@ -91,8 +108,54 @@ textarea {
   padding: 0.5rem 0.6rem;
 }
 
+/*
+ * The box itself: sized, and never shrunk below its size by the flex row it sits in.
+ * No `accent-color` — `:root`'s `color-scheme: light dark` already hands the native
+ * control both palettes, and naming one colour here would fix it to one of them.
+ */
+input[type="checkbox"] {
+  flex: none;
+  width: 1.15rem;
+  height: 1.15rem;
+  margin: 0;
+}
+
+/*
+ * A `select` is built by the script (the reach levels, ADR-0177 §10) and had no rule
+ * at all, so it took the browser's own font — under 16px on iOS, which is the zoom
+ * trap above. It gets the field's font and the touch floor and not its width: a
+ * chooser is as wide as its longest option.
+ */
+select {
+  max-width: 100%;
+  min-height: 44px;
+  font: inherit;
+  color: inherit;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 0.4rem 0.5rem;
+}
+
+/*
+ * Every button on this page comes through this one rule — the panel openers, the row
+ * controls a listing builds (a belief's Forget, a notification's Dismiss, a question's
+ * Accept, a confirmation's Yes), lane 3's `.fault-dismiss` and "Start a new
+ * conversation" — so the 44px touch floor is written once and there is no button that
+ * can be added without it.
+ *
+ * `inline-flex` is what makes `min-height` centre the label rather than leave it at
+ * the top of a taller box. `max-width: 100%` with the wrapping left alone is the pair
+ * that keeps a long label inside the page: a button that cannot exceed its container
+ * wraps between its words, where one that could would push the document sideways.
+ */
 button {
   margin-top: 0.7rem;
+  max-width: 100%;
+  min-height: 44px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   font: inherit;
   color: var(--paper);
   background: var(--ink);
@@ -198,6 +261,62 @@ button[disabled] {
 
 .choice label {
   font-weight: 400;
+}
+
+/*
+ * A checkbox and the words beside it are **one** element (#1429, #1440): the box is
+ * inside its own `<label>`, in the document and in `offerScope` alike. Two reasons,
+ * and each on its own would be enough.
+ *
+ * A flex row wraps between its items, so a box and a label that were siblings could be
+ * put on two lines by a narrow viewport — the beliefs panel offers three pairs in one
+ * row, and at 390px a wrap between the third box and its own words reads as a box
+ * belonging to the band above it. Nested, the pair is one item and cannot be split.
+ *
+ * And it is what makes the target 44px without a 44px box. The tappable area of a
+ * label is the label, so the whole strip — box, gap and words — toggles the band, at
+ * the floor the rest of this sheet holds, while the box stays the size a box is.
+ */
+.check {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  margin-bottom: 0;
+  font-weight: 400;
+}
+
+/*
+ * The index of what is on screen (#1429). A phone shows about a third of one panel at
+ * a time, and this page grows a panel every time a listing is read — so by the fourth
+ * read the control the owner just pressed has put its answer a thousand pixels below
+ * the button that asked for it.
+ *
+ * It is a plain list of in-page links, so nothing here is a timer and nothing is a
+ * request. It carries exactly the panels that are open, never a panel that is not, and
+ * it takes each name from that panel's own heading — one vocabulary, and a panel added
+ * later is indexed without this file learning its name.
+ *
+ * It wraps rather than scrolling or truncating: a name shortened to fit would be the
+ * one place on this surface where what is on screen is not what the panel says it is.
+ */
+.panel-index {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0 0 1.2rem;
+}
+
+.panel-index a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0.2rem 0.7rem;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  font-size: 0.85rem;
+  color: var(--muted);
+  text-decoration: none;
 }
 
 /*
@@ -351,4 +470,53 @@ button[disabled] {
   border-top: none;
   margin-top: 0;
   padding-top: 0;
+}
+
+/*
+ * The phone (#1429). One breakpoint, at 480px, because there is one layout question
+ * on this page — whether a 44rem column's gutters and a panel's inset are affordable
+ * — and it is answered the same way by every width below it.
+ *
+ * Nothing here hides anything, shortens anything or moves anything into a scroller.
+ * The panels are the same panels carrying the same text: what changes is how much of
+ * the viewport the furniture around them takes. That is deliberate on a surface whose
+ * ADRs repeatedly forbid one answer standing in for another (ADR-0139 §3, ADR-0177 §6,
+ * ADR-0178 §7) — a responsive rule that clamped a confirmation's recipients or a
+ * grant's uses to fit a phone would breach them from the stylesheet.
+ *
+ * `44rem` needs no rule: it is a maximum, so the column is already the viewport here.
+ */
+@media (max-width: 480px) {
+  .shell {
+    padding: 1rem 0.85rem 3rem;
+  }
+
+  h1 {
+    font-size: 1.2rem;
+    margin: 0 0 0.8rem;
+  }
+
+  /*
+   * The inset costs 2.4rem of a 390px screen — a tenth of it — to draw a border the
+   * heading already implies. It is halved rather than dropped, because the border is
+   * what says where one panel's answer ends and the next begins.
+   */
+  .panel {
+    padding: 0.9rem 0.85rem;
+    margin: 0.9rem 0;
+  }
+
+  .scope-form {
+    padding-left: 0.6rem;
+  }
+
+  /*
+   * A row of buttons is a column of buttons here, and each keeps its own width rather
+   * than being shrunk to a share of the line: `flex` would squeeze six openers into
+   * one row of slivers, and `body`'s `overflow-wrap: anywhere` would then break their
+   * labels mid-word — the "Remo ve" this project has already shipped once (PR #1385).
+   */
+  .choice > button {
+    flex: none;
+  }
 }

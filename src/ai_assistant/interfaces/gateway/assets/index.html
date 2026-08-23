@@ -48,9 +48,16 @@
             The gateway never falls back from one to the other, so on a build whose
             provider cannot stream this checkbox is the path that still answers.
           -->
+          <!--
+            The box is inside its own label (#1440): the pair is one flex item, so a
+            narrow viewport cannot wrap the words away from the box they belong to,
+            and the whole strip is the tap target rather than a 1.15rem square.
+          -->
           <p class="choice">
-            <input type="checkbox" id="stream-answer" name="stream-answer" checked />
-            <label for="stream-answer">Show the answer as it is written</label>
+            <label class="check" for="stream-answer">
+              <input type="checkbox" id="stream-answer" name="stream-answer" checked />
+              Show the answer as it is written
+            </label>
           </p>
           <button type="submit" id="ask-button">Ask</button>
         </form>
@@ -76,6 +83,18 @@
         <button type="button" id="conversations-button">Conversations</button>
         <button type="button" id="confirmations-button">What is waiting for your answer</button>
       </section>
+
+      <!--
+        The index of what is on screen (#1429), built by `app.js` from the open panels'
+        own headings and empty in this document for the reason the confirmation prompt
+        is: a name written here would be a second place a panel is called something,
+        and the interesting thing about it would be which of the two had gone stale.
+
+        It sits here, immediately under the console, because the console is where a
+        panel is asked for — so the list of what that produced is beside the controls
+        that produced it, rather than at the foot of everything it points at.
+      -->
+      <nav id="panel-index" class="panel-index" aria-label="Panels on this page" hidden></nav>
 
       <section id="answer" class="panel" hidden>
         <h2>What happened</h2>
@@ -202,13 +221,26 @@
 
       <section id="beliefs" class="panel" hidden>
         <h3>What I believe</h3>
+        <!--
+          Three bands, three pairs, and each pair is one element (#1440). Flat, a wrap
+          at 390px put a band's own words on the line below its box and against the
+          band above it — which on this panel is not a cosmetic fault: the three bands
+          are ADR-0130 §6's three levels, and a box read against the wrong name is a
+          filter the owner did not set.
+        -->
         <p class="choice">
-          <input type="checkbox" id="band-asserted" name="band-asserted" checked />
-          <label for="band-asserted">You told me</label>
-          <input type="checkbox" id="band-derived" name="band-derived" checked />
-          <label for="band-derived">I worked it out</label>
-          <input type="checkbox" id="band-attested" name="band-attested" checked />
-          <label for="band-attested">A connected source reported it</label>
+          <label class="check" for="band-asserted">
+            <input type="checkbox" id="band-asserted" name="band-asserted" checked />
+            You told me
+          </label>
+          <label class="check" for="band-derived">
+            <input type="checkbox" id="band-derived" name="band-derived" checked />
+            I worked it out
+          </label>
+          <label class="check" for="band-attested">
+            <input type="checkbox" id="band-attested" name="band-attested" checked />
+            A connected source reported it
+          </label>
         </p>
         <div id="belief-list"></div>
       </section>
