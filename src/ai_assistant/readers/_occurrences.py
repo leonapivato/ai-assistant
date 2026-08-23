@@ -35,6 +35,17 @@ the ``RRULE`` arithmetic. The window, the seek, the override composition and the
 budgets are all here, because they are what §7b ratified; a library's own
 "expand between these dates" helper would be a second, unreviewed answer to the
 questions this section exists to settle.
+
+**``TZID`` resolution is delegated; whether it *succeeded* is not** (#1491,
+:func:`_unresolved_zone`). ``icalendar`` resolves a zone by calling
+``zoneinfo.ZoneInfo`` and swallowing every refusal it can raise, so a property
+naming a zone it could not resolve arrives here as a **naive** value — byte for
+byte what a genuinely floating one arrives as, and §7b localises a floating value
+in ``Settings.timezone``. Silently reinterpreting a stated zone as the user's own
+is not a smaller version of reading the entry; it is reading it wrong, at an
+instant nobody wrote. So a declared-but-unresolved zone makes its value
+unreadable here, and §7b's skip rule then does what it does for every other
+entry a parseable source contains and this reader cannot interpret.
 """
 
 from __future__ import annotations
@@ -592,7 +603,64 @@ def _reduce(component: Any, zone: tzinfo, ledger: _Ledger) -> _Entry | None:
     )
 
 
-def _localised(prop: Any, zone: tzinfo) -> tuple[datetime, bool] | None:
+def _unresolved_zone(prop: Any, *, holder: Any = None) -> bool:
+    """Whether ``prop`` declares a ``TZID`` the parser did not resolve (#1491).
+
+    **A value that names a zone and arrives naive is not floating time**, and
+    telling those two apart is the whole of this function. ``icalendar``'s
+    ``ZONEINFO`` provider resolves a ``TZID`` by calling ``zoneinfo.ZoneInfo`` and
+    catching both refusals it can raise — ``ZoneInfoNotFoundError`` for a key the
+    database does not hold, and ``ValueError`` for the two shapes that would leave
+    ``TZPATH`` ("keys may not be absolute paths", "keys must refer to
+    subdirectories of TZPATH") — returning ``None`` for each, with no warning. The
+    value is then built from the wall clock alone, so
+    ``DTSTART;TZID=../../../../etc/passwd:20260823T182300`` reaches
+    :func:`_localised` indistinguishable from a floating
+    ``DTSTART:20260823T182300`` and is localised in ``Settings.timezone``. The
+    entry lands as an attested belief at an instant nobody wrote — a thirty-minute
+    invite read as two and a half hours, which is how the milestone-23 QA run
+    found it.
+
+    **The marked ADR-0183 §5 clause held throughout and is not what this repairs.**
+    No file the source named was ever opened: the key selects into a fixed local
+    namespace it cannot direct or extend, and the two refusals above *are* that
+    namespace refusing to be escaped. What was missing is the reader noticing the
+    refusal, which §5's own supporting prose assumes it does.
+
+    **The declaration is read off the property rather than re-resolved here.**
+    Re-resolving would be this module answering a question the parser has already
+    answered, and answering it differently: ``icalendar`` strips a leading ``/``
+    from the id and maps a Windows zone name onto its IANA key before the lookup,
+    so ``TZID="W. Europe Standard Time"`` resolves and ``TZID=/etc/passwd`` is
+    refused as the *relative* ``etc/passwd`` rather than as an absolute path. A
+    declared zone beside a naive value **is** the parser's answer, whatever route
+    it took there — and it stays the parser's answer when the pin moves.
+
+    **A ``DATE``-valued property is outside this entirely**, whatever parameters it
+    carries. RFC 5545 §3.2.19 forbids ``TZID`` on one, ``icalendar`` yields a
+    ``date`` rather than a ``datetime``, and §7b rules such a value localised in
+    ``Settings.timezone`` unconditionally. Refusing an all-day entry over a
+    parameter the standard says is not there would skip entries on a rule §7b does
+    not state.
+
+    Args:
+        prop: The property whose ``dt`` carries the value.
+        holder: Where the ``TZID`` parameter is declared, when that is not ``prop``
+            itself. ``RDATE`` and ``EXDATE`` arrive as one ``vDDDLists`` carrying
+            the parameter for the whole line, and its individual values carry it
+            only where it **resolved** — so reading the parameter off a value is
+            exactly backwards for the case that matters (icalendar 7.2.2).
+    """
+    value = getattr(prop, "dt", None)
+    if not isinstance(value, datetime) or value.tzinfo is not None:
+        return False
+    params = getattr(prop if holder is None else holder, "params", None)
+    if params is None:
+        return False
+    return bool(str(params.get("TZID") or "").strip())
+
+
+def _localised(prop: Any, zone: tzinfo, *, holder: Any = None) -> tuple[datetime, bool] | None:
     """Return ``(aware start, all_day)``, localising a floating or date-only value.
 
     ``fold=0`` is the platform default and is exactly what §7b requires of a
@@ -602,7 +670,20 @@ def _localised(prop: Any, zone: tzinfo) -> tuple[datetime, bool] | None:
     no special case. Such an entry is **never skipped** for sitting on a
     transition — it is a real appointment someone holds, and skipping would drop
     an hour of a calendar twice a year, silently.
+
+    **A value declaring a zone the parser could not resolve is neither floating nor
+    localised** (:func:`_unresolved_zone`, #1491). It returns ``None`` — the same
+    answer this function already gives a value it cannot read at all — so ADR-0093
+    §7b's skip rule fires and ADR-0117 §5 withholds the reading's coverage.
+
+    Args:
+        prop: The property whose ``dt`` carries the value.
+        zone: ``Settings.timezone``, which a floating or date-only value is
+            localised in and which a **stated** zone is never silently replaced by.
+        holder: Passed through to :func:`_unresolved_zone`.
     """
+    if _unresolved_zone(prop, holder=holder):
+        return None
     value = getattr(prop, "dt", None)
     # `datetime` before `date`: it is a subclass of it.
     if isinstance(value, datetime):
@@ -619,8 +700,19 @@ def _duration(
     all_day: bool,
     zone: tzinfo,
 ) -> timedelta | None:
-    """The occurrence duration the component declares, by RFC 5545's defaults."""
-    end = _localised(component.get("DTEND"), zone)
+    """The occurrence duration the component declares, by RFC 5545's defaults.
+
+    **A ``DTEND`` naming an unresolved zone is not an absent ``DTEND``** (#1491).
+    Falling through to the defaults below would give the entry a duration the
+    source never stated — instantaneous, or a whole day — computed from a property
+    the source did write and this reader could not read. ``None`` makes the
+    component uninterpretable instead, which is §7b's skip rule and is the same
+    answer an unreadable ``DTSTART`` already gets.
+    """
+    prop = component.get("DTEND")
+    if _unresolved_zone(prop):
+        return None
+    end = _localised(prop, zone)
     if end is not None:
         return end[0] - local_start
     declared = getattr(component.get("DURATION"), "dt", None)
@@ -632,7 +724,16 @@ def _duration(
 
 
 def _override_form(component: Any, zone: tzinfo) -> tuple[_Form, datetime | None]:
-    """Classify the component and, for an override, key the occurrence it names."""
+    """Classify the component and, for an override, key the occurrence it names.
+
+    **An unresolved zone on the ``RECURRENCE-ID`` lands in ``OPAQUE``, and that is
+    the ruled fail-closed shape rather than a wider blast radius** (#1491, §7b).
+    The key is the instant the override *governs*; without it the read cannot say
+    which occurrences this correction was about, so the extent is unknown and §7b
+    suppresses the whole series — "where the affected extent is itself unknown, the
+    whole series is suppressed". Leaving those occurrences to the master would
+    propose exactly what the correction says is stale.
+    """
     prop = component.get("RECURRENCE-ID")
     if prop is None:
         return _Form.MASTER, None
@@ -659,8 +760,20 @@ def _reported_at(component: Any, zone: tzinfo) -> datetime | None:
     makes it mandatory, and a component missing it is malformed at the component
     level, which §7b's skip rule already covers. Widening to a second property
     would be this module inventing a rule where a ratified one exists.
+
+    **A ``DTSTAMP`` naming an unresolved zone declares no usable report time**
+    (#1491). RFC 5545 makes ``DTSTAMP`` a UTC value, so a ``TZID`` on one is
+    malformed to begin with; localising it in ``Settings.timezone`` would stamp
+    the attestation — and, through ADR-0103 §9, the belief's
+    ``last_confirmed_at`` — with an instant the source did not give. ``None``
+    takes the path a component carrying no ``DTSTAMP`` already takes: counted
+    against the entry cap (§7b), skipped rather than proposed, and the reading's
+    coverage withheld (ADR-0117 §5).
     """
-    stamped = getattr(component.get("DTSTAMP"), "dt", None)
+    prop = component.get("DTSTAMP")
+    if _unresolved_zone(prop):
+        return None
+    stamped = getattr(prop, "dt", None)
     if not isinstance(stamped, datetime):
         return None
     return _to_utc(stamped if stamped.tzinfo is not None else stamped.replace(tzinfo=zone))
@@ -743,6 +856,12 @@ def _dates(component: Any, name: str, zone: tzinfo, ledger: _Ledger) -> tuple[da
     direction: an unread ``RDATE`` omits an occurrence the source states, and an
     unread ``EXDATE`` emits one the source excludes. Neither is "the source says
     this does not occur", which is the one shape §5 exempts.
+
+    **A value whose zone did not resolve is skipped on the same rule** (#1491), and
+    the ``TZID`` is read from the **line** rather than from the value. One
+    ``RDATE`` or ``EXDATE`` property is a ``vDDDLists`` carrying the parameter for
+    every value on it, and the values themselves carry it only where it resolved —
+    so a value is bare in exactly the case this check exists for.
     """
     prop = component.get(name)
     if prop is None:
@@ -750,7 +869,7 @@ def _dates(component: Any, name: str, zone: tzinfo, ledger: _Ledger) -> tuple[da
     found: list[datetime] = []
     for group in prop if isinstance(prop, list) else [prop]:
         for item in getattr(group, "dts", ()):
-            localised = _localised(item, zone)
+            localised = _localised(item, zone, holder=group)
             if localised is None:
                 ledger.unaccounted()
                 continue
