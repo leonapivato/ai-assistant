@@ -1,6 +1,6 @@
 # 187. The band ordering stands against an outsider's supply, and precedence orders a band without excluding it
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-23
 - **This is the *second* revisit of ADR-0072 §5's band ordering, and the first one
   to weigh the adversarial input.** #663 records ADR-0072 §5's revisit trigger as
