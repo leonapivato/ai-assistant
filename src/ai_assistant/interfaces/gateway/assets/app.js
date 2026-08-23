@@ -392,6 +392,21 @@ const FAULTS = {
     "the session no longer match. Restart the gateway and start a session again.",
   "session-ceiling": "The gateway is holding as many sessions as it admits.",
   "bootstrap-exchange-failed": "That did not start a session.",
+  // ADR-0174 §4, and the one refusal on this page whose remedy no status code hints at
+  // (#1438). The assets are served to **any** device of the overlay — §4 keeps them
+  // above the device check deliberately, because "an overlay member obtains nothing
+  // from them they could not obtain from the distribution" — so the page loads, looks
+  // right, and refuses at the moment `Start` is pressed. Without a sentence here that
+  // arrived as "the gateway refused that request (HTTP 403)", from which nobody guesses
+  // that the answer is a setting on another machine.
+  //
+  // The setting is named because naming it is the whole remedy, and the last sentence
+  // is §4's own: the exchange is refused "without the value being read, compared or
+  // consumed", so unlike a failed exchange this one has not spent anything.
+  "device-not-listed":
+    "This device may not start a session at this gateway. Add its overlay identity to " +
+    "gateway_remote_browser_devices, on the machine the gateway runs on, and start the " +
+    "gateway again. The value you pasted was not read, so it is still good.",
   "hub-unreachable":
     "The hub is not reachable, so nothing was asked. This is the gateway " +
     "reporting a transport failure — it is not an answer, and nothing was queued.",

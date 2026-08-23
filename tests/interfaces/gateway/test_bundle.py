@@ -28,6 +28,7 @@ from ai_assistant.core.types import (
     NotificationCondition,
     NotificationReach,
 )
+from ai_assistant.interfaces.gateway.records import RefusalCondition
 from ai_assistant.interfaces.gateway.server import packaged_bundle
 
 _ROOT = Path(__file__).resolve().parents[3] / "src" / "ai_assistant" / "interfaces" / "gateway"
@@ -359,6 +360,44 @@ def test_the_page_indexes_the_panels_that_are_open() -> None:
     # It navigates by fragment: no timer, no request, and nothing that could become one.
     assert "link.href = `#${panel.id}`;" in building
     assert "scrollIntoView" not in script
+
+
+def test_every_refusal_a_browser_can_provoke_is_a_condition_the_page_reads() -> None:
+    """Issue #1438, closed at the enumeration rather than at the one entry that was
+    missing.
+
+    ``device-not-listed`` is the one it was, and the worst one to be missing: ADR-0174
+    §4 keeps the assets **above** the device check deliberately — "an overlay member
+    obtains nothing from them they could not obtain from the distribution" — so an
+    unlisted phone loads the page, sees it whole, and is refused at the moment `Start`
+    is pressed. Without an entry that arrived as "the gateway refused that request
+    (HTTP 403)", from which nobody guesses that the remedy is a setting on the laptop.
+
+    **The other two conditions are absent and must stay absent**, which is the half a
+    reading of the enumerations alone gets wrong. ``_check_door`` decides `host` and
+    `origin` *before* ``RequestClass.ASSET`` is answered, so a request failing either
+    one never receives the bundle: there is no page in which the sentence could be
+    rendered, and an entry for one would be prose no browser can reach. If that
+    ordering ever changes, this is the check that says the two now owe words.
+    """
+    script = _code("app.js")
+    faults = script[
+        script.index("const FAULTS = {") : script.index("\n};", script.index("const FAULTS = {"))
+    ]
+    named = set(re.findall(r'^\s*"?([a-z-]+)"?:', faults, re.MULTILINE))
+    decided_before_the_page_exists = {
+        RefusalCondition.HOST_NOT_BOUND.value,
+        RefusalCondition.ORIGIN_NOT_OWN.value,
+    }
+
+    reachable = {one.value for one in RefusalCondition} - decided_before_the_page_exists
+    assert reachable <= named, sorted(reachable - named)
+    assert not decided_before_the_page_exists & named
+    # The remedy is the setting's name, and §4's own clause is why the last sentence is
+    # safe to say: the exchange is refused "without the value being read, compared or
+    # consumed", so nothing was spent and nothing needs re-minting.
+    assert "gateway_remote_browser_devices" in faults
+    assert "The value you pasted was not read, so it is still good." in faults
 
 
 def test_the_header_half_is_held_in_origin_scoped_storage_shared_across_tabs() -> None:
