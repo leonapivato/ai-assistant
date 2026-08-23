@@ -112,7 +112,7 @@ _ENVELOPE: Final = """\
 
 Reply with a single JSON object and nothing else — no prose, no code fence:
 
-{"relations": [{"id": "<stored belief id, exactly as given>",
+{"relations": [{"id": "<stored belief id, exactly as quoted above>",
                 "relation": "restates" | "adds" | "contradicts"}]}
 
 Give one entry for each stored belief listed above and none for anything else. \
@@ -422,6 +422,45 @@ def _report(
     return ReconcilerReport(relations=relations, outcomes=frozenset({outcome}))
 
 
+def _quoted_span(value: str) -> str:
+    """Render one held string so it cannot write this assembler's own syntax.
+
+    ADR-0098 §2 rules that a span's attribution is "not forgeable from inside the
+    span", and that "an assembler that embeds a span in a syntax the serialised span
+    can itself produce does not conform, whatever labels it emits". This prompt's
+    syntax is line-oriented — one line per belief, opened by a ``PROPOSED BELIEF``
+    or ``STORED BELIEF`` keyword — and the spans reaching it are
+    :data:`~ai_assistant.core.types.EncodableText`, which validates UTF-8
+    encodability and permits every newline and quotation mark in between.
+
+    :func:`json.dumps` is the deterministic transform §2 admits, at its default
+    ``ensure_ascii=True``: the result is single-line printable ASCII delimited by
+    quotes the value can no longer close. The ASCII part is the clause rather than a
+    preference — ``ensure_ascii=False`` emits U+2028 and U+2029 literally, which
+    JSON does not escape and which :meth:`str.splitlines` treats as line boundaries,
+    so a span carrying one could still open a line and forge a belief. Escaping
+    every non-ASCII character closes that by construction rather than by enumerating
+    the two code points known today.
+
+    **A fourth copy of this transform rather than an import, because golden rule 1
+    forbids the import.** ``orchestration.composing`` and ``planning.planner`` each
+    hold a ``_quoted_span`` and ``orchestration.consolidation`` calls
+    :func:`json.dumps` directly — the inventory ADR-0183 §13 records — and ``memory``
+    may import none of those subsystems. The escaping is deliberately *identical* to
+    theirs and is pinned against ``consolidation``'s by a test, so the four cannot
+    drift apart on the property that matters; whether the transform earns a shared
+    home is a decision reaching four subsystems and is filed as an issue rather than
+    taken inside this fence.
+
+    Args:
+        value: The held string, verbatim as this system carries it.
+
+    Returns:
+        The quoted, escaped span to interpolate into a prompt line.
+    """
+    return json.dumps(value)
+
+
 def _render(record: MemoryRecord, consulted: Sequence[MemoryRecord]) -> str:
     """The user turn: the proposal, then each member consulted about, by id.
 
@@ -434,16 +473,40 @@ def _render(record: MemoryRecord, consulted: Sequence[MemoryRecord]) -> str:
     fixes that a relation is a property of those two and of nothing else, so a
     provenance field, a band or a validity window in the prompt would be an
     invitation to derive a relation from something that cannot support one.
+
+    **Every free-text span is escaped, and the container is one line per belief**
+    (ADR-0098 §2, #1454). The block form this replaced — a ``STORED BELIEF <id>``
+    line, a ``kind:`` line and the content, separated by blank lines — is a syntax an
+    interpolated span could itself write, and a reader's belief reaches here on the
+    ordinary ingest path: ``_may_reconcile`` fires when neither side is
+    ``USER_ASSERTED``, and a reader's proposal and a stored reader belief are both
+    ``EXTERNAL`` (ADR-0183 §8). With :func:`_quoted_span` the span is single-line
+    printable ASCII, so it cannot reach the start of a line, and each belief is one
+    line whose keyword is the assembler's first token — the construction
+    ``orchestration.consolidation._render`` already carries, one subsystem over.
+
+    ``kind`` is not escaped and does not need to be: every member of
+    :data:`~ai_assistant.core.types.MemoryRecord` fixes it as a ``Literal``, so it is
+    the assembler's own vocabulary rather than a span. The **id** is escaped even
+    though ADR-0092 §6 obliges an ``EXTERNAL`` producer to mint one opaque to its
+    source, for the reason ``orchestration.composing`` gives for quoting this
+    system's own output: "a span this system authored can still carry a newline, and
+    §2's non-forgeability is a property of the assembler rather than a judgement
+    about the span's author". ``MemoryRecord.id`` is ``EncodableText``, and a
+    container whose non-forgeability rested on a producer elsewhere behaving would
+    be the reasoning §2 exists to refuse. The quoting round-trips through the reply:
+    an id shown as a JSON string is the same string the envelope asks the model to
+    put back in a JSON field.
     """
-    stored = "\n\n".join(
-        f"STORED BELIEF {conflict.id}\nkind: {conflict.kind}\n{conflict.content}"
+    lines = [f"PROPOSED BELIEF ({record.kind}) {_quoted_span(record.content)}", ""]
+    lines.extend(
+        f"STORED BELIEF {_quoted_span(conflict.id)} ({conflict.kind}) "
+        f"{_quoted_span(conflict.content)}"
         for conflict in consulted
     )
-    return (
-        f"PROPOSED BELIEF\nkind: {record.kind}\n{record.content}\n\n"
-        f"{stored}\n\n"
-        f"Answer for each of the {len(consulted)} stored belief(s) above."
-    )
+    lines.append("")
+    lines.append(f"Answer for each of the {len(consulted)} stored belief(s) above.")
+    return "\n".join(lines)
 
 
 def _read(content: str, consulted: set[str]) -> dict[str, ConflictRelation] | None:
