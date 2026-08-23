@@ -217,15 +217,20 @@ Four follow a read that actually ran:
 - **`UNCONFIRMED`** — the read returned and the re-check raised `GrantError`, so the
   reading was discarded "exactly as a withdrawn grant is" (ADR-0097 §5).
 - **`COMPLETED`** — the read returned and the re-check confirmed the grant, so the
-  reading was handed to its use.
+  reading was **admitted** for its use.
 
-**`COMPLETED` is a fact about the read and its gate, and it deliberately claims
-nothing about the use.** It says the reading was handed over; whether the use then
-kept, rejected or failed on what it was handed is `MemoryPolicy`'s subject, or the
-facet adapter's, and their own records answer it. Claiming more would be
-unrecordable as well as untrue: §5 requires the row to be written **before** the use
-runs, so an outcome defined by the use's success could not be known when the row is
-written, and amending the row afterwards is the mutation §6 forbids.
+**`COMPLETED` is a fact about the read and its gate, and it claims nothing whatever
+about the use — not that the use ran, and not that the reading reached it.** It says
+the gate ruled the reading admissible; what the use then did with it, and whether it
+was ever handed one, is `MemoryPolicy`'s subject or the facet adapter's, and their
+own records answer it. Anything stronger would be unrecordable as well as untrue.
+§5 requires the row to be written **before** the use runs, so an outcome defined by
+the handoff could not be known when the row is written; amending the row afterwards
+is the mutation §6 forbids; and §5a's cancellation interleaving makes the point
+concrete — a cancellation landing between the row's commit and the recorder call's
+return leaves a `COMPLETED` row for a reading that was never handed anywhere. Under
+the definition above that row is **true**, which is the property an audit record has
+to have.
 
 **The two unanswerable outcomes are separated from their answered twins because
 collapsing them would put a false claim in the trail.** "There was no live grant"
@@ -265,6 +270,33 @@ the residual moves from invisible to recorded.
 > nothing else — the value `Reader.name` returns, which ADR-0093 §7 requires to be
 > declared rather than configured and Tier 2, and which ADR-0097 §1 already keys a
 > grant on.
+
+> **Normative.** `source` is a **faithful copy** of that value and is stored
+> **byte for byte**: it is `NonBlankEncodableText`, which refuses a blank identity
+> and normalises nothing. No implementation strips, case-folds or otherwise
+> normalises it, on the write path or at lookup.
+
+**The type is ADR-0096 §2's rule applied rather than chosen.** That section states
+it generally — "**a faithful copy takes the type of the field it copies, and may
+tighten only in ways that reject**" — and `NonBlankEncodableText` exists for
+precisely this shape, as `ContextFacet.source` already uses it. `Reader.name` returns
+a bare `str` and `SourceReading.source` is `EncodableText`, neither of which strips,
+so `Identifier` here would make a conforming reader named `"  calendar  "` produce a
+record naming `"calendar"` — a record that does not say what happened, in the store
+whose premise is that its records are not fabricated, and one that could collide with
+a genuinely distinct reader.
+
+**The cost is a join this ADR does not pretend is total.** `SourceGrant.source` *is*
+`Identifier` and does strip, so for such a reader the grant row and the read row
+would not compare equal. That divergence is ADR-0097 §1's and predates this ADR —
+**#667** is the open issue proposing one identifier contract across `Reader.name`,
+`SourceReading.source` and `Attestation.reported_by` — and ADR-0097 §9 is what keeps
+it inert: a grant admits a `source` "only when it equals the `name` of a `Reader` the
+hub actually holds, which makes the admissible set the set of declared constants and
+leaves no free-text route in". Both declared constants today, `"calendar"` and
+`"email"`, are unaffected by stripping. Recording the identity truthfully and
+inheriting a known open divergence is the right trade against recording a normalised
+identity and hiding it; §14 defers the convergence to #667's lane.
 
 > **Normative.** What a read produced is recorded as a **count and never as a
 > thing**: `produced` is the number of items the **reading** carried — its
@@ -770,7 +802,10 @@ no key, and the exit test does not ask them to.
 > **Normative.** **Arm (a) — completeness.** A run drives a known number of read
 > attempts, fewer than the cap, across all three uses and both readers, including at
 > least one of each of `ReadOutcome`'s six members, and reconstructs each one from
-> `export()` alone with no other store consulted.
+> `export()` alone with no other store consulted. Every driver runs on a controlled
+> clock, and the arm asserts each record's `started_at` against the instant that
+> clock served before its first `live()` call — including on a read whose bytes are
+> acquired later, so a lane that reached for `SourceReading.read_at` fails here.
 
 > **Normative.** **Arm (b) — the revocation question.** A run grants a source,
 > drives reads, revokes it, and lets the driver run again; the trail alone must
@@ -847,14 +882,15 @@ unexercised while the milestone closed on four green figures.
     - `id: DurableIdentifier` — the record's own id, minted by the caller, as
       `PermissionDecision.id` and `SourceGrant.id` are (ADR-0021 §3: a store neither
       mints ids nor reads a clock).
-    - `source: Identifier` — the reader's declared identity (§2), matching
-      `SourceGrant.source` and `Attestation.reported_by`, so a blank source is
-      refused by the type.
+    - `source: NonBlankEncodableText` — the reader's declared identity, a faithful
+      copy stored byte for byte (§2). A blank identity is refused by the type and
+      nothing is normalised; `Identifier` is deliberately **not** used, and #667 is
+      the open divergence that choice inherits.
     - `use: GrantScope` — which of the three uses the attempt was for.
-    - `started_at: UtcInstant` — the instant the attempt started, which is the
-      instant the first grant check ruled: ADR-0097 §5 makes the check and the start
-      of the read one synchronous step, so one instant is truthful for both.
-      Timezone-aware and refused naive.
+    - `started_at: UtcInstant` — the instant the attempt started, read from the
+      driver's injected clock immediately before the first `live()` call. ADR-0097
+      §5 makes the check and the start of the read one synchronous step, so one
+      instant is truthful for both. Timezone-aware and refused naive.
     - `outcome: ReadOutcome` — §1's ruling, one of six.
     - `grant: DurableIdentifier | None` — required with no default; the
       `SourceGrant.id` the attempt ran under, `None` exactly on `REFUSED` and
@@ -926,6 +962,22 @@ unexercised while the milestone closed on four green figures.
 - **`core/config.py`** gains **one** field:
   - `source_read_trail_max_rows: int` — default `200_000`, `gt=0`, `lt=2**63`, with
     no sentinel and no unlimited spelling (§6).
+
+> **Normative.** Every driving site takes an **injected clock** as a required
+> constructor argument with no default, guarded by
+> `core/clock.py`'s `checked_clock` as `ClockContextSource` and
+> `orchestration/grants.py` already guard theirs, and reads `started_at` from it
+> **immediately before the first `live()` call**. No implementation reads a module
+> clock, and none derives `started_at` from `SourceReading.read_at`.
+
+**That clause exists because none of the three sites holds a clock today** —
+`IngestionStage.__init__` takes a reader, a write stage and a grant seam;
+`_GrantedFacetSource.__init__` takes a reader and a grant seam — so a lane reaching
+for `datetime.now()` at the call site is the path of least resistance, and it would
+make §11's deterministic arms untestable. `SourceReading.read_at` is not the value
+either: ADR-0093 §10 captures it "at the moment the source's bytes are acquired",
+which is after the instant this record is about, and `REFUSED` and `UNANSWERED`
+have no reading to take it from at all.
 
 > **Normative.** The implementing lane ships both triads and the store in one change
 > with its primary producer, under ADR-0137 §2's contract-seam exception; it wires
@@ -1035,6 +1087,11 @@ supplies no obligation of its own (ADR-0089 §3).
   store's subject is a `Reader`, and nothing here reaches a keyring.
 - **Aggregation** — counts, last-read instants, per-source rollups. The surface ADR's
   to ask for, and §8's third clause forbids the one place they are most tempting.
+- **Converging `SourceReadRecord.source` with `SourceGrant.source`** — the strip /
+  no-strip divergence §2 inherits. Fires with **#667**, which proposes one identifier
+  contract across `Reader.name`, `SourceReading.source` and `Attestation.reported_by`
+  and is where the answer belongs; a lane that changed one of the two types alone
+  would move the divergence rather than close it.
 - **Everything ADR-0097 §12 and ADR-0139 §10 defer other than the read record**,
   unchanged and not re-listed.
 
@@ -1125,6 +1182,14 @@ two-row protocol with a correlation id, a second write on the hot path, a double
 store — the 105,120 yearly refusals that open nothing would each cost two rows — and
 a new class of half-recorded attempt whose outcome row never arrived. It buys a
 narrower version of the same residual rather than none.
+
+**Type `source` as `Identifier`, matching `SourceGrant.source` so the join is
+total.** Refused in §2: `Identifier` strips, `Reader.name` and
+`SourceReading.source` do not, and ADR-0096 §2's rule for a faithful copy is that it
+"may tighten only in ways that reject". A stripping type would let the trail name a
+source the reader is not called, which is the one thing an audit record may not do,
+and it would buy a join that ADR-0097 §9's admissible set already makes total for
+every identity the hub can actually hold.
 
 **Shield the recorder write across an external cancellation.** Refused in §5a.
 ADR-0060's preamble permits a bounded deferral, so this is available rather than
