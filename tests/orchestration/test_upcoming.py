@@ -17,6 +17,7 @@ about offers that really landed before the failure.
 
 from __future__ import annotations
 
+import contextlib
 import inspect
 import json
 from datetime import UTC, datetime, timedelta
@@ -29,6 +30,7 @@ from ai_assistant.core.errors import (
     GrantError,
     NotificationStoreError,
     ReaderError,
+    ReadTrailError,
     SourceNotGrantedError,
 )
 from ai_assistant.core.types import (
@@ -37,6 +39,7 @@ from ai_assistant.core.types import (
     NotificationCondition,
     NotificationDisposition,
     NotificationDispositionKind,
+    ReadOutcome,
     ReportedExtent,
 )
 from ai_assistant.orchestration import UpcomingEventStage
@@ -916,3 +919,109 @@ def test_the_producer_holds_nothing_a_memory_or_a_model_would_need() -> None:
     parameters = set(inspect.signature(UpcomingEventStage.__init__).parameters)
 
     assert parameters == {"self", "reader", "grants", "writer", "reads", "now", "lead"}
+
+
+# --- ADR-0185 §5: the attempt is recorded, before the first offer -------------
+
+
+@pytest.mark.parametrize(
+    ("outcome", "arrange"),
+    [
+        pytest.param(ReadOutcome.COMPLETED, "granted", id="completed"),
+        pytest.param(ReadOutcome.REFUSED, "ungranted", id="refused"),
+        pytest.param(ReadOutcome.UNANSWERED, "unanswerable", id="unanswered"),
+        pytest.param(ReadOutcome.FAILED, "failing", id="failed"),
+        pytest.param(ReadOutcome.DISCARDED, "revoked-mid-read", id="discarded"),
+    ],
+)
+async def test_every_attempt_leaves_one_row_naming_its_outcome(
+    outcome: ReadOutcome, arrange: str
+) -> None:
+    """ADR-0185 §1: one row per attempt, whatever became of it.
+
+    ADR-0133 §1's use, and the one whose refusals ADR-0097 §5 names as the volume
+    driver: "a deployment that revokes a grant while leaving the interval set …
+    therefore logs a refusal every interval". Since ADR-0185 §7 that refusal is a
+    durable row the *user* can read rather than a line in an operator's terminal.
+    """
+    harness = Harness(
+        reader=FakeReader(failure=OSError("gone")) if arrange == "failing" else None,
+        grants=_arranged(arrange),
+    )
+
+    with contextlib.suppress(GrantError, ReaderError, SourceNotGrantedError):
+        await harness.stage.notice()
+
+    (row,) = harness.reads.written
+    assert row.outcome is outcome
+    assert row.source == harness.reader.name
+    assert row.use is GrantScope.NOTIFY
+
+
+def _arranged(arrange: str) -> SourceGrants:
+    """The grant seam each of the five arrangements needs."""
+    if arrange == "ungranted":
+        return FakeSourceGrants()
+    granted = FakeSourceGrants([source_grant(DEFAULT_READER_NAME)])
+    if arrange == "unanswerable":
+        granted.fail_live()
+    elif arrange == "revoked-mid-read":
+        granted.revoke_after(1)
+    return granted
+
+
+async def test_the_row_is_written_before_the_first_offer() -> None:
+    """ADR-0185 §5's ordering clause, and its fail-closed consequence.
+
+    "Where the recorder raises, the driver discards the reading: … no candidate is
+    concluded." ADR-0130 §3 makes offering and persisting one call, so a producer
+    that offered first and recorded afterwards would already have written the
+    durable record by the time the recorder refused — which is exactly the placement
+    ADR-0132 §2 reasons about for the *discard* limb, applied to this one.
+    """
+    harness = Harness([_occurrence(starts_in=timedelta(minutes=5), summary="E5")])
+    harness.reads.fail_record()
+
+    with pytest.raises(ReadTrailError):
+        await harness.stage.notice()
+
+    assert harness.offered == []
+
+
+async def test_the_recorded_instant_is_the_clock_and_the_candidate_is_the_reading() -> None:
+    """The two anchors, asserted together (ADR-0185 §12, ADR-0132 §4).
+
+    ADR-0185 §12 states normatively that it "does not touch ADR-0132 §4":
+    ``checked_at`` "is **not** the instant a candidate was noticed; it anchors no
+    selection, no validation and no expiry". The injected clock answers thirteen
+    minutes past the reading, so the two values are distinguishable and a producer
+    that crossed them fails here.
+    """
+    harness = Harness([_occurrence(starts_in=timedelta(minutes=5), summary="E5")])
+
+    assert await harness.stage.notice() == 1
+
+    (row,) = harness.reads.written
+    (candidate,) = harness.offered
+    assert row.checked_at != _READ_AT
+    assert candidate.noticed_at == _READ_AT
+
+
+async def test_the_count_is_what_the_reading_carried_and_not_what_was_offered() -> None:
+    """ADR-0185 §2: ``produced`` is the reading's items, not this producer's output.
+
+    "It is a property of what the source returned and states **nothing** about what
+    this producer did with it — not how many occurrences the window selected, and not
+    how many candidates were offered." A reading of three occurrences of which one is
+    inside the lead window records three and offers one, and the two numbers are
+    asserted together so a producer that recorded its own output fails.
+    """
+    harness = Harness(
+        [_occurrence(starts_in=timedelta(minutes=n), summary=f"E{n}") for n in (5, 60, 120)]
+    )
+
+    offered = await harness.stage.notice()
+
+    (row,) = harness.reads.written
+    assert offered == 1
+    assert row.produced == 3
