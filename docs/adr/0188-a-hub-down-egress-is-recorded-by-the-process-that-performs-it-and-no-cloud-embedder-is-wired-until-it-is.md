@@ -314,17 +314,30 @@ misstate both.
 > **before the first record leaves the device**. The append is not conditional on
 > the run succeeding, on any send succeeding, or on the seal ever being reached.
 
-> **Normative.** The `sealed` event is appended at exit, on every path the process
+> **Normative.** An `opened` event that cannot be appended and flushed **refuses the
+> run**, before anything leaves the device, with a diagnostic naming the file and the
+> underlying failure. No lane makes the write best-effort, warns and proceeds, or
+> falls back to a second location: an egress this system cannot record is an egress
+> it does not perform.
+
+> **Normative.** The `sealed` event is appended at exit on every path the process
 > survives — a completed run, a failure raised out of the embedder or the store, and
-> a `KeyboardInterrupt`. Only a path that ends the process without running its exit —
-> `SIGKILL`, a power cut, a kernel panic — leaves a run unsealed.
+> a `KeyboardInterrupt`.
+
+> **Normative.** A run is left unsealed by exactly three things: a path that ends the
+> process without running its exit (`SIGKILL`, a power cut, a kernel panic); a seal
+> that cannot be appended or flushed; and a seal whose durability the filesystem will
+> not confirm. The second and third are reported to the operator on standard error,
+> naming the file, and neither turns a migration that completed into one that failed —
+> the record's durability and the run's outcome are separate facts, which is the shape
+> ADR-0104 §3 already chose for a swap that happened but could not be flushed.
 
 > **Normative.** A run whose `opened` event stands with no `sealed` event
 > reconstructs as *authorised, sending entered, extent undeterminable* — never as no
-> egress, and never as a completed one. No lane, no surface and no exit measurement
-> treats a missing seal as the absence of an act, and none infers the extent from the
-> `opened` event's disclosed counts, which state what was *authorised* and not what
-> was sent.
+> egress, and never as a completed one, **and this reading does not vary with why the
+> seal is missing**. No lane, no surface and no exit measurement treats a missing seal
+> as the absence of an act, and none infers the extent from the `opened` event's
+> disclosed counts, which state what was *authorised* and not what was sent.
 
 **The order is the whole of it.** A record written at the commit point records
 nothing when the run is killed halfway, which is the case that matters most: an
@@ -333,6 +346,24 @@ twelve thousand records sent. The disclosure ADR-0104 §4 requires already sits 
 exactly this point — `service/reembed.py`'s `_run_locked` prints the store, the
 models and the counts and only then calls `Reembedder.run` — so the write-ahead
 point is a moment the design already has, not one this ADR invents.
+
+**The two write failures are treated differently, and the asymmetry is the whole
+design rather than an inconsistency.** A failed `opened` write happens while nothing
+has left the device, so refusing costs the operator a retry and loses nothing — the
+migration is resumable by ADR-0104 §2, and the disclosure has already told them what
+they were authorising. A failed `sealed` write happens after records have been sent,
+where there is nothing left to refuse: the egress is in the past, and aborting the
+process would only discard the run's remaining work. What is available in the second
+case is to say so, which the clause requires, and to leave the record in the one state
+that is true — unsealed, meaning the extent is not known from the file. Treating a
+seal failure as fatal would trade a recoverable ignorance for an unrecoverable one.
+
+**A seal that cannot be written is why the unsealed reading may not be refined.**
+It would be tempting to let a surface say "this run completed, we merely failed to
+record it", on the strength of the process having reached its exit. Nothing durable
+supports that sentence: the claim would rest on a report printed to a terminal, which
+is exactly the substitute for a record that Alternatives refuses ADR-0104 §4's
+disclosure for. So the file's reading is fixed by what the file holds.
 
 **Stating the indeterminacy rather than resolving it is ADR-0185 §1's move.** There,
 a `FAILED` read leaves opened-ness undeterminable and §10 excludes it from the
