@@ -21,6 +21,10 @@ uv --version
 uv 0.12.5 (x86_64-unknown-linux-gnu)
 ```
 
+That is one machine's answer, quoted for its shape rather than its numbers.
+Nothing on this page asks for a particular uv version — what matters is that the
+command runs at all.
+
 If you installed it with `pip` into a particular interpreter and that
 interpreter's script directory is not on your `PATH`, `uv` will not be found —
 `<that python> -m uv` reaches exactly the same program, and works everywhere

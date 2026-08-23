@@ -180,6 +180,14 @@ Open **`http://127.0.0.1:8422`** in a browser on this same machine.
 The page shows one panel, **Start a session**. Paste the bootstrap value into
 the *Bootstrap value* field and press **Start**.
 
+**Start** posts the value to `/session`, as `{"bootstrap_value": …}`. A gateway
+that accepts it answers with the two halves of a session and nothing else: a
+`header_half` in the JSON body, which the page keeps and sets as the
+`X-Assistant-Session` header on every later request, and an `assistant_session`
+cookie the browser attaches on its own. Every admitted request carries both
+halves (ADR-0168 §6) — so a client that finishes this step without a browser has
+to store a cookie as well as set a header.
+
 That value is good exactly once, and it is good for ten minutes. The gateway
 mints one when it starts, prints it on standard output, and never prints that
 one again — not in a log record, not in an error, not in any page. Exchanging it
@@ -192,7 +200,8 @@ HTTP/1.1 400 Bad Request
 ### If you lose it, ask for another one
 
 You do not restart the gateway. Send it `SIGUSR1`, from any terminal on the
-machine it runs on — the process id is on the last line it printed:
+machine it runs on and as the user that started it — the process id is on the
+last line it printed:
 
 ```bash
 kill -SIGUSR1 3941204
@@ -281,6 +290,12 @@ never stopped. Again: step 7's mint act, not a restart.
 finishes what it is doing and releases its lock. Neither leaves anything
 running behind it.
 
+`hub.sock` goes when the hub stops accepting; **`hub.lock` stays**, and a file
+left there is not a stale hub. What a hub holds is a kernel lock on that file,
+released the moment the process ends however it ends — so the file's presence
+says nothing about whether one is running, and deleting it by hand is what could
+let two hubs end up holding the same directory at once (ADR-0083 §1).
+
 ## When it does not work
 
 **`The assistant hub is not reachable: no assistant hub is listening at
@@ -300,7 +315,8 @@ would be acceptable; the fix is almost always in that sentence.
 
 **`Error: the gateway could not bind port 8422 … address already in use`.**
 Something else already holds that port — most often another gateway you forgot
-about. Stop it, or set `ASSISTANT_GATEWAY_PORT` to a free port. The gateway
+about. Stop it, or set `ASSISTANT_GATEWAY_PORT` to a free port — in the `.env`
+from step 2, or exported in the shell you start the **gateway** in. The gateway
 prints its bootstrap value *before* it binds, so there will be one on the screen
 above the error: it went with the process that failed to start, and the next
 gateway prints its own. (Once you have done [`phone.md`](phone.md) the wording
