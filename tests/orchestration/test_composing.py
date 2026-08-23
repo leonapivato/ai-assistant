@@ -20,6 +20,7 @@ from ai_assistant.core.errors import ModelError, ModelUnavailableError
 from ai_assistant.core.types import (
     ActionPlan,
     Attestation,
+    BeliefBand,
     CalendarFacet,
     CurrentContext,
     Disposition,
@@ -40,6 +41,7 @@ from ai_assistant.core.types import (
     TimeOfDay,
     ToolFailureKind,
     TurnResult,
+    band_of,
 )
 from ai_assistant.orchestration import composing, payloads
 from ai_assistant.orchestration.composing import ComposingStage
@@ -102,17 +104,23 @@ def _turn(
     )
 
 
-def _provenance(source: MemorySource) -> Provenance:
+def _provenance(source: MemorySource, *, marked: bool = False) -> Provenance:
     """A provenance for ``source``, carrying whatever that band's type requires.
 
     ``EXTERNAL`` is in the ``ATTESTED`` band and the type refuses one with no
     attestation naming what reported it (ADR-0073 §4, ADR-0092 §1) — which is
     exactly the held datum ADR-0098 §2's non-forgeability derives the origin from.
+
+    ``marked`` sets ADR-0106 §2's ``derived_from_external`` raw, on any source, so a
+    case can build the cells the *predicate* collapses as well as the ones it
+    distinguishes — §7 forbids a band-keyed validator precisely so a record outside
+    ``DERIVED`` carrying the marker stays constructible.
     """
     return Provenance(
         source=source,
         confidence=1.0 if source is MemorySource.USER_ASSERTED else 0.6,
         last_updated=AT,
+        derived_from_external=marked,
         attestation=(
             Attestation(reported_by="a-connected-source", reported_at=AT)
             if source is MemorySource.EXTERNAL
@@ -126,9 +134,13 @@ def _belief(
     *,
     source: MemorySource = MemorySource.USER_ASSERTED,
     record_id: str = "rec-1",
+    marked: bool = False,
 ) -> SemanticMemory:
     return SemanticMemory(
-        id=record_id, content=content, fact=content, provenance=_provenance(source)
+        id=record_id,
+        content=content,
+        fact=content,
+        provenance=_provenance(source, marked=marked),
     )
 
 
@@ -310,7 +322,74 @@ async def test_an_external_record_is_presented_as_third_party_data() -> None:
     own = next(line for line in prompt.splitlines() if "prefers hiking" in line)
     external = next(line for line in prompt.splitlines() if "connected source said so" in line)
     assert "recorded by this system" in own
+    # The authorship phrase, and it is the ``ATTESTED`` arm's alone: a connected
+    # source authored this record's content, which is what makes it true here and
+    # false of a ``DERIVED`` record resting on one. The case below holds that line.
     assert "reported by a connected source" in external
+
+
+@pytest.mark.parametrize(
+    ("source", "marked", "expected"),
+    [
+        (MemorySource.USER_ASSERTED, False, "recorded by this system"),
+        # Constructible and meaningless: ADR-0106 §7 forbids a band-keyed validator,
+        # and §2 rules the marker "carries no meaning outside the ``DERIVED`` band",
+        # so the predicate's band guard must keep this record out of both source
+        # arms. Without it the user's own word would render as resting on a source,
+        # which ADR-0098 §1 forbids in principle.
+        (MemorySource.USER_ASSERTED, True, "recorded by this system"),
+        (MemorySource.OBSERVED, False, "recorded by this system"),
+        (MemorySource.INFERRED, False, "recorded by this system"),
+        (MemorySource.OBSERVED, True, "resting on what a connected source reported"),
+        (MemorySource.INFERRED, True, "resting on what a connected source reported"),
+        (MemorySource.EXTERNAL, False, "reported by a connected source"),
+        # The band already records externality (ADR-0106 §1), so the marker adds
+        # nothing here and must not change the term either.
+        (MemorySource.EXTERNAL, True, "reported by a connected source"),
+    ],
+)
+async def test_the_origin_term_never_names_a_source_as_a_derived_records_author(
+    source: MemorySource, marked: bool, expected: str
+) -> None:
+    """#1466: the origin term predicates the warrant, and authorship only in `ATTESTED`.
+
+    ADR-0106 §1 defines the predicate as "a record **rests on** recorded external
+    content" — a statement about the warrant — and two bands satisfy it for different
+    reasons. In ``ATTESTED`` the content *is* the source's report. In ``DERIVED`` it
+    is this system's own text over material that included one. Wording both as
+    "reported by a connected source" put an ``ATTESTED`` attribution on a ``DERIVED``
+    record, so one bullet said both "reported by a connected source" and "this system
+    worked this out" about one span — a standing the record does not have, which
+    ADR-0072 §6 and ADR-0073 §4 forbid a rendering from claiming, and an inversion of
+    a marker whose purpose is caution.
+
+    Asserted per band and marker rather than on the two cells the old pin covered,
+    because the defect lived in a cell neither of them built. What is asserted is the
+    property, not only the string: the authorship phrase appears **only** where a
+    connected source authored the content, while the taint stays legible in the
+    derived cell that carries it — a fix that dropped the term would satisfy ADR-0072
+    §6 and defeat ADR-0106 §2.
+    """
+    model = FakeModelProvider("here is your answer")
+    stage = ComposingStage(model=model, streaming=FakeStreamingCompleter())
+
+    await stage.compose(
+        turn=_turn(memories=(_belief("the user prefers hiking", source=source, marked=marked),)),
+        step=None,
+        undriven=(),
+    )
+
+    line = next(one for one in _prompt(model).splitlines() if "prefers hiking" in one)
+    band = band_of(source)
+    assert expected in line
+    if band is not BeliefBand.ATTESTED:
+        # The whole of #1466: no rendering of a record this system authored says a
+        # connected source reported it.
+        assert "reported by a connected source" not in line
+        assert composing._STANCE[band] in line
+    if marked and band is BeliefBand.DERIVED:
+        # …and the caution survives the correction, which is the other half.
+        assert "a connected source" in line
 
 
 async def test_a_record_cannot_forge_the_assemblers_own_container_syntax() -> None:

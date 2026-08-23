@@ -33,19 +33,23 @@ import structlog.testing
 from ai_assistant.core.errors import MemoryStoreError, SelfConsumingWriteError
 from ai_assistant.core.types import (
     Attestation,
+    BeliefBand,
     MemoryDecisionKind,
     MemorySource,
     MemoryUpdateProposal,
     Provenance,
     SemanticMemory,
     Validity,
+    band_of,
 )
 from ai_assistant.memory import DefaultMemoryPolicy
 from ai_assistant.orchestration import MemoryWriteStage, QuestionStage
 from ai_assistant.orchestration.consolidation import (
     _MAX_EXTRACTION_MISSES,
+    _SYSTEM_PROMPT,
     CONSOLIDATION_WALK,
     ConsolidationStage,
+    _render,
 )
 from ai_assistant.service.scheduler import Job, Scheduler
 from ai_assistant.testing import (
@@ -1304,8 +1308,69 @@ async def test_origin_is_marked_from_provenance_and_not_from_the_text() -> None:
     await stage.run()
 
     first, second = model.calls[0].messages[-1].content.splitlines()
+    # ``third-party`` is the ``ATTESTED`` arm alone — a connected source authored
+    # R1's content. R2 is derived and clean. The cell neither of these builds — a
+    # derived record *resting* on a source — is the case below (#1466).
     assert first.startswith("[R1] (semantic, third-party)")
     assert second.startswith("[R2] (semantic, this system's own)")
+
+
+@pytest.mark.parametrize(
+    ("source", "tainted", "expected"),
+    [
+        (MemorySource.USER_ASSERTED, False, "this system's own"),
+        # Constructible and meaningless: ADR-0106 §7 forbids a band-keyed validator
+        # and §2 rules the marker "carries no meaning outside the ``DERIVED`` band",
+        # so the predicate's band guard must keep the user's own word out of both
+        # third-party arms — ADR-0098 §1 forbids calling it external in principle.
+        (MemorySource.USER_ASSERTED, True, "this system's own"),
+        (MemorySource.OBSERVED, False, "this system's own"),
+        (MemorySource.INFERRED, False, "this system's own"),
+        (MemorySource.OBSERVED, True, "rests on third-party"),
+        (MemorySource.INFERRED, True, "rests on third-party"),
+        (MemorySource.EXTERNAL, False, "third-party"),
+        # The band already records externality (ADR-0106 §1), so the marker adds
+        # nothing here and must not change the term either.
+        (MemorySource.EXTERNAL, True, "third-party"),
+    ],
+)
+def test_the_origin_term_never_names_a_source_as_a_derived_records_author(
+    source: MemorySource, tainted: bool, expected: str
+) -> None:
+    """#1466: the origin term predicates the warrant, and authorship only in `ATTESTED`.
+
+    ADR-0106 §1 defines the predicate as "a record **rests on** recorded external
+    content" — a statement about the warrant — and two bands satisfy it for different
+    reasons. In ``ATTESTED`` the content *is* what a connected source reported. In
+    ``DERIVED`` it is this system's own text, authored over material that included
+    one. Marking both ``third-party`` gave a connected source's authorship to this
+    system's own words — a standing the record does not have, which ADR-0072 §6 and
+    ADR-0073 §4 forbid a rendering from claiming — and it made the system prompt's
+    own gloss false for that line, since the gloss says the marked content was "not
+    written by this system or its user".
+
+    Which is why the last assertion is on the prompt rather than on the line: the
+    term and the sentence explaining it to the model are one fact in two places, and
+    a term the prompt does not gloss is a marking the reader cannot use. This
+    renderer's vocabulary stays its own — no band, no confidence, its own words —
+    because #1453 established the three assemblers' vocabularies differ deliberately.
+    """
+    line = _render([_record("r1", "an ordinary belief", source=source, tainted=tainted)])
+    band = band_of(source)
+
+    assert line.startswith(f"[R1] (semantic, {expected})")
+    if band is not BeliefBand.ATTESTED:
+        # The whole of #1466: no rendering of a record this system authored marks it
+        # as the third party's own — the bare term, not a term containing it.
+        assert not line.startswith("[R1] (semantic, third-party)")
+    if band is BeliefBand.DERIVED and tainted:
+        # …and the caution survives the correction, which is the other half: a fix
+        # that dropped the term would satisfy ADR-0072 §6 and defeat ADR-0106 §2.
+        assert "third-party" in line
+    if expected != "this system's own":
+        # Every mark the model is asked to act on is a mark the prompt explains,
+        # verbatim and in quotes, so the two cannot drift apart silently.
+        assert f'"{expected}"' in _SYSTEM_PROMPT
 
 
 async def test_an_oversized_reply_is_refused_before_it_is_decoded() -> None:
