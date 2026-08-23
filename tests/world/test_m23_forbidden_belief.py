@@ -109,13 +109,15 @@ async def _cycles(world: World, *, records: int, count: int) -> list[str]:
     for cycle in range(count):
         plant(world.source, cycle=cycle, records=records, hostile=True)
         await world.ingestion.ingest()
+        # Marked **before** this cycle's consolidation, so the check below is about
+        # the calls this cycle made. One provider serves every cycle, and an
+        # unscoped scan would let cycle 0's prompt vouch for cycle 9's — nine cycles
+        # unexamined while the check kept passing.
+        before = len(world.consolidation_model.calls)
         outcome = await world.consolidations(f"consolidation-{cycle}").run()
-        # The transcript answers whatever it is shown, so the arm has to show that
-        # what it *was* shown carried the planted content — otherwise a regression
-        # that stopped selecting ATTESTED records into the chunk would leave every
-        # assertion below standing while nothing hostile reached a producer.
-        assert carried_the_injection(world.consolidation_model), (
-            f"cycle {cycle} consolidated a chunk carrying none of the planted content"
+        assert carried_the_injection(world.consolidation_model, since=before), (
+            f"cycle {cycle} consolidated a chunk carrying none of the planted content, "
+            "so this cycle put nothing hostile in front of a producer"
         )
         assert outcome.committed == 0, (
             f"cycle {cycle} committed {outcome.committed} consolidated belief(s) over a "
