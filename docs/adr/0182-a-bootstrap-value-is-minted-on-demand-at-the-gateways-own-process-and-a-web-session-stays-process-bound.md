@@ -274,10 +274,16 @@ locked out of a running gateway by a supervisor closing a pipe.
 
 ### 2. One outstanding value at a time, and four ways it ceases
 
-> **Normative.** At most **one** unexchanged bootstrap value stands at a time. A
-> **disclosed** mint (§1) replaces the outstanding value, which ceases to admit
-> anything at that moment, and no gateway holds two — not even for the width of a
-> mint act, because §1 orders disclosure before replacement.
+> **Normative.** At most **one** unexchanged bootstrap value **admits** at a time.
+> A **disclosed** mint (§1) replaces the outstanding value, which ceases to admit
+> anything at that moment, so there is no instant at which two values admit — not
+> even the width of a mint act, because §1 orders disclosure before replacement.
+
+> **Normative.** The invariant above is about what **admits**, not about what the
+> gateway holds. An undisclosed **candidate** is not a value (§3), it admits
+> nothing, and **no exchange accepts one before the disclosure that promotes it**.
+> Its coexistence in the gateway's memory with the still-outstanding value, for the
+> width of a disclosure, is required by §1's order and is not two values standing.
 
 > **Normative.** An outstanding value ceases to admit anything on the first of
 > four events, and there is no fifth: its exchange (ADR-0168 §5's single use),
@@ -294,6 +300,21 @@ locked out of a running gateway by a supervisor closing a pipe.
 > it failed, "never whether the value was well-formed, whether one is still
 > outstanding, or whether a session already exists" — and never which of the four
 > events above ended the value it carried.
+
+**The invariant is stated over admission because §1's order makes the custody
+reading impossible to satisfy.** An earlier draft said "no gateway holds two — not
+even for the width of a mint act, **because** §1 orders disclosure before
+replacement", which offers §1 as the ground for the one thing §1 forbids: minting a
+candidate and disclosing it before promotion means the candidate and the outstanding
+value are both in memory for the width of the write. Adversarial review found it on
+the eighth round. Read literally, an implementer resolving the contradiction in §2's
+favour would destroy the old value before disclosing — the exact defect §1's ordering
+was fixed on the third round to remove. The rest of this ADR already reads the way
+the clause above now does: §3 says a candidate "is not yet a value", and §4's own
+argument turns on "an old value exchanged while a candidate is being disclosed". What
+the invariant has to carry is that no two values ever admit, which is the hazard the
+next paragraph is about, and the clause naming the exchange is what makes that true
+of the interval rather than merely asserted about it.
 
 **One outstanding value is what keeps this from needing a ceiling of its own.**
 Several values standing at once would be a pool: bounded by nothing but the owner's
@@ -981,7 +1002,9 @@ carrying the earlier draft in its head would get backwards;
 that a value the gateway could not disclose is not minted, that a previously
 outstanding value still admits after such a failure — the ordering §1 fixes, and the
 one an implementation is most likely to get backwards — and that the gateway keeps
-serving; and that `gateway_bootstrap_ttl` is refused at load on a non-positive value,
+serving; that an exchange presenting an undisclosed candidate is refused, which is
+what makes §2's admission invariant true across the interval §1's order creates;
+and that `gateway_bootstrap_ttl` is refused at load on a non-positive value,
 in the `gt=timedelta(0)` form. The monotonic clause of §3 is pinned the way the
 session bounds already are — by driving the injected deferral seam rather than by
 moving a clock — so that the test asserts the source the gateway uses rather than
