@@ -295,7 +295,9 @@ Something else already holds that port — most often another gateway you forgot
 about. Stop it, or set `ASSISTANT_GATEWAY_PORT` to a free port. The gateway
 prints its bootstrap value *before* it binds, so there will be one on the screen
 above the error: it went with the process that failed to start, and the next
-gateway prints its own.
+gateway prints its own. (Once you have done [`phone.md`](phone.md) the wording
+changes a little, because there are then two listeners on that port and either
+could be the one refused.)
 
 **`This gateway could not install the mint act …`**, printed at start. It is
 serving normally and every browser it admits is fine, but `kill -SIGUSR1` will
