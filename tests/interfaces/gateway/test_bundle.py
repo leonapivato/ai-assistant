@@ -966,6 +966,196 @@ def test_the_page_offers_both_turn_entries_and_falls_back_to_neither() -> None:
     assert script.count("askStreaming(") == 2
 
 
+def test_an_ask_whose_answer_never_arrives_does_not_hold_the_owners_control_for_ever() -> None:
+    """Issue #1500. ``ask`` disables ``#ask-button`` before the request goes out and
+    re-enables it in a ``finally``; ``fetch`` carries no deadline of its own, so a socket
+    that dies without settling leaves that ``await`` pending for ever, the ``finally``
+    never runs, and the owner's one way into the assistant stays greyed out until the
+    page is reloaded. It is #1474's failure on a different request.
+
+    **A different clause of ADR-0182 §7 governs, and it supplies a control rather than a
+    bound.** #1474 turns on §7's *third* clause, which is about delivery streams and
+    about concurrency, so PR #1496 could bound a duration the clause is silent on. An
+    ``ask`` is reached by §7's **fifth** clause — "The page re-issues **no other
+    request** of its own motion. Every request that asks the assistant for something …
+    is re-issued only on an act by the owner" — and by the paragraph grounding it, which
+    names the remedy in terms: re-issuing an ask "is a turn the owner may already have
+    had executed", so "offering the owner a visible retry costs **one control** and
+    removes the class".
+
+    What is pinned here is the invariant #1500 is about: every exit an ask has, the ones
+    that never settle included, goes through the one function that hands the control
+    back — and the owner has an act that reaches it while the request is still out.
+    """
+    script = _code("app.js")
+    document = _markup("index.html")
+    asking = _functions(script)["ask"]
+    abandon = _functions(script)["abandonAsk"]
+
+    # One place re-enables the button, so a path that released the control without
+    # saying anything would have to go through the sentence too.
+    assert script.count('el("ask-button").disabled = false;') == 1
+    assert 'el("ask-button").disabled = false;' in _functions(script)["releaseAsk"]
+    # The wait is a controller and not a flag, so aborting it is what makes the pending
+    # `fetch` settle rather than merely marking it settled.
+    assert "const waiting = new AbortController();" in asking
+    assert "waiting.abort();" in abandon
+    # Carried into both turn entries, which is what puts the abort on the socket rather
+    # than only on this page's own bookkeeping.
+    assert "await askStreaming(half, asked, chosenAt, waiting.signal);" in asking
+    assert "await askWhole(half, asked, chosenAt, waiting.signal);" in asking
+    assert script.count("signal: stopping,") == 2
+    # The owner's act reaches it, from a control that ships nowhere in the document and
+    # is built beside the button it stands in for.
+    assert 'id="stop-waiting"' not in document
+    assert 'stop.addEventListener("click", abandonAsk);' in script
+    assert script.count("abandonAsk") == 2
+    assert "offerStopWaiting();" in script
+
+
+def test_stopping_a_wait_says_the_turns_outcome_is_not_known_and_claims_nothing_else() -> None:
+    """ADR-0177 §7's fourth clause, which is this surface's own addition to ADR-0139
+    §4's three outcomes, reaching the request that asks the assistant for something.
+
+    "A failure of the **browser's own** request to the gateway — the request was sent and
+    no response was read — is an outcome that is **not known**, whatever the gateway
+    did", and "no front end resolves it by assuming either of the other two". A control
+    that simply came back would assume one by omission: a restored control reads as an
+    act that finished.
+
+    So the three things the owner cannot otherwise know are each said — the turn may have
+    run, nothing was cancelled at the assistant, and asking again is a new question
+    rather than a retry of that one, which is ADR-0182 §7's "the page re-asks only when
+    the owner asks it to" said where the owner is. The route back is a read rather than
+    an assertion (ADR-0177 §7's last clause: no surface states a state it has not read).
+    """
+    script = _code("app.js")
+    abandon = _functions(script)["abandonAsk"]
+
+    assert 'fault(ASK_ABANDONED, "console");' in abandon
+    assert "What became of the turn is not known" in script
+    assert "may have carried it out and may never have received it" in script
+    assert "Nothing was re-sent and nothing was cancelled" in script
+    assert "asks a new question rather than retrying that one" in script
+    assert "it will show in the conversations listing" in script
+    # And it sends nothing at all, which is what keeps a control that ends a wait from
+    # being the silent retry ADR-0168 §9 forbids wearing a button's clothes.
+    for sends in ("fetch(", "relay(", "act(", "watchDeliveries("):
+        assert sends not in abandon, sends
+    # Inside the ask form, where a button with no type is a submit button — which would
+    # ask the question again from the one control whose whole purpose is that it does not.
+    assert 'stop.type = "button";' in script
+    # Said while the question is out, too. The sentence promises no deadline, because
+    # there is none: what it tells the owner is that this page cannot tell a slow turn
+    # from one that will never answer, which is what makes the control theirs to use.
+    assert "askWaiting(true);" in _functions(script)["ask"]
+    assert "This browser puts no deadline on a turn" in script
+    assert "wait is yours to do." in script
+
+
+def test_the_wait_is_ended_by_the_owner_and_by_no_clock_of_the_pages_own() -> None:
+    """The decision #1500 asks a taker to make, pinned where changing it would have to
+    pass this test: an automatic deadline on an ask is **declined**, and the page's own
+    motion is left exactly as ADR-0182 §7 left it — two events and one clock.
+
+    **Any figure would pace something the gateway paces, and no head discloses it.**
+    ``server.py``'s ``_TURN_BUDGET`` gives every turn sixty seconds — ``_ask`` and
+    ``_pump_answer`` both pass it — and it reaches the browser in no header, no value and
+    no setting. A page-side deadline would be a second number that can silently disagree
+    with it, which is ``SILENT_CADENCES``' own argument one surface out, and deriving one
+    from ``usableCadence``'s figure would be the substitution that rule refuses.
+
+    **``HEAD_DEADLINE_MILLISECONDS``' argument does not transfer**, which is the trap
+    this test exists for. That bound is defensible because what it covers is "a round
+    trip and an in-process table read, and nothing else": ``_write_stream`` writes and
+    drains the delivery head *before* it awaits the body. An ``/ask`` head is written
+    after the whole turn, so the same thirty seconds there would abandon a healthy turn
+    that was thinking and announce that its outcome was not known — true, and useless.
+    """
+    script = _code("app.js")
+
+    # Still one clock, and still the delivery stream's. A second `setTimeout` would be
+    # the page taking motion over a request ADR-0182 §7 makes the owner's.
+    assert len(_timeouts(script)) == 1
+    assert "setInterval" not in script
+    # And no deadline reaches the ask at all: neither the delivery bound nor a new one.
+    for function in ("ask", "abandonAsk", "askWhole", "askStreaming", "releaseAsk"):
+        body = _functions(script)[function]
+        for clock in ("setTimeout", "HEAD_DEADLINE_MILLISECONDS", "SILENT_CADENCES", "cadence"):
+            assert clock not in body, (function, clock)
+    # The one clock there is cannot reach the abandonment either, so the wait is ended
+    # by the owner and by nothing this page schedules.
+    assert "abandonAsk" not in _timeouts(script)[0]
+    assert "releaseAsk" not in _timeouts(script)[0]
+
+
+def test_a_settled_ask_does_not_hand_back_a_control_a_later_question_took() -> None:
+    """The race the remedy creates, closed where it is created.
+
+    Stopping a wait re-enables ``#ask-button``, which is the point of it — so the owner
+    can ask again at once, while the abandoned request's promise is still unsettled. That
+    promise then rejects, and an unguarded ``finally`` would run `releaseAsk` on the
+    *live* turn: the button back in the middle of it, and that turn's own way out hidden.
+
+    The guard is an identity comparison against the controller rather than a flag,
+    because what has to be decided is *which ask* is being waited on, and the controller
+    is the only thing that is one per ask.
+    """
+    script = _code("app.js")
+    asking = _functions(script)["ask"]
+
+    assert "if (awaited === waiting) {" in asking
+    assert asking.index("if (awaited === waiting) {") < asking.index("releaseAsk();")
+    # Released before the abort, so the rejection it provokes finds this ask settled.
+    abandon = _functions(script)["abandonAsk"]
+    assert abandon.index("releaseAsk();") < abandon.index("waiting.abort();")
+    # `awaited` is written in exactly three places — taken, and given back in the one
+    # function that hands the control back with it.
+    assert len(re.findall(r"(?<!let )awaited = ", script)) == 2
+    assert "awaited = null;" in _functions(script)["releaseAsk"]
+
+
+def test_an_abandoned_ask_leaves_no_answer_shaped_nothing_on_screen() -> None:
+    """What an abort must not be allowed to render, on the three paths it can land on.
+
+    ADR-0173 §3 makes the terminal outcome's ``reply`` the answer and forbids treating
+    "an accumulated chunk sequence as the record of what the assistant said", so partial
+    text has to go the way ``ANSWER_STREAM_CUT`` sends it — cleared, not left standing
+    under a fault.
+
+    ``readBody`` is the subtler half. It answers anything unreadable with an empty object
+    rather than throwing, which is the right rule for a body the gateway wrote badly and
+    the wrong one for a read the owner stopped: ``{}`` rendered as an outcome is an
+    answer-shaped nothing, and reported as a refusal it is a condition the gateway never
+    named. Both entries check the signal instead of trusting the throw.
+
+    And the guard in ``ask``'s own ``catch`` is the last one: an abort the owner asked
+    for is not the gateway having gone, and saying it was would be a wrong explanation
+    rather than a missing one — ``readDeliveries``' catch keeps the same distinction.
+    """
+    script = _code("app.js")
+    abandon = _functions(script)["abandonAsk"]
+
+    assert 'clearNode(el("answer-body"));' in abandon
+    assert 'show("answer", false);' in abandon
+    assert abandon.index('clearNode(el("answer-body"));') < abandon.index("fault(ASK_ABANDONED")
+    # The two body reads that an abort can land in the middle of.
+    assert script.count("if (stopping.aborted) {") == 2
+    whole = _functions(script)["askWhole"]
+    assert whole.index("const body = await readBody(response);") < whole.index(
+        "if (stopping.aborted) {"
+    )
+    assert whole.index("if (stopping.aborted) {") < whole.index("if (response.ok) {")
+    stream = _functions(script)["askStreaming"]
+    assert stream.index("if (stopping.aborted) {") < stream.index('show("answer", false);')
+    # And the catch, which stays silent for an ending the owner already has words for.
+    asking = _functions(script)["ask"]
+    assert "if (!waiting.signal.aborted) {" in asking
+    assert asking.index("if (!waiting.signal.aborted) {") < asking.index(
+        'fault(GATEWAY_GONE, "console");'
+    )
+
+
 def test_the_page_renders_a_notification_in_the_open_page_and_by_no_other_means() -> None:
     """§9: "A notification is rendered inside the open page and by no other means.
     This ADR authorises no Notification API, no Push API, no service worker, and no
