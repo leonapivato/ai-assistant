@@ -77,6 +77,7 @@ from ai_assistant.core.errors import (
     IncompleteProvisioningError,
     InvalidGrantError,
     OversizedValueError,
+    ReadTrailError,
     UngrantableSourceError,
     UnknownConnectionError,
     UnknownContinuationError,
@@ -111,12 +112,19 @@ from ai_assistant.core.types import (
     ReplyChunk,
     Reversibility,
     RiskLevel,
+    SourceReadRecord,
     ToolCost,
     ToolDefinition,
     TurnOutcome,
     secret_value,
 )
-from ai_assistant.testing import Disclosure, FakeAuditTrail, SecretMethod
+from ai_assistant.testing import (
+    Disclosure,
+    FakeAuditTrail,
+    FakeSourceReadTrail,
+    SecretMethod,
+    source_read_record,
+)
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -428,6 +436,179 @@ class DecisionSubject:
     trail: SeededAuditTrail
 
 
+#: When the seeded read trail's first grant check resolved. Fixed, for
+#: :data:`_RULED_AT`'s reason.
+_CHECKED_AT: Final = datetime(2026, 3, 2, 14, 0, 0, tzinfo=UTC)
+
+#: The rows every seeded read trail holds, as ``(id, seconds after``
+#: :data:`_CHECKED_AT` ``)``, **in the order they are recorded** — which is the
+#: order that decides this surface, because ADR-0185 §6 orders this store by
+#: recording order and "never by ``checked_at``".
+#:
+#: **Every plausible wrong ordering of these four rows is a different sequence from
+#: the right one, and that is the whole design of the fixture.** The right answer is
+#: :data:`_READ_ORDER`. Against it: relaying the store's ``export`` gives the
+#: recorded order below; ``checked_at`` descending gives ``r-4, r-3, r-2, r-1`` and
+#: ascending its reverse; ``id`` ascending gives ``r-1 … r-4`` and descending
+#: ``r-4 … r-1``. None of the five equals :data:`_READ_ORDER`, so a case asserting
+#: the sequence positively also refutes each of them — which a fixture with sorted
+#: ids or monotonic instants would not, and this one deliberately has neither.
+#:
+#: ``r-3`` and ``r-2`` share an instant, so the "a tie in ``checked_at`` is not a tie
+#: in this order" case is exercised over rows that really tie rather than assumed.
+_SEEDED_READS: Final[tuple[tuple[str, int], ...]] = (
+    ("r-3", 2),
+    ("r-1", 0),
+    ("r-4", 3),
+    ("r-2", 2),
+)
+
+#: ADR-0186 §10's order over :data:`_SEEDED_READS`: newest-**recorded** first, which
+#: is the recorded sequence reversed. Written out rather than computed, so the
+#: expectation is something a reader checks against the ADR rather than against a
+#: second copy of the implementation.
+_READ_ORDER: Final[tuple[str, ...]] = ("r-2", "r-4", "r-1", "r-3")
+
+#: How many read records the overfull subject's trail holds. Six, which is over
+#: :data:`_TINY_LIMIT` while a single row — about 134 bytes, a record carrying no
+#: content at all (ADR-0185 §10) — is comfortably under it. So what is refused is
+#: the **artifact**, which is the only thing that distinguishes a complete export
+#: from a truncated one (ADR-0186 §3).
+#:
+#: :data:`_TINY_LIMIT` itself rather than a constant of its own, unlike
+#: :data:`_DECISION_LIMIT`: that one exists because a single ``PermissionDecision``
+#: embeds a whole ``ToolDefinition`` and overruns 512 bytes on its own, and a read
+#: record embeds nothing.
+_OVERFULL_READS = 6
+
+
+def _attempt(record_id: str, *, at: datetime) -> SourceReadRecord:
+    """One recorded ``COMPLETED`` read, through the canonical builder.
+
+    ``source_read_record`` rather than the model's constructor, for
+    :func:`_ruling`'s reason: the helper derives the ``grant`` pointer from the
+    outcome, so a row's grant agrees with what §2 permits for that outcome by
+    construction rather than by care (ADR-0185 §2).
+    """
+    return source_read_record("calendar", record_id=record_id, checked_at=at, produced=1)
+
+
+class SeededReadTrail:
+    """A conforming ``SourceReadTrail`` that logs which read reached it.
+
+    The one capability the canonical fake does not owe a consumer and ADR-0186 §11's
+    clauses — inherited by §10 — make a suite case need. ``reads`` is the **negative
+    control** for §3's "locally and before any I/O": an assertion that a malformed
+    ``limit`` was refused is worth little unless a case can see the read it did not
+    cause. It is the role :attr:`SeededAuditTrail.reads` plays one store over.
+
+    **It wraps the canonical fake rather than subclassing it**, which is the one
+    structural difference from :class:`SeededAuditTrail` and is not a preference:
+    ``FakeSourceReadTrail`` is ``@final``, and that marker is ADR-0185's lane's
+    decision rather than this suite's to quietly lift. Delegation costs nothing here
+    because every Protocol in ``core/protocols.py`` is satisfied **structurally** —
+    an object carrying the four members is a ``SourceReadTrail``, whatever it
+    inherits — so what the bindings hand the engine is a conforming store either
+    way. The conformance itself is not taken on trust: the suite's own
+    ``test_it_satisfies_the_protocol`` covers the *engine*, and every case below
+    drives this object through one.
+
+    **No ``ordered_export`` knob here, and its absence is the contract rather than an
+    omission.** :class:`SeededAuditTrail` needs one because ``AuditTrail.export``
+    states *no* order, so the only way to catch an engine that relays is to hand it
+    a conforming trail that answers unordered. ``SourceReadTrail.export`` states its
+    order — "every record the store holds, in recording order" — so a trail
+    answering in any other order would not be conforming, and a double that did so
+    would test an implementation against a store no implementation may be. What
+    catches a relaying engine here instead is the **direction**: recording order is
+    the reverse of the listing's, so relaying it fails
+    :meth:`AssistantEngineContract.test_the_read_export_is_reversed_and_not_relayed`
+    over any trail with two rows in it.
+    """
+
+    def __init__(self) -> None:
+        """Create an empty trail that logs its reads."""
+        self._trail = FakeSourceReadTrail()
+        #: Which reads reached the store, in the order they arrived.
+        self.reads: list[str] = []
+
+    def fail_read(self) -> None:
+        """Arm both reads to raise ``ReadTrailError``.
+
+        Relayed to the canonical fake's own lever. "The store could not be read" is
+        the one failure no sequence of surface calls produces — nothing a caller can
+        do corrupts a database — so a suite case for it needs a knob on the object
+        standing behind the subject, which reaches that state identically through a
+        seam and through a socket.
+        """
+        self._trail.fail_read()
+
+    async def record(self, read: SourceReadRecord) -> str:
+        """Append ``read`` and return its id. Not logged: only *reads* are controls."""
+        return await self._trail.record(read)
+
+    async def recent(self, *, limit: int = 50) -> list[SourceReadRecord]:
+        """Log the read, then answer as the canonical fake does."""
+        self.reads.append("recent")
+        return await self._trail.recent(limit=limit)
+
+    async def export(self) -> list[SourceReadRecord]:
+        """Log the read, then answer as the canonical fake does."""
+        self.reads.append("export")
+        return await self._trail.export()
+
+    async def clear(self) -> int:
+        """Delete every record, returning the number removed.
+
+        Carried so this object satisfies ``SourceReadTrail`` **whole** rather than
+        only the two members the engine calls. Nothing on the promoted surface
+        reaches it — ADR-0186 §4's refusal of a promoted ``clear`` binds here
+        through §10 — and a double that omitted it would be a narrower seam than the
+        one the engine is wired with, which is how a fixture starts proving less
+        than it appears to.
+        """
+        return await self._trail.clear()
+
+
+async def seeded_read_trail(
+    rows: tuple[tuple[str, int], ...] = _SEEDED_READS,
+) -> SeededReadTrail:
+    """A read trail holding ``rows``, recorded in that order.
+
+    Shared so the three bindings cannot arrange three different premises for one
+    clause, exactly as :func:`seeded_trail` is.
+
+    Args:
+        rows: What to record, as ``(id, seconds after`` :data:`_CHECKED_AT` ``)``.
+
+    Returns:
+        The seeded trail, with :attr:`SeededReadTrail.reads` cleared — so a case
+        reading it reads what the *subject* caused rather than what the setup did.
+    """
+    trail = SeededReadTrail()
+    for record_id, offset in rows:
+        await trail.record(_attempt(record_id, at=_CHECKED_AT + timedelta(seconds=offset)))
+    trail.reads.clear()
+    return trail
+
+
+@dataclass(frozen=True, slots=True)
+class ReadSubject:
+    """An engine on the read surface, and the trail standing behind it.
+
+    Attributes:
+        engine: The subject under test.
+        trail: The seeded trail the engine ultimately reads, reached from the test
+            process rather than through the surface. Read by a case as a **negative
+            control** — a ``limit`` ADR-0186 §3 refuses locally must leave ``reads``
+            empty — and as the evidence that the reversal case is not vacuous, since
+            a case can ask the trail directly what order it handed over.
+    """
+
+    engine: AssistantEngine
+    trail: SeededReadTrail
+
+
 class AssistantEngineContract(ABC):
     """What every ``AssistantEngine`` implementation must do."""
 
@@ -654,6 +835,42 @@ class AssistantEngineContract(ABC):
         A fixture for :attr:`decisions`' reason, and one of its own: at a limit this
         small the *setup* would be refused if it ran through the surface, exactly as
         :attr:`overfull_granting_engine`'s six grants would be.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def reads(self) -> ReadSubject:
+        """A subject over a trail holding :data:`_SEEDED_READS`, and that trail.
+
+        **A fixture because nothing on this surface writes one**, on
+        :attr:`decisions`' reason arriving from the other side: there a promoted
+        ``record`` is *refused* (ADR-0186 §4), here there was never one to refuse —
+        a read is authored on the seam that gated it (ADR-0185 §5), and ADR-0186
+        §10's pair is two reads and nothing else. Either way the only route to a
+        trail with rows in it is to be handed an implementation already holding
+        them, and :func:`seeded_read_trail` builds it so the three bindings cannot
+        arrange three different premises for one clause.
+
+        **The trail comes with it** for :attr:`decisions`' reason: ADR-0186 §3's
+        local refusals are negative clauses — refused "before any I/O" — and an
+        assertion that no read happened is worth nothing unless a case can see the
+        log it did not reach.
+
+        There is no unordered sibling to this fixture, and
+        :class:`SeededReadTrail` records why: this store *states* its export's
+        order, so the case that catches a relaying engine is the **direction** one
+        rather than a double exercising a freedom the contract does not grant.
+        """
+
+    @pytest.fixture
+    @abstractmethod
+    def overfull_reads(self) -> AssistantEngine:
+        """A subject at :data:`_TINY_LIMIT` holding :data:`_OVERFULL_READS` records.
+
+        Enough that the whole trail does not fit the contract limit, and few enough
+        that a single row does — :attr:`overfull_decisions`' shape, at the shared
+        tiny limit rather than a bespoke one, because a read record carries no
+        content (ADR-0185 §10) and so is a fraction of a ruling's size.
         """
 
     # --- the shape of the surface -----------------------------------------
@@ -2619,6 +2836,329 @@ class AssistantEngineContract(ABC):
             await overfull_decisions.export_decisions()
 
         assert await overfull_decisions.recent_decisions(limit=1) != ()
+
+    # --- the read trail's two reads (ADR-0186 §10) -------------------------
+    #
+    # **The same block one store over**, and here for the block above's reason: this
+    # suite is subclassed by the concrete engine, by the canonical fake **and** by
+    # ``HubClient``, so it is the only place a clause binds all three, and it is
+    # what settles that the client's two methods land in this change rather than a
+    # later one.
+    #
+    # **What is not repeated here is as deliberate as what is.** ADR-0186 §10 binds
+    # this pair to §2's determinism, §3's local refusal and §7's last two clauses,
+    # and explicitly **not** to §7's egress content floor — "which is about a
+    # binding no read record carries". So there is no case about an account
+    # identity, a span, a destination set or a payload description below, and their
+    # absence is the ADR read correctly rather than coverage missing.
+
+    async def test_the_read_listing_and_the_export_share_one_total_order(
+        self, reads: ReadSubject
+    ) -> None:
+        """ADR-0186 §10: newest-**recorded** first, on both.
+
+        §10 binds this pair to §2's *determinism* while forbidding it to reshape
+        §2's *order*, and this store's order is not §2's: ADR-0185 §6 orders it by
+        recording order and rules out ``checked_at`` by name. So the shared order is
+        the recorded sequence reversed, and both operations answer in it.
+        """
+        listed = await reads.engine.recent_reads()
+        exported = await reads.engine.export_reads()
+
+        assert tuple(row.id for row in listed) == _READ_ORDER
+        assert tuple(row.id for row in exported) == _READ_ORDER
+
+    async def test_the_read_order_is_never_derived_from_the_instant_a_row_carries(
+        self, reads: ReadSubject
+    ) -> None:
+        """ADR-0185 §6, as this surface has to preserve it — the sharper double.
+
+        **The case that separates a conforming implementation from the plausible
+        wrong one**, and it is this pair's counterpart to the decision block's
+        unordered double rather than a copy of it. There the store states no export
+        order, so the risk is an engine that *relays*; here the store states one, so
+        the risk is an engine that **sorts** — reaching for ``checked_at`` because
+        that is the only instant on the row and because the sibling operation sorts
+        by ``decided_at``.
+
+        It would be wrong for a reason the fixture cannot show but ADR-0185 §6 states
+        outright: ``checked_at`` is **caller-supplied**, so an order derived from it
+        moves under a backwards clock correction — the same hazard that made the
+        store key its own prune on recording order rather than on that instant,
+        where "a prune keyed on it after a backwards clock correction deletes the
+        rows it just wrote".
+
+        Asserted in both directions. The fixture's own premise is checked first, so
+        the case cannot pass by the two orders happening to agree; then each
+        ``checked_at`` ordering is refuted by name, which a bare positive assertion
+        would leave to inference.
+        """
+        by_instant = sorted(_SEEDED_READS, key=lambda row: row[1])
+        assert tuple(row[0] for row in by_instant) != _READ_ORDER, (
+            "the fixture must disagree with the instant ordering, or it tests nothing"
+        )
+
+        exported = await reads.engine.export_reads()
+        answered = tuple(row.id for row in exported)
+
+        assert answered == _READ_ORDER
+        assert answered != tuple(row[0] for row in by_instant)
+        assert answered != tuple(row[0] for row in reversed(by_instant))
+        assert answered != tuple(sorted(_READ_ORDER))
+        assert answered != tuple(sorted(_READ_ORDER, reverse=True))
+
+    async def test_two_reads_checked_at_one_instant_keep_their_recording_order(
+        self, reads: ReadSubject
+    ) -> None:
+        """ADR-0185 §6: a tie in ``checked_at`` is not a tie in this order at all.
+
+        ``r-3`` and ``r-2`` share an instant and are recorded three rows apart, so an
+        implementation that ordered by ``checked_at`` — with any tie-break, or with
+        none and a stable sort — cannot put them in the recorded relation. The pair
+        is asserted on its own because a whole-sequence comparison can pass for the
+        wrong reason on a fixture where the two happen to coincide.
+
+        **The asymmetry with the decision block is the point.** There the ``id``
+        tie-break is what makes the order *total*; here the order is total by
+        construction, because recording order is a sequence rather than a key, and
+        nothing on the row is consulted at all.
+        """
+        exported = await reads.engine.export_reads()
+        tied = [row.id for row in exported if row.checked_at == _CHECKED_AT + timedelta(seconds=2)]
+
+        assert tied == ["r-2", "r-3"]
+
+    async def test_the_read_export_is_reversed_and_not_relayed(self, reads: ReadSubject) -> None:
+        """ADR-0186 §10: the **engine** owes the reversal.
+
+        ``SourceReadTrail.export`` returns "every record the store holds, in
+        recording order" — oldest first — while ``recent`` answers newest-recorded
+        first. An implementation handing the store's list back as it arrived would
+        return the exact **reverse** of the listing, and §2's prefix property would
+        be gone with it.
+
+        The trail is asked directly first, which is what stops the case being
+        vacuous: it establishes that the store really did hand over the opposite
+        order, so the engine's answer is evidence of a reversal rather than of a
+        store that happened to agree.
+        """
+        relayed = [row.id for row in await reads.trail.export()]
+
+        assert relayed == list(reversed(_READ_ORDER)), (
+            "the fixture must exercise the store's stated order, or it tests nothing"
+        )
+
+        exported = await reads.engine.export_reads()
+
+        assert tuple(row.id for row in exported) == _READ_ORDER
+
+    async def test_the_read_listing_is_a_prefix_of_the_read_export(
+        self, reads: ReadSubject
+    ) -> None:
+        """ADR-0186 §2 through §10: ``recent_reads(limit=n)`` is the first ``n``.
+
+        **The case nothing else would catch.** An implementation that relayed the
+        listing and relayed the export would answer both in a conforming-looking
+        order and hand back one as the *reverse* of the other, which no single-call
+        assertion notices. It is also what makes the two answers comparable, which
+        is why ADR-0186 §1 — inherited whole by §10 — has the engine relay rather
+        than compose.
+        """
+        exported = await reads.engine.export_reads()
+
+        for size in range(1, len(_READ_ORDER) + 1):
+            page = await reads.engine.recent_reads(limit=size)
+            assert page == exported[:size], f"the page of {size} is not the export's prefix"
+
+    async def test_each_read_operation_reaches_its_own_store_read_and_no_other(
+        self, reads: ReadSubject
+    ) -> None:
+        """ADR-0186 §1 through §10: the listing reads ``recent``, the export ``export``.
+
+        Otherwise untestable by answers alone, because over a trail small enough to
+        write down the two are indistinguishable. An ``export_reads`` implemented as
+        ``trail.recent(limit=50)`` agrees with a conforming one on every other
+        fixture in this block and silently truncates a real trail at the default
+        page — turning the artifact ADR-0004 §6's export right reaches into exactly
+        the partial export §3 forbids "without saying so". The mirror error is
+        cheaper but still wrong: a listing served by loading the whole trail and
+        slicing is a paging surface that lies about its cost (ADR-0102 §10), and on
+        this store it would load a horizon of up to
+        ``source_read_trail_max_rows`` rows to answer a page of fifty.
+
+        Asserted from the store's own read log rather than from row counts, so the
+        case fails on the *first* call to the wrong method, whatever the trail holds.
+        """
+        await reads.engine.recent_reads(limit=2)
+
+        assert reads.trail.reads == ["recent"]
+
+        reads.trail.reads.clear()
+        await reads.engine.export_reads()
+
+        assert reads.trail.reads == ["export"]
+
+    async def test_the_read_export_is_not_bounded_by_the_listing_s_default_page(
+        self, reads: ReadSubject
+    ) -> None:
+        """ADR-0186 §3 through §10: the export is "bounded by nothing at the contract".
+
+        The observable half of the clause above, over a trail larger than
+        :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE` — the size at which a
+        truncating implementation stops agreeing with a conforming one. Seeded by
+        the case rather than by a fixture, because what every other case needs is a
+        trail small enough to state the order over by name.
+
+        The prefix property is re-asserted at this size, and that is the point of
+        doing it twice: over a trail that fits in one page a listing which *is* the
+        whole trail satisfies the prefix rule vacuously.
+
+        The rows are appended **after** the seeded four, so they are the *newest*
+        recorded and the default page is entirely made of them — which is also what
+        makes the assertion sensitive to the reversal, since a relaying export would
+        put them at the far end instead.
+        """
+        for index in range(DEFAULT_PAGE_SIZE):
+            await reads.trail.record(
+                _attempt(f"x-{index:03d}", at=_CHECKED_AT + timedelta(seconds=index + 10))
+            )
+
+        exported = await reads.engine.export_reads()
+
+        assert len(exported) == len(_SEEDED_READS) + DEFAULT_PAGE_SIZE
+        assert await reads.engine.recent_reads() == exported[:DEFAULT_PAGE_SIZE]
+
+    @pytest.mark.parametrize("bad", [0, -1, 2**63])
+    async def test_recent_reads_refuses_a_non_positive_limit_locally(
+        self, reads: ReadSubject, bad: int
+    ) -> None:
+        """ADR-0186 §3 through §10, and ``0`` is the case it exists for.
+
+        ``SourceReadTrail.recent`` refuses a non-positive ``limit`` where ADR-0085
+        §9 would admit zero, and §3 resolves that by refusing it **locally in every
+        implementation** rather than reproducing the live wart ``recent_grants``'
+        own contract records. The store's own reason is sharper than the audit
+        trail's precedent: it "issues ``LIMIT ?`` against SQLite", which turns
+        ``limit=-1`` into no limit at all — so a passed-through negative makes the
+        one bounded read the unbounded read it exists to avoid.
+
+        The untouched log is the half that says *locally*: a client that shipped
+        ``limit=0`` to the hub would be exactly the silently more permissive
+        implementation §9 forbids, and would leave a ``recent`` behind here.
+        """
+        with pytest.raises(ValueError, match=r"\w"):
+            await reads.engine.recent_reads(limit=bad)
+
+        assert reads.trail.reads == []
+
+    @pytest.mark.parametrize("bad", [1.5, True, "1", None])
+    async def test_a_read_limit_that_is_not_an_integer_is_refused_locally(
+        self, reads: ReadSubject, bad: object
+    ) -> None:
+        """The type before the range, for :meth:`beliefs`' reason (ADR-0186 §3).
+
+        ``0 < 1.5 < 2**63`` is true, so a range check alone admits a float; and
+        ``True`` is an ``int`` that would silently mean a page of one, which is a
+        wrong answer rather than a refusal.
+        """
+        with pytest.raises(TypeError, match=r"\w"):
+            # The wrong *type* is the point of the case, so the annotation is
+            # deliberately violated here.
+            await reads.engine.recent_reads(limit=bad)  # type: ignore[arg-type]
+
+        assert reads.trail.reads == []
+
+    def test_the_read_page_size_default_is_the_declared_one(self, reads: ReadSubject) -> None:
+        """ADR-0085 §3a reaches ``recent_reads`` like every other paging method.
+
+        It is ``DEFAULT_PAGE_SIZE`` and not the store's own literal ``50``, even
+        though the two are equal today: the surface's default is the constant, and a
+        subject that had copied the number would drift the day ADR-0085 §3a's value
+        moves.
+        """
+        parameter = inspect.signature(reads.engine.recent_reads).parameters["limit"]
+        assert parameter.default == DEFAULT_PAGE_SIZE
+
+    def test_the_read_export_takes_no_argument(self, reads: ReadSubject) -> None:
+        """ADR-0186 §1 through §10: no ``limit``, no cursor — and no ``source``.
+
+        Two operations rather than one, and **two rather than three**: ADR-0185 §12
+        left "a per-source query and a count … the surface ADR's to ask for if it
+        needs them", and ADR-0186 §10 declined both, so a ``source`` argument
+        appearing here would be the surface that was asked for and not requested.
+        Asserted over the signature because the failure is an argument being
+        **added**, which no call that omits it would ever notice.
+        """
+        assert inspect.signature(reads.engine.export_reads).parameters == {}
+
+    async def test_both_read_operations_return_a_tuple(self, reads: ReadSubject) -> None:
+        """ADR-0085 §3b: a caller that mutated what it was handed changed nothing.
+
+        Sharper than housekeeping on this pair: both store methods return a
+        ``list``, and the export's implementation reverses one, so a subject
+        handing back what it built is the likely mistake rather than a contrived
+        one.
+        """
+        assert isinstance(await reads.engine.recent_reads(), tuple)
+        assert isinstance(await reads.engine.export_reads(), tuple)
+
+    @pytest.mark.parametrize("operation", ["recent_reads", "export_reads"])
+    async def test_a_read_trail_that_cannot_be_read_is_reported_as_the_failure_it_was(
+        self, reads: ReadSubject, operation: str
+    ) -> None:
+        """The store's declared failure reaches the caller as itself, on both reads.
+
+        ``ReadTrailError`` is what ``SourceReadTrail``'s reads raise when the trail
+        cannot be read — a corrupt or unopenable database, the one failure no
+        sequence of surface calls produces. **A clause the shared suite is the only
+        place for**, because the three implementations reach it by three different
+        routes and could disagree without any of them looking wrong on its own: the
+        in-process pair let the exception out of a relayed store call, while the
+        client has to recognise the type on an error frame and rebuild it (ADR-0085
+        §10a fixes the wire's error vocabulary as "exactly the ``AssistantError``
+        subtree").
+
+        **What it forecloses is a plausible kindness**, and it is worse here than on
+        the audit trail. An implementation answering ``()`` for an unreadable trail
+        would tell a user nothing has ever been read from their sources — and on
+        this store an empty answer is *also* the truthful answer for a hub that has
+        read nothing, so the two would be indistinguishable at the surface where the
+        exit test is measured.
+
+        ``ReadTrailError`` is **one class and not two** (ADR-0185 §12), so this case
+        does not split by cause: under §5's fail-closed rule a caller's recourse is
+        identical however the store failed.
+        """
+        reads.trail.fail_read()
+
+        with pytest.raises(ReadTrailError, match=r"\w"):
+            await getattr(reads.engine, operation)()
+
+    async def test_a_read_export_too_large_for_the_frame_is_refused_whole(
+        self, overfull_reads: AssistantEngine
+    ) -> None:
+        """ADR-0186 §3 through §10: the oversized **result**, refused whole.
+
+        The suite's own fifth clause applied to the largest result this pair can
+        produce. §3's answer is stated rather than waved at: "No implementation
+        truncates the artifact, samples it, or returns a partial export without
+        saying so." A refusal is typed, so a client renders it as one and cannot
+        mistake it for an empty trail.
+
+        **This store has a second remedy the audit trail has not**, and it is worth
+        naming so a reader does not conclude the frame budget is the only knob:
+        ``source_read_trail_max_rows`` bounds the trail itself (ADR-0185 §6), which
+        is why an export here is a horizon rather than a history. Neither remedy is
+        truncation, which is the clause.
+
+        The neighbouring read still answers at the same limit, which is the control:
+        a case that only asserted the raise would pass against an implementation
+        whose limit was simply too small for anything at all.
+        """
+        with pytest.raises(OversizedValueError):
+            await overfull_reads.export_reads()
+
+        assert await overfull_reads.recent_reads(limit=1) != ()
 
 
 def backwards_clock() -> Callable[[], datetime]:

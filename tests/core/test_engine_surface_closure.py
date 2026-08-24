@@ -117,6 +117,17 @@ _NAMESPACE: Final = {
 #: they predate this block (ADR-0097 §2) and are ``core`` leaves the walk terminates
 #: at, exactly as :func:`_declared_by_this_change` sorts them.
 #:
+#: ``SourceReadRecord`` and ``ReadOutcome`` are **not** here for that same reason and
+#: it is worth saying, because they are the first types the walk reaches through a
+#: method ADR-0186 §10 added rather than through one that predates the block. They
+#: are ADR-0185 §12's, declared ahead of :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE`
+#: in source order, so :func:`_declared_by_this_change` already sorts them as leaves
+#: — which is the whole of the test and not a loophole: ADR-0085 §5's property is
+#: that ``core`` is closed under its own field graph, and a type declared in
+#: ``core.types`` before this block was already inside that closure the day it
+#: landed. Listing them here would assert their reachability twice while leaving
+#: ``SourceGrant`` asserted once, for no difference in what is checked.
+#:
 #: The thirty-ninth is ADR-0189 §3's ``Warrant``, which ``Retirement.warrant``
 #: names: the standing a retired record is held with, whether its warrant rests on
 #: recorded external content, and the attestation on the attested band. It is the
@@ -374,13 +385,23 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     one request away on a remote transport — while ``get`` is deferred with its
     trigger rather than refused.
 
+    ADR-0186 §10's two take it to thirty-six: ``recent_reads`` and ``export_reads``,
+    the same pair one store over, relaying ADR-0185 §12's ``SourceReadTrail``. Two
+    for §1's reason exactly, and the pair's own §12 chance to ask for more was
+    declined: ADR-0185 left "a per-source query and a count … the surface ADR's to
+    ask for if it needs them", and this surface does not — ADR-0186 §1's second
+    clause is inherited whole, so a consumer wanting a subset selects it from what
+    these return. ``SourceReadTrail.record`` and ``clear`` stay unpromoted on §4's
+    reasoning read one store over, and neither of the two is a browser operation
+    (§6, inherited by §10), so ADR-0177 §1's thirty is unmoved.
+
     **This assertion is now also #1125's answer.** ``core/types.py`` and
     ``wire/surface.py`` each carried a prose count of this surface that had gone
     stale by seven; both now name this check instead of restating a number, which
     is `CONTRIBUTING.md` -> "No state claims in living documents" applied to a
     comment in ``src/``.
     """
-    assert len(_method_names()) == 34
+    assert len(_method_names()) == 36
 
 
 def test_a_streaming_method_declares_its_union_chunk_first_terminal_last() -> None:
@@ -493,6 +514,18 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     is all ADR-0124 §9 asks for. ADR-0189 §9 states the bump in the deciding ADR and
     puts it on the contract lane.
 
+    **ADR-0186 §10 is back under the first limb**, and takes the method set to
+    thirty-six and the version to 14. ``recent_reads`` and ``export_reads`` are the
+    read trail's half of the same decision, so the reasoning at 12 carries over
+    without amendment: ``wire.surface``'s ``METHODS`` is derived from the Protocol,
+    so a version 14 client sending ``export_reads`` to a version 13 hub is refused
+    there, and **no wire-carried ``core`` type changes for it** —
+    ``SourceReadRecord`` and ``ReadOutcome`` were promoted by ADR-0185 and reach
+    this surface by being named in a return annotation rather than by being minted,
+    so a version 13 peer's trouble is the unknown *method* and never an unknown
+    member. ADR-0186 §5 states the bump in the deciding ADR and §10 binds this pair
+    to it by inheritance.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -501,7 +534,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (34, 13), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (36, 14), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

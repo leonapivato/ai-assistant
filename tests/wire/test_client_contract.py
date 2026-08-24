@@ -55,6 +55,7 @@ from assistant_engine_contract import (
     _NOT_CANONICAL,
     _OVERFULL_DECISIONS,
     _OVERFULL_GRANTS,
+    _OVERFULL_READS,
     _SOURCE,
     _TINY_LIMIT,
     _UNHELD_SOURCE,
@@ -63,7 +64,9 @@ from assistant_engine_contract import (
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
+    ReadSubject,
     backwards_clock,
+    seeded_read_trail,
     seeded_trail,
 )
 
@@ -389,5 +392,43 @@ class TestHubEngineClientContract(AssistantEngineContract):
             backing,
             tmp_path / "hub.sock",
             max_frame_bytes=_DECISION_LIMIT + ENVELOPE_RESERVE_BYTES,
+        ) as client:
+            yield client
+
+    @pytest.fixture
+    async def reads(self, tmp_path: Path) -> AsyncIterator[ReadSubject]:
+        """A client of a hub whose engine reads a seeded read trail, and that trail.
+
+        Arranged hub-side on :attr:`decisions`' terms, and here it is not even a
+        refusal that keeps a client out of the store: ADR-0186 §10's pair is two
+        reads and no writer, because a read row is authored on the seam that gated
+        it (ADR-0185 §5). The trail is read from the test process rather than over
+        the wire, which is what makes it a negative control: §3's refusals must
+        happen **before a frame is sent**, and only a log read from where the read
+        would have landed says so.
+        """
+        trail = await seeded_read_trail()
+        backing = FakeAssistantEngine()
+        backing.reads = trail
+        async with serving(backing, tmp_path / "hub.sock") as client:
+            yield ReadSubject(engine=client, trail=trail)
+
+    @pytest.fixture
+    async def overfull_reads(self, tmp_path: Path) -> AsyncIterator[AssistantEngine]:
+        """A client of a hub whose published limit the whole read trail exceeds.
+
+        :attr:`overfull_decisions`' binding, one store over: this one really
+        serialises, so the frame is the bound rather than an in-process measurement,
+        and the hub publishes the same number the backing engine measures against.
+        """
+        trail = await seeded_read_trail(
+            rows=tuple((f"r-{index}", index) for index in range(_OVERFULL_READS))
+        )
+        backing = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+        backing.reads = trail
+        async with serving(
+            backing,
+            tmp_path / "hub.sock",
+            max_frame_bytes=_TINY_LIMIT + ENVELOPE_RESERVE_BYTES,
         ) as client:
             yield client

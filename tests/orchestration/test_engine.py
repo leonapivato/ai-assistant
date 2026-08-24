@@ -137,7 +137,7 @@ from ai_assistant.testing import (
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Mapping, Sequence
 
-    from ai_assistant.core.protocols import AuditTrail, EgressBinder
+    from ai_assistant.core.protocols import AuditTrail, EgressBinder, SourceReadTrail
     from ai_assistant.core.types import (
         Conversation,
         CurrentContext,
@@ -402,6 +402,7 @@ class Harness:
         trace_retention: timedelta | None = TRACE_RETENTION,
         binder: EgressBinder | None = None,
         trail: AuditTrail | None = None,
+        reads: SourceReadTrail | None = None,
     ) -> None:
         self.plans = FakePlanStore(now=lambda: AT)
         # ``trail`` is a knob because the audit surface's own reader cases need a
@@ -480,7 +481,12 @@ class Harness:
         # double; a harness holding two objects here would let `recent_reads` answer
         # about a store the ingestion stages never wrote to, which is precisely the
         # wiring mistake no type can catch.
-        self.reads = FakeSourceReadTrail()
+        #
+        # A knob for ``trail``'s reason, one store over: the read surface's own cases
+        # need a **durable** trail, because the order ``export_reads`` reverses comes
+        # from the store's ``ORDER BY`` rather than from a Python list, and a fake
+        # cannot exhibit a wrong one.
+        self.reads: SourceReadTrail = FakeSourceReadTrail() if reads is None else reads
         self.grants = FakeSourceGrants(
             [
                 # `reader` is deliberately `object` here — the duck-typed fakes this

@@ -1173,3 +1173,60 @@ def test_neither_audit_read_is_a_connection_method() -> None:
 
     assert reads <= METHODS
     assert not (reads & CONNECTION_METHODS)
+
+
+# --- ADR-0186 §10: the read-trail reads are carried on this listener too ------
+
+
+@pytest.mark.parametrize(
+    ("method", "payload"),
+    [("recent_reads", {"limit": 10}), ("export_reads", {})],
+)
+async def test_both_read_trail_reads_are_served_on_the_remote_listener(
+    tmp_path: Path, method: str, payload: dict[str, Any]
+) -> None:
+    """ADR-0186 §5's first clause, reaching this pair through §10's inheritance.
+
+    The audit pair's case one store over, and it sits beside it for that case's
+    reason: ``serve_connection`` bars a method from this listener exactly when it is
+    in ``CONNECTION_METHODS``, so "carried here" and "not one of the five" are the
+    same fact reached from opposite sides.
+
+    **The disclosure argument is stronger here than it was there, not weaker.** The
+    five are withheld because they carry a **Tier 0 credential** (ADR-0151 §13),
+    which ADR-0124 §3's accepted-disclosure list does not cover. A
+    ``SourceReadRecord`` carries no credential and, unlike a ``PermissionDecision``,
+    carries no embedded declaration either: ADR-0185 §10 excludes content from the
+    record **by name** — "It does **not** mean the content of the read, and no lane
+    may report the milestone met on the strength of a trail that carries any" — so
+    what crosses is a source's declared identity, a use, an instant, an outcome, a
+    grant id and a count. Withholding it would leave a user on their own second
+    machine unable to read what their assistant had read, which is precisely the
+    deployment milestone 24's exit is measured on.
+    """
+    engine = FakeAssistantEngine()
+    async with _remote(tmp_path, engine=engine) as hub:
+        minted = hub.registry.enrol(_DEVICE, now=_MOMENT)
+        async with _dialling(hub) as peer:
+            assert (await peer.connect(minted.credential)).kind is env.FrameKind.CONNECT_ACK
+            await peer.send(
+                env.Envelope(kind=env.FrameKind.REQUEST, id="r-0", payload=payload, method=method)
+            )
+            answer = await peer.receive()
+
+    assert answer.kind is env.FrameKind.RESULT, f"{method} was not served: {answer.payload}"
+    assert [name for name, _arguments in engine.calls] == [method]
+
+
+def test_neither_read_trail_read_is_a_connection_method() -> None:
+    """ADR-0186 §5 through §10: "Neither joins ``CONNECTION_METHODS``".
+
+    Asserted against the **frozen set itself** rather than by absence from a
+    hand-written list, so a rename or an addition on either side is caught here, and
+    in both directions: the two are on the promoted surface, and neither is among
+    the five ADR-0151 §13 withholds.
+    """
+    reads = {"recent_reads", "export_reads"}
+
+    assert reads <= METHODS
+    assert not (reads & CONNECTION_METHODS)
