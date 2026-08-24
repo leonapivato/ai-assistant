@@ -116,6 +116,7 @@ if TYPE_CHECKING:
         ReplyChunk,
         SecretValue,
         SourceGrant,
+        SourceReadRecord,
         TurnOutcome,
     )
 
@@ -1227,6 +1228,69 @@ class HubClient:
             into a wire-side schema (ADR-0186 §5, ADR-0184 §3).
         """
         return await self._call("export_decisions")  # type: ignore[no-any-return]
+
+    # --- the read trail's two reads (ADR-0186 §10) -------------------------
+    #
+    # Hand-written for the pair above's reason, unchanged: the server is reflected
+    # off the Protocol and this class is not, so a client that grew no methods
+    # would raise ``AttributeError`` before a frame was ever sent.
+
+    async def recent_reads(self, *, limit: int = DEFAULT_PAGE_SIZE) -> tuple[SourceReadRecord, ...]:
+        """One page of what this system read from a source (ADR-0186 §10).
+
+        **Not a connection method**, so no :meth:`_refuse_off_loopback` and no entry
+        in ``wire/server.py``'s ``CONNECTION_METHODS`` (ADR-0186 §5, §10). A
+        ``SourceReadRecord`` carries no credential and, by ADR-0185 §10's own
+        exclusion, no content: it states the source's declared identity, the use,
+        the instant the grant check resolved, the outcome, the grant it ran under
+        and how many items the reading carried — and nothing of what was read.
+
+        ``limit`` is refused when it is **not strictly positive**, locally and
+        before a frame is sent (ADR-0186 §3, §10), which is the clause
+        ``AssistantEngineContract`` holds all three implementations to.
+
+        Args:
+            limit: How many rows this page holds.
+
+        Returns:
+            The page, **newest-recorded first** — the first ``limit`` rows of
+            :meth:`export_reads`. Recording order and never ``checked_at``
+            (ADR-0185 §6), so a position is a claim about the order the hub wrote
+            rows in and about nothing else.
+
+        Raises:
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+        """
+        positive_page_argument(limit, name="limit")
+        return await self._call("recent_reads", limit=limit)  # type: ignore[no-any-return]
+
+    async def export_reads(self) -> tuple[SourceReadRecord, ...]:
+        """Every read attempt the trail still holds (ADR-0186 §10).
+
+        **No local refusal to add**, because the method takes no argument — the
+        shape :meth:`export_decisions` already has.
+
+        **What comes back is a horizon and not a history**, which is the one place
+        this pair is not the decision pair's mirror (ADR-0186 §10, ADR-0185 §9).
+        The hub's store prunes oldest-first at ``source_read_trail_max_rows``, so
+        this reconstructs every attempt **still held**; ADR-0004 §6's export right
+        is satisfied to that extent and no further. A caller composing this with
+        :meth:`export_decisions` states that horizon on the artifact's face:
+        presenting a pruned half and an unpruned half as one record would claim a
+        completeness half of it does not have.
+
+        Returns:
+            Every record still held, newest-recorded first, reversed hub-side.
+
+        Raises:
+            OversizedValueError: Raised by the hub, and arriving as a typed error
+                frame, if the whole trail exceeds the contract limit — never a
+                truncated artifact (ADR-0186 §3). The remedies are
+                ``hub_max_frame_bytes``, the number the connect reply already
+                published to this client, and the horizon setting itself.
+        """
+        return await self._call("export_reads")  # type: ignore[no-any-return]
 
 
 class HubEngineClient(HubClient):

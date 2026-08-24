@@ -158,6 +158,7 @@ if TYPE_CHECKING:
         NotificationPolicy,
         NotificationStore,
         PlanStore,
+        SourceReadTrail,
         TraceRetention,
         TraceSink,
     )
@@ -187,6 +188,7 @@ if TYPE_CHECKING:
         Question,
         SecretValue,
         SourceGrant,
+        SourceReadRecord,
         TurnResult,
     )
     from ai_assistant.orchestration.composing import ComposedReply, ComposingStage
@@ -513,6 +515,44 @@ async def _ordered_decisions(
     """
     by_id = sorted(await read, key=lambda decision: decision.id)
     return tuple(sorted(by_id, key=lambda decision: decision.decided_at, reverse=True))
+
+
+async def _newest_recorded_first(
+    read: Awaitable[list[SourceReadRecord]],
+) -> tuple[SourceReadRecord, ...]:
+    """Await ``SourceReadTrail.export`` and put the listing's order on what it returned.
+
+    **A reversal and never a sort**, which is the whole of how this differs from
+    :func:`_ordered_decisions` — and the difference is the store contract's, not a
+    preference. ``AuditTrail.export`` states *no* order, so that helper owes a sort;
+    ``SourceReadTrail.export`` states one, "every record the store holds, **in
+    recording order**", and ``SourceReadTrail.recent`` states its reverse,
+    "newest-recorded first … never by ``checked_at``, and no implementation derives
+    the order by comparing ``checked_at`` values" (ADR-0185 §6). So the export
+    arrives oldest-first and this hands it back newest-first, which is what makes
+    ADR-0186 §2's prefix property hold across the pair.
+
+    **Sorting these rows is not merely unnecessary, it is unavailable.** A
+    ``SourceReadRecord`` carries no sequence number; its ``id`` is caller-minted and
+    unordered; and its ``checked_at`` is caller-supplied, so a sort keyed on it
+    would answer differently after a backwards clock correction — the same hazard
+    that made ADR-0185 §6 key the store's own prune on recording order rather than
+    on that instant. Recording order is knowable here **only** because the store's
+    contract states it.
+
+    Applied to the **export** alone: ``recent`` already promises this order, so
+    :meth:`Engine.recent_reads` relays it untouched. Reversing a page that is
+    already newest-first would be exactly wrong, where re-sorting a conforming
+    audit page is merely redundant — which is why there is no single helper for
+    both reads here as there is for the decision pair.
+
+    Args:
+        read: The ``export`` call to await.
+
+    Returns:
+        Its rows, as the tuple ADR-0085 §3b requires, newest-recorded first.
+    """
+    return tuple(reversed(await read))
 
 
 async def _written_preferences(
@@ -1075,6 +1115,7 @@ class Engine:
         runner: StepRunner,
         plans: PlanStore,
         trail: AuditTrail,
+        reads: SourceReadTrail,
         memory: MemoryStore,
         deferrals: DeferralStore,
         traces: TraceRetention,
@@ -1132,6 +1173,27 @@ class Engine:
                 records nothing; authoring rulings stays the runner's (ADR-0042 §6).
                 A façade wired to a *second* trail would recover confirmations the
                 runner's own ``resume`` cannot resolve.
+            reads: The source-read trail — the **same instance** the three drivers
+                record into (a composition-root single-instance obligation of the
+                same shape as ``plans`` and ``trail``; ADR-0185 §4). The façade
+                reads it **query-only**, for :meth:`recent_reads` and
+                :meth:`export_reads`, and records nothing: authoring a row stays the
+                driver's, on the seam that gated the read (ADR-0185 §5).
+
+                **This is the wide seam's only holder**, which is the arrangement
+                ADR-0185 §4 designed and §12 left this surface to complete.
+                ``SourceReadTrail`` deliberately does not inherit
+                ``SourceReadRecorder``, and the three drivers are annotated with the
+                narrow one — so a driver cannot *name* ``recent`` or ``export``, and
+                ADR-0093 §5's forbidden cursor stays out of a sensor's reach. That
+                narrowing is what makes this parameter necessary rather than
+                convenient: there is no collaborator the façade already holds that
+                could answer these two.
+
+                A façade wired to a *second* trail would answer a user's history
+                from a store nothing writes to — which is worse than an error, since
+                an empty trail is a truthful answer about a store that was never
+                read from, and this one would be indistinguishable from it.
             memory: Long-term memory — the same instance ``loop`` retrieves from and
                 the writer behind it persists to (a composition-root single-instance
                 obligation of the same shape as ``plans`` and ``trail``; ADR-0028
@@ -1497,6 +1559,7 @@ class Engine:
         self._runner = runner
         self._plans = plans
         self._trail = trail
+        self._reads = reads
         self._memory = memory
         self._deferrals = deferrals
         self._traces = traces
@@ -4028,6 +4091,61 @@ class Engine:
         return await self._tracked(
             _ordered_decisions(self._trail.export()),
             "export_decisions",
+            checked=True,
+        )
+
+    # --- the read trail's two reads (ADR-0186 §10) -------------------------
+
+    async def recent_reads(self, *, limit: int = DEFAULT_PAGE_SIZE) -> tuple[SourceReadRecord, ...]:
+        """List what this system read from a source, newest-recorded first.
+
+        Relays :meth:`SourceReadTrail.recent` **untouched**, which is the whole of
+        the implementation: that method already promises this order (ADR-0185 §6),
+        and ADR-0186 §10 binds the pair to one order rather than to §2's key. There
+        is nothing here to sort — see :func:`_newest_recorded_first` for why sorting
+        these rows is unavailable rather than merely unnecessary.
+
+        ``limit`` is refused when it is **not strictly positive**, on
+        ``recent_decisions``' reason and in every implementation (ADR-0186 §3, §10).
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+            ReadTrailError: If the trail cannot be read.
+            OversizedValueError: If the page exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        positive_page_argument(limit, name="limit")
+        check_arguments("recent_reads", max_bytes=self._max_payload_bytes, limit=limit)
+        return await self._tracked(
+            _as_tuple(self._reads.recent(limit=limit)),
+            "recent_reads",
+            checked=True,
+        )
+
+    async def export_reads(self) -> tuple[SourceReadRecord, ...]:
+        """Return every read attempt the trail still holds, in ``recent_reads``' order.
+
+        **Reversed rather than relayed**, because the store's ``export`` is in
+        recording order and the listing is its reverse — without that,
+        ADR-0186 §2's prefix property would be false across this pair.
+
+        **The horizon, not the history** (ADR-0185 §9, §10): the store prunes
+        oldest-first at ``source_read_trail_max_rows``, so this returns every
+        attempt still held and no lane reports it as a complete history. A trail too
+        large for the frame is an ``OversizedValueError`` and no artifact at all —
+        the measurement ``_tracked`` already applies to every result.
+
+        Raises:
+            RuntimeError: If the engine is shutting down.
+            ReadTrailError: If the trail cannot be read.
+            OversizedValueError: If the whole trail exceeds the contract limit.
+        """
+        self._reject_if_closing()
+        return await self._tracked(
+            _newest_recorded_first(self._reads.export()),
+            "export_reads",
             checked=True,
         )
 

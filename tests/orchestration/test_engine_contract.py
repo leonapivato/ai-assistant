@@ -86,6 +86,7 @@ from ai_assistant.testing import (
     FakeObserver,
     FakePlanStore,
     FakeSourceGrantStore,
+    FakeSourceReadTrail,
     FakeStreamingCompleter,
     FakeToolInvoker,
     FakeTraceRetention,
@@ -96,7 +97,7 @@ from ai_assistant.testing.grants import source_grant
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 
-    from ai_assistant.core.protocols import AssistantEngine, AuditTrail
+    from ai_assistant.core.protocols import AssistantEngine, AuditTrail, SourceReadTrail
     from ai_assistant.core.types import (
         CurrentContext,
         FrozenJson,
@@ -239,6 +240,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     grant_clock: Callable[[], datetime] | None = None,
     provisioner: FakeConnectionProvisioner | None = None,
     trail: AuditTrail | None = None,
+    reads: SourceReadTrail | None = None,
 ) -> Engine:
     """Build one engine over in-memory fakes, wired as the composition root would.
 
@@ -255,6 +257,10 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     ``record`` — so a subject with rulings in it has to be *built* with them, and
     because the case separating an engine that sorts from one that relays needs a
     conforming trail whose ``export`` exercises the freedom ADR-0021 §4 leaves it.
+
+    ``reads`` is the source-read trail the two ADR-0186 §10 reads relay, a knob for
+    the same reason one turn over: a read is authored on the seam that gated it
+    (ADR-0185 §5), so nothing on this surface appends one either.
     """
     # **The conversation store's clock advances**, because ADR-0074 §2's sort key
     # is activity and a frozen clock cannot express "more recently active" at all —
@@ -265,6 +271,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
     conversation_clock = lambda: AT + timedelta(seconds=next(ticks))  # noqa: E731
     plans = FakePlanStore(now=lambda: AT)
     audit: AuditTrail = FakeAuditTrail() if trail is None else trail
+    read_trail: SourceReadTrail = FakeSourceReadTrail() if reads is None else reads
     confirmable = _confirmable()
     invoker = FakeToolInvoker([(confirmable, _succeeds)] if parks else [])
     # The egress binding seam, wired only where the suite needs a park: ADR-0178
@@ -323,6 +330,7 @@ def _wire(  # noqa: PLR0913 — one knob per state the shared suite needs a subj
         runner=runner,
         plans=plans,
         trail=audit,
+        reads=read_trail,
         memory=memory,
         deferrals=deferrals,
         # The narrow deletion seam (ADR-0119 §7), with the horizon the composition

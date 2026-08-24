@@ -680,14 +680,23 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # instance lock already covers, opened by the same process, and closed in the
         # same ordered shutdown.
         #
-        # **One object, passed three times** (ADR-0185 §4): as a
-        # `SourceReadRecorder` to each of the three drivers. Structural typing is
-        # what makes that sound, and the narrowing is the *annotation on the
-        # driver's constructor* rather than anything done here — what a driver
-        # cannot do is name `recent`, which is what keeps ADR-0093 §5's forbidden
-        # cursor out of a sensor's reach. The wide `SourceReadTrail` seam has no
-        # holder yet: the surface that reaches the user is ADR-0186's, and ADR-0185
-        # §12 puts it in its own lane.
+        # **One object, passed four times** (ADR-0185 §4, ADR-0186 §10): as a
+        # `SourceReadRecorder` to each of the three drivers, and **whole, as the
+        # `SourceReadTrail`, to the engine**. Structural typing is what makes that
+        # sound, and the narrowing is the *annotation on the driver's constructor*
+        # rather than anything done here — what a driver cannot do is name `recent`,
+        # which is what keeps ADR-0093 §5's forbidden cursor out of a sensor's reach.
+        #
+        # **The engine is the wide seam's only holder**, which is the surface
+        # ADR-0185 §12 left to its own lane and ADR-0186 §10 decided. The asymmetry
+        # is the design: the drivers write and cannot read, the façade reads and does
+        # not write — authoring a row stays on the seam that gated the read (ADR-0185
+        # §5), and ADR-0186 §4's refusal of a promoted `record` is one store over the
+        # same rule. That all four positions hold the **same instance** is a
+        # composition-root obligation no type can state: a façade wired to a second
+        # trail would answer a user's history from a store nothing writes to, which
+        # is worse than an error, since it is indistinguishable from the truthful
+        # answer that nothing has been read.
         #
         # **The cap is the user's configuration and reaches the constructor**, where
         # it is validated once and read once (ADR-0185 §6). It is a row count rather
@@ -998,6 +1007,12 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             runner=runner,
             plans=plans,
             trail=trail,
+            # The very trail the three drivers record into, handed over **whole**
+            # here and narrowed to `SourceReadRecorder` at each of them (ADR-0185 §4,
+            # ADR-0186 §10). This is the only position that names the wide seam, and
+            # it is what makes `recent_reads` and `export_reads` answer about the
+            # reads that actually happened rather than about an empty second store.
+            reads=reads,
             # The same store the loop retrieves from and the writer persists to, so
             # the inspection surface lists the beliefs the assistant actually uses
             # and ``forget`` destroys what the user was shown (ADR-0073 §7).

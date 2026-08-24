@@ -2,6 +2,34 @@
 
 - Status: Partially superseded by ADR-0178 (§8's four-member rendering clause, and §8's no-claim clause, each only as it reaches a surface rendering a `Confirmation` that carries ADR-0178 §1's egress member)
 - Date: 2026-08-22
+- Amended: 2026-08-24 by ADR-0186 — **§1's third clause again, by the same count,
+  and this note retires the count rather than correcting it.** The change carrying
+  this note adds `recent_reads` and `export_reads` to `AssistantEngine` — ADR-0186
+  §10's second pair, over ADR-0185 §12's `SourceReadTrail` — so the operations of
+  the promoted surface that are neither in §1's enumeration nor the gateway's own
+  now number **five**, where the note below put them at three and the clause itself
+  says "one".
+
+  **Do not read that as the number to fix next time.** The count was never what
+  §1's third clause obliges, and writing a third dated note to move it to six would
+  be the stale-citation refresh this corpus rules against. What that clause
+  obliges, stated without a count and true of any promoted surface: **a method on
+  `AssistantEngine` is outside the browser's reach until an ADR puts it inside**,
+  and `learn` is named there only as the instance that existed when §1 was written.
+  A later lane adding to the promoted surface owes this document nothing at all —
+  §1's *first* clause is an explicit closed enumeration ("exactly these **thirty**
+  … and no others") which already governs every method it does not name, which is
+  precisely the property ADR-0168 §6 wanted when it chose to name what may appear
+  rather than what may not.
+
+  **The count of thirty is unchanged, for the third time and for the same reason**:
+  it counts what a browser may reach, not what the promoted surface carries.
+  ADR-0186 §6 states that conclusion for the decision pair, and §10 binds the read
+  pair to §6 by inheritance without restating it — neither is one of the thirty, no
+  browser request resolves to either, and the gateway makes neither call of its
+  own. The promoted method set moves from thirty-four to thirty-six; that number
+  lives beside `PROTOCOL_VERSION` in `wire/envelope.py`, where it is load-bearing,
+  and not here.
 - Amended: 2026-08-24 by ADR-0186 — **§1's third clause, by a count and nothing
   else.** That clause reads that `learn` "is the one operation of the promoted
   surface that is neither in the enumeration above nor the gateway's own". The
