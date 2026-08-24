@@ -543,8 +543,8 @@ def _parse(raw: bytes) -> list[Any]:
             covers the re-zoning too, which is interpretation of the same bytes.
     """
     try:
+        _refuse_mismatched_delimiters(raw)
         calendar = Calendar.from_ical(raw)
-        _refuse_timezone_ids_walk_cannot_reach(calendar)
         components = list(calendar.walk("VEVENT"))
         _rezone(components, _own_zones(_declared_zones(calendar)))
     except Exception as exc:
@@ -553,35 +553,72 @@ def _parse(raw: bytes) -> list[Any]:
     return components
 
 
-def _refuse_timezone_ids_walk_cannot_reach(calendar: Any) -> None:
-    """Refuse a document that hands the cache a definition ``walk`` cannot return.
+def _refuse_mismatched_delimiters(raw: bytes) -> None:
+    """Refuse a document whose ``END`` tags do not match the ``BEGIN`` they close.
 
-    ``icalendar`` decides what to cache from the **END** tag rather than from the
-    component's own type — ``if vals.upper() == "VTIMEZONE" and "TZID" in
-    component`` (``parser/ical/component.py``) — so a component opened
-    ``BEGIN:VEVENT``, carrying a ``TZID`` property and closed ``END:VTIMEZONE`` is
-    handed to ``cache_timezone_component`` while arriving here as an ``Event`` that
-    ``walk("VTIMEZONE")`` never returns.
+    ``icalendar`` decides what to cache from the **END** tag alone —
+    ``if vals.upper() == "VTIMEZONE" and "TZID" in component``
+    (``parser/ical/component.py``) — while the component it builds takes its type
+    from the ``BEGIN``. A mismatched pair therefore splits the two, and the parsed
+    tree cannot be asked about it afterwards because it records only the ``BEGIN``:
 
-    That is round 3's read-order dependence through a door :func:`_own_zones` cannot
-    reach. Cold, the library builds the definition and ``Event.to_tz`` does not
-    exist, so ADR-0093 §8 reports a refusal; warm, the build is skipped and the same
-    bytes read normally, proposing their other entries. :func:`_own_zones` cannot
-    close it because the parsed tree no longer records which tag closed the
-    component — the mismatch is gone by the time anything here can look.
+    * ``BEGIN:VEVENT`` … ``END:VTIMEZONE`` is handed to
+      ``cache_timezone_component`` while arriving as an ``Event`` that
+      ``walk("VTIMEZONE")`` never returns. Cold, ``Event.to_tz`` does not exist and
+      the read refuses; warm, the build is skipped and the same bytes read normally.
+    * ``BEGIN:VTIMEZONE`` … ``END:VEVENT`` is the mirror: never cached, so cold a
+      value naming that id stays naive and #1491 skips it — but warm it resolves
+      from the cache, and :func:`_rezone` then re-seats it onto the definition
+      ``walk`` *does* return, proposing an entry the cold read skipped.
 
-    So it is refused on the property instead, which is the cold answer made
-    unconditional and costs a well-formed document nothing: RFC 5545 §3.6.5 makes
-    ``TZID`` a property of ``VTIMEZONE`` alone — on every other component a zone is
-    named by the ``TZID`` *parameter* of a value, which is not this — so no
-    conforming document carries one anywhere else, and the only way to produce one
-    is a delimiter that does not match its own ``BEGIN``. Adversarial review found
-    it on round 5.
+    Both are ADR-0093 §5's read-order dependence, and neither is reachable from the
+    parsed tree — which is why this reads the delimiters out of the bytes instead.
+    That is a structural well-formedness question rather than a second answer to the
+    semantics ADR-0093 §7b ratifies: it decides only whether the document says what
+    it contains, and RFC 5545 §3.6 requires every ``END`` to name its own ``BEGIN``.
+
+    **Deliberately narrow.** An unclosed ``BEGIN`` is not refused: caching happens
+    when a component *ends*, so a component that never ends is never cached and
+    decides nothing here. Only a genuine mismatch is refused, so a well-delimited
+    component carrying a stray ``TZID`` **property** — which the library never
+    caches, its ``END`` tag not being ``VTIMEZONE`` — is left to §7b's skip rule as
+    before. Adversarial review found both halves, on rounds 5 and 6.
     """
-    for component in calendar.walk():
-        if component.name != "VTIMEZONE" and "TZID" in component:
-            msg = "a TZID property outside a VTIMEZONE component"
+    stack: list[str] = []
+    for line in _content_lines(raw):
+        tag, _, name = line.partition(":")
+        keyword = tag.partition(";")[0].strip().upper()
+        if keyword == "BEGIN":
+            stack.append(name.strip().upper())
+        elif keyword == "END" and (not stack or stack.pop() != name.strip().upper()):
+            msg = "a component delimiter that does not match the one it closes"
             raise ValueError(msg)
+
+
+def _content_lines(raw: bytes) -> Iterator[str]:
+    """The document's content lines, unfolded as RFC 5545 §3.1 folds them.
+
+    Unfolding is the one piece of the format this has to redo, because a ``BEGIN``
+    split across a fold is still a ``BEGIN`` to the parser — and a check that missed
+    that would refuse documents ``icalendar`` reads, which is the failure the
+    previous guard was blocked for. A continuation is a line whose first character
+    is a space or a tab, and that character is not part of the value.
+
+    Decoded permissively because only the delimiters are being read: every byte this
+    function is asked about is ASCII, so a replacement character elsewhere cannot
+    turn one content line into another.
+    """
+    current = ""
+    for raw_line in raw.decode("utf-8", errors="replace").split("\n"):
+        line = raw_line.rstrip("\r")
+        if line[:1] in (" ", "\t"):
+            current += line[1:]
+            continue
+        if current:
+            yield current
+        current = line
+    if current:
+        yield current
 
 
 def _declared_zones(calendar: Any) -> dict[str, Any]:
