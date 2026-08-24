@@ -32,6 +32,8 @@ from ai_assistant.core.types import (
 from ai_assistant.testing import DEFAULT_READER_NAME, FakeReader, attested_proposal
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from ai_assistant.core.protocols import Reader
 
 _WHEN = datetime(2026, 1, 1, tzinfo=UTC)
@@ -415,6 +417,50 @@ def test_a_hex_shaped_declared_name_is_admitted_because_a_declared_name_is_not_a
     assert subject.name == _DISCRIMINATOR
 
 
+@pytest.mark.parametrize(
+    "construct",
+    [
+        pytest.param(
+            lambda hostile: FakeReader(name=hostile(DEFAULT_READER_NAME)),
+            id="a declared name on its own",
+        ),
+        pytest.param(
+            lambda hostile: FakeReader(
+                name=hostile(DEFAULT_READER_NAME), discriminator=_DISCRIMINATOR
+            ),
+            id="the declared half of a discriminated identity",
+        ),
+        pytest.param(
+            lambda hostile: FakeReader(discriminator=hostile(_DISCRIMINATOR)),
+            id="the discriminator",
+        ),
+    ],
+)
+def test_a_hostile_string_subclass_is_refused_at_either_half(
+    construct: Callable[[Callable[[str], str]], FakeReader],
+) -> None:
+    """The checks read the contents; the composition reads ``__format__`` (ADR-0190 §4).
+
+    ``Hostile``'s *contents* are a conforming declared name and a conforming
+    discriminator, so every check in both refusals passes — and then the f-string
+    that joins the halves calls the subclass's own ``__format__`` and stores what
+    it says instead. It would compose ``"fake-source:b a d:x"``: two colons, a
+    blank, and no relation to what was checked. That is the same hole
+    ``FakeMemoryWriter``'s and the id factory's guards are for, at the seam
+    ADR-0190 §4 opened, and it is why both halves are refused as *built-in*
+    strings before anything reads them.
+    """
+
+    class Hostile(str):
+        __slots__ = ()
+
+        def __format__(self, format_spec: str, /) -> str:
+            return "b a d:x"
+
+    with pytest.raises(ValueError, match=r"(?i)built-in str"):
+        construct(Hostile)
+
+
 def test_a_discriminator_never_becomes_the_whole_identity() -> None:
     """§3's "never a discriminator on its own", held structurally rather than checked.
 
@@ -423,7 +469,10 @@ def test_a_discriminator_never_becomes_the_whole_identity() -> None:
     and ``discriminator`` is only ever composed onto it. So the property is a fact
     about the constructor's shape rather than a validator that could be argued
     with — which is the same move ADR-0092 §2 makes when it prefers a value object
-    over two nullable fields to make a half-state unconstructable.
+    over two nullable fields to make a half-state unconstructable. The one way a
+    caller could still argue with it — a ``str`` subclass whose ``__format__``
+    supplies a different value at composition time — is closed by refusing both
+    halves as built-in strings, which is what keeps this a fact about the shape.
     """
     assert FakeReader(discriminator=_DISCRIMINATOR).name == _DISCRIMINATED
     assert declared_name_of(FakeReader(discriminator=_DISCRIMINATOR).name) == DEFAULT_READER_NAME

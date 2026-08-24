@@ -552,6 +552,39 @@ def _synthesise(
     )
 
 
+def _refuse_non_builtin_str(value: str, half: str) -> None:
+    """Refuse a ``str`` subclass before either half of an identity is read.
+
+    :func:`_mint`'s guard, at the other seam and for the same reason: a subclass
+    satisfies the annotation and passes every check below on its *contents*, then
+    supplies its own ``__format__`` when the two halves are composed. A
+    discriminator holding 32 lowercase hexadecimal characters whose ``__format__``
+    returns ``"BAD"`` composes ``"fake-source:BAD"``; a declared name whose
+    ``__format__`` returns ``":x"`` composes an identity carrying two colons and
+    no declared half. Both are values ADR-0190 §4 refuses, reached through a fake
+    that had just checked them — and the second is how a subclass would argue with
+    §3's "never a discriminator on its own", which the split otherwise makes a fact
+    about this constructor's shape rather than a validator.
+
+    **Refused rather than normalised.** ``str(value)`` calls the subclass's own
+    ``__str__``, which is worth no more than its ``__format__``; and this seam
+    refuses rather than repairs (see :func:`_refuse_malformed_declared_name`).
+    Nothing about the value is introspected in the message — not ``repr``, not
+    ``type(...).__name__`` — because a hostile one could raise past the guard,
+    while ``type(value) is not str`` invokes no user code at all.
+
+    Raises:
+        ValueError: If ``value`` is not a built-in ``str``.
+    """
+    if type(value) is not str:
+        msg = (
+            f"a source identity's {half} is a built-in str; a str subclass is refused "
+            f"before anything reads or formats it, since its own __format__ can compose "
+            f"an identity out of contents these checks never saw (ADR-0190 §4)"
+        )
+        raise ValueError(msg)
+
+
 def _refuse_malformed_declared_name(name: str) -> None:
     """Refuse a value that is not a declared name (ADR-0190 §4).
 
@@ -575,8 +608,10 @@ def _refuse_malformed_declared_name(name: str) -> None:
 
     Raises:
         ValueError: If ``name`` is empty or blank, is not equal to its own
-            ``str.strip()``, contains a colon, or is not UTF-8-encodable.
+            ``str.strip()``, contains a colon, is not UTF-8-encodable, or is not
+            a built-in ``str`` (:func:`_refuse_non_builtin_str`).
     """
+    _refuse_non_builtin_str(name, "declared name")
     if not name or name != name.strip():
         msg = (
             f"a reader's declared name is non-empty and equal to its own str.strip(), "
@@ -615,9 +650,11 @@ def _refuse_malformed_discriminator(discriminator: str) -> None:
     identity out of it.
 
     Raises:
-        ValueError: If ``discriminator`` is not exactly 32 characters drawn from
-            ``0123456789abcdef``.
+        ValueError: If ``discriminator`` is not a built-in ``str``
+            (:func:`_refuse_non_builtin_str`), or is not exactly 32 characters
+            drawn from ``0123456789abcdef``.
     """
+    _refuse_non_builtin_str(discriminator, "discriminator")
     if len(discriminator) != _DISCRIMINATOR_WIDTH or not set(discriminator) <= (
         _DISCRIMINATOR_ALPHABET
     ):
