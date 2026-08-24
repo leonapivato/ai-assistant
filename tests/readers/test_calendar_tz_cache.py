@@ -366,6 +366,176 @@ async def test_three_readers_parsing_at_once_each_read_their_own_document(
         assert third.coverage is None
 
 
+# --- every property the zone can arrive on, not only DTSTART/DTEND -----------
+
+#: A wall time the planted ``+01:00`` puts at 13:00Z, and a second at 13:30Z.
+#: Both are inside the fixture window ``[10:00Z, 14:00Z)``, so a definition that
+#: reached them changes what the reading says rather than falling off its end —
+#: and neither collides with the master's own 12:00Z occurrence, so an invented
+#: occurrence is an extra proposal instead of a duplicate the grouping absorbs.
+_LATER: Final = "20260803T140000"
+_LATER_STILL: Final = "20260803T143000"
+
+
+def _series(*lines: str, uid: str = "series", summary: str = "series") -> str:
+    """A master at :data:`NOW`, in UTC, carrying ``lines``.
+
+    ``DTSTART`` states its zone as ``Z`` and the duration states none, so the only
+    ``TZID`` anywhere in the document is the one on the property under test. That
+    is what makes each case below an assertion about *that* property: if the
+    re-seating reached ``DTSTART``/``DTEND`` alone, this entry would be read
+    identically and only the property's own contribution would move.
+    """
+    return vevent(f"DTSTART:{utc(NOW)}", "DURATION:PT30M", *lines, f"SUMMARY:{summary}", uid=uid)
+
+
+#: The master occurrence of :func:`_series`, which every case here keeps.
+_SERIES_RENDERED: Final = 'Calendar entry "series", on 2026-08-03 from 12:00 to 12:30 (UTC).'
+
+#: The two occurrences of the hourly master the ``EXDATE`` cases exclude from.
+_HOURLY_RENDERED: Final = [
+    'Calendar entry "hourly", on 2026-08-03 from 12:00 to 12:30 (UTC).',
+    'Calendar entry "hourly", on 2026-08-03 from 13:00 to 13:30 (UTC).',
+]
+
+
+async def _plant(tmp_path: Path) -> None:
+    """Cache :data:`_HOSTILE` the way the hub does — by reading a source that defines it."""
+    await _read(_written(tmp_path, "planted.ics", _vtimezone(), _entry(uid="defined")))
+    assert tzp.timezone(_HOSTILE) is not None, "the earlier read is what these cases turn on"
+
+
+@pytest.mark.parametrize(
+    "rdates",
+    [
+        pytest.param((f"RDATE;TZID={_HOSTILE}:{_LATER}",), id="one-line-one-value"),
+        pytest.param(
+            (f"RDATE;TZID={_HOSTILE}:{_LATER},{_LATER_STILL}",), id="one-line-many-values"
+        ),
+        pytest.param(
+            (f"RDATE;TZID={_HOSTILE}:{_LATER}", f"RDATE;TZID={_HOSTILE}:{_LATER_STILL}"),
+            id="repeated-property",
+        ),
+    ],
+)
+@pytest.mark.parametrize("planted", [False, True], ids=["fresh", "id-already-cached"])
+async def test_an_rdate_naming_a_cached_zone_states_no_extra_occurrence(
+    tmp_path: Path, planted: bool, rdates: tuple[str, ...]
+) -> None:
+    """An earlier read may not add an occurrence to a series it has nothing to do with.
+
+    ``RDATE`` is where the leak *creates* rather than merely mis-times: warm, the
+    values resolve at the other document's offset and the reader proposes an
+    occurrence at a readable instant the source never stated. Cold, the zone does
+    not resolve, the value is skipped and ADR-0117 §5 withholds the coverage — so
+    identical bytes proposed a meeting in a hub that had read the id before and
+    skipped it in a fresh one, which is ADR-0093 §5's read-order dependence on a
+    property no case reached.
+
+    **The three shapes are the three ways ``icalendar`` nests these values**, and
+    they are separate parameters because the traversal has a separate branch for
+    each: one ``vDDDLists`` per line holding its values under ``dts``, and a *list*
+    of those properties where the name repeats. A `DTSTART`-only re-seating leaves
+    all three leaking; dropping the list branch alone leaves the repeated one
+    leaking while the other two still pass.
+
+    The ``fresh`` column is what makes the pair an assertion rather than a
+    snapshot: it is the same bytes, and the reading may not depend on which of the
+    two the process reached first.
+    """
+    if planted:
+        await _plant(tmp_path)
+
+    reading = await _read(_written(tmp_path, "rdated.ics", _series(*rdates)))
+
+    assert summaries(reading.proposals) == [_SERIES_RENDERED]
+    assert reading.coverage is None, "an instruction the source states and this read skipped (§5)"
+
+
+@pytest.mark.parametrize(
+    "exdates",
+    [
+        pytest.param((f"EXDATE;TZID={_HOSTILE}:{_LATER}",), id="one-line-one-value"),
+        pytest.param(
+            (f"EXDATE;TZID={_HOSTILE}:20260803T130000,{_LATER}",), id="one-line-many-values"
+        ),
+        pytest.param(
+            (f"EXDATE;TZID={_HOSTILE}:20260803T130000", f"EXDATE;TZID={_HOSTILE}:{_LATER}"),
+            id="repeated-property",
+        ),
+    ],
+)
+@pytest.mark.parametrize("planted", [False, True], ids=["fresh", "id-already-cached"])
+async def test_an_exdate_naming_a_cached_zone_suppresses_no_occurrence(
+    tmp_path: Path, planted: bool, exdates: tuple[str, ...]
+) -> None:
+    """The other direction: an earlier read may not delete an occurrence either.
+
+    ``EXDATE`` removes, so the leak here is silent in the shape that matters most —
+    an occurrence the source states, absent from the reading, with nothing in it
+    saying so. Warm, the excluded wall times resolve at ``+01:00`` onto the
+    master's own occurrences and take them out; cold, they are skipped unapplied
+    and the coverage is withheld instead (ADR-0117 §5, which is explicit that an
+    unread ``EXDATE`` is an instruction not applied rather than an absence).
+
+    Both proposals must therefore stand in both columns. The multi-value and
+    repeated shapes exclude *both* occurrences when they leak, so a broken
+    traversal empties the reading rather than shortening it.
+    """
+    if planted:
+        await _plant(tmp_path)
+
+    hourly = _series("RRULE:FREQ=HOURLY;COUNT=2", *exdates, uid="hourly", summary="hourly")
+
+    reading = await _read(_written(tmp_path, "exdated.ics", hourly))
+
+    assert summaries(reading.proposals) == _HOURLY_RENDERED
+    assert reading.coverage is None, "an instruction the source states and this read skipped (§5)"
+
+
+@pytest.mark.parametrize("planted", [False, True], ids=["fresh", "id-already-cached"])
+async def test_a_recurrence_id_naming_a_cached_zone_keys_no_override(
+    tmp_path: Path, planted: bool
+) -> None:
+    """A cached zone may not decide which occurrence a correction is about.
+
+    ``RECURRENCE-ID`` is the key, not a time the user sees, and that is what makes
+    it the worst of the three: warm, the id resolves at the other document's offset
+    and the override lands on a real occurrence, applying a correction — here a
+    move — that the cold read never applies. Cold the instant is unknown, and
+    ADR-0093 §7b suppresses the whole series rather than leaving its occurrences to
+    the master: "where the affected extent is itself unknown, the whole series is
+    suppressed", because an override is a correction and mis-scoping one re-states
+    superseded information as current.
+
+    So the series is absent in both columns and only :data:`_GOOD` survives — the
+    same reading ``test_an_unresolvable_zone_on_a_recurrence_id_suppresses_the_series``
+    pins cold, now asserted against a process that has already seen the id.
+
+    Unlike the two above, this one rides no branch of its own: a ``RECURRENCE-ID``
+    is a ``vDDDTypes``, whose ``dts`` is ``[self]``, so it reaches the re-seating by
+    the same path ``DTSTART`` does. What it pins is the *reach* — that the
+    re-seating walks every property the component holds rather than the two the
+    reading's start and end come from.
+    """
+    if planted:
+        await _plant(tmp_path)
+
+    master = _series("RRULE:FREQ=HOURLY;COUNT=2", uid="corrected")
+    override = vevent(
+        f"RECURRENCE-ID;TZID={_HOSTILE}:{_LATER}",
+        f"DTSTART:{utc(NOW + timedelta(hours=1, minutes=15))}",
+        "DURATION:PT30M",
+        "SUMMARY:moved",
+        uid="corrected",
+    )
+
+    reading = await _read(_written(tmp_path, "corrected.ics", _GOOD, master, override))
+
+    assert summaries(reading.proposals) == [_GOOD_RENDERED]
+    assert reading.coverage is None, "an override this read could not key (§7b)"
+
+
 # --- what the re-seating may not reach ---------------------------------------
 
 
