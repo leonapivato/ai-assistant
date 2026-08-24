@@ -1,6 +1,6 @@
 # 29. The tool invocation contract
 
-- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it")
+- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it", and §3's "carries no cost" omission as it reaches cost and not disclosure)
 - Date: 2026-07-21
 - Partially superseded: 2026-08-24 by ADR-0192 — **one paragraph of §5, and the
   reasons behind it are kept rather than reversed.** §5 closes by answering
@@ -27,6 +27,22 @@
   carries it: §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and
   Consequences amended by ADR-0032; §8 amended by ADR-0034 and by ADR-0039 — the
   four `Amended:` notes below, none of which is altered. Refs #1503, #1544.
+- Partially superseded: 2026-08-24 by ADR-0192 — **§3's cost omission, and cost
+  only.** §3 rules "**`ToolResult` carries no cost and no disclosure report**, and
+  both omissions are decisions", and gives cost's reason: "invocation cannot —
+  billing is asynchronous, so a `spent` field would hold a number the tool made up".
+  ADR-0192 §5 adds `ToolResult.incurred_cost`, a `ToolCost` a tool reports **only
+  where it knows one**, so a tool whose price settles asynchronously reports
+  `CostBasis.UNKNOWN` and the accumulator fails closed — §3's objection selects that
+  arm rather than being waived, and ADR-0192 §5 forbids the invented number in terms.
+  §3 anticipated the landing ("Both are additive fields on this type when their own
+  decisions land"), but it calls the omission a decision, so the reversal is recorded
+  as a supersession rather than left to the anticipation. **The disclosure half
+  stands entirely**: no per-call reach report lands, and issue #57 is untouched.
+  Everything else of §3 stands and ADR-0192 relies on it — failure returned as data,
+  `ToolOutcome`'s three members, `retryable` on `ToolFailureKind`, the message rule,
+  and `output` as `FrozenJsonValue`. This ADR's decision text below is not rewritten
+  (ADR-0070 §1). Refs #1503, #1544.
 - Amended: 2026-07-21 by ADR-0031 — the corrections first use found
   (PR #188). §4's interrupted-call rule gains a core home and is
   ToolDefinition.interrupted_outcome, a read-only property in core/types.py, so
