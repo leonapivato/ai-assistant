@@ -2562,27 +2562,80 @@ function bandWords(band) {
   return band;
 }
 
-// Why a belief is held — band-dependent, and the answer is complete for one band
-// and owed for two (ADR-0073 §4).
+// Why a belief is held — band-dependent, and the answer is complete for all three
+// bands since ADR-0189 §2 gave the projection somewhere to put the attestation.
 //
 // **The floor is what stops the gap being papered over.** A derived belief conveys
 // how many citations stand behind it and is never presented as carrying a warrant
-// this surface cannot show; an attested one is named as someone else's report, and
-// the line says outright that "last revised" is this system's clock rather than the
-// source's. Beside any rendered count sits ADR-0107 §5's ceiling, because a
-// displaced citation is not a lost one.
+// this surface cannot show; an attested one **names the reporting source and states
+// the instant that source said the fact was current** (ADR-0189 §4), and the line
+// still says outright that "last revised" is this system's clock rather than the
+// source's — which matters more now, not less, because there are two instants on the
+// screen and ADR-0073 §4 forbids offering ours as the source's. Beside any rendered
+// count sits ADR-0107 §5's ceiling, because a displaced citation is not a lost one.
+//
+// This line used to say the source and the instant were recorded and could not be
+// shown here. That was true while the projection dropped them, and it is the
+// limitation #1276 tracked; ADR-0189 §2 removed the limitation, so the sentence goes.
+//
+// **The source is named at source granularity and no finer.** ADR-0098 §8's third
+// clause is adopted unchanged by ADR-0189 §4: no surface claims to identify the author
+// within a source, so the value is apposed to "a connected source" and cannot be read
+// as a person. ADR-0093 §7 forbids deriving a reader's identity from the source's
+// location or contents, so the organiser of an invite and the sender of a mail are not
+// on the record and cannot be. Where a display label exists it renders in the
+// identity's place and the identity is the fallback (ADR-0189 §5, ADR-0093 §7's own
+// wording) — no label is configured anywhere yet, ADR-0189 §8 leaves the mechanism to
+// the registry lane, and no response on this surface carries one.
 function whyHeld(belief) {
   if (belief.band === "asserted") {
     return "You told me, and your own word is the whole of it.";
   }
   if (belief.band === "attested") {
+    // Off-contract rather than impossible: ADR-0189 §2 adds no cross-field validator
+    // to the belief DTOs, so the type admits a state no store produces. Claiming
+    // nothing was recorded would err in the direction ADR-0073 §4 forgives least, and
+    // the old sentence would claim a limit this projection no longer has — what is
+    // true either way is that this surface was not handed it.
+    if (belief.attestation === null) {
+      return (
+        "A source you connected reported it — neither your word nor my inference. " +
+        "What reached me here does not name that source or say when it spoke, so " +
+        "'last revised' is when I changed my mind and not when the source spoke."
+      );
+    }
     return (
-      "A source you connected reported it — neither your word nor my inference. I " +
-      "recorded which source, and when it said so, but cannot show them here, so " +
-      "'last revised' is when I changed my mind and not when the source spoke."
+      `A connected source reported it — ${belief.attestation.reported_by}, neither ` +
+      "your word nor my inference. That source said this was current as of " +
+      `${belief.attestation.reported_at}, on its own clock; 'last revised' is when ` +
+      "I changed my mind and not when the source spoke."
     );
   }
   return whyDerived(belief);
+}
+
+// That a **derived** belief's warrant came from outside, or nothing (ADR-0189 §4).
+//
+// Read off the projection's own field beside its band, and never recomputed from the
+// band: ADR-0189 §2 forbids that in as many words, and a client re-deriving the
+// disjunction is exactly how its second half gets dropped (ADR-0106 §2).
+//
+// **It says nothing about the belief's own content, and that prohibition is the
+// clause itself.** §4: a surface "does **not** present the record's own content as
+// third-party text on that ground: the content is a sentence this system's model
+// wrote". ADR-0098 §7's own round-6 draft made that reach and had to be repaired, so
+// this names the warrant and affirms the words are ours in one breath.
+//
+// **And it is silent on false rather than negative.** A false is *nothing external is
+// recorded in this warrant*, never *nothing external influenced it* (ADR-0098 §5) —
+// the link is unrecoverable once a model's output is recorded truthfully, so a line
+// claiming the negative would assert what no field holds.
+function outsideWarrant(rests) {
+  return rests
+    ? " Some of what I worked it out from came from a connected source rather than " +
+        "from you — the belief above is still my own sentence, but its warrant is " +
+        "not entirely mine."
+    : "";
 }
 
 function whyDerived(belief) {
@@ -2592,11 +2645,18 @@ function whyDerived(belief) {
         "longer keep a reference to — those may still exist; I stopped carrying " +
         "them, they were not lost."
       : "";
+  // Appended once here rather than per branch, for the ceiling's own reason: ADR-0189
+  // §4 binds the clause to the band and not to any of the four count states, so a
+  // per-branch append would be four chances to forget it — and the belief whose
+  // warrant came from outside is the one a user needs told on every one of them.
+  const outside = outsideWarrant(belief.rests_on_recorded_external_content);
   if (belief.evidence_count === 0) {
     return (
       (ceiling
         ? "I worked it out, and I carry no evidence for it now."
-        : "I worked it out, and no supporting evidence was recorded.") + ceiling
+        : "I worked it out, and no supporting evidence was recorded.") +
+      ceiling +
+      outside
     );
   }
   if (belief.unsupported) {
@@ -2604,7 +2664,8 @@ function whyDerived(belief) {
       `I worked it out from ${belief.evidence_count} piece(s) of evidence, none of ` +
       "which still exists. I still hold it — I have not unlearnt it because the " +
       (ceiling ? "evidence went." : "evidence went — but nothing supports it any more.") +
-      ceiling
+      ceiling +
+      outside
     );
   }
   if (belief.lost_evidence > 0) {
@@ -2612,10 +2673,13 @@ function whyDerived(belief) {
       `I worked it out from ${belief.evidence_count} piece(s) of evidence, ` +
       `${belief.lost_evidence} of which no longer exists. The confidence shown ` +
       "reflects what is left." +
-      ceiling
+      ceiling +
+      outside
     );
   }
-  return `I worked it out from ${belief.evidence_count} piece(s) of evidence.` + ceiling;
+  return (
+    `I worked it out from ${belief.evidence_count} piece(s) of evidence.` + ceiling + outside
+  );
 }
 
 // One belief, carrying everything ADR-0073 §4 requires of both views: the band, the
@@ -2815,6 +2879,10 @@ function renderQuestion(list, question, path, offset) {
   );
   line(item, `Why I am asking: ${question.reason}`, "hint");
   line(item, `Proposed because: ${question.rationale}`, "hint");
+  const origin = proposalOrigin(question);
+  if (origin) {
+    line(item, `Where it came from: ${origin}`, "hint");
+  }
   renderRetirements(item, question);
   line(item, `Asked: ${question.asked_at}`, "hint");
   line(
@@ -2844,10 +2912,132 @@ function renderQuestion(list, question, path, offset) {
   list.appendChild(item);
 }
 
-// Exactly what accepting would retire (ADR-0078 §8), which is not decoration but
-// the exact scope the answer authorises. A conflict already retired is rendered as
-// no longer held rather than omitted: omitting it would understate the answer's
-// scope in one direction and overstate it in the other.
+// Where the **proposal** came from, or nothing to say (ADR-0189 §4, §9).
+//
+// Both fields read here describe the record that would be written if the question were
+// accepted — the same reading `band` already has on this type — and describe **no
+// entry in `retires`** (ADR-0189 §2). Each retirement answers for itself through its
+// own `warrant`, which `retirementOrigin` reads, and the two must not be run together:
+// a question proposing the user's own assertion routinely retires an attested calendar
+// line, so one answer could never serve for both.
+//
+// **The attested arm is why ADR-0189 §9 names this renderer by hand.** §4 binds every
+// surface that renders an attested belief, question or retirement, and a question is
+// the projection the first attested proposals actually reach — a lane that rewrote
+// only the belief explanation would have left the surface §4 was written for
+// unchanged. Nothing here says the proposal *is* held: a pending question is not a
+// belief of any band, and the band line above it stays the conditional it was.
+function proposalOrigin(question) {
+  if (question.attestation !== null) {
+    return (
+      `A connected source reported it — ${question.attestation.reported_by}, which ` +
+      `said this was current as of ${question.attestation.reported_at}, on that ` +
+      "source's own clock."
+    );
+  }
+  if (question.band === "derived" && question.rests_on_recorded_external_content) {
+    return (
+      "I worked it out, and some of what I worked it out from came from a connected " +
+      "source rather than from you."
+    );
+  }
+  return "";
+}
+
+// How a retired record's content is introduced, and what is said about it (§4).
+//
+// ADR-0189 §4 rules three arms over a retirement, and telling them apart is the whole
+// of what #673 asked for. Before `warrant` existed this list rendered
+// attacker-authorable calendar text under "Accepting would retire:" with **no origin
+// marker at all** — a third party's sentence carried on the assistant's authority, at
+// the one screen where the user is deciding. ADR-0098 §7 names that as the failure
+// escalation is meant to prevent: "Escalating to the user is not a mitigation if the
+// escalation is where the attacker's sentence is read as ours."
+//
+// * **attested** — the content **is** presented as third-party content, and the source
+//   and the instant it spoke are named beside it.
+// * **asserted** — the user's own word (ADR-0038 §1a), and §4 forbids presenting it as
+//   third-party.
+// * **derived** — this system's own sentence, likewise not third-party; where its
+//   *warrant* rests on recorded external content that is said about the warrant and
+//   never about the words.
+//
+// An earlier draft of ADR-0189 ruled the third-party presentation unconditionally and
+// architecture review caught it on round 3: it would have rendered a retirement of the
+// user's own assertion as somebody else's words. The band decides, and the band lives
+// inside `warrant` rather than on the retirement, which is why it is read there.
+//
+// **The lead comes before the content and not after it.** A marker read *after* the
+// sentence it qualifies has already let that sentence land as ours, and this is a
+// confirmation prompt — the user is deciding while they read.
+function retirementOrigin(warrant) {
+  // Off-contract rather than impossible: ADR-0189 §2 puts the content/warrant tie on
+  // the producer and adds no validator. It is not rendered as *no longer held* — the
+  // content is right there — and it asserts no band, no origin and no source.
+  if (warrant === null) {
+    return {
+      lead: "origin unrecorded —",
+      note: "I cannot say how this was held or what reported it.",
+      className: "hint",
+    };
+  }
+  if (warrant.band === "attested") {
+    return {
+      lead: "someone else's words —",
+      note:
+        warrant.attestation === null
+          ? "A connected source reported this. These are not my words and not yours."
+          : `${warrant.attestation.reported_by} reported this, and said it was ` +
+            `current as of ${warrant.attestation.reported_at}, on that source's own ` +
+            "clock. These are not my words and not yours.",
+      className: "notice",
+    };
+  }
+  if (warrant.band === "asserted") {
+    return {
+      lead: "your own words —",
+      note: "You told me this; it is neither a source's report nor my inference.",
+      className: "hint",
+    };
+  }
+  return {
+    lead: "my own inference —",
+    note:
+      "I worked this out, so these are my words rather than a source's." +
+      (warrant.rests_on_recorded_external_content
+        ? " Some of what I worked it out from came from a connected source rather " +
+          "than from you."
+        : ""),
+    className: "hint",
+  };
+}
+
+// Exactly what accepting would retire (ADR-0078 §8, ADR-0189 §4), which is not
+// decoration but the exact scope the answer authorises. A conflict already retired is
+// rendered as no longer held rather than omitted: omitting it would understate the
+// answer's scope in one direction and overstate it in the other.
+//
+// The **unresolved** entry deliberately gains nothing. ADR-0189 §4's last retirement
+// clause: where the warrant is absent the surface "renders it as *no longer held* …
+// and asserts nothing about its band, its origin or its source. It renders no third
+// state as `false` and no absence as a value." There is no attested tombstone to
+// build — §2 makes `warrant` and `content` null together — so this line is exactly the
+// sentence it was.
+//
+// Every value on both arms reaches the page through `line`, which writes into the
+// document's own text node and never as markup (ADR-0168 §6, ADR-0042 §4, ADR-0189
+// §9's last clause but one). A `reported_by` is a value this system declared and a
+// `reported_at` is an instant, but a retirement's `content` is neither, and the line
+// that renders them together neutralises all of them the same way.
+//
+// **Two properties are what make the attribution unforgeable, and both are structural
+// rather than remembered.** The adapter-authored lead is written *before* the content
+// within its element, so the first attribution a reader meets is always ours; and
+// `.hint` and `.notice` declare no `white-space: pre-wrap` — unlike `.reply` and
+// `.notification-detail`, which do and say why — so a newline inside a content
+// collapses to a space instead of forging a second line under a marker this file
+// wrote. That is #1336's argument for `_safe` eating `\n`, reaching the same
+// conclusion on the other target by a different mechanism.
 function renderRetirements(item, question) {
   if (question.retires.length === 0) {
     line(item, "Accepting would retire: nothing", "hint");
@@ -2855,13 +3045,13 @@ function renderRetirements(item, question) {
   }
   line(item, "Accepting would retire:", "hint");
   question.retires.forEach((one) => {
-    line(
-      item,
-      one.content === null
-        ? `${one.record_id} — no longer held, so accepting would not touch it`
-        : `${one.content} (${one.record_id})`,
-      "hint"
-    );
+    if (one.content === null) {
+      line(item, `${one.record_id} — no longer held, so accepting would not touch it`, "hint");
+      return;
+    }
+    const origin = retirementOrigin(one.warrant);
+    line(item, `${origin.lead} ${one.content} (${one.record_id})`, origin.className);
+    line(item, origin.note, "hint");
   });
 }
 

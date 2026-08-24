@@ -129,6 +129,7 @@ from ai_assistant.core.streams import closing_stream
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
     AnswerOutcome,
+    Attestation,
     Belief,
     BeliefBand,
     BeliefSummary,
@@ -159,6 +160,7 @@ from ai_assistant.core.types import (
     StepOutcome,
     SuccessorLink,
     TurnOutcome,
+    Warrant,
     secret_value,
 )
 from ai_assistant.interfaces.gateway import streams
@@ -3828,6 +3830,14 @@ def _belief_fields(belief: Belief | BeliefSummary) -> dict[str, Any]:
 
     ``unsupported`` is carried rather than left to the page to compute, so the one
     definition ADR-0085 §4a states holds on both types and on this surface too.
+
+    **ADR-0189 §2's two fields cross too, and without them the browser cannot render
+    at all.** §9 obliges ``whyHeld`` to name the reporting source and state the instant
+    that source said the fact was current, and this function is the whole of the wire
+    to that page: a belief reaching the front end is what this dict says it is and
+    nothing more. The pair is carried on **both** belief views under one name, which is
+    ADR-0107 §3's ruling one field over — a listing row that answered less than the row
+    it links to is the same projection defective in one place.
     """
     return {
         "id": belief.id,
@@ -3841,6 +3851,58 @@ def _belief_fields(belief: Belief | BeliefSummary) -> dict[str, Any]:
         "lost_evidence": belief.lost_evidence,
         "evidence_elided": belief.evidence_elided,
         "unsupported": belief.unsupported,
+        "attestation": _attestation_view(belief.attestation),
+        "rests_on_recorded_external_content": belief.rests_on_recorded_external_content,
+    }
+
+
+def _attestation_view(attestation: Attestation | None) -> dict[str, Any] | None:
+    """What reported a record and when that source said so (ADR-0092 §1, ADR-0189 §2).
+
+    Carried **whole** rather than as two members beside each other, which is ADR-0092
+    §2's argument reaching the wire: two independent nullable members admit four
+    states, of which two are half-answers — a source with no instant renders "your
+    calendar had this as of …" with a blank, and an instant with no source attributes
+    it to nobody. One optional object with two required members makes both of those
+    unconstructable here exactly as they are on the record.
+
+    ``reported_at`` crosses as the **source's** clock and is never substituted for by
+    ``last_updated``, which crosses separately and is declared to be ours (ADR-0073
+    §4, ADR-0189 §4).
+
+    ``extent`` is deliberately not carried. ADR-0189 §2 rides it along on the model —
+    "``Attestation.extent`` rides along and nothing renders it, deliberately" — and §10
+    leaves its rendering to ADR-0117, so no surface has a rule for it and putting it on
+    this wire would ship a value with no consumer (ADR-0045 §1).
+    """
+    if attestation is None:
+        return None
+    return {
+        "reported_by": attestation.reported_by,
+        "reported_at": attestation.reported_at.isoformat(),
+    }
+
+
+def _warrant_view(warrant: Warrant | None) -> dict[str, Any] | None:
+    """How a retired record is held, and where its warrant came from (ADR-0189 §2, §3).
+
+    The one projection that carries no standing of its own, so its three facts cross as
+    one object: a warrant that exists is always whole, because all three are resolved
+    together by one ``MemoryStore.get`` or not at all. ``None`` is the case ADR-0045 §6
+    produces — the store hides a closed window, ``content`` is ``null`` too, and the
+    page renders it as *no longer held* while asserting nothing about band, origin or
+    source.
+
+    ``band`` crosses **inside** the warrant rather than beside it on the retirement,
+    because ADR-0189 §3 rules that a projection carries each fact in exactly one place:
+    a second path to one fact is a second thing that can disagree.
+    """
+    if warrant is None:
+        return None
+    return {
+        "band": warrant.band.value,
+        "rests_on_recorded_external_content": warrant.rests_on_recorded_external_content,
+        "attestation": _attestation_view(warrant.attestation),
     }
 
 
@@ -3881,6 +3943,16 @@ def _question_view(question: Question) -> dict[str, Any]:
     when it was asked and until when it is answerable; its state, which is what tells
     an interrupted question from an open one; and any successor an answer already
     raised, with **that** question's own state (§9).
+
+    **Two origins cross, they are about different records, and confusing them is the
+    error ADR-0189 §2 legislates against.** ``attestation`` and
+    ``rests_on_recorded_external_content`` at the top level describe the **proposal** —
+    the record that would be written if the question were accepted — on the same
+    reading ``band`` already has here. Each entry in ``retires`` answers for itself
+    through its own ``warrant``, which is the field that lets the page tell an
+    attacker-authorable line the user is being asked to overrule from this system's own
+    sentence (#673): a question proposing the user's own assertion routinely retires an
+    attested calendar entry, so one answer could never have served for both.
     """
     return {
         "id": question.id,
@@ -3891,11 +3963,18 @@ def _question_view(question: Question) -> dict[str, Any]:
         "rationale": question.rationale,
         "reason": question.reason,
         "retires": [
-            {"record_id": one.record_id, "content": one.content} for one in question.retires
+            {
+                "record_id": one.record_id,
+                "content": one.content,
+                "warrant": _warrant_view(one.warrant),
+            }
+            for one in question.retires
         ],
         "asked_at": question.asked_at.isoformat(),
         "expires_at": None if question.expires_at is None else question.expires_at.isoformat(),
         "successor": _successor_view(question.successor),
+        "attestation": _attestation_view(question.attestation),
+        "rests_on_recorded_external_content": question.rests_on_recorded_external_content,
     }
 
 

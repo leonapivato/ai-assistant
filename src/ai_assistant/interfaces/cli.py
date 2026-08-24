@@ -276,6 +276,7 @@ if TYPE_CHECKING:
         SourceGrant,
         StepOutcome,
         TurnOutcome,
+        Warrant,
     )
 
 app = typer.Typer(
@@ -5446,6 +5447,11 @@ def _render_question(question: Question) -> None:
       enter — worded as a conditional, never as a belief held. A pending question is
       not a belief of any band (§1), so "would be held as" rather than "is";
     * **why the user is being asked** — the ruling's own non-optional reason;
+    * **where the proposal came from** (:func:`_proposal_origin`), which ADR-0189 §9
+      puts on this renderer by name: §4 binds "every surface that renders an attested
+      belief, question or retirement", and a question is the projection the first
+      attested proposals actually reach, so a lane that updated only the belief
+      explanation would have left the surface §4 was written for unchanged;
     * **what accepting would retire** (:func:`_render_retirements`), which is not
       decoration but the exact scope the answer authorises;
     * **when it was asked and when it stops being answerable**;
@@ -5468,6 +5474,9 @@ def _render_question(question: Question) -> None:
     )
     console.print(f"  [dim]Why I am asking:[/] {_safe(question.reason)}")
     console.print(f"  [dim]Proposed because:[/] {_safe(question.rationale)}")
+    origin = _proposal_origin(question)
+    if origin:
+        console.print(f"  [dim]Where it came from:[/] {origin}")
     _render_retirements(question)
     console.print(f"  [dim]Asked:[/] {_when(question.asked_at)}")
     if question.expires_at is None:
@@ -5502,13 +5511,147 @@ def _render_question(question: Question) -> None:
     _render_successor(question)
 
 
+def _proposal_origin(question: Question) -> str:
+    """Where the **proposal** came from, or nothing to say (ADR-0189 §4, §9).
+
+    Both fields read here describe the record that would be written if the question
+    were accepted — the same reading ``band`` already has on this type — and describe
+    **no entry in ``retires``** (ADR-0189 §2). Each retirement answers for itself
+    through its own warrant, which :func:`_retirement_origin` renders, and the two must
+    not be confused: a question proposing the user's own assertion routinely retires an
+    attested calendar line, so borrowing one answer for the other would mislabel both.
+
+    **The attested arm is why §9 names this renderer.** A pending question is not a
+    belief of any band, so nothing here says the proposal *is* held — but where it
+    would be attested, §4's first clause requires the reporting source named and the
+    instant it said the fact was current stated on that source's clock, and this is the
+    only place on this surface that can do it.
+
+    The derived arm carries §4's third clause about the *warrant*, never about the
+    content — see :func:`_outside_warrant`, whose prohibition applies here unchanged.
+
+    Args:
+        question: The question being rendered.
+
+    Returns:
+        The clause, or the empty string where the proposal's origin adds nothing the
+        band has not already said.
+    """
+    if question.attestation is not None:
+        return (
+            f"a connected source reported it — {_safe(question.attestation.reported_by)}, "
+            f"which said this was current as of "
+            f"{_when(question.attestation.reported_at)}, on that source's own clock."
+        )
+    if question.band is BeliefBand.DERIVED and question.rests_on_recorded_external_content:
+        return (
+            "I worked it out, and some of what I worked it out from came from a "
+            "connected source rather than from you."
+        )
+    return ""
+
+
+def _retirement_origin(warrant: Warrant | None) -> tuple[str, str]:
+    """How a retired record's content is introduced, and what is said about it (§4).
+
+    ADR-0189 §4 rules three arms over a :class:`~ai_assistant.core.types.Retirement`,
+    and the distinction between them is the whole of what #673 asked for. Before
+    ``warrant`` existed this surface rendered attacker-authorable calendar text under
+    *"Accepting would retire:"* with **no origin marker at all** — a third party's
+    sentence presented on the assistant's authority, at the one screen where the user
+    is deciding. ADR-0098 §7 names that as the failure escalation is supposed to
+    prevent: "Escalating to the user is not a mitigation if the escalation is where
+    the attacker's sentence is read as ours."
+
+    * **Attested** — the content **is** presented as third-party content, which is
+      ADR-0098 §7's first clause satisfiable for the first time, and the source and
+      the instant it spoke are named beside it (ADR-0189 §4's first clause read one
+      projection over).
+    * **Asserted** — the content is the user's own word (ADR-0038 §1a) and is **not**
+      third-party. §4 is explicit that no surface presents it as such.
+    * **Derived** — the content is this system's own sentence, likewise not
+      third-party; where its *warrant* rests on recorded external content that fact is
+      conveyed about the warrant and never about the words.
+
+    An earlier draft of ADR-0189 ruled the third-party presentation unconditionally
+    and architecture review caught it on round 3, because it would have rendered a
+    retirement of the user's own assertion as somebody else's words. The band is what
+    tells the three apart, and the band is inside ``warrant`` rather than on the
+    ``Retirement``, which is why this reads it there (§4).
+
+    **The lead comes before the content rather than after it**, because a marker a
+    user reads *after* the sentence it qualifies has already let the sentence land as
+    ours — and this is a confirmation prompt, where the whole point is that they are
+    deciding while they read.
+
+    **The ``None`` arm is off-contract and is still answered.** ADR-0189 §2 puts the
+    ``content``/``warrant`` tie on the producer and adds no validator, so a warrantless
+    resolved retirement is constructable and no producer in the tree builds one. It is
+    not rendered as *no longer held* — that would be false, the content is right there —
+    and it asserts no band, no origin and no source, which is the only honest answer
+    available.
+
+    Args:
+        warrant: The retired record's warrant, or ``None``.
+
+    Returns:
+        The lead that introduces the content, and the note that follows it.
+    """
+    if warrant is None:
+        return (
+            "[dim]origin unrecorded —[/]",
+            "I cannot say how this was held or what reported it.",
+        )
+    match warrant.band:
+        case BeliefBand.ATTESTED:
+            lead = "[yellow]someone else's words —[/]"
+            note = (
+                (
+                    f"{_safe(warrant.attestation.reported_by)} reported this, and said it "
+                    f"was current as of {_when(warrant.attestation.reported_at)}, on that "
+                    f"source's own clock. These are not my words and not yours."
+                )
+                if warrant.attestation is not None
+                else "A connected source reported this. These are not my words and not yours."
+            )
+        case BeliefBand.ASSERTED:
+            lead = "[dim]your own words —[/]"
+            note = "You told me this; it is neither a source's report nor my inference."
+        case BeliefBand.DERIVED:
+            lead = "[dim]my own inference —[/]"
+            note = "I worked this out, so these are my words rather than a source's."
+            if warrant.rests_on_recorded_external_content:
+                note += (
+                    " Some of what I worked it out from came from a connected source "
+                    "rather than from you."
+                )
+        case _:  # pragma: no cover - exhaustive
+            assert_never(warrant.band)
+    return lead, note
+
+
 def _render_retirements(question: Question) -> None:
-    """Render exactly what accepting a question would retire (ADR-0078 §8).
+    """Render exactly what accepting a question would retire (ADR-0078 §8, ADR-0189 §4).
 
     A conflict that has been retired since the question was asked does not resolve
     and is rendered as **no longer held** rather than omitted: the user should be told
     that the thing they would be overruling is already gone. Omitting it would
     understate the answer's scope in one direction and overstate it in the other.
+
+    Each resolved entry now carries where its content came from
+    (:func:`_retirement_origin`), which is what closes #673. The **unresolved** entry
+    deliberately gains nothing: ADR-0189 §4's last retirement clause rules that where
+    the warrant is absent the surface "renders it as *no longer held* … and asserts
+    nothing about its band, its origin or its source. It renders no third state as
+    ``False`` and no absence as a value." There is no attested tombstone to construct —
+    §2 makes ``warrant`` and ``content`` ``None`` together — so this line stays exactly
+    the sentence it was.
+
+    Every value on both arms is neutralised for this terminal (``_safe``, ADR-0042 §4,
+    ADR-0189 §9's last clause but one). A ``reported_by`` is a value this system
+    declared and a ``reported_at`` is an instant, but a ``content`` is neither, and the
+    line that renders them together escapes all of them — so no retired content can
+    forge the attribution of the span above or below it.
     """
     if not question.retires:
         console.print("  [dim]Accepting would retire:[/] nothing")
@@ -5520,10 +5663,12 @@ def _render_retirements(question: Question) -> None:
                 f"    - [dim]{_safe(retirement.record_id)} — no longer held, so accepting "
                 f"would not touch it[/]"
             )
-        else:
-            console.print(
-                f"    - {_safe(retirement.content)} [dim]({_safe(retirement.record_id)})[/]"
-            )
+            continue
+        lead, note = _retirement_origin(retirement.warrant)
+        console.print(
+            f"    - {lead} {_safe(retirement.content)} [dim]({_safe(retirement.record_id)})[/]"
+        )
+        console.print(f"      [dim]{note}[/]")
 
 
 def _render_successor(question: Question) -> None:
@@ -5731,8 +5876,47 @@ def _elision_ceiling(elided: int) -> str:
     )
 
 
+def _outside_warrant(rests_on_recorded_external_content: bool) -> str:
+    """That a **derived** belief's warrant came from outside, or nothing (ADR-0189 §4).
+
+    §4's third clause: a surface conveys that a warrant came from outside where the
+    band is ``DERIVED`` and the externality answer is ``True``, read from
+    ``rests_on_recorded_external_content`` beside ``band``. This is the sentence that
+    discharges it, and its two silences are as ruled as its text.
+
+    **It says nothing about the belief's own content, and that prohibition is the
+    clause itself.** §4 is explicit that a surface "does **not** present the record's
+    own content as third-party text on that ground: the content is a sentence this
+    system's model wrote, and ADR-0098 §1 decides externality by the recorded origin
+    of the text." ADR-0098 §7's own round-6 mistake was exactly this reach, so the
+    line names the *warrant* and affirms the words are mine in the same breath.
+
+    **And it is silent on ``False`` rather than negative.** A ``False`` is *nothing
+    external is recorded in this warrant*, never *nothing external influenced it*
+    (ADR-0098 §5, ADR-0106 §1): the link is unrecoverable once a model's output is
+    recorded truthfully, so a surface printing "nothing outside reached this" would
+    assert what no field on the record holds.
+
+    Args:
+        rests_on_recorded_external_content: The projection's own field, as the engine
+            computed it — never recomputed here from ``band``, which ADR-0189 §2
+            forbids and which would drop the disjunction's second half anyway.
+
+    Returns:
+        The clause, or the empty string where there is nothing that can honestly be
+        said.
+    """
+    if not rests_on_recorded_external_content:
+        return ""
+    return (
+        " Some of what I worked it out from came from a connected source rather than "
+        "from you — the belief above is still my own sentence, but its warrant is not "
+        "entirely mine."
+    )
+
+
 def _why_derived(belief: Belief | BeliefSummary) -> str:
-    """Why a **derived** belief is held: the count, what is gone, and the ceiling.
+    """Why a **derived** belief is held: the count, what is gone, the ceiling, the origin.
 
     Split out of :func:`_why` so the ceiling is appended **once, on every path**
     rather than per branch. That is the structural point: ADR-0107 §5 owes the
@@ -5741,6 +5925,12 @@ def _why_derived(belief: Belief | BeliefSummary) -> str:
     A per-branch append would let a fifth state be added later with the clause
     forgotten, and the belief that elided nine hundred citations is exactly the one
     that would go unmentioned.
+
+    **ADR-0189 §4's outside-warrant clause rides on the same argument and the same
+    append** (:func:`_outside_warrant`). §4 binds it to the band rather than to any
+    of the four count states, so a per-branch append would be four chances to forget
+    it — and the belief whose warrant came from a connected source is exactly the one
+    a user needs told about, on every one of them.
 
     **Two of the four states say something that stops being true once anything has
     been displaced, and both are repaired here rather than qualified.**
@@ -5784,7 +5974,7 @@ def _why_derived(belief: Belief | BeliefSummary) -> str:
         )
     else:
         head = f"I worked it out from {belief.evidence_count} piece(s) of evidence."
-    return head + ceiling
+    return head + ceiling + _outside_warrant(belief.rests_on_recorded_external_content)
 
 
 def _why(belief: Belief | BeliefSummary) -> str:
@@ -5807,9 +5997,10 @@ def _why(belief: Belief | BeliefSummary) -> str:
       support is *entirely* gone says so, and says that it is still held — because it
       is not retired, and a line implying otherwise would misdescribe what the user
       can still do with it.
-    * **Attested** — it is named as someone else's report, so it reads as neither
-      the user's word nor the assistant's inference, and the line says outright that
-      ``Last revised`` is the assistant's clock rather than the source's.
+    * **Attested** — the reporting source is **named**, the instant that source said
+      the fact was current is stated on *its* clock, and the line still says outright
+      that ``Last revised`` is the assistant's clock rather than the source's
+      (ADR-0189 §4, ADR-0073 §4).
 
     **The asserted and attested lines are unchanged by ADR-0107, and that is its §2
     applied rather than an omission.** §2 scopes the elision disclosure to
@@ -5822,20 +6013,39 @@ def _why(belief: Belief | BeliefSummary) -> str:
     a count at all is ADR-0073 §4's own ``ATTESTED`` gate, left to the lane holding
     leg 6's first ``EXTERNAL`` producer (ADR-0107 §10).
 
-    **The attested line states a limit of this surface, never a limit of the store.**
-    Which source spoke, and when, are *held*: an attested belief carries an
-    :class:`~ai_assistant.core.types.Attestation` by construction, since
-    :class:`~ai_assistant.core.types.Provenance` makes one mandatory exactly on this
-    band (ADR-0092 §1). What drops them is the projection — neither
+    **This line used to state a limit of the surface, and ADR-0189 removed the
+    limit** (**#1276**). Which source spoke, and when, were always *held* — a
+    :class:`~ai_assistant.core.types.Provenance` makes an
+    :class:`~ai_assistant.core.types.Attestation` mandatory exactly on this band
+    (ADR-0092 §1) — and what dropped them was the projection: neither
     :class:`~ai_assistant.core.types.Belief` nor
-    :class:`~ai_assistant.core.types.BeliefSummary` has anywhere to put one (**#1276**).
-    ADR-0107 §10 keeps that question open and ADR-0073 §4's ``ATTESTED`` gate assigns
-    it to the lane holding the first ``EXTERNAL`` producer. So "not recorded" would err
-    in the direction ADR-0073 §4 forgives least: a user auditing what is held about
-    them would read it as "you did not keep it", the inverse of the truth, on the one
-    band whose whole purpose is provenance. ADR-0098 §8 reads this branch as evidence
-    that the belief surface carries no attestation — and it still is, in words that
-    are also true of the store.
+    :class:`~ai_assistant.core.types.BeliefSummary` had anywhere to put one. ADR-0189
+    §2 gave both of them one, so this branch now names the source and states the
+    instant instead of explaining that it cannot, which is ADR-0098 §8's second tier
+    reached and ADR-0073 §4's ``ATTESTED`` gate met at the surface.
+
+    **Two floors survive the change and one of them is new.** ``Last revised`` is
+    still declared to be this system's clock, because ADR-0073 §4 forbids offering it
+    as the source's and the new line puts a *second* instant on the screen beside it —
+    which is precisely the error ADR-0189's Consequences names as newly available to a
+    surface that renders one of the two facts. And the source is named at **source
+    granularity and no finer** (ADR-0189 §4, ADR-0098 §8's third clause): the value is
+    apposed to "a connected source" so it cannot be read as a person, because
+    ADR-0093 §7 forbids deriving a reader's identity from what the source contains, so
+    the organiser of an invite and the sender of a mail are not on the record and
+    cannot be.
+
+    **Where no label is configured the identity is what renders**, which is ADR-0093
+    §7's own fallback adopted unchanged by ADR-0189 §5 — and no label is configured
+    anywhere yet, because ADR-0189 §8 leaves the mechanism to the registry lane.
+
+    **The attestation-less attested belief is off-contract and still gets a sentence.**
+    ADR-0189 §2 adds no cross-field validator to these two DTOs, deliberately, so the
+    type admits a state the store cannot produce. Rendering the old "I recorded which
+    source" line there would claim something this projection does not show; claiming
+    nothing was recorded would err in the direction ADR-0073 §4 forgives least. What is
+    true either way is that what reached *this surface* does not carry it, so that is
+    what it says.
     """
     match belief.band:
         case BeliefBand.ASSERTED:
@@ -5843,11 +6053,19 @@ def _why(belief: Belief | BeliefSummary) -> str:
         case BeliefBand.DERIVED:
             return _why_derived(belief)
         case BeliefBand.ATTESTED:
+            if belief.attestation is None:
+                return (
+                    "a source you connected reported it — neither your word nor my "
+                    "inference. What reached me here does not name that source or say "
+                    "when it spoke, so 'Last revised' below is when I changed my mind "
+                    "and not when the source spoke."
+                )
             return (
-                "a source you connected reported it — neither your word nor my inference. "
-                "I recorded which source, and when it said so, but cannot show them here, "
-                "so 'Last revised' below is when I changed my mind and not when the "
-                "source spoke."
+                f"a connected source reported it — {_safe(belief.attestation.reported_by)}, "
+                f"neither your word nor my inference. That source said this was current "
+                f"as of {_when(belief.attestation.reported_at)}, on its own clock; "
+                f"'Last revised' below is when I changed my mind and not when the "
+                f"source spoke."
             )
         case _:  # pragma: no cover - exhaustive
             assert_never(belief.band)
