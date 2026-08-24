@@ -210,8 +210,11 @@ decides all three." They are decided here.
 > docstring: `ReaderContract` asserts that `Reader.name` is one of §4's two forms.
 > Decidably, over the value alone: it is UTF-8-encodable; it is equal to its own
 > `str.strip()`; it carries at most one colon; and where it carries one, the part
-> before it is **non-empty** and the part after it is exactly 32 characters drawn
-> from `0123456789abcdef`. The
+> before it is **non-empty and equal to its own `str.strip()`** and the part after it
+> is exactly 32 characters drawn from `0123456789abcdef`. **The declared part is
+> tested for canonicality in its own right**, because canonicality of the whole value
+> does not imply it: `"calendar :0f3c…"` is equal to its own `str.strip()` and still
+> carries a declared name that is not, which §4 refuses. The
 > canonical `FakeReader` in `ai_assistant.testing` is verified through that suite
 > like every other subject. `CONTRIBUTING.md` → "Adding a Protocol" governs: "The
 > triad is what a Protocol *change* is measured against too — extend the suite in the
