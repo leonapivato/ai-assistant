@@ -998,8 +998,9 @@ def test_an_ask_whose_answer_never_arrives_does_not_hold_the_owners_control_for_
     assert 'el("ask-button").disabled = false;' in _functions(script)["releaseAsk"]
     # The wait is a controller and not a flag, so aborting it is what makes the pending
     # `fetch` settle rather than merely marking it settled.
-    assert "const waiting = { stopping: new AbortController(), heard: false, owns: false };" in (
-        asking
+    assert (
+        "const waiting = { stopping: new AbortController(), heard: false, composing: null };"
+        in asking
     )
     assert "waiting.stopping.abort();" in abandon
     # Carried into both turn entries, which is what puts the abort on the socket rather
@@ -1040,7 +1041,7 @@ def test_stopping_a_wait_says_the_turns_outcome_is_not_known_and_claims_nothing_
     assert "may have carried it out and may never have received it" in script
     assert "Nothing was re-sent and nothing was cancelled" in script
     assert "asks a new question rather than retrying that one" in script
-    assert "it will show in the conversations listing" in script
+    assert "The conversations listing is where to look for it" in script
     # And it sends nothing at all, which is what keeps a control that ends a wait from
     # being the silent retry ADR-0168 §9 forbids wearing a button's clothes.
     for sends in ("fetch(", "relay(", "act(", "watchDeliveries("):
@@ -1141,14 +1142,18 @@ def test_an_abandoned_ask_leaves_no_answer_shaped_nothing_on_screen() -> None:
 
     assert 'clearNode(el("answer-body"));' in abandon
     assert 'show("answer", false);' in abandon
-    assert abandon.index("if (waiting.owns) {") < abandon.index('clearNode(el("answer-body"));')
+    assert abandon.index("if (mine) {") < abandon.index('clearNode(el("answer-body"));')
     # The two body reads that an abort can land in the middle of.
     assert script.count("if (waiting.stopping.signal.aborted) {") == 2
     whole = _functions(script)["askWhole"]
     assert whole.index("const body = await readBody(response);") < whole.index(
         "if (waiting.stopping.signal.aborted) {"
     )
-    assert whole.index("if (waiting.stopping.signal.aborted) {") < whole.index("if (response.ok) {")
+    # `rindex`, because the render branch is the *second* `if (response.ok)` in this
+    # function: the first is the guard that decides whether the turn was heard from.
+    assert whole.index("if (waiting.stopping.signal.aborted) {") < whole.rindex(
+        "if (response.ok) {"
+    )
     stream = _functions(script)["askStreaming"]
     assert stream.index("if (waiting.stopping.signal.aborted) {") < stream.index(
         'show("answer", false);'
@@ -1187,27 +1192,30 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     whole = _functions(script)["askWhole"]
     stream = _functions(script)["askStreaming"]
 
-    # `/ask`: the head is the proof, and it is taken before the body read an abort lands
-    # in — so a wait stopped during that read is announced as a turn that ran.
-    assert "waiting.heard = true;" in whole
+    # `/ask`: a **successful** head is the proof, and only that. A refusal is decided by
+    # `_check_door` or `_session_bound` before `_assistant` is reached, so a refusal head
+    # whose body then stalls says the gateway replied and nothing about the assistant.
+    assert "if (response.ok) {\n    waiting.heard = true;\n  }" in whole
     assert whole.index("waiting.heard = true;") < whole.index(
         "const body = await readBody(response);"
     )
+    assert script.count("waiting.heard = true;") == 2
     # `/ask/stream`: the head takes the panel and claims nothing about the assistant, and
     # the first chunk is what says the question got there.
-    assert "waiting.owns = true;" in stream
-    assert stream.index('show("answer", true);') < stream.index("waiting.owns = true;")
-    assert stream.index("waiting.owns = true;") < stream.index("waiting.heard = true;")
+    assert "waiting.composing = composing;" in stream
+    assert stream.index('show("answer", true);') < stream.index("waiting.composing = composing;")
+    assert stream.index("waiting.composing = composing;") < stream.index("waiting.heard = true;")
     assert stream.index('if (value.kind === "chunk") {') < stream.index("waiting.heard = true;")
     assert stream.index("waiting.heard = true;") < stream.index("composing.textContent +=")
-    # `owns` is set nowhere else, so the whole entry never clears a panel it did not take.
-    assert script.count("waiting.owns = true;") == 1
-    assert "waiting.owns" not in whole
-    # The clearing is under it, and the sentence about the clearing is under both — a
-    # stream abandoned between its head and its first chunk owns an empty panel, which is
-    # not something to announce having cleared.
-    assert "if (waiting.owns) {" in abandon
-    assert "waiting.owns && waiting.heard ?" in abandon
+    # The node is held nowhere else, so the whole entry never clears a panel it never took.
+    assert script.count("waiting.composing = ") == 1
+    assert "waiting.composing" not in whole
+    # And ownership is asked about *now*: the node is in the document exactly while the
+    # panel is still this turn's, so a park answered into it — `renderOutcome` replaces
+    # the panel — takes it back without any bookkeeping having to be kept in step.
+    assert "const mine = waiting.composing !== null && waiting.composing.isConnected;" in abandon
+    assert "if (mine) {" in abandon
+    assert "mine && waiting.heard ?" in abandon
     # And the two sentences differ in exactly the clauses the evidence decides. The one
     # that claims nothing was received says so only where nothing was; the other says the
     # question got there and narrows what is unknown to the ending.
@@ -1219,7 +1227,12 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     # it that do not depend on how far the answer got are said in both.
     assert script.count("nothing was cancelled — the assistant was not told to stop.") == 2
     assert script.count("new question rather than retrying that one") == 2
-    assert script.count("show in the conversations listing.") == 2
+    # The route back is one constant read by both, so the two endings cannot drift apart
+    # on it — and it points rather than promises, because a turn that ran is not thereby
+    # a turn that was recorded (`TurnOutcome.capture_degraded`, ADR-0074 §9 item 6).
+    assert script.count("WHERE_TO_LOOK") == 3
+    assert "though a turn whose record " in script
+    assert "could not be written does not appear there" in script
 
 
 def test_the_page_renders_a_notification_in_the_open_page_and_by_no_other_means() -> None:
