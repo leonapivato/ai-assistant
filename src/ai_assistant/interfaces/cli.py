@@ -6670,9 +6670,15 @@ def _render_standing(standing: tuple[SourceGrant, ...]) -> None:
     list still answers none of it — ADR-0139 §6's clause that no client presents a
     read, a read count or a last-read instant beside a standing grant is unchanged,
     and ADR-0185 §8 restates it so this lane cannot be read as relaxing it. What
-    has changed is that the question now has a surface of its own: ``assistant
-    reads``. So the closing sentence names it rather than saying nothing answers
-    it, which ADR-0186 §10 wrote as true "until the read surface lands".
+    has changed is that the question has a surface of its own: ``assistant reads``.
+    So the closing sentence names it rather than saying nothing answers it, which
+    ADR-0186 §10 wrote as true "until the read surface lands".
+
+    **It is named for what it records, which is *attempts*.** The unit there is an
+    attempt and not a read (ADR-0185 §1) — a refusal is a row, and on a failure
+    whether anything was opened is not determinable at all — so pointing at it as
+    "the record of what was read" would overclaim in the one direction ADR-0186 §8
+    bars, presenting an attempt as an event.
     """
     if not standing:
         console.print(
@@ -6696,7 +6702,8 @@ def _render_standing(standing: tuple[SourceGrant, ...]) -> None:
         "[dim]This is what you permitted, read from the record of your own "
         "decisions. It is not a list of what is configured — see 'assistant "
         "sources' — and it says nothing about what has actually been read: "
-        "'assistant reads' is the record of that.[/]"
+        "'assistant reads' is the record of every attempt to read one, and how "
+        "each ended.[/]"
     )
 
 
@@ -7858,13 +7865,22 @@ def _read_ending(outcome: ReadOutcome) -> tuple[str, str]:
     assert_never(outcome)
 
 
-def _read_grant_line(grant: str | None) -> str:
+def _read_grant_line(record: SourceReadRecord) -> str:
     """The grant the attempt ran under, or the absence that is itself a fact.
 
     ``grant`` is ``None`` **exactly** on ``REFUSED`` and ``UNANSWERED`` and is set
     on every other outcome (ADR-0185 §2, checked at construction), so the absence
-    states that no live grant was found at the first check rather than that
-    something is missing from the row.
+    states something about the check rather than something missing from the row.
+
+    **The two absences are two different sentences, and that is the whole reason
+    this takes the record rather than the field** (ADR-0185 §1). On ``REFUSED``
+    there was no live grant; on ``UNANSWERED`` the check *raised*, so whether one
+    existed is not known. One wording for both would put the claim "there was no
+    live grant" onto the row where it is precisely unknown — the fold ADR-0185 §1
+    names, arriving at the surface rather than in the store, and contradicting the
+    row's own ending line one line above it. ADR-0097 §5 is the older statement of
+    the same rule: "a store fault and a withdrawn grant are different facts and an
+    operator must be able to tell them apart."
 
     **The pointer is one-way and is never resolved here** (ADR-0185 §8). Nothing
     joins back from a grant to its reads, and an id that no longer resolves —
@@ -7872,10 +7888,25 @@ def _read_grant_line(grant: str | None) -> str:
     corruption**: the row says truthfully what the attempt cited at the time. So
     this renders the id as recorded, claims nothing about whether it still
     resolves, and looks nothing up.
+
+    Args:
+        record: The row, for its ``grant`` and for the outcome that says what an
+            absent one means.
+
+    Returns:
+        The recorded id with what it is, or the sentence naming which absence
+        this is.
     """
-    if grant is None:
-        return "[dim]none — no live grant was found when I checked[/]"
-    return f"{_safe(grant)} [dim](what the attempt cited then; it is not looked up now)[/]"
+    if record.grant is not None:
+        return (
+            f"{_safe(record.grant)} [dim](what the attempt cited then; it is not looked up now)[/]"
+        )
+    if record.outcome is ReadOutcome.UNANSWERED:
+        return "[dim]none cited — the check did not answer, so whether you allowed it is unknown[/]"
+    # The remaining ungranted outcome is ``REFUSED``: ADR-0185 §2's construction
+    # invariant refuses a ``None`` grant on the other four, and a model that
+    # admitted a fifth would be a change to that ADR rather than to this branch.
+    return "[dim]none — you had allowed no live grant when I checked[/]"
 
 
 def _render_read(record: SourceReadRecord) -> None:
@@ -7911,7 +7942,7 @@ def _render_read(record: SourceReadRecord) -> None:
     console.print(f"    [dim]{ending}[/]")
     console.print(f"  [bold]Source:[/] {_safe(record.source)} [dim](as the reader declares it)[/]")
     console.print(f"  [bold]Read for:[/] {_scope_phrase((record.use,))}")
-    console.print(f"  [bold]Under grant:[/] {_read_grant_line(record.grant)}")
+    console.print(f"  [bold]Under grant:[/] {_read_grant_line(record)}")
     console.print(
         f"  [bold]Produced:[/] {record.produced} item(s) "
         "[dim](a count of what the source returned, never the thing itself)[/]"

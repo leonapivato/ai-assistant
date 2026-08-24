@@ -593,9 +593,39 @@ def test_a_refused_attempt_is_a_row_of_its_own_naming_no_grant(
 
     assert "refused" in rendered
     assert "not opened" in rendered
-    assert "no live grant was found when I checked" in rendered
+    assert "you had allowed no live grant when I checked" in rendered
     assert "email" in rendered
     assert "0 item(s)" in rendered
+
+
+def test_an_unanswered_attempt_never_says_there_was_no_live_grant(
+    output: StringIO, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ADR-0185 §1's fold, barred at the surface rather than only in the store.
+
+    Both outcomes carry ``grant=None``, so one wording for the absence would put
+    the claim *there was no live grant* onto the row where that is precisely what
+    is not known — and would contradict the row's own ending line one line above
+    it. "A store fault and a withdrawn grant are different facts and an operator
+    must be able to tell them apart" (ADR-0097 §5), and the whole reason
+    ``UNANSWERED`` is a member of its own is that the distinction must survive.
+
+    Asserted over the **whole row** rather than over the ending line alone: round
+    1's blocker was a row whose two lines disagreed, and a case asserting either
+    line by itself would have passed while the screen said both things.
+    """
+    unanswered = _record("r-1", outcome=ReadOutcome.UNANSWERED, grant=None, produced=0)
+    rendered = _listing(output, monkeypatch, unanswered)
+
+    assert "could not find out whether you allowed it" in rendered
+    assert "the check did not answer, so whether you allowed it is unknown" in rendered
+    # Not the refused row's sentence, in any part of the row.
+    assert "no live grant" not in rendered
+
+    # And the two absences are two sentences, not one shared with a different label.
+    refused_line = cli._read_grant_line(_refused("r-2"))
+    assert cli._read_grant_line(unanswered) != refused_line
+    assert "no live grant" in refused_line
 
 
 def test_a_grant_that_no_longer_resolves_is_rendered_as_recorded(
@@ -684,6 +714,13 @@ def test_the_grant_surface_still_reports_no_read_and_now_names_the_one_that_does
     §10 wrote its closing sentence as true "until the read surface lands", and the
     honest correction is to point at the surface rather than to keep saying nothing
     answers the question.
+
+    **The pointer names the unit that surface records, which is an attempt.** A
+    footer calling it "the record of what was read" would overclaim in the one
+    direction ADR-0186 §8 bars — a refusal is a row there, and on a failure whether
+    anything was opened is not determinable at all — so the cross-reference has to
+    carry the word "attempt" or it hands the reader a promise the other command
+    does not keep. Round 1's second blocker was exactly that sentence.
     """
     cli._render_standing(
         (
@@ -698,11 +735,14 @@ def test_the_grant_surface_still_reports_no_read_and_now_names_the_one_that_does
     rendered = _flat(output.getvalue())
 
     assert "says nothing about what has actually been read" in rendered
-    assert "'assistant reads' is the record of that" in rendered
+    assert "'assistant reads' is the record of every attempt to read one" in rendered
     # No read, no count, no instant of one: the clause is about what is *shown*
-    # beside a grant, and the only instant here is the grant's own.
-    assert "attempt" not in rendered
+    # beside a grant, and the only instant here is the grant's own. The word
+    # "attempt" appears in the cross-reference and nowhere else, so what is asserted
+    # is the absence of a rendered *value* rather than of a word.
     assert "item(s)" not in rendered
+    assert rendered.count("attempt") == 1
+    assert "last read" not in rendered
 
 
 # --- the error boundary on the listing ---------------------------------------
