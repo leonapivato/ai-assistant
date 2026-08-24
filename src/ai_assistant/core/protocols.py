@@ -2204,7 +2204,8 @@ class Reader(Protocol):
         because "used for logging" has been read as licence before (ADR-0055), and
         here it would be read as licence twice over.
 
-        **Two forms and no third** (ADR-0190 §4). A **declared name** is non-empty,
+        **Two forms and no third, and never a discriminator on its own** (ADR-0190
+        §3, §4). A **declared name** is non-empty,
         UTF-8-encodable, equal to its own ``str.strip()``, and contains no colon. A
         **bare** identity is a declared name and nothing else — ``"calendar"``,
         ``"email"``. A **discriminated** identity is that declared name, one ASCII

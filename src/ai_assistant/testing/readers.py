@@ -528,6 +528,16 @@ def _synthesise(
     )
 
 
+def _looks_like_a_discriminator(value: str) -> bool:
+    """Whether ``value`` is exactly a discriminator's width and alphabet.
+
+    Asked in both directions (ADR-0190 §4): of the half after a colon, which must
+    be one, and of a colon-free identity, which must **not** be — §3 rules that
+    ``Reader.name`` is "never a discriminator on its own".
+    """
+    return len(value) == _DISCRIMINATOR_WIDTH and set(value) <= _DISCRIMINATOR_ALPHABET
+
+
 def _refuse_malformed_identity(name: str) -> None:
     """Refuse an identity that is neither of ADR-0190 §4's two forms.
 
@@ -546,11 +556,20 @@ def _refuse_malformed_identity(name: str) -> None:
     ``FakeReader(name="calendar:ABC")`` would be configurable into failing its own
     conformance suite, which is the one thing this fake may never be.
 
+    **One refusal here is not one ``ReaderContract`` makes**, and the asymmetry is
+    ADR-0190 §3's own division rather than an inconsistency. §3 rules that
+    ``Reader.name`` is "never a discriminator on its own", and a colon-free
+    32-character hexadecimal value is decidably one — so this seam refuses it. The
+    suite does not: §3 enumerates the checks it makes "decidably, over the value
+    alone" and this is not among them, because the suite's remit stops where the
+    prefix check does. A *reader* declaring such a value is caught by the concrete
+    reader's test, which compares the declared half against the type's own name.
+
     Raises:
         ValueError: If ``name`` is not a bare declared name — non-empty,
-            UTF-8-encodable, equal to its own ``str.strip()``, and colon-free — or
-            that name, one ASCII colon, and exactly 32 characters drawn from
-            ``0123456789abcdef``.
+            UTF-8-encodable, equal to its own ``str.strip()``, colon-free, and not
+            itself a discriminator — or that name, one ASCII colon, and exactly 32
+            characters drawn from ``0123456789abcdef``.
     """
     declared, colon, discriminator = name.partition(":")
     if not declared or declared != declared.strip():
@@ -571,6 +590,14 @@ def _refuse_malformed_identity(name: str) -> None:
         )
         raise ValueError(msg) from exc
     if not colon:
+        if _looks_like_a_discriminator(declared):
+            msg = (
+                f"a source identity is never a discriminator on its own (ADR-0190 §3), "
+                f"and {name!r} is one: a bare 32-character hexadecimal value costs "
+                f"ADR-0093 §7's 'declared by the sensor' half entirely and leaves a "
+                f"surface nothing to render but 32 hex characters (ADR-0190 §4)"
+            )
+            raise ValueError(msg)
         return
     if ":" in discriminator:
         msg = (
@@ -579,10 +606,7 @@ def _refuse_malformed_identity(name: str) -> None:
             f"rather than conventional (ADR-0190 §4)"
         )
         raise ValueError(msg)
-    if (
-        len(discriminator) != _DISCRIMINATOR_WIDTH
-        or not set(discriminator) <= _DISCRIMINATOR_ALPHABET
-    ):
+    if not _looks_like_a_discriminator(discriminator):
         msg = (
             f"a discriminator is exactly {_DISCRIMINATOR_WIDTH} characters drawn from "
             f"'0123456789abcdef', got {discriminator!r}; an uppercase or short one is "
