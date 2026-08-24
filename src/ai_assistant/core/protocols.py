@@ -7997,6 +7997,188 @@ class AssistantEngine(Protocol):
         """
         ...
 
+    # --- the read trail's two reads (ADR-0186 §10) --------------------------
+    #
+    # **The second pair, mirroring the first**, over
+    # :meth:`SourceReadTrail.recent` and :meth:`SourceReadTrail.export` — the shape
+    # ADR-0186 §10 fixes for it and ADR-0185 §12 left to this lane. Everything §1
+    # says about the decision pair is said here about this one: two operations
+    # because a single method cannot be both bounded and complete, neither
+    # composing, filtering, projecting, enriching or summarising, and neither
+    # reading any other store.
+    #
+    # **The two trails partition the subject** (ADR-0186 §10, ADR-0185 §10): a read
+    # is never a ``PermissionDecision`` and an egress is never a
+    # ``SourceReadRecord``, and **neither pair answers the other's half**. No
+    # surface presents :meth:`recent_decisions` or :meth:`export_decisions` as an
+    # answer to what was read from a source, and none presents these two as an
+    # answer to what was decided about an act on the world. Nothing joins them: two
+    # rows about the same content share no key, and milestone 24's exit does not ask
+    # them to.
+    #
+    # **What this pair inherits from §1's, without restating it** (ADR-0186 §10):
+    # §2's determinism, stated below in this store's own terms; §3's local refusal
+    # of ``limit``; §7's last two clauses — a surface renders a row whole or renders
+    # **fewer rows**, never partial ones, and inserts every value into its output as
+    # **data**, neutralised for that target on render (ADR-0042 §4); and §8's bars on
+    # liveness, on authorisation and on event wording. The neutralisation clause is
+    # not inherited pro forma: ADR-0183 rules that "the adversary writes the source",
+    # and ``SourceReadRecord.source`` is a declared identity stored **byte for byte**
+    # with nothing normalised (ADR-0185 §2).
+    #
+    # **What it does not inherit is §7's egress content floor**, which is about a
+    # binding no read record carries. A read row has no ``account_identity``, no
+    # spans, no destination set and no payload description, and its origin fact is
+    # not a boolean at all: ADR-0185 §3 rules that "the origin fact a read record
+    # carries is its ``source``", because on this side there is nothing to compute —
+    # a field asserting *this content is external* would be ``True`` on every row
+    # ever written.
+    #
+    # **No per-source query and no count**, and this is the surface that was owed the
+    # chance to ask for them. ADR-0185 §12 declined to mint either "without a
+    # consumer" and left them "the surface ADR's to ask for if it needs them"; this
+    # pair does not need them, because ADR-0186 §1's second clause is inherited whole
+    # — no third method, no argument beyond ``limit``, no filter by source, by use, by
+    # outcome or by window. **A consumer that wants a subset selects it from what
+    # these return**, which is what keeps the two answers comparable and what stops a
+    # contract acquiring methods nobody calls (ADR-0021 §4). Both stay additive the
+    # day a consumer arrives (ADR-0008 §1).
+    #
+    # **Both are served on both listeners and neither is a connection method**
+    # (ADR-0186 §5, read one store over): a ``SourceReadRecord`` carries no
+    # credential and no content — ADR-0185 §10 excludes content from the record by
+    # name — so no new class of data reaches ADR-0124's hop. Neither is one of
+    # ADR-0177 §1's thirty browser operations, and no browser request resolves to
+    # either (ADR-0186 §6).
+
+    async def recent_reads(self, *, limit: int = DEFAULT_PAGE_SIZE) -> tuple[SourceReadRecord, ...]:
+        """What this system read from a source, newest-recorded first, bounded.
+
+        The bounded half of the read pair, reading :meth:`SourceReadTrail.recent`
+        (ADR-0186 §10). It **relays**, on :meth:`recent_decisions`' terms exactly.
+
+        **The order is recording order, and that is a real departure from §1's
+        rather than a restatement of it.** ADR-0186 §10 binds this pair to §2's
+        *determinism* while forbidding it to reshape §2's *order*, and this store's
+        order is not §2's: :meth:`SourceReadTrail.recent` is ordered "by **recording
+        order**, reversed — never by ``checked_at``, and no implementation derives
+        the order by comparing ``checked_at`` values" (ADR-0185 §6). So both
+        operations here answer **newest-recorded first**, and
+        :meth:`export_reads` is where the obligation bites.
+
+        **No implementation sorts these rows**, and it could not do so correctly if
+        it tried. A :class:`~ai_assistant.core.types.SourceReadRecord` carries no
+        sequence number, its ``id`` is caller-minted and unordered, and its
+        ``checked_at`` is **caller-supplied** — so an implementation ordering by
+        ``checked_at`` would answer differently after a backwards clock correction,
+        for rows the store itself keys its prune on recording order to avoid
+        (ADR-0185 §6). Recording order is the store's to state and this surface's to
+        preserve.
+
+        **The prefix property holds and is what makes the two comparable**
+        (ADR-0186 §2, §10): ``recent_reads(limit=n)`` returns the first ``n`` of the
+        sequence :meth:`export_reads` returns over the same trail state.
+
+        **A row states an attempt and never a live fact** (ADR-0186 §8, ADR-0185
+        §8). No surface derives from one whether a source is still granted, what a
+        grant's scope is, or what a source's grant history is —
+        ``SourceGrants.live`` remains the only answer to whether a read may happen.
+        A ``grant`` naming an id that no longer resolves is **legible history rather
+        than corruption**: the row says truthfully what the read cited at the time,
+        and no implementation treats it as a defect, repairs it, or drops the row.
+        No bound, no schedule, no cursor and no skip decision is derived from what
+        this returns (ADR-0093 §5, ADR-0185 §8), and no client presents a read, a
+        read count or a last-read instant beside a standing grant (ADR-0139 §6).
+
+        **A row states what was attempted, not what came of it** (ADR-0186 §8's
+        third bar, one store over). ``produced`` counts the items the reading
+        carried and says nothing about what any use did with them — that is memory's
+        record and the notification store's (ADR-0185 §10) — and an outcome is a
+        ruling on the attempt rather than a word for an event.
+
+        Args:
+            limit: The most rows to return. Refused when **not strictly positive**,
+                locally and before any I/O, in every implementation (ADR-0186 §3,
+                §10) — the same refusal :meth:`recent_decisions` states, and for the
+                same reason: :meth:`SourceReadTrail.recent` refuses a non-positive
+                ``limit`` where ADR-0085 §9 would admit zero, and neither
+                implementation may be silently more permissive than the other. There
+                is deliberately no ``offset``, no ``source`` and no ``outcome``
+                argument (ADR-0102 §10, ADR-0186 §1's second clause).
+
+        Returns:
+            Up to ``limit`` records, newest-recorded first — the first ``limit`` of
+            :meth:`export_reads`' sequence.
+
+        Raises:
+            TypeError: If ``limit`` is not an integer, or is a ``bool``.
+            ValueError: If ``limit`` is not in ``[1, 2**63)``.
+            ReadTrailError: If the trail cannot be read.
+            OversizedValueError: If the page exceeds the contract limit.
+        """
+        ...
+
+    async def export_reads(self) -> tuple[SourceReadRecord, ...]:
+        """Every read attempt the trail still holds, in the same order.
+
+        The unbounded half, reading :meth:`SourceReadTrail.export` (ADR-0186 §10),
+        and the surface on which ADR-0004 §6's export right reaches this store.
+
+        **The reversal is this operation's own obligation**, and it is ADR-0186 §2's
+        clause arriving in this store's terms. :meth:`SourceReadTrail.export`
+        returns "every record the store holds, **in recording order**" — oldest
+        first — while :meth:`recent_reads` answers newest-recorded first. An
+        implementation that relayed the store's list would hand back the **reverse**
+        of the listing's order, and §2's prefix guarantee would be gone with it. So
+        the operation reverses what it was handed, over a list it has already
+        materialised.
+
+        **Reversed and never sorted**, which is the difference from
+        :meth:`export_decisions` worth stating rather than leaving to be discovered.
+        ``AuditTrail.export`` states *no* order, so that operation owes a sort; this
+        store *does* state one, so the order is derivable only from the store's
+        contract and never from the rows. An implementation reaching for
+        ``sorted(rows, key=…checked_at…)`` would be ordering by a caller-supplied
+        instant the store itself refuses to key on (ADR-0185 §6), and would answer
+        differently after a backwards clock correction.
+
+        **It delivers the horizon rather than the history, and no surface presents
+        it otherwise** (ADR-0186 §10, ADR-0185 §9, §10). The store prunes: it holds
+        at most ``Settings.source_read_trail_max_rows`` records and deletes the
+        earliest-recorded first, so this reconstructs every attempt it **still
+        holds** and reads older than the configured cap are gone. That is the
+        declared cost of the bound ADR-0139 §6 required, ADR-0004 §6's export right
+        is satisfied to that extent and no further, and **no lane may report it as a
+        complete history**.
+
+        **The two exports on this surface are therefore not equally complete**
+        (ADR-0186 §10). :meth:`export_decisions` returns every row its trail holds
+        and that trail prunes nothing (#108). A composed artifact carrying both
+        states the read half's horizon **on its face**; one presenting a pruned half
+        and an unpruned half as one record would claim a completeness half of it
+        does not have.
+
+        **Complete or refused, never truncated** (ADR-0186 §3, §10). It takes no
+        argument, is bounded by nothing at the contract, and is subject to ADR-0085
+        §8c's payload limit exactly as every other unbounded read on this surface
+        is. A trail whose canonical encoding exceeds the limit raises
+        :class:`~ai_assistant.core.errors.OversizedValueError` carrying the limit and
+        the measured size; no implementation truncates the artifact, samples it, or
+        returns a partial export without saying so. The remedy is
+        ``hub_max_frame_bytes``, the setting the connect reply already carries to the
+        client — and, on this store alone, ``source_read_trail_max_rows``, which is
+        the horizon itself rather than a frame budget.
+
+        Returns:
+            Every record the store still holds, newest-recorded first —
+            :meth:`recent_reads`' order, applied to the whole trail.
+
+        Raises:
+            ReadTrailError: If the trail cannot be read.
+            OversizedValueError: If the whole trail exceeds the contract limit.
+        """
+        ...
+
 
 @runtime_checkable
 class Secrets(Protocol):

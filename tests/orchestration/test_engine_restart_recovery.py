@@ -69,6 +69,7 @@ from ai_assistant.testing import (
     FakeModelProvider,
     FakeObserver,
     FakeSourceGrantStore,
+    FakeSourceReadTrail,
     FakeStreamingCompleter,
     FakeToolInvoker,
     FakeTraceRetention,
@@ -268,6 +269,10 @@ def _make_engine(
         runner=runner,
         plans=plans,
         trail=trail,
+        # ADR-0186 §10's read trail. A fresh one per engine, like the trace
+        # fakes above: this module is about a restarted façade recovering a
+        # durable park, and no read attempt crosses that restart.
+        reads=FakeSourceReadTrail(),
         memory=memory,
         deferrals=deferrals,
         # The narrow deletion seam and its horizon (ADR-0119 §7, §10). This module

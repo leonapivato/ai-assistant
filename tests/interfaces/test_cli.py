@@ -133,6 +133,7 @@ from ai_assistant.testing import (
     FakeObserver,
     FakePlanStore,
     FakeSourceGrantStore,
+    FakeSourceReadTrail,
     FakeStreamingCompleter,
     FakeToolInvoker,
     FakeTraceRetention,
@@ -335,6 +336,11 @@ def _engine(
         runner=runner,
         plans=plans,
         trail=trail,
+        # ADR-0186 §10's read trail. Empty and unwired to any driver here: this
+        # module's cases are about what the CLI renders, and the two read
+        # operations have no CLI door yet — §9's commands are the decision pair's
+        # and the read pair's consumer lane is its own (ADR-0186 §11).
+        reads=FakeSourceReadTrail(),
         memory=memory,
         deferrals=deferrals,
         # The narrow deletion seam and its horizon (ADR-0119 §7, §10). Required on
@@ -2530,6 +2536,8 @@ def _conversation_engine(
         runner=runner,
         plans=plans,
         trail=trail,
+        # ADR-0186 §10's read trail, on the sibling builder's terms above.
+        reads=FakeSourceReadTrail(),
         memory=memory,
         deferrals=deferrals,
         # The narrow deletion seam and its horizon (ADR-0119 §7, §10). Required on

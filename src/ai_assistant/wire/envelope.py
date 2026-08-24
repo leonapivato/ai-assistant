@@ -286,12 +286,40 @@ from ai_assistant.wire.errors import (
 #: **Nothing else under** ``wire/`` **changes for it**, as at 8, at 10 and at 11
 #: and for the same reason: the connect exchange gains no member, no frame's
 #: encoding changes, no :class:`FrameKind` is added, and the promoted surface's
-#: method set is untouched at thirty-four. A result payload takes the shape of the
+#: method set is untouched at the thirty-four it stood at when 13 landed. A result
+#: payload takes the shape of the
 #: method's own declared return annotation (ADR-0085 §10), so the members cross
 #: without a second declaration and nothing transcribes them into a wire-side
 #: schema — ``Warrant`` included, which is a new *promoted* type rather than a new
 #: wire declaration (ADR-0085 §5's closure is what carries it).
-PROTOCOL_VERSION: Final[int] = 13
+#:
+#: **14 since ADR-0186 §10**, which adds the second of that ADR's two pairs to the
+#: promoted ``AssistantEngine`` surface — ``recent_reads``, the bounded listing of
+#: what this system read from a source, and ``export_reads``, the whole-trail read
+#: over ADR-0185 §12's ``SourceReadTrail``. ADR-0124 §9's **first** limb again, on
+#: 12's reasoning exactly: the rule reaches "any change to the promoted surface's
+#: method set", and ``wire.surface``'s ``METHODS`` is derived from the Protocol, so
+#: a version 14 client sending ``export_reads`` to a version 13 hub is refused
+#: there — the half-finished upgrade §3 wants legible at the handshake rather than
+#: inside a call. ADR-0186 §5's obligation binds this pair through §10's
+#: inheritance, and it falls on the change that adds the methods.
+#:
+#: **The method set moves from thirty-four to thirty-six**, and that number is what
+#: this note is about. ADR-0177 §1's browser enumeration does **not** move: it
+#: stands at thirty, because it counts what a browser may reach rather than what
+#: the promoted surface carries, and ADR-0186 §6 — inherited by §10 — states that
+#: no browser request resolves to either of these.
+#:
+#: **Nothing else under** ``wire/`` **changes for it but the client's two
+#: methods**, as at 12 and for that entry's reason: no ``core`` type is added or
+#: altered — ``SourceReadRecord`` and ``ReadOutcome`` were promoted by ADR-0185 and
+#: reach this surface by being named in a return annotation rather than by being
+#: minted — so the second limb is not what is being invoked. ``METHODS``,
+#: ``STREAMING_METHODS``, both adapters and the error mapping are all derived from
+#: the Protocol; ``wire/client.py`` is hand-written, so its two forwarding methods
+#: are the one edit. Neither method joins ``wire/server.py``'s
+#: ``CONNECTION_METHODS``: both listeners carry both (ADR-0186 §5, §10).
+PROTOCOL_VERSION: Final[int] = 14
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a

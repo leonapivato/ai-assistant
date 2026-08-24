@@ -106,11 +106,12 @@ from ai_assistant.testing.notifications import (
     FakeNotificationStore,
 )
 from ai_assistant.testing.permissions import FakeAuditTrail
+from ai_assistant.testing.reads import FakeSourceReadTrail
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable, Sequence
 
-    from ai_assistant.core.protocols import AuditTrail
+    from ai_assistant.core.protocols import AuditTrail, SourceReadTrail
     from ai_assistant.core.types import (
         ConnectedAccount,
         ConnectionAct,
@@ -124,6 +125,7 @@ if TYPE_CHECKING:
         NotificationPreferences,
         PermissionDecision,
         SecretValue,
+        SourceReadRecord,
     )
 
 #: A fixed instant, so a fake engine's output is deterministic without a clock.
@@ -280,6 +282,20 @@ class FakeAssistantEngine:
         #: what its own sort produced, and would pass that case while asserting
         #: nothing.
         self.trail: AuditTrail = FakeAuditTrail()
+        #: The source-read trail ADR-0186 §10's two reads relay, public and seeded
+        #: the same way — ``await engine.reads.record(read)`` — and for the same
+        #: reason: this surface has no producer for a row either, because a read is
+        #: authored on the seam that gated it (ADR-0185 §5) and nothing a client can
+        #: call appends one.
+        #:
+        #: **A whole ``SourceReadTrail`` rather than a list of records**, on the
+        #: ``trail`` attribute's reason with one turned around. There the point was
+        #: that ``AuditTrail.export`` states *no* order; here it is that
+        #: ``SourceReadTrail.export`` states one — recording order — which a bare
+        #: list could only reproduce by accident of append order rather than by a
+        #: contract a suite can hold the surface to. Replaceable, so a case can
+        #: substitute a conforming trail that logs its reads or fails on demand.
+        self.reads: SourceReadTrail = FakeSourceReadTrail()
         #: Every call, in order, as ``(method, arguments)`` — so a test can assert
         #: what reached the engine without reaching into its state.
         #:
@@ -1062,6 +1078,36 @@ class FakeAssistantEngine:
         """
         self.calls.append(("export_decisions", {}))
         return self._checked(_ordered_decisions(await self.trail.export()), "export_decisions")
+
+    # --- the read trail's two reads (ADR-0186 §10) -------------------------
+
+    async def recent_reads(self, *, limit: int = DEFAULT_PAGE_SIZE) -> tuple[SourceReadRecord, ...]:
+        """What this system read from a source, newest-recorded first.
+
+        Relayed rather than reordered: ``SourceReadTrail.recent`` already promises
+        this order (ADR-0185 §6), and these rows carry nothing an implementation
+        could correctly sort by — see :meth:`export_reads`.
+        """
+        positive_page_argument(limit, name="limit")
+        check_arguments("recent_reads", max_bytes=self._max_payload_bytes, limit=limit)
+        self.calls.append(("recent_reads", {"limit": limit}))
+        return self._checked(tuple(await self.reads.recent(limit=limit)), "recent_reads")
+
+    async def export_reads(self) -> tuple[SourceReadRecord, ...]:
+        """Every read attempt still held, in :meth:`recent_reads`' order.
+
+        **Reversed here rather than relayed** (ADR-0186 §10): the store's ``export``
+        is in *recording* order and the listing is its reverse, so an implementation
+        handing the list back as it arrived would break §2's prefix property across
+        this pair. Reversed and never **sorted** — a ``SourceReadRecord`` has no
+        sequence number, an unordered caller-minted ``id``, and a caller-supplied
+        ``checked_at`` the store itself refuses to key on (ADR-0185 §6).
+
+        What comes back is the **horizon** rather than the history: the store prunes
+        oldest-first, and no surface reports this as a complete record (ADR-0185 §9).
+        """
+        self.calls.append(("export_reads", {}))
+        return self._checked(tuple(reversed(await self.reads.export())), "export_reads")
 
     def _live_grant(self, source: str) -> SourceGrant | None:
         """The grant on ``source`` no recorded revocation names (ADR-0097 §4).

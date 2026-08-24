@@ -124,7 +124,7 @@ from ai_assistant.testing import (
     FakeReader,
     FakeSourceGrants,
     FakeSourceGrantStore,
-    FakeSourceReadRecorder,
+    FakeSourceReadTrail,
     FakeStreamingCompleter,
     FakeToolInvoker,
     FakeTraceRetention,
@@ -471,7 +471,16 @@ class Harness:
         # ADR-0185 §5's recorder, one object behind both ingestion stages exactly as
         # the grant seam is: a composition root passes one store to every driver, and
         # a harness that gave each its own could not show a trail holding both.
-        self.reads = FakeSourceReadRecorder()
+        #
+        # **A whole trail rather than the bare recorder, since ADR-0186 §10.** The
+        # engine now holds the wide seam as well, and the composition root passes
+        # *one* object into all four positions — narrowed to `SourceReadRecorder` at
+        # each driver, whole at the façade. `FakeSourceReadTrail` satisfies both
+        # Protocols structurally, which is ADR-0185 §4's arrangement modelled in the
+        # double; a harness holding two objects here would let `recent_reads` answer
+        # about a store the ingestion stages never wrote to, which is precisely the
+        # wiring mistake no type can catch.
+        self.reads = FakeSourceReadTrail()
         self.grants = FakeSourceGrants(
             [
                 # `reader` is deliberately `object` here — the duck-typed fakes this
@@ -554,6 +563,7 @@ class Harness:
             runner=runner,
             plans=self.plans,
             trail=self.trail,
+            reads=self.reads,
             memory=self.memory,
             deferrals=self.deferrals,
             traces=self.traces,
@@ -1024,6 +1034,7 @@ def _fresh_facade(harness: Harness) -> Engine:
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
@@ -1141,6 +1152,7 @@ async def test_a_recovered_entry_does_not_count_toward_the_confirmation_ceiling(
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
@@ -1203,6 +1215,7 @@ async def test_an_in_process_park_resolved_elsewhere_is_reconciled_and_frees_the
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
@@ -1257,6 +1270,7 @@ async def test_reconcile_keeps_a_concurrent_same_engine_converse_park() -> None:
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
@@ -1398,6 +1412,7 @@ async def test_concurrent_recovery_does_not_prune_another_calls_returned_token()
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
@@ -2145,6 +2160,7 @@ async def test_a_clock_at_the_start_of_the_calendar_does_not_break_the_sweep() -
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
@@ -2579,6 +2595,7 @@ async def test_outstanding_confirmations_apply_backpressure_without_stranding() 
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
@@ -2649,6 +2666,7 @@ async def test_the_confirmation_ceiling_is_a_hard_bound_under_concurrency() -> N
         runner=harness.engine._runner,
         plans=harness.plans,
         trail=harness.trail,
+        reads=harness.reads,
         memory=harness.memory,
         deferrals=harness.deferrals,
         traces=harness.traces,
@@ -2685,6 +2703,7 @@ async def test_a_non_positive_confirmation_ceiling_is_refused() -> None:
             runner=harness.engine._runner,
             plans=harness.plans,
             trail=harness.trail,
+            reads=harness.reads,
             memory=harness.memory,
             deferrals=harness.deferrals,
             traces=harness.traces,
@@ -2710,6 +2729,7 @@ async def test_a_non_integer_confirmation_ceiling_is_refused(bad: object) -> Non
             runner=harness.engine._runner,
             plans=harness.plans,
             trail=harness.trail,
+            reads=harness.reads,
             memory=harness.memory,
             deferrals=harness.deferrals,
             traces=harness.traces,

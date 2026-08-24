@@ -131,7 +131,7 @@ from ai_assistant.testing import (
     FakePlanStore,
     FakeSourceGrants,
     FakeSourceGrantStore,
-    FakeSourceReadRecorder,
+    FakeSourceReadTrail,
     FakeStreamingCompleter,
     FakeTraceRetention,
     FakeTraceSink,
@@ -553,11 +553,15 @@ def build_world(
     source = tmp_path / "calendar.ics"
     plant(source, cycle=0, records=2, hostile=False)
     reader = CalendarReader(source, now=lambda: NOW, window_past=WINDOW, window_future=WINDOW)
+    # One trail, narrowed to `SourceReadRecorder` here and handed whole to the
+    # engine below, exactly as the composition root wires it (ADR-0185 §4,
+    # ADR-0186 §10).
+    reads = FakeSourceReadTrail()
     ingestion = IngestionStage(
         reader=reader,
         writes=writes,
         grants=FakeSourceGrants([source_grant(CALENDAR_READER_NAME)]),
-        reads=FakeSourceReadRecorder(),
+        reads=reads,
         now=lambda: NOW,
     )
 
@@ -618,6 +622,8 @@ def build_world(
         runner=runner,
         plans=plans,
         trail=trail,
+        # The very trail the ingestion stage above records into (ADR-0186 §10).
+        reads=reads,
         memory=store,
         deferrals=deferrals,
         traces=FakeTraceRetention(),
