@@ -8087,10 +8087,13 @@ class AssistantEngine(Protocol):
     # which is ADR-0186 §10 in terms: the read surface "is a **second pair**
     # mirroring §1's, over ADR-0185 §12's ``SourceReadTrail.recent`` and
     # ``SourceReadTrail.export``, minted by its own lane against the merged
-    # contract". §11's first clause defines what that lane carries — the Protocol
-    # methods, the shared conformance cases, the ``orchestration`` implementation,
-    # the canonical fake, ``HubClient``'s forwarding methods and the version bump,
-    # "one change under ADR-0137 §2". No further ADR stands between the two, and §6
+    # contract". What that lane carries is the same shape §11's first clause fixes
+    # for the decision lane — the Protocol methods, the shared conformance cases,
+    # the ``orchestration`` implementation, the canonical fake, ``HubClient``'s
+    # forwarding methods and the version bump, "one change under ADR-0137 §2". §11
+    # is written about that lane and is not in §10's inheritance list, so it is the
+    # template this one follows rather than a definition of it.
+    # No further ADR stands between the two, and §6
     # shows that ADR-0186 says so when it means it: a browser view is "a **later
     # consumer lane with its own ratified decision**", where §10 says "its own
     # lane … against the merged contract". What §10 leaves open is the *spelling*,

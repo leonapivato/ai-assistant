@@ -268,11 +268,16 @@ from ai_assistant.wire.errors import (
 #: ``wire.surface``'s ``return_adapter`` validates a result against the method's
 #: declared return annotation, and ``wire.codec``'s ``project`` renders a model by
 #: ``model_dump()``, which **includes** a ``None`` member rather than omitting it —
-#: exactly as at 10. So a version 13 hub emits ``"attestation": null`` and
-#: ``"rests_on_recorded_external_content": false`` on **every** belief, listed or
-#: single, and ``"warrant": null`` on every retirement, and a version 12 client
-#: fails ``extra_forbidden`` on the first of them: a belief page it asked for
-#: arriving as a decode error. The other direction is quiet rather than absent —
+#: exactly as at 10. So a version 13 hub emits ``attestation`` and
+#: ``rests_on_recorded_external_content`` on **every** belief, listed or single,
+#: and ``warrant`` on every retirement — **present whatever it holds**, since
+#: ``model_dump()`` renders a populated member and a ``None`` one alike — and a
+#: version 12 client fails ``extra_forbidden`` on the first of them: a belief page
+#: it asked for arriving as a decode error. What makes it fail is the member being
+#: *there*, not what is in it, which is why this entry states presence rather than
+#: a value: an attested belief carries a real ``Attestation`` and one resting on
+#: recorded external content carries ``true``, and the client fails identically on
+#: both. The other direction is quiet rather than absent —
 #: every field is additive with a default (ADR-0189 §9), so a version 13 client
 #: decoding a version 12 hub's ``Belief`` gets the defaults instead of ``missing``
 #: — which is why this is 10's shape rather than 11's, where a required member made

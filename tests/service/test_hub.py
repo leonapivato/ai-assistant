@@ -1210,7 +1210,7 @@ async def test_a_missing_credential_stays_down_before_any_store_is_opened(
     deployment fault: no restart produces a credential.
 
     That it runs **above** the composition root's disk line is the second half.
-    Nothing should open seven databases to discover a variable is unset.
+    Nothing should open the hub's databases to discover a variable is unset.
     """
     built: list[Path] = []
 

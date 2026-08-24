@@ -31,7 +31,7 @@ other-writable ancestor carrying it (``/tmp``) is accepted.
 ADR-0084 §1 puts the ``sun_path`` budget at this step too: "a perfectly writable,
 perfectly valid data directory can have a path no socket can be bound inside", and
 left unchecked that failure lands at ADR-0083 §3's **step 6** — after the lock is
-held, the seven stores are open and the start-up sweeps have run. It is a property
+held, the stores are open and the start-up sweeps have run. It is a property
 of ``data_dir`` rather than of the listener, which is why it sits beside the other
 three rather than in :mod:`ai_assistant.service.transport`.
 
@@ -39,7 +39,7 @@ three rather than in :mod:`ai_assistant.service.transport`.
 wrong — a bind mount, an ACL, a symlinked ancestor" and that what actually closes
 the hole is the client authenticating the *server* from the kernel's peer
 credentials after connecting. That belongs to the transport lane. These
-conditions stay as defence in depth, and because the eight databases in this
+conditions stay as defence in depth, and because the databases in this
 directory have no handshake to fall back on.
 """
 
@@ -122,7 +122,7 @@ def _check_leaf(data_dir: Path) -> None:
         msg = (
             f"the data directory {data_dir} is owned by uid {info.st_uid}, not by "
             f"uid {os.geteuid()} which the hub runs as; another user's directory holds "
-            f"the eight databases and the instance lock, so the hub will not open them"
+            f"this hub's databases and the instance lock, so the hub will not open them"
         )
         raise ConfigurationError(msg)
     if info.st_mode & _WRITABLE_BY_OTHERS:
