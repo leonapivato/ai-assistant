@@ -130,11 +130,11 @@ second calendar has misread it.
 > not hold a bare identity — and that is the whole of what assign-once needs.
 
 > **Normative.** ADR-0093 §7's last sentence — "The calendar sensor's identity is
-> `"calendar"`" — is **narrowed to the first configured calendar** of a deployment
-> that assigned it, which under ADR-0189 §6's assign-once rule is every deployment
-> that has configured a calendar at all — `calendar_reader_path` defaults to `None`
-> and a deployment in that state has assigned nothing. It is no longer true of a
-> `CalendarReader` as such.
+> `"calendar"`" — is **narrowed to the calendar source that was assigned it**, and
+> holds for no other. A deployment that has configured no calendar has assigned it to
+> nothing (`calendar_reader_path` defaults to `None`), and a deployment that minted a
+> discriminator for its first calendar under §1 has not assigned it either. It is no
+> longer true of a `CalendarReader` as such.
 
 **Everything about the shape is ADR-0189 §6's and is cited rather than restated.**
 The mint's arithmetic, the assign-once rule and its reason, why a fixed form closes
