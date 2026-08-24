@@ -725,12 +725,23 @@ def _zone_bearing(value: Any) -> Iterator[tuple[Any, Any]]:
 
 
 def _declared_id(prop: Any, holder: Any) -> str:
-    """The ``TZID`` a value states, read off the value or the line that carries it."""
+    """The ``TZID`` a value states, read off the value or the line that carries it.
+
+    **Byte for byte as the parameter carries it**, because whitespace is part of the
+    id everywhere the library compares one: ``clean_timezone_id`` strips ``/`` and
+    nothing else, and ``TZID`` is a quotable parameter, so ``TZID=" X "`` and
+    ``TZID=X`` name two different zones and ``icalendar`` caches and resolves them
+    separately. Trimming here made them one id and re-seated a value the cache had
+    resolved under the padded name onto this document's definition of the bare one —
+    a reading that appeared only once some earlier read had cached the padded id,
+    which is the read-order dependence this whole path exists to remove rather than
+    a tidier spelling of it. Adversarial review found it on round 4.
+    """
     for carrier in (prop, holder):
         params = getattr(carrier, "params", None)
         if params is None:
             continue
-        declared = str(params.get("TZID") or "").strip()
+        declared = str(params.get("TZID") or "")
         if declared:
             return declared
     return ""

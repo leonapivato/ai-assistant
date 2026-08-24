@@ -445,6 +445,38 @@ async def test_a_definition_nothing_names_and_cannot_build_refuses_either_way(
     assert _HOSTILE not in str(refusal.value), "ADR-0093 §8's message is payload-free"
 
 
+@pytest.mark.parametrize("planted", [False, True], ids=["fresh", "id-already-cached"])
+async def test_an_id_padded_with_whitespace_is_a_different_id_either_way(
+    tmp_path: Path, planted: bool
+) -> None:
+    """Whitespace is part of a ``TZID``, so trimming one merges two distinct zones.
+
+    ``TZP.clean_timezone_id`` strips ``/`` and nothing else, and ``TZID`` is a
+    quotable parameter — so ``TZID=" Tzcache/Hostile "`` and ``TZID:Tzcache/Hostile``
+    are two ids that ``icalendar`` caches and resolves separately. The document here
+    defines only the bare one; its entry names the padded one, which this document
+    therefore does not define and which must be skipped exactly as any other
+    unresolvable zone is (#1491, ADR-0117 §5).
+
+    Trimming the stated id made those one id: once an earlier read had cached the
+    padded name, the value resolved from that cache, was found "declared", and was
+    re-seated onto the bare definition in front of it — so the entry was proposed
+    warm and skipped cold, on identical bytes. Adversarial review found it on
+    round 4, and the ``fresh`` column is what makes the pair an assertion rather
+    than a snapshot.
+    """
+    padded = f" {_HOSTILE} "
+    if planted:
+        Calendar.from_ical(calendar(_vtimezone(padded, offset="+0500")))
+        assert tzp.timezone(padded) is not None, "the plant is what this case is about"
+
+    parts = (_GOOD, _vtimezone(), _entry(f'"{padded}"'))
+    reading = await _read(_written(tmp_path, "padded.ics", *parts))
+
+    assert summaries(reading.proposals) == [_GOOD_RENDERED]
+    assert reading.coverage is None, "an entry the source holds and this read skipped (§5)"
+
+
 # --- what the re-seating may not cost ----------------------------------------
 
 
