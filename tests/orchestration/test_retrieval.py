@@ -1,4 +1,4 @@
-"""Tests for the per-band assembler (ADR-0072 §5, ADR-0113 §5 and §6).
+"""Tests for the per-band assembler (ADR-0072 §5, ADR-0113 §5 and §6, ADR-0187 §4).
 
 ADR-0113 §7's fifth obligation is the reason this file exists rather than another
 handful of store conformance clauses: §5's cross-call rule is "the one obligation
@@ -11,10 +11,17 @@ concurrency. It stands in for a store whose contents a concurrent fold moves
 between two of one turn's reads — which ADR-0113 §5 establishes is reachable on
 the live write path, since ``add`` is an upsert on the caller's id and a
 ``REINFORCE`` fold takes the incoming provenance's source at the target's id.
+
+ADR-0187 §4d routes the same way for the same reason and says so: its floor "is
+discharged by tests in the assembler's own suite. No conformance clause is added to
+any store's suite: the floor is a property of the composition and is invisible to
+every single call, exactly as ADR-0113 §7 says of the deduplication rule beside
+it." Those cases are the last section of this file.
 """
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
@@ -29,6 +36,7 @@ from ai_assistant.core.types import (
     MemorySource,
     Provenance,
     SemanticMemory,
+    band_of,
 )
 from ai_assistant.orchestration.retrieval import BAND_PRECEDENCE, assemble_by_band
 from ai_assistant.testing import FakeMemoryStore
@@ -50,17 +58,24 @@ _SOURCE_FOR: dict[BeliefBand, MemorySource] = {
 }
 
 
-def _record(record_id: str, band: BeliefBand, *, score: float = 0.9) -> MemoryRecord:
+def _record(
+    record_id: str, band: BeliefBand, *, score: float = 0.9, content: str | None = None
+) -> MemoryRecord:
     """A live semantic record in ``band``, carrying a relevance ``score``.
 
     ``search`` populates ``score`` (ADR-0113 §7), so the double's answers do too —
     a composition that dropped or recomputed it would otherwise pass unnoticed.
+
+    ``content`` defaults to something unique per id. The cases that drive a real
+    ``FakeMemoryStore`` rather than the scripted double override it, because there
+    the content is what the relevance read matches on.
     """
     source = _SOURCE_FOR[band]
+    body = f"{record_id} content" if content is None else content
     return SemanticMemory(
         id=record_id,
-        content=f"{record_id} content",
-        fact=f"{record_id} content",
+        content=body,
+        fact=body,
         score=score,
         provenance=Provenance(
             source=source,
@@ -165,13 +180,19 @@ async def test_one_budget_is_filled_in_order_and_a_short_band_donates_its_remain
     assert [limit for _, limit in store.calls] == [4, 3, 3]
 
 
-async def test_a_band_that_fills_the_budget_stops_the_later_reads() -> None:
-    """A full budget ends the composition, so the lower bands are never asked.
+async def test_below_the_band_count_a_full_budget_still_stops_the_later_reads() -> None:
+    """Under a budget too small for the floor, strict precedence stands unchanged.
 
-    Not merely an optimisation: ADR-0113 §8 observes that N band-scoped calls buy N
-    independent candidate budgets, and the latency of the extra calls is #789's
-    question. Skipping the calls whose results could not be used is the part of that
-    cost this lane can decline without deciding anything §8 reserves.
+    ADR-0187 §4 binds "where the budget admits at least as many records as there are
+    bands in ``BAND_PRECEDENCE``". At a budget of two there is no allocation giving
+    all three bands a slot, §4 rules nothing for the case, and its no-larger-share
+    clause forbids inventing a partial reservation — so this is the pre-ADR
+    behaviour, retained deliberately rather than left over.
+
+    Skipping the reads is what that behaviour buys here: ADR-0113 §8 observes that N
+    band-scoped calls buy N independent candidate budgets, and the latency of the
+    extra calls is #789's question. Where the floor binds, §4's first clause takes
+    that saving away and the calls are made — the case above this one.
     """
     store = _ScriptedStore(
         {BeliefBand.ASSERTED: [[_record(f"a{i}", BeliefBand.ASSERTED) for i in range(4)]]}
@@ -423,3 +444,271 @@ async def test_a_failing_band_read_propagates_rather_than_composing_a_partial_re
 
     with pytest.raises(MemoryStoreError, match="derived read is down"):
         await assemble_by_band(store, "q", limit=5)
+
+
+# --- ADR-0187 §4: precedence orders a band; it does not exclude one ---------------
+#
+# The cases below are the whole of what ADR-0187 §4d puts in this suite: "That
+# lane's obligation is discharged by tests in the assembler's own suite. No
+# conformance clause is added to any store's suite: the floor is a property of the
+# composition and is invisible to every single call, exactly as ADR-0113 §7 says of
+# the deduplication rule beside it."
+
+
+async def test_an_attested_flood_does_not_exclude_the_derived_band_from_the_turn() -> None:
+    """#1527's live demonstration, driven at the seam that produced it.
+
+    The milestone-24 QA run planted 35 attested records lexically relevant to one
+    query beside one ``USER_ASSERTED`` and one ``INFERRED`` record equally relevant,
+    and asked for the composition root's own budget of 30. What came back was 29
+    attested and 1 asserted, with the derived band's read never issued at all —
+    the budget was exhausted above it, so the system's own inference about the user
+    was absent from the turn while sitting eligible in the store.
+
+    That is ADR-0098 §10's displacement live, with ADR-0183 §7's quantity argument
+    behind it: the attested band is the one an outsider writes into and "the
+    quantity is theirs to choose", so thirty entries in a source are the whole of
+    what it takes. ADR-0187 §4's first clause forbids it, and this is the case that
+    fails without the floor.
+
+    Driven against ``FakeMemoryStore`` rather than the run's ``SqliteMemoryStore``:
+    the obligation is the composition's, ADR-0187 §4d puts it in this suite, and the
+    canonical fake is what this subsystem reaches for instead of another
+    subsystem's concrete store. What the run's figures buy is the *shape* — an
+    attested supply larger than the whole budget beside one record in each of the
+    other two bands — which is the only condition the defect needs.
+    """
+    query = "weekly schedule plan meetings"
+    store = FakeMemoryStore(now=lambda: _AT)
+    await store.add(_record("asserted-1", BeliefBand.ASSERTED, content=query))
+    for index in range(35):
+        await store.add(_record(f"attested-{index}", BeliefBand.ATTESTED, content=query))
+    await store.add(_record("derived-1", BeliefBand.DERIVED, content=query))
+
+    composed = await assemble_by_band(store, query, limit=30)
+
+    bands = Counter(band_of(record.provenance.source) for record in composed)
+    assert bands == Counter(
+        {BeliefBand.ASSERTED: 1, BeliefBand.ATTESTED: 28, BeliefBand.DERIVED: 1}
+    ), "the derived band's own inference must survive an attested supply that outsizes the budget"
+    assert len(composed) == 30, "the floor reserves a slot; it never leaves one empty"
+
+
+async def test_no_bands_read_is_skipped_or_bounded_to_zero_by_a_full_higher_band() -> None:
+    """ADR-0187 §4's first clause, on the reads rather than on the composition.
+
+    "No band's read may be skipped, or bounded to zero, because a higher-precedence
+    band's supply exhausted the budget." A composition that returned the right
+    records while never asking the lower bands would satisfy the second half of §4
+    by luck on this store and fail on the next one, so the calls are asserted
+    directly: three of them, each carrying a budget it could actually spend.
+
+    The reserve costs nothing here. The attested and derived reads come back empty,
+    so neither reserves anything, both held slots return upward, and the asserted
+    band keeps the whole budget it would have had before this ADR.
+    """
+    store = _ScriptedStore(
+        {BeliefBand.ASSERTED: [[_record(f"a{i}", BeliefBand.ASSERTED) for i in range(30)]]}
+    )
+
+    composed = await assemble_by_band(store, "q", limit=30)
+
+    assert [bands for bands, _ in store.calls] == [[band] for band in BAND_PRECEDENCE]
+    assert all(asked >= 1 for _, asked in store.calls), "a read bounded to zero is a skipped read"
+    assert [record.id for record in composed] == [f"a{i}" for i in range(30)]
+
+
+async def test_a_band_whose_read_returns_a_record_holds_at_least_one_slot() -> None:
+    """ADR-0187 §4's first clause on the composition, and §1's stated cost with it.
+
+    A store whose assertions would fill the budget on their own, with one attested
+    and one derived record beside them. Before the floor the composition was thirty
+    assertions and the lower two bands were never read; under §4 each of them holds
+    exactly one slot and the asserted band holds twenty-eight.
+
+    ADR-0187 §1 states that cost rather than glossing it: "on a store whose
+    assertions would otherwise fill the budget the attested band holds one record
+    and the asserted band holds one fewer". It is the floor's cost and not the
+    ordering's — the same slot is owed to ``DERIVED`` with no outsider anywhere in
+    the picture — and it is the same one slot whether the source behind the attested
+    record holds one entry or thirty thousand.
+    """
+    store = _ScriptedStore(
+        {
+            BeliefBand.ASSERTED: [[_record(f"a{i}", BeliefBand.ASSERTED) for i in range(30)]],
+            BeliefBand.ATTESTED: [[_record(f"t{i}", BeliefBand.ATTESTED) for i in range(5)]],
+            BeliefBand.DERIVED: [[_record(f"d{i}", BeliefBand.DERIVED) for i in range(5)]],
+        }
+    )
+
+    composed = await assemble_by_band(store, "q", limit=30)
+
+    assert [record.id for record in composed] == [
+        *(f"a{i}" for i in range(28)),
+        "t0",
+        "d0",
+    ]
+
+
+async def test_the_reservation_is_taken_from_the_lowest_band_above_its_own_floor() -> None:
+    """ADR-0187 §4's second clause, on both halves of it.
+
+    "Where a reservation must be taken from a band that would otherwise have held
+    the slot, it is taken from the **lowest-precedence band holding more than its
+    own floor**, and within that band from its least relevant record."
+
+    Here the asserted band supplies ten of a budget of thirty and the attested band
+    would have taken the other twenty. The slot the derived band needs is therefore
+    owed by ``ATTESTED``, not by ``ASSERTED``: the user's own band is untouched at
+    ten, and the record that goes is ``t19`` — the last of the page the store
+    ranked, which is its least relevant.
+    """
+    store = _ScriptedStore(
+        {
+            BeliefBand.ASSERTED: [[_record(f"a{i}", BeliefBand.ASSERTED) for i in range(10)]],
+            BeliefBand.ATTESTED: [[_record(f"t{i}", BeliefBand.ATTESTED) for i in range(30)]],
+            BeliefBand.DERIVED: [[_record(f"d{i}", BeliefBand.DERIVED) for i in range(5)]],
+        }
+    )
+
+    composed = await assemble_by_band(store, "q", limit=30)
+
+    assert [record.id for record in composed] == [
+        *(f"a{i}" for i in range(10)),
+        *(f"t{i}" for i in range(19)),
+        "d0",
+    ]
+    assert "t19" not in {record.id for record in composed}
+
+
+async def test_a_band_that_returns_nothing_reserves_nothing_and_leaves_no_slot_empty() -> None:
+    """ADR-0187 §4's second clause, its last sentence — the unused reserve goes back.
+
+    "A band whose read returns nothing reserves nothing, and no slot is left empty
+    in order to hold a reservation open."
+
+    The attested read comes back empty, so the slot held against it returns to the
+    highest-precedence band with a record left over rather than being spent on the
+    derived band or dropped. Both halves are asserted: the derived band holds
+    exactly its floor of one — it does not inherit a reserve that was never its — and
+    the composition is a full thirty rather than twenty-nine.
+    """
+    store = _ScriptedStore(
+        {
+            BeliefBand.ASSERTED: [[_record(f"a{i}", BeliefBand.ASSERTED) for i in range(30)]],
+            BeliefBand.ATTESTED: [[]],
+            BeliefBand.DERIVED: [[_record(f"d{i}", BeliefBand.DERIVED) for i in range(5)]],
+        }
+    )
+
+    composed = await assemble_by_band(store, "q", limit=30)
+
+    assert [record.id for record in composed] == [*(f"a{i}" for i in range(29)), "d0"]
+
+
+async def test_at_a_budget_of_exactly_the_band_count_every_band_holds_one() -> None:
+    """The boundary ADR-0187 §4's condition names, checked on the boundary itself.
+
+    "Where the budget admits at least as many records as there are bands in
+    ``BAND_PRECEDENCE``" — three, here, with every band able to supply five. The
+    floor consumes the whole budget and precedence has no other slot to govern,
+    which is the smallest budget at which §4 binds at all. One below it is the case
+    above, where strict precedence stands.
+    """
+    store = _ScriptedStore(
+        {
+            BeliefBand.ASSERTED: [[_record(f"a{i}", BeliefBand.ASSERTED) for i in range(5)]],
+            BeliefBand.ATTESTED: [[_record(f"t{i}", BeliefBand.ATTESTED) for i in range(5)]],
+            BeliefBand.DERIVED: [[_record(f"d{i}", BeliefBand.DERIVED) for i in range(5)]],
+        }
+    )
+
+    composed = await assemble_by_band(store, "q", limit=len(BAND_PRECEDENCE))
+
+    assert [record.id for record in composed] == ["a0", "t0", "d0"]
+
+
+async def test_a_band_whose_only_record_was_deduplicated_holds_no_floor() -> None:
+    """ADR-0187 §4's first clause is written over what survives deduplication.
+
+    §4 promises a slot to "a band whose own read returns a record that ADR-0113 §5's
+    cross-call deduplication does not remove", and ADR-0187 §9 says why in terms: "a
+    band whose only returned record was deduplicated has nothing left to hold its
+    floor with — which §4's first clause states in its own words rather than leaving
+    to this paragraph". Such a band "obliges no further read", so the assembler does
+    not go back for another page.
+
+    The scenario is the same fold as the deduplication case above: ``x`` is answered
+    by the attested read and again by the derived one. The derived band's page is
+    empty once ``x`` is removed from it, so the band reserves nothing and the
+    composition is the one attested record — with the derived read still issued,
+    because §4's first clause forbids skipping it.
+    """
+    store = _ScriptedStore(
+        {
+            BeliefBand.ASSERTED: [[]],
+            BeliefBand.ATTESTED: [[_record("x", BeliefBand.ATTESTED)]],
+            BeliefBand.DERIVED: [[_record("x", BeliefBand.DERIVED)]],
+        }
+    )
+
+    composed = await assemble_by_band(store, "q", limit=3)
+
+    assert [record.id for record in composed] == ["x"]
+    assert [bands for bands, _ in store.calls] == [[band] for band in BAND_PRECEDENCE]
+
+
+async def test_the_floor_is_one_slot_and_not_a_share() -> None:
+    """ADR-0187 §4's no-larger-share clause, pinned as a behaviour rather than a comment.
+
+    "A proportional split, a per-band quota, a cap on any band's take, or any other
+    reservation larger than the one above is a bet on a frequency and waits for the
+    measurement ADR-0112 §7's first clause gates and #789 owns."
+
+    So a store dominated by one band still spends almost the whole budget on it. The
+    derived band here could supply thirty records and takes exactly one, because
+    what the floor reserves is representation and not a share — and the failure a
+    proportional split would produce is the one ``assemble_by_band``'s own budget
+    reasoning already refuses, returning a third of a budget it could have filled.
+    """
+    store = _ScriptedStore(
+        {
+            BeliefBand.ASSERTED: [[_record(f"a{i}", BeliefBand.ASSERTED) for i in range(30)]],
+            BeliefBand.ATTESTED: [[_record(f"t{i}", BeliefBand.ATTESTED) for i in range(30)]],
+            BeliefBand.DERIVED: [[_record(f"d{i}", BeliefBand.DERIVED) for i in range(30)]],
+        }
+    )
+
+    composed = await assemble_by_band(store, "q", limit=30)
+
+    bands = Counter(band_of(record.provenance.source) for record in composed)
+    assert bands == Counter(
+        {BeliefBand.ASSERTED: 28, BeliefBand.ATTESTED: 1, BeliefBand.DERIVED: 1}
+    )
+
+
+async def test_no_band_is_asked_for_more_than_the_budget() -> None:
+    """The floor is not the over-request ADR-0187 §4d forecloses.
+
+    §4d rules out "a floor obtained by over-requesting against an estimate of how
+    many records to expect from each band, which is the headroom bet ADR-0113 §8
+    declines and ADR-0112 §7 gates". The shape taken here asks each band for the
+    most it could lawfully be *allocated* — the budget less what the bands above it
+    are guaranteed — which is never more than the budget and involves no estimate of
+    anything. This pins that arithmetic against the store, on the case where the
+    temptation to over-ask is largest: every band full, so every reserve is claimed.
+
+    ``tests/app/test_composition.py`` holds the same property against the real
+    ``RETRIEVAL_LIMIT``; this holds the shape of every call rather than the maximum.
+    """
+    store = _ScriptedStore(
+        {
+            BeliefBand.ASSERTED: [[_record(f"a{i}", BeliefBand.ASSERTED) for i in range(30)]],
+            BeliefBand.ATTESTED: [[_record(f"t{i}", BeliefBand.ATTESTED) for i in range(30)]],
+            BeliefBand.DERIVED: [[_record(f"d{i}", BeliefBand.DERIVED) for i in range(30)]],
+        }
+    )
+
+    await assemble_by_band(store, "q", limit=30)
+
+    assert [asked for _, asked in store.calls] == [30, 2, 1]
