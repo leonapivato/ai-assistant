@@ -312,6 +312,25 @@ def test_the_export_states_the_horizon_where_the_decision_export_states_complete
     assert "horizon" not in decisions_help
 
 
+def test_the_listing_names_both_reasons_it_is_not_a_record_of_every_read() -> None:
+    """The two gaps, stated together where a user meets the command.
+
+    The horizon is one (ADR-0185 §6). ADR-0185 §5a's two fault paths are the other,
+    and they are the ones a surface forgets: a recorder that raised and a
+    cancellation landing after the read began each leave a read that ran with **no
+    row**. §10 measures the milestone's exit over attempts "driven to an outcome
+    with a recorder that answered" for exactly that reason, and §5a forbids citing
+    either path as licence to leave an access unrecorded — so a surface may neither
+    hide them nor lean on them. What it can do is say so, which is what makes
+    "every read" a phrase this command never uses about itself.
+    """
+    reads_help = _flat(CliRunner().invoke(cli.app, ["reads", "--help"]).stdout)
+
+    assert "oldest attempts are dropped as it fills" in reads_help
+    assert "two faults leave no row at all" in reads_help
+    assert "Show the attempts I recorded" in reads_help
+
+
 # --- §9/§10: the listing's bound ---------------------------------------------
 
 
@@ -388,12 +407,18 @@ def test_an_empty_page_is_never_the_claim_that_nothing_was_read(
     the record failed, or the horizon pruned it." The whole reason refusals are
     recorded is that absence says nothing — so an empty page rendered as "nothing
     was ever read" would put back exactly the claim the store refuses to make.
+
+    **Both reasons are asserted, not one.** The horizon is the obvious one; ADR-0185
+    §5a's two fault paths — a recorder that raised, a cancellation landing after the
+    read began — are the ones a surface forgets, and they are why "every read" is a
+    sentence this module never writes.
     """
     rendered = _listing(output, monkeypatch)
 
     assert "Nothing recorded" in rendered
     assert "not a claim that nothing was ever read" in rendered
-    assert "oldest attempts are dropped" in rendered
+    assert "oldest attempts are dropped as it fills" in rendered
+    assert "two faults leave no row at all" in rendered
 
 
 # --- ADR-0185 §2: a row renders whole ----------------------------------------
@@ -715,12 +740,14 @@ def test_the_grant_surface_still_reports_no_read_and_now_names_the_one_that_does
     honest correction is to point at the surface rather than to keep saying nothing
     answers the question.
 
-    **The pointer names the unit that surface records, which is an attempt.** A
-    footer calling it "the record of what was read" would overclaim in the one
-    direction ADR-0186 §8 bars — a refusal is a row there, and on a failure whether
-    anything was opened is not determinable at all — so the cross-reference has to
-    carry the word "attempt" or it hands the reader a promise the other command
-    does not keep. Round 1's second blocker was exactly that sentence.
+    **The pointer names the unit that surface records, which is an attempt, and
+    claims no completeness for it.** Two rounds of review landed on this one
+    sentence. "The record of what was read" overclaims in the direction ADR-0186 §8
+    bars — a refusal is a row there, and on a failure whether anything was opened is
+    not determinable at all. "The record of *every* attempt" overclaims in the other
+    direction: the store prunes (ADR-0185 §6) and §5a names two faults on which a
+    read runs with no row, so no surface in this module says "every". What is left
+    is where attempts are recorded, which is what the sentence has to be.
     """
     cli._render_standing(
         (
@@ -735,7 +762,8 @@ def test_the_grant_surface_still_reports_no_read_and_now_names_the_one_that_does
     rendered = _flat(output.getvalue())
 
     assert "says nothing about what has actually been read" in rendered
-    assert "'assistant reads' is the record of every attempt to read one" in rendered
+    assert "'assistant reads' is where attempts to read one are recorded" in rendered
+    assert "every attempt" not in rendered
     # No read, no count, no instant of one: the clause is about what is *shown*
     # beside a grant, and the only instant here is the grant's own. The word
     # "attempt" appears in the cross-reference and nowhere else, so what is asserted

@@ -161,7 +161,7 @@ ADR-0004 §6's whole-installation artifact, which neither of these discharges
 (#1502).
 
 ``reads`` and ``export-reads`` are the same pair one store over — ADR-0186 §10's
-**second pair**, over the record of every attempt this system made to read a
+**second pair**, over the record of the attempts this system made to read a
 source (ADR-0185). The two trails **partition** the subject: a read is never a
 :class:`~ai_assistant.core.types.PermissionDecision` and an egress is never a
 :class:`~ai_assistant.core.types.SourceReadRecord`, so neither pair answers the
@@ -186,7 +186,13 @@ its trail holds, and that trail prunes nothing (#108). ``export-reads`` writes t
 records and deletes the earliest-recorded first (ADR-0185 §6), so attempts older
 than the cap are gone, ADR-0004 §6's export right is discharged "to that extent
 and no further" (ADR-0185 §9, §10), and no lane may report it as a complete
-history.
+history. ADR-0185 §5a's two paths are the second reason no surface here says
+"every read": a recorder that raised and a cancellation landing after the read
+began each leave a read that ran with no row, and §10 measures the exit over
+attempts "driven to an outcome with a recorder that answered" for exactly that
+reason. Neither is licence to leave an access unrecorded; both are places the
+mechanism does not reach, and a surface that papered over them would be claiming
+a completeness the store does not have.
 
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
@@ -2134,7 +2140,7 @@ def reads(
         help="How many read attempts to show at most (at least 1).",
     ),
 ) -> None:
-    """Show every time I tried to read one of your sources, refusals included.
+    """Show the attempts I recorded to read your sources, refusals included.
 
     One row per **attempt** — the act that starts when I check whether you allow a
     source to be read and ends one of six ways. A refusal is a row like any other,
@@ -2155,9 +2161,14 @@ def reads(
     not an ordering by the instant each row shows: two rows can carry instants that
     disagree with their positions, and the position is what the record states.
 
-    This record has a horizon: the oldest attempts are dropped as it fills, so
-    ``--limit`` reaches back only as far as it still holds. ``assistant
-    export-reads`` writes what is left, whole.
+    **This is what I recorded, which is not quite the same as everything that ever
+    happened, and both gaps are worth naming.** The record has a horizon: the
+    oldest attempts are dropped as it fills, so ``--limit`` reaches back only as
+    far as it still holds. And two faults leave no row at all — if I cannot write
+    the record I throw the reading away rather than keep it, and a shutdown landing
+    mid-read may leave nothing behind. Nothing came of either, but neither is here.
+
+    ``assistant export-reads`` writes what is left, whole.
     """
     code = asyncio.run(_list_reads(limit=limit))
     raise typer.Exit(code)
@@ -6702,7 +6713,7 @@ def _render_standing(standing: tuple[SourceGrant, ...]) -> None:
         "[dim]This is what you permitted, read from the record of your own "
         "decisions. It is not a list of what is configured — see 'assistant "
         "sources' — and it says nothing about what has actually been read: "
-        "'assistant reads' is the record of every attempt to read one, and how "
+        "'assistant reads' is where attempts to read one are recorded, and how "
         "each ended.[/]"
     )
 
@@ -7970,7 +7981,10 @@ def _render_reads(recorded: tuple[SourceReadRecord, ...], *, limit: int) -> None
     argument for recording refusals is that an absence in a pruning store is
     ambiguous by construction — no row could mean not read, or pruned, or never
     recorded — so the one thing this surface must not do is turn an empty page into
-    the statement the store declines to make.
+    the statement the store declines to make. Both reasons are named rather than
+    one: the horizon (§6) and ADR-0185 §5a's two fault paths, on which a read runs
+    with no row at all. Neither is licence to leave an access unrecorded — §5a
+    forbids citing them as one — and both are why no line here says "every read".
 
     **The horizon is stated on the listing as well as on the export** (ADR-0186
     §10). A user who raises ``--limit`` until the page stops growing has reached the
@@ -7985,7 +7999,8 @@ def _render_reads(recorded: tuple[SourceReadRecord, ...], *, limit: int) -> None
         console.print("[yellow]Nothing recorded.[/] No attempt to read a source is in this record.")
         console.print(
             "[dim]That is not a claim that nothing was ever read: this record states "
-            "what it holds, and the oldest attempts are dropped as it fills.[/]"
+            "what it holds, the oldest attempts are dropped as it fills, and two "
+            "faults leave no row at all.[/]"
         )
         return
     console.print(f"[bold]{len(recorded)}[/] read attempt(s), newest recorded first:\n")
