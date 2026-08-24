@@ -2988,8 +2988,8 @@ function retirementOrigin(warrant) {
         warrant.attestation === null
           ? "A connected source reported this. These are not my words and not yours."
           : `${warrant.attestation.reported_by} reported this, and said it was ` +
-            `current as of ${warrant.attestation.reported_at}, on that source's own ` +
-            "clock. These are not my words and not yours.",
+            `current as of ${warrant.attestation.reported_at}, ` +
+            "on that source's own clock. These are not my words and not yours.",
       className: "notice",
     };
   }
