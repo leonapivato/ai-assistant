@@ -187,12 +187,16 @@ records and deletes the earliest-recorded first (ADR-0185 §6), so attempts olde
 than the cap are gone, ADR-0004 §6's export right is discharged "to that extent
 and no further" (ADR-0185 §9, §10), and no lane may report it as a complete
 history. ADR-0185 §5a's two paths are the second reason no surface here says
-"every read": a recorder that raised and a cancellation landing after the read
-began each leave a read that ran with no row, and §10 measures the exit over
-attempts "driven to an outcome with a recorder that answered" for exactly that
-reason. Neither is licence to leave an access unrecorded; both are places the
-mechanism does not reach, and a surface that papered over them would be claiming
-a completeness the store does not have.
+"every read", and the two are **not** the same shape: a recorder that raised
+leaves a read that ran with **no** row, while a cancellation landing after the
+read began leaves none where it landed before the recorder call and an
+**indeterminate** state where it landed inside one already in flight — ADR-0060's
+rule that a cancelled write may or may not have committed, and §5a forbids
+assuming either result. §10 measures the exit over attempts "driven to an outcome
+with a recorder that answered" for exactly that reason. Neither path is licence
+to leave an access unrecorded; both are places the mechanism does not reach, and a
+surface that papered over them would be claiming a completeness the store does
+not have.
 
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
@@ -2164,9 +2168,11 @@ def reads(
     **This is what I recorded, which is not quite the same as everything that ever
     happened, and both gaps are worth naming.** The record has a horizon: the
     oldest attempts are dropped as it fills, so ``--limit`` reaches back only as
-    far as it still holds. And two faults leave no row at all — if I cannot write
-    the record I throw the reading away rather than keep it, and a shutdown landing
-    mid-read may leave nothing behind. Nothing came of either, but neither is here.
+    far as it still holds. And two faults can leave a read without a row. If I
+    cannot write the record I throw the reading away rather than keep it, and
+    nothing is written down. If I am shut down while a read is under way, the row
+    may be missing — or may already be here — and which of the two it was is not
+    something I can tell you afterwards. Nothing came of a read I could not record.
 
     ``assistant export-reads`` writes what is left, whole.
     """
@@ -7982,9 +7988,12 @@ def _render_reads(recorded: tuple[SourceReadRecord, ...], *, limit: int) -> None
     ambiguous by construction — no row could mean not read, or pruned, or never
     recorded — so the one thing this surface must not do is turn an empty page into
     the statement the store declines to make. Both reasons are named rather than
-    one: the horizon (§6) and ADR-0185 §5a's two fault paths, on which a read runs
-    with no row at all. Neither is licence to leave an access unrecorded — §5a
-    forbids citing them as one — and both are why no line here says "every read".
+    one: the horizon (§6), and ADR-0185 §5a's two fault paths, on which a read can
+    run with no row — certainly so where the recorder raised, and *indeterminately*
+    so where a cancellation landed inside a recorder call already in flight, which
+    ADR-0060 forbids assuming either way. Neither path is licence to leave an
+    access unrecorded — §5a forbids citing them as one — and both are why no line
+    here says "every read".
 
     **The horizon is stated on the listing as well as on the export** (ADR-0186
     §10). A user who raises ``--limit`` until the page stops growing has reached the
@@ -7999,8 +8008,8 @@ def _render_reads(recorded: tuple[SourceReadRecord, ...], *, limit: int) -> None
         console.print("[yellow]Nothing recorded.[/] No attempt to read a source is in this record.")
         console.print(
             "[dim]That is not a claim that nothing was ever read: this record states "
-            "what it holds, the oldest attempts are dropped as it fills, and two "
-            "faults leave no row at all.[/]"
+            "what it holds, the oldest attempts are dropped as it fills, and a fault "
+            "can leave a read with no row.[/]"
         )
         return
     console.print(f"[bold]{len(recorded)}[/] read attempt(s), newest recorded first:\n")
