@@ -497,35 +497,103 @@ async def test_an_id_padded_with_whitespace_is_a_different_id_either_way(
     assert reading.coverage is None, "an entry the source holds and this read skipped (§5)"
 
 
+@pytest.mark.parametrize(
+    "component",
+    [
+        pytest.param(
+            "\r\n".join(["BEGIN:VEVENT", f"TZID:{_HOSTILE}", "END:VTIMEZONE"]),
+            id="cached-as-a-zone-arrives-as-an-event",
+        ),
+        pytest.param(
+            _vtimezone().replace("END:VTIMEZONE", "END:VEVENT"),
+            id="arrives-as-a-zone-never-cached",
+        ),
+    ],
+)
 @pytest.mark.parametrize("planted", [False, True], ids=["fresh", "id-already-cached"])
-async def test_a_definition_closed_by_a_mismatched_delimiter_refuses_either_way(
-    tmp_path: Path, planted: bool
+async def test_a_component_closed_by_the_wrong_delimiter_refuses_either_way(
+    tmp_path: Path, planted: bool, component: str
 ) -> None:
-    """The cache is written from the ``END`` tag, so ``walk`` is not the whole set.
+    """The cache is keyed off the ``END`` tag, the component's type off the ``BEGIN``.
 
-    ``icalendar`` caches on ``vals.upper() == "VTIMEZONE" and "TZID" in component``
-    — the tag that *closed* the component, not the component's own type. So
-    ``BEGIN:VEVENT`` carrying a ``TZID`` and closed ``END:VTIMEZONE`` is handed to
-    ``cache_timezone_component`` while arriving as an ``Event`` that
-    ``walk("VTIMEZONE")`` never returns, and which the eager build therefore never
-    sees. Cold, the library builds it and ``Event.to_tz`` does not exist, so the
-    read refuses; warm, the build is skipped and the same bytes read normally,
-    proposing the good entry beside it.
+    A mismatched pair splits the two, and each direction leaks a different way:
 
-    It is refused on the stray ``TZID`` property instead: RFC 5545 §3.6.5 makes that
-    a ``VTIMEZONE`` property alone, so no conforming document has one elsewhere.
-    Adversarial review found it on round 5, and both columns are the assertion.
+    * ``BEGIN:VEVENT`` … ``END:VTIMEZONE`` is cached but arrives as an ``Event``
+      ``walk("VTIMEZONE")`` never returns. Cold, ``Event.to_tz`` does not exist and
+      the read refuses; warm, the build is skipped and the bytes read normally.
+    * ``BEGIN:VTIMEZONE`` … ``END:VEVENT`` is never cached but *is* returned by
+      ``walk``. Cold, the entry naming it stays naive and #1491 skips it; warm, it
+      resolves from the cache and is re-seated onto the definition beside it, so the
+      entry is proposed.
+
+    Neither is visible in the parsed tree, which records only the ``BEGIN`` — so the
+    delimiters are read out of the bytes and a mismatch refuses. Adversarial review
+    found the first on round 5 and the second on round 6.
     """
     if planted:
         await _read(_written(tmp_path, "planted.ics", _vtimezone(), _entry(uid="defined")))
 
-    mismatched = "\r\n".join(["BEGIN:VEVENT", f"TZID:{_HOSTILE}", "END:VTIMEZONE"])
-
     with pytest.raises(ReaderError) as refusal:
-        await _read(_written(tmp_path, "mismatched.ics", _GOOD, mismatched))
+        await _read(_written(tmp_path, "mismatched.ics", _GOOD, component, _entry()))
 
     assert isinstance(refusal.value.__cause__, SourceNotParseableError)
     assert _HOSTILE not in str(refusal.value), "ADR-0093 §8's message is payload-free"
+
+
+async def test_a_stray_tzid_property_on_a_well_closed_component_still_reads(
+    tmp_path: Path,
+) -> None:
+    """The refusal is for mismatched delimiters, not for a property out of place.
+
+    A ``VEVENT`` closed by its own ``END`` never reaches
+    ``cache_timezone_component`` whatever properties it carries, so a stray ``TZID``
+    property decides nothing and the entry is interpretable exactly as before.
+    ADR-0093 §7b skips what a parseable source holds and this reader cannot read; it
+    does not refuse the document. An earlier form of this check keyed on the
+    property rather than the delimiter and turned this calendar into a refusal —
+    adversarial review blocked it on round 6, and this is the pin.
+    """
+    entry = "\r\n".join(
+        [
+            "BEGIN:VEVENT",
+            "UID:stray",
+            "DTSTAMP:20260803T090000Z",
+            f"TZID:{_HOSTILE}",
+            f"DTSTART:{utc(NOW)}",
+            f"DTEND:{utc(NOW + timedelta(hours=1))}",
+            "SUMMARY:standup",
+            "END:VEVENT",
+        ]
+    )
+
+    reading = await _read(_written(tmp_path, "stray.ics", entry))
+
+    assert summaries(reading.proposals) == [_GOOD_RENDERED]
+    assert reading.coverage is not None, "nothing was skipped, so the read is accounted"
+
+
+async def test_a_delimiter_folded_across_two_lines_is_still_one_delimiter(
+    tmp_path: Path,
+) -> None:
+    """RFC 5545 §3.1 folding, which the delimiter check has to undo to be correct.
+
+    ``BEGIN:VTIME`` + ``CRLF`` + ``" ZONE"`` is one content line reading
+    ``BEGIN:VTIMEZONE``, and ``icalendar`` unfolds it before it sees a tag at all. A
+    check that compared the raw lines would call this a mismatch and refuse a
+    document the library reads — the same false refusal the property-keyed guard was
+    blocked for, arriving by a different route. So the entry here must still resolve
+    against the definition beside it.
+    """
+    folded = (
+        _vtimezone()
+        .replace("BEGIN:VTIMEZONE", "BEGIN:VTIME\r\n ZONE")
+        .replace("END:VTIMEZONE", "END:VTIME\r\n ZONE")
+    )
+
+    reading = await _read(_written(tmp_path, "folded.ics", folded, _entry()))
+
+    assert summaries(reading.proposals) == [_LEAKED_RENDERED]
+    assert reading.coverage is not None
 
 
 # --- what the re-seating may not cost ----------------------------------------
