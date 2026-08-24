@@ -193,8 +193,10 @@ def test_it_names_the_reader_it_holds() -> None:
     """The reader's declared identity, not a second constant.
 
     An operator reading a degradation log needs to know which *source* degraded,
-    and ADR-0093 §7 makes a reader's identity declared rather than configured
-    precisely so it is safe to log verbatim.
+    and a source identity is safe to log verbatim because ADR-0093 §7 keeps it
+    "never derived from the source's location or contents" — the property
+    ADR-0190 §2 carries forward unchanged, and the one that makes a minted
+    discriminator admissible rather than an exception to it.
     """
     assert _source(_reader(), _granted()).name == DEFAULT_READER_NAME
 

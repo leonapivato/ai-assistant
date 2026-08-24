@@ -31,7 +31,7 @@ from ics_fixtures import NOW, STAMP, calendar, frozen, reader, source, utc, veve
 
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "core"))
 
-from reader_contract import GatedRead, ReaderContract
+from reader_contract import GatedRead, ReaderContract, declared_name_of
 
 from ai_assistant.core.errors import ReaderError
 from ai_assistant.readers import CALENDAR_READER_NAME, CalendarReader, _source
@@ -101,6 +101,30 @@ class TestCalendarReaderContract(ReaderContract):
         return GatedRead(
             reader=reader(source(self._tmp, _ONE_ENTRY, name="gated.ics")), gate=suspension
         )
+
+
+# --- the identity half the shared suite cannot reach (ADR-0190 §3) ----------
+
+
+def test_the_declared_half_of_the_identity_is_this_readers_own_name(tmp_path: Path) -> None:
+    """``ReaderContract`` decides §4's form; only this file can decide the type.
+
+    ADR-0190 §3 names this test in advance and says why the suite cannot be it:
+    the suite holds a ``Reader`` and nothing to compare a prefix against, so a
+    reader declaring a colon-bearing name merely *shaped* like a discriminated
+    identity passes there while breaching §4. Here the declared half is checkable
+    against the constant this reader type declares.
+
+    ``CalendarReader`` returns a bare identity today, because a deployment
+    configures one calendar (ADR-0093 §7, ADR-0142 §8) and the first configured
+    source of a type may hold that type's bare name. The assertion is written
+    through :func:`declared_name_of` rather than as equality with ``name`` so it
+    keeps saying the same thing on the day a second configured calendar hands this
+    class a discriminated identity.
+    """
+    subject = reader(source(tmp_path, _ONE_ENTRY))
+
+    assert declared_name_of(subject.name) == CALENDAR_READER_NAME
 
 
 # --- the three failure cases ADR-0093 §10 names by name (#648) --------------

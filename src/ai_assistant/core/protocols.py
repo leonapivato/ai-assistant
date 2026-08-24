@@ -2181,14 +2181,21 @@ class Reader(Protocol):
 
     @property
     def name(self) -> str:
-        """This reader's stable identifier, declared rather than configured.
+        """The identity of the **configured source** this reader serves.
+
+        One configured source — one entry in a deployment's configuration for a
+        reader type, with its own backing location — and not a reader class, not a
+        backing location, and **not this object**: every ``Reader`` the composition
+        root builds to serve one configured source returns that source's one
+        identity (ADR-0189 §6). It is the only seam a source identity reaches, and
+        a grant "keys on nothing else" (ADR-0097 §1).
 
         It is **Tier 2 / operational** (ADR-0004 §1) and must stay that way, and
         the obligation is stricter here than :attr:`ContextSource.name`'s rather
         than merely inherited, because a reader's identity has a second consumer.
         It is never derived from the source's location or contents — a path,
-        filename, address or account identifier may not be used as one — because
-        the identity is what lands on the reading, on
+        filename, address or account identifier may not be used as one, or as any
+        part of one — because the identity is what lands on the reading, on
         :attr:`~ai_assistant.core.types.Attestation.reported_by` of every belief
         the gate then stores, in every export, and in every log line, in a system
         whose ADR-0004 §5 rule is that logs never contain Tier 1 data. A reader
@@ -2197,11 +2204,48 @@ class Reader(Protocol):
         because "used for logging" has been read as licence before (ADR-0055), and
         here it would be read as licence twice over.
 
-        **Stable across calls**, and not a configurable value: a free-text setting
-        is precisely the mechanism by which a user would put their email address or
-        a path there, and no validator can tell a chosen label from a personal one.
-        A declared constant cannot carry personal data at all, which is a property
-        rather than a rule (ADR-0093 §7).
+        **Two forms and no third** (ADR-0190 §4). A **declared name** is non-empty,
+        UTF-8-encodable, equal to its own ``str.strip()``, and contains no colon. A
+        **bare** identity is a declared name and nothing else — ``"calendar"``,
+        ``"email"``. A **discriminated** identity is that declared name, one ASCII
+        colon, then a discriminator: exactly 32 characters drawn from
+        ``0123456789abcdef``. So
+        ``"calendar:0f3c9d1a7b45e28c6d90fa3b17e4c852"`` is an identity, while a
+        bare discriminator, an empty declared part, an uppercase discriminator, a
+        differently-ordered value and a differently-separated one are not
+        identities at all. ``ReaderContract`` decides every part of that over the
+        value alone; that the declared half is *this reader type's own* declared
+        name is the concrete reader's test, because the suite holds a ``Reader``
+        and nothing to compare a prefix against (ADR-0190 §3).
+
+        **Which form a source holds is fixed when that source is configured**
+        (ADR-0189 §6, ADR-0190 §1). The **first** source of a reader type a
+        deployment configures may hold that type's bare declared name; every source
+        of that type configured **after** it carries a minted discriminator,
+        whether or not the first took the bare name. An identity is assigned once
+        and never changes — not across restarts, not when the source is repointed
+        at a different backing location, and not when a second source of the type
+        is configured beside it — because a re-assignment would orphan every
+        ``reported_by`` naming the old value and every grant keyed on it.
+
+        **The type-name half stays the sensor's**, declared and not configurable;
+        what a deployment supplies is the discriminator alone (ADR-0190 §1).
+        ADR-0093 §7 chose a declared constant because "a free-text setting is
+        precisely the mechanism by which a user would put their email address or a
+        path there, and no validator can tell a chosen label from a personal one" —
+        which still binds the declared half, and still forbids a human-facing label
+        settling here (ADR-0189 §5). It does not reach a discriminator, because a
+        validator *can* tell 32 hexadecimal characters from an address, so the
+        hazard is closed by the shape of the value rather than by a rule about what
+        may be typed into it. **ADR-0190 §1 partially supersedes ADR-0093 §7's "not
+        a configurable value" clause in exactly that one respect and in no other**;
+        §7's remaining identity properties, restated above, are untouched.
+
+        **Stable across calls.** A reader whose identity moved under a read would
+        scatter one source's beliefs across two ``reported_by`` values no later
+        fold could bring back together — and an identity assigned once at
+        configuration cannot move under a read, which is the property this clause
+        exists to pin.
 
         A property rather than a constructor argument, for
         :attr:`ContextSource.name`'s reason: the assembler and the ingestion stage

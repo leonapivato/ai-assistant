@@ -216,9 +216,13 @@ def test_it_conforms_to_the_context_source_protocol() -> None:
 def test_it_names_the_reader_it_holds() -> None:
     """The reader's declared identity — ``"email"`` on a real one, never the account.
 
-    ADR-0140 §12 makes that identity declared rather than configured for exactly
-    this reason: an operator reading a degradation log needs to know which source
-    degraded, and the log line is Tier 2 (ADR-0093 §7).
+    Never the account for exactly this reason: an operator reading a degradation
+    log needs to know which source degraded, and the log line is Tier 2 (ADR-0093
+    §7, ADR-0140 §12). The type-name half of the identity stays the reader's own
+    declared constant after ADR-0190 §1, which supersedes ADR-0093 §7's
+    "not a configurable value" clause only far enough to admit a minted
+    discriminator beside that name — and a discriminator carries no information
+    about the source it names either.
     """
     assert _source(_reader(), _granted()).name == DEFAULT_READER_NAME
 

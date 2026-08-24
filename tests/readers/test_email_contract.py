@@ -40,7 +40,7 @@ from mbox_fixtures import NOW, envelope, facet_of, message, reader, store
 
 sys.path.insert(0, str(_Path(__file__).resolve().parent.parent / "core"))
 
-from reader_contract import GatedRead, ReaderContract, assert_conforms
+from reader_contract import GatedRead, ReaderContract, assert_conforms, declared_name_of
 
 from ai_assistant.core.errors import ReaderError
 from ai_assistant.readers import EMAIL_READER_NAME, _source
@@ -112,6 +112,25 @@ class TestEmailReaderContract(ReaderContract):
         return GatedRead(
             reader=reader(store(self._tmp, envelope(), name="gated.mbox")), gate=suspension
         )
+
+
+# --- the identity half the shared suite cannot reach (ADR-0190 §3) ----------
+
+
+def test_the_declared_half_of_the_identity_is_this_readers_own_name(tmp_path: Path) -> None:
+    """``ReaderContract`` decides §4's form; only this file can decide the type.
+
+    ADR-0190 §3 names this test in advance: the suite holds a ``Reader`` and
+    nothing to compare a prefix against, so a reader declaring a colon-bearing
+    name merely *shaped* like a discriminated identity passes there while
+    breaching §4. Here the declared half is checkable against the constant this
+    reader type declares — and the identity a mailbox reader declares is exactly
+    where a personal one would otherwise land, since ADR-0093 §7 forbids the
+    account identifier being used as one or as any part of one.
+    """
+    subject = reader(store(tmp_path, envelope(delivered_at=_IN_WINDOW)))
+
+    assert declared_name_of(subject.name) == EMAIL_READER_NAME
 
 
 # --- what an unreadable source does, and what an unreadable *message* does ---
