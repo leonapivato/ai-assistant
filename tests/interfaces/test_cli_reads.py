@@ -316,19 +316,31 @@ def test_the_listing_names_both_reasons_it_is_not_a_record_of_every_read() -> No
     """The two gaps, stated together where a user meets the command.
 
     The horizon is one (ADR-0185 §6). ADR-0185 §5a's two fault paths are the other,
-    and they are the ones a surface forgets: a recorder that raised and a
-    cancellation landing after the read began each leave a read that ran with **no
-    row**. §10 measures the milestone's exit over attempts "driven to an outcome
-    with a recorder that answered" for exactly that reason, and §5a forbids citing
-    either path as licence to leave an access unrecorded — so a surface may neither
-    hide them nor lean on them. What it can do is say so, which is what makes
-    "every read" a phrase this command never uses about itself.
+    and they are the ones a surface forgets. §10 measures the milestone's exit over
+    attempts "driven to an outcome with a recorder that answered" for exactly that
+    reason, and §5a forbids citing either path as licence to leave an access
+    unrecorded — so a surface may neither hide them nor lean on them. What it can do
+    is say so, which is what makes "every read" a phrase this command never uses
+    about itself.
+
+    **And the two are not the same shape, which the help preserves rather than
+    flattens.** A recorder that raised leaves no row. A cancellation landing after
+    the read began leaves none where it landed before the recorder call, but where
+    it landed *inside* one already in flight "whether the row exists is
+    indeterminate under ADR-0060" — so the help says the row may be missing or may
+    already be there, and says the difference is not recoverable afterwards.
+    Promising the absence would be the same assumption as promising the row.
     """
     reads_help = _flat(CliRunner().invoke(cli.app, ["reads", "--help"]).stdout)
 
-    assert "oldest attempts are dropped as it fills" in reads_help
-    assert "two faults leave no row at all" in reads_help
     assert "Show the attempts I recorded" in reads_help
+    assert "oldest attempts are dropped as it fills" in reads_help
+    # The recorder fault: no row, stated flatly.
+    assert "cannot write the record I throw the reading away" in reads_help
+    assert "nothing is written down" in reads_help
+    # The cancellation: both outcomes offered, neither claimed.
+    assert "may be missing — or may already be here" in reads_help
+    assert "not something I can tell you afterwards" in reads_help
 
 
 # --- §9/§10: the listing's bound ---------------------------------------------
@@ -411,14 +423,17 @@ def test_an_empty_page_is_never_the_claim_that_nothing_was_read(
     **Both reasons are asserted, not one.** The horizon is the obvious one; ADR-0185
     §5a's two fault paths — a recorder that raised, a cancellation landing after the
     read began — are the ones a surface forgets, and they are why "every read" is a
-    sentence this module never writes.
+    sentence this module never writes. The line says a fault **can** leave a read
+    with no row rather than that it does: on one of the two paths whether the row
+    exists is indeterminate (ADR-0060), and a screen asserting the absence would be
+    making the assumption §5a forbids in the other direction.
     """
     rendered = _listing(output, monkeypatch)
 
     assert "Nothing recorded" in rendered
     assert "not a claim that nothing was ever read" in rendered
     assert "oldest attempts are dropped as it fills" in rendered
-    assert "two faults leave no row at all" in rendered
+    assert "a fault can leave a read with no row" in rendered
 
 
 # --- ADR-0185 §2: a row renders whole ----------------------------------------
