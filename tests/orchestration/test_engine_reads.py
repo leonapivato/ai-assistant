@@ -215,7 +215,7 @@ async def test_a_read_of_the_trail_is_refused_once_shutdown_has_begun(operation:
 async def test_neither_read_changes_what_the_trail_holds(
     durable: tuple[Harness, SqliteSourceReadTrail],
 ) -> None:
-    """ADR-0186 §4 through §10: the promoted surface reads and never appends.
+    """ADR-0186 §4's reasoning one store over: this surface reads and never appends.
 
     A client that could append to the record of what its assistant had read could
     fabricate the history milestone 24's exit is measured on — the fabrication
