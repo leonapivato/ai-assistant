@@ -51,12 +51,13 @@ if TYPE_CHECKING:
 
 _AT = datetime(2026, 6, 1, tzinfo=UTC)
 
-#: A **discriminated** source identity (ADR-0190 §4) — a declared name, one ASCII
-#: colon and a 32-character minted discriminator — so this stage is driven by
-#: what a deployment's second configured calendar would declare. It read
-#: ``"calendar:work"`` before ADR-0190, which is neither of §4's two forms and
-#: which ``FakeReader`` now refuses at the seam that admits an identity.
-_SOURCE = "calendar:0f3c9d1a7b45e28c6d90fa3b17e4c852"
+#: The two halves of a **discriminated** source identity (ADR-0190 §4), so this
+#: stage is driven by what a deployment's second configured calendar would
+#: declare. It read ``"calendar:work"`` before ADR-0190, which is neither of §4's
+#: two forms.
+_DECLARED = "calendar"
+_DISCRIMINATOR = "0f3c9d1a7b45e28c6d90fa3b17e4c852"
+_SOURCE = f"{_DECLARED}:{_DISCRIMINATOR}"
 _COVERAGE = ReadCoverage(covers_until=_AT + timedelta(days=30))
 
 
@@ -257,7 +258,9 @@ async def test_the_ingestion_stage_forwards_the_readers_own_reading(
     reader never reported. That is the fabrication §2 exists to forbid, and the seam
     between the reader and the stage is the only place it is visible.
     """
-    reader = FakeReader([_proposal("a"), _proposal("b")], name=_SOURCE)
+    reader = FakeReader(
+        [_proposal("a"), _proposal("b")], name=_DECLARED, discriminator=_DISCRIMINATOR
+    )
     reading = await reader.read()
     scripted = _ScriptedReader(reading.model_copy(update={"coverage": coverage}))
     writes = _RecordingWriteStage()

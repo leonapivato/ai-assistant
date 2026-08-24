@@ -293,11 +293,12 @@ class FakeReader:
     conformance suite is.
     """
 
-    def __init__(  # noqa: PLR0913 — a script, an identity, two instants, a coverage, a facet, a failure and an id factory; each is one knob a consumer sets on its own
+    def __init__(  # noqa: PLR0913 — a script, an identity's two halves, two instants, a coverage, a facet, a failure and an id factory; each is one knob a consumer sets on its own
         self,
         proposals: Sequence[MemoryUpdateProposal] | None = None,
         *,
         name: str = DEFAULT_READER_NAME,
+        discriminator: str | None = None,
         read_at: datetime = _DEFAULT_READ_AT,
         as_of: datetime | None = None,
         coverage: ReadCoverage | None = None,
@@ -313,24 +314,44 @@ class FakeReader:
                 sequence is the distinct, explicit "this source had nothing to
                 propose", which is a **successful** reading a consumer needs to
                 exercise (ADR-0093 §8).
-            name: The identity of the configured source this reader serves, and
-                therefore the reading's ``source`` and every proposal's
-                ``reported_by``. Either of ADR-0190 §4's two forms: a bare declared
-                name (``"calendar"``) or a discriminated one
-                (``"calendar:0f3c9d1a7b45e28c6d90fa3b17e4c852"``), which is how a
-                consumer drives a second configured source of one type. A parameter
-                here and a declared constant on today's real readers — a fake whose
-                identity were hard-coded could not stand in for two readers at
-                once, which is what a consumer testing "the right identity reached
-                the right belief" needs it for. That the **declared** half is Tier
-                2 stays a *test author's* obligation, and deliberately not a
-                validator: ADR-0093 §7 rules that "no validator can tell a chosen
-                label from a personal one", and that half of §7 survives ADR-0190
-                §1's partial supersession intact. So name the producer
-                (``"calendar"``), never its source's location or the data it holds
-                (``"alice@example.com calendar"``). Nothing production reads it —
+            name: The **declared name** — the reader type's own half of the
+                identity (ADR-0190 §4): non-empty, UTF-8-encodable, equal to its
+                own ``str.strip()``, and colon-free. A parameter here and a
+                declared constant on today's real readers — a fake whose identity
+                were hard-coded could not stand in for two readers at once, which
+                is what a consumer testing "the right identity reached the right
+                belief" needs it for. That it is Tier 2 stays a *test author's*
+                obligation, and deliberately not a validator: ADR-0093 §7 rules
+                that "no validator can tell a chosen label from a personal one",
+                and that half of §7 survives ADR-0190 §1's partial supersession
+                intact. So name the producer (``"calendar"``), never its source's
+                location or the data it holds (``"alice@example.com calendar"``).
+                Nothing production reads it —
                 ``lint-imports`` keeps ``ai_assistant.testing`` out of every
                 shipping package — so the blast radius is one test's output.
+            discriminator: The deployment-minted half, for a consumer driving a
+                **second configured source of one type** — 32 characters drawn
+                from ``0123456789abcdef``, or ``None`` (the default) for a source
+                holding its type's bare declared name. :attr:`name` is then
+                ``f"{name}:{discriminator}"``, which is ADR-0190 §4's discriminated
+                form.
+
+                **Two parameters rather than one identity string, and ADR-0190 §1
+                is the shape**: "The type-name half stays the sensor's, declared
+                and not configurable. What a deployment supplies is the
+                discriminator alone." §4 guards the two separately for that reason
+                — a seam taking a discriminator on its own is bound "whether or not
+                a whole identity passes through it" — and composing here is what
+                makes :attr:`name` one of §4's two forms **by construction**.
+
+                It also settles a case no single string could. A discriminator's
+                spelling is not distinctive: ``"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"``
+                is a perfectly conforming *declared name* under §4, and a seam
+                given one identity string cannot tell it from a discriminator
+                supplied without its prefix — so it must either refuse a conforming
+                reader or admit what §3 forbids, which is "never a discriminator on
+                its own". Split, neither happens: a declared name is whatever it
+                is, and a discriminator can only arrive as one.
             read_at: The instant this fake pretends it acquired the source's bytes
                 — our clock, always present because it is always knowable.
             as_of: A reading-wide instant the *source* declares, or ``None`` where
@@ -379,19 +400,22 @@ class FakeReader:
                 a minted id: a blank mint fails rather than becoming a key.
 
         Raises:
-            ValueError: If ``name`` is neither of ADR-0190 §4's two forms, if
-                ``facet``'s stamp is not the one this fake's readings carry (a
-                ``ValidationError``, which is a ``ValueError``), or if any scripted
-                proposal is an ``EpisodicMemory``, is outside the ``ATTESTED``
-                band, is attested to a source other than ``name``, or carries no
+            ValueError: If ``name`` is not a declared name or ``discriminator`` is
+                not a discriminator (ADR-0190 §4), if ``facet``'s stamp is not the
+                one this fake's readings carry (a ``ValidationError``, which is a
+                ``ValueError``), or if any scripted proposal is an
+                ``EpisodicMemory``, is outside the ``ATTESTED`` band, is attested
+                to a source other than this reader's identity, or carries no
                 rationale. Each is a clause of the ``Reader`` contract, so allowing
                 it would only move the failure to ``read()`` time — or, for the
                 attribution, to a stored belief attributed to a reader that never
                 reported it — far from the mistake. The canonical fake must not be
                 configurable into failing its own conformance suite.
         """
-        _refuse_malformed_identity(name)
-        self._name = name
+        _refuse_malformed_declared_name(name)
+        if discriminator is not None:
+            _refuse_malformed_discriminator(discriminator)
+        self._name = name if discriminator is None else f"{name}:{discriminator}"
         self._read_at = read_at
         self._as_of = as_of
         self._coverage = coverage
@@ -528,89 +552,79 @@ def _synthesise(
     )
 
 
-def _looks_like_a_discriminator(value: str) -> bool:
-    """Whether ``value`` is exactly a discriminator's width and alphabet.
+def _refuse_malformed_declared_name(name: str) -> None:
+    """Refuse a value that is not a declared name (ADR-0190 §4).
 
-    Asked in both directions (ADR-0190 §4): of the half after a colon, which must
-    be one, and of a colon-free identity, which must **not** be — §3 rules that
-    ``Reader.name`` is "never a discriminator on its own".
-    """
-    return len(value) == _DISCRIMINATOR_WIDTH and set(value) <= _DISCRIMINATOR_ALPHABET
+    A declared name is non-empty, UTF-8-encodable, equal to its own
+    ``str.strip()``, and **contains no colon** — and that is the whole of it. Its
+    *spelling* is otherwise unconstrained, so a reader type whose declared name
+    happens to be 32 hexadecimal characters is conforming and is admitted here;
+    nothing decidable over one string tells such a name from a discriminator
+    supplied without its prefix, which is why the discriminator arrives through
+    its own parameter instead of being read out of this one.
 
-
-def _refuse_malformed_identity(name: str) -> None:
-    """Refuse an identity that is neither of ADR-0190 §4's two forms.
-
-    This constructor is **a seam that admits a source identity** (ADR-0190 §4), so
-    it refuses rather than repairs. The version before ADR-0190 *stripped*, on the
-    ground that ``Attestation.reported_by`` is an ``Identifier`` — whose validator
-    returns ``value.strip()`` — while ``SourceReading.source`` is
-    ``EncodableText``, which does not, so ``" calendar "`` would otherwise produce
-    a reading attributed to ``"calendar"`` by a producer calling itself
-    ``" calendar "``. §4 closes that hole at the declaring end instead, by ruling a
-    declared name canonical, and a fake that quietly canonicalised would hide from
-    its author the exact value §4 refuses.
-
-    Refusing is not optional here for the colon-bearing case: with
-    ``ReaderContract``'s identity clause in place, a fake constructed as
-    ``FakeReader(name="calendar:ABC")`` would be configurable into failing its own
-    conformance suite, which is the one thing this fake may never be.
-
-    **One refusal here is not one ``ReaderContract`` makes**, and the asymmetry is
-    ADR-0190 §3's own division rather than an inconsistency. §3 rules that
-    ``Reader.name`` is "never a discriminator on its own", and a colon-free
-    32-character hexadecimal value is decidably one — so this seam refuses it. The
-    suite does not: §3 enumerates the checks it makes "decidably, over the value
-    alone" and this is not among them, because the suite's remit stops where the
-    prefix check does. A *reader* declaring such a value is caught by the concrete
-    reader's test, which compares the declared half against the type's own name.
+    **This seam refuses rather than repairs.** The version before ADR-0190
+    *stripped*, on the sound ground that ``Attestation.reported_by`` is an
+    ``Identifier`` — whose validator returns ``value.strip()`` — while
+    ``SourceReading.source`` is ``EncodableText``, which does not, so
+    ``" calendar "`` would otherwise produce a reading attributed to
+    ``"calendar"`` by a producer calling itself ``" calendar "``. §4 closes that
+    hole at the declaring end instead, by ruling a declared name canonical, and a
+    fake that quietly canonicalised would hide from its author the exact value §4
+    refuses.
 
     Raises:
-        ValueError: If ``name`` is not a bare declared name — non-empty,
-            UTF-8-encodable, equal to its own ``str.strip()``, colon-free, and not
-            itself a discriminator — or that name, one ASCII colon, and exactly 32
-            characters drawn from ``0123456789abcdef``.
+        ValueError: If ``name`` is empty or blank, is not equal to its own
+            ``str.strip()``, contains a colon, or is not UTF-8-encodable.
     """
-    declared, colon, discriminator = name.partition(":")
-    if not declared or declared != declared.strip():
+    if not name or name != name.strip():
         msg = (
             f"a reader's declared name is non-empty and equal to its own str.strip(), "
-            f"got {declared!r} from {name!r}; a padded one puts one source into the "
-            f"store under two spellings, since Attestation.reported_by strips and "
+            f"and {name!r} is not; a padded one puts one source into the store under "
+            f"two spellings, since Attestation.reported_by strips and "
             f"SourceReading.source does not (ADR-0190 §4)"
+        )
+        raise ValueError(msg)
+    if ":" in name:
+        msg = (
+            f"a declared name contains no colon, and {name!r} does; the colon is what "
+            f"separates a declared name from a discriminator, and admitting one here "
+            f"would make that split conventional rather than total (ADR-0190 §4). "
+            f"Pass the discriminator as `discriminator=` instead"
         )
         raise ValueError(msg)
     try:
         name.encode("utf-8")
     except UnicodeEncodeError as exc:
         msg = (
-            f"a source identity is UTF-8-encodable, and {name!r} is not; neither "
+            f"a declared name is UTF-8-encodable, and {name!r} is not; neither "
             f"SourceReading.source nor Attestation.reported_by could carry it "
             f"(ADR-0190 §4)"
         )
         raise ValueError(msg) from exc
-    if not colon:
-        if _looks_like_a_discriminator(declared):
-            msg = (
-                f"a source identity is never a discriminator on its own (ADR-0190 §3), "
-                f"and {name!r} is one: a bare 32-character hexadecimal value costs "
-                f"ADR-0093 §7's 'declared by the sensor' half entirely and leaves a "
-                f"surface nothing to render but 32 hex characters (ADR-0190 §4)"
-            )
-            raise ValueError(msg)
-        return
-    if ":" in discriminator:
-        msg = (
-            f"a source identity carries at most one colon, and {name!r} carries more; "
-            f"a declared name may contain none, which is what makes the split total "
-            f"rather than conventional (ADR-0190 §4)"
-        )
-        raise ValueError(msg)
-    if not _looks_like_a_discriminator(discriminator):
+
+
+def _refuse_malformed_discriminator(discriminator: str) -> None:
+    """Refuse a value that is not a discriminator (ADR-0190 §4).
+
+    §4's *first* admitting clause, which binds "a seam that takes a discriminator
+    on its own — a configuration field, a mint's output — whether or not a whole
+    identity passes through it". It exists separately from the identity clause
+    because §1 rules that what a deployment supplies is the discriminator alone,
+    so the value a deployment types is guarded before anything composes an
+    identity out of it.
+
+    Raises:
+        ValueError: If ``discriminator`` is not exactly 32 characters drawn from
+            ``0123456789abcdef``.
+    """
+    if len(discriminator) != _DISCRIMINATOR_WIDTH or not set(discriminator) <= (
+        _DISCRIMINATOR_ALPHABET
+    ):
         msg = (
             f"a discriminator is exactly {_DISCRIMINATOR_WIDTH} characters drawn from "
-            f"'0123456789abcdef', got {discriminator!r}; an uppercase or short one is "
-            f"not an identity at all (ADR-0190 §4)"
+            f"'0123456789abcdef', got {discriminator!r}; an uppercase, short or "
+            f"otherwise-spelled one is not an identity at all (ADR-0190 §4)"
         )
         raise ValueError(msg)
 
