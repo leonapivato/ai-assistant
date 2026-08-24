@@ -170,23 +170,36 @@ ADR-0017 §4's honest accounting and a measurement.
 > with no terminator is not a reply, whatever octets arrived, and reporting it as
 > one would let a truncated stream stand in for an answer.
 
-> **Normative.** `read_line` bounds what it will buffer for one line at the single
-> ceiling `core` states for this contract, and raises rather than growing past it.
+> **Normative.** `read_line` bounds what it will buffer for one line at that same
+> ceiling and raises `TransportError` rather than growing past it — a far end
+> sending an unterminated line is buying memory from a client that is holding a
+> credential, which is a fact about the connection and so is that type's subject.
 
-> **Normative.** `read` takes a `limit` that is an integer in `1..ceiling`
-> inclusive, where the ceiling is that same one `core` states. Any other value —
-> negative, zero, or larger — is refused rather than interpreted, so no spelling of
-> `limit` means "read until end of stream". It returns at least one and at most
-> `limit` octets, or empty bytes at end of stream; a short read is ordinary and is
-> not an error.
+> **Normative.** `read` takes a `limit` that is an integer in `1..4096` inclusive.
+> It returns at least one and at most `limit` octets, or empty bytes at end of
+> stream; a short read is ordinary and is not an error.
+
+> **Normative.** A `limit` outside that range — zero, negative, or larger — raises
+> `ValueError`, so no spelling of `limit` means "read until end of stream". It is
+> `ValueError` and not `TransportError` because the two have different subjects: a
+> `TransportError` says what happened to the connection, and an out-of-domain limit
+> is the caller's own defect and says nothing about it. The contract states
+> behaviour for integer values; a non-integer is a typing defect the gate catches,
+> and no implementation is obliged to re-check it at runtime.
 
 > **Normative.** `read` and `read_line` consume one shared cursor over one stream:
 > octets returned by either are never returned again by the other.
 
-> **Normative.** The buffering ceiling is one named constant in `core`, not a
-> per-implementation choice, so the canonical fake and the production implementation
-> refuse the same inputs and a consumer tested against one behaves against the
-> other.
+> **Normative.** The buffering ceiling is **4096 octets**, held as one named
+> constant in `core` rather than chosen per implementation, so the canonical fake
+> and the production implementation refuse the same inputs and a consumer tested
+> against one behaves against the other. For `read_line` it is counted **inclusive
+> of the terminator**.
+
+> **Normative.** 4096 is the value `ai_assistant.tools.egress` already opens its
+> connections with, so nothing about what the seam accepts moves. Changing it is a
+> change to `core` surface and takes an ADR; the conformance suites pin the exact
+> boundary at 4096 and at 4097.
 
 > **Normative.** `close` is idempotent, and it suppresses and logs an ordinary
 > release failure rather than raising it: a channel that cannot be released reports
@@ -196,6 +209,18 @@ ADR-0017 §4's honest accounting and a measurement.
 > the clause above and is governed by ADR-0060 §1, which binds every Protocol in
 > `core/protocols.py`: `close` makes the channel safe and then re-raises. It never
 > absorbs such a cancellation and never converts it into a return.
+
+> **Normative.** An `open_channel` cancelled from outside after it has acquired a
+> socket and before it has returned a channel releases what it acquired, and then
+> re-raises. No channel reached the caller, so nothing else can ever release it,
+> and ADR-0060 §1's first clause is unsatisfiable at this seam any other way.
+
+> **Normative.** The `OutboundTransport` conformance suite carries a deterministic
+> cancellation case in ADR-0060 §3's shape — the call held open *inside* the
+> resource it acquired, cancelled there, and the resource observed afterwards —
+> built on `ai_assistant.testing`'s suspension scaffolding rather than on a sleep.
+> A case asserting only that `CancelledError` escaped does not discharge this
+> clause.
 
 > **Normative.** A new `TransportError` in `core/errors.py` is what
 > `open_channel`, `read_line`, `read`, `write` and `start_tls` raise when a
@@ -663,6 +688,12 @@ about whether they are captured.
 > lane reads the arm as establishing that such a tool could not have opened a
 > connection by some other route.
 
+> **Normative.** The undesignated probe carries its own execution marker, recorded
+> at the point it attempts to acquire a route, and the arm asserts that marker
+> fired **before** it accepts the probe's zero transport records. A probe that was
+> never registered, was not selected, or was reduced to a no-op records zero for a
+> reason that has nothing to do with the property being measured.
+
 > **Normative.** The arm also instruments **every** creator the running event loop
 > exposes that can reach off the device — at minimum `create_connection` and
 > `create_datagram_endpoint` — so that an attempt made from inside the arm fails
@@ -688,8 +719,15 @@ about whether they are captured.
 > nothing.
 
 > **Normative.** Every assertion in that arm reads a record the arm's own
-> instruments made — the fake's, or the connection instrument's. No assertion in it
-> is a source scan, an import-graph check or a text search.
+> instruments made — the fake's, the loop instruments', or the probe's execution
+> marker. No assertion in it is a source scan, an import-graph check or a text
+> search.
+
+> **Normative.** Every instrument this arm relies on owes a positive control
+> demonstrating it is live in the composition the zero was measured in, and a zero
+> read from an uncontrolled instrument discharges no part of the exit. The clauses
+> above are that rule applied to the four instruments this arm has; a lane adding a
+> fifth owes it a control too, without a further ADR.
 
 **The negative assertion measures the handout, and the arm now says so in its own
 text.** Adversarial review of this ADR's first round showed why the wider reading
@@ -728,6 +766,17 @@ ADR-0084 §1.
 and `loop.sock_connect` over one, are below every creator the arm wraps. They stay
 the nets' ground and #1545's stated residue, and §7's third clause governs what may
 be claimed about them: nothing.
+
+**The general clause above is the one this section kept rediscovering, and it is
+marked for that reason.** Rounds 1 through 4 of this ADR's review each found the
+same defect one layer further in: the fake could read zero because nothing reached
+it; the loop recorder could read zero because it was attached to the wrong loop;
+one creator's calibration said nothing about another creator's wrapper; and the
+probe itself could read zero because it never ran. Four repairs to four
+instruments would leave the fifth instrument unguarded, and stating the rule only
+in prose would leave it binding nothing at all under ADR-0089 §3 — which is
+precisely the finding round 3 raised against an earlier prose version of this same
+sentence.
 
 **The positive control is not ceremony.** An assertion that a recorder saw nothing
 is satisfied by a recorder nothing could ever reach, and a harness that mis-wires
@@ -802,8 +851,9 @@ deferred with reasons, one of which has since expired.
 
 - **New `core` surface:** two Protocols in `core/protocols.py`
   (`OutboundTransport`, `ByteChannel`), one pydantic model in `core/types.py`
-  (`TransportEndpoint`), and an error in `core/errors.py` for what the capability
-  refuses. Two Protocols mean **two triads** in the implementing lane, and
+  (`TransportEndpoint`), a `TransportError` in `core/errors.py` for what the
+  capability refuses, and one named buffering-ceiling constant fixed at 4096
+  octets. Two Protocols mean **two triads** in the implementing lane, and
   `tests/core/test_protocol_triad.py` enforces that mechanically.
 - **A Protocol change is a breaking change** (golden rule 5). This ADR is ratified
   and merged as its own PR before anything implements against it (ADR-0015 §5), and
