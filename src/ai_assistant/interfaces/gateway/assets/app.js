@@ -1551,42 +1551,47 @@ const REFUSED_AT_THE_DOOR =
 // **And a refusal that is not a session's ending**, which adversarial review found on
 // round 5. `ASK_ABANDONED` opens by saying "the question was sent and nothing here read
 // a reply" — false of *every* refusal head, because a status line is a reply — and goes
-// on to say the assistant "may have carried it out", which for some of those statuses is
+// on to say the assistant "may have carried it out", which for most of those statuses is
 // known to be false. ADR-0139 §4 is the rule in both directions: an act is reported as
 // one of exactly three outcomes "and never as either of the other two", so a known
 // not-landed act announced as not known breaches it exactly as the reverse does. This
 // page already says so of itself, one surface over, in `relay`: "reporting a landed act
 // as 'not known' is forbidden by the same clause that forbids the reverse".
 //
-// **What separates the two sentences is whether the engine could have been reached**,
-// and on the two ask paths that is decided by the status alone for three of them:
+// **What separates the sentences is whether the engine could have been reached, and the
+// small set is the one that says yes.** The first draft of this enumerated the statuses
+// decided *before* the engine and let everything else fall through to "not known".
+// Adversarial review then spent two rounds handing back statuses that list had missed —
+// `503` on round 5, `413` on round 7, the latter written by `read_request`'s parser and
+// so absent from `_REFUSAL_STATUS` entirely, which is where the list had been derived
+// from. That is a table this page cannot keep in step with a file it does not import,
+// and the fix is to stop keeping it.
 //
-// - `421` — `HOST_NOT_BOUND`, taken by `_check_door` before a session is even looked up.
-// - `403` — `ORIGIN_NOT_OWN` and ADR-0174 §4's `DEVICE_NOT_LISTED`, both taken there too.
-//   The *other* `403`s `server.py` writes — ADR-0177 §3's two connection refusals — are
-//   gated on `_CONNECTION_PATHS`, which neither ask path is, so they are not reachable
-//   here and the status stays decisive on this surface.
-// - `503` — `hub-connection-ceiling`. `_relayed` raises it out of `_take_hub_slot()`
-//   *before* it awaits `call()`, so nothing was relayed.
+// **So the page enumerates the other side, which is closed and stays closed.** A refusal
+// head is written after the relay began only by `_relay_fault`, the one function
+// ADR-0168 §9 makes responsible for a failed relay — "a transport failure
+// distinguishable from a request the hub received and declined" — and it writes exactly
+// three statuses. Everything else the two ask paths can answer with is decided before
+// `_relayed` awaits `call()`: the door's `421` and `403`, the parser's `413` and
+// `malformed-request`, `_ceiling`'s `503`, and any status a later lane refuses with
+// before it relays. So the default is "no turn ran", and it is right by construction
+// rather than by a list being complete.
 //
-// `401` and `409` belong to the same class and never reach here: the branch above takes
-// them, because ADR-0182 §6 gives them a remedy as well as a sentence.
-//
-// **And three statuses are deliberately excluded, each because it is not proof.** `400`
-// is shared — `malformed-request` is refused before the call and `rejected` is a
-// `ValueError` out of it — so it says nothing either way. `502` is `hub-unreachable`,
-// and a `TransportError` can be raised after the request was written, so the turn may
-// well have run. `422` is `assistant-declined`, which ADR-0168 §9 defines as "a request
-// the hub **received** and declined". Guessing in this direction is the expensive one:
-// telling an owner no turn ran when one did is what sends them to ask it a second time.
-const REFUSED_BEFORE_THE_ENGINE = new Set([403, 421, 503]);
+// **The one coupling this keeps is nameable and tested.** A lane adding a *post*-relay
+// status would add it to `_relay_fault`, because that is what §9 makes that function
+// for, and `test_bundle.py` reads these three back out of it by calling it — so the two
+// halves cannot drift without the gate saying so. `400` is here because `_relay_fault`
+// writes it for a `ValueError` out of the call, even though the parser writes the same
+// status before one: shared, therefore not proof, therefore not claimed.
+const RELAY_FAULT_STATUS = new Set([400, 422, 502]);
 
 // **And the one status that proves the opposite half**, which adversarial review found
 // on round 6. `422` is `assistant-declined`, and ADR-0168 §9 defines it as "a request
 // the hub **received** and declined" — the very distinction §9 requires the gateway to
-// keep. So it settles the same question the set above settles, in the other direction:
-// the assistant was reached. Grouping it with `400` and `502` said the status said
-// nothing, and the status says a great deal.
+// keep. So it is the one member of `RELAY_FAULT_STATUS` that is not ambiguous at all:
+// it is proof the assistant was reached, and is taken before that set is consulted.
+// Grouping it with `400` and `502` said the status said nothing, and it says a great
+// deal.
 //
 // It is decisive on these two paths only. `server.py` writes `422` in one other place —
 // `_connection_fault`'s `identity-unusable` — and that serves ADR-0151's connection
@@ -1629,20 +1634,17 @@ const ASK_REFUSED_DECLINED =
   "Nothing was re-sent and nothing was cancelled — the assistant was not told to stop. " +
   "Asking again asks a new question rather than retrying that one.";
 
-// Which of the three a refusal head earns, and the whole enumeration in one place so
-// that a status can be checked against it rather than hunted for in a branch. Every
-// status the two ask paths can answer with is here or is deliberately not: `401` and
-// `409` are taken by the re-entry branch above, and `400` and `502` fall through because
-// neither is proof — `400` is shared between `malformed-request` and `rejected`, and a
-// `TransportError` can be raised after the request was written.
+// Which of the three a refusal head earns, and the whole enumeration in one place.
+// `401` and `409` never arrive here — the re-entry branch above takes them, because
+// ADR-0182 §6 gives them a remedy as well as a sentence.
 function refusalAbandoned(status) {
-  if (REFUSED_BEFORE_THE_ENGINE.has(status)) {
-    return ASK_REFUSED_UNRUN;
-  }
   if (status === DECLINED_BY_THE_ASSISTANT) {
     return ASK_REFUSED_DECLINED;
   }
-  return ASK_REFUSED_UNREAD;
+  if (RELAY_FAULT_STATUS.has(status)) {
+    return ASK_REFUSED_UNREAD;
+  }
+  return ASK_REFUSED_UNRUN;
 }
 
 // The control, and the line beside it. Built here rather than shipped in `index.html`

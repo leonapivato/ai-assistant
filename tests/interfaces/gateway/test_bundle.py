@@ -20,6 +20,7 @@ from typing import Final
 
 import pytest
 
+from ai_assistant.core.errors import AssistantError
 from ai_assistant.core.types import (
     DEFAULT_NOTIFICATION_REACH,
     BeliefBand,
@@ -29,7 +30,12 @@ from ai_assistant.core.types import (
     NotificationReach,
 )
 from ai_assistant.interfaces.gateway.records import RefusalCondition
-from ai_assistant.interfaces.gateway.server import _REFUSAL_STATUS, packaged_bundle
+from ai_assistant.interfaces.gateway.server import (
+    _REFUSAL_STATUS,
+    _relay_fault,
+    packaged_bundle,
+)
+from ai_assistant.wire.errors import TransportError
 
 _ROOT = Path(__file__).resolve().parents[3] / "src" / "ai_assistant" / "interfaces" / "gateway"
 _ASSETS = _ROOT / "assets"
@@ -1356,18 +1362,20 @@ def test_a_wait_stopped_after_any_other_refusal_head_says_a_reply_was_read() -> 
     script = _code("app.js")
     abandon = _functions(script)["abandonAsk"]
 
-    assert "const REFUSED_BEFORE_THE_ENGINE = new Set([403, 421, 503]);" in script
-    # Every status in the set is one the gateway really answers with, and none of the
-    # three excluded ones crept in — asserted against `server.py` rather than restated.
-    decided = {403, 421, 503}
-    answered = {status for status, _ in _REFUSAL_STATUS.values()}
-    assert {403, 421} <= answered
-    for shared in (400, 502, 422):
-        assert shared not in decided, shared
-    # The session pair is the same class and is taken by the branch above, so it must not
-    # be duplicated here — two places saying "no turn ran" would be two places to drift.
+    assert "const RELAY_FAULT_STATUS = new Set([400, 422, 502]);" in script
+    # **The set is read back out of `_relay_fault` by calling it**, which is the whole
+    # point of enumerating this side rather than the other: a lane adding a post-relay
+    # status adds it there, because ADR-0168 §9 makes that function what classifies a
+    # failed relay, and this fails until the page agrees.
+    declared = {int(one) for one in re.findall(r"\d+", _js_set(script, "RELAY_FAULT_STATUS"))}
+    assert declared == relayed_statuses()
+    # And the statuses decided *before* the relay are outside it — including the parser's
+    # `413`, which cost round 7 and which `_REFUSAL_STATUS` never holds at all. That is
+    # why deriving the other side from that table could not work, and why this test reads
+    # the parser's own status rather than a list.
+    assert 413 not in declared
     for taken in SESSION_REFUSAL_STATUSES:
-        assert taken not in decided, taken
+        assert taken not in declared, taken
 
     # Taken for every refusal head, after the session branch and before the black hole's.
     assert "if (waiting.refusedWith !== null) {" in abandon
@@ -1416,17 +1424,27 @@ def test_a_declined_turn_is_announced_as_one_the_assistant_did_receive() -> None
     choose = _functions(script)["refusalAbandoned"]
 
     assert "const DECLINED_BY_THE_ASSISTANT = 422;" in script
+    assert _relay_fault(AssistantError("no")).status == 422
     assert "if (status === DECLINED_BY_THE_ASSISTANT) {" in choose
     assert "return ASK_REFUSED_DECLINED;" in choose
-    # The order is the argument: the pre-engine set is asked first, and what falls past
-    # both is the ambiguous remainder rather than a fourth case nobody wrote.
-    assert choose.index("REFUSED_BEFORE_THE_ENGINE.has(status)") < choose.index(
-        "status === DECLINED_BY_THE_ASSISTANT"
+    # The order is the argument. `422` is itself a member of `RELAY_FAULT_STATUS`, so it
+    # has to be taken first or the ambiguous sentence would swallow the one status in
+    # that set which is not ambiguous at all.
+    assert choose.index("status === DECLINED_BY_THE_ASSISTANT") < choose.index(
+        "RELAY_FAULT_STATUS.has(status)"
     )
-    assert choose.rstrip().endswith("return ASK_REFUSED_UNREAD;\n}")
-    # And it is the whole enumeration: three answers, and nothing else decides one.
+    # And what falls past both is the default rather than a fourth case nobody wrote: a
+    # refusal written before the relay began, which is every status but these three.
+    assert choose.rstrip().endswith("return ASK_REFUSED_UNRUN;\n}")
     assert choose.count("return ") == 3
     assert script.count("refusalAbandoned(") == 2
+    # The two statuses that cost rounds 5 and 7 land on that default, and so does the
+    # parser's `413` — the one no table derived from `_REFUSAL_STATUS` could have held.
+    for unrun in (403, 421, 503, 413, 429, 404):
+        assert unrun not in relayed_statuses(), unrun
+    # `422` is in that set and is still not ambiguous, which is the case the ordering
+    # above exists for.
+    assert 422 in relayed_statuses()
 
     # What it says, and the two things it may not say.
     assert "The assistant did receive that question and declined it" in script
@@ -2408,6 +2426,31 @@ def _catch_blocks(script: str) -> list[str]:
             index += 1
         blocks.append(script[opened.end() : index])
     return blocks
+
+
+def _js_set(script: str, name: str) -> str:
+    """The literal text a named ``new Set([...])`` declaration carries.
+
+    Read by name rather than by a bare digit search so that a second table appearing
+    in the file cannot answer a question asked about this one.
+    """
+    opened = script.index(f"const {name} = new Set([")
+    return script[opened : script.index("]);", opened)]
+
+
+def relayed_statuses() -> set[int]:
+    """Every status :func:`_relay_fault` writes, by calling it.
+
+    ADR-0168 §9 makes that function what classifies a failed relay, so this is the
+    closed set of statuses a refusal head can carry that were written *after* the
+    gateway began relaying the turn. The page enumerates this side precisely because
+    it is closed; the other side is not, and two review rounds were spent proving it.
+    """
+    return {
+        _relay_fault(TransportError("gone")).status,
+        _relay_fault(AssistantError("no")).status,
+        _relay_fault(ValueError("bad")).status,
+    }
 
 
 def _timeouts(script: str) -> list[str]:
