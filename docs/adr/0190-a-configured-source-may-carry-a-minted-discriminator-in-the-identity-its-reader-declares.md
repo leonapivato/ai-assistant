@@ -198,11 +198,28 @@ decides all three." They are decided here.
 > docstring in the same change**, and may not land one against a sentence that
 > forbids it. No lane may land a discriminated identity earlier by any other route.
 
-> **Normative.** `ReaderContract`'s two identity clauses — that the declared
-> identity is non-empty, and that it is stable across calls — are **unchanged and
-> still bind**. Neither is disturbed by a discriminator: an identity assigned once
-> at configuration cannot move under a read, which is the property that clause
-> exists to pin. The suite gains no clause from this ADR.
+> **Normative.** `ReaderContract`'s two existing identity clauses — that the
+> declared identity is non-empty, and that it is stable across calls — are
+> **unchanged and still bind**. Neither is disturbed by a discriminator: an identity
+> assigned once at configuration cannot move under a read, which is the property
+> that clause exists to pin.
+
+> **Normative.** The **suite gains a clause**, in the same change that corrects the
+> docstring: `ReaderContract` asserts that `Reader.name` is one of §4's two forms —
+> that it contains no colon, or contains exactly one colon whose suffix is exactly
+> 32 characters drawn from `0123456789abcdef`. The canonical `FakeReader` in
+> `ai_assistant.testing` is verified through that suite like every other subject.
+> `CONTRIBUTING.md` → "Adding a Protocol" governs: "The triad is what a Protocol
+> *change* is measured against too — extend the suite in the same change, so the new
+> obligation is enforced rather than assumed."
+
+> **Normative.** What that clause **cannot** reach is that the part before the colon
+> is the reader type's own declared name. The suite holds a `Reader` and nothing to
+> compare its prefix against, so a reader declaring a colon-bearing name that happens
+> to be shaped like a discriminated one passes it while breaching §4. That is the
+> **concrete reader's test**, and it is named here so its lane writes it — the same
+> division `reader_contract.py` already makes for the three §8 obligations a generic
+> suite cannot decide.
 
 > **Normative.** No `core/types.py` change is owed. An identity is carried as
 > `Identifier` — non-blank, stripped, UTF-8-encodable — and both of §4's two forms
@@ -354,8 +371,12 @@ else**.
   the `Settings` shape that carries it is the registry's, since a deployment with one
   configured source per type never writes one (ADR-0189 §8, ADR-0093 §7a). Fires with
   the registry.
-- **`Reader.name`'s docstring correction** (§3). Fires with that same lane, or with
-  a contract lane that reaches `core/protocols.py` earlier, whichever comes first.
+- **`Reader.name`'s docstring correction and the `ReaderContract` clause that pins
+  §4's two forms** (§3), together with the concrete reader's test for the half the
+  suite cannot reach. One change, not three: `CONTRIBUTING.md` → "Adding a Protocol"
+  requires the suite extended in the same change as the obligation. Fires with the
+  lane that admits a discriminated identity, or with a contract lane that reaches
+  `core/protocols.py` earlier, whichever comes first.
 - **The source registry, the display label's configuration, and the client surface
   for more than one configured source.** Unchanged and still ADR-0189 §8's, with
   ADR-0093 §11's trigger unfired. This ADR removes a gate and supplies none of them.
