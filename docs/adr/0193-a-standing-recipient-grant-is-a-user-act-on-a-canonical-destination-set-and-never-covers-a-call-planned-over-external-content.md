@@ -212,13 +212,121 @@ under §3, and **egress call** carries ADR-0148's meaning unchanged.
 > wholesale erase. An `ActionPolicy` implementation is given the query face and
 > never the store.
 
+> **Normative.** The surface is exactly the following, and a contract that adds a
+> member, widens an argument or changes a return is changing this decision rather
+> than implementing it. The block is display, not a mark (ADR-0089 §2); the
+> clauses below it are the obligations.
+
+```python
+class RecipientGrant(BaseModel):                       # core/types.py
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    id: DurableIdentifier
+    tool: ToolDefinition                    # by value, detached (§1)
+    account: BoundAccount                   # by value; identity *and* reference
+    destinations: tuple[CanonicalDestination, ...]   # non-empty, no duplicates, ordered
+    decided_at: UtcInstant
+    expires_at: UtcInstant                  # required; no unbounded spelling (§9)
+    revokes: DurableIdentifier | None = None
+
+
+class RecipientGrants(Protocol):                       # core/protocols.py
+    async def covering(self, request: ActionRequest) -> RecipientGrant | None: ...
+
+
+class RecipientGrantStore(Protocol):                   # core/protocols.py
+    async def record(self, grant: RecipientGrant) -> str: ...
+    async def covering(self, request: ActionRequest) -> RecipientGrant | None: ...
+    async def get(self, grant_id: str) -> RecipientGrant | None: ...
+    async def standing(self) -> list[RecipientGrant]: ...
+    async def recent(self, *, limit: int = 50) -> list[RecipientGrant]: ...
+    async def export(self) -> list[RecipientGrant]: ...
+    async def clear(self) -> int: ...
+```
+
+> **Normative.** `covering` takes the whole `ActionRequest` and returns the
+> **record** rather than a boolean, so the caller can name what authorised the
+> `ALLOW` it is about to author. It returns the live grant matching **four** of
+> §3's five comparisons — liveness, tool equality by value, account equality by
+> value, and containment of the request's canonical destination set — and `None`
+> where none matches. `None` means exactly that and never that the store could not
+> be read; `RecipientGrantError` says the second. A request whose `egress_binding`
+> is `None` is answered `None`.
+
+> **Normative.** `covering` does **not** read `planned_with_external_content`, and
+> §4's bar is not stated on this seam. That clause is an obligation of the
+> `ActionPolicy` contract — ADR-0181 §5's ninth clause puts the neighbouring one
+> there in terms — so the policy applies it to `covering`'s answer, and §3's
+> coverage is the conjunction of the two. A safety rule stated in both places
+> would be two statements to keep in step, and the one that drifted would be the
+> one nobody was reading.
+
+> **Normative.** `covering` is the **only** member on `RecipientGrants`. A policy
+> asks about the one request it is ruling on; a policy that could enumerate the
+> store is one that could log or leak the user's recipient set, which is ADR-0097
+> §3's argument for keeping `SourceGrants` at one member, read one store over.
+> `standing` and `recent` are on the wider face, for the surface that shows the
+> user what they have granted.
+
+> **Normative.** `get` answers by id **without** regard to liveness, and it is a
+> separate member for that reason: §6's `record` check and §11's rendering both
+> need a record a `covering` read would decline to return. It is on the store face
+> alone, so no policy holds it.
+
+> **Normative.** Every query returns a **detached snapshot** — the list, the
+> records in it, and everything mutable those reach — on ADR-0018 §3's rule as
+> ADR-0021 §4 applies it to a second store. `recent` is ordered by `decided_at`
+> descending, ties broken by `id` ascending, and `limit` must be strictly
+> positive: a non-positive value raises `ValueError` rather than being clamped or
+> passed through, for the reason ADR-0021 §4 gives — `LIMIT ?` against SQLite
+> turns `-1` into no limit at all, and this is a Tier 1 store.
+
+> **Normative.** `standing` returns every **live** grant and `export` returns
+> every record, live or not; `export` is what discharges ADR-0004 §6's
+> portability obligation for this store, so it may omit nothing.
+
+> **Normative.** Every member is cancellable under `core/protocols.py`'s
+> cancellation clause (ADR-0060) and observes no caller-owned container
+> (ADR-0065), as the neighbouring store Protocols do.
+
 > **Normative.** The store is **append-only**. A grant is never edited, narrowed,
 > re-scoped or extended in place; changing what a user has authorised is a
 > revocation followed by a new grant, and both records are kept (ADR-0097 §2's
 > shape, read one store over).
 
 > **Normative.** Ids and instants are supplied by the caller that records, as
-> `PermissionDecision`'s and `SourceGrant`'s are. A store mints no id.
+> `PermissionDecision`'s and `SourceGrant`'s are. A store mints no id and reads no
+> clock on the write path.
+
+> **Normative.** `record` is **write-once and atomic**, on `AuditTrail.record`'s
+> and `SourceGrantStore.record`'s shape and for their reason. Re-recording an id
+> already present raises rather than overwriting; the duplicate-id check, the
+> revocation invariants and the append are **one** operation, not a read followed
+> by a write, so two concurrent writes cannot both observe the store as they found
+> it. It stores a detached, validated snapshot, recursively over reachable state,
+> and never retains the caller's object.
+
+> **Normative.** A **revoking** record transcribes verbatim every field of the
+> grant it revokes except `id`, `decided_at` and `revokes`, and `record` refuses it
+> unless the named grant is present, is itself a granting record, is not already
+> revoked, and matches every transcribed field. A revocation is **never refused for
+> its timestamp**, including one that predates the grant it revokes, for the reason
+> `SourceGrantStore.record` gives: `decided_at` is caller-supplied and this store
+> reads no clock on the write path, so a host clock corrected backwards would
+> otherwise make a grant permanently unrevokable.
+
+> **Normative.** Both refusals raise `InvalidRecipientGrantError`, and a store
+> that cannot be read or written raises `RecipientGrantError`, its base — two
+> classes in `ai_assistant.core.errors`, on `InvalidGrantError`'s "one class rather
+> than three" reasoning, because the caller's recourse is identical in every
+> refusing case. They are **not** `GrantError` and `InvalidGrantError`, whose
+> stated subject is the source-grant store: one handler catching both would join
+> the two seams ADR-0097 §7 keeps apart, and they fail closed onto different
+> things.
+
+> **Normative.** A component that cannot get an answer from this seam **fails
+> closed**. A `RecipientGrantError` raised by a query is not a grant, and no
+> policy proceeds on a stale answer, an earlier lookup or an absent one
+> (`GrantError`'s own clause, read one store over).
 
 **The declaration is embedded by value rather than named by id, and that is
 ADR-0021 §1's ruling applied to a record that outlives the call.** ADR-0021 §1
@@ -350,7 +458,9 @@ unruled.
 > compared as `CanonicalDestination` compares — every field, never across
 > protocols; and the request's binding does not carry
 > `planned_with_external_content` (§4). A grant that fails any of the five covers
-> nothing about that request.
+> nothing about that request. The first four are `RecipientGrants.covering`'s and
+> the fifth is the policy's (§1, §7); coverage is their conjunction and no
+> component treats either half as the whole.
 
 > **Normative.** Coverage is a comparison of recorded values and is never an
 > inference. No component widens a grant by folding case, by matching a domain, by
@@ -371,12 +481,23 @@ unruled.
 > does not exempt a call from any other floor a policy owes, and does not
 > authorise a call the seam would refuse to describe (ADR-0152 §6).
 
-> **Normative.** A grant is **monotone against every floor**. Its only effect is
-> to turn a `CONFIRM` into an `ALLOW` for a request it covers wholly under the
-> five comparisons above. It never widens a declared reach, never lowers a
-> threshold, never suppresses a floor ADR-0021 §5 or ADR-0148 §8 states, and never
-> makes any request's outcome less restrictive than the same request would draw
-> with no grant in the store at all.
+> **Normative.** A grant's **only** effect on an outcome is to discharge the
+> recipient-authorisation ground of ADR-0148 §3's first clause and ADR-0148 §8's
+> third clause, for a request it covers wholly under the five comparisons above.
+> It discharges nothing else. It never widens a declared reach, never lowers or
+> reads a threshold, never converts a `DENY` into anything, never affects a
+> request it does not cover, and never satisfies a floor stated over any fact
+> other than recipient authorisation — ADR-0148 §8's third clause's second limb
+> about the payload description among them.
+
+> **Normative.** ADR-0021 §5's monotonicity obligation is unchanged and is not
+> stated over this. A grant is "an input the policy was given, not a severity
+> axis" (ADR-0021 §5), so monotonicity continues to compare requests "equal in
+> every other respect including that one": raising `risk_level`, raising
+> `reversibility` or widening `discloses` must still never produce a less
+> restrictive outcome, **with the grants in the store held equal**. No
+> implementation reads either clause as forbidding the `CONFIRM` → `ALLOW`
+> transition this ADR exists to permit.
 
 **The account is compared because a destination set alone is a key with a
 duplicate, and the corpus had already found the hole before the survey named
@@ -472,8 +593,9 @@ part of the floor left standing.
 
 > **Normative.** A `RecipientGrant` may authorise a call that forwards
 > user-authored content to a third-party recipient, where that recipient is a
-> member of the grant's canonical destination set and §3's other three
-> comparisons hold. That is the whole of what it authorises.
+> member of the grant's canonical destination set and **all four** of §3's other
+> comparisons hold — liveness, tool equality, account equality and the absence of
+> `planned_with_external_content`. That is the whole of what it authorises.
 
 > **Normative.** A grant states nothing about the payload and authorises no
 > content. It does not classify a span, does not raise a span's tier, does not
@@ -535,17 +657,26 @@ narrow it over an inference, for §4's second clause's reason.
 > field is added to any recorded type to carry the basis.**
 
 > **Normative.** `AuditTrail.record` refuses a **non-resolving** `ALLOW` whose
-> `authorised_by` is set unless, in the grant store: a record with that `id`
-> exists; it is a granting record rather than a revoking one; its
-> `ToolDefinition` equals the decision's `tool` by value; and its canonical
-> destination set contains every member of the decision's. The refusal is
-> `InvalidResolutionError`, as the resolving-pointer refusal already is.
+> `authorised_by` is set unless **all six** hold: a record with that `id` exists
+> in the grant store; it is a granting record rather than a revoking one; its
+> `ToolDefinition` equals the decision's `tool` by value; its `BoundAccount`
+> equals the decision's binding's `account` by value, both facts and not one; its
+> canonical destination set contains every member of the decision's; and the
+> decision's binding does not carry `planned_with_external_content`. That is
+> §3's five comparisons less liveness, which is the one of them that is not a
+> fact about two recorded values.
+
+> **Normative.** The refusal is `InvalidAuthorisationError`, a third sibling under
+> `AuditError` in `ai_assistant.core.errors`, beside `DuplicateDecisionError` and
+> `InvalidResolutionError`. It is its own class for the reason those two are —
+> a replayed write, a substituted resolution subject and a fabricated standing
+> pointer are three facts an operator must be able to tell apart — and no lane
+> widens `InvalidResolutionError`'s stated subject to cover it.
 
 > **Normative.** `record` checks existence, kind and subject match, and **nothing
-> else**. It does not evaluate liveness, does not re-run §3's coverage rule as a
-> ruling, does not consult a clock, and returns no outcome. ADR-0021 §3's division
-> is unchanged: the policy rules, the caller records, the trail validates what it
-> holds both halves of.
+> else**. It does not evaluate liveness, does not consult a clock, does not
+> re-rule, and returns no outcome. ADR-0021 §3's division is unchanged: the policy
+> rules, the caller records, the trail validates what it holds both halves of.
 
 > **Normative.** An `ActionPolicy` constructed with no `RecipientGrants` returns
 > `authorised_by is None` from `decide`, exactly as ADR-0021 §3 requires today. A
@@ -695,15 +826,35 @@ has four recipients.
 > time, so the store reads the clock and the policy does not (ADR-0021 §3,
 > ADR-0007 §2's read-time enforcement).
 
-> **Normative.** An expired or revoked grant is **not deleted**. It stays in the
-> store, is not live, and remains resolvable so that an `authorised_by` recorded
-> while it was live still names a readable record for the life of the trail.
+> **Normative.** An expired or revoked grant is **not deleted** by expiry, by
+> revocation, or by any operation but `clear`. It stays in the store and is not
+> live, so an `authorised_by` recorded while it was live still names a readable
+> record for **as long as the store holds records**.
 
 > **Normative.** The store's records are **Tier 1** (ADR-0004): a canonical
 > destination is a recipient of the user's, and the store is durable, ordered and
 > rendered to the user. It persists locally only, `export` returns a portable
 > snapshot of every record, and `clear` erases the store wholesale and returns the
 > count. There is no `delete(id)`.
+
+> **Normative.** `clear` on this store **takes the explanations with it**, and no
+> clause of this ADR is read as promising otherwise. A recorded `ALLOW` whose
+> `authorised_by` names a grant the user has since erased stays recorded and stays
+> true about the moment it was made; §11's basis is still route (b), because
+> `resolves` is unset and `authorised_by` is present, and the surface renders it
+> as a standing-grant `ALLOW` **whose grant the store no longer holds** — never as
+> a route-(a) decision, never as `authorised_by` unset, and never as a defect.
+
+> **Normative.** `record`'s refusal (§6) is evaluated at the moment of the write
+> and is a statement about the store as it then stood. No component re-evaluates
+> it later, treats a subsequently erased or revoked grant as invalidating a
+> recorded decision, or refuses to render such a row.
+
+> **Normative.** No lane makes this store's `clear` conditional on, coordinated
+> with, or transactional against the audit trail's. Cross-tier erasure is
+> ADR-0007 §4's deferred coordinator and is not decided here; what is decided is
+> that each store's own wholesale erase is the user's to perform and that the
+> consequence above is disclosed rather than designed around.
 
 **The bound the expiry clause obtains is that the user chose an end, and it is
 not that the end is near.** A user may name a date decades out and the clause is
@@ -714,6 +865,20 @@ unlimited spelling for the read trail's bound, and the reason ADR-0097 §8 refus
 grant minted from configuration. The asymmetry with `SourceGrant`, which has no
 expiry, is deliberate and is the one this corpus keeps drawing: a source grant
 authorises reading *in*, and this authorises sending *out*.
+
+**The erasure clauses are the resolution of a real tension, and it is resolved
+toward the data right.** §6 makes a route-(b) pointer meaningful by resolving it
+into this store; §9 lets the user destroy this store. Both must hold, and the
+only question is which gives. It is the resolvability, because the alternative is
+a store the user cannot erase because an audit row points into it — an audit
+trail acquiring a veto over a data right, which is precisely inverted. ADR-0021
+§4 drew the same line for the trail itself: "the user may burn the book; nobody
+may tear out a page." Burning this book leaves the trail's rows intact, still
+saying which route authorised them and still carrying the whole binding — the
+resolved destination set, the account and the payload description are on the
+*decision*, by ADR-0148 §6 and ADR-0150 §1, not fetched from the grant. What is
+lost is the grant's own text, and §11's rendering clause says so on the row
+rather than leaving a reader to infer it.
 
 **Selective deletion is refused for a reason that is not the audit trail's.**
 ADR-0021 §4 refuses a `delete(id)` on the trail because "selective erasure of an
@@ -750,10 +915,26 @@ one nobody can check.
 ### 11. What the audit surface renders, and what it still may not
 
 > **Normative.** A surface rendering a decision under ADR-0186 §1 renders, for a
-> row whose ruling is `ALLOW`, **which of ADR-0017 §2's two bases authorised it**:
-> a decision of the user about that call, or a standing recipient grant the user
-> established. This extends ADR-0186 §7 by one fact and changes none of its
-> others; every clause of §7 and §8 holds unchanged over such a row.
+> row whose ruling is `ALLOW`, **what authorised it**, in exactly **three** states,
+> each distinct from the other two and none rendered as any other: a decision of
+> the user about *that* call (`resolves` set, `authorised_by` equal to it); a
+> standing recipient grant the user established (`resolves` unset,
+> `authorised_by` set); or **the policy's own rules, resting on no user decision**
+> (`authorised_by` unset). This extends ADR-0186 §7 by one fact and changes none
+> of its others; every clause of §7 and §8 holds unchanged over such a row.
+
+> **Normative.** The three states are total over `ALLOW` rows and the third is not
+> a residual or an error. ADR-0021 §5's floor bars an auto-granted `ALLOW` only
+> for a **non-empty `discloses`**, so a non-disclosing, known-cost action reaching
+> `ALLOW` with `authorised_by` unset is conforming and ordinary, and ADR-0186 §1's
+> operations return every decision rather than only egress ones. A surface that
+> forced such a row into one of the first two would be asserting a user decision
+> that was never taken.
+
+> **Normative.** No surface renders the third state as an omission, a blank, a
+> failure to record, or anything a reader could mistake for either of the first
+> two — ADR-0186 §7's three-origin-state discipline, read on this second
+> three-state fact.
 
 > **Normative.** No surface derives liveness from the row. It states that a grant
 > was the basis when the ruling was made, never that the grant is current, that it
@@ -764,6 +945,17 @@ one nobody can check.
 > assurance, a risk signal, or a reason to suppress, reorder or de-emphasise any
 > part of ADR-0186 §7. It is a fact about the decision, rendered as data and
 > neutralised for its target on render.
+
+**Three states rather than two, and the third is what makes the pair honest.**
+An earlier draft of this section rendered "which of ADR-0017 §2's two bases
+authorised it" over every `ALLOW`, which architecture review found unsatisfiable
+on round 1: neither basis is true of a policy-granted `ALLOW`, and ADR-0186's
+listing is not scoped to egress. Scoping the clause to egress rows would have
+been the other repair and is the worse one — it leaves a reader of a non-egress
+`ALLOW` with no statement at all about what authorised it, when the record
+already determines the answer. The discriminator is total because
+`authorised_by` and `resolves` are, and §6's second clause is what makes the
+first two unambiguous.
 
 **#68's first comment is the whole reason this section exists**: "the audit record
 must capture the resolved destination plus which of the two authorised it —
@@ -886,7 +1078,21 @@ their canonical fakes in `ai_assistant.testing`, together with the
 > **Normative.** The lane ships a test asserting that a grant whose destination
 > set covers the request's, established against a **different** `BoundAccount`,
 > covers nothing — and one asserting the same for a grant differing only in the
-> account's connection reference (§3's first clause).
+> account's connection reference (§3's first clause). It ships the same pair
+> against `AuditTrail.record`'s refusal (§6's third clause), because the policy
+> and the trail are two enforcement points and a test of one is not a test of the
+> other.
+
+> **Normative.** The lane ships tests over **liveness**: a revoked grant covers
+> nothing; a grant covers nothing at and after its `expires_at` and covers
+> normally before it; and a read concurrent with a revocation returns one answer
+> or the other and never a torn one. Every one of them is a test the policy tests
+> above pass without.
+
+> **Normative.** The lane ships a test asserting that `RecipientGrantStore.record`
+> refuses a duplicate id, refuses a revocation naming an absent, already-revoked or
+> differently-transcribed grant, and does **not** refuse a revocation whose
+> `decided_at` predates the grant it revokes (§1).
 
 > **Normative.** The lane re-attests ADR-0154 §4's condition 3 in the same change
 > (§12's fifth clause).
