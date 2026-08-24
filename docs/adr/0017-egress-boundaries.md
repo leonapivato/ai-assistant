@@ -1,8 +1,38 @@
 # 17. Egress boundaries: `models/` is not the only one
 
-- Status: Partially superseded by ADR-0124 (§1's rule as an exhaustive enumeration of the components that may transmit, and §2's framing of those two as the complete set of boundaries)
+- Status: Partially superseded by ADR-0124 (§1's rule as an exhaustive enumeration of the components that may transmit, and §2's framing of those two as the complete set of boundaries) and ADR-0191 (§8's deferral of the injected transport capability)
 - Date: 2026-07-19
 - Accepted: 2026-07-20
+- **Partially superseded: 2026-08-24 by ADR-0191 — §8's deferral, and nothing
+  else.** ADR-0191 adopts the outbound-transport capability §8 describes: a
+  Protocol in `core` injected into the boundaries allowed to use it, held by
+  `app/composition.py` alone, with no default and no ambient holder, and with a
+  canonical fake in `ai_assistant.testing` that a test asserts on at runtime.
+
+  **Replaced — §8's deferral.** "Deferred, not dismissed" is no longer the live
+  reading: a reader acting on §8 today builds the capability rather than waiting,
+  which is ADR-0070 §1's test coming out on the supersession side. §8's three
+  grounds are **not** replaced and stay legible as the record of why it was
+  deferred — ADR-0191 §5 keeps the first ("it does not fit `models/`") as its own
+  decision, its second expired when ADR-0029 ratified invocation, and its third is
+  what let the capability be decided without reopening §1.
+
+  **Not replaced — everything else, and §3 and §4 most of all.** §3's fourteen
+  conditions stand exactly as ratified and as ADR-0154 attested them. §4's
+  argument stands whole, **including "an import contract is a net, not a proof"**:
+  ADR-0191 §7 keeps the enumerated contract and the source-reading tests as
+  defence in depth, extends one of them, and forbids any lane from reading it as
+  making egress from an undesignated place impossible. §1's rule as ADR-0124 §1
+  restates it, §2's account of the two boundaries and its three pre-existing
+  `models/` gaps (#83's `models/` half, #74, #89), §5, §6, §7 and §9's open list
+  are all untouched.
+
+  **What acceptance did not change.** ADR-0191 designates nothing, widens no
+  enumeration of egress boundaries and authorises no byte; ADR-0154 §1's
+  designation of `ai_assistant.tools.egress` is unchanged, and the capability is
+  how that seam reaches the world rather than a second seam. Issue #85 closes with
+  ADR-0191's implementing lane, not with its ratification.
+
 - **Designated: 2026-08-14 by ADR-0154 — §2's condition met, and §3 is not
   superseded by it.** ADR-0154 is the "later ADR" §2 reserves designation to: it
   names the seam module `ai_assistant.tools.egress`, attests each of §3's fourteen
