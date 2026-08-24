@@ -30,6 +30,7 @@ from assistant_engine_contract import (
     _NOT_CANONICAL,
     _OVERFULL_DECISIONS,
     _OVERFULL_GRANTS,
+    _OVERFULL_READS,
     _SOURCE,
     _TINY_LIMIT,
     _UNHELD_SOURCE,
@@ -38,7 +39,9 @@ from assistant_engine_contract import (
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
+    ReadSubject,
     backwards_clock,
+    seeded_read_trail,
     seeded_trail,
 )
 
@@ -571,6 +574,35 @@ class TestEngineContract(AssistantEngineContract):
             rows=tuple((f"d-{index}", index) for index in range(_OVERFULL_DECISIONS))
         )
         built = _wire(trail=trail, max_payload_bytes=_DECISION_LIMIT)
+        await built.start()
+        try:
+            yield built
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def reads(self) -> AsyncIterator[ReadSubject]:
+        """One wired engine over a seeded read trail, and that trail.
+
+        Built and handed over on :attr:`decisions`' terms exactly: the engine holds
+        its ``SourceReadTrail`` privately, so the suite's negative controls are only
+        expressible if the case can read the store the composition root wired.
+        """
+        trail = await seeded_read_trail()
+        built = _wire(reads=trail)
+        await built.start()
+        try:
+            yield ReadSubject(engine=built, trail=trail)
+        finally:
+            await built.aclose()
+
+    @pytest.fixture
+    async def overfull_reads(self) -> AsyncIterator[AssistantEngine]:
+        """One wired engine at the tiny limit, over a read trail too large for it."""
+        trail = await seeded_read_trail(
+            rows=tuple((f"r-{index}", index) for index in range(_OVERFULL_READS))
+        )
+        built = _wire(reads=trail, max_payload_bytes=_TINY_LIMIT)
         await built.start()
         try:
             yield built

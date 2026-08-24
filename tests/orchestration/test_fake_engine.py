@@ -24,6 +24,7 @@ from assistant_engine_contract import (
     _NOT_CANONICAL,
     _OVERFULL_DECISIONS,
     _OVERFULL_GRANTS,
+    _OVERFULL_READS,
     _SOURCE,
     _TINY_LIMIT,
     _UNHELD_SOURCE,
@@ -32,8 +33,10 @@ from assistant_engine_contract import (
     AssistantEngineContract,
     ConnectionSubject,
     DecisionSubject,
+    ReadSubject,
     backwards_clock,
     page_after_mutating_the_filter,
+    seeded_read_trail,
     seeded_trail,
 )
 
@@ -225,6 +228,32 @@ class TestFakeAssistantEngineContract(AssistantEngineContract):
         engine = FakeAssistantEngine(max_payload_bytes=_DECISION_LIMIT)
         engine.trail = await seeded_trail(
             rows=tuple((f"d-{index}", index) for index in range(_OVERFULL_DECISIONS))
+        )
+        return engine
+
+    @pytest.fixture
+    async def reads(self) -> ReadSubject:
+        """The fake over a seeded read trail — the object the suite reads as its control.
+
+        ``reads`` is a plain attribute on :attr:`decisions`' terms. **Why the fake
+        holds a whole ``SourceReadTrail`` is a different argument here**, and it
+        points the other way: on the audit side a bare list would have been unable
+        to exercise a freedom the contract grants, while here it would fail to
+        exercise an obligation the contract *states* — the store promises recording
+        order, and a list could only reproduce it by accident of append order rather
+        than by a contract this suite can hold the surface to.
+        """
+        trail = await seeded_read_trail()
+        engine = FakeAssistantEngine()
+        engine.reads = trail
+        return ReadSubject(engine=engine, trail=trail)
+
+    @pytest.fixture
+    async def overfull_reads(self) -> AssistantEngine:
+        """A fake at the tiny limit whose whole read trail does not fit it."""
+        engine = FakeAssistantEngine(max_payload_bytes=_TINY_LIMIT)
+        engine.reads = await seeded_read_trail(
+            rows=tuple((f"r-{index}", index) for index in range(_OVERFULL_READS))
         )
         return engine
 
