@@ -105,7 +105,9 @@
   the deployment mints (128 bits, 32 lowercase hexadecimal characters, assigned
   once at configuration, never changed, never re-used). The **type-name half stays
   the sensor's**, declared and not configurable; what a deployment supplies is the
-  instance-distinguishing part alone. §7's last sentence, "The calendar sensor's
+  discriminator alone, and ADR-0190 §4 spells the whole identity — the declared
+  name, a colon, then the 32 hexadecimal characters, with no other form admitted.
+  §7's last sentence, "The calendar sensor's
   identity is `"calendar"`", is narrowed with it: it holds for the first configured
   calendar of a deployment that assigned it, and no longer for a `CalendarReader`
   as such.
