@@ -2450,6 +2450,52 @@ def test_the_browsers_question_origin_never_answers_for_what_it_would_retire() -
     ), "#746's trap: the band alone would call a tainted consolidation purely our own"
 
 
+def test_the_browser_keys_a_proposals_origin_on_the_band_and_never_on_an_attestation() -> None:
+    """ADR-0072 §4: nothing acquires the standing of a band it is not in by decorating.
+
+    ADR-0189 §2 adds no cross-field validator to ``Question``, so a question banded
+    ``asserted`` carrying an attestation is model-valid, crosses this wire, and reaches
+    this renderer. A page keyed on the attestation's **presence** would introduce the
+    user's own word as a connected source's report — the laundering ADR-0072 §4 names
+    one type over, where "an attestation on an ``INFERRED`` record would be the same
+    laundering by a different field — a derived guess wearing a citation to a system
+    that never reported it".
+
+    The attested-with-no-attestation arm is checked in the same test because the two are
+    one repair: asking the band first is what creates that arm, and leaving it
+    unanswered would trade a lie for a silence on the one band whose whole purpose is
+    provenance.
+    """
+    origin = _functions(_code("app.js"))["proposalOrigin"]
+
+    assert origin.index('question.band === "attested"') < origin.index("question.attestation"), (
+        "the band is asked first, so an attestation outside that band selects nothing"
+    )
+    assert "does not name that source or say when it spoke" in origin
+    assert "not recorded" not in origin
+
+
+def test_every_rendered_line_reaches_the_page_as_a_text_node() -> None:
+    """The one builder all three of these paths write through (ADR-0168 §6).
+
+    "The front end inserts every value the hub returned into the page as **text** and
+    never as markup, and executes nothing derived from one" — and an origin marker
+    beside a retirement's own words is exactly the pair that clause is about.
+
+    The module-wide sink check reads the whole file, which answers "is there a markup
+    sink anywhere"; this reads the builder, which answers "does a rendered line still
+    reach the page as text". A ``line`` that stopped appending a text node would pass the
+    first and fail here, rather than silently weakening every path that calls it.
+    """
+    builder = _functions(_code("app.js"))["line"]
+
+    assert 'document.createElement("p")' in builder
+    assert "p.textContent = text;" in builder
+    assert "parent.appendChild(p);" in builder
+    for sink in _MARKUP_SINKS:
+        assert sink not in builder
+
+
 def test_a_listing_offers_the_next_page_rather_than_stopping_at_a_full_one() -> None:
     """ADR-0073 §1 makes the belief read an **enumeration** so that what is past a page
     stays reachable, and a rendered row is the browser's only route to ``forget``.

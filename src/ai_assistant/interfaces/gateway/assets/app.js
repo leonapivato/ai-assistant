@@ -2927,8 +2927,27 @@ function renderQuestion(list, question, path, offset) {
 // only the belief explanation would have left the surface §4 was written for
 // unchanged. Nothing here says the proposal *is* held: a pending question is not a
 // belief of any band, and the band line above it stays the conditional it was.
+//
+// **The band selects the arm, and an attestation's presence never does.** ADR-0189 §2
+// adds no cross-field validator to this type, so a question banded `asserted` carrying
+// an attestation is model-valid and crosses this wire — and a renderer keyed on the
+// attestation would introduce the user's own word as a connected source's report. That
+// is the laundering ADR-0072 §4 forbids in its own words: classification is keyed on
+// the source and never on a decoration, so "nothing may acquire the standing of a band
+// it is not in by decorating itself".
+//
+// The attested-with-no-attestation arm gets the honest sentence `whyHeld` gives its
+// own, for the same reason: this projection is not what dropped the fact, so "not
+// recorded" would err in the direction ADR-0073 §4 forgives least, and silence would
+// leave the one band whose whole purpose is provenance saying nothing.
 function proposalOrigin(question) {
-  if (question.attestation !== null) {
+  if (question.band === "attested") {
+    if (question.attestation === null) {
+      return (
+        "A source you connected reported it, and what reached me here " +
+        "does not name that source or say when it spoke."
+      );
+    }
     return (
       `A connected source reported it — ${question.attestation.reported_by}, which ` +
       `said this was current as of ${question.attestation.reported_at}, on that ` +

@@ -4441,6 +4441,55 @@ def test_a_question_whose_proposal_rests_on_outside_content_says_so(
     assert "someone else's words" not in rendered
 
 
+@pytest.mark.parametrize(
+    "band",
+    [
+        pytest.param(BeliefBand.ASSERTED, id="asserted"),
+        pytest.param(BeliefBand.DERIVED, id="derived"),
+    ],
+)
+def test_an_attestation_outside_the_attested_band_promotes_no_proposal(
+    band: BeliefBand, output: StringIO
+) -> None:
+    """ADR-0072 §4: nothing acquires the standing of a band it is not in by decorating.
+
+    ADR-0189 §2 adds no cross-field validator to ``Question`` — those are ratified types
+    with construction sites in the tree, and ADR-0086 §3's admissibility test refuses a
+    validator that would refuse what already works — so ``Question(band=ASSERTED,
+    attestation=…)`` is model-valid and reaches this surface.
+
+    A renderer keyed on the attestation's **presence** would then introduce the user's
+    own word as a connected source's report, which is exactly the laundering ADR-0072 §4
+    names one type over: classification is keyed on the source and never on a
+    decoration, so "an attestation on an ``INFERRED`` record would be the same
+    laundering by a different field — a derived guess wearing a citation to a system
+    that never reported it". The band is the classifier, and this keeps it the
+    classifier here.
+    """
+    cli._render_question(_question(band=band, attestation=ATTESTED_BY))
+    rendered = _flat(output.getvalue())
+    assert "work-calendar" not in rendered
+    assert "connected source reported it" not in rendered
+    assert f"Would be held as: {band.value}" in rendered, "and the band is unchanged"
+
+
+def test_an_attested_proposal_with_no_attestation_says_what_reached_it(
+    output: StringIO,
+) -> None:
+    """The off-contract arm on this path, answered as ``_why`` answers its own.
+
+    Constructable for the same reason, and it must draw neither of the two available
+    lies: claiming the attestation was **not recorded**, which errs in the direction
+    ADR-0073 §4 forgives least on the one band whose whole purpose is provenance, or
+    saying nothing at all — which would leave the attested arm silent on the very
+    surface ADR-0189 §9 names to stop that.
+    """
+    cli._render_question(_question(band=BeliefBand.ATTESTED))
+    rendered = _flat(output.getvalue())
+    assert "does not name that source or say when it spoke" in rendered
+    assert "not recorded" not in rendered
+
+
 def test_a_questions_own_origin_never_answers_for_what_it_would_retire(
     output: StringIO,
 ) -> None:

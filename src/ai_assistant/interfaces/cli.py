@@ -5530,6 +5530,21 @@ def _proposal_origin(question: Question) -> str:
     The derived arm carries §4's third clause about the *warrant*, never about the
     content — see :func:`_outside_warrant`, whose prohibition applies here unchanged.
 
+    **The band selects the arm, and an attestation's presence never does.** ADR-0189 §2
+    adds no cross-field validator to this type, so ``Question(band=ASSERTED,
+    attestation=…)`` is model-valid — and a renderer keyed on the attestation would
+    introduce the user's own word as a connected source's report. That is the laundering
+    ADR-0072 §4 forbids in its own words: classification is keyed on the source and
+    never on a decoration, so "nothing may acquire the standing of a band it is not in
+    by decorating itself". The band is the classifier here as it is everywhere else, so
+    this matches on it, is total over it, and says nothing at all about an attestation
+    carried outside the attested band.
+
+    The attested-with-no-attestation arm gets the honest sentence :func:`_why` gives its
+    own, for the same reason: this projection is not what dropped the fact, so "not
+    recorded" would err in the direction ADR-0073 §4 forgives least — and saying nothing
+    would leave the one band whose whole purpose is provenance silent about it.
+
     Args:
         question: The question being rendered.
 
@@ -5537,18 +5552,29 @@ def _proposal_origin(question: Question) -> str:
         The clause, or the empty string where the proposal's origin adds nothing the
         band has not already said.
     """
-    if question.attestation is not None:
-        return (
-            f"a connected source reported it — {_safe(question.attestation.reported_by)}, "
-            f"which said this was current as of "
-            f"{_when(question.attestation.reported_at)}, on that source's own clock."
-        )
-    if question.band is BeliefBand.DERIVED and question.rests_on_recorded_external_content:
-        return (
-            "I worked it out, and some of what I worked it out from came from a "
-            "connected source rather than from you."
-        )
-    return ""
+    match question.band:
+        case BeliefBand.ATTESTED:
+            if question.attestation is None:
+                return (
+                    "a source you connected reported it, and what reached me here does "
+                    "not name that source or say when it spoke."
+                )
+            return (
+                f"a connected source reported it — {_safe(question.attestation.reported_by)}, "
+                f"which said this was current as of "
+                f"{_when(question.attestation.reported_at)}, on that source's own clock."
+            )
+        case BeliefBand.DERIVED:
+            if question.rests_on_recorded_external_content:
+                return (
+                    "I worked it out, and some of what I worked it out from came from a "
+                    "connected source rather than from you."
+                )
+            return ""
+        case BeliefBand.ASSERTED:
+            return ""
+        case _:  # pragma: no cover - exhaustive
+            assert_never(question.band)
 
 
 def _retirement_origin(warrant: Warrant | None) -> tuple[str, str]:
