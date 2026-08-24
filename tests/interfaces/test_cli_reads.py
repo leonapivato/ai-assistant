@@ -166,8 +166,45 @@ def _wire(monkeypatch: pytest.MonkeyPatch, engine: object) -> None:
 
 
 def _flat(rendered: str) -> str:
-    """The rendering with its line wrapping removed, so a case asserts sentences."""
+    """The rendering with its line wrapping removed, so a case asserts sentences.
+
+    For the **listing**, whose console this module pins at a known width with
+    ``force_terminal=False``. Help output does not come through that console and is
+    normalised by :func:`_help_text` instead; the two are kept apart deliberately,
+    so that a stray escape sequence in a *listing* fails a case here rather than
+    being quietly swallowed on the way to an assertion.
+    """
     return " ".join(rendered.split())
+
+
+#: One ANSI SGR sequence. ``tests/interfaces/test_cli.py``'s pattern, for its
+#: reason: Typer renders ``--help`` through a Rich console this module does not
+#: own, and that console decides its own colour and width from the environment.
+_SGR = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+def _help_text(rendered: str) -> str:
+    """Help output as flowing words: no colour, no borders, no wrapping.
+
+    Lifted from ``tests/interfaces/test_cli.py``'s helper of the same name, which
+    is the prior art on this surface, and adopted here after CI proved the naive
+    version environment-dependent.
+
+    **The failure is worth recording, because the naive assertion passes locally
+    and is a time bomb.** ``--help`` is rendered by Typer's own Rich console, not
+    by the one the ``output`` fixture pins, so it takes its width and its colour
+    from the environment. Rich pads every line of a description with SGR codes, so
+    a paragraph that wraps puts ``\\x1b[0m`` and ``\\x1b[1m`` *between* two words of
+    one sentence — and a phrase asserted across that break is absent from the
+    string while being plainly present on the screen. Collapsing whitespace alone
+    does not fix it; the codes have to go, and the panel borders with them.
+
+    Normalising rather than pinning ``COLUMNS`` is the prior art's choice and the
+    right one: it makes the assertion true at *every* width instead of at one
+    agreed width, which is what a case about the words in a sentence actually
+    means to say.
+    """
+    return " ".join(_SGR.sub("", rendered).replace("│", " ").split())
 
 
 def _listing(output: StringIO, monkeypatch: pytest.MonkeyPatch, *recorded: SourceReadRecord) -> str:
@@ -301,13 +338,17 @@ def test_the_export_states_the_horizon_where_the_decision_export_states_complete
     dropping of the oldest, and says which of the two records this is; the decision
     export's help still claims the whole record, and that claim stays true because
     that trail prunes nothing (#108).
+
+    Read through :func:`_help_text`, as every help assertion in this module is: the
+    phrases are short enough that this one happened to survive CI's width, which is
+    luck rather than a property and not the basis for keeping an assertion.
     """
-    reads_help = _flat(CliRunner().invoke(cli.app, ["export-reads", "--help"]).stdout)
+    reads_help = _help_text(CliRunner().invoke(cli.app, ["export-reads", "--help"]).stdout)
     assert "still hold" in reads_help
     assert "deleted to make room" in reads_help
     assert "horizon and not the history" in reads_help
 
-    decisions_help = _flat(CliRunner().invoke(cli.app, ["export-decisions", "--help"]).stdout)
+    decisions_help = _help_text(CliRunner().invoke(cli.app, ["export-decisions", "--help"]).stdout)
     assert "Every ruling" in decisions_help
     assert "horizon" not in decisions_help
 
@@ -330,8 +371,14 @@ def test_the_listing_names_both_reasons_it_is_not_a_record_of_every_read() -> No
     indeterminate under ADR-0060" — so the help says the row may be missing or may
     already be there, and says the difference is not recoverable afterwards.
     Promising the absence would be the same assumption as promising the row.
+
+    **This is the case that proved :func:`_help_text` necessary.** Asserted first
+    through plain whitespace collapsing, it passed locally and failed in CI on the
+    longest phrase — the one whose line break landed mid-sentence, with Rich's own
+    SGR padding sitting between "you" and "afterwards". The words were on the
+    screen; they were not in the string.
     """
-    reads_help = _flat(CliRunner().invoke(cli.app, ["reads", "--help"]).stdout)
+    reads_help = _help_text(CliRunner().invoke(cli.app, ["reads", "--help"]).stdout)
 
     assert "Show the attempts I recorded" in reads_help
     assert "oldest attempts are dropped as it fills" in reads_help
