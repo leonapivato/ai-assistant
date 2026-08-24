@@ -1325,6 +1325,167 @@ function sessionLost(body, said) {
   return false;
 }
 
+// --- an ask that never answers, and the wait the owner can end (#1500) -------
+//
+// `fetch` carries no deadline of its own, so a socket that dies without settling — a
+// phone whose network went away without an RST, a black-holed connection — leaves the
+// `await` below pending for ever. `ask` disables `#ask-button` before the request goes
+// out and re-enables it in a `finally`, so that `finally` never ran: the owner's one
+// way into the assistant stayed greyed out until the page was reloaded. It is #1474's
+// failure on a different request, and it is closed differently, because a different
+// clause of ADR-0182 §7 governs.
+//
+// **Which clause, and what it does and does not say.** #1474 is a *delivery stream*,
+// and §7's third clause is about those: it permits a re-establishment "only while it
+// holds none", which is a rule about concurrency, so a bound on how long a head-less
+// one may be held closes a gap the clause is silent on. An `ask` is reached by §7's
+// **fifth** clause instead — "The page re-issues **no other request** of its own
+// motion. Every request that asks the assistant for something — each of ADR-0177 §6's
+// operations — is re-issued only on an act by the owner" — and by the paragraph that
+// grounds it: re-issuing an ask "is a turn the owner may already have had executed",
+// so "offering the owner a visible retry costs one control and removes the class".
+// Nothing here re-issues anything, so the fifth clause is not breached; what §7 does
+// supply is the *shape* of the remedy, and it is a control.
+//
+// **So the wait is bounded by the owner's own act and by no clock of this page's**,
+// which is a decision rather than the easier half of one. An automatic deadline was
+// considered and is declined on three grounds:
+//
+// - **Any figure would pace something the gateway paces, and no head discloses it.**
+//   `server.py`'s `_TURN_BUDGET` gives every turn sixty seconds — `_ask` and
+//   `_pump_answer` both pass it — and it reaches the browser in no header, in no value
+//   and in no setting. A page-side deadline would therefore be a second number that
+//   can silently disagree with it, which is `SILENT_CADENCES`' own argument one
+//   surface out, and deriving one from `usableCadence`'s figure would be exactly the
+//   substitution that rule refuses: `gateway_notification_budget` paces a delivery
+//   stream and says nothing about a turn.
+// - **`HEAD_DEADLINE_MILLISECONDS`' argument does not transfer.** That figure is
+//   defensible because what it bounds is "a round trip and an in-process table read,
+//   and nothing else" — the delivery head is written before the poll is awaited. An
+//   `/ask` head is written *after* the whole turn: `_ask` awaits `converse` and
+//   answers with the outcome. A thirty-second bound there would abandon a healthy
+//   turn that was thinking, and announce that its outcome was not known — true, and
+//   useless.
+// - **It would cover one of the three places the socket can die anyway.** A black hole
+//   before the head, one between the head and the first chunk, and one mid-stream are
+//   one failure to the owner, and only a control the owner can press at any moment
+//   ends all three.
+//
+// The honest cost is the one thing a control cannot do: an owner who never looks is
+// never recovered. That is bounded by where the control sits — beside the greyed-out
+// button, which is the thing the owner is looking at when they wonder why they cannot
+// ask — and by the page saying, while it waits, that it is waiting and that no deadline
+// of its own will end it.
+
+// The ask this page is waiting on an answer to, as the controller that can stop the
+// wait, or `null` while nothing is outstanding. One at a time, because `#ask-button` is
+// disabled for exactly that window.
+let awaited = null;
+
+// Said while a question is out. **It does not promise a deadline**, because there is
+// none here: what it does is tell the owner that the page cannot tell a turn that is
+// taking a while from one whose answer will never arrive, which is the fact that makes
+// the control beside it the owner's to use rather than a button that ought to be
+// unnecessary.
+const ASKING =
+  "Waiting for an answer. This browser puts no deadline on a turn and cannot tell one " +
+  "that is taking a while from one whose answer will never arrive, so stopping the " +
+  "wait is yours to do.";
+
+// What stopping the wait did, and — the whole of why this sentence is long — what it
+// did **not**.
+//
+// ADR-0177 §7's fourth clause is the rule: "A failure of the **browser's own** request
+// to the gateway — the request was sent and no response was read — is an outcome that
+// is **not known**, whatever the gateway did", and "no front end resolves it by
+// assuming either of the other two". A page that handed the button back saying nothing
+// would be assuming one of them by omission, because a control that comes back looks
+// like an act that finished. So the three things the owner cannot otherwise know are
+// each said: the turn may have run, nothing was cancelled at the assistant, and asking
+// again is a new question rather than a retry of that one — which is ADR-0182 §7's own
+// "the page re-asks only when the owner asks it to", said where the owner is.
+//
+// The last sentence is the route back, and it is a read rather than an assertion: if
+// the turn did run it made an episode, and the conversations listing is where that
+// shows. This page states no state it has not read (ADR-0177 §7's last clause).
+const ASK_ABANDONED =
+  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
+  "What became of the turn is not known: the question was sent and nothing here read a " +
+  "reply, so the assistant may have carried it out and may never have received it. " +
+  "Nothing was re-sent and nothing was cancelled — the assistant was not told to stop. " +
+  "Asking again asks a new question rather than retrying that one. If that turn did " +
+  "run, it will show in the conversations listing.";
+
+// The control, and the line beside it. Built here rather than shipped in `index.html`
+// because it belongs to a request and not to the surface — the page already builds a
+// fault's Dismiss (`offerDismiss`), a park's pair (`offerApproval`) and the credential
+// field this way — and because the sheet reaches it wherever it is created: `button` is
+// the one rule every control on this page comes through, so the 44px touch floor and
+// the `max-width: 100%` that keeps a long label inside a phone's width are not this
+// function's to remember.
+function offerStopWaiting() {
+  const said = document.createElement("p");
+  said.className = "hint";
+  said.id = "ask-state";
+  said.hidden = true;
+  const stop = document.createElement("button");
+  // Inside the ask form, where a button with no type is a submit button — which would
+  // ask the question again, on the one control whose entire purpose is that it sends
+  // nothing (ADR-0182 §7's fifth clause).
+  stop.type = "button";
+  stop.id = "stop-waiting";
+  stop.textContent = "Stop waiting";
+  stop.hidden = true;
+  stop.addEventListener("click", abandonAsk);
+  const form = el("ask-form");
+  form.appendChild(said);
+  form.appendChild(stop);
+}
+
+// Whether a question is out, said and offered in one place so the sentence and the
+// control cannot get out of step with each other.
+function askWaiting(is) {
+  el("ask-state").textContent = is ? ASKING : "";
+  el("ask-state").hidden = !is;
+  el("stop-waiting").hidden = !is;
+}
+
+// The control handed back and the wait ended, whatever ended it. This is the invariant
+// #1500 is about: it runs on every exit an ask has, the ones that never settle
+// included, and it is the only thing that re-enables the button.
+function releaseAsk() {
+  awaited = null;
+  askWaiting(false);
+  el("ask-button").disabled = false;
+}
+
+// The owner's act, and the only thing on this page that ends a turn's wait early.
+//
+// **It aborts and it announces, and it sends nothing.** The abort is what makes the
+// pending `fetch` settle, so the promise this page is waiting on stops being one that
+// never resolves; the sentence is what keeps the restored control from reading as an
+// act that finished. A control that quietly re-ran the question would be the silent
+// retry ADR-0168 §9 forbids wearing a button's clothes — `offerDismiss` says the same
+// of itself, one surface over.
+function abandonAsk() {
+  const waiting = awaited;
+  if (waiting === null) {
+    return;
+  }
+  // Released before the abort, so the rejection it provokes finds this ask already
+  // settled and `ask`'s own `finally` leaves the control alone.
+  releaseAsk();
+  waiting.abort();
+  // **The partial text goes with it**, for `ANSWER_STREAM_CUT`'s reason: ADR-0173 §3
+  // makes the terminal outcome's `reply` the answer, so an accumulated chunk sequence
+  // is not "the record of what the assistant said" and leaving it on screen renders a
+  // non-answer as one. There is nothing to be done with it either way — ADR-0175 §10
+  // declines resuming a cut stream, and this stream was not even cut, it was let go.
+  clearNode(el("answer-body"));
+  show("answer", false);
+  fault(ASK_ABANDONED, "console");
+}
+
 async function ask(event) {
   event.preventDefault();
   fault(null, "console");
@@ -1338,6 +1499,9 @@ async function ask(event) {
   // Read before the request goes out, so that what is compared on the way back is the
   // selection this turn was sent under and not the one it is landing into.
   const chosenAt = chose;
+  const waiting = new AbortController();
+  awaited = waiting;
+  askWaiting(true);
   try {
     const asked = { utterance: el("utterance").value };
     if (conversationId !== null) {
@@ -1353,27 +1517,54 @@ async function ask(event) {
     // ADR-0173 §7 refuses the same fallback one layer in. A second attempt is the
     // owner asking again, visibly.
     if (el("stream-answer").checked) {
-      await askStreaming(half, asked, chosenAt);
+      await askStreaming(half, asked, chosenAt, waiting.signal);
     } else {
-      await askWhole(half, asked, chosenAt);
+      await askWhole(half, asked, chosenAt, waiting.signal);
     }
   } catch (_) {
-    // `fetch` rejects when the connection itself failed — the gateway is gone,
-    // which is a different fault from the hub being gone and is said as one.
-    show("answer", false);
-    fault(GATEWAY_GONE, "console");
+    // An abort this owner asked for is not the gateway having gone, and saying it was
+    // would be a wrong explanation rather than a missing one — `readDeliveries`' own
+    // catch keeps the same distinction. `abandonAsk` has already said what happened, in
+    // the one place that knows it was an act rather than a failure, so this branch
+    // stays silent for it. Whatever the abort provoked lands here — the `fetch`
+    // rejecting, the stream's reader erroring, a body half-read — and one check covers
+    // them all, because what makes them one condition is the signal and not the throw.
+    if (!waiting.signal.aborted) {
+      // `fetch` rejects when the connection itself failed — the gateway is gone,
+      // which is a different fault from the hub being gone and is said as one.
+      show("answer", false);
+      fault(GATEWAY_GONE, "console");
+    }
   } finally {
-    button.disabled = false;
+    // **Only while this ask is still the one being waited on.** An owner who stopped
+    // waiting and then asked afresh leaves this promise to settle *after* the next
+    // question has taken the control, and a `finally` that re-enabled the button then
+    // would hand it back in the middle of a live turn — and hide that turn's own way
+    // out. The comparison is against the controller rather than a flag, so it is the
+    // identity of the ask that decides it.
+    if (awaited === waiting) {
+      releaseAsk();
+    }
   }
 }
 
-async function askWhole(half, asked, chosenAt) {
+async function askWhole(half, asked, chosenAt, stopping) {
   const response = await fetch("/ask", {
     method: "POST",
     headers: admitted(half, true),
     body: JSON.stringify(asked),
+    signal: stopping,
   });
   const body = await readBody(response);
+  // **A body abandoned part-way through is not a body this page can read**, and
+  // `readBody` cannot tell the difference: it answers anything unreadable with an empty
+  // object, which is the right rule for a body the gateway wrote badly and the wrong
+  // one for a read the owner stopped. Rendering `{}` here would put an answer-shaped
+  // nothing on screen for a turn whose outcome is not known; reporting it as a refusal
+  // below would be worse. The owner has already been told what happened.
+  if (stopping.aborted) {
+    return;
+  }
   if (response.ok) {
     renderOutcome(body.outcome, chosenAt);
     return;
@@ -1392,14 +1583,21 @@ async function askWhole(half, asked, chosenAt) {
 // sequence and the terminal reply disagree, what stands is the terminal reply. No
 // accumulated chunk sequence is kept, and none is treated as the record of what the
 // assistant said.
-async function askStreaming(half, asked, chosenAt) {
+async function askStreaming(half, asked, chosenAt, stopping) {
   const response = await fetch("/ask/stream", {
     method: "POST",
     headers: admitted(half, true),
     body: JSON.stringify(asked),
+    signal: stopping,
   });
   if (!response.ok) {
     const body = await readBody(response);
+    // `askWhole`'s reason, on the one path here that reads a body rather than a stream:
+    // a refusal whose body the owner stopped reading is not a refusal this page can
+    // put into words, and it has already said what it did.
+    if (stopping.aborted) {
+      return;
+    }
     show("answer", false);
     conversationLost(body, asked.conversation_id);
     refused("console", body, response.status);
@@ -4597,6 +4795,8 @@ function showConsole() {
 
 el("bootstrap-form").addEventListener("submit", startSession);
 el("ask-form").addEventListener("submit", ask);
+// The way out of a wait, built once and hidden until there is a wait to leave (#1500).
+offerStopWaiting();
 el("new-conversation").addEventListener("click", startFresh);
 // Wrapped rather than passed, because the listener's argument is a `MouseEvent` and
 // `watchDeliveries` reads its first argument as the sentence to announce.
