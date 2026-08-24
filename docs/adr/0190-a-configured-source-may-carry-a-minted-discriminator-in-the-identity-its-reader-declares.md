@@ -206,9 +206,10 @@ decides all three." They are decided here.
 
 > **Normative.** The **suite gains a clause**, in the same change that corrects the
 > docstring: `ReaderContract` asserts that `Reader.name` is one of §4's two forms.
-> Decidably, over the value alone: it is equal to its own `str.strip()`; it carries
-> at most one colon; and where it carries one, the part before it is **non-empty**
-> and the part after it is exactly 32 characters drawn from `0123456789abcdef`. The
+> Decidably, over the value alone: it is UTF-8-encodable; it is equal to its own
+> `str.strip()`; it carries at most one colon; and where it carries one, the part
+> before it is **non-empty** and the part after it is exactly 32 characters drawn
+> from `0123456789abcdef`. The
 > canonical `FakeReader` in `ai_assistant.testing` is verified through that suite
 > like every other subject. `CONTRIBUTING.md` → "Adding a Protocol" governs: "The
 > triad is what a Protocol *change* is measured against too — extend the suite in the
@@ -223,7 +224,9 @@ decides all three." They are decided here.
 > suite cannot decide.
 
 > **Normative.** No `core/types.py` change is owed. Both of §4's forms pass
-> `Identifier` — non-blank and UTF-8-encodable — **and pass through it unchanged**,
+> `Identifier` — §4 requires non-blank and UTF-8-encodable for exactly that reason,
+> and a lone surrogate is a declared name `Identifier` and `SourceReading.source`
+> alike would refuse — **and they pass through it unchanged**,
 > which is §4's canonicality clause doing that work rather than an accident:
 > `Identifier`'s validator returns `value.strip()`, so a non-canonical identity
 > would be silently rewritten on the way to `Attestation.reported_by`. ADR-0097 §9's
@@ -255,10 +258,11 @@ discriminated identity — no second source can be configured at all (§6, ADR-0
 
 ### 4. How an identity is spelled, in full, and the one seam that refuses a malformed one
 
-> **Normative.** A **declared name** is non-empty, **canonical** — equal to its own
-> `str.strip()` — and **contains no colon**. These are new obligations on every
-> `Reader`, stacked on ADR-0093 §7's existing ones and contradicting none of them:
-> no declared name in the tree or in the corpus breaches any of the three.
+> **Normative.** A **declared name** is non-empty, **UTF-8-encodable**, **canonical**
+> — equal to its own `str.strip()` — and **contains no colon**. These are new
+> obligations on every `Reader`, stacked on ADR-0093 §7's existing ones and
+> contradicting none of them: no declared name in the tree or in the corpus breaches
+> any of the four.
 
 > **Normative.** A **bare** identity is a declared name and nothing else:
 > `"calendar"`, `"email"`. It is unchanged from what ADR-0093 §7 rules and what every
