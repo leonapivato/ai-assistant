@@ -318,6 +318,17 @@ class RecipientGrantStore(Protocol):                   # core/protocols.py
 > every record, live or not; `export` is what discharges ADR-0004 §6's
 > portability obligation for this store, so it may omit nothing.
 
+**Neither is bounded, and that is `SourceGrantStore`'s shape taken deliberately
+rather than by inattention.** `standing` answers "what have I authorised", a
+question whose whole point is totality: a truncated answer to it is worse than a
+large one, because a user reading it would believe they had seen their standing
+policy. The bounded read is `recent`, which is why it exists and why its `limit`
+refuses a non-positive value. Adversarial review raised the unbounded
+materialisation of a Tier 1 store against this member on round 8, and the finding
+is right about the shape and about **both** grant stores — `SourceGrantStore`
+declares the identical member — so it is recorded as **#1551** and settled for
+the pair rather than for one of them here.
+
 > **Normative.** Every member is cancellable under `core/protocols.py`'s
 > cancellation clause (ADR-0060) and observes no caller-owned container
 > (ADR-0065), as the neighbouring store Protocols do.
@@ -335,14 +346,22 @@ class RecipientGrantStore(Protocol):                   # core/protocols.py
 
 > **Normative.** `clear` retains **nothing**: no record, no id, no tombstone, no
 > derived value. An id this store held before a `clear` may be recorded again
-> afterwards, and no clause here treats that as an aliasing hazard, because
-> **nothing ever re-resolves an already-recorded `authorised_by`**. `record`
-> resolves the pointer once, at the instant the decision is written, against the
-> store as it then stands, and compares the resolved grant's subject to the
-> decision's (§6); every later reader takes the row as it stands (§11). A recycled
-> id can therefore mislead no reader, and it admits no write either: a grant
-> recorded after a `clear` is a grant the user established, and it authorises
-> exactly what §6's subject match lets it authorise and nothing else.
+> afterwards, and what that can and cannot do is stated exactly, because an
+> earlier draft of this clause overstated it.
+>
+> It cannot mislead a **reader**: nothing ever re-resolves an already-recorded
+> `authorised_by`, at render time or at any later read (§6, §11), so no component
+> asks this store what a recorded pointer means. It cannot widen what a row
+> **authorised**: `record` compared the resolved grant's tool, account and
+> destination set against that decision's own before appending (§6), so the row
+> rests on a grant that covered it at the instant it was validated.
+>
+> What it **can** do is what every other race across these two stores can. A
+> `clear` and a re-record landing between `record`'s resolution read and its
+> append leave a row naming an id that now resolves to a different grant. That is
+> the window §9 states, not a second hazard, and it is not one a tombstone would
+> close: round 3's tombstone made ids unrecyclable, which is a different property
+> from making the read and the append one act. No clause here claims otherwise.
 
 > **Normative.** Two words are used precisely and are not interchangeable. A
 > granting record is **outstanding** while no revoking record names it — a fact
@@ -455,16 +474,33 @@ which this section has already removed from the policy. A trail that could appen
 a grant is one `record` call away from authorising the row it is about to
 validate, and nothing about the resulting store would look wrong afterwards.
 
-**What the fusion would buy is atomicity, and atomicity buys nothing here.** The
-interleaving one transaction removes — a revocation landing between the trail's
-grant read and its own insert — is a strict *subset* of the window §9 already
-states, because the policy's `covering` read is strictly earlier than `record` in
-every route-(b) flow. Route (a) needed atomicity for a property this seam does not
-have: two racing resolutions of one `CONFIRM` must not both succeed (ADR-0021 §4),
-whereas a standing grant is many-use by construction, so there is no single-use
-guarantee for a transaction to protect. The two stores also stay separately
-erasable, which §9 requires and which ADR-0007 §4's cross-tier coordinator has not
-yet decided.
+**What the fusion would buy is atomicity between `record`'s resolution read and
+its own append, and that is a real thing to give up rather than nothing.** Round
+8 of this review found the giving-up on both lenses, and the ADR now says it: a
+revocation or a `clear` landing in that interval is not seen by the check, so §6
+states its guarantee over the resolution read rather than over the append, and §9
+carries the residual window. One store would close that interval. It is refused
+anyway, for three reasons.
+
+*The capability.* The trade is microseconds of window against a component that
+can both mint and validate the same record. This corpus has decided that
+direction twice already — ADR-0097 §3 for the source-grant store, and this
+section for the policy — and neither time was the reason that the race mattered
+less than the capability; it was that "nothing about the resulting record looks
+wrong afterwards".
+
+*It would not deliver the property a reader would assume from it.* The policy's
+`covering` read is strictly earlier than `record` in every route-(b) flow, so "a
+revocation stops a call not yet executed" is unavailable under either shape. What
+one store buys is a smaller instance of a window that has to be stated either
+way, and a stated window is what §9 already is.
+
+*There was never a single-use guarantee here to protect.* Route (a) needed
+atomicity because two racing resolutions of one `CONFIRM` must not both succeed
+(ADR-0021 §4). A standing grant is many-use by construction, so no transaction is
+protecting an invariant that a second write would break. The two stores also stay
+separately erasable, which §9 requires and which ADR-0007 §4's cross-tier
+coordinator has not yet decided.
 
 ### 2. A grant is established only by a user act that names the recipient
 
@@ -863,15 +899,24 @@ narrow it over an inference, for §4's second clause's reason.
 > so that `decided_at` belongs to the caller that records, and the policy is the
 > component this invariant is defending against.
 
-> **Normative.** Revocation, by contrast, is decided **at the write**, because
-> `outstanding` is a fact about two records and needs no clock, and because
-> ordering a revocation against the decision's `decided_at` would be unsound — a
-> revoking record's own `decided_at` is caller-supplied and may legitimately
-> predate the grant it revokes (§1). The consequence is stated rather than hidden:
-> a revocation landing between the policy's `covering` read and the write makes
-> that `ALLOW` unrecordable, and under ADR-0037 §2's decide → record → read back →
-> claim the call then does not happen. That is the fail-closed direction and it is
-> what a user who revokes expects; §9 states the window that remains.
+> **Normative.** Revocation, by contrast, is decided at the **resolution read
+> inside `record`** — the instant `outstanding` answers — because `outstanding` is
+> a fact about two records and needs no clock, and because ordering a revocation
+> against the decision's `decided_at` would be unsound: a revoking record's own
+> `decided_at` is caller-supplied and may legitimately predate the grant it
+> revokes (§1).
+
+> **Normative.** `record`'s guarantee is stated over that instant and **not over
+> the append**, because the resolution read and the append are two awaits and this
+> ADR builds no linearisation point across the two stores (§1). What `record`
+> guarantees is exactly this: **at the instant the pointer was resolved, it named
+> an outstanding grant covering this decision.** A revocation or a `clear` landing
+> before that read refuses the write, and under ADR-0037 §2's decide → record →
+> read back → claim the call then does not happen — the fail-closed direction, and
+> what a user who revokes expects. One landing between that read and the append
+> does not refuse it. No clause of this ADR claims a stronger ordering; §9 states
+> the window that remains, and it is the same window for a revocation and for a
+> `clear`.
 
 > **Normative.** A `RecipientGrantError` from the resolution face is **not** an
 > accepted write. `record` refuses, raising `InvalidAuthorisationError` chained
@@ -1089,19 +1134,23 @@ has four recipients.
 > §8's first clause).
 
 > **Normative.** Revocation is **prospective, and it bites twice**: it governs
-> every `covering` read that begins after it is recorded, and it refuses the
-> **write** of any route-(b) `ALLOW` that has not yet reached `record` (§6). It
-> retracts no decision already recorded. What it does **not** order itself against
-> is a ruling whose `covering` read had already returned *and* whose write had
-> already completed; such an `ALLOW` may still be executed. No clause of this ADR
-> claims a stronger ordering, and no lane states or implies one.
+> every `covering` read that begins after it is recorded, and it refuses the write
+> of any route-(b) `ALLOW` whose **resolution read inside `record`** (§6) begins
+> after it is recorded. It retracts no decision already recorded, and it does not
+> order itself against a resolution read that had already answered — so an `ALLOW`
+> validated an instant before a revocation is still appended, and may still be
+> executed. No clause of this ADR claims a stronger ordering, and no lane states
+> or implies one.
 
-> **Normative.** The residual window therefore runs from the **write** to the
-> execution, not from the lookup, and no lane closes it by re-reading the grant
-> seam at the seam that runs the tool, or by a linearisation across the two
-> stores. A later ADR that wants a stronger ordering decides it explicitly and
-> with an implementation in hand; it may not be inferred from this section's
-> silence.
+> **Normative.** The residual window therefore runs from **`record`'s resolution
+> read** to the execution. It is strictly smaller than the window a check at the
+> policy's lookup alone would leave, because that lookup is strictly earlier; it
+> is not zero, and no clause here rounds it to zero. A `clear` racing that same
+> interval has the same effect and is the same window (§1). No lane closes what
+> remains by re-reading the grant seam at the seam that runs the tool, or by a
+> linearisation across the two stores; a later ADR that wants a stronger ordering
+> decides it explicitly and with an implementation in hand, and it may not be
+> inferred from this section's silence.
 
 > **Normative.** Every grant carries an instant after which it is not live, and
 > there is **no unbounded spelling** of it: no null, no sentinel, no "forever".
@@ -1161,25 +1210,26 @@ has four recipients.
 > consequence above is disclosed rather than designed around.
 
 **The window is stated because it is real and bounded, and §6 makes it smaller
-than earlier drafts of this section did.** Between a `covering` read returning a
-grant and the resulting `ALLOW` reaching `record`, a revocation can land — and
-because the trail resolves the pointer at the write, that `ALLOW` is now
-**refused** rather than recorded. So the window a revocation does not reach runs
-from the write to the execution, not from the lookup to the execution. Closing
-what remains would take a re-read at the seam that runs the tool, or a
-linearisation across the grant store and the trail: the first puts an
-authorisation conclusion in `tools/` (§7), and the second is the cross-store
-transaction this section and ADR-0007 §4 both decline to invent for erasure and
-which would be no more buildable here.
+than earlier drafts of this section did without making it vanish.** Between a
+`covering` read returning a grant and the resulting `ALLOW` reaching `record`, a
+revocation can land — and because the trail resolves the pointer again, that
+`ALLOW` is now **refused** rather than recorded. What that moves is the boundary,
+from the policy's lookup to `record`'s resolution read. It does not move it to
+the append: those are two awaits, and round 8 of this review blocked on an earlier
+draft of this section that said otherwise. Closing the remainder would take a
+re-read at the seam that runs the tool, or a linearisation across the grant store
+and the trail: the first puts an authorisation conclusion in `tools/` (§7), and
+the second is the cross-store transaction this section and ADR-0007 §4 both
+decline to invent for erasure, refused for the three reasons §1 gives.
 
 **What the window contains is stated exactly, because an earlier draft said "one
 call" and that was false.** Adversarial review found on round 4 that one event
 loop runs many concurrent tasks, so the set that passes after a revocation is
-**every ruling already recorded and not yet executed** — bounded by the
-executions outstanding at that instant and by nothing this ADR states. There is no
-per-grant serialisation, no reservation and no cap, and no clause here claims one.
-What is *not* in the window is any ruling whose lookup begins after the revocation
-is recorded, any ruling whose write has not yet happened, and any widening: every
+**every ruling whose resolution read had already answered and whose execution has
+not yet run** — bounded by the rulings in flight at that instant and by nothing
+this ADR states. There is no per-grant serialisation, no reservation and no cap,
+and no clause here claims one. What is *not* in the window is any ruling whose
+resolution read begins after the revocation is recorded, and any widening: every
 call that passes goes to a recipient of the grant the user had authorised, under
 the same declaration and the same account, with nothing in it moving after the
 ruling (ADR-0148 §1, §4).
@@ -1494,10 +1544,40 @@ narrowings of one store, not three implementations.
 
 > **Normative.** The lane ships the pair that separates §6's two liveness rules,
 > which no other test in this section reaches: a grant that expires **after** the
-> ruling and **before** the write is still recorded, and a revocation landing in
-> that same interval refuses the write. The first fails against an implementation
-> that read a clock; the second fails against one that decided revocation as of
-> the decision's `decided_at`.
+> ruling and **before** `record` runs is still recorded, and a revocation recorded
+> before `record`'s resolution read refuses the write. The first fails against an
+> implementation that read a clock; the second fails against one that decided
+> revocation as of the decision's `decided_at`.
+
+> **Normative.** The lane ships the test that pins §6's stated **linearisation
+> point**, and the ADR is falsified rather than the test adjusted if it cannot be
+> written: a revocation landing between `record`'s resolution read and its append
+> leaves the decision **recorded**, not refused. It is the counterpart of the
+> clause above and it asserts the limit rather than the guarantee, so that a later
+> lane cannot read §6 as promising atomicity across the two stores. The same test
+> is owed for a `clear` and a re-record of the id in that interval (§1's `clear`
+> clause).
+
+> **Normative.** The lane ships **detachment** tests for every query on all three
+> faces: a caller mutating a returned list, a returned `RecipientGrant` through
+> its `__dict__`, or anything mutable those reach, changes nothing a later query
+> returns (§1's detached-snapshot clause). A fake that hands back its own objects
+> passes every other test in this section, and a grant whose `destinations` or
+> `expires_at` could be rewritten in place after a query is a widening of what the
+> user authorised.
+
+> **Normative.** The lane ships a test asserting that an `ActionPolicy` whose
+> `RecipientGrants.covering` raises `RecipientGrantError` returns **no** `ALLOW`
+> on route (b), and does not answer from a cached, earlier or absent result (§1's
+> last clause). An implementation that reuses the last successful lookup passes
+> every other policy test in this section.
+
+> **Normative.** The lane ships construction tests for `RecipientGrant`'s
+> `destinations`: an empty tuple and one carrying a duplicate are refused at
+> construction, a valid one round-trips through `model_dump(mode="json")` with its
+> order preserved, and order is preserved on read back from the store. The
+> annotation enforces none of the three (§1's first clause), and every other test
+> in this section can be written with valid fixtures.
 
 > **Normative.** The lane ships a test asserting that a request whose canonical
 > destination set is partly covered draws `CONFIRM` and that the confirmation
@@ -1683,14 +1763,16 @@ green on one tree — and it is ratified only after that, by the one-line
   cost ADR-0021 §4 already accepted for the resolution invariant, taken again for
   the same reason. The dependency is one member wide and cannot append, revoke or
   enumerate, so the trail can validate a grant and can never author one.
-- **A revocation stops a call already ruled on but not yet recorded, and does
-  not stop one already recorded.** The write-time check moves the boundary from
-  the lookup to the write, so the window §9 states runs from the write to the
-  execution. The cost is that an honest `ALLOW` overtaken by a revocation becomes
-  unrecordable and the call does not happen — the direction that fails closed.
-  Beyond that boundary it is the same prospectivity ADR-0097 §4 delivers for
-  source grants, and a later ADR wanting more decides it with an implementation
-  in hand.
+- **A revocation stops a call already ruled on but not yet validated by the
+  trail.** The check at `record` moves the boundary from the policy's lookup to
+  `record`'s resolution read, so the window §9 states runs from that read to the
+  execution rather than from the lookup. It does not run from the *append*: the
+  read and the append are two awaits, and this ADR builds no linearisation point
+  across the two stores and says why (§1). The cost of the boundary it does move
+  is that an honest `ALLOW` overtaken by a revocation becomes unrecordable and the
+  call does not happen — the direction that fails closed. Beyond it, this is the
+  same prospectivity ADR-0097 §4 delivers for source grants, and a later ADR
+  wanting more decides it with an implementation in hand.
 - **Revisit if** a mechanism lands that makes a payload's provenance recordable
   (#1154), if egress-side Tier 0 detection lands (#75), if a second egress
   boundary is designated and needs its own answer, or if a per-recipient
