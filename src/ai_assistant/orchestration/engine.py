@@ -125,6 +125,7 @@ from ai_assistant.core.types import (
     TraceOutcome,
     TurnOutcome,
     band_of,
+    rests_on_recorded_external_content,
     secret_value,
 )
 from ai_assistant.orchestration.notifications import hand_off
@@ -886,6 +887,24 @@ def belief_from_record(record: MemoryRecord, evidence: tuple[Evidence, ...] = ()
     would resolve exactly that imprecision, and resolve it wrongly. It is carried on
     **every** band (ADR-0107 §3): §2's rendering obligation is scoped to ``DERIVED``
     and this is not a rendering.
+
+    **The origin of what it shows travels too** (ADR-0189 §1, §2): the record's
+    ``attestation`` projected **whole** — never split into two scalars, which would
+    reintroduce on the surface's side of the seam the half-states ADR-0092 §2 made
+    unconstructable on the record's — and the answer
+    :func:`~ai_assistant.core.types.rests_on_recorded_external_content` gives for
+    this record's provenance. That function is read and
+    ``Provenance.derived_from_external`` is **not**: ADR-0106 §2 rules that every
+    consumer asking "does this rest on recorded external content?" calls it, because
+    the hand-rolled disjunction "is short enough that every consumer will write it
+    and one of them will write only the second half". Carrying the predicate's whole
+    answer rather than only the part ``band`` does not cover is what stops each
+    *client* re-deriving that disjunction and dropping the same half (ADR-0189 §3).
+
+    Both travel **as the record holds them**, on every band: ADR-0189 §1's second
+    clause forbids a projection computing a rendering, choosing a wording, or
+    omitting a fact because the surface it expects would not display it. What a
+    surface says about them is ADR-0189 §4's, and this is not a rendering either.
     """
     provenance = record.provenance
     resolved = sum(1 for item in evidence if not item.lost)
@@ -901,6 +920,8 @@ def belief_from_record(record: MemoryRecord, evidence: tuple[Evidence, ...] = ()
         last_updated=provenance.last_updated,
         valid_until=record.validity.valid_until,
         evidence_elided=provenance.evidence_elided,
+        attestation=provenance.attestation,
+        rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
     )
 
 
@@ -927,6 +948,14 @@ def belief_summary_from_record(record: MemoryRecord, *, cited: int, resolved: in
     belief's presented confidence because the system worked, which inverts the
     signal" (ADR-0086 §4).
 
+    **The origin of what it shows is carried here exactly as
+    :func:`belief_from_record` carries it** (ADR-0189 §1, §2), and the sameness is
+    the point: ADR-0085 §4a's split is about *citations*, not about provenance, and
+    a listing that disclosed less of a belief's origin than the detail view it is
+    drilled into would make the two disagree about a fact neither computes. Both
+    read :func:`~ai_assistant.core.types.rests_on_recorded_external_content` and
+    neither reads ``Provenance.derived_from_external`` (ADR-0106 §2).
+
     Args:
         record: The stored record.
         cited: How many citations the record carries.
@@ -944,6 +973,8 @@ def belief_summary_from_record(record: MemoryRecord, *, cited: int, resolved: in
         lost_evidence=cited - resolved,
         valid_until=record.validity.valid_until,
         evidence_elided=provenance.evidence_elided,
+        attestation=provenance.attestation,
+        rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
     )
 
 

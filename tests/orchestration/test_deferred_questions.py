@@ -37,6 +37,8 @@ from ai_assistant.core.errors import (
 )
 from ai_assistant.core.types import (
     AnswerKind,
+    Attestation,
+    BeliefBand,
     DataTier,
     DeferralState,
     MemoryDecision,
@@ -48,6 +50,7 @@ from ai_assistant.core.types import (
     SemanticMemory,
     SourceReading,
     Validity,
+    band_of,
 )
 from ai_assistant.memory import DefaultMemoryPolicy
 from ai_assistant.orchestration import (
@@ -76,6 +79,12 @@ if TYPE_CHECKING:
 
 AT = datetime(2026, 7, 1, tzinfo=UTC)
 
+#: When the reporting source said the fact was current — deliberately **not** ``AT``,
+#: which is this system's own revision instant. ADR-0073 §4's floor forbids a surface
+#: offering ours as the source's, and a fixture where the two are equal cannot tell a
+#: projection carrying the source's clock from one carrying ours (ADR-0189 §4).
+REPORTED_AT = datetime(2026, 6, 28, 9, 30, tzinfo=UTC)
+
 #: The `ASK_USER` ruling a scripted policy hands back, when a test needs a question
 #: without depending on any policy's rules for it.
 _ASK = MemoryDecision(kind=MemoryDecisionKind.ASK_USER, reason="fake: the user decides")
@@ -101,28 +110,53 @@ def _record(
     *,
     source: MemorySource = MemorySource.USER_ASSERTED,
     validity: Validity | None = None,
+    derived_from_external: bool = False,
 ) -> SemanticMemory:
-    """A semantic record; ``USER_ASSERTED`` carries the full confidence it must."""
+    """A semantic record; ``USER_ASSERTED`` carries the full confidence it must.
+
+    The attestation is supplied from the band rather than taken as a keyword: the
+    ``ATTESTED`` band has been unconstructable without one since ADR-0092 §1, and no
+    case here needs a different one. ``derived_from_external`` **is** a keyword,
+    because it is the one input ADR-0106 §2's predicate has that the band does not
+    decide.
+    """
     confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.6
     return SemanticMemory(
         id=record_id,
         content=content,
         fact=content,
         validity=validity if validity is not None else Validity(),
-        provenance=Provenance(source=source, confidence=confidence, last_updated=AT),
+        provenance=Provenance(
+            source=source,
+            confidence=confidence,
+            last_updated=AT,
+            derived_from_external=derived_from_external,
+            attestation=(
+                Attestation(reported_by="calendar", reported_at=REPORTED_AT)
+                if band_of(source) is BeliefBand.ATTESTED
+                else None
+            ),
+        ),
     )
 
 
-def _proposal(
+def _proposal(  # noqa: PLR0913 — one keyword per knob the proposed record has
     record_id: str,
     content: str,
     *,
     source: MemorySource = MemorySource.USER_ASSERTED,
     validity: Validity | None = None,
     sensitivity: DataTier = DataTier.PERSONAL,
+    derived_from_external: bool = False,
 ) -> MemoryUpdateProposal:
     return MemoryUpdateProposal(
-        proposed=_record(record_id, content, source=source, validity=validity),
+        proposed=_record(
+            record_id,
+            content,
+            source=source,
+            validity=validity,
+            derived_from_external=derived_from_external,
+        ),
         rationale="the user said so",
         sensitivity=sensitivity,
     )
@@ -260,6 +294,167 @@ async def test_the_question_shows_a_conflict_that_has_since_been_retired_as_no_l
     [question] = await harness.questions.questions()
 
     assert [(r.record_id, r.content) for r in question.retires] == [("live-1", None)]
+
+
+# --------------------------------------------------------------------------- #
+# The origin of what the question shows (ADR-0189 §1, §2)                     #
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("source", "derived_from_external", "band", "rests"),
+    [
+        (MemorySource.USER_ASSERTED, False, BeliefBand.ASSERTED, False),
+        (MemorySource.INFERRED, False, BeliefBand.DERIVED, False),
+        (MemorySource.INFERRED, True, BeliefBand.DERIVED, True),
+        (MemorySource.EXTERNAL, False, BeliefBand.ATTESTED, True),
+    ],
+)
+async def test_a_retirement_carries_the_warrant_of_the_record_it_would_retire(
+    source: MemorySource, derived_from_external: bool, band: BeliefBand, rests: bool
+) -> None:
+    """ADR-0189 §2: a `Retirement` finally answers *how is this held?* (#673).
+
+    The whole of what the projection knew about a line it asks the user to overrule
+    was its text. An attacker-authorable calendar entry, the user's own earlier word
+    and this system's own inference rendered identically — so ADR-0098 §7's first
+    clause, which is scoped to "every span its projection identifies as external",
+    had nothing to identify one with. The band is that fact, and the surface's rule
+    for each of the three is ADR-0189 §4's rather than anything decided here.
+
+    A scripted policy, because what is under test is the projection over each band
+    and not any policy's ruling about them: `DefaultMemoryPolicy` need not rule
+    `ASK_USER` on all four, and a test that depended on it doing so would be testing
+    the policy.
+    """
+    harness = Harness(policy=_DefersThenRules(MemoryDecisionKind.SUPERSEDE))
+    await harness.memory.add(
+        _record("live-1", _LISBON, source=source, derived_from_external=derived_from_external)
+    )
+
+    outcome = await harness.writes.write(_proposal("new-1", _PORTO))
+
+    assert outcome.result.decision.kind is MemoryDecisionKind.ASK_USER
+    [question] = await harness.questions.questions()
+    [retirement] = question.retires
+
+    assert retirement.record_id == "live-1"
+    assert retirement.content == _LISBON
+    assert retirement.warrant is not None
+    assert retirement.warrant.band is band
+    assert retirement.warrant.rests_on_recorded_external_content is rests
+    if band is BeliefBand.ATTESTED:
+        assert retirement.warrant.attestation is not None
+        # Both halves ADR-0073 §4's gate asks for, and the instant is the *source's*
+        # clock rather than ours — `AT` is when this system last revised the record.
+        assert retirement.warrant.attestation.reported_by == "calendar"
+        assert retirement.warrant.attestation.reported_at == REPORTED_AT
+    else:
+        assert retirement.warrant.attestation is None
+
+
+async def test_a_retirement_sets_its_warrant_exactly_when_it_sets_its_content() -> None:
+    """ADR-0189 §2's producer obligation, over both arms of one question.
+
+    Both are resolved from one ``MemoryStore.get``, so a conflict retired since the
+    question was frozen has neither and a conflict that still resolves has both.
+    ``None`` on both is ADR-0045 §6's case — the store hides a closed window — and
+    the row is still shown, because the user should be told the thing they would be
+    overruling is already gone.
+
+    The obligation is on this producer: ADR-0189 §2 adds no cross-field validator to
+    `Retirement`, on ADR-0107 §4's precedent, so nothing but this asserts it. A
+    half-set retirement would render *no longer held* beside a band, or a band beside
+    nothing.
+    """
+    harness = Harness()
+    await harness.memory.add(_record("live-1", _LISBON))
+    await harness.memory.add(_record("live-2", _LISBON))
+    outcome = await harness.writes.write(_proposal("new-1", _PORTO))
+    assert outcome.admission is not None
+    await harness.memory.delete("live-2")
+
+    [question] = await harness.questions.questions()
+
+    assert {one.record_id for one in question.retires} == {"live-1", "live-2"}
+    for retirement in question.retires:
+        assert (retirement.warrant is None) is (retirement.content is None), (
+            "warrant is set exactly when content is"
+        )
+    resolved = next(one for one in question.retires if one.record_id == "live-1")
+    gone = next(one for one in question.retires if one.record_id == "live-2")
+    assert resolved.content == _LISBON
+    assert resolved.warrant is not None
+    assert gone.content is None
+    assert gone.warrant is None
+
+
+async def test_the_question_s_own_origin_is_the_proposal_s_and_never_a_conflict_s() -> None:
+    """ADR-0189 §2: both new fields describe the **proposal**, as ``band`` already does.
+
+    A pending question is not a belief of any band (ADR-0078 §1), and the two origin
+    fields answer for the record that would be written if the user accepted. Each
+    entry in ``retires`` answers for itself through its own ``warrant``.
+
+    The two are deliberately opposite here — an attested proposal against an asserted
+    conflict — because a projection that borrowed the conflict's origin for the
+    question's would pass every same-band fixture. Reversed, it would tell the user
+    that what they are being asked to believe was reported by a connected source when
+    the source reported the line they are being asked to overrule.
+    """
+    harness = Harness(policy=_DefersThenRules(MemoryDecisionKind.SUPERSEDE))
+    await harness.memory.add(_record("live-1", _LISBON))
+
+    outcome = await harness.writes.write(_proposal("new-1", _PORTO, source=MemorySource.EXTERNAL))
+
+    assert outcome.result.decision.kind is MemoryDecisionKind.ASK_USER
+    [question] = await harness.questions.questions()
+
+    assert question.band is BeliefBand.ATTESTED
+    assert question.rests_on_recorded_external_content is True
+    assert question.attestation is not None
+    assert question.attestation.reported_by == "calendar"
+    assert question.attestation.reported_at == REPORTED_AT
+    # The conflict answers for itself, and its answer is the other one.
+    [retirement] = question.retires
+    assert retirement.warrant is not None
+    assert retirement.warrant.band is BeliefBand.ASSERTED
+    assert retirement.warrant.attestation is None
+    assert retirement.warrant.rests_on_recorded_external_content is False
+
+
+async def test_an_unattested_question_carries_no_attestation_and_the_predicate_s_answer() -> None:
+    """The other side of the same field pair, and the one that tells the predicate apart.
+
+    A `DERIVED` proposal whose warrant traces to recorded external content is the
+    case ADR-0106 §2's field exists for and the only one the band does not decide
+    (#746). A `USER_ASSERTED` proposal carrying the same flag is malformed rather
+    than adversarial — ADR-0106 §7 leaves it constructible — and the band-guarded
+    predicate answers `False` for it, which a projection reading
+    ``derived_from_external`` directly would get wrong.
+    """
+    harness = Harness(policy=_DefersThenRules(MemoryDecisionKind.SUPERSEDE))
+    await harness.memory.add(_record("live-1", _LISBON))
+
+    outcome = await harness.writes.write(
+        _proposal("new-1", _PORTO, source=MemorySource.INFERRED, derived_from_external=True)
+    )
+
+    assert outcome.admission is not None
+    [tainted] = await harness.questions.questions()
+    assert tainted.band is BeliefBand.DERIVED
+    assert tainted.attestation is None
+    assert tainted.rests_on_recorded_external_content is True
+
+    flagged = Harness(policy=_DefersThenRules(MemoryDecisionKind.SUPERSEDE))
+    await flagged.memory.add(_record("live-1", _LISBON))
+    await flagged.writes.write(_proposal("new-2", _SEVILLE, derived_from_external=True))
+
+    [asserted] = await flagged.questions.questions()
+    assert asserted.band is BeliefBand.ASSERTED
+    assert asserted.rests_on_recorded_external_content is False, (
+        "the user's own utterance is not external, however the record is flagged"
+    )
 
 
 # --------------------------------------------------------------------------- #

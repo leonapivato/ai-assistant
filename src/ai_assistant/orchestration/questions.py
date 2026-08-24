@@ -62,7 +62,9 @@ from ai_assistant.core.types import (
     Retirement,
     SuccessorLink,
     UserConfirmation,
+    Warrant,
     band_of,
+    rests_on_recorded_external_content,
 )
 from ai_assistant.orchestration.writes import admit_question
 
@@ -532,7 +534,24 @@ class QuestionStage:
         return tuple([await self._project(row) for row in rows])
 
     async def _project(self, deferral: DeferredProposal) -> Question:
-        """Build the :class:`Question` a surface renders (ADR-0078 §8)."""
+        """Build the :class:`Question` a surface renders (ADR-0078 §8).
+
+        **The two origin fields describe the proposal**, on the same reading
+        ``band`` already has here, and describe **no entry in** ``retires``
+        (ADR-0189 §2): they come from the proposed record's own provenance, and each
+        retirement answers for itself through its own
+        :attr:`~ai_assistant.core.types.Retirement.warrant`. A projection that
+        borrowed a conflict's attestation for the question's would tell the user that
+        the *proposal* was reported by a source, when what a source reported is the
+        line they are being asked to overrule.
+
+        ``rests_on_recorded_external_content`` is
+        :func:`~ai_assistant.core.types.rests_on_recorded_external_content` applied
+        to that provenance, never ``Provenance.derived_from_external`` read directly
+        (ADR-0106 §2, ADR-0189 §9): the function is band-guarded and the field is
+        not, so the short hand-rolled version reports a user's own assertion as
+        resting on external content whenever a malformed record carries the flag.
+        """
         proposal = deferral.proposal
         record = proposal.proposed
         return Question(
@@ -550,12 +569,53 @@ class QuestionStage:
             asked_at=deferral.deferred_at,
             expires_at=deferral.expires_at,
             successor=await self._successor(deferral.successor_id),
+            attestation=record.provenance.attestation,
+            rests_on_recorded_external_content=rests_on_recorded_external_content(
+                record.provenance
+            ),
         )
 
     async def _retirement(self, record_id: str) -> Retirement:
-        """Resolve one frozen conflict id to what it says, or to *no longer held*."""
+        """Resolve one frozen conflict id to what it says, or to *no longer held*.
+
+        **The warrant is set exactly when the content is** (ADR-0189 §2): both are
+        resolved from this one ``MemoryStore.get``, and ``None`` on both is the case
+        ADR-0045 §6 produces, where the store hides a closed window and the retired
+        record no longer resolves. The obligation is on this producer — no
+        cross-field validator on :class:`~ai_assistant.core.types.Retirement`
+        asserts it, because one would have refused the two-field construction this
+        method made before ADR-0189's contract lane landed, which is ADR-0107 §4's
+        shape and ADR-0086 §3's admissibility test answered honestly.
+
+        **This is the field that lets a surface tell the user whose words they are
+        being asked to overrule** (#673). The band is what identifies a span as
+        external (ADR-0098 §7), and it is the fact a
+        :class:`~ai_assistant.core.types.Retirement` has never carried: an
+        attacker-authorable calendar line and this system's own inference render
+        identically without it. Which of the three the content is stays the
+        surface's to say (ADR-0189 §4) and nothing is decided here.
+
+        The :class:`~ai_assistant.core.types.Warrant`'s band-keyed validator cannot
+        refuse anything this builds, and that is a property of the record rather
+        than of the arguments: ``Provenance`` carries an ``attestation`` exactly in
+        the ``ATTESTED`` band (ADR-0092 §1), and
+        :func:`~ai_assistant.core.types.rests_on_recorded_external_content` is
+        band-guarded (ADR-0106 §2), so every combination reachable from a stored
+        record is one ADR-0189 §3 admits.
+        """
         held = await self._memory.get(record_id)
-        return Retirement(record_id=record_id, content=None if held is None else held.content)
+        if held is None:
+            return Retirement(record_id=record_id, content=None, warrant=None)
+        provenance = held.provenance
+        return Retirement(
+            record_id=record_id,
+            content=held.content,
+            warrant=Warrant(
+                band=band_of(provenance.source),
+                rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
+                attestation=provenance.attestation,
+            ),
+        )
 
     async def _successor(self, successor_id: str | None) -> SuccessorLink | None:
         """Resolve a stamped successor to its id **and its state** (ADR-0078 §9).
