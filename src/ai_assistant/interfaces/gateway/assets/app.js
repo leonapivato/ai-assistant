@@ -1325,6 +1325,29 @@ function sessionLost(body, said) {
   return false;
 }
 
+// **The same two conditions, named by the response head alone.**
+//
+// `sessionLost` reads the condition out of the *body*, which is right everywhere a body
+// was read — and is exactly what a request whose body read the owner stopped does not
+// have. For these two conditions the head is enough on its own, and reading it is a read
+// rather than a guess: `server.py`'s `_REFUSAL_STATUS` gives every refusal condition
+// "its own status", because ADR-0168 §6 requires the cookie-half fault "reported to the
+// owner as its own condition, and never flattened into an expiry, a ceiling refusal or
+// an ordinary absent session" — and "a status shared with another condition is that
+// flattening performed by the response rather than by the record". So `401` names
+// `NO_LIVE_SESSION` and `409` names `COOKIE_HALF_MISMATCH`, and nothing else answers
+// with either.
+//
+// **A status is in this table only where it names one condition**, which is the whole of
+// what the table is for. `403` is deliberately absent: `_REFUSAL_STATUS` gives it to
+// `ORIGIN_NOT_OWN` and to `DEVICE_NOT_LISTED` both, so a `403` head says the gateway
+// refused and does not say why — and mapping it here would be this page performing the
+// flattening §6 forbids the response to perform.
+const SESSION_LOST_STATUS = new Map([
+  [401, "no-live-session"],
+  [409, "cookie-half-mismatch"],
+]);
+
 // --- an ask that never answers, and the wait the owner can end (#1500) -------
 //
 // `fetch` carries no deadline of its own, so a socket that dies without settling — a
@@ -1402,6 +1425,19 @@ function sessionLost(body, said) {
 //   complete answer because a later request failed. A node that is still `isConnected`
 //   is this turn's panel; one that has been replaced is not, and no bookkeeping has to
 //   be kept in step to know it. Adversarial review found the flag version on round 2.
+// - `refusedWith` — the status of a refusal head, or `null` where none came back. The
+//   head is read whole before the body is touched, so a status is in hand even where the
+//   body then stalls, and for two of them the status alone names the condition
+//   (`SESSION_LOST_STATUS`). Kept because discarding it is discarding an outcome this
+//   browser *did* read: adversarial review found round 2's fix announcing an unknown
+//   outcome for a `401` whose body the owner stopped waiting on, which is both false and
+//   the one shape that strands a browser holding a header half the gateway will refuse
+//   every future request from.
+//
+// `heard` and `refusedWith` are mutually exclusive by construction — one entry sets
+// `heard` on a successful head and the other sets `refusedWith` on the refusal branch it
+// returns from — and so are `composing` and `refusedWith`, since the panel is taken only
+// after a successful head. Neither pairing has to be reasoned about below.
 let awaited = null;
 
 // Said while a question is out. **It does not promise a deadline**, because there is
@@ -1482,6 +1518,33 @@ const PARTIAL_CLEARED =
   "What had been written into the answer is not the answer and was not kept, so it has " +
   "been cleared rather than left on screen looking like one.";
 
+// **And the ending where the outcome is not unknown at all**, which adversarial review
+// found on round 3. A head this page already read can name the outcome: an expired
+// session or a mismatched cookie half is answered by `_session_bound` — `401` and `409`
+// respectively — and the body stalling after it changes nothing about what the head
+// said. Announcing `ASK_ABANDONED` there would be wrong in every clause that matters:
+// the outcome *is* known, the assistant never received the question, and there is no
+// turn that may have run. ADR-0177 §7's fourth clause is conditioned on "no response was
+// read", and one was.
+//
+// **What such a refusal means is re-entry** (ADR-0182 §6): "A browser presenting a
+// header half the gateway does not admit is shown the bootstrap entry, presented as
+// re-entry rather than as a fault." That is the behaviour `sessionLost` performs, and
+// stopping the wait must reach it by the same route a refusal read to the end does —
+// otherwise the one way an owner has of ending a stalled wait is also the one way they
+// can be left holding a dead header half, staring at a console the gateway will refuse
+// every request from.
+//
+// This sentence is what the *act* did, added to the condition's own words rather than
+// replacing them: `describe` says which of the two conditions the head named, so this
+// says nothing about which — it says only what is true of both. `_session_bound` decides
+// both of them before `_assistant` is reached, so "never reached the assistant" is read
+// off the gateway's own ordering rather than assumed.
+const REFUSED_AT_THE_DOOR =
+  "The question you were waiting on never reached the assistant: the gateway refused it " +
+  "at the door, so no turn ran and nothing was left half-done. Asking it again once you " +
+  "are back in costs nothing.";
+
 // The control, and the line beside it. Built here rather than shipped in `index.html`
 // because it belongs to a request and not to the surface — the page already builds a
 // fault's Dismiss (`offerDismiss`), a park's pair (`offerApproval`) and the credential
@@ -1542,6 +1605,20 @@ function abandonAsk() {
   // settled and `ask`'s own `finally` leaves the control alone.
   releaseAsk();
   waiting.stopping.abort();
+  // **A refusal the head already named is not an unknown outcome, and re-entry is what
+  // it means.** Taken before everything below, because everything below is the wording
+  // and the tidying of a wait whose outcome nobody read — and this is a wait whose
+  // outcome was read off the status line before the body ever stalled.
+  const ended = SESSION_LOST_STATUS.get(waiting.refusedWith);
+  if (ended !== undefined) {
+    const named = { fault: ended };
+    // The screen a refusal read to the end leaves, left the same way by a refusal whose
+    // body the owner stopped reading: both turn entries hide the answer panel before
+    // reporting one, and this is the same refusal reported through a different door.
+    show("answer", false);
+    sessionLost(named, `${describe(named, waiting.refusedWith)} ${REFUSED_AT_THE_DOOR}`);
+    return;
+  }
   // **The partial text goes with it, and nothing else does.** ADR-0173 §3 makes the
   // terminal outcome's `reply` the answer, so an accumulated chunk sequence is not "the
   // record of what the assistant said" and leaving it on screen renders a non-answer as
@@ -1582,8 +1659,13 @@ async function ask(event) {
   // selection this turn was sent under and not the one it is landing into.
   const chosenAt = chose;
   // The record of this one ask: what can stop it, and what has been observed of it.
-  // Both start empty and are set only by their own evidence arriving.
-  const waiting = { stopping: new AbortController(), heard: false, composing: null };
+  // Every observation starts empty and is set only by its own evidence arriving.
+  const waiting = {
+    stopping: new AbortController(),
+    heard: false,
+    composing: null,
+    refusedWith: null,
+  };
   awaited = waiting;
   askWaiting(true);
   try {
@@ -1651,8 +1733,15 @@ async function askWhole(half, asked, chosenAt, waiting) {
   // reached, so a refusal head whose body then stalls says only that the gateway
   // replied. Announcing that the assistant had begun on the question there would be
   // exactly the inaccuracy this pair of sentences exists to avoid.
+  //
+  // **What a refusal head is proof of is itself**, and that is worth keeping rather than
+  // discarding: two of the statuses name their condition on their own, and a wait
+  // stopped during the stalled body is announced from the status rather than from the
+  // body that never arrived (`SESSION_LOST_STATUS`, `abandonAsk`).
   if (response.ok) {
     waiting.heard = true;
+  } else {
+    waiting.refusedWith = response.status;
   }
   const body = await readBody(response);
   // **A body abandoned part-way through is not a body this page can read**, and
@@ -1690,6 +1779,12 @@ async function askStreaming(half, asked, chosenAt, waiting) {
     signal: waiting.stopping.signal,
   });
   if (!response.ok) {
+    // Recorded before the body is touched, and for `askWhole`'s reason: the head is what
+    // survives a body that stalls, and for two statuses it names the condition on its
+    // own. This entry's head proves nothing about the *assistant* — `_write_stream`
+    // drains it before `_pump_answer` is awaited — but that argument is about a
+    // successful head, and a refusal never reaches `_write_stream` at all.
+    waiting.refusedWith = response.status;
     const body = await readBody(response);
     // `askWhole`'s reason, on the one path here that reads a body rather than a stream:
     // a refusal whose body the owner stopped reading is not a refusal this page can

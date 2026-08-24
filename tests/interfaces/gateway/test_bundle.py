@@ -29,7 +29,7 @@ from ai_assistant.core.types import (
     NotificationReach,
 )
 from ai_assistant.interfaces.gateway.records import RefusalCondition
-from ai_assistant.interfaces.gateway.server import packaged_bundle
+from ai_assistant.interfaces.gateway.server import _REFUSAL_STATUS, packaged_bundle
 
 _ROOT = Path(__file__).resolve().parents[3] / "src" / "ai_assistant" / "interfaces" / "gateway"
 _ASSETS = _ROOT / "assets"
@@ -998,10 +998,7 @@ def test_an_ask_whose_answer_never_arrives_does_not_hold_the_owners_control_for_
     assert 'el("ask-button").disabled = false;' in _functions(script)["releaseAsk"]
     # The wait is a controller and not a flag, so aborting it is what makes the pending
     # `fetch` settle rather than merely marking it settled.
-    assert (
-        "const waiting = { stopping: new AbortController(), heard: false, composing: null };"
-        in asking
-    )
+    assert "stopping: new AbortController()," in asking
     assert "waiting.stopping.abort();" in abandon
     # Carried into both turn entries, which is what puts the abort on the socket rather
     # than only on this page's own bookkeeping.
@@ -1181,7 +1178,7 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     only once ``converse`` has returned (``_ask`` awaits it), so its response head is the
     proof, while ``/ask/stream``'s head is written and drained *before* ``_pump_answer``
     is awaited (``_write_stream``) and proves nothing about the assistant — there the
-    first chunk is. ``owns`` says this turn has taken the answer panel over, which is
+    first chunk is. ``composing`` says this turn has taken the answer panel over, which is
     what makes the text in it this turn's to throw away: an owner who asks a second
     question and stops waiting before its head lands still has the *first* question's
     complete answer on screen, and clearing that is destroying a good answer because a
@@ -1233,6 +1230,92 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     assert script.count("WHERE_TO_LOOK") == 3
     assert "though a turn whose record " in script
     assert "could not be written does not appear there" in script
+
+
+def test_a_wait_stopped_after_a_session_refusal_is_re_entry_and_not_an_unknown_outcome() -> None:
+    """Adversarial review, round 3, blocker. A wait whose *head* already refused it is not
+    a wait whose outcome nobody read, and announcing one as the other is wrong twice.
+
+    **It is factually wrong.** ADR-0177 §7's fourth clause makes an outcome not known
+    where "the request was sent and **no response was read**"; a `401` head read before a
+    body that then stalls is a response read. ``Gateway._session_bound`` decides both
+    ``NO_LIVE_SESSION`` and ``COOKIE_HALF_MISMATCH`` *before* ``_assistant`` is reached,
+    so the assistant never received the question and there is no turn that may have run.
+
+    **And it strands the browser.** ADR-0182 §6: "A browser presenting a header half the
+    gateway does not admit is shown the bootstrap entry, presented as re-entry rather than
+    as a fault." A refusal read to the end reaches that through ``sessionLost``; before
+    this, stopping the wait during the stalled body took the generic path instead, leaving
+    the dead header half in storage and the console on screen — so the one act an owner
+    has for ending a stalled wait was also the one way to be left holding a session the
+    gateway will refuse every future request from.
+
+    **The status is enough, and reading it is a read rather than a guess.**
+    ``server.py``'s ``_REFUSAL_STATUS`` gives every condition "its own status", because
+    ADR-0168 §6 requires the cookie-half fault "never flattened into an expiry, a ceiling
+    refusal or an ordinary absent session" and "a status shared with another condition is
+    that flattening performed by the response rather than by the record". So this page may
+    map back exactly the statuses that name one condition — which is why ``403`` is
+    absent: ``_REFUSAL_STATUS`` gives it to two.
+    """
+    script = _code("app.js")
+    abandon = _functions(script)["abandonAsk"]
+    whole = _functions(script)["askWhole"]
+    stream = _functions(script)["askStreaming"]
+
+    # The table, and the two statuses in it, read off the gateway's own mapping rather
+    # than transcribed: a condition given a second condition's status would fail here as
+    # well as breaching §6, and a status this page mapped that the gateway shares would
+    # be this page performing the flattening §6 forbids.
+    statuses = dict(re.findall(r"\[(\d{3}), \"([a-z-]+)\"\],", script))
+    assert statuses == {"401": "no-live-session", "409": "cookie-half-mismatch"}
+    for status, fault in statuses.items():
+        condition = RefusalCondition(fault)
+        assert _REFUSAL_STATUS[condition][0] == int(status), fault
+        shared = [one for one in _REFUSAL_STATUS if _REFUSAL_STATUS[one][0] == int(status)]
+        assert shared == [condition], (status, shared)
+    # And the conditions are the two `sessionLost` acts on, so the two doors into re-entry
+    # cannot come to disagree about what ends a session.
+    for fault in statuses.values():
+        assert f'body.fault === "{fault}"' in _functions(script)["sessionLost"]
+
+    # The head is recorded on both entries, before either touches a body — which is the
+    # whole of why it survives a body that never arrives.
+    assert "waiting.refusedWith = response.status;" in whole
+    assert whole.index("waiting.refusedWith = response.status;") < whole.index(
+        "const body = await readBody(response);"
+    )
+    assert "waiting.refusedWith = response.status;" in stream
+    assert stream.index("waiting.refusedWith = response.status;") < stream.index(
+        "const body = await readBody(response);"
+    )
+    assert script.count("waiting.refusedWith = response.status;") == 2
+    # `heard` is the other branch of the same test on the entry that has both, so no ask
+    # can ever carry a refusal status and a claim that the assistant was reached.
+    assert "if (response.ok) {\n    waiting.heard = true;\n  } else {\n" in whole
+    assert "waiting.heard" not in stream[: stream.index("waiting.refusedWith")]
+
+    # Stopping the wait then takes re-entry, and takes it *before* the wording and the
+    # tidying of an outcome nobody read.
+    assert "const ended = SESSION_LOST_STATUS.get(waiting.refusedWith);" in abandon
+    assert "if (ended !== undefined) {" in abandon
+    assert abandon.index("if (ended !== undefined) {") < abandon.index("const mine =")
+    assert abandon.index("if (ended !== undefined) {") < abandon.index("const said =")
+    # Through `sessionLost`, which is what forgets the half, stops the stream and shows
+    # the bootstrap entry — the three things §6 asks for, none of them re-implemented here.
+    assert "sessionLost(named, `${describe(named, waiting.refusedWith)}" in abandon
+    for reimplemented in ("forgetHeaderHalf(", "showBootstrap(", "stopWatching("):
+        assert reimplemented not in abandon, reimplemented
+    # And it is re-entry rather than a fault (§6), so this ending writes no fault at all —
+    # the one `fault(` call in the function is on the path this one returns before.
+    assert abandon.index("return;", abandon.index("if (ended !== undefined) {")) < abandon.index(
+        "fault("
+    )
+    # What the act says on top of the condition's own words: the same three claims
+    # `ASK_ABANDONED` makes are all false here, so none of them is made.
+    assert "REFUSED_AT_THE_DOOR" in abandon
+    assert "never reached the assistant" in script
+    assert "so no turn ran and nothing was left half-done" in script
 
 
 def test_the_page_renders_a_notification_in_the_open_page_and_by_no_other_means() -> None:
