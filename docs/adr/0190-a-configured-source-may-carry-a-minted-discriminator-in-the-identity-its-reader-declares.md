@@ -1,6 +1,6 @@
 # 190. A configured source may carry a minted discriminator in the identity its reader declares, and the type-name half stays the sensor's
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-24
 - **Decides a `core` contract and implements none of it — a breaking `Reader`
   change (golden rule 5).** It changes what `Reader.name` may return, and so what
