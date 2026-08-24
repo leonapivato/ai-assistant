@@ -46,19 +46,33 @@ is not a smaller version of reading the entry; it is reading it wrong, at an
 instant nobody wrote. So a declared-but-unresolved zone makes its value
 unreadable here, and §7b's skip rule then does what it does for every other
 entry a parseable source contains and this reader cannot interpret.
+
+**And the zones a document defines are its own** (#1497,
+:func:`_only_this_documents_timezones`). ``icalendar`` keeps the timezones it
+builds from ``VTIMEZONE`` components on a module-level singleton, so the cache is
+per *process* rather than per ``Calendar.from_ical`` call — and the hub is one
+resident process reading the source on a timer (§7). Left alone, a ``TZID`` the
+source defined **once** kept resolving at the offset it declared for every later
+read, across files and after the definition had gone, which is a namespace the
+source extends (ADR-0183 §5) and a reading that is a function of read order rather
+than of bytes (the first paragraph above). The parse therefore runs against an
+empty cache and leaves one behind.
 """
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Final
 from zoneinfo import ZoneInfo
 
 from dateutil.rrule import rrulestr
 from icalendar import Calendar
 from icalendar.prop import vRecur
+from icalendar.timezone import tzp
 
 from ai_assistant.readers._compose import one_line
 
@@ -503,8 +517,68 @@ class _Entry:
         return _to_utc(self.local_start)
 
 
+def _forget_cached_timezones() -> None:
+    """Empty ``icalendar``'s process-global ``VTIMEZONE`` cache (#1497).
+
+    **Re-selecting the provider is the reset**: ``TZP.use`` routes to ``TZP._use``,
+    whose first act is to bind a fresh empty cache, and passing the provider's own
+    ``name`` back keeps the provider itself unchanged — so this empties the cache
+    without deciding anything about which implementation looks zones up.
+
+    Reaching into the cache directly would be the obvious alternative and is worse:
+    it is a private, name-mangled attribute of a library declared as a **range**
+    (``icalendar>=6.0``, resolved 7.2.2 — #1448), so a lockfile refresh that
+    renamed it would turn this defence silently inert rather than loudly broken.
+    A `getattr` guarded against that would have to pick between failing every read
+    and continuing without isolation, and neither is a choice this function should
+    be making at a source's convenience.
+    """
+    tzp.use(tzp.name)
+
+
+#: Serialises the region in which the process-global timezone cache is emptied.
+#:
+#: **Not tidiness: ADR-0093 §7 reserves one outstanding worker *per reader*, not
+#: one per process.** Two readers over two configured sources therefore parse on
+#: two threads at once, and without this lock one read's clear would empty the
+#: other's in-flight document out from under it — losing a zone that source
+#: legitimately defines, which is the very regression the isolation exists to
+#: avoid causing. The region held is the parse alone, already bounded by
+#: ``calendar_max_bytes``; a reader kept waiting is still bounded by its own
+#: ``calendar_read_timeout``, which is enforced on the loop rather than here.
+_TZ_CACHE_LOCK: Final = Lock()
+
+
+@contextmanager
+def _only_this_documents_timezones() -> Iterator[None]:
+    """Run the parse against a cache holding nothing but what this document defines.
+
+    Cleared on the way **in** so no earlier read reaches this one, and on the way
+    **out** so this read reaches nothing later — including callers of ``icalendar``
+    that are not readers at all. Clearing only on entry would leave the guarantee
+    resting on every other caller having one of these too, which is not a property
+    this module can assert about a process.
+
+    A zone the document defines itself still resolves, in either component order,
+    because the whole parse is inside the region: ``icalendar`` writes the cache as
+    each ``VTIMEZONE`` component ends and reconciles the document's own values
+    before ``from_ical`` returns.
+    """
+    with _TZ_CACHE_LOCK:
+        _forget_cached_timezones()
+        try:
+            yield
+        finally:
+            _forget_cached_timezones()
+
+
 def _parse(raw: bytes) -> list[Any]:
-    """Parse the bytes into ``VEVENT`` components.
+    """Parse the bytes into ``VEVENT`` components, seeing only this document's zones.
+
+    The isolation sits **outside** the wrapping below on purpose. A failure to
+    isolate is not a statement about the source, so reporting it as an unparseable
+    document would name the wrong cause for it; it reaches ADR-0093 §8's wrapping at
+    the reader's own seam instead, where the message carries the failure's class.
 
     Raises:
         SourceNotParseableError: If ``icalendar`` cannot read the document. The catch
@@ -512,12 +586,13 @@ def _parse(raw: bytes) -> list[Any]:
             between versions, and letting one out unwrapped is exactly what §8
             forbids — both consumers would have to catch by *implementation*.
     """
-    try:
-        calendar = Calendar.from_ical(raw)
-        return list(calendar.walk("VEVENT"))
-    except Exception as exc:
-        msg = "the source is not a readable iCalendar document"
-        raise SourceNotParseableError(msg) from exc
+    with _only_this_documents_timezones():
+        try:
+            calendar = Calendar.from_ical(raw)
+            return list(calendar.walk("VEVENT"))
+        except Exception as exc:
+            msg = "the source is not a readable iCalendar document"
+            raise SourceNotParseableError(msg) from exc
 
 
 def _grouped(components: list[Any], zone: tzinfo, ledger: _Ledger) -> dict[object, list[_Entry]]:

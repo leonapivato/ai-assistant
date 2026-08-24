@@ -45,6 +45,7 @@ Refs #1497, #1491, ADR-0183 §1/§5, ADR-0093 §5/§7/§7b, ADR-0117 §5.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Final
 
@@ -91,6 +92,13 @@ _GOOD_RENDERED: Final = 'Calendar entry "standup", on 2026-08-03 from 12:00 to 1
 #: the cache is still process-global.
 _LEAKED_RENDERED: Final = (
     'Calendar entry "quarterly review", on 2026-08-03 from 12:30 to 13:00 (UTC+01:00).'
+)
+
+#: The mirror of the above, for the concurrent case's second source. A negative
+#: offset, so a reading that picked up the *other* thread's zone renders visibly
+#: differently rather than by an hour nobody notices.
+_WESTERN_RENDERED: Final = (
+    'Calendar entry "quarterly review", on 2026-08-03 from 12:30 to 13:00 (UTC-01:00).'
 )
 
 
@@ -231,6 +239,49 @@ async def test_the_same_bytes_read_twice_produce_the_same_reading(tmp_path: Path
 
     assert summaries(after.proposals) == summaries(before.proposals)
     assert after.coverage == before.coverage
+
+
+async def test_two_readers_parsing_at_once_each_see_only_their_own_zone(
+    tmp_path: Path,
+) -> None:
+    """The hazard the isolation's own lock exists for, exercised rather than reasoned.
+
+    ADR-0093 §7 reserves one outstanding worker **per reader**, so two readers over
+    two configured sources parse on two threads at the same time — and the cache
+    they clear is one structure shared by both. An unserialised clear empties the
+    other read's in-flight document out from under it, and the other read then
+    skips an entry whose zone its own bytes define.
+
+    **A witness rather than a proof, and it is written to say so.** Two threads
+    interleaving is the scheduler's decision, so this can only ever demonstrate the
+    hazard, never bound it; the documents are padded and the rounds repeated to make
+    the overlap likely. It is a sharp witness in practice: with the lock replaced by
+    a ``nullcontext`` it failed on the **first** of the twenty rounds, on the padded
+    documents below. With the region serialised it passes deterministically, so it
+    does not trade a real defect for a flaky suite.
+    """
+    padding = [
+        vevent(f"DTSTART:{utc(NOW)}", f"SUMMARY:filler {n}", uid=f"pad{n}") for n in range(200)
+    ]
+    first = _written(
+        tmp_path,
+        "east.ics",
+        _vtimezone("Tzcache/East", offset="+0100"),
+        *padding,
+        _entry("Tzcache/East"),
+    )
+    second = _written(
+        tmp_path,
+        "west.ics",
+        _vtimezone("Tzcache/West", offset="-0100"),
+        *padding,
+        _entry("Tzcache/West"),
+    )
+
+    for _ in range(20):
+        east, west = await asyncio.gather(_read(first), _read(second))
+        assert _LEAKED_RENDERED in summaries(east.proposals), "east lost its own definition"
+        assert _WESTERN_RENDERED in summaries(west.proposals), "west lost its own definition"
 
 
 # --- what the isolation may not cost -----------------------------------------
