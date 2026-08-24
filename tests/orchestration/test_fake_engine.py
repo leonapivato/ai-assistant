@@ -15,7 +15,7 @@ ratifying the canonical encoding before this change rather than with the hub.
 from __future__ import annotations
 
 import asyncio
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 import pytest
@@ -40,6 +40,8 @@ from assistant_engine_contract import (
 from ai_assistant.core.errors import OversizedValueError
 from ai_assistant.core.types import (
     DEFAULT_PAGE_SIZE,
+    AnswerKind,
+    Attestation,
     BeliefBand,
     BeliefSummary,
     BoundAccount,
@@ -56,6 +58,12 @@ from ai_assistant.core.types import (
     TurnOutcome,
 )
 from ai_assistant.testing import FakeAssistantEngine
+
+#: What reported an attested proposal, on the source's own clock (ADR-0092 §3). A
+#: fixed instant rather than a clock reading: nothing here turns on time.
+_REPORTED = Attestation(
+    reported_by="work-calendar", reported_at=datetime(2026, 3, 2, 8, 30, tzinfo=UTC)
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -483,3 +491,150 @@ async def test_the_resume_clause_catches_an_outcome_with_no_step() -> None:
         ContinuationToken(handle="h-1"), approved=True, timeout=timedelta(seconds=30)
     )
     assert empty.step is None  # nothing to render, and nothing refused it
+
+
+# --- ADR-0189 §2 on the far side of an answer (#1523's knobs, round-1 finding 1) ---
+
+
+async def test_accepting_a_question_writes_a_belief_carrying_the_proposals_own_origin() -> None:
+    """ADR-0189 §2 makes these facts about the record acceptance **writes**.
+
+    So an ``answer`` that dropped them would leave this engine holding a belief whose
+    origin differs from the question it came from — and on the attested band it would
+    not merely differ, it would be unconstructable: ``Provenance`` makes an
+    ``Attestation`` mandatory exactly there (ADR-0092 §1), so writing the proposal's
+    band without the proposal's attestation raises rather than lying quietly.
+
+    Unreachable until #1523's knobs landed, because :meth:`ask` fixed the band at
+    ``ASSERTED`` and no question could carry an attestation at all. Making the state
+    scriptable is what puts an engine on the far side of it.
+    """
+    engine = FakeAssistantEngine()
+    engine.ask(
+        "q-1",
+        content="the board dine at Nopa on Thursday",
+        state=QuestionState.OPEN,
+        band=BeliefBand.ATTESTED,
+        attestation=_REPORTED,
+    )
+
+    outcome = await engine.answer("q-1", accept=True)
+    assert outcome.record_id is not None
+    written = await engine.belief(outcome.record_id)
+
+    assert outcome.kind is AnswerKind.APPLIED
+    assert written is not None
+    assert written.band is BeliefBand.ATTESTED
+    assert written.attestation == _REPORTED
+    assert written.rests_on_recorded_external_content is True
+
+
+async def test_accepting_a_tainted_proposal_keeps_the_warrant_it_was_deferred_for() -> None:
+    """The predicate is what #746 exists for, and it is the one an answer would drop.
+
+    A tainted consolidation reaches the user as an ``ASK_USER`` question precisely
+    because its warrant rests on recorded external content (ADR-0106 §6). A belief
+    written from accepting it that reported ``False`` would have laundered the one fact
+    the question was raised about — and on the ``DERIVED`` band nothing else on the
+    projection supplies it.
+    """
+    engine = FakeAssistantEngine()
+    engine.ask(
+        "q-1",
+        content="they consolidate travel around board weeks",
+        state=QuestionState.OPEN,
+        band=BeliefBand.DERIVED,
+        derived_from_external=True,
+    )
+
+    outcome = await engine.answer("q-1", accept=True)
+    assert outcome.record_id is not None
+    written = await engine.belief(outcome.record_id)
+
+    assert written is not None
+    assert written.rests_on_recorded_external_content is True
+    assert written.attestation is None, "a derived belief names no reporting source"
+
+
+async def test_a_stray_externality_answer_is_discarded_by_the_band_and_not_by_this_engine() -> None:
+    """ADR-0106 §2's band guard, reached through the answer rather than restated in it.
+
+    ADR-0106 §7 forbids a band-keyed validator on ``derived_from_external``, so a
+    ``USER_ASSERTED`` provenance carrying ``True`` stays constructible, and ADR-0189 §2
+    adds no validator to ``Question`` either — so a proposal banded ``ASSERTED`` with
+    the predicate ``True`` is model-valid and reaches this method. What answers it is
+    the classifier: "the user's own utterance is not [external], however it was
+    composed" (ADR-0098 §1), so the written belief reports ``False``.
+
+    Asserted here because the alternative repair — this engine zeroing the value before
+    forwarding it — would be a second spelling of a rule ADR-0072 §4 already keys on the
+    source, and a second spelling is a second thing that can disagree.
+    """
+    engine = FakeAssistantEngine()
+    engine.ask(
+        "q-1",
+        content="the office is in Boston",
+        state=QuestionState.OPEN,
+        band=BeliefBand.ASSERTED,
+        derived_from_external=True,
+    )
+
+    outcome = await engine.answer("q-1", accept=True)
+    assert outcome.record_id is not None
+    written = await engine.belief(outcome.record_id)
+
+    assert written is not None
+    assert written.rests_on_recorded_external_content is False
+
+
+async def test_accepting_an_answer_retires_exactly_what_it_said_it_would() -> None:
+    """ADR-0078 §8: ``retires`` is "the exact scope the answer authorises".
+
+    Not decoration — so an engine that applied the correction and left the conflict live
+    would hold two beliefs the user was told could not both stand, and every surface
+    reading it would render the retired one as current. Unreachable until #1523 made
+    ``retires`` scriptable, which is why it is checked now rather than earlier.
+
+    The tombstone arm rides along because it is the same rule rather than an exception:
+    a retirement that no longer resolves retires nothing, the record having gone when
+    the store hid its closed window (ADR-0045 §6), and discarding by id is idempotent.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold("live-1", content="the user works from Madrid")
+    engine.hold("keep-1", content="the office is in Boston")
+    engine.ask(
+        "q-1",
+        content="the user works from Lisbon",
+        state=QuestionState.OPEN,
+        retires=(engine.retirement("live-1"), engine.retirement("gone-1")),
+    )
+
+    outcome = await engine.answer("q-1", accept=True)
+
+    assert outcome.record_id is not None
+    assert await engine.belief("live-1") is None, "the named conflict is gone"
+    assert await engine.belief("keep-1") is not None, "and nothing else was touched"
+    assert await engine.belief(outcome.record_id) is not None
+
+
+async def test_declining_an_answer_retires_nothing_and_writes_nothing() -> None:
+    """The scope is what **accepting** authorises, so a rejection spends none of it.
+
+    ADR-0078 §8's four outcomes are distinct in what they leave behind, and this is the
+    one that must leave everything: a rejection that retired the conflicts anyway would
+    destroy records on the strength of an answer that declined to make the change.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold("live-1", content="the user works from Madrid")
+    engine.ask(
+        "q-1",
+        content="the user works from Lisbon",
+        state=QuestionState.OPEN,
+        retires=(engine.retirement("live-1"),),
+    )
+
+    outcome = await engine.answer("q-1", accept=False)
+
+    assert outcome.kind is AnswerKind.REJECTED
+    assert outcome.record_id is None
+    assert await engine.belief("live-1") is not None

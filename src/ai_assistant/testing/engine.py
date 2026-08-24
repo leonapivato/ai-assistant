@@ -528,7 +528,35 @@ class FakeAssistantEngine:
         return self._checked(held[offset : offset + limit], "interrupted_questions")
 
     async def answer(self, question_id: Identifier, *, accept: bool) -> AnswerOutcome:
-        """Answer one question, applying it or declining it."""
+        """Answer one question, applying it or declining it.
+
+        **What an accepted answer writes carries the proposal's own origin, and what it
+        authorises is retired.** ADR-0189 §2 defines a ``Question``'s ``attestation`` and
+        ``rests_on_recorded_external_content`` as facts about *the record acceptance
+        would write*, so an answer that dropped them would leave this fake holding a
+        belief whose origin differs from the question it came from. And ADR-0078 §8
+        makes ``retires`` "the exact scope the answer authorises" rather than
+        decoration, so an answer that left a named conflict live would apply a
+        correction and keep the thing it corrected.
+
+        Neither could arise while :meth:`ask` fixed the band at ``ASSERTED`` and built
+        ``retires=()``: no question could carry an attestation and none could name a
+        retirement. Making both scriptable (#1523) is what puts an engine on the far
+        side of them, and this is the whole of what that costs — a working in-memory
+        engine is the point of this class, and an ``answer`` that wrote the wrong record
+        would let a conformance suite pass against behaviour no real engine has.
+
+        The externality answer is forwarded as the ``Provenance`` field it came from
+        rather than as the answer it produced, because :meth:`hold` derives the answer
+        through :func:`~ai_assistant.core.types.rests_on_recorded_external_content` and
+        the band guards it there: a stray ``True`` on a proposal whose band makes the
+        predicate ``False`` is discarded by the classifier, which is ADR-0072 §4 and
+        ADR-0106 §2 doing their job rather than this method second-guessing them.
+
+        **A retirement that no longer resolves retires nothing**, which is not a special
+        case but the same rule: ``MemoryStore.get`` hid a closed window (ADR-0045 §6),
+        the record is already gone, and discarding by id is idempotent.
+        """
         named = identifier(question_id, name="question_id")
         check_arguments(
             "answer", max_bytes=self._max_payload_bytes, question_id=named, accept=accept
@@ -545,8 +573,17 @@ class FakeAssistantEngine:
             return self._checked(
                 AnswerOutcome(kind=AnswerKind.REJECTED, question_id=named), "answer"
             )
+        for retirement in question.retires:
+            self.beliefs_held.pop(retirement.record_id, None)
         record_id = f"rec-{len(self.beliefs_held) + 1}"
-        self.hold(record_id, content=question.content, kind=question.kind, band=question.band)
+        self.hold(
+            record_id,
+            content=question.content,
+            kind=question.kind,
+            band=question.band,
+            attestation=question.attestation,
+            derived_from_external=question.rests_on_recorded_external_content,
+        )
         return self._checked(
             AnswerOutcome(kind=AnswerKind.APPLIED, question_id=named, record_id=record_id), "answer"
         )
