@@ -19,7 +19,9 @@
   two, so every structural implementation of each must grow them or stop satisfying
   it. `ToolInvoker.invoke` gains an obligation and a collaborator, `ToolResult`
   gains a field, `core/types.py` gains two models and `core/errors.py` three error
-  classes. ADR-0015 §5 and golden rule 5 put it in its own PR, ratified before
+  classes. Because the promoted surface's method set changes, the implementing lane
+  also **bumps `PROTOCOL_VERSION` in the same change** (ADR-0124 §9; §9 below).
+  ADR-0015 §5 and golden rule 5 put it in its own PR, ratified before
   anything implements against it.
 - **Required review set: adversarial *and* architecture.** Compelled rather than
   declared: `CONTRIBUTING.md` → "Stop when the required reviews are green" makes a
@@ -107,9 +109,17 @@ surface can state an execution at all, because ADR-0186's two operations return
 
 > **Normative.** `ToolInvoker.invoke` appends a **claim** through the
 > `InvocationLedger` it holds (§2), immediately before the callable is entered and
-> after ADR-0029 §2's three checks have passed, naming the decision the call
-> carries. The append is the consume: it is one atomic store operation, and a call
-> whose claim is refused does not reach the callable.
+> after ADR-0029 §2's three checks have passed, **passing the `PermissionDecision`
+> the call carries** and not its id alone. The append is the consume: it is one
+> atomic store operation, and a call whose claim is refused does not reach the
+> callable.
+
+> **Normative.** Inside that operation the ledger requires the decision it was
+> passed to be **equal to the decision the store holds under that id** — the whole
+> value, by the frozen model's own equality — and refuses
+> `UnrecordedAuthorisationError` where the store holds none under that id, where
+> the stored one's ruling outcome is not `ALLOW`, or where the two are not equal.
+> The row records the id; the equality is what makes the id mean the decision.
 
 > **Normative.** A first claim under a decision that carries none is admitted. On
 > a **spendable** authorisation a **further** claim is refused unless every one of
@@ -135,9 +145,9 @@ surface can state an execution at all, because ADR-0186's two operations return
 > enforced where the rule is.
 
 > **Normative.** A claim refused because the authorisation is spent raises
-> `AuthorisationSpentError`. A claim refused because the trail holds no such
-> decision, or holds one whose ruling outcome is not `ALLOW`, raises
-> `UnrecordedAuthorisationError`. Both are seam faults, returned as no
+> `AuthorisationSpentError`. A claim refused because the trail holds no decision
+> under that id, holds one that is not equal to the decision passed, or holds one
+> whose ruling outcome is not `ALLOW`, raises `UnrecordedAuthorisationError`. Both are seam faults, returned as no
 > `ToolResult` and never as data, and neither is ever auto-retried. A
 > `ToolInvoker` propagates each unchanged rather than translating it.
 
@@ -157,6 +167,25 @@ surface can state an execution at all, because ADR-0186's two operations return
 > claim — "a cancellation absorbed while the **claim itself** was in flight, where
 > the write is known to have landed" — transcribed to this one, and it is what makes
 > the "claim landed or did not" question answerable at all under ADR-0060.
+
+> **Normative.** Where a cancellation is pending and the append **failed**, the
+> append's failure is what leaves the seam: `invoke` raises the `AuditError` — or
+> propagates the clock callable's own exception (§2) — rather than the
+> `CancelledError`. The clause above absorbs the cancellation in order to *observe*
+> the append, and a failed append is an observation with a consequence the
+> cancellation does not carry: nothing could have run. Where the append **landed**,
+> the cancellation is re-raised as the clause above says and the clause below
+> governs.
+
+> **Normative.** That precedence loses no cancellation. The task remains cancelled
+> and the cancellation is delivered again at the next suspension point in the
+> cancelled scope; what the precedence decides is only **which fact the executor is
+> told first**, and the append failure is the one that is true of the act. The
+> alternative was worse in the direction this ADR cares about: a `CancelledError`
+> from a side-effecting non-`NATURAL` call is classified by
+> `ToolDefinition.interrupted_outcome`, so an append that never landed would be
+> recorded `INDETERMINATE` — an act that may have run — for a call the contract
+> guarantees could not have. ADR-0034 §1 refuses exactly that in this window.
 
 > **Normative.** Where the claim landed and the call is then cancelled before the
 > callable is entered, `invoke` appends the completion carrying the outcome ADR-0029
@@ -267,11 +296,27 @@ against the same race, and putting it anywhere else would mean a check followed 
 write with an `await` between them. Two concurrent `invoke`s on one decision reach
 one atomic append: one claims, the other is refused.
 
+**Equality rather than an id lookup, and review found the gap by constructing the
+attack.** An earlier draft passed `decision_id` alone, which admits a caller who
+takes the id of a **recorded, harmless** `ALLOW` and builds a second `ALLOW`
+carrying that same id and a dangerous `ToolDefinition`. ADR-0029 §2's three checks
+inspect the decision the call carries and pass; the ledger, holding only the id,
+finds the harmless stored row and admits the claim; the dangerous callable runs and
+`RecordedInvocation` then reports the harmless tool and capability, because §2's
+join reads the stored decision. That is worse than an unrecorded execution: it is a
+*misrecorded* one, and it defeats ADR-0021 §1's pinned-definition record and
+ADR-0029's equality chain at the one seam this ADR adds. Requiring the whole value
+to match closes it for the price of an argument `ToolInvoker` already holds —
+`ToolCall.decision` — so nothing new reaches `tools/`. It also makes §2's join
+sound: the decision a `RecordedInvocation` is joined to is the decision the act ran
+under, not merely one filed under the same name.
+
 **That narrows #259 and does not close it, and the difference is worth stating.**
 #259 records that `StepExecutor` "accepts any valid `ToolCall`", so a caller
 hand-building an `ALLOW` nobody recorded can have its id committed as a step's
-`approval_ref`. Under the second refusal above such a call cannot **execute**: the
-claim names a decision the trail does not hold and is refused before the callable.
+`approval_ref`. Under the refusals above such a call cannot **execute**: the claim
+carries a decision the trail does not hold — or does not hold *that* value under
+that id — and is refused before the callable.
 What remains reachable is the step claim itself, which is committed before `invoke`
 is entered — so a fabricated authority can still open a step, and that step is then
 closed `FAILED` by ADR-0034 §1's rule. #259's own analysis says a check placed after
@@ -281,8 +326,10 @@ available response; that response is ADR-0034 §1's and it is already specified.
 ### 2. Two seams, not one, and the row they write
 
 > **Normative.** `core/protocols.py` gains `InvocationLedger`, with exactly two
-> members. `claim_invocation(*, decision_id: DurableIdentifier) -> ToolInvocation`
-> appends a claim and returns the stored row.
+> members. `claim_invocation(*, decision: PermissionDecision) -> ToolInvocation`
+> appends a claim and returns the stored row; it stores the decision's `id` and
+> stores no other part of the value it was passed (§1's equality refusal is what it
+> is passed for).
 > `complete_invocation(*, claim_id: DurableIdentifier, outcome: ToolOutcome, incurred_cost: ToolCost, failure_kind: ToolFailureKind | None = None) -> ToolInvocation`
 > appends its completion and returns the stored row. Both are `async`, both stamp
 > `recorded_at` themselves, both mint the row's `id` themselves, and both decide
@@ -294,10 +341,10 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > rather than races it — `CONTRIBUTING.md`'s determinism rule, satisfied the way
 > `planning`'s own `id_factory` satisfies it. A minted id is fresh on every append
 > and is derived from no other field of the row, and in particular not from
-> `decision_id`: the two rows of one attempt share that value, and a retry shares it
-> again, so any derivation from it collides. Returning the stored row is how a
-> caller learns the id it will need — `invoke` passes the claim's own `id` as the
-> completion's `claim_id`, and holds it nowhere else.
+> the decision's `id`: the two rows of one attempt share that value, and a retry
+> shares it again, so any derivation from it collides. Returning the stored row is
+> how a caller learns the id it will need — `invoke` passes the claim's own `id` as
+> the completion's `claim_id`, and holds it nowhere else.
 
 > **Normative.** A `ToolInvoker` implementation holds an `InvocationLedger` and
 > **never** an `AuditTrail`. The ledger can neither record a `PermissionDecision`,
@@ -349,9 +396,13 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > either ledger member raises, the translated ones below included.
 
 > **Normative.** `claim_invocation` refuses in this order and no other: `AuditError`
-> where an argument is not valid; `UnrecordedAuthorisationError` where the named
-> decision is absent from the store or its ruling outcome is not `ALLOW`; then
-> `AuthorisationSpentError` where §1's consume refuses.
+> where an argument is not valid; `UnrecordedAuthorisationError` where the store
+> holds no decision under that id, where the stored decision is not equal to the one
+> passed, or where the stored decision's ruling outcome is not `ALLOW`; then
+> `AuthorisationSpentError` where §1's consume refuses. The three grounds of the
+> second are one class deliberately: they are all "the authority this call claims is
+> not one this store recorded", and separating them would tell a caller which half
+> of a forgery was detected.
 
 > **Normative.** `complete_invocation` refuses in this order and no other:
 > `AuditError` where an argument is not valid, which includes a `failure_kind` that
@@ -360,25 +411,37 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > `UnrecordedAuthorisationError`: a completion names a claim, and the claim already
 > names the decision.
 
-> **Normative.** The two orders above are exhaustive over the **classes** a failure
-> arrives in, not over the causes a failure can have. A failure that is neither a
-> named refusal nor an argument fault — the clock will not yield a reading, the
-> store cannot be read, the store cannot be written — is translated at this
-> boundary and raised as a plain `AuditError` carrying its cause. That is ADR-0026
-> §4's rule for a subsystem boundary and not a new one, and it is why the three
-> named classes derive from `AuditError` rather than standing beside it.
-> `checked_clock` raises `ClockReadingError`, a `ValueError` and **not** an
-> `AssistantError`, so a ledger that let it out would leak a non-`AssistantError`
-> across a Protocol boundary; §1's "a clock that raises refuses the claim" is that
-> translation, named here as the class it arrives in.
+> **Normative.** The two orders above are exhaustive over the **classes a refusal
+> arrives in**, not over the causes a failure can have. A failure that is neither a
+> named refusal nor an argument fault — the guard rejects the reading, the store
+> cannot be read, the store cannot be written — is translated at this boundary and
+> raised as a plain `AuditError` carrying its cause. That is ADR-0026 §4's rule for
+> a subsystem boundary and not a new one, and it is why the three named classes
+> derive from `AuditError` rather than standing beside it.
+
+> **Normative.** The clock is split exactly where ADR-0026 §2 splits it, and this
+> ADR draws no new line. The guard's **own** rejection of a non-conforming reading —
+> `checked_clock`'s owner-labelled `ValueError`, `ClockReadingError` — is a
+> `ValueError` and not an `AssistantError`, so the ledger translates it to
+> `AuditError` and a `ToolInvoker` never meets a non-`AssistantError` from this
+> seam. An exception **the clock callable itself raises** propagates **unwrapped**:
+> ADR-0026 §2 rules that "The guard covers the reading, not the invocation. An
+> exception raised by the clock callable itself propagates unwrapped", and ADR-0034
+> §2 already applies that split at the neighbouring seam, "raising `PlanningError`
+> for the guard's own `ClockReadingError` and leaving anything the callable raises
+> on its own account untouched". The ledger does the same, so **nothing of ADR-0026
+> is superseded** — relabelling a callable's own failure would destroy its type and
+> its cause, which is the reason §2 gives. §1's "a clock that raises refuses the
+> claim" means both halves and is not a claim that both arrive as one class.
 
 > **Normative.** Where such a failure prevents a refusal above from being **decided
 > at all** — the store will not answer whether the decision is recorded, or whether
 > a claim is open — the plain `AuditError` is the whole answer, and no refusal above
 > is guessed at, reported as though it had been evaluated, or skipped over. This
 > costs nothing in safety: §1 makes **every** failure of the claim append an exit
-> before the callable is entered, whatever its class, so an undecidable refusal and
-> a decided one fail in the same direction.
+> before the callable is entered, whatever its class and including the unwrapped
+> exception above, so an undecidable refusal and a decided one fail in the same
+> direction.
 
 > **Normative.** The row restates nothing its decision already fixes. It carries no
 > `ToolDefinition`, no `parameters_digest`, no `step_id`, no `execution_id`, no
@@ -501,6 +564,17 @@ the count.
 > claim completes nothing, because there is no claim: §1's refusals and the rest of
 > ADR-0034 §1's window are that case.
 
+> **Normative.** A **`BaseException` that is not a cancellation** — a
+> `KeyboardInterrupt`, a `SystemExit` — is not an exit that clause reaches, and no
+> outcome is invented for one. ADR-0029 §3 requires it to propagate unchanged, and
+> ADR-0029 §§3–4 compute no `ToolOutcome` for it, so there is nothing to pass
+> `complete_invocation` and this ADR mints nothing to fill the argument. `invoke`
+> writes no completion, lets it propagate, and leaves the claim **open** — which is
+> the exact state the clause below governs, and the honest one: the process is being
+> torn down and the outcome was never established. Where a recovery scan later finds
+> that step `RUNNING`, the clause on ADR-0014 §4 below completes the claim
+> `INDETERMINATE` like any other. Nothing of ADR-0029 §3 is changed by saying so.
+
 > **Normative.** The obligation above is **to make the call**, and a completion
 > that is refused or fails to write changes nothing about the call itself.
 > `invoke` returns the `ToolResult` the call produced, or re-raises the exception
@@ -539,6 +613,34 @@ the count.
 > `InvalidCompletionError` is not reachable by this path. A crash after the last
 > completion and before the transition costs one scan that appends nothing.
 
+> **Normative.** The scan **completes open claims and writes no other outcome.**
+> Where it finds claims under that `approval_ref` already completed, it leaves them
+> exactly as they stand: it rewrites none, appends no second completion for one, and
+> reads none in order to decide the step's transition. ADR-0014 §4's transition
+> graph is untouched by this ADR (§10), and a scan that derived a step's outcome
+> from an audit row would be changing it.
+
+> **Normative.** The two records therefore answer two questions and **are not
+> required to agree**, in one direction and one only: an invocation row may read
+> `SUCCEEDED` or `FAILED` under a step that reads `INDETERMINATE`. That is the crash
+> window between two stores — the seam observed an outcome, wrote it, and the
+> process died before the plan could record it — and the pair is the honest reading
+> of it: the invocation row says what the seam observed, and the step says the plan
+> could not be resolved. Neither is inferred from the other's absence, neither is
+> rewritten to match the other, and this ADR gives no lane, scan or surface a rule
+> for resolving one from the other. §4's rendering floor renders the row, §5's
+> evaluation reads the claim, and ADR-0014 §4 governs the step.
+
+> **Normative.** A claim can also be left **open under a step that is not
+> `RUNNING`**: the completion write failed, `invoke` returned, and the executor
+> committed the step's transition on the result it was handed. No recovery scan
+> returns for that step, so that claim stays open for good. This ADR does not repair
+> it and does not license a scan over steps in other states to close it: the outcome
+> was never durably recorded, so there is nothing to recover and any value written
+> there would be invented. Its cost is §5's — the evaluation fails closed while that
+> claim is in scope — and any operator remedy is the budget ADR's, not a rewrite of
+> a row.
+
 > **Normative.** No lane reverses those two, and no lane treats the completions as
 > follow-up work to be done after the transition. Committing the transition first
 > loses every claim still open at that moment, permanently: the step stops being
@@ -571,18 +673,33 @@ action that may not have happened; the other direction costs a message sent twic
 ADR-0029 §5 already refuses to auto-retry an `INDETERMINATE` outcome, so this
 extends a treatment the corpus has rather than inventing one.
 
-**Two stores, one order, and that ordering is the only guarantee available
-without a transaction across them.** The plan store and the audit store are two
-stores, so no single commit covers both and some crash window is unavoidable. What
-an order buys is that the window always falls on the **re-runnable** side. Written
-as above, the worst crash leaves a step still marked `RUNNING` with some of its
-claims already completed — a state the next scan resolves by doing exactly what it
-would have done anyway. Written the other way it leaves an open claim with nothing
-pointing at it, which is not a state any later act can find. Review found the
-reversal by construction — two open claims under one decision, one completed, then
-a crash — and it is the same class of defect as §6's race clause: two records of
-one attempt cannot be held consistent by prose, so this ADR states the order that
-makes them consistent by construction.
+**Two stores, one order, and that order buys a re-runnable window rather than an
+identical pair.** The plan store and the audit store are two stores, so no single
+commit covers both and some crash window is unavoidable; what an order can buy is
+that the window always falls on the side a later act can still fix. Written as
+above, a crash partway through the scan leaves the step still `RUNNING` with some of
+its claims completed — a state the next scan resolves by doing exactly what it would
+have done anyway. Written the other way it leaves an open claim with nothing
+pointing at it, which no later act can find at all. Review found that reversal by
+construction — two open claims under one decision, one completed, then a crash — and
+it is the same class of defect as §6's race clause.
+
+**What the order does not buy is that the two records read the same, and an earlier
+draft of this ADR claimed it did.** Review found the counter-example immediately:
+a `SUCCEEDED` completion lands, the process dies before the executor commits
+`RUNNING → SUCCEEDED`, and the scan then finds a `RUNNING` step with no open claim.
+Under ADR-0014 §4 it records `INDETERMINATE`, so the ledger reads `SUCCEEDED` and
+the step reads `INDETERMINATE` for one attempt. Closing that would take either a
+transaction across two stores, which there is none, or letting the scan write the
+step's outcome from an audit row, which is a change to ADR-0014 §4's transition
+graph that §10 puts out of scope and that would make the plan store's own
+compare-and-swap answerable to a second store. So the clauses above state the
+divergence instead, in the one direction it can occur and with the reading each
+record supports — which is what ADR-0148 §9's own rule already demands of a pair of
+records, that neither be inferred from the other. The claim that was wrong was
+"converge by construction"; what is true is that neither record is guessed from the
+other, and that the difference is always in the conservative direction: the step is
+the more ignorant of the two, never the more confident.
 
 **A claim with no completion is ADR-0184's third state, one store over.** That ADR
 minted a value rather than a marker precisely so "the absence is its own value", and
@@ -1010,14 +1127,21 @@ is still no egress outside a claimed step; and the reconciliation path is still
 ADR-0014 §4's recovery scan. §9's other three clauses are untouched and this ADR
 rests on all three.
 
-**What the record says positively is that the outcome is now written twice, and how
-the two are kept from disagreeing.** §3 supplies that and is where the scope points:
-the recovery scan appends the `INDETERMINATE` completion for every claim left open
+**What the record says positively is that the outcome is now written twice, and it
+says what holds between the two.** §3 supplies that and is where the scope points.
+The recovery scan appends the `INDETERMINATE` completion for every claim left open
 under the step's `approval_ref`, completions first and the step's transition second,
-so the two records converge by construction rather than by a reader's inference.
-Neither is derived from the other's absence — which is §9's own next sentence,
-"none is inferred from the absence of a record", read forward onto the second
-record, and it is also §3's positive-third-state clause.
+so the window where a crash strands a record always falls on the re-runnable side.
+It does **not** make the two reads identical, and this ADR does not claim it does:
+an invocation row may read `SUCCEEDED` or `FAILED` under a step that reads
+`INDETERMINATE`, because the seam can write its outcome and die before the plan
+records one. What §9 asked for holds in full across that difference — neither
+record is inferred from the other's absence, which is §9's own next sentence read
+forward onto the second record and is also §3's positive-third-state clause — and
+the difference runs in the conservative direction only: the step is the more
+ignorant of the pair, never the more confident. Closing it would take a transaction
+across two stores, or a scan writing a step's outcome from an audit row, which is
+ADR-0014 §4's graph and out of scope (§10).
 
 **Recording it rather than arguing the narrow reading, and the reason is worth
 stating.** The narrow reading is available and was held by an earlier draft: under
@@ -1094,19 +1218,49 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > surface as an `AuditError` carrying its cause, none escapes as a
 > non-`AssistantError`, and none arrives as one of the three named refusals (§2).
 
-> **Normative.** Two failure-path tests are owed because two clauses above are
+> **Normative.** The suite pins the **equality** refusal with the attack §1 names:
+> a decision recorded under an id, and a second, structurally different `ALLOW`
+> carrying that same id, passed to `claim_invocation` — refused
+> `UnrecordedAuthorisationError`, before any append, and indistinguishably from an
+> id the store never held.
+
+> **Normative.** It pins ADR-0026 §2's split at this seam in both directions: a
+> guard rejection surfaces as `AuditError`, and an exception the clock **callable**
+> raises on its own account arrives at the caller **unwrapped**, with its type and
+> cause intact.
+
+> **Normative.** Five failure-path tests are owed because five clauses above are
 > written against them. **A completion write that fails** leaves the claim open,
 > returns the call's own `ToolResult` unchanged, reaches the operator as a
 > diagnostic, and makes a spend evaluation over that scope fail closed (§§3, 5).
 > **A recovery scan interrupted between two completions** leaves the step
 > `RUNNING`; a second scan completes the claim still open and only then commits the
-> transition; a third appends nothing (§3).
+> transition; a third appends nothing (§3). **A crash after the last completion and
+> before the step's transition** leaves a completed claim under a `RUNNING` step,
+> and the next scan appends nothing and records the step `INDETERMINATE` — the
+> divergence §3 states, asserted rather than repaired. **A cancellation delivered
+> while an append that then fails is in flight** surfaces the append's failure and
+> not the `CancelledError` (§1). **A non-cancellation `BaseException` raised from
+> the callable** propagates unchanged, writes no completion, and leaves the claim
+> open (§3).
 
 > **Normative.** `ToolInvocation` and `RecordedInvocation` join the promoted set
 > `tests/core/test_engine_surface_closure.py` walks, together with the transitive
 > closure of what their fields reach (ADR-0085 §5), and every string among them is
 > `EncodableText` (ADR-0085 §4c). The lane adds no figure to a comment for either
 > count; those checks own them.
+
+> **Normative.** §4's two operations change the promoted surface's **method set**,
+> so the implementing lane **bumps `PROTOCOL_VERSION` in the same change**. That is
+> ADR-0124 §9's rule in terms — it reaches "any change to the promoted surface's
+> method set or to a method's arguments or results (ADR-0085 §3)", and the
+> obligation is "on whoever makes the change, in the same change". Without the bump
+> a client at the new version and a hub at the old pass the exact-version handshake
+> and `recent_invocations` then fails as an unknown method rather than as an
+> incompatible peer, which is the failure the handshake exists to prevent. The
+> lane's wire tests cover the mixed-version rejection. The lane also applies
+> ADR-0124 §9's second limb to `ToolResult.incurred_cost` where that type is
+> wire-carried; one bump discharges both grounds.
 
 > **Normative.** The composition root wires one object as both `InvocationLedger`
 > and `AuditTrail`, and hands the `ToolInvoker` the ledger alone. A composition that
@@ -1160,6 +1314,22 @@ row kinds, and the annotation belongs to the kind that was already there.
   real cost on the hot path of every tool call and it is accepted: the write before
   the callable is the consume, and a consume that is not durable before the effect
   is not a consume.
+- **The wire protocol version moves.** Two methods join the promoted surface, so
+  ADR-0124 §9's rule fires and the implementing lane bumps `PROTOCOL_VERSION` in the
+  same change. Every deployed spoke and the hub are upgraded together, which for the
+  hop this system is on is two machines upgraded by hand.
+- **An id is no longer enough to claim under a decision.** The ledger is passed the
+  whole `PermissionDecision` and refuses unless the store holds that same value, so
+  a caller that reuses a recorded id for a different `ALLOW` is refused before the
+  callable. The cost is one argument and one equality comparison inside the append;
+  what it buys is that a `RecordedInvocation` reports the decision the act actually
+  ran under.
+- **The two records of one attempt can read differently, and the ADR says so rather
+  than promising otherwise.** A completion can land and the process die before the
+  plan records the outcome, leaving `SUCCEEDED` in the trail under an
+  `INDETERMINATE` step. The divergence runs one way — the step is the more ignorant
+  — and closing it would take a transaction across two stores or a scan writing plan
+  state from an audit row, neither of which this ADR takes.
 - **A `ToolInvoker` implementation now holds an `InvocationLedger`.** That is a new
   collaborator on a seam whose whole design was that it holds a registry binding and
   nothing else — the cost #259 priced when it described closing the same hole one
