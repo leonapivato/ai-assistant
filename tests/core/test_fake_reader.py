@@ -80,18 +80,20 @@ class TestFakeReaderContractDiscriminated(ReaderContract):
 
     @pytest.fixture
     def reader(self) -> Reader:
-        return FakeReader(name=_DISCRIMINATED)
+        return FakeReader(discriminator=_DISCRIMINATOR)
 
     @pytest.fixture
     def empty_reader(self) -> Reader:
-        return FakeReader([], name=f"quiet-source:{_DISCRIMINATOR}")
+        return FakeReader([], name="quiet-source", discriminator=_DISCRIMINATOR)
 
     @pytest.fixture
     def failing_reader(self) -> Reader:
-        return FakeReader(name=f"broken-source:{_DISCRIMINATOR}", failure=FileNotFoundError())
+        return FakeReader(
+            name="broken-source", discriminator=_DISCRIMINATOR, failure=FileNotFoundError()
+        )
 
     def gated_read(self) -> GatedRead:
-        subject = FakeReader(name=_DISCRIMINATED)
+        subject = FakeReader(discriminator=_DISCRIMINATOR)
         return GatedRead(reader=subject, gate=subject.suspend_next())
 
 
@@ -336,35 +338,28 @@ async def test_a_scripted_reading_is_stable_across_reads() -> None:
     assert await subject.read() == await subject.read()
 
 
-def test_a_blank_identity_is_refused_at_construction() -> None:
-    """The canonical fake must not be configurable into breaking its own contract."""
-    with pytest.raises(ValueError, match=r"(?i)declared name|blank"):
-        FakeReader(name="   ")
-
-
 @pytest.mark.parametrize(
     "name",
     [
-        pytest.param(" calendar ", id="padded declared name"),
-        pytest.param("calendar :0f3c9d1a7b45e28c6d90fa3b17e4c852", id="padded declared half"),
-        pytest.param(":0f3c9d1a7b45e28c6d90fa3b17e4c852", id="empty declared half"),
-        pytest.param("calendar:0F3C9D1A7B45E28C6D90FA3B17E4C852", id="uppercase discriminator"),
-        pytest.param("calendar:0f3c9d1a7b45e28c6d90fa3b17e4c85", id="31 characters"),
-        pytest.param("calendar:0f3c9d1a7b45e28c6d90fa3b17e4c8523", id="33 characters"),
-        pytest.param("calendar:0f3c9d1a7b45e28c6d90fa3b17e4c85g", id="outside the alphabet"),
-        pytest.param("calendar:work:0f3c9d1a7b45e28c6d90fa3b17e4c852", id="two colons"),
+        pytest.param("   ", id="blank"),
+        pytest.param("", id="empty"),
+        pytest.param(" calendar ", id="padded"),
+        pytest.param("calendar ", id="trailing space"),
+        pytest.param("calendar:0f3c9d1a7b45e28c6d90fa3b17e4c852", id="a whole identity"),
+        pytest.param("calendar:work", id="any colon at all"),
         pytest.param("calendar\ud800", id="lone surrogate"),
     ],
 )
-def test_an_identity_of_neither_form_is_refused_at_construction(name: str) -> None:
-    """This constructor is a seam that admits a source identity (ADR-0190 §4).
+def test_a_value_that_is_not_a_declared_name_is_refused_at_construction(name: str) -> None:
+    """``name`` is the **declared name** half, and this seam refuses rather than repairs.
 
-    §4 admits a bare declared name and a declared name plus one colon plus 32
-    lowercase hexadecimal characters, and calls everything else "not identities at
-    all" — so the seam refuses rather than repairs.
+    ADR-0190 §4: non-empty, UTF-8-encodable, equal to its own ``str.strip()``, and
+    colon-free. A whole discriminated identity is refused here too, and that is the
+    point of the split — the discriminator arrives through its own parameter, so
+    there is exactly one way to spell each half and no way for the two to disagree.
 
-    The padded cases are the ones that used to be *repaired*. The fake stripped,
-    on the sound ground that ``Attestation.reported_by`` strips and
+    The padded cases are the ones that used to be *repaired*. The fake stripped, on
+    the sound ground that ``Attestation.reported_by`` strips and
     ``SourceReading.source`` does not; §4 closes that at the declaring end instead,
     and a fake that canonicalised silently would hide the offending value from the
     author who wrote it.
@@ -373,24 +368,65 @@ def test_an_identity_of_neither_form_is_refused_at_construction(name: str) -> No
         FakeReader(name=name)
 
 
-def test_a_bare_discriminator_is_refused_by_the_seam_the_suite_cannot_refuse_it_from() -> None:
-    """ADR-0190 §3: ``Reader.name`` is "never a discriminator on its own".
+@pytest.mark.parametrize(
+    "discriminator",
+    [
+        pytest.param("0F3C9D1A7B45E28C6D90FA3B17E4C852", id="uppercase"),
+        pytest.param("0f3c9d1a7b45e28c6d90fa3b17e4c85", id="31 characters"),
+        pytest.param("0f3c9d1a7b45e28c6d90fa3b17e4c8523", id="33 characters"),
+        pytest.param("0f3c9d1a7b45e28c6d90fa3b17e4c85g", id="outside the alphabet"),
+        pytest.param("0f3c9d1a-7b45-e28c-6d90-fa3b17e4c852", id="separators"),
+        pytest.param("", id="empty"),
+    ],
+)
+def test_a_value_that_is_not_a_discriminator_is_refused_at_construction(
+    discriminator: str,
+) -> None:
+    """ADR-0190 §4's *first* admitting clause, which is not the identity clause.
 
-    §4 lists a bare discriminator among the values that "are not identities at
-    all", and §3 states it as a direct obligation on what ``Reader.name`` returns.
-    A colon-free 32-character hexadecimal value is decidably one, so this
-    constructor — a seam that admits a source identity — refuses it.
-
-    **``ReaderContract`` does not**, and the asymmetry is §3's own division. The
-    checks §3 enumerates for the suite are made "decidably, over the value alone"
-    and this is not among them; the suite's remit stops exactly where the prefix
-    check does, which §3 spells out in the clause beginning "What that clause
-    **cannot** reach". A ``Reader`` that declared such a value would be caught by
-    the concrete reader's test instead, which is the case below and its siblings in
-    ``tests/readers/``. Pinned in both places so neither reads as an oversight.
+    §4 binds "a seam that takes a discriminator on its own — a configuration field,
+    a mint's output — whether or not a whole identity passes through it", and gives
+    the reason: §1 rules that what a deployment supplies is the discriminator
+    alone, so "a registry field taking ``ABC…`` uppercase breaches no clause and
+    composes ``calendar:ABC…`` afterwards" if only the identity clause guards it.
+    This parameter is that seam, and it is guarded before anything composes.
     """
-    with pytest.raises(ValueError, match=r"(?i)never a discriminator on its own"):
-        FakeReader(name=_DISCRIMINATOR)
+    with pytest.raises(ValueError, match=r"(?i)ADR-0190"):
+        FakeReader(discriminator=discriminator)
+
+
+def test_a_hex_shaped_declared_name_is_admitted_because_a_declared_name_is_not_a_spelling() -> None:
+    """A discriminator is defined by its role, not by looking like one (ADR-0190 §1).
+
+    §4 constrains a declared name to be non-empty, UTF-8-encodable, canonical and
+    colon-free, and constrains its spelling no further — so a reader type declaring
+    32 hexadecimal characters is conforming, and the canonical fake has to be able
+    to stand in for it. §3's "never a discriminator on its own" is not reachable by
+    inspecting one string: nothing decidable tells this value from a discriminator
+    handed over without its prefix.
+
+    The split is what makes both true at once. A discriminator can only arrive as
+    ``discriminator=``, so it can never *become* the whole identity however it is
+    spelled; and a declared name is whatever the reader type says it is. Pinned
+    because the shape heuristic that would refuse this was tried and was wrong.
+    """
+    subject = FakeReader(name=_DISCRIMINATOR)
+
+    assert subject.name == _DISCRIMINATOR
+
+
+def test_a_discriminator_never_becomes_the_whole_identity() -> None:
+    """§3's "never a discriminator on its own", held structurally rather than checked.
+
+    There is no argument to this constructor that yields an identity with no
+    declared half: ``name`` refuses a colon and defaults to a real declared name,
+    and ``discriminator`` is only ever composed onto it. So the property is a fact
+    about the constructor's shape rather than a validator that could be argued
+    with — which is the same move ADR-0092 §2 makes when it prefers a value object
+    over two nullable fields to make a half-state unconstructable.
+    """
+    assert FakeReader(discriminator=_DISCRIMINATOR).name == _DISCRIMINATED
+    assert declared_name_of(FakeReader(discriminator=_DISCRIMINATOR).name) == DEFAULT_READER_NAME
 
 
 async def test_a_discriminated_identity_reaches_the_reading_and_its_attestation() -> None:
@@ -400,7 +436,7 @@ async def test_a_discriminated_identity_reaches_the_reading_and_its_attestation(
     the value verbatim and ``reported_by`` — an ``Identifier``, which strips — has
     nothing to strip, which is exactly what §4's canonicality rule buys.
     """
-    subject = FakeReader(name=_DISCRIMINATED)
+    subject = FakeReader(discriminator=_DISCRIMINATOR)
 
     reading = await subject.read()
 
@@ -417,12 +453,11 @@ def test_the_declared_half_of_the_fakes_own_identity_is_its_own_declared_name() 
     """The half ``ReaderContract`` cannot reach, for this subject (ADR-0190 §3).
 
     The suite holds a ``Reader`` and nothing to compare a prefix against. For the
-    fake the declared name is the parameter's own, so the check is that a
-    discriminated identity keeps the declared half the caller gave it rather than
-    acquiring one from the discriminator.
+    fake the declared name is ``name``'s own value, so the check is that composing
+    a discriminator onto it leaves that half exactly as the caller gave it.
     """
     assert declared_name_of(FakeReader().name) == DEFAULT_READER_NAME
-    assert declared_name_of(FakeReader(name=_DISCRIMINATED).name) == DEFAULT_READER_NAME
+    assert declared_name_of(FakeReader(discriminator=_DISCRIMINATOR).name) == DEFAULT_READER_NAME
 
 
 def test_an_episodic_proposal_is_refused_at_construction() -> None:
