@@ -540,8 +540,10 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # and a store refuses — §7 puts no ceiling on a retention, the deliberate
     # escape being ``None``, while this backend stamps one as microseconds into a
     # signed 64-bit column — so without this call a deployment configuring one
-    # past that bound would create the data directory and open every store below
-    # the line before learning its configuration was unusable. #372's contract is that
+    # past that bound would create the data directory and open the stores that
+    # precede the notification store, only then learning its configuration was
+    # unusable — the store's own constructor checks before it opens its file, so
+    # the stores after it never open either. #372's contract is that
     # "no directory is created and no database file is written for a build that
     # was never going to succeed", and a check that touches no resource belongs
     # above the line whatever opens it below.
