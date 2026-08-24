@@ -160,6 +160,34 @@ wrong layer (golden rule 3). The bare name ``export`` stays **reserved** for
 ADR-0004 §6's whole-installation artifact, which neither of these discharges
 (#1502).
 
+``reads`` and ``export-reads`` are the same pair one store over — ADR-0186 §10's
+**second pair**, over the record of every attempt this system made to read a
+source (ADR-0185). The two trails **partition** the subject: a read is never a
+:class:`~ai_assistant.core.types.PermissionDecision` and an egress is never a
+:class:`~ai_assistant.core.types.SourceReadRecord`, so neither pair answers the
+other's half and neither is presented as though it did. §10's inheritance is what
+binds this module — §7's last two clauses (a row is rendered whole or not at all;
+every value is inserted as **data**) and §8's bars on liveness, on authorisation
+and on event wording, the last transposed to this store: a row states what was
+*attempted*, never what came of it. What §10 does **not** inherit here is §7's
+egress content floor, which is about a binding no read record carries.
+
+**A refused read is a row and is rendered as one** (ADR-0185 §7). It is the row
+the trail exists for: "was this source read after I revoked it" is answered
+positively rather than by an absence, which in a pruning store is ambiguous by
+construction. So ``assistant granted`` still says what may be reached and this
+says what was attempted, and neither reports the other — no read, read count or
+last-read instant appears beside a standing grant (ADR-0139 §6, ADR-0185 §8).
+
+**The two exports are not equally complete, and that is said here rather than
+left to be discovered** (ADR-0186 §10). ``export-decisions`` writes every ruling
+its trail holds, and that trail prunes nothing (#108). ``export-reads`` writes the
+**horizon**: the store holds at most ``Settings.source_read_trail_max_rows``
+records and deletes the earliest-recorded first (ADR-0185 §6), so attempts older
+than the cap are gone, ADR-0004 §6's export right is discharged "to that extent
+and no further" (ADR-0185 §9, §10), and no lane may report it as a complete
+history.
+
 v1 renders the *final* state of each call; streaming is deferred (ADR-0042 §5).
 """
 
@@ -221,6 +249,7 @@ from ai_assistant.core.types import (
     QuestionState,
     QueueOutcome,
     QuietWindow,
+    ReadOutcome,
     ReplyChunk,
     SecretScope,
     StepStatus,
@@ -274,6 +303,7 @@ if TYPE_CHECKING:
         Question,
         QueuedQuestion,
         SourceGrant,
+        SourceReadRecord,
         StepOutcome,
         TurnOutcome,
         Warrant,
@@ -303,8 +333,9 @@ app.add_typer(device_app, name="device")
 console = Console()
 
 #: Where a diagnostic goes when standard output is carrying an **artifact**
-#: (ADR-0186 §9). ``export-decisions`` writes one JSON document to standard output
-#: "and nothing else on that stream", so its error boundary cannot use
+#: (ADR-0186 §9, §10). ``export-decisions`` and ``export-reads`` each write one
+#: JSON document to standard output
+#: "and nothing else on that stream", so their error boundary cannot use
 #: :data:`console` — a hub that is not reachable would otherwise put a sentence
 #: where a user's shell expects the export. Every other command on this surface
 #: keeps writing to :data:`console`, because a terminal reading a listing is not a
@@ -2094,6 +2125,74 @@ def export_decisions() -> None:
     raise typer.Exit(code)
 
 
+@app.command()
+def reads(
+    limit: int = typer.Option(
+        DEFAULT_PAGE_SIZE,
+        "--limit",
+        callback=_positive_page_argument,
+        help="How many read attempts to show at most (at least 1).",
+    ),
+) -> None:
+    """Show every time I tried to read one of your sources, refusals included.
+
+    One row per **attempt** — the act that starts when I check whether you allow a
+    source to be read and ends one of six ways. A refusal is a row like any other,
+    and it is the row this record exists for: "was that source read after I
+    revoked it?" is answered here by something written down, not by an absence.
+
+    **A row says an attempt was made and how it ended, and nothing further.** It
+    does not say the source is still allowed, what you currently allow it for, or
+    that the grant it names still exists — ``assistant granted`` is what states
+    what you allow now. It does not say what was *done* with anything read,
+    either: what a source returned is counted here and nothing more.
+
+    **Nothing the source said is in this record.** There is no content, no entry,
+    no path and no location — only which source, what for, when I checked, how it
+    ended, the grant it ran under, and how many items came back.
+
+    **The order is the order I recorded them in, newest first.** It is deliberately
+    not an ordering by the instant each row shows: two rows can carry instants that
+    disagree with their positions, and the position is what the record states.
+
+    This record has a horizon: the oldest attempts are dropped as it fills, so
+    ``--limit`` reaches back only as far as it still holds. ``assistant
+    export-reads`` writes what is left, whole.
+    """
+    code = asyncio.run(_list_reads(limit=limit))
+    raise typer.Exit(code)
+
+
+@app.command("export-reads")
+def export_reads() -> None:
+    """Write every read attempt I still hold to standard output, as one JSON document.
+
+    **This is the horizon and not the history**, which is the one way it differs
+    from ``assistant export-decisions``. That record keeps every ruling ever made
+    and drops nothing. This one is capped: when it is full the earliest attempt
+    recorded is deleted to make room, so what you get here is every attempt I
+    **still hold**, and attempts older than the cap are gone. Nothing in the
+    document says otherwise, and nothing here presents the two exports as one
+    record of equal completeness.
+
+    Within that horizon it is the whole of it or an error — nothing here truncates
+    or samples an export without saying so — and it is in ``assistant reads``'
+    order.
+
+    **The document is a faithful copy.** No key is added, renamed or annotated for
+    presentation, so it validates back into exactly the records it came from.
+
+    **Only the document goes to standard output** — every message, warning and
+    error goes to standard error — so ``assistant export-reads > reads.json``
+    writes an artifact and nothing else. There is no ``--output``: your shell
+    already decides where a stream goes, and better than I would.
+
+    This exports **one** store, and is not the whole-installation export.
+    """
+    code = asyncio.run(_export_reads())
+    raise typer.Exit(code)
+
+
 @device_app.command("enrol")
 def device_enrol(
     hub_identity: str = typer.Argument(
@@ -3285,6 +3384,43 @@ async def _export_decisions() -> int:
         return await _drive_export_decisions(engine, artifact=artifact)
 
 
+async def _list_reads(*, limit: int) -> int:
+    """Obtain a client, read the bounded listing, and render it (ADR-0186 §10).
+
+    :func:`_list_decisions`' shape over the read trail, and deliberately the same
+    shape: §10 mints "a **second pair** mirroring §1's", so a door that differed
+    here would be a difference the contract does not have.
+    """
+    try:
+        engine = await _open_engine()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+
+    return await _drive_reads(engine, limit=limit)
+
+
+async def _export_reads() -> int:
+    """Obtain a client, read the whole trail, and write the artifact (ADR-0186 §10).
+
+    :func:`_export_decisions`' claim on standard output, for the same reason and by
+    the same means: the stream is claimed for the document before anything else
+    runs, and everything in between — the settings load, the logging configuration,
+    the probe, the call — prints to standard error instead, whatever prints it and
+    whether or not this module wrote it. §9's clause is about the *stream*, and a
+    redirect is the only way to say that about code this adapter does not own.
+    """
+    artifact = sys.stdout
+    with contextlib.redirect_stdout(sys.stderr):
+        try:
+            engine = await _open_engine()
+        except (AssistantError, TransportError) as exc:
+            _render_error(exc, to_stderr=True)
+            return _EXIT_ERROR
+
+        return await _drive_export_reads(engine, artifact=artifact)
+
+
 async def _forget_belief(belief_id: str, *, assume_yes: bool) -> int:
     """Load settings, build the engine, run the deletion ceremony, and close it.
 
@@ -4242,6 +4378,78 @@ def _decisions_artifact(recorded: tuple[PermissionDecision, ...]) -> str:
         One JSON document, newline-terminated so it is a well-formed text stream.
     """
     return json.dumps([decision.model_dump(mode="json") for decision in recorded], indent=2) + "\n"
+
+
+async def _drive_reads(engine: AssistantEngine, *, limit: int) -> int:
+    """Read the bounded listing of read attempts and render it in the operation's order.
+
+    The order is the **engine's** guarantee and is this store's own rather than
+    ADR-0186 §2's: ``recent_reads`` answers newest-*recorded* first, because
+    ``SourceReadTrail.recent`` is ordered "by recording order, reversed — never by
+    ``checked_at``" (ADR-0185 §6). So nothing here sorts — and nothing here *could*
+    sort correctly, since a record carries no sequence number, its ``id`` is
+    caller-minted and unordered, and its ``checked_at`` is caller-supplied. Nothing
+    here filters either: a consumer wanting a subset selects it from what the
+    operation returned, and an adapter selecting for the user would be the business
+    logic golden rule 3 keeps out of this layer.
+    """
+    try:
+        recorded = await engine.recent_reads(limit=limit)
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc)
+        return _EXIT_ERROR
+    _render_reads(recorded, limit=limit)
+    return _EXIT_OK
+
+
+async def _drive_export_reads(engine: AssistantEngine, *, artifact: TextIO) -> int:
+    """Read the whole trail and write ADR-0186 §9's document to ``artifact``.
+
+    **Whole or nothing**, :func:`_drive_export_decisions`' clause over the store
+    that prunes. ``export_reads`` raises rather than truncating when the trail
+    outgrows the contract limit (ADR-0085 §8c), and that refusal is rendered as an
+    error on standard error with **no** document written. "Whole" is the horizon
+    the store still holds and never the history (ADR-0185 §9), which is stated in
+    the command's own words rather than annotated onto the artifact: a marker key
+    would stop the document re-validating and stop it being an export.
+    """
+    try:
+        recorded = await engine.export_reads()
+    except (AssistantError, TransportError) as exc:
+        _render_error(exc, to_stderr=True)
+        return _EXIT_ERROR
+    artifact.write(_reads_artifact(recorded))
+    artifact.flush()
+    return _EXIT_OK
+
+
+def _reads_artifact(recorded: tuple[SourceReadRecord, ...]) -> str:
+    """ADR-0186 §9's document over the read trail: the records' own projections.
+
+    **Faithful, which is a statement about keys.** Each row is its own
+    ``model_dump(mode="json")`` and this adds no key, removes none, renames none,
+    reorders none for presentation and annotates none — so the array re-validates
+    as ``tuple[SourceReadRecord, ...]``, whose model sets ``extra="forbid"``. In
+    particular the horizon is **not** annotated onto the document: a
+    ``"complete": false`` marker beside the members would fail that re-validation
+    and stop the export being one. ``assistant export-reads``' own words are where
+    the horizon is stated, exactly as ADR-0186 §9 puts the words for an unrecorded
+    origin on ``assistant decisions`` rather than in the artifact.
+
+    **Not folded together with** :func:`_decisions_artifact`, and the reason is the
+    return annotation rather than the two-line body. The type is what says which
+    store this document is a faithful copy *of*, and it is what
+    ``tests/interfaces/test_cli.py``'s walk over this module reads to pin where a
+    recorded ruling may reach; a shared helper taking a sequence of models would
+    make both claims unstatable.
+
+    Args:
+        recorded: Every record the trail still holds, in the operation's order.
+
+    Returns:
+        One JSON document, newline-terminated so it is a well-formed text stream.
+    """
+    return json.dumps([record.model_dump(mode="json") for record in recorded], indent=2) + "\n"
 
 
 def _partial_reference(exc: BaseException) -> str | None:
@@ -6458,8 +6666,13 @@ def _render_standing(standing: tuple[SourceGrant, ...]) -> None:
     **Nothing here is a claim about configuration or about reads.** Whether a held
     reader currently declares one of these sources is a different question and
     ``assistant sources`` is where it is asked (§3's fourth clause, ADR-0093 §7).
-    Whether a source was actually read has no answer on any surface yet (§6), and
-    saying so plainly is what stops this list being read as one.
+    Whether a source was *actually read* is a different question again, and this
+    list still answers none of it — ADR-0139 §6's clause that no client presents a
+    read, a read count or a last-read instant beside a standing grant is unchanged,
+    and ADR-0185 §8 restates it so this lane cannot be read as relaxing it. What
+    has changed is that the question now has a surface of its own: ``assistant
+    reads``. So the closing sentence names it rather than saying nothing answers
+    it, which ADR-0186 §10 wrote as true "until the read surface lands".
     """
     if not standing:
         console.print(
@@ -6482,7 +6695,8 @@ def _render_standing(standing: tuple[SourceGrant, ...]) -> None:
     console.print(
         "[dim]This is what you permitted, read from the record of your own "
         "decisions. It is not a list of what is configured — see 'assistant "
-        "sources' — and it says nothing about what has actually been read.[/]"
+        "sources' — and it says nothing about what has actually been read: "
+        "'assistant reads' is the record of that.[/]"
     )
 
 
@@ -7541,6 +7755,231 @@ def _render_decisions(recorded: tuple[PermissionDecision, ...], *, limit: int) -
     console.print(
         "[dim]A digest binds the arguments a ruling was taken over. The arguments "
         "themselves are not in this record and are not shown.[/]"
+    )
+
+
+# --- rendering the read trail (ADR-0186 §10, ADR-0185 §1, §2, §7) -----------
+# The second pair's rendering, and the block above is its model rather than its
+# template. What is inherited is §7's last two clauses and §8's bars (ADR-0186
+# §10); what is *not* is §7's egress content floor, which is about a binding no
+# read record carries. What is added is this store's own: six outcomes, opened-ness
+# as a function of the outcome and undeterminable on one of them, and a horizon.
+
+
+def _checked_at(instant: datetime) -> str:
+    """The instant a read's grant check resolved, at :func:`_decided_at`'s precision.
+
+    **The same format for a different fact, deliberately.** ADR-0186 §10 inherits
+    §7's clause that no surface "omits, truncates, summarises, samples or counts in
+    place of any part of what it renders", so a minute-grained instant would be a
+    truncation here for the reason it is one there — and this store makes the case
+    stronger, not weaker: a driver checking a revoked source on a schedule writes
+    rows seconds apart, and at ``%H:%M`` a page of them renders as one instant
+    repeated.
+
+    **What the value is remains this store's own.** It is the instant the *first
+    grant check resolved*, read immediately after that and before ``read()``
+    (ADR-0185 §2) — not when the read finished, which no field records. And it is
+    **not** the ordering key: ADR-0185 §6 orders the trail by recording order and
+    forbids deriving an order by comparing these values, so two rows may carry
+    instants that disagree with their positions. :func:`_render_reads` says so
+    where a reader would otherwise infer the opposite.
+
+    A pure formatting of a value that arrived on the record — no clock is read
+    here, and none may be (golden rule 3).
+    """
+    return _decided_at(instant)
+
+
+def _read_ending(outcome: ReadOutcome) -> tuple[str, str]:
+    """How the attempt ended: the word for it, and what it says about opening.
+
+    **Opened-ness is a function of the outcome and is not recorded a second time**
+    (ADR-0185 §1), so it is *rendered* from the outcome rather than looked for on
+    the record — a boolean beside the field was refused for ADR-0106 §2's reason,
+    and a renderer inventing one here would be minting that second spelling at the
+    surface instead. Five of the six determine it; on ``FAILED`` it is "not
+    determinable from the record", and this says so rather than inferring in either
+    direction — a reader can refuse before starting work at all or fail with the
+    bytes already in hand, and ADR-0093 §8 makes both cross the seam as the same
+    error.
+
+    **Each word is about the attempt, never about what came of it** (ADR-0186 §8's
+    third clause, one store over). A completed attempt says the reading was
+    admitted for its use and says nothing about whether the use ran, what it kept,
+    or whether anything reached the user — those are memory's record and the
+    notification store's (ADR-0185 §10). "Remembered" beside a completed row is the
+    specific regression this wording exists against.
+
+    **The two unanswerable outcomes stay separate from their answered twins**
+    (ADR-0185 §1). "There was no live grant" and "I could not find out whether
+    there was one" are different facts about the user's authorisation, and folding
+    them would put a claim into a record whose premise is that it fabricates none.
+
+    **The word is the enum's own**, so what a user reads and what an exported row
+    carries are the same six words, and a reader comparing a screen with a
+    ``reads.json`` needs no glossary between them.
+
+    **Two values rather than one line**, because a row's identifier is what a user
+    quotes and an identifier that lands in a different column on every row cannot
+    be found: the clause is long on three outcomes and short on three, so folding
+    it into the headline pushes the instant and the id past the wrap on exactly the
+    rows the reader is looking hardest at.
+
+    Total over the enum through :func:`~typing.assert_never`, so a seventh outcome
+    would fail the type check rather than render as an empty ending.
+
+    Args:
+        outcome: How the attempt ended, as the record states it.
+
+    Returns:
+        The outcome's own word, coloured, and the sentence that says whether the
+        source was opened and what followed.
+    """
+    match outcome:
+        case ReadOutcome.COMPLETED:
+            return "[green]completed[/]", "opened, and the grant still stood at the re-check"
+        case ReadOutcome.REFUSED:
+            return "[red]refused[/]", "not opened: you allowed no live grant for it"
+        case ReadOutcome.UNANSWERED:
+            return "[red]unanswered[/]", "not opened: I could not find out whether you allowed it"
+        case ReadOutcome.FAILED:
+            return "[yellow]failed[/]", "the read raised; whether it was opened is not recorded"
+        case ReadOutcome.DISCARDED:
+            return (
+                "[yellow]discarded[/]",
+                "opened, then the grant was gone at the re-check, so the reading was dropped whole",
+            )
+        case ReadOutcome.UNCONFIRMED:
+            return (
+                "[yellow]unconfirmed[/]",
+                "opened, then the re-check could not be answered, so the reading was dropped whole",
+            )
+    assert_never(outcome)
+
+
+def _read_grant_line(grant: str | None) -> str:
+    """The grant the attempt ran under, or the absence that is itself a fact.
+
+    ``grant`` is ``None`` **exactly** on ``REFUSED`` and ``UNANSWERED`` and is set
+    on every other outcome (ADR-0185 §2, checked at construction), so the absence
+    states that no live grant was found at the first check rather than that
+    something is missing from the row.
+
+    **The pointer is one-way and is never resolved here** (ADR-0185 §8). Nothing
+    joins back from a grant to its reads, and an id that no longer resolves —
+    after a withdrawal, or a cleared store — is **legible history rather than
+    corruption**: the row says truthfully what the attempt cited at the time. So
+    this renders the id as recorded, claims nothing about whether it still
+    resolves, and looks nothing up.
+    """
+    if grant is None:
+        return "[dim]none — no live grant was found when I checked[/]"
+    return f"{_safe(grant)} [dim](what the attempt cited then; it is not looked up now)[/]"
+
+
+def _render_read(record: SourceReadRecord) -> None:
+    """One recorded read attempt, whole (ADR-0186 §7's last two clauses, §10).
+
+    **All seven of the record's fields are rendered** (ADR-0185 §2): its own id,
+    the source, the use, the instant the check resolved, the outcome, the grant,
+    and the count. Nothing here truncates, summarises, samples or counts in place
+    of any part of one, so a narrow terminal gets fewer rows rather than shorter
+    ones.
+
+    **What is deliberately absent is what the record does not hold.** There is no
+    content, no entry, no path and no configured location, and no string derived
+    from any of them (ADR-0185 §2) — :attr:`source` is the reader's *declared
+    identity* and :attr:`produced` is a count rather than a thing. A surface
+    reaching for "what did it say" would be reaching for something that was never
+    written down, which ADR-0004 §5 and ADR-0093 §8 forbid being written down.
+
+    **Nothing here derives liveness or authorisation from history** (ADR-0186 §8,
+    ADR-0185 §8). A row is not consulted to decide whether a source is granted,
+    what a grant's scope is, or what a source's grant history is;
+    ``SourceGrants.live`` remains the only answer to whether a read may happen, and
+    ``assistant granted`` is the surface that asks it.
+
+    Every value is inserted as data and neutralised for this terminal (ADR-0186
+    §7's last clause, ADR-0042 §4). Being read from an append-only store relaxes
+    nothing: a source is the identity a reader *declares*, stored byte for byte
+    with nothing normalised away (ADR-0185 §2), which is exactly the kind of value
+    a renderer must not hand a terminal unescaped.
+    """
+    word, ending = _read_ending(record.outcome)
+    console.print(f"  {word} [dim]{_checked_at(record.checked_at)}[/] [dim]{_safe(record.id)}[/]")
+    console.print(f"    [dim]{ending}[/]")
+    console.print(f"  [bold]Source:[/] {_safe(record.source)} [dim](as the reader declares it)[/]")
+    console.print(f"  [bold]Read for:[/] {_scope_phrase((record.use,))}")
+    console.print(f"  [bold]Under grant:[/] {_read_grant_line(record.grant)}")
+    console.print(
+        f"  [bold]Produced:[/] {record.produced} item(s) "
+        "[dim](a count of what the source returned, never the thing itself)[/]"
+    )
+    console.print()
+
+
+def _render_reads(recorded: tuple[SourceReadRecord, ...], *, limit: int) -> None:
+    """The bounded listing, and the four things the page itself has to say.
+
+    **Order is recording order, newest first, and is not the instant on the row**
+    (ADR-0185 §6). The store keys its own prune on recording order precisely
+    because ``checked_at`` is caller-supplied and can move backwards, so a page
+    whose positions disagreed with its instants would be correct and would look
+    broken. The footer says which of the two is the claim.
+
+    **Liveness is not derivable from history** (ADR-0186 §8's first clause,
+    ADR-0185 §8). A row states an attempt was made — never that the source is still
+    allowed, that the grant it names still exists, or what the scope is now. That
+    sentence is printed rather than assumed, because the reader who most needs it
+    is the one treating this list as a permissions screen; ADR-0139 §6's clause
+    runs the other way too, and nothing here puts a read beside a standing grant.
+
+    **An empty page is not a claim that nothing was ever read.** ADR-0185 §7's
+    argument for recording refusals is that an absence in a pruning store is
+    ambiguous by construction — no row could mean not read, or pruned, or never
+    recorded — so the one thing this surface must not do is turn an empty page into
+    the statement the store declines to make.
+
+    **The horizon is stated on the listing as well as on the export** (ADR-0186
+    §10). A user who raises ``--limit`` until the page stops growing has reached the
+    horizon and not the beginning, and a bound with no way to tell those apart is a
+    truncation the reader cannot see.
+
+    Args:
+        recorded: The page, in the operation's order.
+        limit: The bound that was asked for, so a full page can say it is one.
+    """
+    if not recorded:
+        console.print("[yellow]Nothing recorded.[/] No attempt to read a source is in this record.")
+        console.print(
+            "[dim]That is not a claim that nothing was ever read: this record states "
+            "what it holds, and the oldest attempts are dropped as it fills.[/]"
+        )
+        return
+    console.print(f"[bold]{len(recorded)}[/] read attempt(s), newest recorded first:\n")
+    for record in recorded:
+        _render_read(record)
+    if len(recorded) == limit:
+        console.print(
+            f"[dim]Showing {limit}. Ask for more with --limit; there is no total "
+            "count, and 'assistant export-reads' writes every attempt still held.[/]"
+        )
+    console.print(
+        "[dim]Each row is an attempt that was made. It does not say the source is "
+        "still allowed, what you allow it for now, or that the grant named above "
+        "still exists — 'assistant granted' is what states that.[/]"
+    )
+    console.print(
+        "[dim]What a source returned is counted here and never shown: this record "
+        "holds no content at all. And a row says what was attempted, not what came "
+        "of it: what any use then did with a reading is a different record.[/]"
+    )
+    console.print(
+        "[dim]The order is the order I recorded these in, newest first — not an "
+        "ordering by the instant shown, which is when I checked whether you allowed "
+        "the read. The oldest attempts are dropped as this record fills, so it "
+        "reaches back only as far as it still holds.[/]"
     )
 
 
