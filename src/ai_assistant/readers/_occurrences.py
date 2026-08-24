@@ -81,6 +81,7 @@ from zoneinfo import ZoneInfo, available_timezones
 
 from dateutil.rrule import rrulestr
 from icalendar import Calendar
+from icalendar.parser import Contentlines
 from icalendar.prop import vRecur
 from icalendar.timezone import tzp
 
@@ -577,6 +578,18 @@ def _refuse_mismatched_delimiters(raw: bytes) -> None:
     semantics ADR-0093 §7b ratifies: it decides only whether the document says what
     it contains, and RFC 5545 §3.6 requires every ``END`` to name its own ``BEGIN``.
 
+    **Read through the library's own content-line parser**, so this compares what
+    the parser compared rather than a second reading of the same bytes.
+    ``Contentlines.from_ical`` supplies the ``utf-8-sig`` decode that removes a BOM,
+    the §3.1 unfolding that makes a delimiter split across two lines one delimiter,
+    and the quoting-aware ``parts()`` split; and the names are folded with ``upper``
+    and nothing else, because ``handle_begin_component`` builds its component from
+    ``vals.upper()`` with no trimming — so ``BEGIN: VTIMEZONE`` opens a component
+    named ``" VTIMEZONE"`` that ``END:VTIMEZONE`` does not close, while still
+    triggering the cache. Every one of those was a way an independent reader
+    diverged from the parser: adversarial review found the folding case on round 6
+    and the BOM and padded-name cases on round 7.
+
     **Deliberately narrow.** An unclosed ``BEGIN`` is not refused: caching happens
     when a component *ends*, so a component that never ends is never cached and
     decides nothing here. Only a genuine mismatch is refused, so a well-delimited
@@ -585,40 +598,26 @@ def _refuse_mismatched_delimiters(raw: bytes) -> None:
     before. Adversarial review found both halves, on rounds 5 and 6.
     """
     stack: list[str] = []
-    for line in _content_lines(raw):
-        tag, _, name = line.partition(":")
-        keyword = tag.partition(";")[0].strip().upper()
+    # `Contentlines.from_ical` carries no annotations in icalendar 7.2.2. It is the
+    # parser's own entry point, and reusing it rather than re-deriving its result is
+    # the whole point of this walk.
+    for line in Contentlines.from_ical(raw):  # type: ignore[no-untyped-call]
+        if not line:
+            continue
+        try:
+            name, _, value = line.parts()
+        except ValueError:
+            # The library reaches `handle_line_parse_error` here, which skips the
+            # line inside a component that tolerates it and raises otherwise — so
+            # skipping cannot refuse a document it reads, and a line it refuses over
+            # never reaches the delimiters this walk is counting.
+            continue
+        keyword = name.upper()
         if keyword == "BEGIN":
-            stack.append(name.strip().upper())
-        elif keyword == "END" and (not stack or stack.pop() != name.strip().upper()):
+            stack.append(value.upper())
+        elif keyword == "END" and (not stack or stack.pop() != value.upper()):
             msg = "a component delimiter that does not match the one it closes"
             raise ValueError(msg)
-
-
-def _content_lines(raw: bytes) -> Iterator[str]:
-    """The document's content lines, unfolded as RFC 5545 §3.1 folds them.
-
-    Unfolding is the one piece of the format this has to redo, because a ``BEGIN``
-    split across a fold is still a ``BEGIN`` to the parser — and a check that missed
-    that would refuse documents ``icalendar`` reads, which is the failure the
-    previous guard was blocked for. A continuation is a line whose first character
-    is a space or a tab, and that character is not part of the value.
-
-    Decoded permissively because only the delimiters are being read: every byte this
-    function is asked about is ASCII, so a replacement character elsewhere cannot
-    turn one content line into another.
-    """
-    current = ""
-    for raw_line in raw.decode("utf-8", errors="replace").split("\n"):
-        line = raw_line.rstrip("\r")
-        if line[:1] in (" ", "\t"):
-            current += line[1:]
-            continue
-        if current:
-            yield current
-        current = line
-    if current:
-        yield current
 
 
 def _declared_zones(calendar: Any) -> dict[str, Any]:
