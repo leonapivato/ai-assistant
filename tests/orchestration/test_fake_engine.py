@@ -703,3 +703,38 @@ async def test_an_explicitly_held_id_is_never_minted_over() -> None:
     seeded = await engine.belief("rec-1")
     assert seeded is not None
     assert seeded.content == "seeded by hand"
+
+
+async def test_a_correction_never_lands_on_the_id_it_just_retired() -> None:
+    """ADR-0045 §4's id rule, read one implementation over.
+
+    A supersession there writes the correction "as a *new* record, at a freshly-minted
+    unique id … it no longer borrows ``T``'s id", and the requirement is that the minted
+    id is absent from the store with "the retained target ``T`` included" — because §4
+    step 1 keeps the target: "``T`` stays on disk with a closed window — retained, off
+    the read path".
+
+    **This engine has no windows, and that is exactly why the rule needs stating here.**
+    Retiring removes the record outright, so an absence check alone is satisfied by the
+    id that was just freed, and the correction lands on the identity of the belief it
+    overturned. A consumer reading ``record_id`` back would then be told the new belief
+    *is* the old one, which is the confusion §4's "no longer borrows" clause exists to
+    prevent.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold("rec-1", content="the user works from Madrid")
+    engine.ask(
+        "q-1",
+        content="the user works from Lisbon",
+        state=QuestionState.OPEN,
+        retires=(engine.retirement("rec-1", content="the user works from Madrid"),),
+    )
+
+    outcome = await engine.answer("q-1", accept=True)
+
+    assert outcome.record_id != "rec-1", "the correction is a new record, not the old id"
+    assert await engine.belief("rec-1") is None
+    assert outcome.record_id is not None
+    written = await engine.belief(outcome.record_id)
+    assert written is not None
+    assert written.content == "the user works from Lisbon"

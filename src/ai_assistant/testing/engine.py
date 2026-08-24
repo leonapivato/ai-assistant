@@ -570,8 +570,20 @@ class FakeAssistantEngine:
         this method now shrinks the store. With ``rec-1`` and ``rec-2`` held, retiring
         ``rec-1`` and sizing the next id would mint ``rec-2`` and write on top of the
         unrelated survivor — an answer destroying a record outside the scope it
-        presented, which is the opposite of ADR-0078 §8's guarantee. The loop past an id
-        already held covers the other direction, where a test has held an explicit
+        presented, which is the opposite of ADR-0078 §8's guarantee.
+
+        **And the ids this answer just retired are reserved against the mint**, which is
+        ADR-0045 §4's rule about a correction's id read one implementation over. There a
+        superseded target is *retained* with a closed window — "``T`` stays on disk with
+        a closed window — retained, off the read path" — so the freshly-minted id must be
+        "absent from the store" with "the retained target ``T`` included", and the new
+        record "no longer borrows ``T``'s id". This engine has no windows, so retiring
+        removes the record outright and an absence check alone would happily hand the
+        correction the very id it just retired. Reserving them restores what §4
+        guarantees: a correction is a new record at a new id, never the overturned one
+        wearing new content. Adversarial review found it on this lane's round 3.
+
+        The loop also covers the other direction, where a caller has held an explicit
         ``rec-N`` of its own.
         """
         named = identifier(question_id, name="question_id")
@@ -590,10 +602,11 @@ class FakeAssistantEngine:
             return self._checked(
                 AnswerOutcome(kind=AnswerKind.REJECTED, question_id=named), "answer"
             )
-        for retirement in question.retires:
-            self.beliefs_held.pop(retirement.record_id, None)
+        retired = {retirement.record_id for retirement in question.retires}
+        for named_record in retired:
+            self.beliefs_held.pop(named_record, None)
         record_id = f"rec-{next(self._written)}"
-        while record_id in self.beliefs_held:
+        while record_id in self.beliefs_held or record_id in retired:
             record_id = f"rec-{next(self._written)}"
         self.hold(
             record_id,
