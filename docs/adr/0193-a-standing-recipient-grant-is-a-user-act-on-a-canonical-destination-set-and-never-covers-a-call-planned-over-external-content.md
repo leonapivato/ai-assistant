@@ -220,13 +220,13 @@ under §3, and **egress call** carries ADR-0148's meaning unchanged.
 ```python
 class RecipientGrant(BaseModel):                       # core/types.py
     model_config = ConfigDict(extra="forbid", frozen=True)
-    id: RecipientGrantId                    # minted by the type; opaque (§1)
+    id: DurableIdentifier                   # minted by the caller that records
     tool: ToolDefinition                    # by value, detached (§1)
     account: BoundAccount                   # by value; identity *and* reference
     destinations: tuple[CanonicalDestination, ...]   # non-empty, no duplicates, ordered
     decided_at: UtcInstant
     expires_at: UtcInstant                  # required; no unbounded spelling (§9)
-    revokes: RecipientGrantId | None = None
+    revokes: DurableIdentifier | None = None
 
 
 class RecipientGrants(Protocol):                       # core/protocols.py
@@ -303,56 +303,42 @@ class RecipientGrantStore(Protocol):                   # core/protocols.py
 > revocation followed by a new grant, and both records are kept (ADR-0097 §2's
 > shape, read one store over).
 
-> **Normative.** `RecipientGrantId` is a **new `core` type**: the hex form of a
-> random UUID, **defaulted and shape-checked**, so no caller can supply one *from
-> data* — ADR-0119 §3's rule for a trace's own id, verbatim in mechanism and in
-> what it claims. No caller parses, orders or derives one, and the only source of
-> a `revokes` value is the `id` of a record the store already holds. The store
-> still mints nothing and reads no clock on the write path (ADR-0021 §3).
+> **Normative.** Ids and instants are supplied by the caller that records, as
+> `PermissionDecision`'s and `SourceGrant`'s are, and are `DurableIdentifier` and
+> `UtcInstant` as theirs are. A store mints no id and reads no clock on the write
+> path (ADR-0021 §3). The only source of a `revokes` value is the `id` of a record
+> the store already holds.
 
-> **Normative.** What the shape buys is that the value **cannot carry data**, and
-> that is the whole of what this ADR rests on it for. It does **not** buy
-> provenance: a default cannot distinguish a fresh mint from a caller passing a
-> correctly shaped string, because the hydration path a store needs to reload a
-> row is the same constructor. ADR-0119 accepts that residue in terms and this ADR
-> accepts it identically; no clause here states or implies that a
-> `RecipientGrantId` was minted by this system.
+> **Normative.** `clear` retains **nothing**: no record, no id, no tombstone, no
+> derived value. An id this store held before a `clear` may be recorded again
+> afterwards, and that is harmless because **nothing ever resolves a historical
+> `authorised_by`**. §6's check runs at write time against the store as it then
+> stands, on a decision being recorded now; §11's second clause forbids any
+> surface from resolving a recorded pointer at all. No component reads a past
+> decision's `authorised_by` against this store, so no component can be given the
+> wrong answer.
 
-> **Normative.** The shape is why a caller-chosen id is refused here where
-> `PermissionDecision`'s and `SourceGrant`'s are permitted. `DurableIdentifier` is
-> `Identifier` — any non-blank encodable text — so a caller-minted grant id may be
-> `alice@example.com`, and §1's tombstone would keep a recipient address after the
-> `clear` that exists to destroy exactly that (ADR-0004 §1, §6). A UUID-shaped id
-> cannot hold one, so the tombstone holds nothing to erase, and that conclusion
-> needs the shape alone rather than the provenance the shape does not give.
-
-> **Normative.** Instants are supplied by the caller that records, as
-> `PermissionDecision`'s and `SourceGrant`'s are.
-
-> **Normative.** An id this store has ever recorded is **never reused**. `clear`
-> erases the records and **retains a tombstone of their ids**, durable across a
-> restart, and `record` refuses an id in that set exactly as it refuses one still
-> present. The tombstone holds minted `RecipientGrantId`s and nothing else — no
-> destination, no account, no tool, no instant — so it is Tier 2 / operational and
-> survives an erasure that destroys every Tier 1 record beside it.
+> **Normative.** Two words are used precisely and are not interchangeable. A
+> granting record is **outstanding** while no revoking record names it — a fact
+> about the store's own contents, needing no clock. It is **live** while it is
+> outstanding **and** its `expires_at` has not passed — outstanding plus the
+> clock. `record` decides over *outstanding*; `covering` and `standing` answer
+> over *live* (§9).
 
 > **Normative.** `record` refuses a **granting** record whose `tool`, `account`
-> and `destinations` all equal those of an **unrevoked** granting record whose
-> `expires_at` is **after the incoming record's own `decided_at`**. The test is
-> over two recorded instants and never over the clock, so the write path stays
-> clock-free: `decided_at` is the caller's statement of when the user decided, and
-> comparing it to the other record's `expires_at` is exactly the question "was
-> that grant still running when this one was made". Narrowing or widening is a
-> revocation followed by a new grant, and both are kept — the rule
-> `SourceGrantStore.record` states as "at most one live grant per source", read on
-> this store's own subject.
+> and `destinations` all equal those of an **outstanding** granting record.
+> Expiry does not enter it, so the write path reads no clock and no
+> caller-supplied instant decides anything. This is `SourceGrantStore.record`'s
+> "at most one live grant per source" with ADR-0097 §4's own liveness — derived
+> from the revocation relation alone — read on this store's subject.
 
 > **Normative.** Overlapping grants over *different* destination sets stay
 > permitted and are what `covering`'s precedence is for. What is refused is a
 > second grant that **is** the first, because revoking one would leave the other
-> standing and the user would have revoked nothing. Once a grant's `expires_at`
-> has passed, an identical new grant is admitted without first revoking the spent
-> one, which is what keeps the rule from becoming a trap.
+> standing and the user would have revoked nothing. Re-granting a triple whose
+> grant has expired is a **revocation followed by a new grant**, both appended and
+> both kept, which is the operation §1 already requires for every other change to
+> what a user has authorised.
 
 > **Normative.** `record` is **write-once and atomic**, on `AuditTrail.record`'s
 > and `SourceGrantStore.record`'s shape and for their reason. Re-recording an id
@@ -956,8 +942,10 @@ has four recipients.
 > `covering` or `standing`, and is never a valid `authorised_by`; it appears in
 > `recent` and `export` as the record of an act, which is what it is.
 
-> **Normative.** A granting record is live when no revoking record names it and
-> its `expires_at` has not passed. Liveness is evaluated by the store at read
+> **Normative.** A granting record is **outstanding** when no revoking record
+> names it, and **live** when it is outstanding and its `expires_at` has not
+> passed (§1). An expired grant is still outstanding, so it can still be revoked
+> and it still blocks an identical new one until it is. Liveness is evaluated by the store at read
 > time, so the store reads the clock and the policy does not (ADR-0021 §3,
 > ADR-0007 §2's read-time enforcement).
 
@@ -984,8 +972,8 @@ has four recipients.
 > `resolves` is unset and `authorised_by` is present, and the surface renders it
 > in §11's **second** state — a standing authorisation this row names — never as a
 > route-(a) decision, never as `authorised_by` unset, and never as a defect. §1's
-> tombstone clause is what stops that pointer ever naming a *different* grant
-> instead, and §11's second clause is why no surface goes looking.
+> §11's second clause — no surface resolves a recorded pointer — is why the row
+> reads the same however the store has since changed.
 
 > **Normative.** `record`'s refusal (§6) is evaluated at the moment of the write
 > and is a statement about the store as it then stood. No component re-evaluates
@@ -1154,14 +1142,19 @@ shape one field over — the absence is its own value, not a spelling of a prese
 one — and it needs no migration, no backfill and no rewriting of an append-only
 store.
 
-**Aliasing is closed at the store rather than at the surface.** §1's tombstone
-clause makes an id this store has recorded unusable again, `clear` included, and
-§1's minted-id clause makes every id it issues opaque and unchosen. What remains
-is a collision between a pointer this store never issued and one it later mints,
-which is the collision `PermissionDecision.id` and `SourceGrant.id` already rest
-on across the whole corpus; nothing here is weaker than that, and no clause
-claims a defence the minting does not already give. Since no surface resolves the
-pointer, a collision moves no row into a different state either.
+**Aliasing is closed by nobody resolving the pointer, which is why this ADR
+carries no machinery against it.** Round 2 of this review raised a recorded
+`authorised_by` being rebound to a different future grant after a `clear`, and
+round 3's repair was a tombstone of every id the store had ever held, with an
+opaque minted id type to keep that tombstone free of the user's data. Round 5
+found the type could not deliver that — thirty-two hex characters encode sixteen
+bytes of anything a caller chooses — and the machinery was removed rather than
+hardened, because §11's second clause had by then closed the hazard at its
+source: **no component ever resolves a recorded `authorised_by` against this
+store.** §6's check reads the store at the moment a *new* decision is written;
+every later reader takes the row as it stands. A rebound id can therefore mislead
+nobody, and an id is an ordinary `DurableIdentifier` again, as
+`PermissionDecision`'s and `SourceGrant`'s are.
 
 **Three states rather than two, and the third is what makes the pair honest.**
 An earlier draft of this section rendered "which of ADR-0017 §2's two bases
@@ -1326,13 +1319,13 @@ their canonical fakes in `ai_assistant.testing`, together with the
 > above pass without.
 
 > **Normative.** The lane ships a test asserting that `RecipientGrantStore.record`
-> refuses a duplicate id, refuses a **granting** record duplicating a live grant's
-> `tool`, `account` and `destinations`, refuses a revocation naming an absent,
+> refuses a duplicate id, refuses a **granting** record duplicating an
+> **outstanding** grant's `tool`, `account` and `destinations`, refuses a revocation naming an absent,
 > already-revoked or differently-transcribed grant, and does **not** refuse a
 > revocation whose `decided_at` predates the grant it revokes (§1).
 
 > **Normative.** The lane ships a **concurrent** test for the duplicate-grant
-> refusal: two identical granting records, different ids, recorded at once, of
+> refusal: two identical granting records, distinct ids, recorded at once, of
 > which exactly one write succeeds. A sequential test passes an implementation
 > whose check and insert are two operations, which is the race ADR-0021 §4's
 > atomicity argument is about.
@@ -1346,14 +1339,14 @@ their canonical fakes in `ai_assistant.testing`, together with the
 > read** against two records sharing an `expires_at`, asserting that one query
 > returns both or neither (§9's single-read clause).
 
-> **Normative.** The lane ships a test asserting that an id is refused after
-> `clear`, and again after a **restart** of the store, so the tombstone is shown
-> to be durable rather than in-process (§1).
+> **Normative.** The lane ships a test asserting that `clear` retains nothing:
+> an id recorded before it is accepted again after it, and again after a restart
+> of the store (§1's `clear` clause).
 
-> **Normative.** The lane ships a test asserting that a `RecipientGrantId` cannot
-> be constructed from a caller-chosen string — `alice@example.com` among them —
-> and that a revoking record's `revokes` is only ever an id the store already
-> holds (§1).
+> **Normative.** The lane ships a test asserting that `record` refuses an
+> identical granting record while the first is **outstanding but expired**, and
+> accepts one once the first has been revoked — the two sides of §1's
+> outstanding-not-live rule.
 
 > **Normative.** The lane re-attests ADR-0154 §4's condition 3 in the same change
 > (§12's fifth clause).
