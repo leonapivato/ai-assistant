@@ -11,6 +11,15 @@
   the required reviews are green" and ADR-0015 §1.
 - Amends: ADR-0021 §6's **Spend accumulation** deferral and ADR-0029 §7's
   spend-accumulation half; §10 applies ADR-0070 §1 and ADR-0082 §1 to each.
+- **Depends on ADR-0192 by number, and on no field of it.** This ADR cites that
+  decision as the thing that records what an invocation cost — a completion row
+  carrying a reported figure, and a claim that may stand open — and reshapes
+  nothing of it: it adds no member to its Protocol, no entry to its refusal order
+  and no field to its row. What it does not do is *precede* it in implementation:
+  §11 sequences the lane that builds this behind the lane that builds ADR-0192's
+  record, which is what `CONTRIBUTING.md` → "Contract ADRs land before their
+  implementation" requires. Deciding two contracts in parallel and building them
+  in order is batch #1544's shape, not a departure from it.
 
 ## Context
 
@@ -85,29 +94,34 @@ provider's bill, which is ADR-0014 §7's deferral and stays there.
 
 ### 1. One ceiling, in one currency, over calendar periods, and unset means unbounded
 
-> **Normative.** `core.config.Settings` gains exactly five fields and no others:
+> **Normative.** `core.config.Settings` gains exactly four fields and no others:
 > `world_spend_currency: str | None`, `world_spend_month_ceiling: Decimal | None`,
-> `world_spend_day_ceiling: Decimal | None`,
-> `world_spend_unknown_allowance: Decimal | None`, each defaulting to `None`, and
-> nothing else. They are the whole of this mechanism's configuration and no other
-> setting conditions it.
+> `world_spend_day_ceiling: Decimal | None` and
+> `world_spend_unknown_allowance: Decimal | None`, each defaulting to `None`. They
+> are the whole of this mechanism's configuration and no other setting conditions
+> it.
 
 > **Normative.** `world_spend_currency` is validated on **shape only** — exactly
 > three uppercase ASCII letters, ISO-4217's alphabetic form, neither normalised
 > nor checked against the live register. This is `ToolCost.currency`'s rule
 > (ADR-0016 §4) and not a second one.
 
-> **Normative.** Each of the three amounts, where set, is a `Decimal` that is
-> **finite and greater than or equal to zero**. A non-finite value is refused at
-> load, as `ToolCost.amount` refuses one, and for the same reason: `Decimal`
-> admits `Infinity` and `NaN`, neither survives arithmetic in a running total,
-> and `NaN` makes every comparison false rather than answering.
+> **Normative.** Either ceiling, where set, is a `Decimal` that is **finite and
+> greater than or equal to zero**. A non-finite value is refused at load, as
+> `ToolCost.amount` refuses one, and for the same reason: `Decimal` admits
+> `Infinity` and `NaN`, neither survives arithmetic in a running total, and `NaN`
+> makes every comparison false rather than answering.
 
-> **Normative.** `world_spend_currency` is set if and only if at least one of
-> `world_spend_month_ceiling` and `world_spend_day_ceiling` is set;
-> `world_spend_unknown_allowance` may be set only where at least one ceiling is.
-> A configuration failing either biconditional raises `ConfigurationError` at
-> load, as every other malformed setting does.
+> **Normative.** `world_spend_unknown_allowance`, where set, is a `Decimal` that
+> is **finite and strictly greater than zero**. Zero is refused at load in every
+> spelling `Decimal` admits for it — `Decimal("0")`, `Decimal("-0")`,
+> `Decimal("0.00")`, `Decimal("0E-9")` — and so is any negative value.
+
+> **Normative.** A ceiling and the allowance may each be set only where
+> `world_spend_currency` is set. `world_spend_currency` **may be set alone**: that
+> configures a **reporting currency** under which totals are computed and readable
+> (§6) and nothing is ever refused. A configuration violating this raises
+> `ConfigurationError` at load, as every other malformed setting does.
 
 > **Normative.** A ceiling bounds **the sum over tool invocations**, across every
 > registered tool, and is scoped to the world as a whole. No per-tool, per-capability
@@ -115,10 +129,20 @@ provider's bill, which is ADR-0014 §7's deferral and stays there.
 > ratified decision (§8).
 
 > **Normative.** The two periods are **calendar periods in the user's configured
-> time zone** (`Settings.timezone`): `CALENDAR_DAY` is midnight to midnight, and
-> `CALENDAR_MONTH` is the first instant of the month to the first instant of the
-> next. Each is half-open — a row belongs to the period containing its recorded
-> instant, and the period's end instant belongs to the next period.
+> time zone** (`Settings.timezone`), and each is the half-open instant interval
+> `[start, end)`: a row belongs to the period containing its recorded instant, and
+> a period's `end` instant belongs to the next period.
+
+> **Normative.** A period's `start` is the **earliest instant whose local civil
+> date in that zone is the period's first date**, and its `end` is that same
+> selection applied to the first date of the following period —
+> the next day for `CALENDAR_DAY`, the first of the next month for
+> `CALENDAR_MONTH`. Where that date's civil midnight is **repeated** across a
+> backward transition, the **earlier** of the two instants is the boundary; where
+> it **does not exist** across a forward transition, the boundary is the instant
+> of the transition itself, which is the first instant of that civil date that
+> exists. No implementation constructs a boundary by naming a wall-clock midnight
+> and accepting whatever `fold` a default supplies.
 
 > **Normative.** Both ceilings bind independently and simultaneously where both
 > are set. A call is refused where it would cross **either**. A
@@ -126,8 +150,9 @@ provider's bill, which is ADR-0014 §7's deferral and stays there.
 > never the binding one; nothing refuses a configuration on that ground.
 
 > **Normative.** **No ceiling configured means no ceiling.** Where both ceilings
-> are unset, this mechanism refuses nothing, admits every call, and the running
-> total is still computed and still readable (§6). No default amount is minted,
+> are unset this mechanism refuses nothing and admits every call — unconditionally,
+> whatever any total says. Where a reporting currency is nonetheless configured the
+> totals are still computed and still readable (§6). No default amount is minted,
 > here or by an implementation.
 
 **Calendar rather than rolling, and the day ceiling is what pays for it.** A
@@ -173,11 +198,20 @@ trigger rather than pre-deciding it here.
 
 ### 2. What is counted: a declared estimate before, a reported figure after, and an unknown price that is never zero
 
+> **Normative.** An accounted total is computed only where
+> `world_spend_currency` is set. Where no currency is configured nothing is
+> summed, no total is stated, and nothing is refused.
+
 > **Normative.** The **accounted total** of a period is the sum of the reported
 > per-invocation costs carried by ADR-0192's **completion** rows whose recorded
-> instant falls in that period. Nothing else contributes to it: not a
-> `ToolDefinition.cost`, not an open claim, not a `PermissionDecision`, not a
-> model call.
+> instant falls in that period, **plus a contribution for every open claim** in
+> that period — a claim ADR-0192 records that carries no completion. Nothing else
+> contributes to it: not a `ToolDefinition.cost`, not a `PermissionDecision`, not
+> a model call.
+
+> **Normative.** An **open claim contributes exactly as an `UNKNOWN` cost does**
+> under the clause below — the allowance where one is configured, and otherwise a
+> contribution greater than any ceiling.
 
 > **Normative.** The **projected total** for a call under admission is the
 > accounted total of the period plus that call's **declared** cost — the
@@ -191,14 +225,26 @@ trigger rather than pre-deciding it here.
 > **Normative.** A cost whose basis is `UNKNOWN` contributes
 > `world_spend_unknown_allowance` where that setting is set, and where it is not,
 > it contributes **more than any ceiling**: in the projected total the call is
-> refused, and in the accounted total the period's total becomes **indeterminate**
-> and no further call in that period is admitted. An `UNKNOWN` cost is never
-> treated as zero and never omitted from a total.
+> refused, and in the accounted total the period becomes **indeterminate**. An
+> `UNKNOWN` cost is never treated as zero and never omitted from a total.
+
+> **Normative.** An indeterminate accounted total refuses admission **only while
+> at least one ceiling is configured**. Where neither ceiling is set, nothing is
+> refused whatever the total says: §1's "no ceiling configured means no ceiling"
+> is unconditional, and this clause is what makes it so.
 
 > **Normative.** A cost denominated in a currency other than `world_spend_currency`
 > is **never converted**. It is treated exactly as an `UNKNOWN` basis is by the
 > clause above. No implementation reads an exchange rate, and no lane adds one
 > without its own ratified decision (§8).
+
+> **Normative.** Every sum and comparison this mechanism performs is **exact**.
+> It is computed in a `decimal.Context` with `Inexact` and `Rounded` trapped, so a
+> computation that would round raises rather than answering quietly, and no
+> implementation widens the precision silently, rounds to a currency's minor unit,
+> or compares two amounts through `float`. A trapped computation is a **refusal**
+> under admission and an **indeterminate** total under a read — the same
+> fail-closed direction the rest of this section takes.
 
 > **Normative.** An indeterminate accounted total is a state of one period and
 > ends when that period does. It is not carried into the next period, and no
@@ -290,7 +336,7 @@ the two properties it has rather than letting a reader assume the stronger one.
 > anything here.
 
 > **Normative.** No implementation makes the admission conditional on the calling
-> subsystem, the tool's identity, a setting other than §1's five, or a value
+> subsystem, the tool's identity, a setting other than §1's four, or a value
 > carried in the request. There is no parameter, argument or configuration by
 > which a caller obtains an invocation the ceiling would refuse.
 
@@ -333,9 +379,12 @@ above the seam inherits none of that.
 
 **The residue this placement leaves, named rather than left to be found.** The
 admission is a read followed by ADR-0192's claim, which is a second operation, so
-two invocations in flight can each project a total that does not yet include the
-other. The overshoot is bounded — by the number of concurrent calls times the
-largest declared estimate among them — and it is **unreachable today**, because
+two invocations whose admissions both run *before* either claim lands can each
+project a total that does not yet include the other. §2's open-claim rule is what
+keeps that window narrow rather than wide: once the first claim is appended, the
+second admission counts it — as an `UNKNOWN` is counted — so the exposure is the
+interleave between one call's admission read and its own claim append, and not
+the whole duration of a call. It is bounded, and it is **unreachable today**, because
 ADR-0029 §7 rules that "one executor runs at a time". It is not unreachable
 forever. The obligation is stated in §8 and belongs to the ADR that lands parallel
 execution: it either moves the admission into the claim's own atomic operation or
@@ -401,66 +450,98 @@ enforce on the two records beside it. Nothing about which recipient, which
 subject, or which argument is needed to explain a ceiling; the numbers are the
 whole explanation.
 
-### 5. `SpendLedger`: one `core` Protocol, two `core` types, one holder
+### 5. `SpendGate` and `SpendLedger`: two `core` Protocols, two `core` types, one holder
 
-> **Normative.** `core/protocols.py` gains `SpendLedger`, with exactly two
-> members, both `async`.
-> `admit_invocation(*, estimate: ToolCost) -> None` evaluates §3's admission and
-> raises `SpendCeilingError` where it refuses, returning `None` otherwise; it
-> stores nothing and appends nothing.
-> `spend_totals() -> tuple[SpendTotal, ...]` returns one `SpendTotal` per period
-> this ADR defines, in a fixed order — `CALENDAR_DAY` then `CALENDAR_MONTH` — and
-> returns both entries whether or not either ceiling is configured.
+> **Normative.** `core/protocols.py` gains **two** Protocols, each with exactly
+> one `async` member. `SpendGate` has
+> `admit_invocation(*, estimate: ToolCost) -> None`, which evaluates §3's
+> admission and raises `SpendCeilingError` where it refuses, returning `None`
+> otherwise; it stores nothing and appends nothing. `SpendLedger` has
+> `spend_totals() -> tuple[SpendTotal, ...]`, which returns one `SpendTotal` per
+> period this ADR defines, in a fixed order — `CALENDAR_DAY` then
+> `CALENDAR_MONTH` — and returns both entries whatever is configured.
+
+> **Normative.** They are two Protocols because they have two consumers and
+> neither needs the other's face: the invoker holds a `SpendGate` and **never** a
+> `SpendLedger`, and the engine reads a `SpendLedger` and never holds a
+> `SpendGate`. No implementation hands `tools/` a route to a totals projection,
+> and none hands an adapter a route to an admission.
 
 > **Normative.** `core/types.py` gains `SpendPeriod`, a `StrEnum` with exactly two
 > members, `CALENDAR_DAY` and `CALENDAR_MONTH`, and no ordering semantics.
 
 > **Normative.** `core/types.py` gains `SpendTotal`, frozen with
 > `extra="forbid"`, carrying exactly: `period: SpendPeriod`;
-> `period_start: datetime` and `period_end: datetime`, both timezone-aware and
-> `period_end` exclusive; `ceiling: Decimal | None`; `currency: str | None`,
-> present if and only if `ceiling` is; and `accounted: Decimal | None`, where
-> `None` states that the period's total is **indeterminate** under §2.
+> `period_start: UtcInstant` and `period_end: UtcInstant`, `period_end` exclusive;
+> `time_zone: str`, the IANA zone those boundaries were computed in;
+> `ceiling: Decimal | None`; `currency: str | None`; and
+> `accounted: Decimal | None`.
 
-> **Normative.** A `ToolInvoker` implementation holds a `SpendLedger`. It acquires
-> no `AuditTrail` and no additional store handle by this ADR, and the ledger can
-> neither record nor read a `PermissionDecision`, neither export nor `clear`.
+> **Normative.** Both instants are `UtcInstant` and never a bare `datetime`.
+> ADR-0023 §2 makes that the type of every instant-valued field in
+> `core/types.py`, `tests/core/test_instant_coverage.py` fails the gate on a bare
+> annotation, and this ADR claims no exemption from either.
+
+> **Normative.** `time_zone` is carried rather than assumed by a reader. The
+> boundaries are the *ledger's* zone, and a surface may be a client configured
+> differently from the process that computed them; a renderer uses this field and
+> never its own configuration.
+
+> **Normative.** `ceiling` is non-`None` only where `currency` is. `accounted` is
+> `None` in exactly two states, which `currency` discriminates: where `currency`
+> is `None`, no currency is configured and no total was computed; where `currency`
+> is not `None`, the period is **indeterminate** under §2. No third meaning is
+> assigned to the absence.
+
+> **Normative.** A `ToolInvoker` implementation holds a `SpendGate`. It acquires
+> no `AuditTrail`, no `SpendLedger` and no additional store handle by this ADR,
+> and the gate can neither record nor read a `PermissionDecision`, neither export
+> nor `clear`.
 
 > **Normative.** `app/composition.py` is the sole holder and the sole wirer: it
 > constructs the ledger, reads §1's settings, injects the clock, and hands the
 > object to the invoker. No subsystem constructs one, and no default is
 > substituted where the composition root did not wire one.
 
-> **Normative.** One object implements `SpendLedger` and ADR-0192's ledger seam,
-> because the totals are computed from that ledger's own rows. Two stores keyed by
-> the same rows could disagree about a total, which is the failure ADR-0016 §7
-> named for two registries, one seam over.
+> **Normative.** One object implements `SpendGate`, `SpendLedger` and ADR-0192's
+> ledger seam, because all three read the same rows. Two stores keyed by the same
+> rows could disagree about a total, which is the failure ADR-0016 §7 named for
+> two registries, one seam over.
 
 **A `None` accounted total is the right shape here, and it is not the optional
 `ToolCost` ADR-0016 §4 refused.** That refusal was about a *cost* field whose
 `None` had to be distinguished from **free** — two meanings collapsing into one
-absence, in a field where a spend policy would read the absence as zero. A total
-has no such collision: zero spend is `Decimal("0")` and is representable, so the
-only thing `None` can mean is the one thing it does mean — the sum is not a
-number, because a member of it was not one. The state it names is exactly §2's
-indeterminate period, and it is computed rather than stored, so nothing can leave
-it set.
+absence, in a field where a spend policy would read the absence as zero. Here
+zero spend is `Decimal("0")` and is representable, so "the total is zero" never
+reaches the absence at all. The absence carries two states rather than one, and
+the clause above gives them a discriminator that is already on the model:
+`currency` present means the sum was attempted and is not a number; `currency`
+absent means no currency was configured and no sum was attempted. That is a
+two-field read of the same kind ADR-0016 §2 obliges `permissions` to make of
+`discloses` and `reversibility`, and it is stated on the type rather than left to
+a consumer to infer. Both states are computed rather than stored, so nothing can
+leave either one set.
 
-**Two members and no more, and each is there for a named consumer.**
-`admit_invocation` has one caller, the invoker, and takes the one value the
-invoker holds that the ledger cannot derive — the declaration on the definition
-ADR-0029 §2's checks have already pinned. `spend_totals` has one caller, the
-engine operation in §6. There is deliberately no member that returns "the amount
-remaining", no member that reserves, and no member that writes: a reservation
-would be a second two-phase ledger beside ADR-0192's, duplicating its claim and
-its completion for a quantity that is already derivable from them.
+**One member each, and the split is ADR-0029 §1's argument one seam over.** That
+section refused to hand every holder of a lookup the ability to execute, and gave
+as its reason that "a consumer that only reads is one a test can double without
+stubbing execution". The same holds here in both directions: an invoker able to
+read a totals projection has acquired a permissions-owned history it has no use
+for, and an adapter able to call the admission has acquired the ability to spend
+a budget. `admit_invocation` takes the one value the invoker holds that the store
+cannot derive — the declaration on the definition ADR-0029 §2's checks have
+already pinned. `spend_totals` has one caller, the engine operation in §6. There
+is deliberately no member returning "the amount remaining", none that reserves,
+and none that writes: a reservation would be a second two-phase ledger beside
+ADR-0192's, duplicating its claim and its completion for a quantity already
+derivable from them.
 
-**A new Protocol, so it is a triad.** Contract, shared conformance suite and
-canonical fake in `ai_assistant.testing`, in one change and never deferred
-(`CONTRIBUTING.md` → "Adding a Protocol"), and under ADR-0137 §2 it rides with
-its primary production implementation — the `permissions` store that also
-satisfies ADR-0192's ledger, which is the consumer whose demands shape it. §11 is
-where that lands.
+**Two new Protocols, so they are a triad.** Contract, shared conformance suite
+and canonical fake in `ai_assistant.testing`, in one change and never deferred
+(`CONTRIBUTING.md` → "Adding a Protocol"), and under ADR-0137 §2 they ride with
+their primary production implementation — the `permissions` store that also
+satisfies ADR-0192's ledger, which is the consumer whose demands shape them. §11
+is where that lands.
 
 ### 6. What the user sees
 
@@ -468,11 +549,14 @@ where that lands.
 > `spend_totals()`, relaying `SpendLedger.spend_totals` and returning what it
 > returns.
 
-> **Normative.** `interfaces/cli.py` gains exactly one command, which renders that
-> operation's `SpendTotal` values: each period, its bounds in the user's
-> configured time zone, its ceiling and currency where configured, and its
-> accounted total — or, where the total is indeterminate, that it is, and that no
-> further call in that period will be admitted.
+> **Normative.** `interfaces/cli.py` gains exactly one command, which renders
+> that operation's `SpendTotal` values: each period, its bounds rendered in the
+> value's own `time_zone` and never in the client's, its ceiling and currency
+> where configured, and its accounted total. Where `accounted` is absent it
+> renders which of §5's two states applies, reading `currency` to tell them apart:
+> that no currency is configured and no total is stated, or that the period is
+> indeterminate — and, where a ceiling is also configured, that no further call in
+> that period will be admitted.
 
 > **Normative.** This operation is **not** one of ADR-0177 §1's thirty. No browser
 > request resolves to it, no browser argument reaches it, the gateway makes no
@@ -569,10 +653,10 @@ Scoping something out is a decision, so each carries the condition that reopens 
   stays there. Its consequence is stated rather than hidden: an unknown-priced
   completion with no configured allowance closes its period until the period rolls
   over, and the only remedies are the allowance, a changed ceiling, and time.
-- **The concurrency residue of §3's placement.** Reopened by, and owed by, the ADR
-  that lands parallel execution (ADR-0029 §7, ADR-0014 §7): it moves the admission
-  into the claim's atomic operation or holds a lease across the pair. It may not
-  land concurrency and leave §3 as written.
+- **The concurrency residue of §3's placement** (#1553). Reopened by, and owed by,
+  the ADR that lands parallel execution (ADR-0029 §7, ADR-0014 §7): it moves the
+  admission into the claim's own atomic operation or holds a lease across the
+  pair. It may not land concurrency and leave §3 as written.
 - **Money a tool moves.** ADR-0016 §7's transacted-cost deferral, untouched. The
   price of a flight lives in a call's parameters, and pricing it needs the
   parameter-level policy ADR-0016 §4 declined to invent.
@@ -655,10 +739,10 @@ replacing them.
 
 ### 11. What the implementing lane owes, and what it is sequenced behind
 
-> **Normative.** The implementing lane lands `SpendLedger` as a triad — the
-> Protocol, a shared conformance suite, and a canonical fake in
-> `ai_assistant.testing` — together with the `SpendTotal` and `SpendPeriod` types,
-> the `SpendCeilingError` class, §1's five settings, the invoker's call to
+> **Normative.** The implementing lane lands `SpendGate` and `SpendLedger` as a
+> triad — both Protocols, a shared conformance suite for each, and canonical fakes
+> in `ai_assistant.testing` — together with the `SpendTotal` and `SpendPeriod`
+> types, the `SpendCeilingError` class, §1's four settings, the invoker's call to
 > `admit_invocation`, the engine operation and the CLI command, in one change
 > under ADR-0137 §2.
 
@@ -671,10 +755,23 @@ replacing them.
 > `FREE` call admitted with the accounted total already at the ceiling; an
 > `UNKNOWN` estimate refused with no allowance configured and admitted at the
 > allowance with one; an `UNKNOWN` completion making the period indeterminate and
-> the next call refused; a foreign-currency cost taking the `UNKNOWN` path; a
-> period rollover clearing an indeterminate total; both ceilings configured with
-> the day ceiling binding first; and no ceiling configured admitting everything
-> while still reporting a total.
+> the next call refused; an **open claim** doing the same, including the case where
+> the completion append itself failed; a foreign-currency cost taking the `UNKNOWN`
+> path; a period rollover clearing an indeterminate total; both ceilings configured
+> with the day ceiling binding first; a reporting currency configured with no
+> ceiling, where a total is stated and **nothing is refused even while the period
+> is indeterminate**; and no currency configured at all, where no total is stated.
+
+> **Normative.** The suite drives the boundary cases §1's period rule exists for,
+> on real IANA zones: a civil date whose midnight is **repeated** across a
+> backward transition, and one whose midnight **does not exist** across a forward
+> transition, with a row placed on each side of the selected instant. A suite that
+> exercises only UTC does not discharge this clause.
+
+> **Normative.** The lane refuses a zero allowance at load in each of §1's
+> spellings, and drives a one-unit crossing at a magnitude where the default
+> 28-digit `decimal` context would round it away — pinning that the arithmetic is
+> exact and that a trapped computation fails closed rather than admitting.
 
 > **Normative.** The lane asserts that a refused call left **no** claim and no
 > completion in ADR-0192's ledger, and that the refusal reached the executor as
@@ -702,6 +799,11 @@ replacing them.
   user acts. That is a real denial of service on the user's own assistant, taken
   knowingly: the alternative is a total that under-reports by an unbounded amount
   while presenting itself as a bound. §8 names the deferral that would soften it.
+- **A currency with no ceiling is a supported configuration**, and it is the
+  cheapest way in: the totals are computed and readable, nothing is ever refused,
+  and a user can watch what the world costs for a month before deciding what to
+  cap it at. It is also what keeps the unbounded case coherent — a total needs a
+  denominator, and this is where it comes from.
 - **The ceiling is not a guarantee about the total, and says so.** It bounds what
   *begins*, not what *ends up spent*, because a declaration can understate.
   Stating the weaker property is what keeps the number honest — the same candour
@@ -711,8 +813,9 @@ replacing them.
   what ADR-0021 §5's whole conformance argument rests on.
 - **Erasing the trail resets the ceiling.** Accepted, because the alternative is a
   spend record that outlives the user's own erasure.
-- **`core` grows by four names** — `SpendLedger`, `SpendPeriod`, `SpendTotal`,
-  `SpendCeilingError` — plus one engine member and five settings. That is the
+- **`core` grows by five names** — `SpendGate`, `SpendLedger`, `SpendPeriod`,
+  `SpendTotal`, `SpendCeilingError` — plus one engine member and four settings.
+  That is the
   breaking-change surface golden rule 5 asks be flagged, and none of it lands
   here.
 - **Two deferrals close and a third is created.** ADR-0021 §6's and ADR-0029 §7's
