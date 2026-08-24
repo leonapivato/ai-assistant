@@ -998,13 +998,15 @@ def test_an_ask_whose_answer_never_arrives_does_not_hold_the_owners_control_for_
     assert 'el("ask-button").disabled = false;' in _functions(script)["releaseAsk"]
     # The wait is a controller and not a flag, so aborting it is what makes the pending
     # `fetch` settle rather than merely marking it settled.
-    assert "const waiting = new AbortController();" in asking
-    assert "waiting.abort();" in abandon
+    assert "const waiting = { stopping: new AbortController(), heard: false, owns: false };" in (
+        asking
+    )
+    assert "waiting.stopping.abort();" in abandon
     # Carried into both turn entries, which is what puts the abort on the socket rather
     # than only on this page's own bookkeeping.
-    assert "await askStreaming(half, asked, chosenAt, waiting.signal);" in asking
-    assert "await askWhole(half, asked, chosenAt, waiting.signal);" in asking
-    assert script.count("signal: stopping,") == 2
+    assert "await askStreaming(half, asked, chosenAt, waiting);" in asking
+    assert "await askWhole(half, asked, chosenAt, waiting);" in asking
+    assert script.count("signal: waiting.stopping.signal,") == 2
     # The owner's act reaches it, from a control that ships nowhere in the document and
     # is built beside the button it stands in for.
     assert 'id="stop-waiting"' not in document
@@ -1032,7 +1034,8 @@ def test_stopping_a_wait_says_the_turns_outcome_is_not_known_and_claims_nothing_
     script = _code("app.js")
     abandon = _functions(script)["abandonAsk"]
 
-    assert 'fault(ASK_ABANDONED, "console");' in abandon
+    assert "const said = waiting.heard ? ASK_ABANDONED_MIDWAY : ASK_ABANDONED;" in abandon
+    assert '`${said} ${PARTIAL_CLEARED}` : said, "console"' in abandon
     assert "What became of the turn is not known" in script
     assert "may have carried it out and may never have received it" in script
     assert "Nothing was re-sent and nothing was cancelled" in script
@@ -1108,7 +1111,7 @@ def test_a_settled_ask_does_not_hand_back_a_control_a_later_question_took() -> N
     assert asking.index("if (awaited === waiting) {") < asking.index("releaseAsk();")
     # Released before the abort, so the rejection it provokes finds this ask settled.
     abandon = _functions(script)["abandonAsk"]
-    assert abandon.index("releaseAsk();") < abandon.index("waiting.abort();")
+    assert abandon.index("releaseAsk();") < abandon.index("waiting.stopping.abort();")
     # `awaited` is written in exactly three places — taken, and given back in the one
     # function that hands the control back with it.
     assert len(re.findall(r"(?<!let )awaited = ", script)) == 2
@@ -1138,22 +1141,85 @@ def test_an_abandoned_ask_leaves_no_answer_shaped_nothing_on_screen() -> None:
 
     assert 'clearNode(el("answer-body"));' in abandon
     assert 'show("answer", false);' in abandon
-    assert abandon.index('clearNode(el("answer-body"));') < abandon.index("fault(ASK_ABANDONED")
+    assert abandon.index("if (waiting.owns) {") < abandon.index('clearNode(el("answer-body"));')
     # The two body reads that an abort can land in the middle of.
-    assert script.count("if (stopping.aborted) {") == 2
+    assert script.count("if (waiting.stopping.signal.aborted) {") == 2
     whole = _functions(script)["askWhole"]
     assert whole.index("const body = await readBody(response);") < whole.index(
-        "if (stopping.aborted) {"
+        "if (waiting.stopping.signal.aborted) {"
     )
-    assert whole.index("if (stopping.aborted) {") < whole.index("if (response.ok) {")
+    assert whole.index("if (waiting.stopping.signal.aborted) {") < whole.index("if (response.ok) {")
     stream = _functions(script)["askStreaming"]
-    assert stream.index("if (stopping.aborted) {") < stream.index('show("answer", false);')
+    assert stream.index("if (waiting.stopping.signal.aborted) {") < stream.index(
+        'show("answer", false);'
+    )
     # And the catch, which stays silent for an ending the owner already has words for.
     asking = _functions(script)["ask"]
-    assert "if (!waiting.signal.aborted) {" in asking
-    assert asking.index("if (!waiting.signal.aborted) {") < asking.index(
+    assert "if (!waiting.stopping.signal.aborted) {" in asking
+    assert asking.index("if (!waiting.stopping.signal.aborted) {") < asking.index(
         'fault(GATEWAY_GONE, "console");'
     )
+
+
+def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> None:
+    """Adversarial review, round 1, blocker and major — both are one mistake: a single
+    sentence and a single clearing act, applied to states they are false in.
+
+    ADR-0177 §7's fourth clause makes an outcome not known where "the request was sent
+    and **no response was read**". Said after a chunk has been rendered it is factually
+    wrong twice over — something here *did* read a reply, and the assistant demonstrably
+    *did* receive the question — and ADR-0182 §7 requires the page's announcement to be
+    accurate rather than merely present.
+
+    **The two facts are separate and are set by different evidence.** ``heard`` says the
+    question reached the assistant, and what proves it differs by entry: ``/ask`` answers
+    only once ``converse`` has returned (``_ask`` awaits it), so its response head is the
+    proof, while ``/ask/stream``'s head is written and drained *before* ``_pump_answer``
+    is awaited (``_write_stream``) and proves nothing about the assistant — there the
+    first chunk is. ``owns`` says this turn has taken the answer panel over, which is
+    what makes the text in it this turn's to throw away: an owner who asks a second
+    question and stops waiting before its head lands still has the *first* question's
+    complete answer on screen, and clearing that is destroying a good answer because a
+    later request failed.
+    """
+    script = _code("app.js")
+    abandon = _functions(script)["abandonAsk"]
+    whole = _functions(script)["askWhole"]
+    stream = _functions(script)["askStreaming"]
+
+    # `/ask`: the head is the proof, and it is taken before the body read an abort lands
+    # in — so a wait stopped during that read is announced as a turn that ran.
+    assert "waiting.heard = true;" in whole
+    assert whole.index("waiting.heard = true;") < whole.index(
+        "const body = await readBody(response);"
+    )
+    # `/ask/stream`: the head takes the panel and claims nothing about the assistant, and
+    # the first chunk is what says the question got there.
+    assert "waiting.owns = true;" in stream
+    assert stream.index('show("answer", true);') < stream.index("waiting.owns = true;")
+    assert stream.index("waiting.owns = true;") < stream.index("waiting.heard = true;")
+    assert stream.index('if (value.kind === "chunk") {') < stream.index("waiting.heard = true;")
+    assert stream.index("waiting.heard = true;") < stream.index("composing.textContent +=")
+    # `owns` is set nowhere else, so the whole entry never clears a panel it did not take.
+    assert script.count("waiting.owns = true;") == 1
+    assert "waiting.owns" not in whole
+    # The clearing is under it, and the sentence about the clearing is under both — a
+    # stream abandoned between its head and its first chunk owns an empty panel, which is
+    # not something to announce having cleared.
+    assert "if (waiting.owns) {" in abandon
+    assert "waiting.owns && waiting.heard ?" in abandon
+    # And the two sentences differ in exactly the clauses the evidence decides. The one
+    # that claims nothing was received says so only where nothing was; the other says the
+    # question got there and narrows what is unknown to the ending.
+    assert "may have carried it out and may never have received it" in script
+    assert "the question was sent and nothing here read a " in script
+    assert "so the assistant did receive the " in script
+    assert "how it ended is what is not known" in script
+    # What neither of them may drop: the act is the same act, so the three things about
+    # it that do not depend on how far the answer got are said in both.
+    assert script.count("nothing was cancelled — the assistant was not told to stop.") == 2
+    assert script.count("new question rather than retrying that one") == 2
+    assert script.count("show in the conversations listing.") == 2
 
 
 def test_the_page_renders_a_notification_in_the_open_page_and_by_no_other_means() -> None:
