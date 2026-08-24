@@ -7,7 +7,9 @@
   disclosure report" as it reaches cost; §1 and §5 below state each scope and what
   of §§3 and 5 stands. ADR-0021 — §4's paragraph "It bounds resolutions, not
   executions, and the difference is worth being precise about"; §2 below states the
-  scope and what of §4 stands.
+  scope and what of §4 stands. ADR-0148 — §9's third clause, as it reaches **where**
+  an attempt's outcome is recorded and not **which four** outcomes there are; §7
+  below states the scope and what of §9 stands.
 - **Decides `core/protocols.py` and `core/types.py` surface, and it is a breaking
   change.** Golden rule 5 asks that it be flagged. It adds one Protocol —
   `InvocationLedger` — so the implementing lane owes a **triad**: contract, shared
@@ -16,7 +18,7 @@
   existing Protocols: `AuditTrail` gains two read members and `AssistantEngine`
   two, so every structural implementation of each must grow them or stop satisfying
   it. `ToolInvoker.invoke` gains an obligation and a collaborator, `ToolResult`
-  gains a field, `core/types.py` gains two models and `core/errors.py` four error
+  gains a field, `core/types.py` gains two models and `core/errors.py` three error
   classes. ADR-0015 §5 and golden rule 5 put it in its own PR, ratified before
   anything implements against it.
 - **Required review set: adversarial *and* architecture.** Compelled rather than
@@ -140,7 +142,7 @@ surface can state an execution at all, because ADR-0186's two operations return
 > `ToolInvoker` propagates each unchanged rather than translating it.
 
 > **Normative.** **Every** failure of the claim append — either refusal above, a
-> duplicate id, a malformed argument, a clock failure, a store I/O failure, any
+> malformed argument, a clock that will not read, a store that will not write, any
 > class whatever — is an exit **before the callable is entered**, always, and that
 > is a clause of this contract rather than a property of an implementation. Each is
 > therefore an exit in the window ADR-0034 §1 governs, qualifying on that section's
@@ -207,6 +209,22 @@ it. A claim's `recorded_at` is *when the append happened*, and it is an input to
 rule the store enforces against that same caller. A store that enforces a rule over
 a number the caller chose enforces nothing.
 
+**The row's `id` divides on the same line, and review had to point that out.** A
+`PermissionDecision.id` is minted by the caller that records the decision, because
+that id is the name the *rest of the system* already knows the ruling by — a step's
+`approval_ref`, a `ToolCall`'s `decision`, this ADR's own `decision_id` — so it has
+to exist before the write. An invocation row's id names nothing outside the store:
+it is minted at the append, learned from the returned row, and used once, to point
+a completion at its claim. An earlier draft took it as an argument and had no
+answer to the obvious question — where does `ToolInvoker` get one. Neither
+`ToolCall` nor the seam has an id source; deriving one from `decision_id` collides
+across the two rows of a single attempt and again across a retry; and inventing one
+inline would put unseeded randomness on the write path, which `CONTRIBUTING.md`
+forbids. Minting it in the ledger, from an injected factory, answers all three at
+once and takes a refusal class off the contract rather than adding one: nothing
+outside the store can name a row that does not exist yet, so there is no duplicate
+`id` for the store to refuse.
+
 **The discriminator in the spendability clause is ADR-0029 §5's own.** Its retry
 rule permits a repeat when "the tool is not `side_effecting`; or its `idempotency`
 is `NATURAL`; or it is `KEYED` **and** the elapsed time since the first attempt of
@@ -263,12 +281,23 @@ available response; that response is ADR-0034 §1's and it is already specified.
 ### 2. Two seams, not one, and the row they write
 
 > **Normative.** `core/protocols.py` gains `InvocationLedger`, with exactly two
-> members. `claim_invocation(*, id: DurableIdentifier, decision_id: DurableIdentifier) -> ToolInvocation`
+> members. `claim_invocation(*, decision_id: DurableIdentifier) -> ToolInvocation`
 > appends a claim and returns the stored row.
-> `complete_invocation(*, id: DurableIdentifier, claim_id: DurableIdentifier, outcome: ToolOutcome, incurred_cost: ToolCost, failure_kind: ToolFailureKind | None = None) -> ToolInvocation`
+> `complete_invocation(*, claim_id: DurableIdentifier, outcome: ToolOutcome, incurred_cost: ToolCost, failure_kind: ToolFailureKind | None = None) -> ToolInvocation`
 > appends its completion and returns the stored row. Both are `async`, both stamp
-> `recorded_at` themselves, and both decide every refusal below inside the same
-> atomic operation as the append.
+> `recorded_at` themselves, both mint the row's `id` themselves, and both decide
+> every refusal below inside the same atomic operation as the append.
+
+> **Normative.** The ledger mints each row's `id` from an **injected identifier
+> factory**, and no caller supplies one. The factory is a collaborator of the
+> implementation exactly as the `Clock` is, injected so that a test pins the value
+> rather than races it — `CONTRIBUTING.md`'s determinism rule, satisfied the way
+> `planning`'s own `id_factory` satisfies it. A minted id is fresh on every append
+> and is derived from no other field of the row, and in particular not from
+> `decision_id`: the two rows of one attempt share that value, and a retry shares it
+> again, so any derivation from it collides. Returning the stored row is how a
+> caller learns the id it will need — `invoke` passes the claim's own `id` as the
+> completion's `claim_id`, and holds it nowhere else.
 
 > **Normative.** A `ToolInvoker` implementation holds an `InvocationLedger` and
 > **never** an `AuditTrail`. The ledger can neither record a `PermissionDecision`,
@@ -313,24 +342,43 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > else — no ruling, no reason, no binding, no destination, no digest and no whole
 > `ToolDefinition`.
 
-> **Normative.** `core/errors.py` gains exactly four classes, **all four deriving
+> **Normative.** `core/errors.py` gains exactly three classes, **all three deriving
 > from `AuditError`** and none from `ToolError`: `AuthorisationSpentError`,
-> `UnrecordedAuthorisationError`, `DuplicateInvocationError` and
-> `InvalidCompletionError`. Each preserves its cause where it has one. A consumer
-> catching `AuditError` catches every refusal either ledger member makes.
+> `UnrecordedAuthorisationError` and `InvalidCompletionError`. Each preserves its
+> cause where it has one. A consumer catching `AuditError` catches every failure
+> either ledger member raises, the translated ones below included.
 
 > **Normative.** `claim_invocation` refuses in this order and no other: `AuditError`
-> where an argument is not valid; `DuplicateInvocationError` where the `id` is
-> already present; `UnrecordedAuthorisationError` where the named decision is absent
-> from the store or its ruling outcome is not `ALLOW`; then
+> where an argument is not valid; `UnrecordedAuthorisationError` where the named
+> decision is absent from the store or its ruling outcome is not `ALLOW`; then
 > `AuthorisationSpentError` where §1's consume refuses.
 
 > **Normative.** `complete_invocation` refuses in this order and no other:
 > `AuditError` where an argument is not valid, which includes a `failure_kind` that
-> disagrees with `outcome`; `DuplicateInvocationError` where the `id` is already
-> present; then `InvalidCompletionError` where `claim_id` names no recorded claim or
-> names one already completed. It never raises `UnrecordedAuthorisationError`: a
-> completion names a claim, and the claim already names the decision.
+> disagrees with `outcome`; then `InvalidCompletionError` where `claim_id` names no
+> recorded claim or names one already completed. It never raises
+> `UnrecordedAuthorisationError`: a completion names a claim, and the claim already
+> names the decision.
+
+> **Normative.** The two orders above are exhaustive over the **classes** a failure
+> arrives in, not over the causes a failure can have. A failure that is neither a
+> named refusal nor an argument fault — the clock will not yield a reading, the
+> store cannot be read, the store cannot be written — is translated at this
+> boundary and raised as a plain `AuditError` carrying its cause. That is ADR-0026
+> §4's rule for a subsystem boundary and not a new one, and it is why the three
+> named classes derive from `AuditError` rather than standing beside it.
+> `checked_clock` raises `ClockReadingError`, a `ValueError` and **not** an
+> `AssistantError`, so a ledger that let it out would leak a non-`AssistantError`
+> across a Protocol boundary; §1's "a clock that raises refuses the claim" is that
+> translation, named here as the class it arrives in.
+
+> **Normative.** Where such a failure prevents a refusal above from being **decided
+> at all** — the store will not answer whether the decision is recorded, or whether
+> a claim is open — the plain `AuditError` is the whole answer, and no refusal above
+> is guessed at, reported as though it had been evaluated, or skipped over. This
+> costs nothing in safety: §1 makes **every** failure of the claim append an exit
+> before the callable is entered, whatever its class, so an undecidable refusal and
+> a decided one fail in the same direction.
 
 > **Normative.** The row restates nothing its decision already fixes. It carries no
 > `ToolDefinition`, no `parameters_digest`, no `step_id`, no `execution_id`, no
@@ -477,6 +525,27 @@ the count.
 > them. Where none is open, it appends nothing: no open claim means no call was in
 > flight.
 
+> **Normative.** The order is **completions first, transition second**. The
+> recovery act appends the `INDETERMINATE` completion for every claim it finds open
+> under that `approval_ref`, and commits the step's transition out of `RUNNING`
+> only after no claim under that decision is still open. It never commits the
+> transition first.
+
+> **Normative.** That ordering is the whole of the crash protocol, and it makes the
+> act **idempotent** without a marker, a generation or a resume point. A crash
+> partway through leaves the step `RUNNING`, so the next scan finds the same step
+> and completes whatever is still open; a claim already completed is no longer open,
+> so no rerun ever attempts a second completion of one and §2's
+> `InvalidCompletionError` is not reachable by this path. A crash after the last
+> completion and before the transition costs one scan that appends nothing.
+
+> **Normative.** No lane reverses those two, and no lane treats the completions as
+> follow-up work to be done after the transition. Committing the transition first
+> loses every claim still open at that moment, permanently: the step stops being
+> `RUNNING`, no later scan returns for it, and nothing else knows to look, because a
+> `ToolInvocation` names no step (§2) and is reachable from that step's
+> `approval_ref` and from nowhere else.
+
 > **Normative.** Completing every open claim is required rather than convenient,
 > because no row names a step. A decision may carry more than one open claim — a
 > non-spendable authorisation admits concurrent invocations (§1) — and a scan
@@ -501,6 +570,19 @@ spent authorisation that might have sent costs a user one fresh confirmation for
 action that may not have happened; the other direction costs a message sent twice.
 ADR-0029 §5 already refuses to auto-retry an `INDETERMINATE` outcome, so this
 extends a treatment the corpus has rather than inventing one.
+
+**Two stores, one order, and that ordering is the only guarantee available
+without a transaction across them.** The plan store and the audit store are two
+stores, so no single commit covers both and some crash window is unavoidable. What
+an order buys is that the window always falls on the **re-runnable** side. Written
+as above, the worst crash leaves a step still marked `RUNNING` with some of its
+claims already completed — a state the next scan resolves by doing exactly what it
+would have done anyway. Written the other way it leaves an open claim with nothing
+pointing at it, which is not a state any later act can find. Review found the
+reversal by construction — two open claims under one decision, one completed, then
+a crash — and it is the same class of defect as §6's race clause: two records of
+one attempt cannot be held consistent by prose, so this ADR states the order that
+makes them consistent by construction.
 
 **A claim with no completion is ADR-0184's third state, one store over.** That ADR
 minted a value rather than a marker precisely so "the absence is its own value", and
@@ -665,10 +747,25 @@ the milestone-24 ruling found it.
 > otherwise. No lane copies `ToolDefinition.cost` into it, or derives it from the
 > declaration by any other route.
 
-> **Normative.** A spend accumulator sums `ToolInvocation.incurred_cost` over
-> **completion** rows and reads no other field of any row for that purpose. A
-> member whose basis is `UNKNOWN` fails closed, which is ADR-0016 §4's rule for
-> `UNKNOWN` and not a new one.
+> **Normative.** A spend accumulator **sums** `ToolInvocation.incurred_cost` over
+> **completion** rows and sums no other field of any row. A member whose basis is
+> `UNKNOWN` fails closed, which is ADR-0016 §4's rule for `UNKNOWN` and not a new
+> one.
+
+> **Normative.** That clause governs the **sum**. It does not govern the
+> **evaluation**, and the two are named apart here deliberately. A spend evaluation
+> reads one further fact and exactly one: whether any claim is **open** in the scope
+> it totals over. An open claim is an act that may have run at a price nothing
+> recorded, so it **fails the evaluation closed**, in the same way and for the same
+> reason a completion whose basis is `UNKNOWN` does. No lane reads an open claim as
+> zero, as free, as pending, or as a row still being written; §3's clause forbidding
+> a reader to resolve it binds here in full.
+
+> **Normative.** Those are one rule over two absences, and the budget ADR states its
+> refusal once over both. A completion carrying `UNKNOWN` says the act ran at a
+> price the tool could not report; an open claim says the act may have run at a
+> price this system failed to write down. Neither is a number, and a total that
+> treats either as zero is exactly the failure this section exists to prevent.
 
 > **Normative.** `incurred_cost` is the price of the invocation. It is never money
 > the tool moved, and no lane reads it as a transacted amount (ADR-0016 §4).
@@ -703,6 +800,20 @@ why the type is a model rather than a bare tuple" — but its sentence "`ToolRes
 carries no cost" is nonetheless false after this ADR, and §3 calls that omission a
 decision, so it is recorded as a supersession and not left to the anticipation
 (§7).
+
+**The accumulator had to be told about the open claim, and review found that hole
+in the one section written to close it — both lenses, independently.** §3 requires
+a completion attempt on every exit and also rules that a completion which will not
+write leaves the claim open while the call's own result stands. So a call that
+reported a real price, whose completion write then failed, leaves a claim, no
+completion, and — under the summing clause read alone — a total of zero. That is
+the precise direction this section was written against, arriving through §3's own
+failure path rather than through a tool that lied. The answer is not a new field:
+the open claim is already the durable record that an act may have run, and the
+accumulator only had to be forbidden from ignoring it. What the clauses above add
+is the separation the earlier wording ran together — what is *summed*, which is
+still completion rows and nothing else, and what is *evaluated*, which now includes
+an absence.
 
 **The distinction between a declaration and a measurement is the one thing this
 section exists to keep.** ADR-0016 §4 makes `cost` "the price of *one invocation of
@@ -744,8 +855,10 @@ here; they are what the surveyed projects' own code and documentation say, and
 
 > **Normative.** `ToolInvocation` rows are Tier 1 (ADR-0004 §7), persist **locally
 > only** under ADR-0004 §2's residency clause, and are held by the same store as
-> the decisions they name. They are append-only and write-once: `record_invocation`
-> refuses a duplicate `id`, and there is no `update` and no selective delete.
+> the decisions they name. They are append-only and write-once: `claim_invocation`
+> and `complete_invocation` each append exactly one row under an `id` the ledger
+> mints fresh at the append (§2), so no caller can name a row in order to overwrite
+> it, and there is no `update` and no selective delete.
 
 > **Normative.** `AuditTrail.clear()` erases **both** row kinds and returns the
 > count of every row it removed, of either kind. No operation erases one kind and
@@ -763,8 +876,10 @@ here; they are what the surveyed projects' own code and documentation say, and
 > discharge ADR-0004 §6's portability obligation for this row kind.
 
 > **Normative.** Every read of this row kind returns a **detached snapshot** — the
-> tuple and everything mutable it reaches — as every other `AuditTrail` read does
-> (ADR-0018 §3, ADR-0021 §4).
+> sequence returned and everything mutable it reaches — as every other `AuditTrail`
+> read does (ADR-0018 §3, ADR-0021 §4). The trail's own two reads return a `list`
+> and the engine's two operations return a `tuple` (§§2, 4); both are detached, and
+> neither is a view onto stored state.
 
 > **Normative.** This ADR mints no retention rule and no TTL. #108's question is
 > unchanged and now covers both kinds of row; a rule that expires one kind and not
@@ -801,8 +916,9 @@ place both records are in hand" stops being true.
 ### 7. What this changes in other ADRs, clause by clause
 
 Under ADR-0082 §1 a record is owed on an earlier ADR exactly where a named clause
-of it fails ADR-0070 §1's test. Two do. The rest are stacked additions and are
-listed so a reviewer can check the showing rather than infer it.
+of it fails ADR-0070 §1's test. **Three ADRs do, across four clauses** — ADR-0029
+§3 and §5, ADR-0021 §4, ADR-0148 §9. The rest are stacked additions and are listed
+so a reviewer can check the showing rather than infer it.
 
 **ADR-0029 §3 — partially superseded, as it reaches cost only.** Its sentence
 "**`ToolResult` carries no cost and no disclosure report**, and both omissions are
@@ -871,31 +987,70 @@ and this ADR introduces none" all stay true. This ADR introduces no such fact on
 the seam either: §3's claim is a durable row in a store, not a value returned from
 `invoke`, and no executor reads it.
 
-**ADR-0148 §9 — nothing is owed, and this is the clause most at risk of being read
-as changed.** The step execution remains the attempt identifier ADR-0017 §3
-requires, the four outcomes remain the step's, and the reconciliation path remains
-ADR-0014 §4's recovery scan. This ADR adds an audit-trail row for the same attempt;
-it does not move the attempt identifier, does not add a reconciliation path, and
-does not permit an egress outside a claimed step. §3's fourth clause has the
-recovery scan write the completion precisely so the two records say the same thing
-rather than two things.
+**ADR-0148 §9 — partially superseded, on *where* an attempt's outcome is recorded
+and not on *which four* outcomes there are.** Its third clause rules that "The four
+outcomes ADR-0017 §3 requires are the step's and no others", and its reasoning gives
+the ground: the trail is append-only, so "an outcome that moves from pending to
+succeeded **cannot** live there", and the condition is discharged "by joining two
+ratified records rather than by adding a third". §2 above puts an outcome on an
+audit row. A reader holding only ADR-0148 would look for an attempt's outcome in one
+store and find that this system writes it in two, so under ADR-0070 §1 that is a
+change to what was decided and it takes a record.
+
+**The scope is one sentence's reach, and three things it could be read to cover are
+outside it.** *(a) No fifth outcome.* `ToolInvocation.outcome` is `ToolOutcome` —
+ADR-0029 §3's three members, alongside the open claim ADR-0148 §9 itself calls
+*pending*. This ADR mints no outcome vocabulary, adds no member to that enum and
+states no fifth state. *(b) No outcome moves.* ADR-0148's stated reason bars a row
+that transitions; §2 writes two rows and no `update`, so a claim is never rewritten
+into a completion and the sentence that supplied the reason stays literally true of
+this store. *(c) The attempt identifier does not move.* It is still the step
+execution; `PermissionDecision.step_id` is still set on every egress decision; there
+is still no egress outside a claimed step; and the reconciliation path is still
+ADR-0014 §4's recovery scan. §9's other three clauses are untouched and this ADR
+rests on all three.
+
+**What the record says positively is that the outcome is now written twice, and how
+the two are kept from disagreeing.** §3 supplies that and is where the scope points:
+the recovery scan appends the `INDETERMINATE` completion for every claim left open
+under the step's `approval_ref`, completions first and the step's transition second,
+so the two records converge by construction rather than by a reader's inference.
+Neither is derived from the other's absence — which is §9's own next sentence,
+"none is inferred from the absence of a record", read forward onto the second
+record, and it is also §3's positive-third-state clause.
+
+**Recording it rather than arguing the narrow reading, and the reason is worth
+stating.** The narrow reading is available and was held by an earlier draft: under
+ADR-0089 §3 unmarked text in a marked ADR determines what a marked clause means and
+never supplies an obligation, so "and no others" bars a fifth vocabulary — which
+this ADR honours in terms — while "cannot live there" is unmarked prose whose stated
+reason is a row that *moves*, which two appends are not. That draft concluded
+nothing was owed while calling §9, in the same paragraph, "the clause most at risk
+of being read as changed". Holding both is the weak position, and ADR-0070 §1's test
+is the decision and not the label. The record costs a status line and a note; being
+wrong about it costs a reader who acts on §9 alone, which is the failure ADR-0082 §1
+exists to prevent.
 
 ### 8. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
-The header edits this ADR makes to ADR-0021 and ADR-0029 are §1-permitted status
-edits and appended dated notes. No ratified sentence of either is rewritten; both
-documents' Decision text stands unedited and legible as history beside the pointer
-here, which is ADR-0070 §2's own treatment of ADR-0001.
+The header edits this ADR makes to ADR-0021, ADR-0029 and ADR-0148 are
+§1-permitted status edits and appended dated notes. No ratified sentence of any of
+the three is rewritten; all three documents' Decision text stands unedited and
+legible as history beside the pointer here, which is ADR-0070 §2's own treatment of
+ADR-0001.
 
-Both lines take the leading `Partially superseded by` token, so `Accepted` is
+All three lines take the leading `Partially superseded by` token, so `Accepted` is
 dropped — the property ADR-0070 §4 makes load-bearing, so that a filter
 prefix-matching `Accepted` cannot read a partially-superseded ADR as fully current.
-Under ADR-0082 §2 the amendment qualifiers those two lines already carry come off
-the line in the same change and stay whole in the dated notes below them. ADR-0021's
-ADR-0148 record already exists as an in-text dated note at the end of its §1;
-ADR-0029's ADR-0031, ADR-0032, ADR-0034 and ADR-0039 records already exist as dated
-header notes. Nothing is lost by the move, which is ADR-0082 §2's stated condition
-for making it.
+Under ADR-0082 §2 the amendment qualifiers a line already carries come off it in the
+same change and stay whole in the dated notes below, which is that section's stated
+condition for making the move. ADR-0021's line carried one and ADR-0029's carried
+three; ADR-0021's ADR-0148 record already exists as an in-text dated note at the end
+of its §1, and ADR-0029's ADR-0031, ADR-0032, ADR-0034 and ADR-0039 records already
+exist as dated header notes, so nothing is lost. **ADR-0148's line carries no
+qualifier to move** — its own 2026-08-22 amendment is already a separate dated
+bullet, which the edit leaves untouched — so on that document the change is the
+token and the appended note and nothing else.
 
 The records are written now, while this ADR stands `Proposed`, rather than at
 ratification. ADR-0165's exempt flip is one ADR file and one changed line, so a
@@ -927,6 +1082,25 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > state and not a licence to write a wrong outcome; where the **claim**'s outcome
 > cannot be observed, the implementation does not satisfy §1 and the conformance
 > suite says so.
+
+> **Normative.** The suite pins the minted `id` at the same boundary: every id
+> comes from the injected factory, ids are fresh across two claims under one
+> decision and across a claim and its own completion, and the caller completes
+> against the row the ledger returned. No test supplies an id and no implementation
+> accepts one.
+
+> **Normative.** It pins the translated failures as **classes**: a clock that
+> raises, a store that cannot be read and a store that cannot be written each
+> surface as an `AuditError` carrying its cause, none escapes as a
+> non-`AssistantError`, and none arrives as one of the three named refusals (§2).
+
+> **Normative.** Two failure-path tests are owed because two clauses above are
+> written against them. **A completion write that fails** leaves the claim open,
+> returns the call's own `ToolResult` unchanged, reaches the operator as a
+> diagnostic, and makes a spend evaluation over that scope fail closed (§§3, 5).
+> **A recovery scan interrupted between two completions** leaves the step
+> `RUNNING`; a second scan completes the claim still open and only then commits the
+> transition; a third appends nothing (§3).
 
 > **Normative.** `ToolInvocation` and `RecordedInvocation` join the promoted set
 > `tests/core/test_engine_surface_closure.py` walks, together with the transitive
@@ -991,11 +1165,12 @@ row kinds, and the annotation belongs to the kind that was already there.
   nothing else — the cost #259 priced when it described closing the same hole one
   level up — but it is two append methods and not the audit trail, so no decision
   write, history read or erasure reaches `tools/`.
-- **The audit store now needs a clock.** `recorded_at` is stamped where the rule is
-  enforced rather than supplied by the party the rule bounds, which is a new
-  injected collaborator on an implementation that had none, and a new failure mode:
-  a clock that will not read refuses the claim, so nothing side-effecting executes.
-  That is the fail-closed direction and it is chosen deliberately.
+- **The audit store now needs a clock and an identifier factory.** `recorded_at` is
+  stamped, and each row's `id` is minted, where the rule is enforced rather than by
+  the party the rule bounds — two new injected collaborators on an implementation
+  that had none, and a new failure mode: a clock that will not read refuses the
+  claim, so nothing side-effecting executes. That is the fail-closed direction and
+  it is chosen deliberately.
 - **`ToolResult` gains a field, so every tool implementation may report a cost and
   none must.** The default is `None` and `None` becomes `UNKNOWN` on the row, so a
   tool that never grows the field fails a budget closed rather than silently
@@ -1014,7 +1189,9 @@ row kinds, and the annotation belongs to the kind that was already there.
   deliberate. A completion that will not write leaves an open claim and an operator
   diagnostic, and the tool's own result is returned unchanged — because reporting a
   known-successful side effect as failed is the one outcome worse than an
-  incomplete record.
+  incomplete record. The residue is paid at the budget instead: an open claim fails
+  a spend evaluation closed (§5), so the next call under that scope is refused
+  rather than admitted against a total that quietly lost a price.
 - **An honest history has a state that is neither success nor failure, and surfaces
   must render it.** A claim with no completion will be visible to users, and a
   surface that finds it awkward is not permitted to resolve it.
@@ -1023,8 +1200,8 @@ row kinds, and the annotation belongs to the kind that was already there.
   than ADR-0021 §4 left it — and #108's own trade is unchanged, only larger.
 - **New `core` surface:** the `InvocationLedger` Protocol with two members;
   `ToolInvocation` and `RecordedInvocation`; `AuthorisationSpentError`,
-  `UnrecordedAuthorisationError`, `DuplicateInvocationError` and
-  `InvalidCompletionError`, all four under `AuditError`; one field on `ToolResult`;
+  `UnrecordedAuthorisationError` and `InvalidCompletionError`, all three under
+  `AuditError`; one field on `ToolResult`;
   two read members on `AuditTrail`; two on `AssistantEngine`; and one obligation on
   `ToolInvoker.invoke`. One triad lands, and three existing conformance suites and
   their fakes grow.
@@ -1112,9 +1289,15 @@ suppressed instead — one uniform rule over every completion failure (§3), whi
 needs no marker.
 
 **Carry an `attempt` ordinal on the claim.** Refused after review found no safe
-allocator: caller-minted races, and store-allocated would make the write path
-rewrite the value it was handed, which ADR-0021 §4's write path never does. §2 says
-what replaces it.
+allocator, and it is not the same question as the row `id` §2 settled on. A
+caller-minted ordinal races — two concurrent claims both compute 1. A store-minted
+one differs from a store-minted id in the way that matters: an id is a fresh value
+that depends on nothing, where an ordinal has to be **counted from the other rows
+under that decision**, which puts a read of the store's own history inside the one
+atomic append the consume depends on. It also buys nothing now that the ledger
+returns the stored row and §1 bounds a spendable authorisation to one claim plus
+retryable `KEYED` retries inside a single window. §2 says what replaces it: the
+claims themselves, in the ledger's own order.
 
 **Let any `FAILED` completion admit a further claim.** The first draft's rule, and
 looser than ADR-0029 §5's retry conjunction, which forbids repeating a side-effecting

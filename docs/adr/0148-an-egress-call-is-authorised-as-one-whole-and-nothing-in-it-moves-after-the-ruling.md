@@ -1,7 +1,35 @@
 # 148. An egress call is authorised as one whole, and nothing in it moves after the ruling
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0192 (§9's third clause, as it reaches where an attempt's outcome is recorded and not which four outcomes there are)
 - Date: 2026-08-13
+- Partially superseded: 2026-08-24 by ADR-0192 — **one clause of §9, on *where* an
+  attempt's outcome is recorded.** §9's third clause rules that "The four outcomes
+  ADR-0017 §3 requires are the step's and no others", and the unmarked reasoning
+  below it grounds that on the trail being append-only: "an outcome that moves from
+  pending to succeeded **cannot** live there", so the condition is discharged "by
+  joining two ratified records rather than by adding a third". ADR-0192 gives the
+  audit trail a `ToolInvocation` row that carries the same attempt's outcome, so a
+  reader holding only this ADR would look for that outcome in one store when the
+  system writes it in two. That is a change to what was decided (ADR-0070 §1) and is
+  recorded here rather than glossed. **What is superseded is only the location.**
+  There is **no fifth outcome**: ADR-0192's field is `ToolOutcome`, ADR-0029 §3's
+  three members alongside the open claim this section itself calls *pending*, and
+  that ADR mints no vocabulary and adds no enum member. **No outcome moves**: it
+  writes a claim row and a completion row and never an `update`, so the sentence
+  that supplied this section's reason stays literally true of that store.
+  **Everything else of §9 stands, and ADR-0192 rests on all of it**: the step
+  execution is still the attempt identifier ADR-0017 §3 requires; every transmission
+  still happens under a committed `→ RUNNING` claim whose `approval_ref` is the
+  authorising decision; `PermissionDecision.step_id` is still set on every egress
+  decision so the two records resolve to each other in both directions; the
+  reconciliation path is still ADR-0014 §4's recovery scan and no seam adds one of
+  its own; and no outcome is inferred from the absence of a record — which ADR-0192
+  §3 reads forward onto the second record, requiring the recovery scan to complete
+  every open claim under that `approval_ref` **before** it commits the step's
+  transition, so the two records converge by construction. No sentence of §§1–8 or
+  §§10–15 is touched, and this ADR's Decision text below is not rewritten (ADR-0070
+  §1). The 2026-08-22 amendment note below is unaffected and stays whole. Refs
+  #1503, #1544.
 - **Amended: 2026-08-22 — §8's fourth clause now has a carrier, and no clause of
   this ADR changes.** §8 requires a `CONFIRM` on an egress call to name the connected
   account's identity, the canonical destination set in both forms and the payload
