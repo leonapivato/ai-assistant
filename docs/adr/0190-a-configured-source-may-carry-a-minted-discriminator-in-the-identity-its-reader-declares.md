@@ -2,6 +2,22 @@
 
 - Status: Proposed
 - Date: 2026-08-24
+- **Decides a `core` contract and implements none of it — a breaking `Reader`
+  change (golden rule 5).** It changes what `Reader.name` may return, and so what
+  every consumer of a source identity may rely on: today an identity is a class
+  constant and two objects of one reader class always agree; after this ADR two
+  configured sources of one reader type declare different identities, and a
+  consumer that assumed one identity per reader *class* is wrong. No signature
+  changes and no `core/types.py` change is owed (§3), but the semantics of a
+  ratified Protocol member do, which is the breaking half. **Because this ADR
+  decides a Protocol's semantics, its required review set is adversarial *and*
+  architecture**, even though the PR carrying it is prose only — ADR-0093's own
+  header took that reading for the same member, and `CONTRIBUTING.md` → "Stop when
+  the required reviews are green" makes it "the ADR deciding that surface" rather
+  than the diff that decides. ADR-0015 §5 and golden rule 5 put it in **its own
+  PR, prose only, ratified before anything implements against it**; the correction
+  it obliges on `core/protocols.py` is §3's, and belongs to the lane that admits a
+  discriminated identity.
 
 ## Context
 
@@ -32,10 +48,15 @@ here, not reopened.
 The other gate is ADR-0093 §7's, and until this ADR nothing in the corpus recorded
 it as one:
 
-> **Normative.** A sensor's identity is **declared by the sensor** and is not a
-> configurable value. It is a stable Tier 2 name, never derived from the source's
-> location or contents; a path, filename, address or account identifier may not be
-> used as one. The calendar sensor's identity is `"calendar"`.
+```text
+**Normative.** A sensor's identity is **declared by the sensor** and is not a
+configurable value. It is a stable Tier 2 name, never derived from the source's
+location or contents; a path, filename, address or account identifier may not be
+used as one. The calendar sensor's identity is `"calendar"`.
+```
+
+That is ADR-0093 §7's mark shown, not made: it is fenced so that quoting the clause
+this ADR supersedes does not re-impose it here (`docs/adr/template.md`, ADR-0089 §2).
 
 A second configured source of one reader type needs an identity that distinguishes
 it from the first. Every `CalendarReader` returns the same class constant, so the
@@ -85,14 +106,28 @@ second calendar has misread it.
 > identity may carry a part that comes from the deployment's configuration, in
 > exactly the shape ADR-0189 §6 specifies and in no other: the **first** source of a
 > reader type a deployment configures may hold that type's bare declared name, and
-> every source of that type configured **after** it carries a minted discriminator —
-> 128 bits, rendered as 32 lowercase hexadecimal characters, assigned once at
-> configuration, never changed, never re-used.
+> every source of that type configured **after** it carries a **discriminator** the
+> deployment mints — 128 bits, rendered as 32 lowercase hexadecimal characters,
+> assigned once at configuration, never changed, never re-used.
+
+> **Normative.** **The discriminator is not the identity.** An identity is one of
+> exactly two things: a **bare** identity, which is a reader type's declared name and
+> nothing else, or a **discriminated** identity, which is that declared name together
+> with one discriminator, spelled as §4 rules. Where this ADR or ADR-0189 §6 states a
+> width, an alphabet or a mint, it states it of the **discriminator**; the identity
+> is what `Reader.name` returns and what §4 spells.
 
 > **Normative.** The **type-name half stays the sensor's**, declared and not
-> configurable. What a deployment supplies is the instance-distinguishing part
-> alone. No deployment may configure the declared name of a reader type, and no
-> configuration may replace an identity with a value that carries no declared part.
+> configurable. What a deployment supplies is the discriminator alone. No deployment
+> may configure the declared name of a reader type, and no identity — bare or
+> discriminated — may lack a declared part.
+
+> **Normative.** Holding the bare name is a **permission and not an obligation**: a
+> deployment may mint a discriminator for the first source of a type as well, and
+> ADR-0189 §6's "may hold … and a deployment that has assigned that bare name has
+> spent it" is adopted with its permissive word intact. What is forbidden is the
+> converse — a source configured after one of its type has taken the bare name may
+> not hold a bare identity — and that is the whole of what assign-once needs.
 
 > **Normative.** ADR-0093 §7's last sentence — "The calendar sensor's identity is
 > `"calendar"`" — is **narrowed to the first configured calendar** of a deployment
@@ -145,20 +180,23 @@ today, what `ReaderContract` requires of it, [and] what the shared conformance s
 (ADR-0095 §3) asserts about it. The lane that takes §12's partial supersession
 decides all three." They are decided here.
 
-> **Normative.** `Reader.name` returns **the identity of the configured source that
-> reader serves** — the bare declared type name where that source is the first of
-> its type the deployment configured, and a discriminated identity under §1 for
-> every later one. It is still a property of the reader, still stable across calls,
-> and still the only seam a source identity reaches (ADR-0097 §1). No member is
-> added to `Reader`, and ADR-0102's rule that "No component reads a source's
-> identity from anything but a `Reader`" is unchanged.
+> **Normative.** `Reader.name` returns **the identity assigned to the configured
+> source that reader serves**, in §4's form — bare or discriminated under §1, and
+> never a discriminator on its own. It is still a property of the reader, still
+> stable across calls, and still the only seam a source identity reaches (ADR-0097
+> §1). No member is added to `Reader`, and ADR-0102's rule that "No component reads
+> a source's identity from anything but a `Reader`" is unchanged.
 
-> **Normative.** `Reader.name`'s docstring in `core/protocols.py` states the
-> superseded clause — "**Stable across calls**, and not a configurable value" and
-> "declared rather than configured" — and becomes false at the moment a
-> discriminated identity is admissible. The lane that admits one **corrects it in
-> the same change**, and may not land a discriminated identity against a docstring
-> that forbids it.
+> **Normative.** `Reader.name`'s docstring in `core/protocols.py` restates the
+> superseded clause — "declared rather than configured", and "**Stable across
+> calls**, and not a configurable value" — citing ADR-0093 §7. From this ADR's
+> ratification that citation is read as naming §7 **as partially superseded here**,
+> so the "not a configurable value" sentence binds nothing and no lane may rely on
+> it. Its "stable across calls" half is untouched and still binds.
+
+> **Normative.** The lane that admits a discriminated identity **corrects that
+> docstring in the same change**, and may not land one against a sentence that
+> forbids it. No lane may land a discriminated identity earlier by any other route.
 
 > **Normative.** `ReaderContract`'s two identity clauses — that the declared
 > identity is non-empty, and that it is stable across calls — are **unchanged and
@@ -167,10 +205,11 @@ decides all three." They are decided here.
 > exists to pin. The suite gains no clause from this ADR.
 
 > **Normative.** No `core/types.py` change is owed. An identity is carried as
-> `Identifier` — non-blank, stripped, UTF-8-encodable — and both a bare declared
-> name and a 32-hex-character discriminated one satisfy it as written. ADR-0097
-> §9's canonicality rule reaches a discriminated identity exactly as it reaches a
-> bare one (ADR-0189 §6).
+> `Identifier` — non-blank, stripped, UTF-8-encodable — and both of §4's two forms
+> satisfy it as written. ADR-0097 §9's canonicality rule reaches a discriminated
+> identity exactly as it reaches a bare one (ADR-0189 §6). `Identifier` is not
+> tightened to §4's form, because it types every identifier in the system and only
+> a source identity has this shape; the refusal sits at §4's admitting seam.
 
 **The docstring clause is stated as an obligation on a later lane rather than
 discharged here, and the reason is golden rule 5.** A contract ADR lands as its own
@@ -181,28 +220,72 @@ reader of the seam actually reads, and a discriminated identity landing beneath 
 sentence saying identities are not configurable is the failure this clause names in
 advance.
 
-### 4. The spelling of a discriminated identity is deferred, and the deferral is narrow
+**The interval where the prose leads the code is ADR-0015 §5's design and not a
+contradiction this ADR introduces.** A ratified contract ADR whose implementation
+has not landed is the *ordinary* state of every contract decision in this corpus —
+that is the whole content of "ratified before anything implements against it". The
+docstring is not a second contract competing with this one; it is a restatement of
+ADR-0093 §7 in code, and a restatement of a partially superseded clause is stale
+prose rather than a live rule. The clause above says exactly which sentence goes
+inert and which does not, so nothing in the interval is left to a reader's judgement,
+and the tree stays conforming throughout because nothing in it returns a
+discriminated identity — no second source can be configured at all (§6, ADR-0189 §8).
 
-> **Normative.** How a discriminated identity is **spelled** — the ordering of the
-> declared part and the discriminator, and the separator between them — is **not
-> decided here**. ADR-0189 §6 fixes the discriminator's width, alphabet and
-> provenance and leaves the composition open, and nothing in this ADR turns on it.
-> It is decided by the lane that admits the second configured source, **in the same
-> change**, because ADR-0189 §6's requirement that a malformed discriminator be
-> "refused by every admitting seam" is not implementable without it.
+### 4. How an identity is spelled, in full, and the one seam that refuses a malformed one
 
-> **Normative.** That lane's spelling must keep §1's second clause true: the
-> declared part must be recoverable from the identity, so that what a deployment
-> supplied and what the sensor declared stay distinguishable in the value itself.
+> **Normative.** A **bare** identity is a reader type's declared name and nothing
+> else: `"calendar"`, `"email"`. It is unchanged from what ADR-0093 §7 rules and what
+> every reader on `main` returns today.
 
-**Deferring the spelling is not leaving the specification incomplete.** The rule
-ADR-0093 §5 invokes against an unfigured bound — that two conforming
-implementations then diverge while each believes it conforms — bites on figures,
-and every figure is already named in ADR-0189 §6. A separator is not a figure of
-that kind: there is
-exactly one lane that will ever choose it, it chooses it beside the validator that
-enforces it, and no second implementation can diverge from it in the meantime
-because no second configured source exists to spell.
+> **Normative.** A **discriminated** identity is that same declared name, then a
+> single ASCII colon `":"`, then the discriminator — 32 characters drawn from
+> `0123456789abcdef` and nothing else. There is no other form:
+> `calendar:0f3c9d1a7b45e28c6d90fa3b17e4c852` is one, and a bare discriminator, an
+> uppercase one, a differently-ordered one and a differently-separated one are not
+> identities at all.
+
+> **Normative.** A reader type's **declared name may not contain a colon**. That is
+> what makes the declared part recoverable — it is the text before the first colon —
+> and it is a new obligation on every `Reader`, stacked on ADR-0093 §7's existing
+> ones and contradicting none of them, since no declared name in the tree or in the
+> corpus contains one.
+
+> **Normative.** Every seam that admits a source identity from configuration
+> **refuses** a value that is neither of the two forms above, and refuses at the
+> point of admission rather than at the point of use. This is ADR-0189 §6's "refused
+> by every admitting seam if it is not of that form", made checkable by fixing the
+> form. `Identifier`'s own rules (non-blank, stripped, UTF-8-encodable) and ADR-0097
+> §9's canonicality rule bind in addition and neither is relaxed.
+
+**The colon and the ordering are decided here, not left to the implementing lane,
+and architecture review was right that they could not be.** An earlier draft deferred
+both to "the lane that admits the second configured source, in the same change" — and
+that lane is an implementation lane, so deferring a normative constraint on the values
+crossing `Reader.name`, `SourceReading.source` and `Attestation.reported_by` into it
+is precisely the contract decision ADR-0015 §5 and golden rule 5 put in a `Proposed`
+ADR ahead of the implementation. The same draft also let §1's width read as the whole
+identity while §4 required a recoverable declared part, which cannot both be true of
+a 32-character value; §1's second clause now separates the discriminator from the
+identity and this section spells the identity.
+
+**Type first, discriminator second, because the prefix is the half that stays useful
+when the value is cut short.** An identity lands in `Attestation.reported_by`, in
+every export and in every log line, and ADR-0189 §5's display label is deferred — so
+until it lands, a surface renders this value as the source's name. `calendar:0f3c…`
+truncates to something a person can read; `0f3c…:calendar` does not, and a bare hex
+identity would make ADR-0189 §4's requirement that a surface name the source
+unsatisfiable in the interval. Sorting and grepping by type fall out of the same
+choice.
+
+**A colon rather than a dot or a dash, and the reason is that the alternatives are
+already spoken for by the declared names themselves.** A declared name is a lowercase
+word today, but nothing forbids `calendar-work` or `mail.local`, and a separator a
+declared name may plausibly contain moves the ambiguity into the value. A colon has
+never appeared in an identity in this corpus, is unambiguous against the hex
+alphabet, and the "may not contain a colon" clause above makes the split total rather
+than conventional. It stays inside `Identifier` — it is neither whitespace nor a
+control character, so it is untouched by #62's open canonical-syntax question and
+prejudges none of it (ADR-0018 §2).
 
 ### 5. This ADR classified under ADR-0070 §1 and ADR-0082 §1
 
@@ -253,14 +336,24 @@ carries "the connected source instance that reported this belief", which is what
 discriminated identity makes true rather than false; ADR-0095's renaming is
 orthogonal.
 
+**§4's no-colon rule is a stacked addition and is recorded here alone.** It puts a
+new obligation on every `Reader`'s declared name, and it contradicts no sentence
+ADR-0093 wrote: §7 already forbids deriving an identity from a location or contents
+and names `"calendar"` as the calendar's, no declared name in the tree or the corpus
+contains a colon, and no clause of ADR-0093 becomes false or over-wide. ADR-0082 §1
+rules that such an addition "is recorded in the ADR that makes it, and nowhere
+else", so ADR-0093's note carries the supersession's extent and not this.
+
 Under ADR-0070 §1 this is a **partial supersession of ADR-0093 §7 and nothing
 else**.
 
 ### 6. Deferred, by name, each with the condition that fires it
 
-- **The spelling of a discriminated identity and the validator that refuses a
-  malformed one** (§4). Fires with the lane that admits a second configured source,
-  in that same change.
+- **Where in a deployment's configuration a discriminator is written, and by what
+  the value is minted.** §4 fixes the value's form and §1 fixes when it is assigned;
+  the `Settings` shape that carries it is the registry's, since a deployment with one
+  configured source per type never writes one (ADR-0189 §8, ADR-0093 §7a). Fires with
+  the registry.
 - **`Reader.name`'s docstring correction** (§3). Fires with that same lane, or with
   a contract lane that reaches `core/protocols.py` earlier, whichever comes first.
 - **The source registry, the display label's configuration, and the client surface
@@ -281,9 +374,9 @@ configured source are all *machinery* with stated triggers, which is a state a l
 can plan against.
 
 **A lane that wants a second source can now start.** It still has to build the
-registry, choose the spelling, correct the docstring, and take ADR-0102 §14's client
-surface — but none of those needs an ADR-lane detour first, which is what this PR
-costs and what it removes.
+registry, correct the docstring, and take ADR-0102 §14's client surface — but the
+identity's form is settled (§4), so none of that needs an ADR-lane detour first,
+which is what this PR costs and what it removes.
 
 **ADR-0093 §7 becomes harder to read at a glance.** Its `Status` line now carries
 three supersession pairs and its header three notes, and its identity clause reads
@@ -317,9 +410,24 @@ specified the rule.
   another document's `Status` line first. The specification it would write is already
   ratified, so waiting buys no information — it only moves a fixed cost onto a lane
   that has something else to do.
-- **Decide the spelling here too, so the doorway ADR is self-contained.** Rejected
-  in §4. A separator chosen with no validator beside it and no second source to spell
-  is a decision taken at the point of least information, and ADR-0093 §7's own
-  history is the argument: its identity clause was written "configured", corrected to
-  "declared" under review, and is being partially superseded now — the shape a value
-  takes is worth deciding where it is enforced.
+- **Defer the identity's spelling to the lane that admits the second source, beside
+  the validator that enforces it.** This is what the first draft did, and it is
+  **rejected** — architecture review's round-1 blocker was correct. The argument for
+  it was that a separator is chosen best where it is enforced; the answer is that the
+  lane enforcing it is an implementation lane, and a normative constraint on the
+  values crossing `Reader.name`, `SourceReading.source` and `Attestation.reported_by`
+  is a contract decision ADR-0015 §5 and golden rule 5 require in a `Proposed` ADR
+  merged ahead of any implementation. Half a specification in a doorway ADR is also
+  the failure ADR-0189 §12 named in advance when it called this lane
+  "fully-specified".
+- **Make a later source's identity the bare 32-hex discriminator, with no declared
+  part.** Rejected in §4. It is the simplest form and it costs ADR-0093 §7's
+  "declared by the sensor" half entirely, where this ADR only needed the "not a
+  configurable value" half. It also makes ADR-0189 §4's requirement that a surface
+  name the source unsatisfiable until §5's display label lands, since the only thing
+  a surface could render is 32 hex characters.
+- **Tighten `Identifier` to §4's two forms.** Rejected in §3. `Identifier` types
+  every identifier in the system — deferral ids, conversation ids, grant ids — and
+  only a source identity has this shape, so the tightening would refuse values that
+  are correct. The refusal belongs at the seam that admits a source identity, which
+  is where §4 puts it.
