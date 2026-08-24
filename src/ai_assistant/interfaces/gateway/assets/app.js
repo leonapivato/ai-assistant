@@ -1581,6 +1581,18 @@ const REFUSED_AT_THE_DOOR =
 // telling an owner no turn ran when one did is what sends them to ask it a second time.
 const REFUSED_BEFORE_THE_ENGINE = new Set([403, 421, 503]);
 
+// **And the one status that proves the opposite half**, which adversarial review found
+// on round 6. `422` is `assistant-declined`, and ADR-0168 §9 defines it as "a request
+// the hub **received** and declined" — the very distinction §9 requires the gateway to
+// keep. So it settles the same question the set above settles, in the other direction:
+// the assistant was reached. Grouping it with `400` and `502` said the status said
+// nothing, and the status says a great deal.
+//
+// It is decisive on these two paths only. `server.py` writes `422` in one other place —
+// `_connection_fault`'s `identity-unusable` — and that serves ADR-0151's connection
+// surface, which neither ask path is.
+const DECLINED_BY_THE_ASSISTANT = 422;
+
 // The refusal whose reason went unread, and all that is known of the turn.
 const ASK_REFUSED_UNREAD =
   "You stopped waiting for that answer, so this browser is no longer listening for it. " +
@@ -1601,6 +1613,37 @@ const ASK_REFUSED_UNRUN =
   "and there is nothing to look for — though this browser stopped before reading which " +
   "refusal it was. Nothing was re-sent and nothing was cancelled. Asking again is a " +
   "fresh question, and worth trying once whatever the gateway refused it for has passed.";
+
+// The same act where the status says the assistant was reached and said no.
+//
+// **It points at no listing and denies none either.** A declined turn produced no answer
+// to record, so promising the conversations listing would be `WHERE_TO_LOOK` used where
+// it is not true; but a decline is the hub's own act and this page did not read what it
+// said about it, so declaring there is nothing to find would be asserting a state it has
+// not read — the rule this file keeps everywhere (ADR-0177 §7). Saying neither is the
+// accurate option, and the missing sentence is what an unread reason costs.
+const ASK_REFUSED_DECLINED =
+  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
+  "The assistant did receive that question and declined it, so no answer was produced — " +
+  "and this browser stopped before reading the reason it gave. " +
+  "Nothing was re-sent and nothing was cancelled — the assistant was not told to stop. " +
+  "Asking again asks a new question rather than retrying that one.";
+
+// Which of the three a refusal head earns, and the whole enumeration in one place so
+// that a status can be checked against it rather than hunted for in a branch. Every
+// status the two ask paths can answer with is here or is deliberately not: `401` and
+// `409` are taken by the re-entry branch above, and `400` and `502` fall through because
+// neither is proof — `400` is shared between `malformed-request` and `rejected`, and a
+// `TransportError` can be raised after the request was written.
+function refusalAbandoned(status) {
+  if (REFUSED_BEFORE_THE_ENGINE.has(status)) {
+    return ASK_REFUSED_UNRUN;
+  }
+  if (status === DECLINED_BY_THE_ASSISTANT) {
+    return ASK_REFUSED_DECLINED;
+  }
+  return ASK_REFUSED_UNREAD;
+}
 
 // The control, and the line beside it. Built here rather than shipped in `index.html`
 // because it belongs to a request and not to the surface — the page already builds a
@@ -1683,10 +1726,7 @@ function abandonAsk() {
   if (waiting.refusedWith !== null) {
     // The screen an ordinary refusal leaves, for the reason the branch above leaves it.
     show("answer", false);
-    fault(
-      REFUSED_BEFORE_THE_ENGINE.has(waiting.refusedWith) ? ASK_REFUSED_UNRUN : ASK_REFUSED_UNREAD,
-      "console"
-    );
+    fault(refusalAbandoned(waiting.refusedWith), "console");
     return;
   }
   // **The partial text goes with it, and nothing else does.** ADR-0173 §3 makes the
