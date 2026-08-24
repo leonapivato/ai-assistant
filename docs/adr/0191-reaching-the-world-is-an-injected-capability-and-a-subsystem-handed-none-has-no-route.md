@@ -193,13 +193,19 @@ ADR-0017 §4's honest accounting and a measurement.
 > **Normative.** The buffering ceiling is **4096 octets**, held as one named
 > constant in `core` rather than chosen per implementation, so the canonical fake
 > and the production implementation refuse the same inputs and a consumer tested
-> against one behaves against the other. For `read_line` it is counted **inclusive
-> of the terminator**.
+> against one behaves against the other.
 
-> **Normative.** 4096 is the value `ai_assistant.tools.egress` already opens its
-> connections with, so nothing about what the seam accepts moves. Changing it is a
-> change to `core` surface and takes an ADR; the conformance suites pin the exact
-> boundary at 4096 and at 4097.
+> **Normative.** For `read_line` the ceiling bounds the octets **before** the
+> terminator, not the returned value. A line of exactly 4096 octets is accepted and
+> returns 4097 including its terminator; a line of 4097 octets before the
+> terminator is refused. The conformance suites pin both of those and nothing
+> between them.
+
+> **Normative.** That is the boundary `ai_assistant.tools.egress` has today, so
+> nothing about what the seam accepts moves: it opens its connections with
+> `limit=4096`, and `asyncio.StreamReader.readuntil` applies that bound to the
+> buffer ahead of the separator. Changing the constant is a change to `core`
+> surface and takes an ADR.
 
 > **Normative.** `close` is idempotent, and it suppresses and logs an ordinary
 > release failure rather than raising it: a channel that cannot be released reports
@@ -210,23 +216,32 @@ ADR-0017 §4's honest accounting and a measurement.
 > `core/protocols.py`: `close` makes the channel safe and then re-raises. It never
 > absorbs such a cancellation and never converts it into a return.
 
-> **Normative.** An `open_channel` cancelled from outside after it has acquired a
-> socket and before it has returned a channel releases what it acquired, and then
-> re-raises. No channel reached the caller, so nothing else can ever release it,
-> and ADR-0060 §1's first clause is unsatisfiable at this seam any other way.
+> **Normative.** An `open_channel` that acquires a socket and then leaves by any
+> exceptional path before returning a channel releases what it acquired first. That
+> covers a cancellation delivered from outside, and equally an ordinary failure — a
+> certificate that did not verify, a refused upgrade, a read that overran. No
+> channel reached the caller in any of those cases, so nothing else can ever
+> release it, and ADR-0060 §1's first clause is unsatisfiable at this seam any
+> other way.
 
-> **Normative.** The `OutboundTransport` conformance suite carries a deterministic
-> cancellation case in ADR-0060 §3's shape — the call held open *inside* the
-> resource it acquired, cancelled there, and the resource observed afterwards —
-> built on `ai_assistant.testing`'s suspension scaffolding rather than on a sleep.
-> A case asserting only that `CancelledError` escaped does not discharge this
-> clause.
+> **Normative.** Where that exceptional path is a cancellation from outside,
+> `open_channel` re-raises it after the release rather than absorbing it or
+> converting it into a return (ADR-0060 §1's second clause).
+
+> **Normative.** The `OutboundTransport` conformance suite carries two deterministic
+> cases over that obligation: a cancellation in ADR-0060 §3's shape — the call held
+> open *inside* the resource it acquired, cancelled there, and the resource observed
+> afterwards, built on `ai_assistant.testing`'s suspension scaffolding rather than
+> on a sleep — and an ordinary post-acquisition failure, observing the same
+> release. A case asserting only that an exception escaped discharges neither.
 
 > **Normative.** A new `TransportError` in `core/errors.py` is what
 > `open_channel`, `read_line`, `read`, `write` and `start_tls` raise when a
 > connection cannot be made or continued — an unreachable endpoint, a certificate
-> that did not verify, a failed upgrade, or a bound this contract states being
-> exceeded. It is the **shared** refusal type: both the production implementation
+> that did not verify, a failed upgrade, or a far end exceeding the line ceiling.
+> A caller-supplied `limit` outside its domain is **not** among them and is
+> `ValueError`'s, by the clause above: `TransportError`'s subject is what the
+> connection did, and the caller's own argument is not that. It is the **shared** refusal type: both the production implementation
 > and the canonical fake raise it, so the conformance suite holds them to one
 > taxonomy and the fake needs no `tools/` import.
 
