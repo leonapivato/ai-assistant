@@ -357,13 +357,16 @@ class SourceGrantsContract:
         nothing ratified, and the value it invents is the one thing standing
         between a configured reader and the user's personal files.
 
-        The whitespace case is not hypothetical. ``SourceGrant.source`` is an
-        ``Identifier``, which *strips*, while ``ReaderContract`` requires only
-        that ``reader.name.strip()`` be non-empty — so ``" calendar "`` is a
-        conforming declared name whose grant would be stored as ``"calendar"``.
-        ADR-0097 §9 closes that at admission, by refusing to grant a
-        non-canonically-named reader at all; this clause is what keeps the store
-        from papering over it instead.
+        The whitespace case was not hypothetical, and ADR-0190 §4 has since made
+        it unreachable from a *conforming* producer. ``SourceGrant.source`` is an
+        ``Identifier``, which *strips*, so ``" calendar "`` would be stored as
+        ``"calendar"``; §4 now rules a declared name canonical and
+        ``ReaderContract`` decides it, so no conforming ``Reader`` can declare
+        that value. ADR-0190 §4 states the consequence for §9 in as many words: it
+        "stays exactly as written and now guards a case a conforming ``Reader``
+        cannot produce — defence against a non-conforming one rather than a dead
+        rule". This clause is the same defence one layer down, keeping the store
+        from papering over a value admission refused.
         """
         await self.given(grants, source_grant(SOURCE))
 

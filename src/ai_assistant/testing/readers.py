@@ -66,8 +66,15 @@ if TYPE_CHECKING:
     from ai_assistant.testing.cancellation import LoopSuspension, ResourceLog
 
 #: The identity this fake declares unless a test names another. Tier 2 and says
-#: what the producer *is*, never what its source holds (ADR-0093 §7).
+#: what the producer *is*, never what its source holds (ADR-0093 §7). Bare, in
+#: ADR-0190 §4's sense: the fake stands in for a deployment's first configured
+#: source of its type unless a test hands it a discriminated identity.
 DEFAULT_READER_NAME: Final = "fake-source"
+
+#: A discriminator's width and alphabet (ADR-0190 §4) — 128 bits rendered as 32
+#: lowercase hexadecimal characters, and nothing else is one.
+_DISCRIMINATOR_WIDTH: Final = 32
+_DISCRIMINATOR_ALPHABET: Final = frozenset("0123456789abcdef")
 
 #: When this fake pretends it read — **our** clock (ADR-0093 §10).
 _DEFAULT_READ_AT: Final = datetime(2026, 1, 2, tzinfo=UTC)
@@ -306,20 +313,24 @@ class FakeReader:
                 sequence is the distinct, explicit "this source had nothing to
                 propose", which is a **successful** reading a consumer needs to
                 exercise (ADR-0093 §8).
-            name: The identity this reader declares, and therefore the reading's
-                ``source`` and every proposal's ``reported_by``. A parameter here
-                and a **declared constant** on a real reader (ADR-0093 §7) — a fake
-                whose identity were hard-coded could not stand in for two readers
-                at once, which is what a consumer testing "the right identity
-                reached the right belief" needs it for. That it is Tier 2 stays a
-                *test author's* obligation, and deliberately not a validator: §7
-                rules that "no validator can tell a chosen label from a personal
-                one", which is why it makes a real reader's identity declared
-                rather than configured instead of trying to check it. So name the
-                producer (``"calendar"``), never its source's location or the data
-                it holds (``"alice@example.com calendar"``). Nothing production
-                reads it — ``lint-imports`` keeps ``ai_assistant.testing`` out of
-                every shipping package — so the blast radius is one test's output.
+            name: The identity of the configured source this reader serves, and
+                therefore the reading's ``source`` and every proposal's
+                ``reported_by``. Either of ADR-0190 §4's two forms: a bare declared
+                name (``"calendar"``) or a discriminated one
+                (``"calendar:0f3c9d1a7b45e28c6d90fa3b17e4c852"``), which is how a
+                consumer drives a second configured source of one type. A parameter
+                here and a declared constant on today's real readers — a fake whose
+                identity were hard-coded could not stand in for two readers at
+                once, which is what a consumer testing "the right identity reached
+                the right belief" needs it for. That the **declared** half is Tier
+                2 stays a *test author's* obligation, and deliberately not a
+                validator: ADR-0093 §7 rules that "no validator can tell a chosen
+                label from a personal one", and that half of §7 survives ADR-0190
+                §1's partial supersession intact. So name the producer
+                (``"calendar"``), never its source's location or the data it holds
+                (``"alice@example.com calendar"``). Nothing production reads it —
+                ``lint-imports`` keeps ``ai_assistant.testing`` out of every
+                shipping package — so the blast radius is one test's output.
             read_at: The instant this fake pretends it acquired the source's bytes
                 — our clock, always present because it is always knowable.
             as_of: A reading-wide instant the *source* declares, or ``None`` where
@@ -368,28 +379,19 @@ class FakeReader:
                 a minted id: a blank mint fails rather than becoming a key.
 
         Raises:
-            ValueError: If ``name`` is blank, if ``facet``'s stamp is not the one
-                this fake's readings carry (a ``ValidationError``, which is a
-                ``ValueError``), or if any scripted proposal is an
-                ``EpisodicMemory``, is outside the ``ATTESTED`` band, is attested
-                to a source other than ``name``, or carries no rationale. Each is a
-                clause of the ``Reader`` contract, so allowing it would only move
-                the failure to ``read()`` time — or, for the attribution, to a
-                stored belief attributed to a reader that never reported it — far
-                from the mistake. The canonical fake must not be configurable into
-                failing its own conformance suite.
+            ValueError: If ``name`` is neither of ADR-0190 §4's two forms, if
+                ``facet``'s stamp is not the one this fake's readings carry (a
+                ``ValidationError``, which is a ``ValueError``), or if any scripted
+                proposal is an ``EpisodicMemory``, is outside the ``ATTESTED``
+                band, is attested to a source other than ``name``, or carries no
+                rationale. Each is a clause of the ``Reader`` contract, so allowing
+                it would only move the failure to ``read()`` time — or, for the
+                attribution, to a stored belief attributed to a reader that never
+                reported it — far from the mistake. The canonical fake must not be
+                configurable into failing its own conformance suite.
         """
-        if not name.strip():
-            msg = "a reader's declared identity must not be blank (ADR-0093 §7)"
-            raise ValueError(msg)
-        # Canonicalised the way `Identifier` canonicalises `Attestation.
-        # reported_by`, so `SourceReading.source` and every proposal's reporter
-        # cannot disagree by a space. `source` is `EncodableText`, which does not
-        # strip, and `reported_by` is `Identifier`, which does — so `" calendar "`
-        # would otherwise produce a reading attributed to `"calendar"` by a
-        # producer calling itself `" calendar "`, failing the suite's attribution
-        # clause on a difference no author would see.
-        self._name = name.strip()
+        _refuse_malformed_identity(name)
+        self._name = name
         self._read_at = read_at
         self._as_of = as_of
         self._coverage = coverage
@@ -526,6 +528,69 @@ def _synthesise(
     )
 
 
+def _refuse_malformed_identity(name: str) -> None:
+    """Refuse an identity that is neither of ADR-0190 §4's two forms.
+
+    This constructor is **a seam that admits a source identity** (ADR-0190 §4), so
+    it refuses rather than repairs. The version before ADR-0190 *stripped*, on the
+    ground that ``Attestation.reported_by`` is an ``Identifier`` — whose validator
+    returns ``value.strip()`` — while ``SourceReading.source`` is
+    ``EncodableText``, which does not, so ``" calendar "`` would otherwise produce
+    a reading attributed to ``"calendar"`` by a producer calling itself
+    ``" calendar "``. §4 closes that hole at the declaring end instead, by ruling a
+    declared name canonical, and a fake that quietly canonicalised would hide from
+    its author the exact value §4 refuses.
+
+    Refusing is not optional here for the colon-bearing case: with
+    ``ReaderContract``'s identity clause in place, a fake constructed as
+    ``FakeReader(name="calendar:ABC")`` would be configurable into failing its own
+    conformance suite, which is the one thing this fake may never be.
+
+    Raises:
+        ValueError: If ``name`` is not a bare declared name — non-empty,
+            UTF-8-encodable, equal to its own ``str.strip()``, and colon-free — or
+            that name, one ASCII colon, and exactly 32 characters drawn from
+            ``0123456789abcdef``.
+    """
+    declared, colon, discriminator = name.partition(":")
+    if not declared or declared != declared.strip():
+        msg = (
+            f"a reader's declared name is non-empty and equal to its own str.strip(), "
+            f"got {declared!r} from {name!r}; a padded one puts one source into the "
+            f"store under two spellings, since Attestation.reported_by strips and "
+            f"SourceReading.source does not (ADR-0190 §4)"
+        )
+        raise ValueError(msg)
+    try:
+        name.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        msg = (
+            f"a source identity is UTF-8-encodable, and {name!r} is not; neither "
+            f"SourceReading.source nor Attestation.reported_by could carry it "
+            f"(ADR-0190 §4)"
+        )
+        raise ValueError(msg) from exc
+    if not colon:
+        return
+    if ":" in discriminator:
+        msg = (
+            f"a source identity carries at most one colon, and {name!r} carries more; "
+            f"a declared name may contain none, which is what makes the split total "
+            f"rather than conventional (ADR-0190 §4)"
+        )
+        raise ValueError(msg)
+    if (
+        len(discriminator) != _DISCRIMINATOR_WIDTH
+        or not set(discriminator) <= _DISCRIMINATOR_ALPHABET
+    ):
+        msg = (
+            f"a discriminator is exactly {_DISCRIMINATOR_WIDTH} characters drawn from "
+            f"'0123456789abcdef', got {discriminator!r}; an uppercase or short one is "
+            f"not an identity at all (ADR-0190 §4)"
+        )
+        raise ValueError(msg)
+
+
 def _refuse_unconformable(index: int, name: str, proposal: MemoryUpdateProposal) -> None:
     """Refuse a scripted proposal no conforming reader could have emitted.
 
@@ -535,9 +600,10 @@ def _refuse_unconformable(index: int, name: str, proposal: MemoryUpdateProposal)
     *carrying* is checked below, as ``FeedbackProcessorContract`` checks it for the
     sibling producer. **Naming** is not, and neither is *chosen*: a substring test
     for the identity would both over- and under-fire — ``"your work calendar said
-    so"`` names the source without containing ``calendar:work``, while
-    ``"scheduled calendar import"`` contains it and names a mechanism — and no
-    check can distinguish a deliberate ``PERSONAL`` from a defaulted one at all.
+    so"`` names the source without containing
+    ``calendar:0f3c9d1a7b45e28c6d90fa3b17e4c852``, while ``"scheduled calendar
+    import"`` contains ``calendar`` and names a mechanism rather than a source —
+    and no check can distinguish a deliberate ``PERSONAL`` from a defaulted one.
     Both stay producer obligations stated in ``Reader.read``'s contract, on the
     reasoning ADR-0093 §7 uses for the identity itself: a proxy that reports the
     property as held is worse than none, because it is believed.

@@ -43,6 +43,13 @@ absence from the suite for absence from the contract:
 * **§3's "neither consumer derives its answer from the other's reading."** A
   statement about how a *caller* wires two paths.
 
+**ADR-0190 §3 adds a fifth exclusion, and names it in advance rather than leaving
+it to be discovered.** The identity clause below decides both of §4's spellings
+over the value alone, and cannot decide that the half before the colon is *this
+reader type's* own declared name — the suite holds a ``Reader`` and nothing to
+compare a prefix against. That is the concrete reader's test, on the same
+division the four above already make.
+
 One further omission is this lane's judgement rather than ADR-0093 §10's ruling,
 and is recorded so it reads as a decision. ADR-0060's **resource** clause — a
 second caller must not reach the resource while a cancelled first call's work is
@@ -87,6 +94,37 @@ _ABSORBED = (
     "English, 'not completed', and a reader wrapping everything it catches "
     "converts it (ADR-0093 §8). Got: {outcome!r}"
 )
+
+#: The discriminator's alphabet and width (ADR-0190 §4). Spelled out here rather
+#: than imported from anything a subject might share with the suite: a
+#: conformance suite that decided conformance by calling the code under test
+#: would report every implementation as conforming with itself.
+_DISCRIMINATOR_ALPHABET = frozenset("0123456789abcdef")
+_DISCRIMINATOR_WIDTH = 32
+
+
+def declared_name_of(identity: str) -> str:
+    """The declared half of a source identity — everything before the first colon.
+
+    Total rather than conventional: ADR-0190 §4 admits **no** colon in a declared
+    name, so an identity carries at most one and the split cannot be ambiguous. A
+    bare identity has none and is its own declared name.
+    """
+    return identity.split(":", 1)[0]
+
+
+def _is_utf8_encodable(value: str) -> bool:
+    """Whether a ``str`` survives the encoding every seam downstream of it uses.
+
+    A Python ``str`` may hold a lone surrogate, which ``EncodableText`` and
+    ``Identifier`` alike refuse — so an identity that is not encodable is one no
+    reading and no attestation could carry (ADR-0190 §3, §4).
+    """
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 @dataclass(frozen=True)
@@ -216,7 +254,7 @@ class ReaderContract:
     def test_conforms_to_protocol(self, reader: Reader) -> None:
         assert isinstance(reader, Reader)
 
-    # --- identity (ADR-0093 §7) ---------------------------------------------
+    # --- identity (ADR-0093 §7, ADR-0190 §3) --------------------------------
 
     def test_the_declared_identity_is_non_empty(self, reader: Reader) -> None:
         """A reader that cannot say what it is forces every caller to carry a name.
@@ -240,6 +278,43 @@ class ReaderContract:
         await reader.read()
 
         assert reader.name == before
+
+    def test_the_declared_identity_is_bare_or_discriminated(self, reader: Reader) -> None:
+        """ADR-0190 §4 admits two spellings of an identity and no third.
+
+        A **bare** identity is a declared name and nothing else; a
+        **discriminated** one is that declared name, one ASCII colon, and 32
+        characters drawn from ``0123456789abcdef``. Everything asserted here is
+        decidable over the value alone, which is what a generic suite holds.
+
+        **The declared half is checked for canonicality in its own right**,
+        because canonicality of the whole value does not imply it: ``"calendar
+        :0f3c…"`` is equal to its own ``str.strip()`` and still carries a declared
+        name that is not, which §4 refuses. That matters at the seam rather than
+        cosmetically — ``Attestation.reported_by`` is an ``Identifier``, whose
+        validator *returns* ``value.strip()``, while ``SourceReading.source`` is
+        ``EncodableText``, which does not strip — so a padded declared name puts
+        one source into the store under two spellings, and makes it ungrantable
+        besides (ADR-0097 §9).
+
+        **What this cannot reach** is that the part before the colon is *this
+        reader type's* own declared name: the suite holds a ``Reader`` and nothing
+        to compare a prefix against, so a reader declaring a colon-bearing name
+        merely *shaped* like a discriminated identity passes here while breaching
+        §4. ADR-0190 §3 names that the concrete reader's test, the same division
+        this file already makes for the three §8 obligations above.
+        """
+        identity = reader.name
+
+        assert _is_utf8_encodable(identity)
+        assert identity == identity.strip()
+        assert identity.count(":") <= 1
+        if ":" in identity:
+            declared, discriminator = identity.split(":", 1)
+            assert declared
+            assert declared == declared.strip()
+            assert len(discriminator) == _DISCRIMINATOR_WIDTH
+            assert set(discriminator) <= _DISCRIMINATOR_ALPHABET
 
     # --- the reading (ADR-0093 §10) -----------------------------------------
 
@@ -398,8 +473,9 @@ class ReaderContract:
         **Naming the source is deliberately not checked, and neither is the
         sensitivity being chosen.** A substring test for the identity would both
         over- and under-fire — "your work calendar said so" names the source
-        without containing ``calendar:work``, and "scheduled calendar import"
-        contains it while naming a mechanism — and no check can tell a deliberate
+        without containing ``calendar:0f3c9d1a7b45e28c6d90fa3b17e4c852``, and
+        "scheduled calendar import" contains ``calendar`` while naming a mechanism
+        rather than a source — and no check can tell a deliberate
         ``PERSONAL`` from a defaulted one at all. Both stay producer obligations in
         ``Reader.read``'s contract, on ADR-0093 §7's own reasoning about the
         identity: a proxy that reports a property as held is worse than no check,
