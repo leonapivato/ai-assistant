@@ -132,7 +132,9 @@ second calendar has misread it.
 > **Normative.** ADR-0093 §7's last sentence — "The calendar sensor's identity is
 > `"calendar"`" — is **narrowed to the first configured calendar** of a deployment
 > that assigned it, which under ADR-0189 §6's assign-once rule is every deployment
-> in existence. It is no longer true of a `CalendarReader` as such.
+> that has configured a calendar at all — `calendar_reader_path` defaults to `None`
+> and a deployment in that state has assigned nothing. It is no longer true of a
+> `CalendarReader` as such.
 
 **Everything about the shape is ADR-0189 §6's and is cited rather than restated.**
 The mint's arithmetic, the assign-once rule and its reason, why a fixed form closes
