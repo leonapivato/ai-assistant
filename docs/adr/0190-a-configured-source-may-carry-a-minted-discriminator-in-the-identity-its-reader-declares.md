@@ -125,9 +125,13 @@ second calendar has misread it.
 > **Normative.** Holding the bare name is a **permission and not an obligation**: a
 > deployment may mint a discriminator for the first source of a type as well, and
 > ADR-0189 §6's "may hold … and a deployment that has assigned that bare name has
-> spent it" is adopted with its permissive word intact. What is forbidden is the
-> converse — a source configured after one of its type has taken the bare name may
-> not hold a bare identity — and that is the whole of what assign-once needs.
+> spent it" is adopted with its permissive word intact. The permission is the
+> **first** configured source's alone, and **declining it does not pass it on**:
+> every source of a type configured after the first carries a discriminator whether
+> or not the first took the bare name, exactly as this section's first clause rules
+> and as ADR-0189 §6 rules of "every source … configured **after** that one". A
+> deployment that minted a discriminator for its first calendar has not left
+> `"calendar"` available to its second — it has left it unused.
 
 > **Normative.** ADR-0093 §7's last sentence — "The calendar sensor's identity is
 > `"calendar"`" — is **narrowed to the calendar source that was assigned it**, and
@@ -162,10 +166,13 @@ adopts them whole and re-opens none of them; a reader wanting the argument reads
 
 > **Normative.** ADR-0093 §7a and §7b are untouched. §7a's note that "The sensor's
 > identity is deliberately not in that table" stays true of the **one configured
-> source** §7a's nine fields describe, which under ADR-0189 §6's assign-once rule
-> holds the bare declared name and needs no field. Where a deployment's
-> configuration carries a discriminator is the registry lane's (ADR-0189 §8), and
-> nothing in this ADR adds a field to §7a's table or to `Settings`.
+> source** §7a's nine fields describe, and the ground is §7a's own shape rather than
+> any allocation rule: those fields carry no discriminator and this ADR adds none, so
+> a source configured through them alone can hold nothing but the bare declared name
+> — not because §1 obliges it to, but because there is no field to write a
+> discriminator into. Where a deployment's configuration carries one is the registry
+> lane's (ADR-0189 §8), and nothing in this ADR adds a field to §7a's table or to
+> `Settings`.
 
 **The identity clause is the only thing this ADR is about, and §7 is a long
 section.** Naming what survives is not book-keeping: ADR-0070 §4 requires the
@@ -373,6 +380,22 @@ act to a named successor, and a reader holding ADR-0189 alone reads that a
 discriminated identity awaits a later lane, which is exactly what has now happened.
 Discharging a deferral on the terms it set is not amending it — ADR-0189 §11's own
 words about ADR-0098 §8, applied to ADR-0189.
+
+**Nothing is owed for acting before §12's stated trigger either, and ADR-0189 §11
+rules on exactly this move.** §12's bullet fires "with the first deployment that wants
+a second source of one type", and no deployment does yet (Context). A firing condition
+states when a deferred act becomes **necessary**, not when it becomes permissible — it
+bounds how long the question may be left open, and a lane taking it earlier leaves
+nothing for a reader of ADR-0189 to be misled by, since §12 tells them the act awaits a
+later lane and it has now had one. The corpus has already ruled it twice, both times in
+ADR-0189 itself: §11 records that **nothing is owed against ADR-0107** for deciding
+"before ADR-0098 §12's own trigger fired", and §6 is expressly "ruled ahead of its
+trigger" on ADR-0107's precedent while §11 records ADR-0093 §11 as standing "with its
+trigger unfired" and owing nothing. This ADR takes the same step one place further
+along. ADR-0082 §1's test comes out the same way: no clause of ADR-0189 becomes false
+or over-wide, and a reader holding it acts no differently — §12 asked for a "**small,
+fully-specified ADR lane** — one clause of one ADR, one Status line", and this is that
+lane arriving early rather than a different lane.
 
 **Against ADR-0097 — nothing is owed.** §1's seam is adopted verbatim, §9's
 canonicality rule is adopted verbatim, and §9a's precondition was discharged by
