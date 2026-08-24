@@ -544,12 +544,44 @@ def _parse(raw: bytes) -> list[Any]:
     """
     try:
         calendar = Calendar.from_ical(raw)
+        _refuse_timezone_ids_walk_cannot_reach(calendar)
         components = list(calendar.walk("VEVENT"))
         _rezone(components, _own_zones(_declared_zones(calendar)))
     except Exception as exc:
         msg = "the source is not a readable iCalendar document"
         raise SourceNotParseableError(msg) from exc
     return components
+
+
+def _refuse_timezone_ids_walk_cannot_reach(calendar: Any) -> None:
+    """Refuse a document that hands the cache a definition ``walk`` cannot return.
+
+    ``icalendar`` decides what to cache from the **END** tag rather than from the
+    component's own type — ``if vals.upper() == "VTIMEZONE" and "TZID" in
+    component`` (``parser/ical/component.py``) — so a component opened
+    ``BEGIN:VEVENT``, carrying a ``TZID`` property and closed ``END:VTIMEZONE`` is
+    handed to ``cache_timezone_component`` while arriving here as an ``Event`` that
+    ``walk("VTIMEZONE")`` never returns.
+
+    That is round 3's read-order dependence through a door :func:`_own_zones` cannot
+    reach. Cold, the library builds the definition and ``Event.to_tz`` does not
+    exist, so ADR-0093 §8 reports a refusal; warm, the build is skipped and the same
+    bytes read normally, proposing their other entries. :func:`_own_zones` cannot
+    close it because the parsed tree no longer records which tag closed the
+    component — the mismatch is gone by the time anything here can look.
+
+    So it is refused on the property instead, which is the cold answer made
+    unconditional and costs a well-formed document nothing: RFC 5545 §3.6.5 makes
+    ``TZID`` a property of ``VTIMEZONE`` alone — on every other component a zone is
+    named by the ``TZID`` *parameter* of a value, which is not this — so no
+    conforming document carries one anywhere else, and the only way to produce one
+    is a delimiter that does not match its own ``BEGIN``. Adversarial review found
+    it on round 5.
+    """
+    for component in calendar.walk():
+        if component.name != "VTIMEZONE" and "TZID" in component:
+            msg = "a TZID property outside a VTIMEZONE component"
+            raise ValueError(msg)
 
 
 def _declared_zones(calendar: Any) -> dict[str, Any]:

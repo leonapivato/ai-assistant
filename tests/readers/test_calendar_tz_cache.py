@@ -60,8 +60,9 @@ Refs #1497, #1491, ADR-0183 §1/§5, ADR-0093 §5/§7/§7b, ADR-0117 §5.
 from __future__ import annotations
 
 import asyncio
+import threading
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 from icalendar import Calendar
@@ -69,6 +70,7 @@ from icalendar.timezone import tzp
 from ics_fixtures import NOW, calendar, reader, source, summaries, utc, vevent
 
 from ai_assistant.core.errors import ReaderError
+from ai_assistant.readers import _occurrences
 from ai_assistant.readers._occurrences import SourceNotParseableError
 
 if TYPE_CHECKING:
@@ -301,7 +303,7 @@ async def test_the_same_bytes_read_twice_produce_the_same_reading(tmp_path: Path
 
 
 async def test_three_readers_parsing_at_once_each_read_their_own_document(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Concurrent reads, because this reader has three instances by design.
 
@@ -313,12 +315,30 @@ async def test_three_readers_parsing_at_once_each_read_their_own_document(
     the parse, since serialising it re-couples exactly what those three instances
     decouple.
 
-    Re-seating writes nothing outside its own call, so this is deterministic rather
-    than a witness: each read names its own document's offset, and the third — which
-    defines nothing — skips its entry however the other two interleave with it. The
-    documents are padded so the parses do overlap in practice; the assertions would
-    hold at any interleaving, including none.
+    **The overlap is required rather than hoped for.** Every parse is held at a
+    three-party barrier, so the reads can only complete if all three are inside
+    ``Calendar.from_ical`` at the same moment: a process-wide lock around the parse
+    — the shorter repair this module rejects — would let the first parse in, block
+    the other two on the lock, and break the barrier on its timeout. Asserting the
+    per-document results alone could not tell that apart from healthy concurrency,
+    which adversarial review found on round 5.
+
+    Re-seating writes nothing outside its own call, so the results are deterministic
+    on top of that: each read names its own document's offset, and the third — which
+    defines nothing — skips its entry however the three interleave.
     """
+    barrier = threading.Barrier(3)
+
+    class _GatedCalendar:
+        """``Calendar``, with every parse held until three of them are in flight."""
+
+        @staticmethod
+        def from_ical(raw: bytes) -> Any:
+            barrier.wait(timeout=30)
+            return Calendar.from_ical(raw)
+
+    monkeypatch.setattr(_occurrences, "Calendar", _GatedCalendar)
+
     padding = [
         vevent(f"DTSTART:{utc(NOW)}", f"SUMMARY:filler {n}", uid=f"pad{n}") for n in range(200)
     ]
@@ -338,7 +358,7 @@ async def test_three_readers_parsing_at_once_each_read_their_own_document(
     )
     neither = _written(tmp_path, "neither.ics", _GOOD, *padding, _entry("Tzcache/East"))
 
-    for _ in range(20):
+    for _ in range(5):
         first, second, third = await asyncio.gather(_read(east), _read(west), _read(neither))
         assert _LEAKED_RENDERED in summaries(first.proposals), "east lost its own definition"
         assert _WESTERN_RENDERED in summaries(second.proposals), "west lost its own definition"
@@ -475,6 +495,37 @@ async def test_an_id_padded_with_whitespace_is_a_different_id_either_way(
 
     assert summaries(reading.proposals) == [_GOOD_RENDERED]
     assert reading.coverage is None, "an entry the source holds and this read skipped (§5)"
+
+
+@pytest.mark.parametrize("planted", [False, True], ids=["fresh", "id-already-cached"])
+async def test_a_definition_closed_by_a_mismatched_delimiter_refuses_either_way(
+    tmp_path: Path, planted: bool
+) -> None:
+    """The cache is written from the ``END`` tag, so ``walk`` is not the whole set.
+
+    ``icalendar`` caches on ``vals.upper() == "VTIMEZONE" and "TZID" in component``
+    — the tag that *closed* the component, not the component's own type. So
+    ``BEGIN:VEVENT`` carrying a ``TZID`` and closed ``END:VTIMEZONE`` is handed to
+    ``cache_timezone_component`` while arriving as an ``Event`` that
+    ``walk("VTIMEZONE")`` never returns, and which the eager build therefore never
+    sees. Cold, the library builds it and ``Event.to_tz`` does not exist, so the
+    read refuses; warm, the build is skipped and the same bytes read normally,
+    proposing the good entry beside it.
+
+    It is refused on the stray ``TZID`` property instead: RFC 5545 §3.6.5 makes that
+    a ``VTIMEZONE`` property alone, so no conforming document has one elsewhere.
+    Adversarial review found it on round 5, and both columns are the assertion.
+    """
+    if planted:
+        await _read(_written(tmp_path, "planted.ics", _vtimezone(), _entry(uid="defined")))
+
+    mismatched = "\r\n".join(["BEGIN:VEVENT", f"TZID:{_HOSTILE}", "END:VTIMEZONE"])
+
+    with pytest.raises(ReaderError) as refusal:
+        await _read(_written(tmp_path, "mismatched.ics", _GOOD, mismatched))
+
+    assert isinstance(refusal.value.__cause__, SourceNotParseableError)
+    assert _HOSTILE not in str(refusal.value), "ADR-0093 §8's message is payload-free"
 
 
 # --- what the re-seating may not cost ----------------------------------------
