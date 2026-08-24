@@ -78,6 +78,7 @@ from ai_assistant.core.types import (
     TurnOutcome,
     Validity,
     band_of,
+    rests_on_recorded_external_content,
     secret_value,
 )
 from ai_assistant.orchestration import (
@@ -2932,13 +2933,21 @@ def _record(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
     content: str = "the office is in Boston",
     score: float | None = None,
     evidence_elided: int = 0,
+    derived_from_external: bool = False,
 ) -> SemanticMemory:
     """A stored semantic record, with every field the projection reads addressable.
 
-    The attestation is *not* a knob: the `ATTESTED` band is unconstructable without
-    one since ADR-0092 §1, and no projection case here reads it, so it is supplied
-    from the band rather than from a keyword nobody would vary. Keyed on `band_of`
-    so a `MemorySource` added into that band later needs no edit here.
+    The attestation is still *not* a knob, and since ADR-0189 §2 the reason has
+    changed rather than gone: the projection now reads it, but the `ATTESTED` band is
+    unconstructable without one (ADR-0092 §1) and no case here needs a *different*
+    one, so it is supplied from the band rather than from a keyword nobody would
+    vary. Keyed on `band_of` so a `MemorySource` added into that band later needs no
+    edit here.
+
+    ``derived_from_external`` **is** a knob, because it is the one input the origin
+    predicate has that the band does not decide (ADR-0106 §2) — and because a record
+    carrying it outside the `DERIVED` band is exactly what tells a projection reading
+    the field apart from one calling the function.
     """
     return SemanticMemory(
         id=record_id,
@@ -2952,6 +2961,7 @@ def _record(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
             evidence=evidence,
             evidence_elided=evidence_elided,
             last_updated=last_updated,
+            derived_from_external=derived_from_external,
             attestation=(
                 Attestation(reported_by="calendar:work", reported_at=AT)
                 if band_of(source) is BeliefBand.ATTESTED
@@ -3122,6 +3132,134 @@ def test_from_record_drops_the_relevance_score() -> None:
     """Nothing was ranked on this path, so no score is carried (ADR-0073 §2, §7)."""
     belief = belief_from_record(_record("rec-1", score=0.93))
     assert not hasattr(belief, "score")
+
+
+# --- the origin of what a projection shows (ADR-0189 §1, §2) ------------
+
+
+@pytest.mark.parametrize(
+    ("source", "derived_from_external", "rests"),
+    [
+        (MemorySource.USER_ASSERTED, False, False),
+        (MemorySource.OBSERVED, False, False),
+        (MemorySource.INFERRED, False, False),
+        (MemorySource.OBSERVED, True, True),
+        (MemorySource.INFERRED, True, True),
+        (MemorySource.EXTERNAL, False, True),
+    ],
+)
+def test_both_projections_carry_the_predicate_s_own_answer(
+    source: MemorySource, derived_from_external: bool, rests: bool
+) -> None:
+    """ADR-0189 §2: the value is `rests_on_recorded_external_content`'s, computed here.
+
+    Every arm of ADR-0106 §2's two-part predicate, on both projections: `ATTESTED`
+    is true by the band alone, `ASSERTED` is false by ADR-0098 §1 whatever the field
+    says, and `DERIVED` is the one case the flag decides — which is the case the
+    field exists for (#746).
+
+    Asserted against the function rather than against a transcribed truth table, so
+    that a projection and the predicate cannot drift apart in a later edit without
+    this failing.
+    """
+    confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.4
+    record = _record(
+        "rec-1",
+        source=source,
+        confidence=confidence,
+        derived_from_external=derived_from_external,
+    )
+
+    assert rests_on_recorded_external_content(record.provenance) is rests
+    assert belief_from_record(record).rests_on_recorded_external_content is rests
+    summary = belief_summary_from_record(record, cited=0, resolved=0)
+    assert summary.rests_on_recorded_external_content is rests
+
+
+def test_a_user_s_own_assertion_never_rests_on_external_content_however_the_record_is_flagged() -> (
+    None
+):
+    """The one case that tells the function apart from the field (ADR-0106 §2, §7).
+
+    ADR-0106 §7 forbids a band-keyed validator on `derived_from_external`, so a
+    `USER_ASSERTED` provenance carrying `True` stays constructible — malformed rather
+    than adversarial. The predicate is band-guarded and answers `False`; a projection
+    that read the field directly would report the user's own utterance as resting on
+    recorded external content, which ADR-0098 §1 forbids in principle "however it was
+    composed".
+
+    This is the assertion that fails the day someone writes
+    ``provenance.derived_from_external`` at either site, and nothing else here does.
+    """
+    flagged = _record("rec-1", source=MemorySource.USER_ASSERTED, derived_from_external=True)
+
+    assert flagged.provenance.derived_from_external is True, "the record really carries it"
+    assert belief_from_record(flagged).rests_on_recorded_external_content is False
+    assert (
+        belief_summary_from_record(flagged, cited=0, resolved=0).rests_on_recorded_external_content
+        is False
+    )
+
+
+def test_both_projections_carry_the_attestation_whole() -> None:
+    """ADR-0189 §2: the `Attestation` as stored, not two scalars beside it.
+
+    Both halves ADR-0073 §4's gate asks for — what reported it and when that source
+    said so — reach the surface as one object, so the half-states ADR-0092 §2 made
+    unconstructable on the record's side of the seam stay unconstructable on the
+    surface's. Identity is asserted rather than field equality: a projection that
+    rebuilt an `Attestation` from two scalars would pass a field-by-field check while
+    dropping `extent`, which ADR-0189 §2 rules rides along.
+    """
+    attested = _record("rec-1", source=MemorySource.EXTERNAL, confidence=0.7)
+    stored = attested.provenance.attestation
+    assert stored is not None
+
+    belief = belief_from_record(attested)
+    summary = belief_summary_from_record(attested, cited=0, resolved=0)
+
+    assert belief.attestation is stored
+    assert summary.attestation is stored
+    assert belief.attestation.reported_by == "calendar:work"
+    assert belief.attestation.reported_at == AT
+
+
+def test_an_unattested_belief_carries_no_attestation_on_either_projection() -> None:
+    """Present exactly where the band is `ATTESTED`, which the record already decides.
+
+    ADR-0189 §2 adds no cross-field validator to either projection and does not need
+    one: `Provenance` carries an attestation exactly in that band (ADR-0092 §1), so
+    the projection carrying it as stored inherits the invariant. What would break it
+    is a projection *manufacturing* one, so the absence is pinned rather than assumed.
+    """
+    for source in (MemorySource.USER_ASSERTED, MemorySource.OBSERVED, MemorySource.INFERRED):
+        confidence = 1.0 if source is MemorySource.USER_ASSERTED else 0.4
+        record = _record("rec-1", source=source, confidence=confidence)
+        assert belief_from_record(record).attestation is None
+        assert belief_summary_from_record(record, cited=0, resolved=0).attestation is None
+
+
+def test_the_listing_and_the_detail_view_agree_about_the_origin() -> None:
+    """The listing discloses a belief's origin exactly as the detail view does.
+
+    ADR-0085 §4a's split is about *citations* — the listing carries counts where the
+    detail carries content — and provenance is on neither side of it. This is ADR-0107
+    §8 item 5's argument one field pair over: a listing that disclosed less than the
+    view it is drilled into would make two reads of one record disagree about a fact
+    neither of them computes.
+    """
+    attested = _record("rec-1", source=MemorySource.EXTERNAL, confidence=0.7)
+    tainted = _record(
+        "rec-2", source=MemorySource.INFERRED, confidence=0.5, derived_from_external=True
+    )
+
+    for record in (attested, tainted):
+        belief = belief_from_record(record)
+        summary = belief_summary_from_record(record, cited=0, resolved=0)
+        assert summary.attestation == belief.attestation
+        assert (
+            summary.rests_on_recorded_external_content is belief.rests_on_recorded_external_content
+        )
 
 
 async def test_beliefs_lists_what_memory_holds_in_the_store_s_own_order() -> None:
