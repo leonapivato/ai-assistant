@@ -738,3 +738,37 @@ async def test_a_correction_never_lands_on_the_id_it_just_retired() -> None:
     written = await engine.belief(outcome.record_id)
     assert written is not None
     assert written.content == "the user works from Lisbon"
+
+
+async def test_an_id_another_open_question_calls_gone_is_never_handed_to_a_new_belief() -> None:
+    """The case only a record of the past catches, and the reason the reservation is one.
+
+    A question that names an unresolved retirement has already told the user that id is
+    "no longer held, so accepting would not touch it" (ADR-0045 §6, ADR-0189 §4). If a
+    *different* answer then mints that id, the first question's promise is retrospectively
+    false: answering it retires a belief that did not exist when it was asked, and ADR-0078
+    §8's exact scope is breached by an ordering rather than by a scope.
+
+    Nothing about the store at mint time can see this coming — the id is absent from it,
+    which is exactly why the question called it gone. Adversarial review found it on this
+    lane's round 4, after two narrower repairs to the present state had each left the next
+    case open.
+    """
+    engine = FakeAssistantEngine()
+    engine.ask(
+        "q-gone",
+        content="a question about something already retired",
+        state=QuestionState.OPEN,
+        retires=(engine.retirement("rec-1"),),
+    )
+    engine.ask("q-new", content="an unrelated correction", state=QuestionState.OPEN)
+
+    written = await engine.answer("q-new", accept=True)
+    assert written.record_id is not None
+    assert written.record_id != "rec-1", "the id a live question calls gone is spoken for"
+
+    await engine.answer("q-gone", accept=True)
+
+    survivor = await engine.belief(written.record_id)
+    assert survivor is not None, "answering the other question touched nothing of it"
+    assert survivor.content == "an unrelated correction"
