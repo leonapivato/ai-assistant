@@ -508,6 +508,10 @@ async def test_an_id_padded_with_whitespace_is_a_different_id_either_way(
             _vtimezone().replace("END:VTIMEZONE", "END:VEVENT"),
             id="arrives-as-a-zone-never-cached",
         ),
+        pytest.param(
+            _vtimezone().replace("BEGIN:VTIMEZONE", "BEGIN: VTIMEZONE"),
+            id="a-padded-name-opens-what-end-does-not-close",
+        ),
     ],
 )
 @pytest.mark.parametrize("planted", [False, True], ids=["fresh", "id-already-cached"])
@@ -516,7 +520,13 @@ async def test_a_component_closed_by_the_wrong_delimiter_refuses_either_way(
 ) -> None:
     """The cache is keyed off the ``END`` tag, the component's type off the ``BEGIN``.
 
-    A mismatched pair splits the two, and each direction leaks a different way:
+    A mismatched pair splits the two, and each direction leaks a different way. The
+    padded case is the same defect written with whitespace: ``handle_begin_component``
+    builds its component from ``vals.upper()`` and trims nothing, so ``BEGIN: VTIMEZONE``
+    opens a component named ``" VTIMEZONE"`` — which ``END:VTIMEZONE`` does not close,
+    while still being the tag that triggers the cache. Cold it raises for want of
+    ``to_tz``; warm it parses. Adversarial review found it on round 7, when this check
+    was still normalising the name itself.
 
     * ``BEGIN:VEVENT`` … ``END:VTIMEZONE`` is cached but arrives as an ``Event``
       ``walk("VTIMEZONE")`` never returns. Cold, ``Event.to_tz`` does not exist and
@@ -591,6 +601,27 @@ async def test_a_delimiter_folded_across_two_lines_is_still_one_delimiter(
     )
 
     reading = await _read(_written(tmp_path, "folded.ics", folded, _entry()))
+
+    assert summaries(reading.proposals) == [_LEAKED_RENDERED]
+    assert reading.coverage is not None
+
+
+async def test_a_byte_order_mark_does_not_cost_the_calendar_its_read(
+    tmp_path: Path,
+) -> None:
+    """The delimiter walk decodes as the parser decodes, or it invents a refusal.
+
+    ``icalendar`` reads bytes through ``to_unicode``, which decodes ``utf-8-sig`` and
+    so removes a leading BOM before ``BEGIN:VCALENDAR``. A walk that decoded plain
+    ``utf-8`` would keep it, fail to recognise that first ``BEGIN``, and then find
+    ``END:VCALENDAR`` closing nothing — refusing a calendar the library reads and
+    losing every entry in it, against ADR-0093 §7b. Exporters emit this: a BOM is
+    what Outlook writes in front of an ``.ics``. Adversarial review found it on
+    round 7, and the fix was to stop decoding independently at all.
+    """
+    raw = "\ufeff".encode() + calendar(_vtimezone(), _entry())
+
+    reading = await _read(source(tmp_path, raw, name="bom.ics"))
 
     assert summaries(reading.proposals) == [_LEAKED_RENDERED]
     assert reading.coverage is not None
