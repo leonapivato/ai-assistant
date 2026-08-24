@@ -1,7 +1,29 @@
 # 154. The `tools/` egress seam is designated, and the fourteen conditions are attested in code
 
-- Status: Accepted
+- Status: Partially superseded by ADR-0193 (§4's standing-authorisation floor, item (ii)'s first clause, in the single respect that a user-established recipient grant may cover an egress call at this seam)
 - Date: 2026-08-14
+- **Note (2026-08-24): §4's standing-authorisation floor is lifted for a
+  user-established recipient grant, and for nothing else.** ADR-0193 is the ADR item
+  (ii)'s second clause anticipated — "the ADR that would permit a standing
+  authorisation to cover an egress call at this seam first establishes a **recorded
+  origin** the authoriser evaluates at the moment it rules … and states its rule over
+  that fact". It rests on the surface the 2026-08-23 note records as existing,
+  ADR-0181 §3's `planned_with_external_content` on the binding, and states its rule
+  over it: no standing recipient grant covers a call carrying that fact, which is
+  ADR-0181 §5's last clause honoured rather than lifted. **What is superseded is item
+  (ii)'s first clause and only in one respect:** a `RecipientGrant` covering a request
+  under ADR-0193 §3 may source an `ALLOW`. Every egress call not so covered is still
+  authorised by a decision of the user about that call. **Nothing else here changes**
+  — §1's designation, §2's clauses (including its bar on a *configuration* granting a
+  standing authorisation for a recipient, which ADR-0193 §2 reinforces), §4's fourteen
+  attestations and their verdicts, §5's transition and §7's limits all stand. §4's
+  condition 3 is unfalsified: ADR-0017 §3 offers a user decision **or** a standing
+  user policy, and the condition now holds by both limbs rather than by the first
+  alone. ADR-0193 lands no code, so the subsection's "route (a) is the only available
+  route today" stays true of the tree until ADR-0193's implementing lane lands; that
+  lane owes the re-attestation, under §4's own rule that a later change either
+  restores the property in the same change or opens an ADR reconsidering the
+  designation (ADR-0193 §12).
 - **Note (2026-08-23): §4's standing-authorisation precondition is met by ADR-0181,
   and §4's floor is unchanged and unlifted.** §4, under "ADR-0098 §3's two obligations
   on this lane, decided", item (ii), second clause requires that "The ADR that would
