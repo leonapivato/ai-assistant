@@ -160,10 +160,18 @@ ADR-0017 §4's honest accounting and a measurement.
 > (`CLAUDE.md`, "I/O-bound methods are `async`") and would put the call outside the
 > reach of ADR-0029 §4's deadline, which is the only bound §2 leaves on it.
 
-> **Normative.** `read_line` returns one line **including** its terminator, and
-> returns empty bytes — and only empty bytes — to mean end of stream. It bounds
-> what it will buffer for one line at the single ceiling `core` states for this
-> contract, and raises rather than growing past it.
+> **Normative.** `read_line`'s terminator is a single `b"\n"`, and the line is
+> returned **including** it — including a preceding `b"\r"` where the far end sent
+> one, which is the protocol's to strip and not this contract's.
+
+> **Normative.** `read_line` returns empty bytes to mean end of stream, and empty
+> bytes means nothing else. Octets received before end of stream with no terminator
+> among them are discarded and end of stream is reported in their place: a line
+> with no terminator is not a reply, whatever octets arrived, and reporting it as
+> one would let a truncated stream stand in for an answer.
+
+> **Normative.** `read_line` bounds what it will buffer for one line at the single
+> ceiling `core` states for this contract, and raises rather than growing past it.
 
 > **Normative.** `read` takes a `limit` that is an integer in `1..ceiling`
 > inclusive, where the ceiling is that same one `core` states. Any other value —
@@ -180,8 +188,14 @@ ADR-0017 §4's honest accounting and a measurement.
 > refuse the same inputs and a consumer tested against one behaves against the
 > other.
 
-> **Normative.** `close` is idempotent and raises nothing. A channel that cannot be
-> released reports it to its logs and not to its caller.
+> **Normative.** `close` is idempotent, and it suppresses and logs an ordinary
+> release failure rather than raising it: a channel that cannot be released reports
+> that to its logs and not to its caller.
+
+> **Normative.** A cancellation delivered from **outside** the call is exempt from
+> the clause above and is governed by ADR-0060 §1, which binds every Protocol in
+> `core/protocols.py`: `close` makes the channel safe and then re-raises. It never
+> absorbs such a cancellation and never converts it into a return.
 
 > **Normative.** A new `TransportError` in `core/errors.py` is what
 > `open_channel`, `read_line`, `read`, `write` and `start_tls` raise when a
@@ -230,13 +244,25 @@ without closing exhausts memory through a method whose name says it is bounded.
 Refusing every value outside `1..ceiling` closes that by making the unbounded
 spelling unrepresentable rather than by asking implementations to remember.
 
-**`close` raising nothing is a rule about exception replacement, not about
-tidiness.** The seam closes its channel from a cleanup path, and Python replaces
-the exception in flight with one raised there. A conforming channel that raised
-from `close` would therefore turn an `IndeterminateTransmissionError` into an
-internal failure — recording a possible disclosure as one that did not happen,
+**`close` suppressing an ordinary failure is a rule about exception replacement,
+not about tidiness.** The seam closes its channel from a cleanup path, and Python
+replaces the exception in flight with one raised there. A conforming channel that
+raised from `close` would therefore turn an `IndeterminateTransmissionError` into
+an internal failure — recording a possible disclosure as one that did not happen,
 which is exactly what §4's window exists to prevent. `_StreamChannel.close`
-already swallows and logs; this makes the tree's behaviour the contract's.
+already swallows `OSError` and logs; this makes the tree's behaviour the
+contract's.
+
+**The cancellation carve-out is not a softening of that, and both review lenses
+had to catch it before it was written.** An earlier draft said `close` "raises
+nothing", flatly. ADR-0060 §1 binds every Protocol in `core/protocols.py` and says
+a cancellation delivered from outside "is delivered onward, never absorbed" — so
+the flat rule obliged a conforming channel to swallow a `CancelledError` arriving
+while it awaited the far end, which is the orphaned-resource failure that ADR
+exists to prevent. The two rules do not actually collide once the subject is
+right: one is about a *release failure*, which the caller can do nothing with, and
+the other is about a *cancellation*, which is the caller's own control flow
+arriving. `close` suppresses the first and re-raises the second.
 
 **The capability is the opener, not the channel, because opening is the act
 being governed.** #85's property is that "a subsystem that was never handed the
@@ -540,9 +566,11 @@ the capability inherit `send_email`'s idea of a call.
 > either on the ground that this capability exists.
 
 > **Normative.** The implementing lane extends the source-reading net's forbidden
-> names with `asyncio`'s connection openers — at minimum `open_connection` and
-> `open_unix_connection` — so that the net which already follows `asyncio`'s
-> attributes covers its connection surface as well as its launch surface (#1545).
+> names with `asyncio.open_connection`, so that the net which already follows
+> `asyncio`'s attributes covers its connection surface as well as its launch
+> surface (#1545). `open_unix_connection` is **not** added: a Unix domain socket
+> stays on the device (ADR-0084 §1) and forbidding it would be a rule about local
+> IPC rather than about egress.
 
 > **Normative.** No lane states or implies that this ADR makes egress from an
 > undesignated place impossible. It makes the route this system hands out the only
@@ -635,18 +663,22 @@ about whether they are captured.
 > lane reads the arm as establishing that such a tool could not have opened a
 > connection by some other route.
 
-> **Normative.** The arm also instruments **every** off-device transport creator
-> the running event loop exposes — at minimum `create_connection`,
-> `create_datagram_endpoint` and `create_unix_connection` — so that an attempt made
-> from inside the arm fails and is recorded, and asserts that none occurred outside
-> the calibration below. Naming one creator does not discharge this clause.
+> **Normative.** The arm also instruments **every** creator the running event loop
+> exposes that can reach off the device — at minimum `create_connection` and
+> `create_datagram_endpoint` — so that an attempt made from inside the arm fails
+> and is recorded, and asserts that none occurred outside the calibration below.
+> Naming one creator does not discharge this clause.
 
-> **Normative.** The arm calibrates that instrument before it asserts anything: it
-> deliberately calls a creator on the **active** loop, asserts the attempt was
-> recorded and refused, and resets the record. A zero read from a recorder attached
-> to a stale or different loop is indistinguishable from a zero read from a live
-> one, and the fake's own positive control does not detect it, being a separate
-> instrument.
+> **Normative.** The Unix-domain creators are **not** instrumented and are not
+> treated as egress anywhere in this ADR. A Unix domain socket does not leave the
+> device (ADR-0084 §1), so it is not ADR-0017 §1's subject, and §5's exclusion of
+> local IPC governs here as it governs everywhere else in this document.
+
+> **Normative.** The arm calibrates **each** instrument it installed before it
+> asserts anything: for every creator it wrapped, it calls that creator on the
+> **active** loop, asserts that attempt was recorded and refused, and resets the
+> record. A calibration of one creator says nothing about another creator's
+> wrapper, so a single calibration does not discharge this clause.
 
 > **Normative.** The same arm, over the same fake in the same composition, drives
 > the designated seam to a bound call and asserts the fake recorded exactly one
@@ -679,6 +711,18 @@ for the same reason a live one does, which is the vacuous zero this section alre
 refuses for the fake, arriving a second time in the fix for it. Every instrument
 this arm installs owes a calibration; that is the general rule the two clauses are
 instances of.
+
+**The arm's predicate is "no creator was called", not "nothing left the device",
+and the difference is why Unix-domain and loopback are out.** A connection to
+`127.0.0.1` through `create_connection` leaves nothing, so an instrument that
+refused every call would be refusing on the wrong ground. The arm can hold the
+stricter, simpler predicate only because *its own* composition legitimately opens
+no socket of any kind: the store is in memory, the model seam is a fake, and the
+transport is `FakeOutboundTransport`. That is a property of the arm's arrangement
+and is stated here rather than generalised into a rule about what any composition
+may open. Round 3's architecture lens caught this ADR asserting the general form —
+instrumenting `create_unix_connection` as egress — against its own §5 and against
+ADR-0084 §1.
 
 **What the arm still does not reach, stated rather than implied.** A raw `socket`,
 and `loop.sock_connect` over one, are below every creator the arm wraps. They stay
