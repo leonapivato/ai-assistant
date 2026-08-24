@@ -1377,9 +1377,27 @@ function sessionLost(body, said) {
 // ask — and by the page saying, while it waits, that it is waiting and that no deadline
 // of its own will end it.
 
-// The ask this page is waiting on an answer to, as the controller that can stop the
-// wait, or `null` while nothing is outstanding. One at a time, because `#ask-button` is
-// disabled for exactly that window.
+// The ask this page is waiting on an answer to, or `null` while nothing is outstanding.
+// One at a time, because `#ask-button` is disabled for exactly that window.
+//
+// **It carries what was observed and not only the abort**, because ADR-0177 §7's fourth
+// clause is conditioned on what was *read*: it makes an outcome not known where "the
+// request was sent and no response was read", and a page that said that after reading
+// half an answer would be announcing a state it is not in. So the record holds two
+// facts, each set at the moment its evidence arrives:
+//
+// - `heard` — something of this turn's own answer reached this browser, so the question
+//   demonstrably got past the gateway to the assistant. What sets it is not the same
+//   event on the two entries, and the difference is load-bearing: `/ask` answers only
+//   once `converse` has returned, so its response head is proof the turn ran, while
+//   `/ask/stream`'s head is written *before* the engine is called (`_write_stream`
+//   drains it, then awaits the body) and proves nothing about the assistant at all. On
+//   that entry the first chunk is the evidence.
+// - `owns` — this turn has taken the answer panel over, which `askStreaming` does when
+//   its head lands and it clears the panel to compose into. Only then is what is on
+//   screen this turn's, and only then may abandoning it clear anything: a question asked
+//   after an answered one leaves the *previous* answer standing there, and wiping that
+//   would destroy a complete answer to a different question.
 let awaited = null;
 
 // Said while a question is out. **It does not promise a deadline**, because there is
@@ -1415,6 +1433,39 @@ const ASK_ABANDONED =
   "Nothing was re-sent and nothing was cancelled — the assistant was not told to stop. " +
   "Asking again asks a new question rather than retrying that one. If that turn did " +
   "run, it will show in the conversations listing.";
+
+// **The same act, said where some of it is already known.** Adversarial review found
+// the sentence above being used for a wait ended *after* part of the answer had
+// arrived, where two of its clauses are false: something here had read a reply, and the
+// assistant demonstrably had received the question. ADR-0177 §7's fourth clause is
+// conditioned on "no response was read", so applying its words to a state where one was
+// is not caution — it is an inaccurate announcement, which ADR-0182 §7 requires the page
+// not to make.
+//
+// So what is unresolved is stated narrowly: the turn reached the assistant, and its
+// *ending* is what nobody here read. Everything else is the same act and says the same
+// things — nothing re-sent, nothing cancelled, a fresh question rather than a retry —
+// because none of that changes with how far the answer got.
+const ASK_ABANDONED_MIDWAY =
+  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
+  "Part of that turn had already reached this browser, so the assistant did receive the " +
+  "question and had begun on it; how it ended is what is not known. Nothing was re-sent " +
+  "and nothing was cancelled — the assistant was not told to stop. Asking again asks a " +
+  "new question rather than retrying that one. If that turn did run to the end, it will " +
+  "show in the conversations listing.";
+
+// And the clause for the screen, added only where there was something on it. It is
+// `ANSWER_STREAM_CUT`'s sentence for `ANSWER_STREAM_CUT`'s reason — ADR-0173 §3 makes
+// the terminal outcome's `reply` the answer, so an accumulated chunk sequence is not
+// "the record of what the assistant said" — and it is a separate clause because the two
+// facts it joins are independent: a whole `ask` abandoned while its body was being read
+// has been heard from and has put nothing on screen, and a stream abandoned between its
+// head and its first chunk has put an empty panel up and been heard from by nothing.
+// Saying either sentence in the other's state would be a wrong explanation rather than a
+// missing one, which is the distinction this page keeps everywhere else.
+const PARTIAL_CLEARED =
+  "What had been written into the answer is not the answer and was not kept, so it has " +
+  "been cleared rather than left on screen looking like one.";
 
 // The control, and the line beside it. Built here rather than shipped in `index.html`
 // because it belongs to a request and not to the surface — the page already builds a
@@ -1475,15 +1526,28 @@ function abandonAsk() {
   // Released before the abort, so the rejection it provokes finds this ask already
   // settled and `ask`'s own `finally` leaves the control alone.
   releaseAsk();
-  waiting.abort();
-  // **The partial text goes with it**, for `ANSWER_STREAM_CUT`'s reason: ADR-0173 §3
-  // makes the terminal outcome's `reply` the answer, so an accumulated chunk sequence
-  // is not "the record of what the assistant said" and leaving it on screen renders a
-  // non-answer as one. There is nothing to be done with it either way — ADR-0175 §10
-  // declines resuming a cut stream, and this stream was not even cut, it was let go.
-  clearNode(el("answer-body"));
-  show("answer", false);
-  fault(ASK_ABANDONED, "console");
+  waiting.stopping.abort();
+  // **The partial text goes with it, and nothing else does.** ADR-0173 §3 makes the
+  // terminal outcome's `reply` the answer, so an accumulated chunk sequence is not "the
+  // record of what the assistant said" and leaving it on screen renders a non-answer as
+  // one; there is nothing to be done with it either way, since ADR-0175 §10 declines
+  // resuming a cut stream and this one was not even cut, it was let go.
+  //
+  // **Only where this turn owns the panel**, which adversarial review found the first
+  // draft ignoring: an owner who asks a second question and stops waiting on it before
+  // its head lands still has the *first* question's answer on screen, and clearing that
+  // would destroy a complete answer to a different question because a later request
+  // failed. `askStreaming` takes the panel over when its head lands, and until then what
+  // is in it is not this turn's to throw away.
+  if (waiting.owns) {
+    clearNode(el("answer-body"));
+    show("answer", false);
+  }
+  // Which sentence is which fact, and the clause about the screen is added only where
+  // there was text on it: a stream abandoned between its head and its first chunk owns
+  // an empty panel, and clearing that is not something to announce.
+  const said = waiting.heard ? ASK_ABANDONED_MIDWAY : ASK_ABANDONED;
+  fault(waiting.owns && waiting.heard ? `${said} ${PARTIAL_CLEARED}` : said, "console");
 }
 
 async function ask(event) {
@@ -1499,7 +1563,9 @@ async function ask(event) {
   // Read before the request goes out, so that what is compared on the way back is the
   // selection this turn was sent under and not the one it is landing into.
   const chosenAt = chose;
-  const waiting = new AbortController();
+  // The record of this one ask: what can stop it, and what has been observed of it.
+  // Both facts start false and are set only by their own evidence arriving.
+  const waiting = { stopping: new AbortController(), heard: false, owns: false };
   awaited = waiting;
   askWaiting(true);
   try {
@@ -1517,9 +1583,9 @@ async function ask(event) {
     // ADR-0173 §7 refuses the same fallback one layer in. A second attempt is the
     // owner asking again, visibly.
     if (el("stream-answer").checked) {
-      await askStreaming(half, asked, chosenAt, waiting.signal);
+      await askStreaming(half, asked, chosenAt, waiting);
     } else {
-      await askWhole(half, asked, chosenAt, waiting.signal);
+      await askWhole(half, asked, chosenAt, waiting);
     }
   } catch (_) {
     // An abort this owner asked for is not the gateway having gone, and saying it was
@@ -1529,7 +1595,7 @@ async function ask(event) {
     // stays silent for it. Whatever the abort provoked lands here — the `fetch`
     // rejecting, the stream's reader erroring, a body half-read — and one check covers
     // them all, because what makes them one condition is the signal and not the throw.
-    if (!waiting.signal.aborted) {
+    if (!waiting.stopping.signal.aborted) {
       // `fetch` rejects when the connection itself failed — the gateway is gone,
       // which is a different fault from the hub being gone and is said as one.
       show("answer", false);
@@ -1548,13 +1614,18 @@ async function ask(event) {
   }
 }
 
-async function askWhole(half, asked, chosenAt, stopping) {
+async function askWhole(half, asked, chosenAt, waiting) {
   const response = await fetch("/ask", {
     method: "POST",
     headers: admitted(half, true),
     body: JSON.stringify(asked),
-    signal: stopping,
+    signal: waiting.stopping.signal,
   });
+  // **A head on this entry is proof the turn ran**, which is why it is the evidence
+  // here and the head of `/ask/stream` is not: `_ask` awaits `converse` and answers
+  // with the outcome, so nothing comes back until the assistant has finished with the
+  // question. Read before the body, because that is the read an abort lands in.
+  waiting.heard = true;
   const body = await readBody(response);
   // **A body abandoned part-way through is not a body this page can read**, and
   // `readBody` cannot tell the difference: it answers anything unreadable with an empty
@@ -1562,7 +1633,7 @@ async function askWhole(half, asked, chosenAt, stopping) {
   // one for a read the owner stopped. Rendering `{}` here would put an answer-shaped
   // nothing on screen for a turn whose outcome is not known; reporting it as a refusal
   // below would be worse. The owner has already been told what happened.
-  if (stopping.aborted) {
+  if (waiting.stopping.signal.aborted) {
     return;
   }
   if (response.ok) {
@@ -1583,19 +1654,19 @@ async function askWhole(half, asked, chosenAt, stopping) {
 // sequence and the terminal reply disagree, what stands is the terminal reply. No
 // accumulated chunk sequence is kept, and none is treated as the record of what the
 // assistant said.
-async function askStreaming(half, asked, chosenAt, stopping) {
+async function askStreaming(half, asked, chosenAt, waiting) {
   const response = await fetch("/ask/stream", {
     method: "POST",
     headers: admitted(half, true),
     body: JSON.stringify(asked),
-    signal: stopping,
+    signal: waiting.stopping.signal,
   });
   if (!response.ok) {
     const body = await readBody(response);
     // `askWhole`'s reason, on the one path here that reads a body rather than a stream:
     // a refusal whose body the owner stopped reading is not a refusal this page can
     // put into words, and it has already said what it did.
-    if (stopping.aborted) {
+    if (waiting.stopping.signal.aborted) {
       return;
     }
     show("answer", false);
@@ -1606,10 +1677,17 @@ async function askStreaming(half, asked, chosenAt, stopping) {
   const panel = el("answer-body");
   clearNode(panel);
   show("answer", true);
+  // From here what is in the panel is this turn's, so this turn may throw it away. The
+  // head alone says nothing about the assistant — the gateway writes and drains it
+  // *before* `_pump_answer` is awaited — so it takes the panel and nothing more.
+  waiting.owns = true;
   const composing = line(panel, "", "reply");
   let terminal = null;
   for await (const value of streamValues(response)) {
     if (value.kind === "chunk") {
+      // The first chunk is what proves the question reached the assistant on this
+      // entry, and it is the fact a wait abandoned from here is announced with.
+      waiting.heard = true;
       composing.textContent += value.text;
     } else if (TERMINAL_KINDS.has(value.kind)) {
       terminal = value;
