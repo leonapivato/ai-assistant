@@ -17,7 +17,7 @@ from datetime import UTC, datetime, timedelta
 from inspect import getsource, isfunction, unwrap
 from io import StringIO
 from itertools import count, product
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Any, Final
 
 import pytest
 import typer.main
@@ -39,6 +39,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     AnswerKind,
     AnswerOutcome,
+    Attestation,
     Belief,
     BeliefBand,
     BeliefSummary,
@@ -96,6 +97,8 @@ from ai_assistant.core.types import (
     ToolDefinition,
     TurnOutcome,
     TurnResult,
+    Warrant,
+    encodable_text,
 )
 from ai_assistant.interfaces import cli
 from ai_assistant.orchestration import (
@@ -1593,6 +1596,17 @@ async def test_drive_learn_folds_real_feedback_into_memory(output: StringIO) -> 
 # --- beliefs / forget: the inspection surface (ADR-0073 §4, §5, §7) -----
 
 
+#: The instant a source says a fact was current — **its** clock, not ours, and
+#: deliberately nowhere near ``AT``. ADR-0073 §4's floor is that a surface must not
+#: offer our revision time as the source's, and two instants that could be mistaken
+#: for each other would let a renderer breach it and still pass (ADR-0092 §3: a
+#: ``reported_at`` earlier than ours is the normal case, not an anomaly).
+REPORTED_AT: Final = datetime(2026, 3, 2, 8, 30, tzinfo=UTC)
+
+#: What reported an attested record, as the store holds it (ADR-0092 §1).
+ATTESTED_BY: Final = Attestation(reported_by="work-calendar", reported_at=REPORTED_AT)
+
+
 def _belief(  # noqa: PLR0913 — one knob per field a Belief carries; that is the point
     band: BeliefBand = BeliefBand.ASSERTED,
     *,
@@ -1602,12 +1616,20 @@ def _belief(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
     evidence: tuple[Evidence, ...] = (),
     valid_until: datetime | None = None,
     evidence_elided: int = 0,
+    attestation: Attestation | None = None,
+    rests_on_recorded_external_content: bool = False,
 ) -> Belief:
     """One projected belief, as the façade hands it to the adapter.
 
     ``confidence`` is the **presented** number: the engine has already adjusted it
     for lost support (ADR-0077 §6), so a case scripting a tombstone also scripts the
     lowered figure rather than expecting this module to compute one.
+
+    ``attestation`` and ``rests_on_recorded_external_content`` are ADR-0189 §2's two
+    fields, and both default to their additive defaults so every case written before
+    that ADR still builds the belief it did. They are **independent knobs rather than
+    derived from the band**, because §2 adds no cross-field validator to this type and
+    the surface must answer for the off-contract state as well as the ruled ones.
     """
     return Belief(
         id=belief_id,
@@ -1619,6 +1641,8 @@ def _belief(  # noqa: PLR0913 — one knob per field a Belief carries; that is t
         last_updated=AT,
         valid_until=valid_until,
         evidence_elided=evidence_elided,
+        attestation=attestation,
+        rests_on_recorded_external_content=rests_on_recorded_external_content,
     )
 
 
@@ -1632,12 +1656,18 @@ def _summary(  # noqa: PLR0913 — one knob per field a BeliefSummary carries; t
     lost_evidence: int = 0,
     valid_until: datetime | None = None,
     evidence_elided: int = 0,
+    attestation: Attestation | None = None,
+    rests_on_recorded_external_content: bool = False,
 ) -> BeliefSummary:
     """One listing row, as the façade hands it to the adapter (ADR-0085 §4a).
 
     The counts are **fields** here rather than derived, because the listing type
     carries no citations to derive them from — which is what makes it impossible
     for a page to ship an episode's text.
+
+    It takes the same two ADR-0189 §2 knobs as :func:`_belief`, under the same names,
+    which is ADR-0107 §3's ruling made testable: the listing row and the row it links
+    to answer the same question or the projection is defective in one place.
     """
     return BeliefSummary(
         id=belief_id,
@@ -1650,6 +1680,8 @@ def _summary(  # noqa: PLR0913 — one knob per field a BeliefSummary carries; t
         last_updated=AT,
         valid_until=valid_until,
         evidence_elided=evidence_elided,
+        attestation=attestation,
+        rests_on_recorded_external_content=rests_on_recorded_external_content,
     )
 
 
@@ -1908,10 +1940,10 @@ def test_an_elision_is_never_rendered_among_the_citations(output: StringIO) -> N
         (BeliefBand.ASSERTED, "you told me, and your own word is the whole of it."),
         (
             BeliefBand.ATTESTED,
-            "a source you connected reported it — neither your word nor my inference. "
-            "I recorded which source, and when it said so, but cannot show them here, "
-            "so 'Last revised' below is when I changed my mind and not when the "
-            "source spoke.",
+            "a connected source reported it — work-calendar, neither your word nor my "
+            "inference. That source said this was current as of 2026-03-02 08:30 UTC, "
+            "on its own clock; 'Last revised' below is when I changed my mind and not "
+            "when the source spoke.",
         ),
     ],
 )
@@ -1933,9 +1965,17 @@ def test_why_is_unchanged_on_the_bands_that_render_no_count(
     test in ``tests/orchestration``, this is what stops a later reader "repairing"
     §2's scoping — the field *is* carried on these bands (§3), and choosing not to
     render it is the ruling.
+
+    **ADR-0189 §4 changed the attested line and changed nothing about this ruling.**
+    The line names the source and its clock now; it still renders no citation count,
+    so it still owes no ceiling, and the equality is what proves the ceiling did not
+    creep in beside the new sentence.
     """
-    assert cli._why(_belief(band, confidence=0.9, evidence_elided=900)) == expected
-    assert cli._why(_summary(band, confidence=0.9, evidence_elided=900)) == expected
+    attestation = ATTESTED_BY if band is BeliefBand.ATTESTED else None
+    held = _belief(band, confidence=0.9, evidence_elided=900, attestation=attestation)
+    listed = _summary(band, confidence=0.9, evidence_elided=900, attestation=attestation)
+    assert cli._why(held) == expected
+    assert cli._why(listed) == expected
 
 
 def test_why_marks_an_attested_belief_as_a_source_s_report_not_ours(output: StringIO) -> None:
@@ -1944,36 +1984,222 @@ def test_why_marks_an_attested_belief_as_a_source_s_report_not_ours(output: Stri
     And our revision time is not offered as the source's — the line says outright
     that ``Last revised`` is when *we* changed our mind.
     """
-    cli._render_belief(_belief(BeliefBand.ATTESTED, confidence=0.9))
+    cli._render_belief(_belief(BeliefBand.ATTESTED, confidence=0.9, attestation=ATTESTED_BY))
     rendered = _flat(output.getvalue())
-    assert "a source you connected reported it" in rendered
+    assert "a connected source reported it" in rendered
     assert "neither your word nor my inference" in rendered
     assert "not when the source spoke" in rendered
 
 
-def test_why_blames_the_surface_for_the_missing_attestation_and_not_the_store(
+# --- ADR-0189 §9: the origin reaches the six rendered surfaces ---------------
+#
+# Three of §9's six rendering paths are this module's — ``_why``,
+# ``_render_retirements`` and ``_render_question`` — and each owes a test over an
+# **attested, resolved** subject asserting that *both* ``reported_by`` and
+# ``reported_at`` reach the rendered output. §9 says outright that a test asserting
+# only that a field is populated, or only that the source is named, does not satisfy
+# it, so every one of these reads the console's own bytes.
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        pytest.param(cli._render_belief, id="belief"),
+        pytest.param(cli._render_belief_summary, id="summary"),
+    ],
+)
+def test_why_names_the_attesting_source_and_when_that_source_spoke(
+    render: Callable[[Any], None], output: StringIO
+) -> None:
+    """ADR-0189 §9's first surface clause, on ``_why``: the source **and** the instant.
+
+    #1276's limitation is gone. The line used to say the source and the report time
+    were recorded and could not be shown here — true while the projection dropped them
+    (ADR-0092 §1 makes an ``Attestation`` mandatory on this band, so the *store* always
+    held both), and ADR-0189 §2 gave both belief DTOs somewhere to put one.
+
+    **Both halves are asserted because ADR-0073 §4's gate is explicitly both**, and
+    ADR-0189 §9 names ``reported_at`` as "the one an implementing lane will drop,
+    because the source-naming half is the one everybody is talking about". A lane that
+    named the source and left ``Last revised`` as the only instant would satisfy
+    ADR-0098 §8's second clause and breach ADR-0073 §4's gate.
+
+    **Run over both DTOs, which is #1517's second finding.** ``_why`` accepts either,
+    so an attested ``Belief`` test alone satisfies every named belief path while an
+    attested *listing* row renders the old generic explanation — the failure ADR-0107
+    §3 already legislated against one field over when it refused both "put the field on
+    ``BeliefSummary`` only" and "put it on ``Belief`` only".
+    """
+    attested = (
+        _belief(BeliefBand.ATTESTED, confidence=0.9, attestation=ATTESTED_BY)
+        if render is cli._render_belief
+        else _summary(BeliefBand.ATTESTED, confidence=0.9, attestation=ATTESTED_BY)
+    )
+    render(attested)
+    rendered = _flat(output.getvalue())
+    assert "work-calendar" in rendered, "the reporting source is named"
+    assert "2026-03-02 08:30 UTC" in rendered, "and the instant it spoke"
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        pytest.param(cli._render_belief, id="belief"),
+        pytest.param(cli._render_belief_summary, id="summary"),
+    ],
+)
+def test_the_attested_line_still_refuses_to_offer_our_clock_as_the_sources(
+    render: Callable[[Any], None], output: StringIO
+) -> None:
+    """ADR-0073 §4's floor, which ADR-0189 §4 restates and the new line makes riskier.
+
+    §4: a surface "renders ``reported_at`` as the **source's** clock and never as this
+    system's, and it does not offer ``last_updated`` in its place". ADR-0189's own
+    Consequences names the newly-available error — "naming the source while still
+    showing our clock as the source's" — so this asserts the two instants are both on
+    screen, are different, and are labelled for whose clock each is.
+    """
+    attested = (
+        _belief(BeliefBand.ATTESTED, confidence=0.9, attestation=ATTESTED_BY)
+        if render is cli._render_belief
+        else _summary(BeliefBand.ATTESTED, confidence=0.9, attestation=ATTESTED_BY)
+    )
+    render(attested)
+    rendered = _flat(output.getvalue())
+    assert "on its own clock" in rendered, "the source's instant is labelled as the source's"
+    assert "Last revised: 2026-07-24 09:00 UTC" in rendered, "ours is still shown"
+    assert "not when the source spoke" in rendered, "and is still declared to be ours"
+    assert "2026-03-02" in rendered, "beside a genuinely different instant"
+
+
+def test_why_reads_the_source_as_a_source_and_never_as_a_person(output: StringIO) -> None:
+    """ADR-0189 §4's second clause, ADR-0098 §8's third adopted unchanged.
+
+    A surface "renders the source at **source granularity and no finer** … a surface
+    that rendered ``reported_by`` as though it named a person would assert what this
+    system does not hold". ADR-0093 §7 forbids deriving a reader's identity from the
+    source's location or contents, so the organiser of an invite and the sender of a
+    mail are not on the record — and ADR-0098 §8 states the cost of pretending
+    otherwise: "a user who reads 'someone sent you' will read the name they are shown
+    as that someone".
+
+    Pinned on the apposition rather than on the absence of a name, because there is no
+    list of person-words to check against: what makes the value unreadable as a person
+    is that it is introduced as a connected source.
+    """
+    cli._render_belief(
+        _belief(
+            BeliefBand.ATTESTED,
+            confidence=0.9,
+            attestation=Attestation(reported_by="alice", reported_at=REPORTED_AT),
+        )
+    )
+    rendered = _flat(output.getvalue())
+    assert "a connected source reported it — alice" in rendered
+    assert "That source said this was current" in rendered
+
+
+def test_why_says_what_reached_it_when_an_attested_belief_carries_no_attestation(
     output: StringIO,
 ) -> None:
-    """#711: the source and the report time *are* held, and the projection drops them.
+    """The off-contract arm, which ADR-0189 §2 leaves constructable on purpose.
 
-    An attested belief carries an ``Attestation`` by construction — ADR-0092 §1's
-    validator on :class:`~ai_assistant.core.types.Provenance` makes one mandatory
-    exactly on this band — so a line reading "not recorded" tells a user auditing
-    what is held about them the inverse of the truth, on the one band whose whole
-    purpose is provenance. The honest limit is this surface's: a
-    :class:`~ai_assistant.core.types.Belief` has nowhere to put an attestation
-    (#568), so the view cannot show what the store kept.
+    §2 adds **no** cross-field validator to ``Belief``, ``BeliefSummary`` or
+    ``Question`` — those are ratified types with construction sites in the tree, and
+    ADR-0086 §3's admissibility test refuses a validator that would refuse what already
+    works — so the type admits an attested belief with no attestation even though
+    ``Provenance``'s own validator means no store can produce one.
 
-    Pinned as **both halves**, because either alone is satisfiable by a wrong line:
-    the claim that the record was made, and the refusal to claim it can be shown
-    here. The negative assertion is what stops the old sentence returning under a
-    reworded neighbour — nothing else in this suite would notice.
+    What the line must not do is either of the two available lies: claiming the
+    attestation was **not recorded**, which errs in the direction ADR-0073 §4 forgives
+    least on the one band whose whole purpose is provenance, or reviving #1276's
+    "cannot show them here", which would claim a limit this projection no longer has.
+    What is true either way is that this surface was not handed it.
     """
     cli._render_belief(_belief(BeliefBand.ATTESTED, confidence=0.9))
     rendered = _flat(output.getvalue())
-    assert "I recorded which source, and when it said so" in rendered
-    assert "cannot show them here" in rendered
+    assert "does not name that source or say when it spoke" in rendered
     assert "not recorded" not in rendered
+    assert "cannot show them here" not in rendered
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        pytest.param(cli._render_belief, id="belief"),
+        pytest.param(cli._render_belief_summary, id="summary"),
+    ],
+)
+def test_why_says_a_derived_warrant_came_from_outside_without_reattributing_the_words(
+    render: Callable[[Any], None], output: StringIO
+) -> None:
+    """#1517's first finding, and ADR-0189 §4's third clause, on ``_why``.
+
+    §9's own matrix has no arm for this: it requires an attested-and-resolved test on
+    all six paths and a tombstone test on the two retirement paths, and **nothing that
+    exercises the derived arm**. So a renderer could show ``reported_by`` and
+    ``reported_at`` correctly everywhere, omit the marker for every ``DERIVED`` record
+    with the predicate ``True``, and pass all eight required tests while breaching §4.
+
+    **The second half is the harder one and is why this is one test rather than two.**
+    §4 forbids the reach as explicitly as it requires the marker: a surface "does
+    **not** present the record's own content as third-party text on that ground: the
+    content is a sentence this system's model wrote, and ADR-0098 §1 decides
+    externality by the recorded origin of the text". ADR-0098 §7's own round-6 draft
+    made exactly that reach and architecture review had to repair it, so the assertion
+    that the *words* stay ours is asserted beside the marker rather than trusted.
+    """
+    outside = (
+        _belief(
+            BeliefBand.DERIVED,
+            confidence=0.35,
+            evidence=_cited("their calendar said Lisbon"),
+            rests_on_recorded_external_content=True,
+        )
+        if render is cli._render_belief
+        else _summary(
+            BeliefBand.DERIVED,
+            confidence=0.35,
+            evidence_count=1,
+            rests_on_recorded_external_content=True,
+        )
+    )
+    render(outside)
+    rendered = _flat(output.getvalue())
+    assert "came from a connected source rather than from you" in rendered
+    assert "still my own sentence" in rendered, "the words are not re-attributed"
+    assert "someone else's words" not in rendered
+
+
+@pytest.mark.parametrize(
+    "render",
+    [
+        pytest.param(cli._render_belief, id="belief"),
+        pytest.param(cli._render_belief_summary, id="summary"),
+    ],
+)
+def test_why_says_nothing_about_the_outside_when_the_predicate_is_false(
+    render: Callable[[Any], None], output: StringIO
+) -> None:
+    """The silence is ruled, not an omission (ADR-0098 §5, ADR-0106 §1).
+
+    A ``False`` is *nothing external is recorded in this warrant*, never *nothing
+    external influenced it*: text whose recorded origin is not external can still have
+    reached a belief — through a plan rationale our own model authored over an
+    attacker's sentence — and no field on the record says so. So a surface printing the
+    negative would assert what this system does not hold, which ADR-0098 §5 marks as a
+    limit and ADR-0106 §1's second clause binds every marker ADR-0189 projects to.
+    """
+    inside = (
+        _belief(BeliefBand.DERIVED, confidence=0.35, evidence=_cited("they said so twice"))
+        if render is cli._render_belief
+        else _summary(BeliefBand.DERIVED, confidence=0.35, evidence_count=1)
+    )
+    render(inside)
+    rendered = _flat(output.getvalue())
+    assert "connected source" not in rendered
+    assert "outside" not in rendered
+    assert "1 piece(s) of evidence" in rendered, "the rest of the derived line is unchanged"
 
 
 def test_render_beliefs_reports_an_empty_page_plainly(output: StringIO) -> None:
@@ -3853,25 +4079,68 @@ class _QuestionEngine:
         """Nothing to release: this stand-in owns no resource."""
 
 
-def _question(
+def _question(  # noqa: PLR0913 — one knob per field a Question carries; that is the point
     question_id: str = "q-1",
     *,
     state: QuestionState = QuestionState.OPEN,
     retires: tuple[Retirement, ...] = (),
     successor: SuccessorLink | None = None,
+    band: BeliefBand = BeliefBand.ASSERTED,
+    attestation: Attestation | None = None,
+    rests_on_recorded_external_content: bool = False,
 ) -> Question:
+    """One deferred question, as the façade hands it to the adapter.
+
+    ``band``, ``attestation`` and ``rests_on_recorded_external_content`` all describe
+    the **proposal** — the record that would be written if the question were accepted —
+    on the same reading ``band`` already had here, and describe no entry in ``retires``
+    (ADR-0189 §2). Each retirement answers for itself through :func:`_retired`.
+    """
     return Question(
         id=question_id,
         state=state,
         content="the user works from Lisbon",
         kind=MemoryKind.SEMANTIC,
-        band=BeliefBand.ASSERTED,
+        band=band,
         rationale="they said so",
         reason="contradicts a prior user assertion",
         retires=retires,
         asked_at=AT,
         expires_at=AT,
         successor=successor,
+        attestation=attestation,
+        rests_on_recorded_external_content=rests_on_recorded_external_content,
+    )
+
+
+def _retired(
+    record_id: str = "live-1",
+    *,
+    content: str | None = "the user works from Madrid",
+    band: BeliefBand = BeliefBand.ASSERTED,
+    attestation: Attestation | None = None,
+    rests_on_recorded_external_content: bool = False,
+) -> Retirement:
+    """One record accepting would retire, with the whole warrant or none of it.
+
+    ``content=None`` yields the tombstone ADR-0045 §6 produces and ADR-0189 §2 ties to
+    it: the store hid a closed window, so ``warrant`` is ``None`` too. Every other call
+    builds a whole warrant, because a warrant that exists is always whole (ADR-0189 §3)
+    and ``Warrant``'s own band-keyed validator refuses every combination the band
+    forecloses.
+    """
+    if content is None:
+        return Retirement(record_id=record_id, content=None, warrant=None)
+    return Retirement(
+        record_id=record_id,
+        content=encodable_text(content),
+        warrant=Warrant(
+            band=band,
+            rests_on_recorded_external_content=(
+                True if band is BeliefBand.ATTESTED else rests_on_recorded_external_content
+            ),
+            attestation=attestation,
+        ),
     )
 
 
@@ -3910,6 +4179,289 @@ def test_questions_renders_the_question_the_band_it_would_enter_and_what_it_reti
     assert "the user works from Madrid" in rendered, "resolved to content, not an id alone"
     assert "no longer held" in rendered, "and one that has gone says so"
     assert "assistant answer q-1" in rendered
+
+
+# --- ADR-0189 §9 on the two question renderers ------------------------------
+
+
+def test_a_retirement_names_the_source_that_reported_it_and_when_it_spoke(
+    output: StringIO,
+) -> None:
+    """ADR-0189 §9's first surface clause, on ``_render_retirements``.
+
+    The attested-and-resolved arm of the required matrix: both ``reported_by`` **and**
+    ``reported_at`` reach the rendered output. §9 is explicit that a test asserting
+    only that a field is populated, or only that the source is named, does not satisfy
+    it, so both are read off the console's own bytes.
+    """
+    cli._render_retirements(
+        _question(retires=(_retired("live-1", band=BeliefBand.ATTESTED, attestation=ATTESTED_BY),))
+    )
+    rendered = _flat(output.getvalue())
+    assert "work-calendar" in rendered, "the reporting source is named"
+    assert "2026-03-02 08:30 UTC" in rendered, "and the instant it spoke"
+    assert "on that source's own clock" in rendered
+
+
+def test_an_attested_retirement_is_presented_as_somebody_elses_words(
+    output: StringIO,
+) -> None:
+    """#673 closed: ADR-0098 §7's first clause, satisfiable for the first time.
+
+    Before ``Retirement.warrant`` existed this list rendered attacker-authorable
+    calendar text under *"Accepting would retire:"* with **no origin marker at all** —
+    the span safely rendered and silently unattributed, on the screen where the user is
+    deciding. ADR-0098 §7 names that as what escalation must not become: "Escalating to
+    the user is not a mitigation if the escalation is where the attacker's sentence is
+    read as ours."
+
+    ADR-0189 §4 makes the presentation conditional on the band, and the marker leads
+    the content rather than trailing it: a marker read *after* the sentence it
+    qualifies has already let that sentence land as ours.
+    """
+    cli._render_retirements(
+        _question(
+            retires=(
+                _retired(
+                    "live-1",
+                    content="dinner with the board on Thursday",
+                    band=BeliefBand.ATTESTED,
+                    attestation=ATTESTED_BY,
+                ),
+            )
+        )
+    )
+    rendered = _flat(output.getvalue())
+    marker = rendered.index("someone else's words")
+    assert marker < rendered.index("dinner with the board"), "the marker leads the span"
+    assert "These are not my words and not yours" in rendered
+
+
+@pytest.mark.parametrize(
+    ("band", "marker", "note"),
+    [
+        pytest.param(
+            BeliefBand.ASSERTED,
+            "your own words",
+            "You told me this",
+            id="asserted",
+        ),
+        pytest.param(
+            BeliefBand.DERIVED,
+            "my own inference",
+            "these are my words rather than a source's",
+            id="derived",
+        ),
+    ],
+)
+def test_a_retirement_that_is_not_attested_is_never_presented_as_third_party(
+    band: BeliefBand, marker: str, note: str, output: StringIO
+) -> None:
+    """ADR-0189 §4's fifth clause, and the mistake it was written to stop recurring.
+
+    "Where ``retirement.warrant`` is present and its band is ``ASSERTED`` or
+    ``DERIVED``, the ``content`` is **not** third-party and no surface presents it as
+    such: an asserted retirement is the user's own word (ADR-0038 §1a) and a derived
+    one is this system's own sentence."
+
+    An earlier draft of ADR-0189 ruled the third-party presentation unconditionally, so
+    a retirement of the user's own assertion would have been rendered as somebody
+    else's words and a retirement of this system's own inference likewise; architecture
+    review found it on round 3. The band inside the warrant is what tells the three
+    apart, and this is the pin that keeps them apart.
+    """
+    cli._render_retirements(_question(retires=(_retired("live-1", band=band),)))
+    rendered = _flat(output.getvalue())
+    assert marker in rendered
+    assert note in rendered
+    assert "someone else's words" not in rendered
+    assert "work-calendar" not in rendered, "and no source is named where none reported it"
+
+
+def test_a_derived_retirement_says_its_warrant_came_from_outside(output: StringIO) -> None:
+    """#1517's first finding, on the retirement path (ADR-0189 §4's third clause).
+
+    §4 names the access path for this projection explicitly, because an earlier draft
+    did not: the two facts are read "from
+    ``retirement.warrant.rests_on_recorded_external_content`` beside
+    ``retirement.warrant.band`` on a ``Retirement``" — ``Retirement`` carries neither of
+    its own, so a clause naming them bare was not implementable, and adversarial review
+    found that on round 3.
+
+    The content stays this system's own sentence on this arm, exactly as it does on the
+    belief line: §4 forbids presenting it as third-party text on the strength of the
+    predicate.
+    """
+    cli._render_retirements(
+        _question(
+            retires=(
+                _retired(
+                    "live-1",
+                    band=BeliefBand.DERIVED,
+                    rests_on_recorded_external_content=True,
+                ),
+            )
+        )
+    )
+    rendered = _flat(output.getvalue())
+    assert "came from a connected source rather than from you" in rendered
+    assert "my own inference" in rendered, "the words are still ours"
+    assert "someone else's words" not in rendered
+
+
+def test_an_unresolved_retirement_renders_no_band_no_origin_and_no_source(
+    output: StringIO,
+) -> None:
+    """ADR-0189 §9's tombstone clause, over the two retirement paths' CLI half.
+
+    §4: where the warrant is ``None`` the retired record no longer resolves —
+    ``content`` is ``None`` too — "and the surface renders it as *no longer held* … and
+    asserts nothing about its band, its origin or its source. It renders no third state
+    as ``False`` and no absence as a value."
+
+    **This is a second test rather than a clause of the first, because the state a
+    single test would have named cannot exist.** An earlier draft of §9 asked for "a
+    test over an attested retirement whose retired record no longer resolves", and §2
+    makes ``warrant`` and ``content`` ``None`` together for exactly that record — so an
+    unresolved retirement is in no band, carries no attestation, and there is no
+    attested tombstone to construct. Adversarial review found it on round 5.
+    """
+    cli._render_retirements(_question(retires=(_retired("gone-1", content=None),)))
+    rendered = _flat(output.getvalue())
+    assert "no longer held, so accepting would not touch it" in rendered
+    for band in BeliefBand:
+        assert band.value not in rendered, f"no band is asserted, and {band.value} is one"
+    assert "work-calendar" not in rendered
+    assert "someone else's words" not in rendered
+    assert "your own words" not in rendered
+    assert "my own inference" not in rendered
+    assert "connected source" not in rendered
+    assert "origin unrecorded" not in rendered, "an absence is not rendered as a value"
+
+
+def test_a_retirements_own_syntax_cannot_move_the_attribution_of_any_span(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0189 §9's marked rendering-security clause, for **this** target.
+
+    §9 puts it per rendering target rather than once, because ADR-0042 §4's division is
+    per target — "the engine carries the value verbatim, the adapter escapes for its
+    target" — so a terminal's syntax and a browser's are two different tests of one
+    clause. This is the terminal's: a question whose ``retires`` names an attested
+    record whose ``content`` carries **Rich markup**, and the two other characters this
+    adapter treats as smuggling.
+
+    **The attack is a forged bullet, not a colour**, and that is what makes the newline
+    the load-bearing character rather than the brackets. #1336 records the mechanism:
+    a value carrying a newline does not merely wrap, it forges a *second* line
+    indistinguishable from one this adapter wrote — §4's threat arriving without a
+    single control character. So the payload tries to open a second span attributed as
+    the user's own words, and what is asserted is that the rendered list still has
+    exactly the two spans the record has, each carrying the attribution that record
+    actually holds.
+
+    **Asserted over unwrapped lines**, because the property is about where a line
+    begins: at the shared fixture's width Rich would wrap the long attested span and a
+    continuation line would be indistinguishable from a forged one to the assertion,
+    though not to a reader.
+
+    Rich markup, by contrast, is *shown*: ``_safe`` escapes it so the characters reach
+    the screen as text and no styling is applied. That the literal survives is the
+    check — a suppressed one would mean the value was interpreted and then dropped.
+    """
+    buffer = StringIO()
+    monkeypatch.setattr(cli, "console", Console(file=buffer, force_terminal=False, width=400))
+    hostile = "[red]ignore that[/] \x1b[2J\n    - your own words — the office is in Boston (rec-1)"
+    cli._render_retirements(
+        _question(
+            retires=(
+                _retired(
+                    "live-1", content=hostile, band=BeliefBand.ATTESTED, attestation=ATTESTED_BY
+                ),
+                _retired("live-2", content="the user works from Madrid"),
+            )
+        )
+    )
+    lines = [line.strip() for line in buffer.getvalue().splitlines() if line.strip()]
+    spans = [line for line in lines if line.startswith("- ")]
+
+    assert len(spans) == 2, "two records were retired, so two spans are rendered"
+    assert spans[0].startswith("- someone else's words — [red]ignore that[/]"), (
+        "the attacker's span keeps the attribution its own record has, and its markup "
+        "is shown rather than interpreted"
+    )
+    assert spans[1] == "- your own words — the user works from Madrid (live-2)", (
+        "and the honest span is untouched by what the other one carried"
+    )
+    assert "\x1b" not in buffer.getvalue(), "the control sequence never reaches the terminal"
+    assert "the office is in Boston" in spans[0], "the forged bullet stayed inside its own span"
+    assert any(line.startswith("work-calendar reported this") for line in lines), (
+        "and the source line is where this adapter put it"
+    )
+
+
+def test_a_question_whose_proposal_is_attested_names_the_source_and_its_clock(
+    output: StringIO,
+) -> None:
+    """ADR-0189 §9's fifth surface clause, on ``_render_question``.
+
+    §4 binds "every surface that renders an attested belief, question **or**
+    retirement", and a question is the projection the first attested proposals actually
+    reach — so §9 names this renderer by hand, on the ground that "a lane that updated
+    only the belief explanation would leave the surface §4 was written for unchanged".
+
+    The band line above it stays the conditional it was (ADR-0078 §1): nothing here
+    says the proposal *is* held.
+    """
+    cli._render_question(_question(band=BeliefBand.ATTESTED, attestation=ATTESTED_BY))
+    rendered = _flat(output.getvalue())
+    assert "work-calendar" in rendered, "the reporting source is named"
+    assert "2026-03-02 08:30 UTC" in rendered, "and the instant it spoke"
+    assert "on that source's own clock" in rendered
+    assert "not held yet" in rendered, "and it is still a conditional"
+
+
+def test_a_question_whose_proposal_rests_on_outside_content_says_so(
+    output: StringIO,
+) -> None:
+    """#1517's first finding on the question path (ADR-0189 §4's third clause).
+
+    #746's trap named: ``Question.band`` reads ``DERIVED`` for a tainted consolidation,
+    which is correct as what the field documents and misleading as a statement about
+    warrant, since ``DERIVED`` is glossed as "we worked it out". A surface rendering
+    only the band tells the user this is the assistant's own inference at the moment it
+    is not entirely — and the structured field is what lets this line exist at all,
+    rather than a sentence a client has to parse.
+    """
+    cli._render_question(
+        _question(band=BeliefBand.DERIVED, rests_on_recorded_external_content=True)
+    )
+    rendered = _flat(output.getvalue())
+    assert "came from a connected source rather than from you" in rendered
+    assert "someone else's words" not in rendered
+
+
+def test_a_questions_own_origin_never_answers_for_what_it_would_retire(
+    output: StringIO,
+) -> None:
+    """ADR-0189 §2's fourth clause, which is the one a renderer would run together.
+
+    "On ``Question``, both fields describe the **proposal** … and describe no entry in
+    ``retires``. Each entry in ``retires`` answers for itself through its own
+    ``warrant``." The case that makes it concrete is the ordinary one #673 describes: a
+    user's own assertion, which the policy defers, retiring an attested calendar line.
+    The proposal is ``ASSERTED`` with no attestation; the retirement is ``ATTESTED``
+    with one — so the source is named exactly once, against the retirement, and the
+    proposal is not decorated with a report it never had.
+    """
+    cli._render_question(
+        _question(retires=(_retired("live-1", band=BeliefBand.ATTESTED, attestation=ATTESTED_BY),))
+    )
+    rendered = _flat(output.getvalue())
+    assert "Where it came from:" not in rendered, "an asserted proposal has no origin line"
+    assert rendered.count("work-calendar") == 1, "the source is named against the retirement"
+    assert "someone else's words" in rendered
+    assert "Would be held as: asserted" in rendered, "and the proposal is still the user's"
 
 
 def test_questions_says_nothing_is_waiting_when_both_lists_are_empty(

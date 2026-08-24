@@ -26,6 +26,7 @@ from ai_assistant.core.errors import GrantError, UngrantableSourceError
 from ai_assistant.core.types import (
     AnswerKind,
     AnswerOutcome,
+    Attestation,
     Belief,
     BeliefBand,
     Evidence,
@@ -35,6 +36,7 @@ from ai_assistant.core.types import (
     ObservationReport,
     ObservedProposal,
     QuestionState,
+    ReportedExtent,
     SuccessorLink,
 )
 from ai_assistant.interfaces.gateway.http import Request
@@ -388,6 +390,14 @@ async def test_a_listing_carries_every_field_the_floor_requires_and_no_citation(
 
     A summary carries **no** citations: the type has nowhere to put one, so a
     conforming listing cannot ship the corpus on every page.
+
+    **ADR-0189 §2's two fields cross as well, and on this view as much as on the
+    single-belief one.** ADR-0107 §3 refused both "put the field on ``BeliefSummary``
+    only" and "put it on ``Belief`` only", because a listing row that answered less
+    than the row it links to is the same projection defective in one place — and #1517
+    records the concrete failure the exact key set below is what catches: an attested
+    listing row rendering the old generic explanation while every single-belief test
+    passes.
     """
     engine = FakeAssistantEngine()
     engine.hold("rec-1", content="the owner runs on Tuesdays", band=BeliefBand.DERIVED)
@@ -408,9 +418,170 @@ async def test_a_listing_carries_every_field_the_floor_requires_and_no_citation(
             "lost_evidence",
             "evidence_elided",
             "unsupported",
+            "attestation",
+            "rests_on_recorded_external_content",
         }
         assert held["band"] == "derived"
         assert "evidence" not in held
+
+
+# --- ADR-0189 §2's fields on the wire the browser reads ----------------------
+#
+# The page has no other source for them: `_belief_fields` and `_question_view` are
+# what a belief and a question *are* by the time `app.js` sees one, so a field that
+# does not cross here cannot be rendered there however §9 words the obligation.
+
+
+async def test_both_belief_views_carry_the_attestation_whole_and_under_one_name() -> None:
+    """ADR-0189 §2 on both belief DTOs, ADR-0092 §2 on the shape it crosses in.
+
+    **Whole rather than as two members**: two independent nullable members admit four
+    states, of which two are half-answers — a source with no instant renders "your
+    calendar had this as of …" with a blank, and an instant with no source attributes
+    it to nobody. One optional object with two required members makes both
+    unconstructable on this wire exactly as they are on the record.
+
+    **On the listing as well as the single-belief view, under one name**, which is
+    ADR-0107 §3's ruling and #1517's second finding: the row and the row it links to
+    answer the same question, or the projection is defective in one place.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold(
+        "rec-1",
+        content="the board dine on Thursday",
+        band=BeliefBand.ATTESTED,
+        attestation=Attestation(reported_by="work-calendar", reported_at=_INSTANT),
+    )
+    async with _harness(engine) as one:
+        _, listing = await one.whole("POST", "/beliefs", {})
+        _, single = await one.whole("POST", "/belief", {"record_id": "rec-1"})
+
+        for view in (listing["beliefs"][0], single["belief"]):
+            assert view["attestation"] == {
+                "reported_by": "work-calendar",
+                "reported_at": _INSTANT.isoformat(),
+            }
+            assert view["rests_on_recorded_external_content"] is True
+
+
+async def test_a_belief_that_nothing_reported_crosses_with_no_attestation() -> None:
+    """The absence is a value and is emitted as one (ADR-0189 §2).
+
+    An ``Attestation`` is present exactly when the band is ``ATTESTED`` (ADR-0092 §1),
+    so an asserted belief has none — and the member still crosses, as ``null``, rather
+    than being omitted. A page cannot tell an absent key from a key it forgot to read,
+    and ADR-0184 is the corpus's ruling that an absence carrying meaning is a value
+    rather than a gap.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold("rec-1", content="the office is in Boston", band=BeliefBand.ASSERTED)
+    async with _harness(engine) as one:
+        _, listing = await one.whole("POST", "/beliefs", {})
+
+        held = listing["beliefs"][0]
+        assert held["attestation"] is None
+        assert held["rests_on_recorded_external_content"] is False
+
+
+async def test_a_derived_belief_carries_the_predicates_answer_and_not_the_flag() -> None:
+    """ADR-0189 §2's fifth clause, which names what may not happen here.
+
+    ``rests_on_recorded_external_content`` "is the value of
+    ``core.types.rests_on_recorded_external_content`` (ADR-0106 §2) applied to the
+    projected record's ``Provenance``, computed by the engine at projection time. No
+    producer supplies it, no surface recomputes it from ``band`` and no component reads
+    ``Provenance.derived_from_external`` in its place."
+
+    The ``DERIVED`` band is the only one where the two answers can differ, which is why
+    it is the one worth crossing: on ``ATTESTED`` and ``ASSERTED`` the band determines
+    the answer and a client could derive it, and on this band nothing else on the
+    projection supplies it (#746).
+    """
+    engine = FakeAssistantEngine()
+    engine.hold(
+        "outside",
+        content="they commute on Tuesdays",
+        band=BeliefBand.DERIVED,
+        derived_from_external=True,
+    )
+    engine.hold("inside", content="they prefer mornings", band=BeliefBand.DERIVED)
+    async with _harness(engine) as one:
+        _, listing = await one.whole("POST", "/beliefs", {})
+
+        answers = {
+            row["id"]: row["rests_on_recorded_external_content"] for row in listing["beliefs"]
+        }
+        assert answers == {"outside": True, "inside": False}
+
+
+async def test_the_extent_rides_on_the_record_and_crosses_to_no_browser() -> None:
+    """ADR-0189 §2 carries it, §10 leaves its rendering to ADR-0117, so it stops here.
+
+    "``Attestation.extent`` rides along and nothing renders it, deliberately" —
+    ADR-0117 §2 made the field optional and meaningful in its absence, and no surface
+    has a rendering rule for it. A value on this wire with no consumer is surface
+    (ADR-0045 §1), so the two members a surface *is* ruled to render are the two that
+    cross.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold(
+        "rec-1",
+        content="the board dine on Thursday",
+        band=BeliefBand.ATTESTED,
+        attestation=Attestation(
+            reported_by="work-calendar",
+            reported_at=_INSTANT,
+            extent=ReportedExtent(extends_until=_INSTANT),
+        ),
+    )
+    async with _harness(engine) as one:
+        _, single = await one.whole("POST", "/belief", {"record_id": "rec-1"})
+
+        assert set(single["belief"]["attestation"]) == {"reported_by", "reported_at"}
+
+
+async def test_each_retirement_carries_its_own_warrant_and_the_question_its_own_origin() -> None:
+    """ADR-0189 §2's fourth clause, on the one wire that could run the two together.
+
+    The question's own two fields describe the **proposal**; each entry in ``retires``
+    answers for itself through its own ``warrant``. The case is #673's ordinary one: a
+    user's own assertion, deferred by the policy, retiring an attested calendar line.
+    The proposal is ``ASSERTED`` with no attestation and the retirement is ``ATTESTED``
+    with one — so a view that borrowed either answer for the other would be visibly
+    wrong here, and a view that carried only one of them would leave the page unable to
+    tell an attacker-authorable line from this system's own sentence.
+    """
+    engine = FakeAssistantEngine()
+    engine.ask(
+        "q-1",
+        content="the user works from Lisbon",
+        state=QuestionState.OPEN,
+        retires=(
+            engine.retirement(
+                "live-1",
+                content="dinner with the board on Thursday",
+                band=BeliefBand.ATTESTED,
+                attestation=Attestation(reported_by="work-calendar", reported_at=_INSTANT),
+            ),
+            engine.retirement("gone-1"),
+        ),
+    )
+    async with _harness(engine) as one:
+        _, body = await one.whole("POST", "/questions", {})
+
+        held = body["questions"][0]
+        assert held["attestation"] is None, "the proposal is the user's own word"
+        assert held["rests_on_recorded_external_content"] is False
+        attested, tombstone = held["retires"]
+        assert attested["warrant"] == {
+            "band": "attested",
+            "rests_on_recorded_external_content": True,
+            "attestation": {
+                "reported_by": "work-calendar",
+                "reported_at": _INSTANT.isoformat(),
+            },
+        }
+        assert tombstone == {"record_id": "gone-1", "content": None, "warrant": None}
 
 
 async def test_an_absent_band_filter_and_an_empty_one_are_different_questions() -> None:
@@ -539,6 +710,8 @@ async def test_a_question_carries_what_it_would_have_the_assistant_believe() -> 
             "asked_at",
             "expires_at",
             "successor",
+            "attestation",
+            "rests_on_recorded_external_content",
         }
         assert held["band"] == "asserted"
         assert held["retires"] == []
