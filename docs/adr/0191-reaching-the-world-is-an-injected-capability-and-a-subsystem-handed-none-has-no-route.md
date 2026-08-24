@@ -10,7 +10,7 @@
 - **This ADR authorises no byte.** It decides a contract. Nothing transmits, no
   tool is registered and no destination is approved by ratifying it, and the seam
   keeps transmitting exactly what it transmits today.
-- Refs #85, #1427, #1544, #1545.
+- Refs #85, #1427, #1544, #1545, #1548.
 
 ## Context
 
@@ -203,6 +203,16 @@ one". An HTTP-shaped capability would invert that: the protocol would be inside 
 capability and every consumer would inherit whatever it decided about redirects,
 proxies and connection reuse.
 
+**The one runtime that hands transport in agrees with the level.** A survey of
+five agent runtimes (#1548) found MCP the only one whose components receive
+transport rather than construct it, and it is stream-shaped: a server is handed a
+read stream and a write stream and builds no client of its own. That is what
+ADR-0147 §3 already anticipated for the MCP consumer — protocol handling "receives
+a connected channel from the seam and never constructs one" — so choosing a channel
+here is not a shape a future MCP integration would have to fight. The survey's
+caveat applies unchanged: it is a reading of published code and documentation, not
+a measurement of ours.
+
 **The cost is named.** A future integration that speaks HTTP will build or import
 an HTTP client over the channel, and doing that well is not free. It is still the
 right trade: that work is confined to the designated seam, where ADR-0147 §3 and
@@ -240,6 +250,16 @@ whole call.
 > it. Neither Protocol carries a pool, a cache or a keep-alive, so no subsystem
 > retains a route to the world between calls.
 
+> **Normative.** There is no parameter, setting, environment variable, fallback or
+> retry by which a component that was not handed the capability obtains one. This
+> holds in tests as well as in production: a test receives the fake by the same
+> route the composition root hands the real implementation, and no test-only
+> back door exists for obtaining either.
+
+> **Normative.** A deployment that configures no integration builds no transport
+> and hands out none. Absence of configuration never selects a default
+> implementation.
+
 **This is the section #85 is actually about, and it is the one the tree fails
 today.** A default argument is an ambient capability wearing an injection's
 clothes: the signature says the transport is supplied, and production supplies
@@ -253,6 +273,24 @@ recorded is asserting that the code path was not reached — the real connector 
 still sitting there, one call away. With it removed, the same assertion says the
 route does not exist, because the object holding the seam is holding the fake and
 there is nothing else to hold.
+
+**The escape-hatch clause is written against a documented failure, not an
+imagined one.** The survey at #1548 records that Claude Code's sandbox — the
+strongest confinement it found, enforced by the operating system — documents two
+ways past itself: a `dangerouslyDisableSandbox` retry the model may attempt, and an
+`excludedCommands` list with, in its own docs' words, "no equivalent managed-only
+lockdown". Both are honest, and both are exactly what a capability claiming to
+close a route by construction cannot have. The clause also reaches tests on
+purpose: a back door added "only for tests" is a back door in the shipped object,
+and the fake existing at all is what makes one unnecessary.
+
+**"Absent means nothing transmits" is the default worth keeping.** The same survey
+notes MCP's `TransportSecuritySettings` is disabled when the caller passes nothing —
+a confinement most deployments therefore lack. This tree already has the opposite
+default: `app/composition.py` builds no integration at all unless the operator
+names both a connection and an endpoint, so a deployment that configures nothing
+registers no tool and opens nothing. Removing the connector default extends that
+property one level down rather than introducing a new one.
 
 **The per-call clause matters more than it looks.** A pooled capability is a
 long-lived connection owned by whoever opened it, and a subsystem that keeps one
@@ -435,6 +473,15 @@ here forecloses the obvious economy of contracting only the opener and leaving t
 channel untested, which would leave the more dangerous of the two — the object that
 holds an open connection — with no conformance suite at all.
 
+**The fakes have a seed in the tree and a precedent outside it.**
+`ScriptedChannel` in `tests/tools/egress_transport_harness.py` is already a
+`ByteChannel` that replays an SMTP script and opens nothing; what it lacks is a
+home `ai_assistant.testing` can hold and a conformance suite holding it to a
+contract. The survey at #1548 records MCP shipping exactly this — an in-memory
+stream pair satisfying the same interface as its real transports, used by that
+SDK's own test suite — which is the same instrument one layer of packaging up.
+The implementing lane promotes rather than invents.
+
 **Recording refusals as well as successes is the clause the milestone depends
 on.** "Did not reach the world" and "was never asked" are different facts, and an
 exit arm that cannot tell them apart cannot distinguish a system that refused from
@@ -518,13 +565,15 @@ deferred with reasons, one of which has since expired.
   to decrement, which does not exist; ADR-0021 §6 defers spend accumulation to
   "invocation reporting what was actually spent", and batch #1544 sequences that
   ADR behind the invocation record's.
-- **The invocation record and consume-on-execution** (ADR-0192, a sibling proposal
-  in this batch). ADR-0017 §8's second ground was that the capability's shape
-  "depends on the invocation contract"; the contract that ground meant is
-  ADR-0029's, which exists. Nothing in this ADR depends on ADR-0192's content, and
-  a reader should not take the numbering as a dependency.
-- **The standing recipient policy** (#68, ADR-0193, a sibling proposal). Who may
-  receive is orthogonal to what opens the connection.
+- **The invocation record and consume-on-execution**, proposed beside this ADR as
+  batch #1544's second lane. ADR-0017 §8's second ground was that the capability's
+  shape "depends on the invocation contract"; the contract that ground meant is
+  ADR-0029's, which exists. Nothing here depends on that sibling's content — it is
+  named by its lane rather than by a number, because no such ADR exists as this one
+  is written and a citation to an unissued number is a defect
+  `tests/scripts/test_adr_citations_corpus.py` refuses.
+- **The standing recipient policy** (#68), proposed beside this ADR as batch
+  #1544's third lane. Who may receive is orthogonal to what opens the connection.
 - **`models/`'s three open controls** — #83's `models/` half, #74, #89 — which §5
   leaves exactly where ADR-0017 §2 put them.
 - **MCP's transport.** ADR-0147 §3 and §4 own it, and §12 there leaves the library
