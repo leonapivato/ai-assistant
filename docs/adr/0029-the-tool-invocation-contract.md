@@ -8,7 +8,9 @@
   — with "The answer is **no**, and it is not a deferral." ADR-0192 §1 makes the
   answer partly yes: on an authorisation whose `ToolDefinition` is
   `side_effecting` and whose `idempotency` is not `NATURAL`, `invoke` appends a
-  claim to the `AuditTrail` immediately before the callable and a second claim is
+  claim into the audit store immediately before the callable — through the
+  narrow `InvocationLedger` Protocol it holds, never the `AuditTrail` itself, so no
+  decision write, history read or erasure reaches `tools/` — and a second claim is
   refused unless the preceding one completed `FAILED`. A reader holding only this
   ADR would act differently, so it is a supersession and not an amendment
   (ADR-0070 §1). **Both of §5's stated reasons survive and ADR-0192 §1 is written
