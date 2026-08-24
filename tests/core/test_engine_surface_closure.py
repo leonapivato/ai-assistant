@@ -58,7 +58,15 @@ _NAMESPACE: Final = {
     "AsyncIterator": AsyncIterator,
 }
 
-#: The thirty-four the corpus has promoted. Twenty-four are ADR-0085 §5's own walk:
+#: What the corpus has promoted, ADR by ADR. **The opening total is deleted rather
+#: than refreshed**: the set below is the roster and ``len(PROMOTED)`` is a fact the
+#: tree carries, while the numeral that stood here had gone stale by four before this
+#: change and would have gone stale by five with it (`CONTRIBUTING.md` -> "No state
+#: claims in living documents"). The per-ADR ordinals below are not that kind of
+#: claim — each names *which* entry an ADR added, which is what a reader checking a
+#: promotion against its ADR needs.
+#:
+#: Twenty-four are ADR-0085 §5's own walk:
 #: thirteen from ``engine.py`` (of which ``BeliefSummary`` is new, §4a), six from
 #: ``questions.py``, one from ``runner.py``, one from ``loop.py``, two from
 #: ``observation.py`` and one from ``conversations.py``. The twenty-fifth is
@@ -108,6 +116,17 @@ _NAMESPACE: Final = {
 #: ``SourceGrant`` and ``GrantScope`` are **not** here and that is not an omission:
 #: they predate this block (ADR-0097 §2) and are ``core`` leaves the walk terminates
 #: at, exactly as :func:`_declared_by_this_change` sorts them.
+#:
+#: The thirty-ninth is ADR-0189 §3's ``Warrant``, which ``Retirement.warrant``
+#: names: the standing a retired record is held with, whether its warrant rests on
+#: recorded external content, and the attestation on the attested band. It is the
+#: one genuinely new type in that decision — ADR-0189 §2's other six additions are
+#: fields on models already here, and the ``Attestation`` three of them carry was
+#: already inside this closure through ``TurnResult.memories -> MemoryRecord ->
+#: Provenance``, which is why §2 could project it whole at no cost to the graph.
+#: The walk reaches it through **two** optional hops, ``Question.retires ->
+#: Retirement.warrant``, and terminates immediately: ``BeliefBand``, ``bool`` and
+#: ``Attestation`` are all already here.
 PROMOTED: Final[frozenset[str]] = frozenset(
     {
         "ContinuationToken",
@@ -148,6 +167,7 @@ PROMOTED: Final[frozenset[str]] = frozenset(
         "ConnectedAccount",
         "ConnectionAct",
         "ReplyChunk",
+        "Warrant",
     }
 )
 
@@ -457,6 +477,22 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     bump in the deciding ADR and §11 puts it on the implementing lane, rather than
     leaving either to be discovered here.
 
+    **ADR-0189 §2 is under the second limb again**, and moves only the version, to
+    13 against the same thirty-four methods. The four user-facing projections gain
+    the origin of what they show — ``attestation`` and
+    ``rests_on_recorded_external_content`` on ``Belief``, ``BeliefSummary`` and
+    ``Question``, and ``warrant`` on ``Retirement`` — and ADR-0178 §6's reading of
+    the tree carries over unchanged: all four set ``extra="forbid"``,
+    ``return_adapter`` validates every result against the declared return
+    annotation, and ``wire.codec``'s ``project`` renders a model by ``model_dump()``,
+    which includes a ``None`` member rather than omitting it. So a version 13 hub
+    emits the new members on **every** belief, question and retirement, and a version
+    12 client fails ``extra_forbidden`` on them. It is 10's shape rather than 11's:
+    every field is additive with a default (ADR-0189 §9), so the reverse direction
+    decodes to the defaults instead of failing ``missing``, and one direction biting
+    is all ADR-0124 §9 asks for. ADR-0189 §9 states the bump in the deciding ADR and
+    puts it on the contract lane.
+
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and
     a deliberately crude one: it fails when either number moves, which is the
@@ -465,7 +501,7 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     """
     from ai_assistant.wire.envelope import PROTOCOL_VERSION  # noqa: PLC0415 — asserted about
 
-    assert (len(_method_names()), PROTOCOL_VERSION) == (34, 12), (
+    assert (len(_method_names()), PROTOCOL_VERSION) == (34, 13), (
         "the promoted method set and the protocol version are pinned together "
         "(ADR-0124 §9); move either and this pin makes you name the limb you are "
         "under — the method set, or a wire-carried core type"

@@ -381,14 +381,23 @@ def test_a_belief_shaped_model_takes_its_ratified_bytes() -> None:
     Built over the real promoted :class:`~ai_assistant.core.types.Belief` rather
     than over a fixture, so it is both the ADR's vector and a live check on the
     promoted type's byte shape. The type's field set has since moved past the one
-    §5e states inline, twice, and the arithmetic below walks back to §5e's own
-    figure rather than leaving the divergence to be rediscovered.
+    §5e states inline — three times now — and the arithmetic below walks back to
+    §5e's own figure rather than leaving the divergence to be rediscovered.
 
     Left at ``evidence_elided``'s default ``0``, unlike every case ADR-0107 §8 item
     6 governs: this vector is about the byte shape, and the field appearing *at* its
     default is the stronger witness that the codec projects generically over the
     whole model. What proves the *value* survives is
     :func:`test_a_belief_carries_its_elision_across_the_wire_unchanged`.
+
+    **ADR-0189 §2's two members are here at their defaults for the same reason, and
+    they are the evidence ADR-0124 §9's second limb rests on for version 13.** A
+    ``Belief`` this vector builds is a user's own assertion with no attestation and a
+    warrant resting on nothing external — so both members are absent-valued, and both
+    are in the bytes anyway, because ``project`` renders a model by ``model_dump()``
+    and a ``None`` member is included rather than omitted. That is precisely why a
+    version 12 client fails ``extra_forbidden`` on **every** belief a version 13 hub
+    sends rather than only on the attested ones (``wire/envelope.py``'s note at 13).
     """
     belief = Belief(
         id="b-1",
@@ -401,13 +410,14 @@ def test_a_belief_shaped_model_takes_its_ratified_bytes() -> None:
         valid_until=None,
     )
     expected = (
-        b'{"band":"asserted","confidence":0.9,"content":"prefers dark mode",'
+        b'{"attestation":null,"band":"asserted","confidence":0.9,'
+        b'"content":"prefers dark mode",'
         b'"evidence":[{"content":"said so"},{"content":null}],"evidence_elided":0,'
         b'"id":"b-1","kind":"preference","last_updated":"2026-08-01T12:00:00Z",'
-        b'"valid_until":null}'
+        b'"rests_on_recorded_external_content":false,"valid_until":null}'
     )
     assert _both(belief) == expected
-    # 226, not §5e's 204, and the two later field-set changes are subtracted in turn
+    # 288, not §5e's 204, and the three later field-set changes are subtracted in turn
     # rather than the difference being asserted as a bare number. ADR-0087 §5
     # anticipates exactly this and rules on it twice: §5e's composite vectors "state
     # the field set they were built over inline, so that a vector remains verifiable
@@ -415,11 +425,21 @@ def test_a_belief_shaped_model_takes_its_ratified_bytes() -> None:
     # later selected differently". What the row exists to witness is unmoved: sorted
     # members, a nested model, an optional inside a tuple, an enum as its member
     # value, an instant, a float, and a ``null`` field.
-    assert len(expected) == 226
+    assert len(expected) == 288
+    # ADR-0189 §2 gave the projection the origin of what it shows: ``attestation``
+    # sorts first of all members and ``rests_on_recorded_external_content`` between
+    # ``last_updated`` and ``valid_until`` — §2's member sort doing its job on two
+    # more fields nobody chose the position of.
+    without_origin = (
+        len(expected)
+        - len(b'"attestation":null,')
+        - len(b'"rests_on_recorded_external_content":false,')
+    )
+    assert without_origin == 226
     # ADR-0107 §3 appended ``evidence_elided``, which §2's member sort places between
     # ``evidence`` and ``id``. ADR-0107 §11 finds no record owed on ADR-0087, because
     # it "fixes the encoding an integer already had" — as this arithmetic shows.
-    without_elision = len(expected) - len(b'"evidence_elided":0,')
+    without_elision = without_origin - len(b'"evidence_elided":0,')
     assert without_elision == 206
     # And 206 rather than 204 because the vector was measured against
     # ``BeliefBand.STATED`` at ``main`` @ 89e0cfe, while the member is spelled

@@ -248,7 +248,50 @@ from ai_assistant.wire.errors import (
 #: edit, and a client that grew none would raise ``AttributeError`` before a frame
 #: was ever sent. Neither method joins ``wire/server.py``'s ``CONNECTION_METHODS``:
 #: both listeners carry both (ADR-0186 §5).
-PROTOCOL_VERSION: Final[int] = 12
+#:
+#: **13 since ADR-0189 §2**, which gives the four user-facing projections the
+#: origin of what they show: ``attestation`` and
+#: ``rests_on_recorded_external_content`` on each of
+#: :class:`~ai_assistant.core.types.Belief`,
+#: :class:`~ai_assistant.core.types.BeliefSummary` and
+#: :class:`~ai_assistant.core.types.Question`, and ``warrant`` — the new
+#: :class:`~ai_assistant.core.types.Warrant` value object — on
+#: :class:`~ai_assistant.core.types.Retirement`. Back under ADR-0124 §9's
+#: **second** limb, the one that decided 5, 8, 10 and 11: "a change to a
+#: wire-carried ``core`` type that makes a value one peer emits invalid for the
+#: other, whether the change widens or narrows the type". ADR-0189 §9 states the
+#: bump in the deciding ADR and puts it on the contract lane, rather than leaving
+#: either to be discovered here.
+#:
+#: **It bites in the direction that bites, and reading the tree is what shows
+#: it.** Every one of the four models sets ``extra="forbid"``,
+#: ``wire.surface``'s ``return_adapter`` validates a result against the method's
+#: declared return annotation, and ``wire.codec``'s ``project`` renders a model by
+#: ``model_dump()``, which **includes** a ``None`` member rather than omitting it —
+#: exactly as at 10. So a version 13 hub emits ``"attestation": null`` and
+#: ``"rests_on_recorded_external_content": false`` on **every** belief, listed or
+#: single, and ``"warrant": null`` on every retirement, and a version 12 client
+#: fails ``extra_forbidden`` on the first of them: a belief page it asked for
+#: arriving as a decode error. The other direction is quiet rather than absent —
+#: every field is additive with a default (ADR-0189 §9), so a version 13 client
+#: decoding a version 12 hub's ``Belief`` gets the defaults instead of ``missing``
+#: — which is why this is 10's shape rather than 11's, where a required member made
+#: it bite both ways.
+#:
+#: The delivery routes are the widest this constant has moved for: a ``Belief``
+#: and a ``BeliefSummary`` reach a client from the two halves of ADR-0077 §6's
+#: inspection surface, and a ``Question`` and its ``Retirement`` entries from the
+#: question reads and from ``TurnOutcome``'s deferrals.
+#:
+#: **Nothing else under** ``wire/`` **changes for it**, as at 8, at 10 and at 11
+#: and for the same reason: the connect exchange gains no member, no frame's
+#: encoding changes, no :class:`FrameKind` is added, and the promoted surface's
+#: method set is untouched at thirty-four. A result payload takes the shape of the
+#: method's own declared return annotation (ADR-0085 §10), so the members cross
+#: without a second declaration and nothing transcribes them into a wire-side
+#: schema — ``Warrant`` included, which is a new *promoted* type rather than a new
+#: wire declaration (ADR-0085 §5's closure is what carries it).
+PROTOCOL_VERSION: Final[int] = 13
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.
 #: Bounding it is what makes the reserve a constant rather than an aspiration; a
