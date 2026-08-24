@@ -293,12 +293,28 @@ it is filed as issue #1519.
 before the first colon, and with no colon admitted in a declared name that split is
 total rather than conventional.
 
-> **Normative.** Every seam that admits a source identity from configuration
-> **refuses** a value that is neither of the two forms above, and refuses at the
-> point of admission rather than at the point of use. This is ADR-0189 §6's "refused
-> by every admitting seam if it is not of that form", made checkable by fixing the
-> form. `Identifier`'s own rules (non-blank, stripped, UTF-8-encodable) and ADR-0097
-> §9's canonicality rule bind in addition and neither is relaxed.
+> **Normative.** Every seam that **mints, admits or persists a discriminator**
+> refuses a value that is not exactly 32 characters drawn from `0123456789abcdef`.
+> This is ADR-0189 §6's "refused by every admitting seam if it is not of that form",
+> adopted over the value §6 states it of, and it binds a seam that takes a
+> discriminator on its own — a configuration field, a mint's output — whether or not
+> a whole identity passes through it.
+
+> **Normative.** Every seam that **admits or composes a source identity** refuses a
+> value that is neither of §4's two forms. Both refusals are at the point of
+> admission rather than the point of use, and the second does not replace the first:
+> a seam that only ever sees the discriminator is bound by the clause above, and
+> composing a well-formed identity from a well-formed discriminator is then the only
+> thing it can do. `Identifier`'s own rules (non-blank, stripped, UTF-8-encodable)
+> and ADR-0097 §9's canonicality rule bind in addition and neither is relaxed.
+
+**Two clauses rather than one, because a registry need never handle a whole
+identity.** An earlier draft put the refusal only on a seam admitting a *source
+identity*, and adversarial review was right that this leaves the seam a deployment
+actually types into unguarded: §1 rules that what a deployment supplies is the
+discriminator alone, so a registry field taking `ABC…` uppercase breaches no clause
+and composes `calendar:ABC…` afterwards. It also narrowed ADR-0189 §6, whose refusal
+is stated of the discriminator, while this ADR claims to adopt §6 unchanged.
 
 **The colon and the ordering are decided here, not left to the implementing lane,
 and architecture review was right that they could not be.** An earlier draft deferred
@@ -379,11 +395,13 @@ carries "the connected source instance that reported this belief", which is what
 discriminated identity makes true rather than false; ADR-0095's renaming is
 orthogonal.
 
-**§4's three declared-name rules are stacked additions and are recorded here alone.**
-Non-empty, canonical and colon-free are new obligations on every `Reader`, and they
+**§4's declared-name rules are stacked additions and are recorded here alone.**
+Non-empty, UTF-8-encodable, canonical and colon-free are new obligations on every
+`Reader` — enumerated rather than counted, since the encodability rule arrived a round
+after the others and a numeral here would already have gone stale once. They
 contradict no sentence ADR-0093 wrote: §7 already forbids deriving an identity from a
 location or contents and names `"calendar"` as the calendar's, no declared name in the
-tree or the corpus breaches any of the three, and no clause of ADR-0093 becomes false
+tree or the corpus breaches any of them, and no clause of ADR-0093 becomes false
 or over-wide. ADR-0082 §1 rules that such an addition "is recorded in the ADR that
 makes it, and nowhere else", so ADR-0093's note carries the supersession's extent and
 not these.
