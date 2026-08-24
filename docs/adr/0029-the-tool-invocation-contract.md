@@ -1,6 +1,6 @@
 # 29. The tool invocation contract
 
-- Status: Accepted, §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and Consequences amended by ADR-0032; §8 amended by ADR-0034 and ADR-0039
+- Status: Accepted, §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and Consequences amended by ADR-0032; §8 amended by ADR-0034 and ADR-0039; §7's spend-accumulation deferral discharged by ADR-0194
 - Date: 2026-07-21
 - Amended: 2026-07-21 by ADR-0031 — the corrections first use found
   (PR #188). §4's interrupted-call rule gains a core home and is
@@ -171,6 +171,24 @@
   line moves, for the reasons ADR-0026 §6 and §9 give.
 - Does **not** designate the `tools/` egress seam. ADR-0017 §3's conditions are
   not discharged here and `tools/` still transmits nothing (§7).
+- Amended: 2026-08-25 (§7 — the spend-accumulation half of its "Standing grants
+  and spend accumulation" scope-out is discharged by ADR-0194). That bullet
+  defers both on durable policy state and adds that the second "additionally
+  needs a cost report invocation cannot honestly produce (§3)". ADR-0192 makes
+  that report producible and ADR-0194 spends it: a ceiling read from
+  `Settings`, an accumulator over the reported figures, and an admission
+  evaluated inside `ToolInvoker.invoke` before the callable is entered. A
+  reader holding only this ADR would read the deferral as still current, so
+  the record is owed (ADR-0082 §1), and it is an **amendment** — nothing §7
+  decided is reversed, its precondition is satisfied rather than overruled.
+  **The bullet's first half stands**: standing grants are still deferred, and
+  ADR-0194 decides nothing about them. §3's "`ToolResult` carries no cost"
+  omission and §5's approval-consumption paragraph are **ADR-0192's** to move,
+  not this note's, and §4's deadline, §5's retry conjunction and §7's other
+  scope-outs — including concurrent execution, which ADR-0194 §8 names as the
+  owner of its own residue — are unaffected. This ADR's ratified text below is
+  **not** rewritten; the `Status` line above and this note are the whole of the
+  record (ADR-0070 §1, ADR-0082 §1 and §2). Refs #1427, ADR-0194 §9, §10.
 
 ## Context
 

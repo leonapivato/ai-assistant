@@ -56,6 +56,26 @@
   discharges it. Discharging it is what changes a **sourced** policy's shape, and
   ADR-0070 §1 makes that a supersession however narrow. ADR-0193 §12 states the
   scope in marked clauses and §15 classifies it.
+- Amended: 2026-08-25 (§6 — the **Spend accumulation** deferral is discharged by
+  ADR-0194). §6 defers a running total against a budget on one stated
+  precondition: it "needs invocation to report what was actually spent".
+  ADR-0192 supplies that report, and ADR-0194 supplies the accumulator, the
+  ceiling, the period, the admission point and the refusal. A reader holding
+  only this ADR would read the deferral as still current and would be wrong
+  about the tree, which is why the record is owed (ADR-0082 §1); it is an
+  **amendment** rather than a supersession because nothing §6 decided is
+  reversed — a deferral decides not to decide now, and its own precondition is
+  satisfied rather than overruled, which is the treatment ADR-0016's header
+  already gives its discharged deferrals. **The rest of §6 stands and stays
+  deferred**: standing grants and policy state, recipient authorisation,
+  gating direct Tier 0/1 access, payload description, retention for the trail
+  and richer audit queries. §5's floors are untouched and unrelaxed — an
+  `UNKNOWN` cost is still never auto-granted, and ADR-0194 neither satisfies
+  nor lifts that floor. This ADR's ratified text below is **not** rewritten;
+  **this note is the whole of the record, and no qualifier for it is written on
+  the `Status` line** — that line now carries the leading `Partially superseded
+  by` token for ADR-0193, and ADR-0082 §2 puts an amendment's record in the
+  dated note rather than on such a line. Refs #1427, ADR-0194 §9, §10.
 - Amended: 2026-08-13 by
   [ADR-0148](0148-an-egress-call-is-authorised-as-one-whole-and-nothing-in-it-moves-after-the-ruling.md)
   §6 — **§1's sentence "the decision binds the payload and holds none of it" is
