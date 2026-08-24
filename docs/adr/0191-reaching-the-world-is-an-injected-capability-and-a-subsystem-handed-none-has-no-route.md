@@ -132,25 +132,72 @@ ADR-0017 §4's honest accounting and a measurement.
 > second Protocol, `ByteChannel`, in `core/protocols.py`. The endpoint it takes is
 > a pydantic model `TransportEndpoint` in `core/types.py`.
 
-> **Normative.** `TransportEndpoint` carries a host, a port and whether TLS is
-> established before the first byte, and nothing else — no scheme, no path, no
-> query, no fragment, no userinfo, no credential and no recipient. An
-> implementation is handed one already parsed and parses no string of its own.
+> **Normative.** `TransportEndpoint` is a frozen pydantic model in `core/types.py`
+> with exactly three fields: `host: str`, `port: int` and `implicit_tls: bool`, and
+> no others — no scheme, no path, no query, no fragment, no userinfo, no credential
+> and no recipient. An implementation is handed one already parsed and parses no
+> string of its own.
+
+> **Normative.** `TransportEndpoint` refuses construction with a host that is empty
+> or only whitespace, or with a port outside `1..65535` inclusive. `implicit_tls`
+> is `True` where TLS is established before the greeting and `False` where the
+> holder must upgrade; there is no third value and in particular no cleartext one.
+
+> **Normative.** `OutboundTransport` declares exactly one method,
+> `async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel`, and
+> no others. It returns a channel already connected to `endpoint`, already under
+> TLS where `implicit_tls` is `True`, and raises rather than returning a channel it
+> could not connect or could not verify.
+
+> **Normative.** `ByteChannel` declares exactly these six members and no others: a
+> read-only property `is_secure: bool`; `async def read_line(self) -> bytes`;
+> `async def read(self, limit: int, /) -> bytes`;
+> `async def write(self, data: bytes, /) -> None`;
+> `async def start_tls(self) -> None`; and `async def close(self) -> None`.
 
 > **Normative.** Every I/O-bearing method on both Protocols is `async`. A
 > synchronous opener or read would block the one event loop the system composes on
 > (`CLAUDE.md`, "I/O-bound methods are `async`") and would put the call outside the
 > reach of ADR-0029 §4's deadline, which is the only bound §2 leaves on it.
 
-> **Normative.** `ByteChannel` carries six operations and no others: a bounded read
-> of one terminated line; a bounded read of at most a caller-stated number of
-> octets; a write; a TLS upgrade; a query of whether TLS has completed; and a
-> close. The raw read is required because §2 rests on a protocol being buildable
-> over the channel, and a line-only channel cannot consume a body that carries no
-> terminator.
+> **Normative.** `read_line` returns one line **including** its terminator, and
+> returns empty bytes — and only empty bytes — to mean end of stream. It bounds
+> what it will buffer for one line at the single ceiling `core` states for this
+> contract, and raises rather than growing past it.
 
-The shape those clauses fix, shown rather than imposed — the marked clauses above
-and in §4 are the obligations, and this block is display:
+> **Normative.** `read` takes a `limit` that is an integer in `1..ceiling`
+> inclusive, where the ceiling is that same one `core` states. Any other value —
+> negative, zero, or larger — is refused rather than interpreted, so no spelling of
+> `limit` means "read until end of stream". It returns at least one and at most
+> `limit` octets, or empty bytes at end of stream; a short read is ordinary and is
+> not an error.
+
+> **Normative.** `read` and `read_line` consume one shared cursor over one stream:
+> octets returned by either are never returned again by the other.
+
+> **Normative.** The buffering ceiling is one named constant in `core`, not a
+> per-implementation choice, so the canonical fake and the production implementation
+> refuse the same inputs and a consumer tested against one behaves against the
+> other.
+
+> **Normative.** `close` is idempotent and raises nothing. A channel that cannot be
+> released reports it to its logs and not to its caller.
+
+> **Normative.** A new `TransportError` in `core/errors.py` is what
+> `open_channel`, `read_line`, `read`, `write` and `start_tls` raise when a
+> connection cannot be made or continued — an unreachable endpoint, a certificate
+> that did not verify, a failed upgrade, or a bound this contract states being
+> exceeded. It is the **shared** refusal type: both the production implementation
+> and the canonical fake raise it, so the conformance suite holds them to one
+> taxonomy and the fake needs no `tools/` import.
+
+> **Normative.** `ai_assistant.tools.egress` keeps `EgressTransportError` and
+> `TransportPinError` as its own classes for refusals about a *binding*, and
+> neither is re-rooted into `core`. Where its ordering requires, the seam wraps or
+> converts a `TransportError` into its own hierarchy.
+
+The same shape restated for reading, which adds nothing the clauses above do not
+already impose:
 
 ```python
 class OutboundTransport(Protocol):
@@ -166,6 +213,30 @@ class ByteChannel(Protocol):
     async def start_tls(self) -> None: ...
     async def close(self) -> None: ...
 ```
+
+**Why the signatures are marked rather than shown.** An earlier draft put this
+block alone and called it display. Architecture review was right that it therefore
+bound nothing: ADR-0089 §3 makes the marks the whole of the obligation, so two
+implementations could have disagreed about the method names, about whether
+`read_line` includes its terminator, and about how end of stream is spelled, while
+each satisfied every marked clause. For a contract ADR that is not a stylistic
+gap — golden rule 5 makes settling the Protocol *this document's* job, before
+anything implements against it.
+
+**`read`'s refused domain is the clause that matters most of the four.** The
+obvious implementation delegates to `asyncio.StreamReader.read`, where `-1` is the
+standard spelling for "buffer until end of stream" — so a peer that streams
+without closing exhausts memory through a method whose name says it is bounded.
+Refusing every value outside `1..ceiling` closes that by making the unbounded
+spelling unrepresentable rather than by asking implementations to remember.
+
+**`close` raising nothing is a rule about exception replacement, not about
+tidiness.** The seam closes its channel from a cleanup path, and Python replaces
+the exception in flight with one raised there. A conforming channel that raised
+from `close` would therefore turn an `IndeterminateTransmissionError` into an
+internal failure — recording a possible disclosure as one that did not happen,
+which is exactly what §4's window exists to prevent. `_StreamChannel.close`
+already swallows and logs; this makes the tree's behaviour the contract's.
 
 **The capability is the opener, not the channel, because opening is the act
 being governed.** #85's property is that "a subsystem that was never handed the
@@ -363,9 +434,10 @@ quietly creating a second, unbound way to reach the same endpoint.
 
 > **Normative.** `ai_assistant.tools.egress` therefore continues to convert a
 > channel failure raised after a payload and its terminator were written into
-> `IndeterminateTransmissionError`, as `_SmtpSession.data` does today. Nothing here
-> narrows that window, widens it, or permits such a failure to be recorded as a
-> refusal that transmitted nothing.
+> `IndeterminateTransmissionError`, as `_SmtpSession.data` does today, and its
+> catch covers `TransportError` as well as `OSError`. Nothing here narrows that
+> window, widens it, or permits such a failure to be recorded as a refusal that
+> transmitted nothing.
 
 These are the properties `open_smtp_channel`, `_tls_context` and `_StreamChannel`
 hold today, restated as obligations on the contract so that they survive the move.
@@ -563,12 +635,18 @@ about whether they are captured.
 > lane reads the arm as establishing that such a tool could not have opened a
 > connection by some other route.
 
-> **Normative.** The arm also instruments the process's connection-creating
-> boundary for its whole duration — the running event loop's `create_connection`,
-> through which both `asyncio.open_connection` and a direct call on the loop pass —
-> so that an attempt made from inside the arm fails and is recorded, and asserts
-> that none occurred at any point in it, the positive control included. It does not
-> reach a raw `socket`, which stays the nets' ground and #1545's stated residue.
+> **Normative.** The arm also instruments **every** off-device transport creator
+> the running event loop exposes — at minimum `create_connection`,
+> `create_datagram_endpoint` and `create_unix_connection` — so that an attempt made
+> from inside the arm fails and is recorded, and asserts that none occurred outside
+> the calibration below. Naming one creator does not discharge this clause.
+
+> **Normative.** The arm calibrates that instrument before it asserts anything: it
+> deliberately calls a creator on the **active** loop, asserts the attempt was
+> recorded and refused, and resets the record. A zero read from a recorder attached
+> to a stale or different loop is indistinguishable from a zero read from a live
+> one, and the fake's own positive control does not detect it, being a separate
+> instrument.
 
 > **Normative.** The same arm, over the same fake in the same composition, drives
 > the designated seam to a bound call and asserts the fake recorded exactly one
@@ -590,6 +668,22 @@ connection succeeded. That is #1545's residue arriving inside the exit test. The
 answer is both halves — say what the fake measures, and instrument the boundary the
 fake does not sit on — and neither half alone is honest. §7's third clause governs
 what may be claimed from the result either way.
+
+**The second round then found the same defect twice more in the repair, which is
+why both clauses above are stated the way they are.** Instrumenting
+`create_connection` alone leaves `create_datagram_endpoint` open, and a datagram
+endpoint reaches a remote address without ever creating a connection — user data
+off the device with both records reading zero. And an instrument is itself
+something that can be attached to nothing: wrapped on a stale loop it reads zero
+for the same reason a live one does, which is the vacuous zero this section already
+refuses for the fake, arriving a second time in the fix for it. Every instrument
+this arm installs owes a calibration; that is the general rule the two clauses are
+instances of.
+
+**What the arm still does not reach, stated rather than implied.** A raw `socket`,
+and `loop.sock_connect` over one, are below every creator the arm wraps. They stay
+the nets' ground and #1545's stated residue, and §7's third clause governs what may
+be claimed about them: nothing.
 
 **The positive control is not ceremony.** An assertion that a recorder saw nothing
 is satisfied by a recorder nothing could ever reach, and a harness that mis-wires
