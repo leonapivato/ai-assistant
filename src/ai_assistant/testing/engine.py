@@ -203,6 +203,19 @@ class FakeAssistantEngine:
         #: unrelated survivor. Adversarial review found it on this lane's round 2, on
         #: the retirement path — which is the one that made a shrink routine.
         self._written = count(1)
+        #: Every id this engine has held, written, or seen a question name as something
+        #: an answer would retire. :meth:`answer` mints past it, which is the "globally
+        #: non-reusing id source" ADR-0045 §4 asks a supersession's id to come from.
+        #:
+        #: **A set rather than an absence check, because absence is a fact about *now*
+        #: and reuse is a fact about *ever*.** Three rounds of this lane's review each
+        #: found a different way for a freed number to come back: sizing the store after
+        #: shrinking it, minting the id an answer had just retired, and — the one only a
+        #: record of the past can catch — minting an id that another *open* question has
+        #: already told the user is "no longer held, so accepting would not touch it",
+        #: whose later answer then retires the belief that took it. Each repair to the
+        #: present state left the next case open, so what is kept is the history.
+        self._spent: set[str] = set()
         self.parked: dict[str, Confirmation] = {}
         self.turn_outcome: TurnOutcome | None = None
         self.observation: ObservationReport = ObservationReport()
@@ -572,19 +585,22 @@ class FakeAssistantEngine:
         unrelated survivor — an answer destroying a record outside the scope it
         presented, which is the opposite of ADR-0078 §8's guarantee.
 
-        **And the ids this answer just retired are reserved against the mint**, which is
-        ADR-0045 §4's rule about a correction's id read one implementation over. There a
-        superseded target is *retained* with a closed window — "``T`` stays on disk with
-        a closed window — retained, off the read path" — so the freshly-minted id must be
-        "absent from the store" with "the retained target ``T`` included", and the new
+        **And it mints past every id this engine has ever spent** — see
+        :attr:`_spent` — not merely past the ones live at this instant. That is
+        ADR-0045 §4's rule about a correction's id, read one implementation over: there
+        a superseded target is *retained* with a closed window ("``T`` stays on disk with
+        a closed window — retained, off the read path"), so §4's freshly-minted id must
+        be "absent from the store" with "the retained target ``T`` included", and the new
         record "no longer borrows ``T``'s id". This engine has no windows, so retiring
-        removes the record outright and an absence check alone would happily hand the
-        correction the very id it just retired. Reserving them restores what §4
-        guarantees: a correction is a new record at a new id, never the overturned one
-        wearing new content. Adversarial review found it on this lane's round 3.
+        removes the record outright and any check against the *present* store is
+        satisfied by a number that has just been freed.
 
-        The loop also covers the other direction, where a caller has held an explicit
-        ``rec-N`` of its own.
+        Three review rounds each found a different way for that to bite, and the last is
+        why the reservation is a history rather than a wider snapshot: a question still
+        open may already have told the user that some id is "no longer held, so accepting
+        would not touch it", and if a later answer mints that id, answering the first
+        question then destroys the belief that took it. No fact about the store at mint
+        time can see that coming; a record of what has been named can.
         """
         named = identifier(question_id, name="question_id")
         check_arguments(
@@ -602,11 +618,10 @@ class FakeAssistantEngine:
             return self._checked(
                 AnswerOutcome(kind=AnswerKind.REJECTED, question_id=named), "answer"
             )
-        retired = {retirement.record_id for retirement in question.retires}
-        for named_record in retired:
-            self.beliefs_held.pop(named_record, None)
+        for retirement in question.retires:
+            self.beliefs_held.pop(retirement.record_id, None)
         record_id = f"rec-{next(self._written)}"
-        while record_id in self.beliefs_held or record_id in retired:
+        while record_id in self._spent:
             record_id = f"rec-{next(self._written)}"
         self.hold(
             record_id,
@@ -1139,6 +1154,7 @@ class FakeAssistantEngine:
             rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
         )
         self.beliefs_held[record_id] = held
+        self._spent.add(record_id)
         return held
 
     @staticmethod
@@ -1266,6 +1282,7 @@ class FakeAssistantEngine:
             attestation=provenance.attestation,
             rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
         )
+        self._spent.update(retirement.record_id for retirement in question.retires)
         match state:
             case QuestionState.OPEN:
                 self.questions_open[question_id] = question
