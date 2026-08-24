@@ -305,6 +305,12 @@ class TestComposites:
         governs: what this vector is for is the byte shape, and the field appearing
         *at* its default is the stronger witness that the codec projects generically
         over the whole model rather than over a chosen subset.
+
+        ADR-0189 §2's ``attestation`` and ``rests_on_recorded_external_content`` join
+        it on the same ground, and at their defaults for the same reason: this belief
+        is a user's own assertion, so neither carries a value, and both are in the
+        bytes anyway. Which is what makes the ADR-0124 §9 bump ``wire/envelope.py``
+        records at version 13 bite on **every** belief rather than on attested ones.
         """
         belief = Belief(
             id="b-1",
@@ -316,10 +322,11 @@ class TestComposites:
             evidence=(Evidence(content="said so"), Evidence()),
         )
         assert _encoded(belief) == (
-            '{"band":"asserted","confidence":0.9,"content":"prefers dark mode",'
+            '{"attestation":null,"band":"asserted","confidence":0.9,'
+            '"content":"prefers dark mode",'
             '"evidence":[{"content":"said so"},{"content":null}],"evidence_elided":0,'
             '"id":"b-1","kind":"preference","last_updated":"2026-08-01T12:00:00Z",'
-            '"valid_until":null}'
+            '"rests_on_recorded_external_content":false,"valid_until":null}'
         )
 
     def test_a_confirmation_shaped_model_sorts_a_frozen_mapping_s_keys(self) -> None:

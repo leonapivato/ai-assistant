@@ -9588,6 +9588,21 @@ class BeliefSummary(BaseModel):
             clamped by band, because the DTO reports what the record holds
             (ADR-0107 §3); whether a *rendering* is owed is a separate question
             §2 scopes to ``DERIVED``.
+        attestation: The record's :attr:`Provenance.attestation` as stored,
+            projected whole (ADR-0189 §2) — what reported the belief and when that
+            source said so — or ``None`` outside the ``ATTESTED`` band. **The
+            listing carries it as well as the single-belief view**, and ADR-0107 §3
+            is the precedent for that being one decision rather than two: it refused
+            both "put the field on ``BeliefSummary`` only" and "put it on ``Belief``
+            only" and required both DTOs to carry it under one name, because a
+            listing row that answered less than the row it links to is the same
+            projection defective in one place.
+        rests_on_recorded_external_content: The value of
+            :func:`rests_on_recorded_external_content` (ADR-0106 §2) applied to the
+            record's :class:`Provenance`, computed by the engine at projection time.
+            Never recomputed by a surface from ``band``, and never read off
+            :attr:`Provenance.derived_from_external` in its place. See
+            :class:`Warrant` for what the value does and does not claim.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -9617,6 +9632,21 @@ class BeliefSummary(BaseModel):
         description=(
             "An upper bound on how many further citations stood behind it and are "
             "no longer carried, as stored (ADR-0107 §3)."
+        ),
+    )
+    attestation: Attestation | None = Field(
+        default=None,
+        description=(
+            "What reported this belief and when that source said so, as stored; "
+            "``None`` outside the ``ATTESTED`` band (ADR-0189 §2)."
+        ),
+    )
+    rests_on_recorded_external_content: bool = Field(
+        default=False,
+        description=(
+            "Whether this belief's warrant rests on recorded external content — "
+            "``rests_on_recorded_external_content(provenance)`` as the engine "
+            "computed it (ADR-0106 §2, ADR-0189 §2)."
         ),
     )
 
@@ -9701,6 +9731,28 @@ class Belief(BaseModel):
             counts below: an elision counts citations ``evidence`` no longer
             contains, so no function of that tuple yields it (ADR-0107 §3). Carried
             on **every** band, never zeroed or clamped by band.
+        attestation: The record's :attr:`Provenance.attestation` as stored,
+            projected whole (ADR-0189 §2) — what reported the belief and when that
+            source said so — or ``None`` outside the ``ATTESTED`` band. **Both
+            halves or neither**: ADR-0073 §4's gate asks for the reporting source's
+            identity *and* its report time, and ADR-0092 §2 made the half-answers
+            unconstructable by carrying them as one value object, so splitting them
+            here would reintroduce on the surface's side of the seam exactly the
+            states that section closed on the record's.
+
+            ``Attestation.extent`` rides along and nothing renders it, deliberately
+            (ADR-0189 §2): splitting the object to leave one bounded optional value
+            behind would mint a second, near-identical spelling of
+            :class:`Attestation`.
+        rests_on_recorded_external_content: The value of
+            :func:`rests_on_recorded_external_content` (ADR-0106 §2) applied to the
+            record's :class:`Provenance`, computed by the engine at projection time.
+            The one fact nothing else on this projection supplies for a ``DERIVED``
+            belief, and what #746 exists for: a structured marker a client can
+            style, filter and order on, where before it could only pass through a
+            sentence. Never recomputed by a surface from ``band``, and never read
+            off :attr:`Provenance.derived_from_external` in its place — see
+            :class:`Warrant` for what the value does and does not claim.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -9727,6 +9779,21 @@ class Belief(BaseModel):
         description=(
             "An upper bound on how many further citations stood behind it and are "
             "no longer carried, as stored (ADR-0107 §3)."
+        ),
+    )
+    attestation: Attestation | None = Field(
+        default=None,
+        description=(
+            "What reported this belief and when that source said so, as stored; "
+            "``None`` outside the ``ATTESTED`` band (ADR-0189 §2)."
+        ),
+    )
+    rests_on_recorded_external_content: bool = Field(
+        default=False,
+        description=(
+            "Whether this belief's warrant rests on recorded external content — "
+            "``rests_on_recorded_external_content(provenance)`` as the engine "
+            "computed it (ADR-0106 §2, ADR-0189 §2)."
         ),
     )
 
@@ -9817,6 +9884,143 @@ class ConversationDigest(BaseModel):
     recorded_turns: int = Field(ge=0, description="How many turns its index holds.")
 
 
+class Warrant(BaseModel):
+    """How a projected record is held, and where its warrant came from (ADR-0189 §3).
+
+    The origin of what a projection shows, for the one projection that carries no
+    standing of its own. ADR-0189 §1 rules that a user-facing projection carries,
+    as **structured fields**, the standing the record is held with, whether its
+    warrant rests on recorded external content, and — where the record is attested
+    — what reported it and when that source said so. :class:`Belief`,
+    :class:`BeliefSummary` and :class:`Question` already carry ``band``, so they
+    take those facts as fields beside it; :class:`Retirement` has never answered
+    "how is this held?" at all, so it takes them as one of these.
+
+    **A value object here and fields there is one rule, not two** (ADR-0189 §3):
+    carry the standing and the origin of the warrant; make a half-answer
+    unconstructable where the facts arrive together; and never spell one fact twice
+    on one model. A nested object on a model that already carries ``band`` would
+    give that model two paths to its band which a careless projection could make
+    disagree — so no projection carrying ``band`` at top level gains one of these.
+    On a :class:`Retirement` the three facts are resolved together by one
+    ``MemoryStore.get`` or not at all, which is ADR-0092 §2's argument applied a
+    second time: a warrant that exists is always whole.
+
+    **The band-keyed validator below is admissible precisely because this type is
+    new.** ADR-0106 §7 refused the equivalent validator on :class:`Provenance` on
+    ADR-0086 §3's test — "does it refuse something that already worked" — because a
+    stored attested record would have been refused on *decode*. This type has no
+    stored instances, no encoded history and no existing construction site, so the
+    same test is answered **no**. It is also why ADR-0189 §2 declines to add the
+    equivalent validator to the three band-carrying projections, whose construction
+    sites are in the tree and in every fixture that builds one.
+
+    Attributes:
+        band: The standing the retired record is held with (ADR-0072 §2), projected
+            from its provenance source — the fact :class:`Retirement` has never
+            carried, and the one ADR-0098 §7's first clause needs to identify a
+            span as external.
+        rests_on_recorded_external_content: The value of
+            :func:`rests_on_recorded_external_content` (ADR-0106 §2) applied to the
+            projected record's :class:`Provenance`. Carrying the whole predicate's
+            answer rather than only the part ``band`` does not cover is what stops
+            each client re-deriving the disjunction and writing only its second
+            half. Never a claim about *influence*: a ``False`` is *nothing external
+            is recorded in this warrant*, never *nothing external influenced it*
+            (ADR-0098 §5).
+        attestation: The record's :attr:`Provenance.attestation` as stored,
+            projected whole, or ``None`` outside the ``ATTESTED`` band. Projected
+            whole rather than as two scalars beside it, because ADR-0092 §2 made the
+            half-states — a source with no instant, an instant with no source —
+            unconstructable on the record's side, and splitting it here would
+            reintroduce them on the surface's side of the seam.
+
+            **The ``None`` default is safe rather than permissive**: the validator
+            below refuses an ``ATTESTED`` warrant that took it, so the default can
+            never stand where an attestation is owed. It mirrors
+            :attr:`Provenance.attestation`, whose shape this projects.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    band: BeliefBand = Field(description="The standing the retired record is held with.")
+    rests_on_recorded_external_content: bool = Field(
+        description=(
+            "Whether the record's warrant rests on recorded external content — "
+            "``rests_on_recorded_external_content(provenance)`` as the engine "
+            "computed it (ADR-0106 §2)."
+        ),
+    )
+    attestation: Attestation | None = Field(
+        default=None,
+        description=(
+            "What reported the record and when that source said so, as stored; "
+            "``None`` outside the ``ATTESTED`` band (ADR-0092 §1)."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _the_band_determines_the_warrant(self) -> Warrant:
+        """Every combination the band decides, asserted over all three members.
+
+        **Over all three and not over ``attestation`` alone**, because a validator
+        asserting only *attestation set iff ``ATTESTED``* leaves this type able to
+        contradict ADR-0189 §2: it would admit ``Warrant(band=ASSERTED,
+        rests_on_recorded_external_content=True, attestation=None)`` — a user's own
+        assertion reporting that its warrant rests on recorded external content,
+        which ADR-0106 §2's predicate makes ``False`` for that band and ADR-0098 §1
+        forbids in principle, since "the user's own utterance is not [external],
+        however it was composed". It would admit the inverse on ``ATTESTED`` too.
+        Architecture review found it on ADR-0189's round 1.
+
+        The repair is the move ADR-0106 §2 made when it band-guarded its own
+        predicate rather than trusting a stray flag: the band is the classifier
+        (ADR-0072 §4), so this asserts everything the band determines and leaves
+        free only what it genuinely does not — the ``DERIVED`` case, which is the
+        one :attr:`rests_on_recorded_external_content` exists for (#746).
+
+        **The band is matched rather than looked up in a mapping**, so the
+        exhaustiveness is mechanical in the shape :func:`band_of` uses: a fourth
+        :class:`BeliefBand` added without deciding what it determines here narrows
+        to a non-``Never`` type under ``mypy --strict`` and fails the gate, rather
+        than reaching a ``KeyError`` at validation time on a record a store already
+        holds.
+        """
+        expected: bool | None
+        match self.band:
+            case BeliefBand.ATTESTED:
+                expected = True
+            case BeliefBand.ASSERTED:
+                expected = False
+            case BeliefBand.DERIVED:
+                expected = None  # the one case the band does not determine
+            case _:  # pragma: no cover - exhaustive
+                assert_never(self.band)
+        attested = self.band is BeliefBand.ATTESTED
+        if attested and self.attestation is None:
+            msg = (
+                "an ATTESTED warrant must carry the attestation naming what reported the "
+                "record and when that source said so (ADR-0073 §4, ADR-0092 §1)"
+            )
+            raise ValueError(msg)
+        if not attested and self.attestation is not None:
+            msg = (
+                f"a {self.band.name} warrant must not carry an attestation: a record may not "
+                f"acquire the standing of a band it is not in by citing a source that never "
+                f"reported it (ADR-0072 §4, ADR-0092 §1)"
+            )
+            raise ValueError(msg)
+        if expected is not None and self.rests_on_recorded_external_content is not expected:
+            msg = (
+                f"a {self.band.name} warrant's rests_on_recorded_external_content is "
+                f"{expected}, and this one says {self.rests_on_recorded_external_content}: the "
+                f"band is the classifier and the predicate is a function of it outside the "
+                f"DERIVED band (ADR-0106 §2, ADR-0098 §1)"
+            )
+            raise ValueError(msg)
+        return self
+
+
 class Retirement(BaseModel):
     """One record a question's answer would retire (ADR-0078 §8).
 
@@ -9829,6 +10033,24 @@ class Retirement(BaseModel):
     Attributes:
         record_id: The conflict's id, opaque data an adapter may echo.
         content: What that record says, or ``None`` when it is no longer held.
+        warrant: How the retired record is held and where its warrant came from
+            (ADR-0189 §2), or ``None`` when it no longer resolves.
+
+            **A producer sets this exactly when it sets ``content``**: both are
+            resolved from one ``MemoryStore.get``, and ``None`` on both is the case
+            ADR-0045 §6 produces, where the store hides a closed window. The
+            obligation is on the producer and **no cross-field validator here
+            asserts it** — the absence is ADR-0189 §2's decision rather than an
+            omission, on ADR-0107 §4's precedent. A validator would refuse, at the
+            moment it landed, the ``Retirement(record_id=…, content=held.content)``
+            that ``orchestration/questions.py`` constructs today, so the contract
+            change ADR-0189 §9 requires to carry no producer could not carry it.
+
+            It is what makes ADR-0098 §7's first two clauses satisfiable where they
+            were not: a surface presents this ``content`` as third-party content
+            exactly when a warrant is present and its band is ``ATTESTED``, and
+            never on the other two bands, where the content is the user's own word
+            (ADR-0038 §1a) or this system's own sentence (ADR-0189 §4).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -9836,6 +10058,14 @@ class Retirement(BaseModel):
     record_id: Identifier = Field(description="The conflict's id.")
     content: EncodableText | None = Field(
         description="What that record says, or ``None`` when it is no longer held."
+    )
+    warrant: Warrant | None = Field(
+        default=None,
+        description=(
+            "How the retired record is held and where its warrant came from; "
+            "``None`` when it no longer resolves, exactly as ``content`` is "
+            "(ADR-0189 §2)."
+        ),
     )
 
 
@@ -9881,6 +10111,19 @@ class Question(BaseModel):
         successor: The question this one's answer already raised, when it has one —
             the state a cancellation caught after a re-deferral admitted a
             successor leaves behind (ADR-0078 §9).
+        attestation: The **proposal's** :attr:`Provenance.attestation` as stored,
+            projected whole (ADR-0189 §2), or ``None`` where the proposal is not
+            attested.
+        rests_on_recorded_external_content: Whether the **proposal's** warrant rests
+            on recorded external content — :func:`rests_on_recorded_external_content`
+            (ADR-0106 §2) applied to its :class:`Provenance`, computed by the engine
+            at projection time.
+
+    **Both new fields describe the proposal, on the same reading ``band`` already
+    has here, and describe no entry in ``retires``** (ADR-0189 §2). Each entry in
+    ``retires`` answers for itself through its own :attr:`Retirement.warrant`, which
+    is the field that lets a surface tell an attacker-authorable line the user is
+    being asked to overrule from this system's own sentence (#673).
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -9899,6 +10142,21 @@ class Question(BaseModel):
     )
     successor: SuccessorLink | None = Field(
         default=None, description="The question this one's answer already raised."
+    )
+    attestation: Attestation | None = Field(
+        default=None,
+        description=(
+            "What reported the **proposal** and when that source said so, as "
+            "stored; ``None`` where it is not attested (ADR-0189 §2)."
+        ),
+    )
+    rests_on_recorded_external_content: bool = Field(
+        default=False,
+        description=(
+            "Whether the **proposal's** warrant rests on recorded external content "
+            "— ``rests_on_recorded_external_content(provenance)`` as the engine "
+            "computed it (ADR-0106 §2, ADR-0189 §2)."
+        ),
     )
 
 
