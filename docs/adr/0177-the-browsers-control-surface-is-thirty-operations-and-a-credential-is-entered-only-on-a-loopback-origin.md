@@ -23,13 +23,14 @@
   rather than what may not.
 
   **The count of thirty is unchanged, for the third time and for the same reason**:
-  it counts what a browser may reach, not what the promoted surface carries.
-  ADR-0186 §6 states that conclusion for the decision pair, and §10 binds the read
-  pair to §6 by inheritance without restating it — neither is one of the thirty, no
-  browser request resolves to either, and the gateway makes neither call of its
-  own. The promoted method set moves from thirty-four to thirty-six; that number
-  lives beside `PROTOCOL_VERSION` in `wire/envelope.py`, where it is load-bearing,
-  and not here.
+  it counts what a browser may reach, not what the promoted surface carries. And it
+  is unchanged *by §1's own first clause* rather than by anything ADR-0186 says —
+  the closed enumeration governs these two because it does not name them, which is
+  the whole point of naming what may appear rather than what may not (ADR-0168 §6).
+  ADR-0186 §6 draws that conclusion for the decision pair; its §10, which mints the
+  read pair, does not carry §6 over and does not need to. The promoted method set
+  moves from thirty-four to thirty-six; that number lives beside `PROTOCOL_VERSION`
+  in `wire/envelope.py`, where it is load-bearing, and not here.
 - Amended: 2026-08-24 by ADR-0186 — **§1's third clause, by a count and nothing
   else.** That clause reads that `learn` "is the one operation of the promoted
   surface that is neither in the enumeration above nor the gateway's own". The

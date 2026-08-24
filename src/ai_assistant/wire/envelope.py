@@ -301,8 +301,11 @@ from ai_assistant.wire.errors import (
 #: method set", and ``wire.surface``'s ``METHODS`` is derived from the Protocol, so
 #: a version 14 client sending ``export_reads`` to a version 13 hub is refused
 #: there — the half-finished upgrade §3 wants legible at the handshake rather than
-#: inside a call. ADR-0186 §5's obligation binds this pair through §10's
-#: inheritance, and it falls on the change that adds the methods.
+#: inside a call. The obligation is **ADR-0124 §9's own**, which reaches "any change
+#: to the promoted surface's method set" without needing a clause about these two
+#: methods in particular; ADR-0186 §5's third clause is the precedent for putting
+#: the note on the change that adds them rather than an inheritance §10 states —
+#: §10's inheritance list names §2, §3, §7 and §8, and not §5.
 #:
 #: **The method set moves from thirty-four to thirty-six**, and that number is what
 #: this note is about. ADR-0177 §1's browser enumeration does **not** move: it
@@ -318,7 +321,10 @@ from ai_assistant.wire.errors import (
 #: ``STREAMING_METHODS``, both adapters and the error mapping are all derived from
 #: the Protocol; ``wire/client.py`` is hand-written, so its two forwarding methods
 #: are the one edit. Neither method joins ``wire/server.py``'s
-#: ``CONNECTION_METHODS``: both listeners carry both (ADR-0186 §5, §10).
+#: ``CONNECTION_METHODS``, so both listeners carry both — by the default
+#: ``METHODS`` and ``CONNECTION_METHODS`` already produce, ADR-0151 §13 being the
+#: only decision that withholds anything and a ``SourceReadRecord`` carrying none of
+#: the Tier 0 credential that is its ground.
 PROTOCOL_VERSION: Final[int] = 14
 
 #: ADR-0085 §8a: "The correlation id is a UUID string and is at most 36 bytes.

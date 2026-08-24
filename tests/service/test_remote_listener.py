@@ -1185,12 +1185,18 @@ def test_neither_audit_read_is_a_connection_method() -> None:
 async def test_both_read_trail_reads_are_served_on_the_remote_listener(
     tmp_path: Path, method: str, payload: dict[str, Any]
 ) -> None:
-    """ADR-0186 §5's first clause, reaching this pair through §10's inheritance.
+    """Both are carried here, by the mechanism's default rather than by a clause.
 
     The audit pair's case one store over, and it sits beside it for that case's
     reason: ``serve_connection`` bars a method from this listener exactly when it is
     in ``CONNECTION_METHODS``, so "carried here" and "not one of the five" are the
     same fact reached from opposite sides.
+
+    **Not inherited from ADR-0186 §5**, whose clause names ``recent_decisions`` and
+    ``export_decisions``, and which §10's closed inheritance list does not carry
+    over. Nothing needs to: a promoted method reaches this listener unless a
+    decision withholds it, and the only one that does is ADR-0151 §13. §5 is the
+    precedent for the identical reasoning rather than the authority.
 
     **The disclosure argument is stronger here than it was there, not weaker.** The
     five are withheld because they carry a **Tier 0 credential** (ADR-0151 §13),
@@ -1219,7 +1225,7 @@ async def test_both_read_trail_reads_are_served_on_the_remote_listener(
 
 
 def test_neither_read_trail_read_is_a_connection_method() -> None:
-    """ADR-0186 §5 through §10: "Neither joins ``CONNECTION_METHODS``".
+    """Neither joins ``CONNECTION_METHODS``, which is what leaves both carried.
 
     Asserted against the **frozen set itself** rather than by absence from a
     hand-written list, so a rename or an addition on either side is caught here, and

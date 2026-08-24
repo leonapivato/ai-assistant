@@ -1239,11 +1239,15 @@ class HubClient:
         """One page of what this system read from a source (ADR-0186 §10).
 
         **Not a connection method**, so no :meth:`_refuse_off_loopback` and no entry
-        in ``wire/server.py``'s ``CONNECTION_METHODS`` (ADR-0186 §5, §10). A
-        ``SourceReadRecord`` carries no credential and, by ADR-0185 §10's own
-        exclusion, no content: it states the source's declared identity, the use,
-        the instant the grant check resolved, the outcome, the grant it ran under
-        and how many items the reading carried — and nothing of what was read.
+        in ``wire/server.py``'s ``CONNECTION_METHODS``. That is the mechanism's own
+        default rather than an ADR-0186 §5 clause inherited — §10's inheritance list
+        does not name §5 — and the only decision withholding anything from the
+        remote listener is ADR-0151 §13, whose ground is a **Tier 0 credential**. A
+        ``SourceReadRecord`` carries none, and by ADR-0185 §10's own exclusion no
+        content either: it states the source's declared identity, the use, the
+        instant the grant check resolved, the outcome, the grant it ran under and
+        how many items the reading carried — and nothing of what was read. ADR-0186
+        §5 reaches the same conclusion for the decision pair on the same reasoning.
 
         ``limit`` is refused when it is **not strictly positive**, locally and
         before a frame is sent (ADR-0186 §3, §10), which is the clause
