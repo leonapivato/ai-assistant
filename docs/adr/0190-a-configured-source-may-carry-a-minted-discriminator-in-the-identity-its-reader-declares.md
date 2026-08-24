@@ -205,13 +205,14 @@ decides all three." They are decided here.
 > that clause exists to pin.
 
 > **Normative.** The **suite gains a clause**, in the same change that corrects the
-> docstring: `ReaderContract` asserts that `Reader.name` is one of §4's two forms —
-> that it contains no colon, or contains exactly one colon whose suffix is exactly
-> 32 characters drawn from `0123456789abcdef`. The canonical `FakeReader` in
-> `ai_assistant.testing` is verified through that suite like every other subject.
-> `CONTRIBUTING.md` → "Adding a Protocol" governs: "The triad is what a Protocol
-> *change* is measured against too — extend the suite in the same change, so the new
-> obligation is enforced rather than assumed."
+> docstring: `ReaderContract` asserts that `Reader.name` is one of §4's two forms.
+> Decidably, over the value alone: it is equal to its own `str.strip()`; it carries
+> at most one colon; and where it carries one, the part before it is **non-empty**
+> and the part after it is exactly 32 characters drawn from `0123456789abcdef`. The
+> canonical `FakeReader` in `ai_assistant.testing` is verified through that suite
+> like every other subject. `CONTRIBUTING.md` → "Adding a Protocol" governs: "The
+> triad is what a Protocol *change* is measured against too — extend the suite in the
+> same change, so the new obligation is enforced rather than assumed."
 
 > **Normative.** What that clause **cannot** reach is that the part before the colon
 > is the reader type's own declared name. The suite holds a `Reader` and nothing to
@@ -221,12 +222,16 @@ decides all three." They are decided here.
 > division `reader_contract.py` already makes for the three §8 obligations a generic
 > suite cannot decide.
 
-> **Normative.** No `core/types.py` change is owed. An identity is carried as
-> `Identifier` — non-blank, stripped, UTF-8-encodable — and both of §4's two forms
-> satisfy it as written. ADR-0097 §9's canonicality rule reaches a discriminated
-> identity exactly as it reaches a bare one (ADR-0189 §6). `Identifier` is not
-> tightened to §4's form, because it types every identifier in the system and only
-> a source identity has this shape; the refusal sits at §4's admitting seam.
+> **Normative.** No `core/types.py` change is owed. Both of §4's forms pass
+> `Identifier` — non-blank and UTF-8-encodable — **and pass through it unchanged**,
+> which is §4's canonicality clause doing that work rather than an accident:
+> `Identifier`'s validator returns `value.strip()`, so a non-canonical identity
+> would be silently rewritten on the way to `Attestation.reported_by`. ADR-0097 §9's
+> canonicality rule reaches a discriminated identity exactly as it reaches a bare
+> one (ADR-0189 §6). `Identifier` is **not** tightened to §4's form: it types every
+> identifier in the system — deferral ids, conversation ids, grant ids — and only a
+> source identity has this shape, so the refusal sits at §4's admitting seam and in
+> the suite clause above.
 
 **The docstring clause is stated as an obligation on a later lane rather than
 discharged here, and the reason is golden rule 5.** A contract ADR lands as its own
@@ -250,22 +255,39 @@ discriminated identity — no second source can be configured at all (§6, ADR-0
 
 ### 4. How an identity is spelled, in full, and the one seam that refuses a malformed one
 
-> **Normative.** A **bare** identity is a reader type's declared name and nothing
-> else: `"calendar"`, `"email"`. It is unchanged from what ADR-0093 §7 rules and what
-> every reader on `main` returns today.
+> **Normative.** A **declared name** is non-empty, **canonical** — equal to its own
+> `str.strip()` — and **contains no colon**. These are new obligations on every
+> `Reader`, stacked on ADR-0093 §7's existing ones and contradicting none of them:
+> no declared name in the tree or in the corpus breaches any of the three.
+
+> **Normative.** A **bare** identity is a declared name and nothing else:
+> `"calendar"`, `"email"`. It is unchanged from what ADR-0093 §7 rules and what every
+> reader on `main` returns today.
 
 > **Normative.** A **discriminated** identity is that same declared name, then a
 > single ASCII colon `":"`, then the discriminator — 32 characters drawn from
 > `0123456789abcdef` and nothing else. There is no other form:
 > `calendar:0f3c9d1a7b45e28c6d90fa3b17e4c852` is one, and a bare discriminator, an
-> uppercase one, a differently-ordered one and a differently-separated one are not
-> identities at all.
+> empty declared part, an uppercase discriminator, a differently-ordered value and a
+> differently-separated one are not identities at all.
 
-> **Normative.** A reader type's **declared name may not contain a colon**. That is
-> what makes the declared part recoverable — it is the text before the first colon —
-> and it is a new obligation on every `Reader`, stacked on ADR-0093 §7's existing
-> ones and contradicting none of them, since no declared name in the tree or in the
-> corpus contains one.
+**The canonicality clause is not decoration, and adversarial review found what it
+closes.** `Attestation.reported_by` is typed `Identifier`, whose `_non_blank`
+validator returns `value.strip()`; `SourceReading.source` is typed `EncodableText`,
+which does not strip. A reader declaring `" calendar "` would therefore put
+`" calendar "` on the reading and `"calendar"` on every belief the gate stored from
+it — one source under two names, and ungrantable besides, since ADR-0097 §9 refuses a
+source "whose identity is not equal to its own `str.strip()`". Requiring the declared
+name to be canonical makes that unreachable for a conforming reader, and makes §3's
+claim that both forms satisfy `Identifier` true rather than nearly true. It does not
+amend ADR-0097 §9, which stays exactly as written and now guards a case a conforming
+`Reader` cannot produce — defence against a non-conforming one rather than a dead
+rule. The **type asymmetry itself is pre-existing and is not this ADR's to change**;
+it is filed as issue #1519.
+
+**The no-colon clause is what makes the declared part recoverable** — it is the text
+before the first colon, and with no colon admitted in a declared name that split is
+total rather than conventional.
 
 > **Normative.** Every seam that admits a source identity from configuration
 > **refuses** a value that is neither of the two forms above, and refuses at the
@@ -353,13 +375,23 @@ carries "the connected source instance that reported this belief", which is what
 discriminated identity makes true rather than false; ADR-0095's renaming is
 orthogonal.
 
-**§4's no-colon rule is a stacked addition and is recorded here alone.** It puts a
-new obligation on every `Reader`'s declared name, and it contradicts no sentence
-ADR-0093 wrote: §7 already forbids deriving an identity from a location or contents
-and names `"calendar"` as the calendar's, no declared name in the tree or the corpus
-contains a colon, and no clause of ADR-0093 becomes false or over-wide. ADR-0082 §1
-rules that such an addition "is recorded in the ADR that makes it, and nowhere
-else", so ADR-0093's note carries the supersession's extent and not this.
+**§4's three declared-name rules are stacked additions and are recorded here alone.**
+Non-empty, canonical and colon-free are new obligations on every `Reader`, and they
+contradict no sentence ADR-0093 wrote: §7 already forbids deriving an identity from a
+location or contents and names `"calendar"` as the calendar's, no declared name in the
+tree or the corpus breaches any of the three, and no clause of ADR-0093 becomes false
+or over-wide. ADR-0082 §1 rules that such an addition "is recorded in the ADR that
+makes it, and nowhere else", so ADR-0093's note carries the supersession's extent and
+not these.
+
+**Against ADR-0097 §9 — nothing is owed either, and the canonicality clause is the
+close case.** §9 rules that "A source whose identity is not equal to its own
+`str.strip()` is not grantable". §4 makes a conforming `Reader` unable to declare such
+an identity, which does not make §9's sentence false or over-wide — it stays exactly
+true, and now guards a state only a non-conforming reader can reach. A reader holding
+ADR-0097 alone acts identically: they refuse to grant a non-canonical source, which is
+still the right act. That is ADR-0082 §1's test answered "no", so it is a stacked
+addition and not an amendment.
 
 Under ADR-0070 §1 this is a **partial supersession of ADR-0093 §7 and nothing
 else**.
