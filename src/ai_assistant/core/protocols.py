@@ -8034,15 +8034,22 @@ class AssistantEngine(Protocol):
     # a field asserting *this content is external* would be ``True`` on every row
     # ever written.
     #
-    # **No per-source query and no count**, and this is the surface that was owed the
-    # chance to ask for them. ADR-0185 §12 declined to mint either "without a
-    # consumer" and left them "the surface ADR's to ask for if it needs them"; this
-    # pair does not need them, because ADR-0186 §1's second clause is inherited whole
-    # — no third method, no argument beyond ``limit``, no filter by source, by use, by
-    # outcome or by window. **A consumer that wants a subset selects it from what
-    # these return**, which is what keeps the two answers comparable and what stops a
-    # contract acquiring methods nobody calls (ADR-0021 §4). Both stay additive the
-    # day a consumer arrives (ADR-0008 §1).
+    # **No per-source query and no count — this lane's choice, not a prohibition it
+    # inherited.** ADR-0185 §12 declined to mint either "without a consumer" and left
+    # them "the surface ADR's to ask for if it needs them"; ADR-0186 §10 passes that
+    # question on rather than closing it, naming "the per-source query and the count
+    # it declined to mint without a consumer, which are this surface's to ask for and
+    # not this document's to guess at". §1's "no third method, no argument beyond
+    # ``limit``" is written about the decision pair and is **not** in §10's
+    # inheritance list, so it stands here as the precedent for the shape rather than
+    # as the rule.
+    #
+    # Declined on the same ground ADR-0185 §12 used one level down: a query with no
+    # consumer is surface with no consumer (ADR-0045 §1, ADR-0028 §7), and the
+    # consumer this pair has is the CLI lane, which can select from what these
+    # return. That also keeps the two answers comparable, and it stops a contract
+    # acquiring methods nobody calls (ADR-0021 §4). Both stay additive the day a
+    # consumer arrives (ADR-0008 §1) — which is the whole reason declining is cheap.
     #
     # **The transport and the browser are decided by their own rules and not by
     # §10's inheritance**, and the distinction is worth stating because §10's

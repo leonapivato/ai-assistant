@@ -388,12 +388,16 @@ def test_the_surface_carries_the_methods_the_adrs_fixed() -> None:
     ADR-0186 §10's two take it to thirty-six: ``recent_reads`` and ``export_reads``,
     the same pair one store over, relaying ADR-0185 §12's ``SourceReadTrail``. Two
     for §1's reason exactly, and the pair's own §12 chance to ask for more was
-    declined: ADR-0185 left "a per-source query and a count … the surface ADR's to
-    ask for if it needs them", and this surface does not — ADR-0186 §1's second
-    clause is inherited whole, so a consumer wanting a subset selects it from what
-    these return. ``SourceReadTrail.record`` and ``clear`` stay unpromoted on §4's
-    reasoning read one store over, and neither of the two is a browser operation
-    (§6, inherited by §10), so ADR-0177 §1's thirty is unmoved.
+    **declined by this lane rather than forbidden to it**: ADR-0185 §12 left "a
+    per-source query and a count … the surface ADR's to ask for if it needs them",
+    and §10 passes that choice to the lane rather than closing it, so the two absent
+    methods are a decision made here on ADR-0045 §1's and ADR-0028 §7's
+    surface-with-no-consumer rule — the same rule ADR-0185 §12 cited when it
+    declined them one level down — with ADR-0186 §1's second clause as the precedent
+    for the shape. ``SourceReadTrail.record`` and ``clear`` stay unpromoted on §4's
+    reasoning read one store over. Neither of the two is a browser operation, by
+    ADR-0177 §1's own closed enumeration rather than by any inheritance, so its
+    thirty is unmoved.
 
     **This assertion is now also #1125's answer.** ``core/types.py`` and
     ``wire/surface.py`` each carried a prose count of this surface that had gone
@@ -523,8 +527,10 @@ def test_the_promoted_surface_and_the_protocol_version_are_both_pinned() -> None
     ``SourceReadRecord`` and ``ReadOutcome`` were promoted by ADR-0185 and reach
     this surface by being named in a return annotation rather than by being minted,
     so a version 13 peer's trouble is the unknown *method* and never an unknown
-    member. ADR-0186 §5 states the bump in the deciding ADR and §10 binds this pair
-    to it by inheritance.
+    member. The obligation is ADR-0124 §9's own — it reaches any change to the
+    promoted method set directly — and ADR-0186 §5's third clause is the precedent
+    for putting the note on the change that adds the methods, not a clause §10
+    carries over.
 
     **ADR-0124 §9 decides no mechanical check and creates none**, saying one is
     owed and leaving its shape open. This is not that check — it is a *pin*, and

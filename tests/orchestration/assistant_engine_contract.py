@@ -496,8 +496,10 @@ def _attempt(record_id: str, *, at: datetime) -> SourceReadRecord:
 class SeededReadTrail:
     """A conforming ``SourceReadTrail`` that logs which read reached it.
 
-    The one capability the canonical fake does not owe a consumer and ADR-0186 §11's
-    clauses — inherited by §10 — make a suite case need. ``reads`` is the **negative
+    The one capability the canonical fake does not owe a consumer, and the one the
+    suite cases below need. §11's clauses are written about the decision pair and
+    are not in §10's inheritance list; they are followed here because §10 makes this
+    pair a mirror of §1's, so the same cases are the ones worth having. ``reads`` is the **negative
     control** for §3's "locally and before any I/O": an assertion that a malformed
     ``limit`` was refused is worth little unless a case can see the read it did not
     cause. It is the role :attr:`SeededAuditTrail.reads` plays one store over.
@@ -2955,14 +2957,15 @@ class AssistantEngineContract(ABC):
     async def test_the_read_listing_is_a_prefix_of_the_read_export(
         self, reads: ReadSubject
     ) -> None:
-        """ADR-0186 §2 through §10: ``recent_reads(limit=n)`` is the first ``n``.
+        """ADR-0186 §10 through §2's determinism: ``recent_reads(limit=n)`` is the first ``n``.
 
         **The case nothing else would catch.** An implementation that relayed the
         listing and relayed the export would answer both in a conforming-looking
         order and hand back one as the *reverse* of the other, which no single-call
         assertion notices. It is also what makes the two answers comparable, which
-        is why ADR-0186 §1 — inherited whole by §10 — has the engine relay rather
-        than compose.
+        is why §1 has the engine relay rather than compose — reasoning this pair
+        mirrors rather than inherits, §10's inheritance list naming §2, §3, §7 and
+        §8 alone.
         """
         exported = await reads.engine.export_reads()
 
@@ -2973,7 +2976,7 @@ class AssistantEngineContract(ABC):
     async def test_each_read_operation_reaches_its_own_store_read_and_no_other(
         self, reads: ReadSubject
     ) -> None:
-        """ADR-0186 §1 through §10: the listing reads ``recent``, the export ``export``.
+        """§10's pair mirrors §1's: the listing reads ``recent``, the export ``export``.
 
         Otherwise untestable by answers alone, because over a trail small enough to
         write down the two are indistinguishable. An ``export_reads`` implemented as
@@ -3080,7 +3083,7 @@ class AssistantEngineContract(ABC):
         assert parameter.default == DEFAULT_PAGE_SIZE
 
     def test_the_read_export_takes_no_argument(self, reads: ReadSubject) -> None:
-        """ADR-0186 §1 through §10: no ``limit``, no cursor — and no ``source``.
+        """§10's pair mirrors §1's shape: no ``limit``, no cursor — and no ``source``.
 
         Two operations rather than one, and **two rather than three**: ADR-0185 §12
         left "a per-source query and a count … the surface ADR's to ask for if it

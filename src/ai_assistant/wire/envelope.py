@@ -310,8 +310,11 @@ from ai_assistant.wire.errors import (
 #: **The method set moves from thirty-four to thirty-six**, and that number is what
 #: this note is about. ADR-0177 §1's browser enumeration does **not** move: it
 #: stands at thirty, because it counts what a browser may reach rather than what
-#: the promoted surface carries, and ADR-0186 §6 — inherited by §10 — states that
-#: no browser request resolves to either of these.
+#: the promoted surface carries. That neither of these is reachable from a browser
+#: follows from ADR-0177 §1's enumeration being **closed** over the methods it does
+#: not name, which is the same clause that already governed every method added
+#: since; ADR-0186 §6 draws it for the decision pair and §10's inheritance list does
+#: not carry §6 over, because nothing needs it to.
 #:
 #: **Nothing else under** ``wire/`` **changes for it but the client's two
 #: methods**, as at 12 and for that entry's reason: no ``core`` type is added or
