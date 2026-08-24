@@ -19,9 +19,12 @@
   stands verbatim and ADR-0192 relies on it**: the derived `idempotency_key` and
   its three properties, the two-part retry conjunction, the two-sided window
   obligation, the fail-closed elapsed-time reading, and the refusal to auto-retry
-  an `INDETERMINATE` outcome or an `Idempotency.NONE` side-effecting tool. §§1–4
-  and §§6–8 are untouched, and this ADR's Decision text below is not rewritten
-  (ADR-0070 §1). **The three amendment qualifiers this `Status` line carried have
+  an `INDETERMINATE` outcome or an `Idempotency.NONE` side-effecting tool — which
+  ADR-0192 §1 does not merely leave standing but transcribes onto its store, so that
+  such a tool gets exactly one invocation per authorisation. §§1–2, §4 and §§6–8 are
+  untouched by **this** scope, as is §3 apart from its cost sentence, which the note
+  below supersedes on its own scope and for its own reason. This ADR's Decision text
+  below is not rewritten (ADR-0070 §1). **The three amendment qualifiers this `Status` line carried have
   moved off it** under ADR-0082 §2, which takes them off a line that gains the
   leading token and leaves each record whole in the dated note that already
   carries it: §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and

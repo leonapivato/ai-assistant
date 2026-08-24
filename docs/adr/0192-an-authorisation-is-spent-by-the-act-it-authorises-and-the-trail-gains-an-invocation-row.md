@@ -9,15 +9,16 @@
   executions, and the difference is worth being precise about"; §2 below states the
   scope and what of §4 stands.
 - **Decides `core/protocols.py` and `core/types.py` surface, and it is a breaking
-  change.** Golden rule 5 asks that it be flagged. `AuditTrail` gains three
-  members, `AssistantEngine` gains two, `ToolInvoker.invoke` gains an obligation
-  and a collaborator, `ToolResult` gains a field, and `core/types.py` gains two
-  models and `core/errors.py` four error classes. Every structural implementation of
-  the two Protocols must grow the new members, and one that does not stops
-  satisfying them. It adds no Protocol, so it is not a triad (`CONTRIBUTING.md` →
-  "Adding a Protocol"); it grows two existing ones, their shared conformance
-  suites and their canonical fakes. ADR-0015 §5 and golden rule 5 put it in its
-  own PR, ratified before anything implements against it.
+  change.** Golden rule 5 asks that it be flagged. It adds one Protocol —
+  `InvocationLedger` — so the implementing lane owes a **triad**: contract, shared
+  conformance suite and canonical fake in `ai_assistant.testing`, in one change and
+  never deferred (`CONTRIBUTING.md` → "Adding a Protocol"). It also grows two
+  existing Protocols: `AuditTrail` gains two read members and `AssistantEngine`
+  two, so every structural implementation of each must grow them or stop satisfying
+  it. `ToolInvoker.invoke` gains an obligation and a collaborator, `ToolResult`
+  gains a field, `core/types.py` gains two models and `core/errors.py` four error
+  classes. ADR-0015 §5 and golden rule 5 put it in its own PR, ratified before
+  anything implements against it.
 - **Required review set: adversarial *and* architecture.** Compelled rather than
   declared: `CONTRIBUTING.md` → "Stop when the required reviews are green" makes a
   change contract-surface when it is the ADR deciding that surface, and the bullet
@@ -102,39 +103,50 @@ surface can state an execution at all, because ADR-0186's two operations return
 > Otherwise it is not spendable, and no invocation under it is ever refused on the
 > ground that the authorisation is spent.
 
-> **Normative.** `ToolInvoker.invoke` appends a **claim** to the `AuditTrail`
-> immediately before the callable is entered and after ADR-0029 §2's three checks
-> have passed, naming the decision the call carries. The append is the consume: it
-> is one atomic store operation, and a call whose claim is refused does not reach
-> the callable.
+> **Normative.** `ToolInvoker.invoke` appends a **claim** through the
+> `InvocationLedger` it holds (§2), immediately before the callable is entered and
+> after ADR-0029 §2's three checks have passed, naming the decision the call
+> carries. The append is the consume: it is one atomic store operation, and a call
+> whose claim is refused does not reach the callable.
 
 > **Normative.** A first claim under a decision that carries none is admitted. On
 > a **spendable** authorisation a **further** claim is refused unless every one of
-> these holds: no claim under that decision is open; the most recent completed
-> claim carries the outcome `FAILED`; that completion's recorded `failure_kind` has
-> `retryable` true; the decision's `ToolDefinition.idempotency` is `KEYED`; and the
-> elapsed time from the **first** claim's instant under that decision to this
-> claim's is strictly less than that definition's `idempotency_window`.
+> these holds: no claim under that decision is open; **no** claim under it carries
+> the outcome `SUCCEEDED` or `INDETERMINATE`; the last claim in the ledger's own
+> append order for that decision is completed `FAILED` with a recorded
+> `failure_kind` whose `retryable` is true; the decision's
+> `ToolDefinition.idempotency` is `KEYED`; and the elapsed time from the **first**
+> claim in that append order to this one is strictly less than that definition's
+> `idempotency_window`.
 
-> **Normative.** Any reading of that elapsed time which is not a positive duration
-> is treated as the window having lapsed, and the claim is refused. That is
-> ADR-0029 §5's fail-closed rule for the same measurement, unchanged and applied at
-> the store rather than restated.
+> **Normative.** "First" and "last" above are the ledger's own **durable append
+> order** for that decision, never an ordering over `recorded_at`. A stored instant
+> is what a reader is shown; the order is what the rule is decided on, and the two
+> are kept apart deliberately — a wall clock that steps backwards must not be able
+> to make a completed act stop being the most recent one.
+
+> **Normative.** The ledger stamps `recorded_at` itself, from an injected `Clock`
+> wrapped by `checked_clock` (ADR-0026), and no caller supplies it. Any reading of
+> the elapsed time that is not a positive duration is treated as the window having
+> lapsed, and the claim is refused; a clock that raises refuses the claim too. Both
+> are ADR-0029 §5's fail-closed rule for the same measurement, unchanged and
+> enforced where the rule is.
 
 > **Normative.** A claim refused because the authorisation is spent raises
 > `AuthorisationSpentError`. A claim refused because the trail holds no such
 > decision, or holds one whose ruling outcome is not `ALLOW`, raises
-> `UnrecordedAuthorisationError`. Both are new classes in `core/errors.py`; both
-> are seam faults, returned as no `ToolResult` and never as data; and neither is
-> ever auto-retried.
+> `UnrecordedAuthorisationError`. Both are seam faults, returned as no
+> `ToolResult` and never as data, and neither is ever auto-retried. A
+> `ToolInvoker` propagates each unchanged rather than translating it.
 
-> **Normative.** Both are raised **before the callable is entered**, always, and
-> that is a clause of this contract rather than a property of an implementation.
-> Each is therefore an exit in the window ADR-0034 §1 governs, qualifying on that
-> section's **second** ground — "The contract says the exit precedes the callable"
-> — exactly as a `ToolBindingError` does. The executor commits `RUNNING → FAILED`
-> and never retries, under ADR-0034 §1's rule unchanged; what it owes is
-> recognising the two classes, as it already recognises `ToolBindingError`.
+> **Normative.** **Every** failure of the claim append — either refusal above, a
+> duplicate id, a malformed argument, a clock failure, a store I/O failure, any
+> class whatever — is an exit **before the callable is entered**, always, and that
+> is a clause of this contract rather than a property of an implementation. Each is
+> therefore an exit in the window ADR-0034 §1 governs, qualifying on that section's
+> **second** ground — "The contract says the exit precedes the callable" — exactly
+> as a `ToolBindingError` does. The executor commits `RUNNING → FAILED` and never
+> retries, on the window and not on a list of classes.
 
 > **Normative.** The claim append is performed so that its outcome is **observable
 > before any cancellation is propagated**: a cancellation delivered while the append
@@ -156,12 +168,11 @@ surface can state an execution at all, because ADR-0186's two operations return
 > it, answering identically before and after a claim; and no lane reads a claim as
 > a change to what a decision says.
 
-> **Normative.** A retry admitted by ADR-0029 §5's two-part conjunction is not a
-> second act. It appends a further claim under the same decision, and it is
-> admitted exactly because the preceding claim completed `FAILED`. ADR-0029 §5's
-> key derivation, its retry conjunction, its two-sided window obligation and its
-> fail-closed elapsed-time reading are untouched and are still what bound
-> repetition.
+> **Normative.** A retry admitted by the third clause is not a second act. It
+> appends a further claim under the same decision, and it is admitted exactly
+> because ADR-0029 §5's conjunction is satisfied. That section's key derivation,
+> its retry conjunction, its two-sided window obligation and its fail-closed
+> elapsed-time reading are untouched and are still what bound repetition.
 
 **The further-claim rule is ADR-0029 §5's two-part retry conjunction transcribed
 onto the store, not a looser one beside it.** §5 permits a repeat only where
@@ -171,15 +182,34 @@ reduces to the one arm that remains: `KEYED`, inside its window. So an
 `Idempotency.NONE` side-effecting tool gets **exactly one claim, ever, whatever the
 failure kind**, which is §5's "An `Idempotency.NONE` side-effecting tool is
 therefore **never** auto-retried, whatever the failure kind" made a property of the
-store. An earlier draft of this section admitted a further claim after *any*
-`FAILED`, which was looser than the executor's own rule and would have left the
-consume unable to bound the tool class most at risk; that is why `failure_kind` is
-on the row at all (§2), and why the window is measured from the first claim rather
-than the last.
+store. An earlier draft admitted a further claim after *any* `FAILED`, which was
+looser than the executor's own rule and would have left the consume unable to bound
+the tool class most at risk; that is why `failure_kind` is on the row at all (§2),
+and why the window is measured from the first claim rather than the last.
 
-**The discriminator in the spendability clause is ADR-0029 §5's own.** Its retry rule
-permits a repeat when "the tool is not `side_effecting`; or its `idempotency` is
-`NATURAL`; or it is `KEYED` **and** the elapsed time since the first attempt of
+**The order and the clock are the two things a caller must not own, and an earlier
+draft gave it both.** It had the caller mint `recorded_at` and the store decide
+admission over those instants, which is two failures in one sentence. A caller
+could submit a retry stamped one second after the first claim, hours later, and
+satisfy every refusal rule — the window would be enforced against a number the
+party being bounded supplied. And "most recent" read over caller instants is not a
+history: with a wall clock that steps back, a claim written after a success can
+carry an earlier instant, and a completed act stops being the most recent one. So
+the ledger stamps, from a clock `checked_clock` guards, and admission reads its own
+append order. `CONTRIBUTING.md`'s determinism rule is satisfied the way the rest of
+the tree satisfies it — the clock is injected, so a test pins the boundary rather
+than racing it.
+
+**This does not make ADR-0021 §4's `record` inconsistent with the ledger, and the
+difference is the point.** A `PermissionDecision.decided_at` is *when a policy
+ruled* — a fact the caller holds and the store cannot recover — so the caller mints
+it. A claim's `recorded_at` is *when the append happened*, and it is an input to a
+rule the store enforces against that same caller. A store that enforces a rule over
+a number the caller chose enforces nothing.
+
+**The discriminator in the spendability clause is ADR-0029 §5's own.** Its retry
+rule permits a repeat when "the tool is not `side_effecting`; or its `idempotency`
+is `NATURAL`; or it is `KEYED` **and** the elapsed time since the first attempt of
 this call is strictly less than `idempotency_window`" — so the corpus has already
 decided which tools a repeat is safe on, and the consume borrows that test rather
 than inventing one. The first two arms decide **spendability**: a read gated by
@@ -189,16 +219,15 @@ refusing the second read would break working behaviour to protect nothing. The
 a lapsed window is not a retry, and §5 says so in terms.
 
 **Why this does not falsify either sentence ADR-0029 §5 gave as its reason.** Retry
-survives, because the retry path is the `FAILED` arm of the third clause: the
-approval still authorises the second attempt, and the transient `UNAVAILABLE` §5
-was written about still does not reach the user as a fresh prompt. And the trail is
-not consumed, because nothing is consumed: a claim is an **append**, and the sole
-thing it spends is a permission to append a second one. What ADR-0029 §5 rejected
-was destroying the record of what was authorised; what this ADR adds is a record
-of what was performed. The paragraph is superseded because its literal answer —
-"no", and "not a deferral" — is now partly yes, which is a change to what was
-decided and takes a supersession under ADR-0070 §1 whatever the reasoning behind it
-survives.
+survives, because the retry path is the `FAILED` arm: the approval still authorises
+the second attempt, and the transient `UNAVAILABLE` §5 was written about still does
+not reach the user as a fresh prompt. And the trail is not consumed, because
+nothing is consumed: a claim is an **append**, and the sole thing it spends is a
+permission to append a second one. What ADR-0029 §5 rejected was destroying the
+record of what was authorised; what this ADR adds is a record of what was
+performed. The paragraph is superseded because its literal answer — "no", and "not
+a deferral" — is now partly yes, which is a change to what was decided and takes a
+supersession under ADR-0070 §1 whatever the reasoning behind it survives.
 
 **Placing the claim immediately before the callable is what keeps two records from
 disagreeing, and the placement is load-bearing.** ADR-0034 §1 rules that an attempt
@@ -210,7 +239,7 @@ not have. Appended where this clause puts it, the two records agree by construct
 before the claim, ADR-0034 §1's window and no invocation row; after it, an act that
 may have run and a row that says so.
 
-**The atomicity lives in the trail, and it lives there for ADR-0021 §4's own
+**The atomicity lives in the store, and it lives there for ADR-0021 §4's own
 reason.** That section put the resolution invariant on `record` "because this is
 the only place both records are in hand", and made the append atomic because
 "without that the single-use guarantee is a race — two concurrent resolutions of the
@@ -220,87 +249,141 @@ against the same race, and putting it anywhere else would mean a check followed 
 write with an `await` between them. Two concurrent `invoke`s on one decision reach
 one atomic append: one claims, the other is refused.
 
-> **Normative.** `AuditTrail.record_invocation` refuses a claim whose named
-> decision is not recorded in the trail, or whose named decision's ruling outcome
-> is not `ALLOW`, with `UnrecordedAuthorisationError`. This is the resolution
-> invariant's placement argument applied to a second row kind: the check is made
-> where both records are in hand.
-
 **That narrows #259 and does not close it, and the difference is worth stating.**
 #259 records that `StepExecutor` "accepts any valid `ToolCall`", so a caller
 hand-building an `ALLOW` nobody recorded can have its id committed as a step's
-`approval_ref`. Under the clause above such a call cannot **execute**: the claim
-names a decision the trail does not hold and is refused before the callable. What
-remains reachable is the step claim itself, which is committed before `invoke` is
-entered — so a fabricated authority can still open a step, and that step is then
-closed `FAILED` by ADR-0034 §1's rule. #259's own analysis says a check placed
-after the claim leaves "closing a step that should never have been opened" as the
-only available response; that response is ADR-0034 §1's and it is already
-specified. The cost this places on implementations is the one #259 priced: a
-`ToolInvoker` implementation now holds the `AuditTrail`.
+`approval_ref`. Under the second refusal above such a call cannot **execute**: the
+claim names a decision the trail does not hold and is refused before the callable.
+What remains reachable is the step claim itself, which is committed before `invoke`
+is entered — so a fabricated authority can still open a step, and that step is then
+closed `FAILED` by ADR-0034 §1's rule. #259's own analysis says a check placed after
+the claim leaves "closing a step that should never have been opened" as the only
+available response; that response is ADR-0034 §1's and it is already specified.
 
-### 2. The invocation row, the three members that write and read it, and what it restates
+### 2. Two seams, not one, and the row they write
 
-> **Normative.** `core/types.py` gains `ToolInvocation`, a frozen model with
-> `extra="forbid"`, in **exactly two well-formed shapes**, refusing every other
-> combination at construction. Both carry `id`, `recorded_at` and `decision_id`. A
-> **claim** carries nothing further. A **completion** additionally carries
-> `completes`, `outcome`, `incurred_cost`, and `failure_kind` when and only when
-> its outcome is `FAILED`. `completes` is the discriminator: present on a
-> completion, absent on a claim.
+> **Normative.** `core/protocols.py` gains `InvocationLedger`, with exactly two
+> members. `claim_invocation(*, id: DurableIdentifier, decision_id: DurableIdentifier) -> ToolInvocation`
+> appends a claim and returns the stored row.
+> `complete_invocation(*, id: DurableIdentifier, claim_id: DurableIdentifier, outcome: ToolOutcome, incurred_cost: ToolCost, failure_kind: ToolFailureKind | None = None) -> ToolInvocation`
+> appends its completion and returns the stored row. Both are `async`, both stamp
+> `recorded_at` themselves, and both decide every refusal below inside the same
+> atomic operation as the append.
 
-> **Normative.** `recorded_at` is a timezone-aware instant, rejected at
-> construction like every other instant in `core`. `outcome` is `ToolOutcome`
-> (ADR-0029 §3) and `failure_kind` is `ToolFailureKind`. This ADR mints no outcome
-> vocabulary of its own, adds no member to either enum, and states no fifth
-> outcome. The **pending** state ADR-0148 §9 names is a claim carrying no
-> completion, and is not a value of any field.
+> **Normative.** A `ToolInvoker` implementation holds an `InvocationLedger` and
+> **never** an `AuditTrail`. The ledger can neither record a `PermissionDecision`,
+> nor read one, nor export, nor `clear`, so no decision write, no history read and
+> no erasure reaches `tools/` through this seam.
 
-> **Normative.** The row carries **no ordinal**. How many acts a decision has
-> backed is read from the claims themselves under `recent_invocations`' total
-> order; no field states it, and no store allocates one.
+> **Normative.** `AuditTrail` gains exactly two members, both reads:
+> `recent_invocations(*, limit: int = 50) -> list[RecordedInvocation]` and
+> `export_invocations() -> list[RecordedInvocation]`. `recent_invocations` carries
+> `recent`'s total order, its bounded default and its `ValueError` on a `limit`
+> that is not strictly positive. Each returns a detached snapshot, as every other
+> `AuditTrail` read does (ADR-0018 §3).
 
-> **Normative.** `AuditTrail` gains exactly three members.
-> `record_invocation(invocation: ToolInvocation) -> str` appends one row and
-> returns its id — `record`'s own shape.
-> `recent_invocations(*, limit: int = 50) -> list[ToolInvocation]` and
-> `export_invocations() -> list[ToolInvocation]` are `recent` and `export` over the
-> second kind, with `recent_invocations` carrying `recent`'s total order, its
-> bounded default and its `ValueError` on a `limit` that is not strictly positive.
+> **Normative.** Each read **joins the row to its decision inside one atomic store
+> operation**, so every `RecordedInvocation` it returns is complete. No consumer
+> assembles one from two reads, and no implementation returns a row it could not
+> pair.
 
-> **Normative.** The **caller mints** `id` and `recorded_at`, exactly as
-> `PermissionDecision.id` and `decided_at` are minted by the caller that records
-> (ADR-0021 §1, §4). The store allocates nothing, generates nothing, defaults
-> nothing and rewrites no field of a row it is handed.
+> **Normative.** The composition root injects **one object implementing both
+> Protocols**, over one store. This is ADR-0029 §8's rule for `ToolRegistry` and
+> `ToolInvoker`, applied for the same reason: two tables keyed by the same
+> decision could diverge, and the consume would then bound one of them.
 
-> **Normative.** `record_invocation`'s refusals are these and no others, each
-> decided **inside** the same atomic operation as the append: `AuditError` where
-> the value is not a valid record; `DuplicateInvocationError` where the `id` is
-> already present; `UnrecordedAuthorisationError` where the named decision is
-> absent from the trail or its ruling outcome is not `ALLOW`; `AuthorisationSpentError`
-> where §1's consume refuses; and `InvalidCompletionError` where a completion names
-> no recorded claim, names a claim already completed, carries a `decision_id`
-> unequal to that claim's, or carries an instant earlier than that claim's. The
-> first four are new classes in `core/errors.py` beside ADR-0021's; equal instants
-> are permitted.
+> **Normative.** `core/types.py` gains `ToolInvocation`, frozen with
+> `extra="forbid"`, whose fields are exactly: `id: DurableIdentifier`;
+> `decision_id: DurableIdentifier`; `recorded_at: UtcInstant`;
+> `completes: DurableIdentifier | None = None`; `outcome: ToolOutcome | None = None`;
+> `incurred_cost: ToolCost | None = None`; and
+> `failure_kind: ToolFailureKind | None = None`.
+
+> **Normative.** It has **exactly two well-formed shapes** and a validator refuses
+> every other combination at construction. A **claim** carries `completes`,
+> `outcome`, `incurred_cost` and `failure_kind` all unset. A **completion** carries
+> `completes`, `outcome` and `incurred_cost` all set, and `failure_kind` set when
+> and only when `outcome` is `FAILED`. `completes` is the discriminator.
+
+> **Normative.** `core/types.py` gains `RecordedInvocation`, frozen with
+> `extra="forbid"`, whose fields are exactly: `invocation: ToolInvocation`;
+> `tool: VisibleIdentifier` and `capability: VisibleIdentifier`, read from the
+> `ToolDefinition` the named decision carries; and `egress_call: bool`, true when
+> and only when that decision's `egress_binding` is not `None`. It carries nothing
+> else — no ruling, no reason, no binding, no destination, no digest and no whole
+> `ToolDefinition`.
+
+> **Normative.** `core/errors.py` gains exactly four classes, **all four deriving
+> from `AuditError`** and none from `ToolError`: `AuthorisationSpentError`,
+> `UnrecordedAuthorisationError`, `DuplicateInvocationError` and
+> `InvalidCompletionError`. Each preserves its cause where it has one. A consumer
+> catching `AuditError` catches every refusal either ledger member makes.
+
+> **Normative.** `claim_invocation` refuses in this order and no other: `AuditError`
+> where an argument is not valid; `DuplicateInvocationError` where the `id` is
+> already present; `UnrecordedAuthorisationError` where the named decision is absent
+> from the store or its ruling outcome is not `ALLOW`; then
+> `AuthorisationSpentError` where §1's consume refuses.
+
+> **Normative.** `complete_invocation` refuses in this order and no other:
+> `AuditError` where an argument is not valid, which includes a `failure_kind` that
+> disagrees with `outcome`; `DuplicateInvocationError` where the `id` is already
+> present; then `InvalidCompletionError` where `claim_id` names no recorded claim or
+> names one already completed. It never raises `UnrecordedAuthorisationError`: a
+> completion names a claim, and the claim already names the decision.
 
 > **Normative.** The row restates nothing its decision already fixes. It carries no
 > `ToolDefinition`, no `parameters_digest`, no `step_id`, no `execution_id`, no
 > account, no transport endpoint and no destination. What a call transmitted to is
 > the decision's own `EgressBinding.canonical_destination_set`, reached through
-> `decision_id`, and no lane copies that set, or any member of it, onto this row.
+> `decision_id`, and no lane copies that set, or any member of it, onto this row or
+> onto a `RecordedInvocation`.
 
 > **Normative.** The row carries **no content**. Not an argument value, not a
 > payload, not a tool's output, not a failure message, and not a digest of any of
-> them. ADR-0004 §5 and ADR-0021 §1's payload rule bind here as they bind on a
-> decision: what this row is an account of is the *act*.
+> them. `failure_kind` is an enum member and is the whole of what a failure
+> contributes. ADR-0004 §5 and ADR-0021 §1's payload rule bind here as they bind on
+> a decision: what this row is an account of is the *act*.
 
-> **Normative.** A completion names exactly one claim and a claim is completed at
-> most once. A completion's `decision_id` is checked against the claim's rather
-> than trusted, at the boundary where both rows are in hand — ADR-0021 §4's own
-> treatment of `tool`, `parameters_digest`, `step_id` and `execution_id` on a
-> resolving decision, and the reason the duplicate is a join key rather than a
-> second shape that could drift.
+> **Normative.** The row carries **no ordinal**. How many acts a decision has backed
+> is read from the claims themselves under `recent_invocations`' order; no field
+> states it, and no store allocates one.
+
+> **Normative.** A completion's `decision_id` is set by the ledger from the claim it
+> completes, never accepted from a caller, so the two cannot disagree.
+
+**Two Protocols rather than one, because the invoker needs two methods and
+`AuditTrail` has nine.** Handing a `ToolInvoker` the whole trail would put decision
+writes, history reads, the whole-trail export and `clear()` into `tools/` — a
+subsystem the architecture map gives integrations, not the permission record. That
+is the shape ADR-0017 §8 wants to move away from and the split ADR-0029 §1 already
+made once, in its own words: "handing every holder of a lookup the ability to
+execute is the shape ADR-0017 §8 wants to move away from, and a consumer that only
+reads is one a test can double without stubbing execution." A ledger that can append
+two kinds of row and read nothing is the narrowest capability that does the job.
+
+**And one object implements both, which is why the split costs no coherence.** The
+consume is only a bound if every writer goes through it, so two independent stores
+keyed by the same decision would be exactly ADR-0016 §7's named failure one level
+over. ADR-0029 §8 already had this problem between the registry and the invoker and
+answered it the same way; the residue is the same too, and it is the composition
+root's.
+
+**`InvocationLedger` is a new Protocol, so it is a triad.** Contract, shared
+conformance suite and canonical fake in `ai_assistant.testing`, in one change and
+never deferred (`CONTRIBUTING.md` → "Adding a Protocol"), and under ADR-0137 §2 it
+may ride with its primary production implementation — the `permissions` store that
+also satisfies `AuditTrail`, which is the consumer whose demands shape it. §9 is
+where that lands.
+
+**The reads return a joined value because the join cannot be done safely anywhere
+else.** An engine reading rows and then reading their decisions has an `await`
+between the two, and `clear()` landing in that gap leaves it holding rows whose
+decisions are gone — with nothing to do but drop them, fabricate the identifiers, or
+fail, all three of which contradict a total projection. One store operation has no
+gap. It also restores ADR-0186 §1's relay rule for the engine (§4), which an earlier
+draft of this ADR had to depart from precisely because the join was in the wrong
+place.
 
 **One row kind rather than two types, because the surface has to show both
 together.** A claim with no completion is precisely the state a user most needs to
@@ -318,8 +401,8 @@ that moves from pending to succeeded **cannot** live there, and an implementatio
 that tried would be rewriting an audit record". A claim and its completion joined
 by a pointer is the shape the trail already writes — a `CONFIRM` and the resolution
 whose `resolves` names it, refused unless the referenced row exists and is not
-already answered — so the last clause is that invariant transcribed onto a second
-row kind rather than a new mechanism.
+already answered — so the completion rule is that invariant transcribed onto a
+second row kind rather than a new mechanism.
 
 **Write-ahead rather than one row after the call, and this is the clause the whole
 section is for.** A single row written on return would record nothing at all for a
@@ -338,22 +421,20 @@ copy exactly. It is also unnecessary: ADR-0148 §1's title is that nothing in an
 egress call moves after the ruling, so the set the call transmitted to **is** the
 set the decision fixed, and a pointer to the decision is a pointer to it.
 
+**`egress_call` is a boolean and not the binding, and that is the line between what
+a surface may say and what it may show.** §4 grants one word — *sent* — on a
+completed egress call, and a boolean is exactly what deciding that word needs. Who
+received the bytes is `recent_decisions`' to render, under ADR-0186 §7's floor,
+from the binding itself; putting a second copy of it here would be the drift the
+paragraph above refuses, in service of a rendering another operation already owes.
+
 **An earlier draft carried an `attempt` ordinal on the claim, and dropping it is a
 correction rather than a simplification.** A caller-minted ordinal cannot be
 allocated safely under concurrency — two racing claims both compute 1 — and a
-store-allocated one would make `record_invocation` rewrite a field of the value it
-was handed, which is the one thing ADR-0021 §4's write path does not do. Neither
-was worth the count, because §1's tightened rule bounds a spendable authorisation
-to one claim plus retryable `KEYED` retries inside one window; the claims
-themselves, in the store's own order, are the count.
-
-**`decision_id` on both shapes is a join key checked at the write, not a second
-shape that must agree.** The pointer chain claim → decision was one hop and
-completion → claim → decision was two, which left a bounded page holding a
-completion whose claim had fallen off it and no way to reach the decision at all
-(§4). Carrying the key on both shapes is ADR-0021 §4's own remedy: it validates the
-duplicate against the row it duplicates, "because this is the only place both
-records are in hand", so the two can never disagree after the write.
+store-allocated one buys nothing now that the ledger returns the stored row and
+§1's rule bounds a spendable authorisation to one claim plus retryable `KEYED`
+retries inside one window. The claims themselves, in the ledger's own order, are
+the count.
 
 ### 3. `INDETERMINATE` spends the authorisation, and exactly-once is not landed here
 
@@ -365,14 +446,30 @@ records are in hand", so the two can never disagree after the write.
 > as `SUCCEEDED`, as `FAILED`, as "did not run", as an omission, or as a row still
 > being written.
 
-> **Normative.** Once a claim is appended, `ToolInvoker.invoke` appends the
-> completion on **every** exit it observes — a returned `ToolResult`, a raised seam
-> fault, an expired deadline, a cancellation — carrying the outcome ADR-0029 §§3–4
-> already compute for that exit. An exit that occurs **before** the claim completes
-> nothing, because there is no claim: §1's two refusals and the rest of ADR-0034
-> §1's window are that case. A completion that is not written because the process
-> did not survive to write it leaves the claim open, which is the state the clause
-> above governs.
+> **Normative.** Once a claim is appended, `ToolInvoker.invoke` calls
+> `complete_invocation` on **every** exit it observes — a returned `ToolResult`, a
+> raised seam fault, an expired deadline, a cancellation — carrying the outcome
+> ADR-0029 §§3–4 already compute for that exit. An exit that occurs **before** the
+> claim completes nothing, because there is no claim: §1's refusals and the rest of
+> ADR-0034 §1's window are that case.
+
+> **Normative.** The obligation above is **to make the call**, and a completion
+> that is refused or fails to write changes nothing about the call itself.
+> `invoke` returns the `ToolResult` the call produced, or re-raises the exception
+> it was already raising, exactly as it would have; it does not convert the
+> completion's failure into a `ToolResult`, does not substitute an outcome, does
+> not retry the act, and does not re-claim. A `SUCCEEDED` side effect is not
+> reported as failed because a disk was full.
+
+> **Normative.** No such failure is **swallowed**: the implementation surfaces it
+> to the operator as a Tier 2 diagnostic carrying the cause, and it is a diagnostic
+> and never a row. `core/logging.py`'s redaction rules and ADR-0004 §5 bind it as
+> they bind every operator-facing message.
+
+> **Normative.** The result of all three clauses is a claim left **open**, which is
+> the state the clause above governs and which no reader resolves. That is the
+> honest record of an act whose outcome this system failed to write down, and it is
+> preferred to every alternative that writes a number down instead.
 
 > **Normative.** Where ADR-0014 §4's recovery scan records `INDETERMINATE` on a
 > step, the same act appends an `INDETERMINATE` completion for **every** open claim
@@ -430,67 +527,53 @@ nothing in this section inherits that nonce or its hazard.
 
 ### 4. The surface: two operations, two sequences, and one word that becomes sayable
 
-> **Normative.** `core/types.py` gains `RecordedInvocation`, a frozen model with
-> `extra="forbid"` carrying exactly three members: the `ToolInvocation` row, and
-> the `id` and `capability` of the `ToolDefinition` carried by the decision the
-> row's `decision_id` names. It carries nothing else — no ruling, no reason, no
-> egress binding, no parameters digest and no whole `ToolDefinition`.
-
 > **Normative.** `AssistantEngine` gains exactly two methods.
 > `recent_invocations(*, limit: int = DEFAULT_PAGE_SIZE) -> tuple[RecordedInvocation, ...]`
 > reads `AuditTrail.recent_invocations`;
 > `export_invocations() -> tuple[RecordedInvocation, ...]` reads
-> `AuditTrail.export_invocations`. Each pairs every row it read with the two
-> identifiers above, read from the trail's own decision at that `decision_id`.
+> `AuditTrail.export_invocations`. Neither composes, filters, projects, enriches or
+> summarises what the trail returns, and neither reads any other store. The join is
+> the store's (§2) and the engine relays it, which is ADR-0186 §1's rule unchanged.
 
-> **Normative.** That pairing is the **only** composition either operation
-> performs. Neither reads any store but the trail, adds any field the trail does
-> not hold, filters, summarises, samples, reorders or drops a row. The projection
-> is **total and one-to-one**: every row the trail returns yields exactly one
-> `RecordedInvocation`, in the trail's order.
-
-> **Normative.** Both return rows ordered by the row's `recorded_at`
+> **Normative.** Both return values ordered by the row's `recorded_at`
 > **descending**, ties broken by the row's `id` **ascending**, and
 > `recent_invocations(limit=n)` returns the first `n` of the sequence
-> `export_invocations()` returns over the same trail state. The
-> order is guaranteed by the engine operation, over a list it has materialised.
-> `limit` is refused when it is not an integer, when it is a `bool`, and when it is
-> outside `[1, 2**63)` — locally and before any I/O, in every implementation.
-> `export_invocations` takes no argument and is subject to ADR-0085 §8c's payload
-> limit exactly as `export_decisions` is. There is no `offset`.
+> `export_invocations()` returns over the same trail state. The order is guaranteed
+> by the engine operation, over a list it has materialised. `limit` is refused when
+> it is not an integer, when it is a `bool`, and when it is outside `[1, 2**63)` —
+> locally and before any I/O, in every implementation. `export_invocations` takes no
+> argument and is subject to ADR-0085 §8c's payload limit exactly as
+> `export_decisions` is. There is no `offset`.
 
 > **Normative.** The two row kinds are two operations returning two sequences. No
 > operation returns a mixed sequence; no lane widens ADR-0186 §1's return type or
 > adds a `ToolInvocation` or a `RecordedInvocation` to what `recent_decisions` or
-> `export_decisions` returns;
-> and ADR-0186 §8's clauses bind every row those two operations return, unchanged
-> and in full.
+> `export_decisions` returns; and ADR-0186 §8's clauses bind every row those two
+> operations return, unchanged and in full.
 
-> **Normative.** ADR-0188's hub-down egress record is not a `ToolInvocation`, is
-> not a `RecordedInvocation`, and is not returned by either operation above. ADR-0188 §7's first clause is read
-> forward onto this surface: that record is rendered through no operation this ADR
-> decides, is listed among no row of these listings, and is counted in no bound
-> stated over them.
+> **Normative.** ADR-0188's hub-down egress record is not a `ToolInvocation`, is not
+> a `RecordedInvocation`, and is not returned by either operation above. ADR-0188
+> §7's first clause is read forward onto this surface: that record is rendered
+> through no operation this ADR decides, is listed among no row of these listings,
+> and is counted in no bound stated over them.
 
 > **Normative.** A surface rendering a `RecordedInvocation` renders, for every one:
 > the row's kind — claim or completion — the instant it was recorded, and the tool
 > identifier and capability the value itself carries. For a completion it also
 > renders the outcome, the failure kind where the outcome is `FAILED`, and the
 > incurred cost, **including that the cost is unknown** where the basis is
-> `UNKNOWN`. It omits, truncates, summarises, samples and counts in place of none
-> of that, and a surface that cannot render one whole renders **fewer of them**.
+> `UNKNOWN`. It omits, truncates, summarises, samples and counts in place of none of
+> that, and a surface that cannot render one whole renders **fewer of them**.
 
 > **Normative.** Every value a surface renders here comes from the
 > `RecordedInvocation` in hand. No surface joins two operations' answers, reads a
 > store, calls a second operation to complete a row, or infers a missing half —
-> which is what the pairing above exists to make unnecessary.
+> which is what the store-side join exists to make unnecessary.
 
 > **Normative.** A surface may render an invocation row **as an execution**, which
-> is what the row is. On a **completion whose outcome is `SUCCEEDED`**, where the
-> surface also holds the row's decision and that decision's `egress_binding` is
-> present, a surface may say that the call was **sent**. It says this on no other
-> row and in no other state, and a surface not holding the decision says it not at
-> all.
+> is what the row is. On a **completion whose outcome is `SUCCEEDED`** and whose
+> `RecordedInvocation` carries `egress_call` true, a surface may say that the call
+> was **sent**. It says this on no other row and in no other state.
 
 > **Normative.** No surface says or implies that anything was **read**, **received**,
 > **delivered**, **seen** or **acted on** by any recipient, on any row, in any
@@ -498,6 +581,11 @@ nothing in this section inherits that nonce or its hazard.
 > what happened after that. ADR-0186 §8's third clause is narrowed to decision rows
 > and to nothing else; every other bar it states stands over every row of every
 > operation, this ADR's included.
+
+> **Normative.** No surface names a recipient, an account, an endpoint or a
+> destination on an invocation row. `egress_call` states that the call was an egress
+> call and states nothing about whose bytes went where; the recipients are
+> `recent_decisions`' to render, under ADR-0186 §7's floor, from the binding itself.
 
 > **Normative.** A surface that renders both kinds together states each row's kind
 > and renders neither in the other's vocabulary. It presents no decision row as a
@@ -525,36 +613,32 @@ merge ADR-0188 §7 names inside the contract, "at which point either this record
 rendered as a ruling, which is false, or the rulings are rendered as transmissions",
 which is the failure both ADRs are defending against from opposite sides.
 
-**The pairing is a stated, narrow departure from ADR-0186 §1's relay rule, made
-because the alternatives are both forbidden.** A bare `ToolInvocation` cannot be
-rendered under its own floor: the tool's identity lives on the decision, a bounded
-page may hold a completion whose claim and whose decision are not on it, and no
-keyed lookup is promoted. That leaves a join, and there is nowhere legitimate to
-put one — golden rule 3 keeps business logic out of `interfaces/`, and ADR-0042 §4
-keeps an adapter from reaching past the engine for a second store. So the join goes
-behind the engine seam, where ADR-0021 §1 already put the same reasoning for a
-decision: it embeds the whole `ToolDefinition` by value so "the trail stays readable
-without the registry". Two short identifiers per row is the smallest version of that
-which makes the floor satisfiable, and it is why `RecordedInvocation` carries
-neither the ruling nor the binding: those are `recent_decisions`' to render, under
-ADR-0186 §7, and duplicating them here would be the second shape §2 refuses.
+**The engine relays and does not compose, and getting there took moving the join.**
+A bare `ToolInvocation` cannot be rendered under its own floor — the tool's identity
+lives on the decision, and a bounded page may hold a completion whose claim and whose
+decision are not on it. An earlier draft had the engine pair the two, which meant an
+`await` between reading rows and reading decisions and a `clear()` able to land in
+it. The join is the store's now (§2), atomically, so the engine is a relay again and
+ADR-0186 §1's rule is untouched rather than departed from. The alternatives were both
+forbidden anyway: golden rule 3 keeps the join out of `interfaces/`, and ADR-0042 §4
+keeps an adapter from reaching past the engine for a second store.
 
 **The projection is bounded by construction, so ADR-0085 §8c's ceiling is not made
-worse by it.** A `RecordedInvocation` is one small row plus two identifiers, where
-a `PermissionDecision` measured 858 bytes in this tree carrying a whole
-`ToolDefinition` and an egress binding (ADR-0186 §3). The export of invocations is
-subject to the same limit and fails the same honest way.
+worse by it.** A `RecordedInvocation` is one small row, two identifiers and a
+boolean, where a `PermissionDecision` measured 858 bytes in this tree carrying a
+whole `ToolDefinition` and an egress binding (ADR-0186 §3). The export of
+invocations is subject to the same limit and fails the same honest way.
 
 **"Sent" is the whole point of the exercise and it is granted narrowly.** ADR-0186
 §8 barred it because the trail held only rulings: "a resolved `ALLOW` says a call
 was permitted and says nothing about whether, or how many times, it ran". That
 sentence stays true of a decision row and is now false of nothing, because the word
-is granted on a different row — one that *is* an execution, joined to a binding that
-fixes where the bytes went. The three words that stay barred everywhere are barred
-for a reason no record can lift: nothing in this system observes a recipient. A
-tool reporting `SUCCEEDED` reports that its own upstream accepted the call, and a
-surface that turned that into "delivered" would be asserting the measurement
-ADR-0016 §3 declines to offer, one axis over.
+is granted on a different row — one that *is* an execution, over a decision the
+store has already confirmed carried a binding. The three words that stay barred
+everywhere are barred for a reason no record can lift: nothing in this system
+observes a recipient. A tool reporting `SUCCEEDED` reports that its own upstream
+accepted the call, and a surface that turned that into "delivered" would be
+asserting the measurement ADR-0016 §3 declines to offer, one axis over.
 
 **Deciding the engine surface here rather than deferring it, which ADR-0188 §7 did
 for its own record.** That deferral rested on the record being "in the data
@@ -667,13 +751,13 @@ here; they are what the surveyed projects' own code and documentation say, and
 > count of every row it removed, of either kind. No operation erases one kind and
 > leaves the other, and no surface offers one.
 
-> **Normative.** `clear()` wins any race with an in-flight invocation. Where a
-> completion is refused because the claim it names was erased under it, §3's
-> completion obligation is **discharged by the attempt**: `invoke` recreates no
-> erased row, re-claims nothing, and does not convert the refusal into a
-> `ToolResult` or alter the result the call had already produced. The user erased
-> that call's record, which is what wholesale erasure means; the call itself is
-> unaffected, and its step still records its own outcome (ADR-0148 §9).
+> **Normative.** `clear()` wins any race with an in-flight invocation. A
+> completion whose claim was erased under it is refused as
+> `InvalidCompletionError` like any other completion naming no claim, and §3's
+> three clauses govern from there without a special case: the call's own result
+> stands, the failure reaches the operator, and nothing is recreated. No lane
+> mints an erasure marker, a cleared generation, or any other value by which the
+> two causes could be told apart.
 
 > **Normative.** `AuditTrail.export_invocations` and the engine operation above
 > discharge ADR-0004 §6's portability obligation for this row kind.
@@ -687,14 +771,18 @@ here; they are what the surveyed projects' own code and documentation say, and
 > the other is not available to the ADR that answers it, because a trail holding
 > completions whose claims have expired would misstate what it holds.
 
-**The race clause resolves a real contradiction rather than papering one.** §3
-requires a completion on every exit after a claim, and §2 refuses a completion whose
-claim is not there — so an erasure landing between them would make two clauses
-unsatisfiable together. Erasure wins because it is the data-rights act and the other
-is a record of it; the direction is the same one ADR-0021 §4 chose when it made the
-trail erasable at all, and the residue is one call whose record the user destroyed on
-purpose. Recreating the row would be the other answer, and it is the one no store may
-give: it writes into a trail the user has just burned.
+**The race clause resolves a real contradiction, and it resolves it without asking
+the store to tell two causes apart.** §3 requires a completion attempt on every exit
+after a claim, and §2 refuses a completion whose claim is not there — so an erasure
+landing between them would, under an earlier draft that suppressed the error, have
+required the store to distinguish "the user burned the trail" from "this pointer is
+corrupt". It cannot: after `clear()` the two are the same absence. Review found that
+squarely, and the fix is that nothing is suppressed. §3's rule is uniform over every
+completion failure — the call's result stands, the operator is told, the claim stays
+open — so the erasure case needs no marker, no generation counter and no precedence
+of its own. Erasure still wins, because it is the data-rights act and the other is a
+record of it; the residue is one call whose record the user destroyed on purpose, and
+recreating the row is the one answer no store may give.
 
 **Extending `clear` rather than adding a second erasure act is what keeps ADR-0021
 §4's rule true.** "The user may burn the book; nobody may tear out a page" is a rule
@@ -756,7 +844,9 @@ over-wide, so under ADR-0082 §1 there is nothing to record against them.
 
 **ADR-0186 — nothing is owed.** §1's second clause reads "Nothing else is promoted
 by **this ADR**", which stays true of ADR-0186 however many methods a later ADR
-promotes. §8's clauses are stated over the rows its §1's two operations return; §4
+promotes. Its relay rule — "Neither composes, filters, projects, enriches or
+summarises" — is not departed from either: §4's two operations relay a value the
+store assembled, which is why §2 puts the join there. §8's clauses are stated over the rows its §1's two operations return; §4
 above binds every one of them over those rows unchanged, and grants the transmission
 word on a different row kind that ADR-0186 did not decide and does not describe. No
 sentence of ADR-0186 becomes false, and its third §8 clause is narrowed only in the
@@ -815,10 +905,19 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 
 ### 9. What the implementing lane owes, and what it is sequenced behind
 
-> **Normative.** The implementing lane lands the `core` surface this ADR names, the
-> obligations in the shared conformance suites for `AuditTrail`, `ToolInvoker` and
-> `AssistantEngine`, and the canonical fakes in `ai_assistant.testing`. No lane
-> implements against this ADR before it is ratified and merged (ADR-0015 §5).
+> **Normative.** The implementing lane lands the `core` surface this ADR names:
+> `InvocationLedger` as a triad — Protocol, shared conformance suite and canonical
+> fake — together with its primary production implementation, the `permissions`
+> store that also satisfies `AuditTrail` (ADR-0137 §2's pairing); the new
+> obligations in the existing conformance suites for `AuditTrail`, `ToolInvoker`
+> and `AssistantEngine`; and the fakes for each. No lane implements against this
+> ADR before it is ratified and merged (ADR-0015 §5).
+
+> **Normative.** The conformance suite for `InvocationLedger` pins the clock at the
+> boundary: an exact-window reading, a reading one unit outside it, a reading that
+> steps backwards, a repeated reading, and a clock that raises — each producing the
+> admission this ADR states. It pins the ordering rule against a backwards clock by
+> asserting over append order and not over instants.
 
 > **Normative.** Two writes here run from paths that may themselves be cancelled:
 > the claim append, whose outcome §1 requires to be observable before a cancellation
@@ -831,8 +930,14 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 
 > **Normative.** `ToolInvocation` and `RecordedInvocation` join the promoted set
 > `tests/core/test_engine_surface_closure.py` walks, together with the transitive
-> closure of what their fields reach (ADR-0085 §5). The lane adds no figure to a
-> comment for either count; that check owns them.
+> closure of what their fields reach (ADR-0085 §5), and every string among them is
+> `EncodableText` (ADR-0085 §4c). The lane adds no figure to a comment for either
+> count; those checks own them.
+
+> **Normative.** The composition root wires one object as both `InvocationLedger`
+> and `AuditTrail`, and hands the `ToolInvoker` the ledger alone. A composition that
+> hands it the trail is a defect the lane's own test names, in the shape ADR-0029
+> §8's pairing test already has.
 
 > **Normative.** The conformance suite exercises the consume under **concurrent**
 > invocation rather than assuming a single-threaded caller, as ADR-0021 §4's suite
@@ -881,10 +986,16 @@ row kinds, and the annotation belongs to the kind that was already there.
   real cost on the hot path of every tool call and it is accepted: the write before
   the callable is the consume, and a consume that is not durable before the effect
   is not a consume.
-- **A `ToolInvoker` implementation now holds the `AuditTrail`.** That is a new
+- **A `ToolInvoker` implementation now holds an `InvocationLedger`.** That is a new
   collaborator on a seam whose whole design was that it holds a registry binding and
-  nothing else, and it is the cost #259 priced when it described closing the same
-  hole one level up.
+  nothing else — the cost #259 priced when it described closing the same hole one
+  level up — but it is two append methods and not the audit trail, so no decision
+  write, history read or erasure reaches `tools/`.
+- **The audit store now needs a clock.** `recorded_at` is stamped where the rule is
+  enforced rather than supplied by the party the rule bounds, which is a new
+  injected collaborator on an implementation that had none, and a new failure mode:
+  a clock that will not read refuses the claim, so nothing side-effecting executes.
+  That is the fail-closed direction and it is chosen deliberately.
 - **`ToolResult` gains a field, so every tool implementation may report a cost and
   none must.** The default is `None` and `None` becomes `UNKNOWN` on the row, so a
   tool that never grows the field fails a budget closed rather than silently
@@ -895,22 +1006,28 @@ row kinds, and the annotation belongs to the kind that was already there.
   exactly as strict as ADR-0029 §5's retry rule already was on the executor; a
   caller that was quietly re-invoking such a tool under one `ALLOW` will now be
   refused, and that refusal is the point.
-- **A surface can no longer be written against `AuditTrail` rows alone.** The
-  engine pairs each row with its tool identity because the floor cannot be met
-  otherwise, which is a composition ADR-0186 §1 declined for its own operations;
-  §4 states the departure and its two forbidden alternatives.
+- **A surface can no longer be written against a bare invocation row.** The store
+  pairs each with its tool identity and one egress fact, atomically, because the
+  rendering floor cannot be met otherwise and because the pairing has no safe home
+  above the store; the engine stays the relay ADR-0186 §1 made it.
+- **An audit write can now fail without failing the call**, and that asymmetry is
+  deliberate. A completion that will not write leaves an open claim and an operator
+  diagnostic, and the tool's own result is returned unchanged — because reporting a
+  known-successful side effect as failed is the one outcome worse than an
+  incomplete record.
 - **An honest history has a state that is neither success nor failure, and surfaces
   must render it.** A claim with no completion will be visible to users, and a
   surface that finds it awkward is not permitted to resolve it.
 - **The trail becomes the busiest store in the system.** Two rows per side-effecting
   call on top of one per gated action, with no retention rule, makes #108 sharper
   than ADR-0021 §4 left it — and #108's own trade is unchanged, only larger.
-- **New `core` surface:** `ToolInvocation` and `RecordedInvocation`;
-  `AuthorisationSpentError`, `UnrecordedAuthorisationError`,
-  `DuplicateInvocationError` and `InvalidCompletionError`; one field on
-  `ToolResult`; three members on `AuditTrail`; two on `AssistantEngine`; and one
-  obligation on `ToolInvoker.invoke`. No new Protocol, so no new triad; three
-  conformance suites and three fakes grow.
+- **New `core` surface:** the `InvocationLedger` Protocol with two members;
+  `ToolInvocation` and `RecordedInvocation`; `AuthorisationSpentError`,
+  `UnrecordedAuthorisationError`, `DuplicateInvocationError` and
+  `InvalidCompletionError`, all four under `AuditError`; one field on `ToolResult`;
+  two read members on `AuditTrail`; two on `AssistantEngine`; and one obligation on
+  `ToolInvoker.invoke`. One triad lands, and three existing conformance suites and
+  their fakes grow.
 - **Revisit when** the budget ADR lands and finds the field named in §5 does not
   answer it; when #234 changes the executor's classification; when a tool contract
   offers a lookup by idempotency key and reconciliation becomes possible; or when a
@@ -968,6 +1085,31 @@ ADR of its own", and doing it here would put this ADR's row (`FAILED`) and the s
 status (`INDETERMINATE`) in disagreement about one attempt unless ADR-0029 §4 moved
 with it. §1's shielded append — the half of the finding that is this ADR's — is
 adopted in full; the classification is left where #234 put it.
+
+**Hand the `ToolInvoker` the whole `AuditTrail`.** The first draft's shape, and
+refused once review named what it hands over: decision writes, history reads, the
+whole-trail export and `clear()`, into `tools/`. The architecture map gives that
+subsystem integrations, not the permission record, and ADR-0029 §1 already split a
+capability by consumer for the same reason. `InvocationLedger` is the two methods
+the invoker needs and nothing else.
+
+**Let the caller mint `recorded_at` and have the store enforce the window over it.**
+The second draft's shape, and wrong twice: the window would be measured against a
+number the bounded party supplied, and "most recent" read over caller instants stops
+being a history the moment a wall clock steps back. The ledger stamps, and admission
+reads its own append order.
+
+**Have the engine pair each row with its decision.** The second draft's shape for
+§4, and refused because it puts an `await` between the two reads with `clear()` able
+to land in it — leaving the engine holding rows whose decisions are gone and nothing
+to do but drop them, fabricate the identifiers, or fail. The store's own operation
+has no gap, and moving the join there restores ADR-0186 §1's relay rule as a bonus.
+
+**Mint an erasure marker so a completion refused after `clear()` can be told from a
+corrupt pointer and suppressed.** Refused: after `clear()` the two are the same
+absence, so the distinction would be a value invented to be trusted. Nothing is
+suppressed instead — one uniform rule over every completion failure (§3), which
+needs no marker.
 
 **Carry an `attempt` ordinal on the claim.** Refused after review found no safe
 allocator: caller-minted races, and store-allocated would make the write path
