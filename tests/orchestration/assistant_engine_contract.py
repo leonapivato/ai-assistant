@@ -564,8 +564,9 @@ class SeededReadTrail:
 
         Carried so this object satisfies ``SourceReadTrail`` **whole** rather than
         only the two members the engine calls. Nothing on the promoted surface
-        reaches it — ADR-0186 §4's refusal of a promoted ``clear`` binds here
-        through §10 — and a double that omitted it would be a narrower seam than the
+        reaches it — ``SourceReadTrail.clear`` stays unpromoted on ADR-0186 §4's
+        reasoning read one store over, §4 not being in §10's inheritance list — and
+        a double that omitted it would be a narrower seam than the
         one the engine is wired with, which is how a fixture starts proving less
         than it appears to.
         """
@@ -3087,8 +3088,11 @@ class AssistantEngineContract(ABC):
 
         Two operations rather than one, and **two rather than three**: ADR-0185 §12
         left "a per-source query and a count … the surface ADR's to ask for if it
-        needs them", and ADR-0186 §10 declined both, so a ``source`` argument
-        appearing here would be the surface that was asked for and not requested.
+        needs them", and ADR-0186 §10 passed that question on rather than closing
+        it — naming them "this surface's to ask for and not this document's to
+        guess at" — so declining both was **this lane's** choice, on ADR-0045 §1's
+        and ADR-0028 §7's surface-with-no-consumer rule. A ``source`` argument
+        appearing here would therefore be a surface nobody asked for.
         Asserted over the signature because the failure is an argument being
         **added**, which no call that omits it would ever notice.
         """

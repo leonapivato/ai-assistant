@@ -482,7 +482,7 @@ def test_a_loop_that_will_not_stop_is_named_rather_than_closed_out_from_under(
     SQLite connections survives anyway.
 
     Driven without the ``hub`` fixture and without an engine: the subject is the
-    loop and its thread, and standing up seven databases to wedge a callback would
+    loop and its thread, and standing up the hub's databases to wedge a callback would
     only make the test slower and the wedge harder to place. The patience is
     shortened for the same reason — waiting the full :data:`_PATIENT` to watch a
     teardown give up would put ten seconds into every run of the suite.

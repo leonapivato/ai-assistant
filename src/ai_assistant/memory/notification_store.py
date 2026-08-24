@@ -454,10 +454,10 @@ def check_notification_tuning(retention: timedelta | None, cap: object) -> None:
     ask it before it touches one.** The retention bound below is the first tuning
     in this tree that ``Settings`` accepts and a store refuses, so
     ``build_composition`` would otherwise create the data directory and open
-    seven databases before learning the configuration was unusable — which is the
-    contract #372 established, that "a bad configuration fails without ever
-    touching disk: no directory is created and no database file is written for a
-    build that was never going to succeed". The constructor still calls this
+    every store below the line before learning the configuration was unusable —
+    which is the contract #372 established, that "a bad configuration fails
+    without ever touching disk: no directory is created and no database file is
+    written for a build that was never going to succeed". The constructor still calls this
     itself: it is public and anyone may build a store directly, so the check
     belongs to the store whether or not a caller asked first.
 

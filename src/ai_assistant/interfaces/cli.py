@@ -2329,7 +2329,7 @@ async def _open_engine() -> AssistantEngine:
     ``build_engine`` and ``Engine.start()``; the process that rendered the prompt
     was the process that opened ``memory.db``. It cannot any more, and not only by
     convention: ADR-0083 ruling 4 makes the hub the only process that opens the
-    seven databases and the API the only door, and the ``interfaces -> app`` import
+    databases and the API the only door, and the ``interfaces -> app`` import
     contract now makes building an engine here a build failure rather than a
     choice (ADR-0084 §6).
 

@@ -377,7 +377,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     no database file is written for a build that was never going to succeed. Only
     the steps that genuinely need an open store stay below that line.
 
-    **It owns the resources it opens.** The four connection-owning stores are
+    **It owns the resources it opens.** The connection-owning stores are
     opened first among the resources; if any *later* construction fails, the ones
     already opened are closed before the error propagates, so no half-built engine
     leaks a connection (ADR-0042 §2). On success, their ``close`` methods are handed
@@ -540,8 +540,8 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
     # and a store refuses — §7 puts no ceiling on a retention, the deliberate
     # escape being ``None``, while this backend stamps one as microseconds into a
     # signed 64-bit column — so without this call a deployment configuring one
-    # past that bound would create the data directory and open seven databases
-    # before learning its configuration was unusable. #372's contract is that
+    # past that bound would create the data directory and open every store below
+    # the line before learning its configuration was unusable. #372's contract is that
     # "no directory is created and no database file is written for a build that
     # was never going to succeed", and a check that touches no resource belongs
     # above the line whatever opens it below.
@@ -710,7 +710,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # connection-owning store and the seventh that is Tier 1: a candidate
         # carries free text a producer wrote to be shown to a person, so it lives
         # under the same data directory and the same owner-only file mode as the
-        # other six Tier 1 stores. ADR-0083 ruling 4's exclusivity needs nothing
+        # other Tier 1 stores. ADR-0083 ruling 4's exclusivity needs nothing
         # new for it, on ADR-0102 §12's reasoning: it is inside the directory the
         # instance lock already covers, opened by the same process, and closed in
         # the same ordered shutdown.

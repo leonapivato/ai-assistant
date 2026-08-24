@@ -913,7 +913,7 @@ def test_a_context_config_failure_touches_no_disk_either(
     unknown timezone or an empty working-hours window
     (``ai_assistant.context.sources``). Because that step runs above the
     ``mkdir``/store-opening block, such a failure must leave the filesystem
-    untouched — no data directory and none of the three SQLite files.
+    untouched — no data directory and none of the SQLite files.
 
     ``Settings`` validates both fields at load, so a well-formed instance can never
     carry a bad one into ``build_engine`` — unlike the vendor check, there is no
@@ -1368,10 +1368,10 @@ async def test_the_grant_store_is_the_sixth_database_in_the_data_directory(
     authoritative document about the data directory is already wrong by two, and
     nothing detected it" — and it is wider than that ADR knew. ADR-0185 §12 obliges
     a lane adding a database to correct every count it touches rather than add to
-    the drift, so the figure above is corrected here. The prose counts in
-    ``service/`` and ``interfaces/`` are outside this lane's fence and are filed as
-    an issue rather than swept in; the **list** below is the assertion that cannot
-    drift, which is why it, and not a number, is what this test turns on.
+    the drift, so the figure above is corrected here. The prose counts that lane's
+    fence excluded were filed as #1510 and deleted rather than refreshed by the
+    lane that closed it; the **list** below is the assertion that cannot drift,
+    which is why it, and not a number, is what this test turns on.
     """
     engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
     try:
@@ -1693,7 +1693,7 @@ def test_an_unusable_notification_retention_fails_before_disk_is_touched(
     duration as microseconds into a signed 64-bit column.
 
     Asked below the line it would still fail, but only after the directory was
-    created and seven databases opened; #372's contract is that "no directory is
+    created and the stores opened; #372's contract is that "no directory is
     created and no database file is written for a build that was never going to
     succeed", and the leftovers are what an operator would then have to reason
     about. So the assertion is about the *filesystem*, not the exception: a check
