@@ -2183,6 +2183,273 @@ def test_the_re_read_before_a_question_is_destroyed_asks_for_the_page_it_came_fr
     assert "forgetQuestion(question.id, path, offset)" in functions["renderQuestion"]
 
 
+# --- ADR-0189 §9: the origin reaches the three browser render paths ---------
+#
+# **Read off the shipped script rather than executed, and the file says why it has
+# to be.** This repository has no JavaScript runtime in its gate: every `app.js`
+# check in this module asserts over the extracted function body, and adding a
+# runtime would be a dependency decision well outside a surface lane's fence. So
+# what is pinned here is that each path *builds* the output §4 obliges — the exact
+# interpolations, the branch each arm takes, and the element structure that makes
+# the attribution unforgeable — and the *rendered* output is recorded in the pull
+# request from the page driven at both viewports, which is the observation §9 is
+# ultimately about.
+
+
+def test_the_browsers_attested_line_names_the_source_and_when_that_source_spoke() -> None:
+    """ADR-0189 §9's first surface clause, on ``whyHeld``.
+
+    Both halves, because ADR-0073 §4's gate is explicitly both and §9 names
+    ``reported_at`` as "the one an implementing lane will drop, because the
+    source-naming half is the one everybody is talking about".
+
+    The sentence #1276 tracked is asserted **gone** as well. A negative is worth its
+    line here for the reason the CLI's own pin records: nothing else in this module
+    would notice the old wording returning under a reworded neighbour, and that wording
+    now states a limit this projection does not have.
+    """
+    why = _functions(_code("app.js"))["whyHeld"]
+
+    assert "${belief.attestation.reported_by}" in why, "the reporting source is named"
+    assert "${belief.attestation.reported_at}" in why, "and the instant it spoke"
+    assert "cannot show them here" not in why, "#1276's limitation is gone"
+
+
+def test_the_browser_never_offers_its_own_clock_as_the_sources() -> None:
+    """ADR-0073 §4's floor, which ADR-0189 §4 restates and the new line makes riskier.
+
+    §4: a surface "renders ``reported_at`` as the **source's** clock and never as this
+    system's, and it does not offer ``last_updated`` in its place". ADR-0189's
+    Consequences names the newly-available error in as many words — "naming the source
+    while still showing our clock as the source's" — so the two instants stay two, and
+    the one this system owns stays labelled as ours.
+    """
+    functions = _functions(_code("app.js"))
+
+    assert "on its own clock" in functions["whyHeld"], "the source's instant is the source's"
+    assert "not when the source spoke" in functions["whyHeld"], "and ours is declared ours"
+    assert "last_updated" not in functions["whyHeld"], "this line does not reach for our clock"
+    assert "Last revised: ${belief.last_updated}" in functions["renderBeliefFields"], (
+        "which is rendered on its own line, as its own fact"
+    )
+
+
+def test_the_browser_reads_the_source_as_a_source_and_never_as_a_person() -> None:
+    """ADR-0189 §4's second clause, ADR-0098 §8's third adopted unchanged.
+
+    A surface renders the source "at **source granularity and no finer**", and "a
+    surface that rendered ``reported_by`` as though it named a person would assert what
+    this system does not hold". ADR-0093 §7 forbids deriving a reader's identity from
+    the source's location or contents, so the organiser of an invite and the sender of
+    a mail are not on the record and cannot be.
+
+    Pinned on the apposition, because that is the mechanism: there is no list of
+    person-words to check a value against, and what makes it unreadable as a person is
+    that this file introduces it as a connected source.
+    """
+    why = _functions(_code("app.js"))["whyHeld"]
+
+    assert "A connected source reported it — ${belief.attestation.reported_by}" in why
+
+
+def test_the_browser_says_a_derived_warrant_came_from_outside_on_every_count_state() -> None:
+    """#1517's first finding, on ``whyHeld`` — and on all four of its count states.
+
+    §9's own matrix has no arm for the derived clause, so a renderer could show
+    ``reported_by`` and ``reported_at`` correctly everywhere, omit the marker for every
+    ``DERIVED`` record with the predicate ``True``, and pass all eight required tests
+    while breaching §4.
+
+    **Appended once rather than per branch**, which is ADR-0107 §5's structural
+    argument about the elision ceiling reaching a second clause: §4 binds this to the
+    band and not to any of the four count states, so a per-branch append would be four
+    chances to forget it. Asserted by counting the appends — one construction, four
+    returns — because a marker missing from one branch is exactly what a
+    presence-anywhere check would pass.
+    """
+    derived = _functions(_code("app.js"))["whyDerived"]
+
+    assert "outsideWarrant(belief.rests_on_recorded_external_content)" in derived
+    assert derived.count("const outside =") == 1, "constructed once"
+    returns = derived.split("return ")[1:]
+    assert len(returns) == 4, "the four states a derived line renders a count in"
+    assert all("outside" in one for one in returns), "and the clause reaches every one"
+
+
+def test_the_browser_says_nothing_about_the_outside_when_the_predicate_is_false() -> None:
+    """The silence is ruled, not an omission (ADR-0098 §5, ADR-0106 §1).
+
+    A ``False`` is *nothing external is recorded in this warrant*, never *nothing
+    external influenced it*: text whose recorded origin is not external can still have
+    reached a belief, and no field on the record says so. A page printing the negative
+    would assert what this system does not hold.
+
+    And the answer is **read**, never recomputed: ADR-0189 §2 forbids a surface
+    deriving it from ``band``, and ADR-0106 §2 gives the reason — the hand-rolled
+    version "is short enough that every consumer will write it and one of them will
+    write only the second half".
+    """
+    functions = _functions(_code("app.js"))
+    outside = functions["outsideWarrant"]
+
+    assert 'return rests\n    ? " Some of what I worked it out from' in outside
+    assert ': "";' in outside, "and the false arm contributes nothing at all"
+    assert "band" not in outside, "the answer is read, never recomputed from the band"
+    assert "derived_from_external" not in _code("app.js"), (
+        "and no client reads the raw field in the predicate's place (ADR-0106 §2)"
+    )
+
+
+def test_the_browser_names_the_source_that_reported_what_would_be_retired() -> None:
+    """ADR-0189 §9's first surface clause, on ``renderRetirements``.
+
+    The attested-and-resolved arm: both ``reported_by`` and ``reported_at`` reach the
+    output. Read through ``warrant`` rather than off the retirement, which §4 spells in
+    the clause itself because an earlier draft named the two facts bare and was not
+    implementable as written — ``Retirement`` carries no ``band`` and no
+    ``rests_on_recorded_external_content`` of its own. Adversarial review found it on
+    ADR-0189's round 3.
+    """
+    origin = _functions(_code("app.js"))["retirementOrigin"]
+
+    assert "${warrant.attestation.reported_by} reported this" in origin
+    assert "${warrant.attestation.reported_at}" in origin
+    assert "on that source's own clock" in origin
+
+
+def test_the_browser_takes_all_three_of_the_retirement_arms_and_keys_them_on_the_band() -> None:
+    """ADR-0189 §4's three retirement clauses, which #673 is closed by telling apart.
+
+    Attested content **is** presented as third-party — ADR-0098 §7's first clause,
+    satisfiable for the first time. Asserted content is the user's own word (ADR-0038
+    §1a) and derived content is this system's own sentence, and §4 rules that no
+    surface presents either as third-party.
+
+    An earlier draft of ADR-0189 ruled the third-party presentation unconditionally, so
+    a retirement of the user's own assertion would have rendered as somebody else's
+    words; architecture review found it on round 3. The band inside the warrant is what
+    tells the three apart, and this is the pin that keeps them apart.
+    """
+    origin = _functions(_code("app.js"))["retirementOrigin"]
+
+    assert 'warrant.band === "attested"' in origin
+    assert 'lead: "someone else\'s words —"' in origin
+    assert 'warrant.band === "asserted"' in origin
+    assert 'lead: "your own words —"' in origin
+    assert 'lead: "my own inference —"' in origin
+    assert origin.count("someone else's words") == 1, "the third-party lead is one arm's alone"
+
+
+def test_the_browsers_unresolved_retirement_states_no_band_no_origin_and_no_source() -> None:
+    """ADR-0189 §9's tombstone clause, over the browser half of the two retirement paths.
+
+    §4: where the warrant is ``None`` the retired record no longer resolves —
+    ``content`` is ``null`` too — "and the surface renders it as *no longer held* … and
+    asserts nothing about its band, its origin or its source. It renders no third state
+    as ``False`` and no absence as a value."
+
+    **A second test rather than a clause of the first, because the state a single test
+    would have named cannot exist**: §2 makes ``warrant`` and ``content`` ``null``
+    together, so an unresolved retirement is in no band, carries no attestation, and
+    there is no attested tombstone to construct. Adversarial review found it on
+    ADR-0189's round 5.
+
+    Asserted on the early return, which is the mechanism: the tombstone branch never
+    reaches ``retirementOrigin`` at all, so no arm of it can leak a lead onto a record
+    that resolves to nothing.
+    """
+    retirements = _functions(_code("app.js"))["renderRetirements"]
+
+    assert "if (one.content === null) {" in retirements
+    assert (
+        "line(item, `${one.record_id} — no longer held, so accepting would not touch it`, "
+        '"hint");' in " ".join(retirements.split())
+    )
+    tombstone = retirements[retirements.index("one.content === null") :]
+    tombstone = tombstone[: tombstone.index("return;")]
+    for named in ("warrant", "attestation", "band", "someone else", "connected source"):
+        assert named not in tombstone, f"the tombstone arm asserts nothing, and {named} is one"
+
+
+def test_a_retirements_own_syntax_cannot_move_the_attribution_of_any_browser_span() -> None:
+    """ADR-0189 §9's marked rendering-security clause, for **this** target.
+
+    §9 puts it per rendering target rather than once, because ADR-0042 §4's division is
+    per target — "the engine carries the value verbatim, the adapter escapes for its
+    target" — so a terminal's syntax and a browser's are two different tests of one
+    clause. This is the browser's, and its two mechanisms are both structural rather
+    than remembered:
+
+    * **Every span is a text node.** ``line`` writes through ``textContent``, so a
+      retirement's content reaches the page as characters and never as markup (ADR-0168
+      §6). The module-wide sink check covers the file; this covers the path.
+    * **A newline cannot forge a second span.** The lead this file wrote is written
+      *before* the content within its element, and ``.hint`` and ``.notice`` declare no
+      ``white-space: pre-wrap`` — unlike ``.reply`` and ``.notification-detail``, which
+      do and say why. So a newline inside a content collapses to a space rather than
+      opening a line under a marker this file authored, which is #1336's argument for
+      ``_safe`` eating ``\\n`` reaching the same conclusion on the other target by a
+      different mechanism.
+    """
+    retirements = _functions(_code("app.js"))["renderRetirements"]
+    stylesheet = _style("app.css")
+
+    assert "line(item, `${origin.lead} ${one.content} (${one.record_id})`" in retirements, (
+        "the lead this file wrote precedes the content within the element"
+    )
+    for sink in _MARKUP_SINKS:
+        assert sink not in retirements
+    for shaped in (".reply", ".notification-detail"):
+        assert "white-space: pre-wrap;" in _rule(stylesheet, shaped), (
+            f"{shaped} is shaped, and says why"
+        )
+    for unshaped in (".hint", ".notice"):
+        assert "white-space" not in _rule(stylesheet, unshaped), (
+            f"{unshaped} carries a retirement's own words and collapses its newlines"
+        )
+
+
+def test_the_browser_renders_an_attested_questions_source_and_its_clock() -> None:
+    """ADR-0189 §9's fifth surface clause, on ``renderQuestion``.
+
+    §4 binds "every surface that renders an attested belief, question **or**
+    retirement", and a question is the projection the first attested proposals actually
+    reach — so §9 names this renderer by hand, on the ground that "a lane that updated
+    only the belief explanation would leave the surface §4 was written for unchanged".
+
+    The band line above it stays the conditional it was: nothing here says the proposal
+    *is* held, because a pending question is not a belief of any band.
+    """
+    functions = _functions(_code("app.js"))
+    question, origin = functions["renderQuestion"], functions["proposalOrigin"]
+
+    assert "const origin = proposalOrigin(question);" in question
+    assert 'line(item, `Where it came from: ${origin}`, "hint");' in question
+    assert "${question.attestation.reported_by}" in origin
+    assert "${question.attestation.reported_at}" in origin
+    assert "not held yet — I am asking first" in question, "and it is still a conditional"
+
+
+def test_the_browsers_question_origin_never_answers_for_what_it_would_retire() -> None:
+    """ADR-0189 §2's fourth clause, which is the one a renderer would run together.
+
+    "On ``Question``, both fields describe the **proposal** … and describe no entry in
+    ``retires``. Each entry in ``retires`` answers for itself through its own
+    ``warrant``." The case that makes it concrete is #673's ordinary one: a user's own
+    assertion, deferred by the policy, retiring an attested calendar line. One reads
+    ``question.attestation``; the other reads ``warrant.attestation``; and neither
+    function reaches for the other's value.
+    """
+    functions = _functions(_code("app.js"))
+
+    assert "warrant" not in functions["proposalOrigin"], "the proposal's origin is its own"
+    assert "question" not in functions["retirementOrigin"], "and the retirement's is its own"
+    assert (
+        'question.band === "derived" && question.rests_on_recorded_external_content'
+        in (functions["proposalOrigin"])
+    ), "#746's trap: the band alone would call a tainted consolidation purely our own"
+
+
 def test_a_listing_offers_the_next_page_rather_than_stopping_at_a_full_one() -> None:
     """ADR-0073 §1 makes the belief read an **enumeration** so that what is past a page
     stays reachable, and a rendered row is the browser's only route to ``forget``.
