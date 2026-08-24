@@ -55,6 +55,14 @@ _TOUCH_FLOOR: Final = "min-height: 44px;"
 _NARROW: Final = "@media (max-width: 480px) {"
 
 
+#: The two statuses ``_REFUSAL_STATUS`` gives to a condition that ends this browser's
+#: session, and to no other condition — so the page may read the condition back off the
+#: head alone when the body it would otherwise read never arrives (ADR-0182 §6). Named
+#: once because two checks below turn on it: that the page maps exactly these, and that
+#: the *other* pre-engine table does not duplicate them.
+SESSION_REFUSAL_STATUSES: Final = frozenset({401, 409})
+
+
 def _asset(name: str) -> str:
     """One shipped file, as text."""
     return (_ASSETS / name).read_text(encoding="utf-8")
@@ -1222,12 +1230,12 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     assert "how it ended is what is not known" in script
     # What neither of them may drop: the act is the same act, so the three things about
     # it that do not depend on how far the answer got are said in both.
-    assert script.count("nothing was cancelled — the assistant was not told to stop.") == 2
-    assert script.count("new question rather than retrying that one") == 2
+    assert script.count("nothing was cancelled — the assistant was not told to stop.") == 3
+    assert script.count("new question rather than retrying that one") == 3
     # The route back is one constant read by both, so the two endings cannot drift apart
     # on it — and it points rather than promises, because a turn that ran is not thereby
     # a turn that was recorded (`TurnOutcome.capture_degraded`, ADR-0074 §9 item 6).
-    assert script.count("WHERE_TO_LOOK") == 3
+    assert script.count("WHERE_TO_LOOK") == 4
     assert "though a turn whose record " in script
     assert "could not be written does not appear there" in script
 
@@ -1269,6 +1277,7 @@ def test_a_wait_stopped_after_a_session_refusal_is_re_entry_and_not_an_unknown_o
     # be this page performing the flattening §6 forbids.
     statuses = dict(re.findall(r"\[(\d{3}), \"([a-z-]+)\"\],", script))
     assert statuses == {"401": "no-live-session", "409": "cookie-half-mismatch"}
+    assert {int(one) for one in statuses} == SESSION_REFUSAL_STATUSES
     for status, fault in statuses.items():
         condition = RefusalCondition(fault)
         assert _REFUSAL_STATUS[condition][0] == int(status), fault
@@ -1316,6 +1325,76 @@ def test_a_wait_stopped_after_a_session_refusal_is_re_entry_and_not_an_unknown_o
     assert "REFUSED_AT_THE_DOOR" in abandon
     assert "never reached the assistant" in script
     assert "so no turn ran and nothing was left half-done" in script
+
+
+def test_a_wait_stopped_after_any_other_refusal_head_says_a_reply_was_read() -> None:
+    """Adversarial review, round 5, blocker. ``ASK_ABANDONED`` opens with "the question
+    was sent and nothing here read a reply", which is false of **every** refusal head — a
+    status line is a reply — and goes on to say the assistant "may have carried it out",
+    which some statuses make known to be false.
+
+    ADR-0139 §4 governs in both directions: an act is reported as one of exactly three
+    outcomes "and never as either of the other two". So a known **not landed** act
+    announced as *not known* breaches it exactly as reporting a landed one that way does,
+    which is the reading ``relay`` already states of itself one surface over.
+
+    **The status settles it on the two ask paths for exactly three of them.** ``421`` is
+    ``HOST_NOT_BOUND`` and ``403`` is ``ORIGIN_NOT_OWN`` or ADR-0174 §4's
+    ``DEVICE_NOT_LISTED``, all taken by ``_check_door`` before a session is looked up;
+    the other ``403``s ``server.py`` writes are ADR-0177 §3's connection refusals, gated
+    on ``_CONNECTION_PATHS``, which neither ask path is. ``503`` is
+    ``hub-connection-ceiling``, raised out of ``_take_hub_slot()`` *before* ``_relayed``
+    awaits ``call()``.
+
+    **And three are excluded because they are not proof.** ``400`` is shared between
+    ``malformed-request`` (before the call) and ``rejected`` (a ``ValueError`` out of it);
+    ``502`` is ``hub-unreachable``, and a ``TransportError`` can be raised after the
+    request was written; ``422`` is ``assistant-declined``, which ADR-0168 §9 defines as
+    "a request the hub **received** and declined". The excluded direction is the
+    expensive one: an owner told no turn ran when one did asks it again.
+    """
+    script = _code("app.js")
+    abandon = _functions(script)["abandonAsk"]
+
+    assert "const REFUSED_BEFORE_THE_ENGINE = new Set([403, 421, 503]);" in script
+    # Every status in the set is one the gateway really answers with, and none of the
+    # three excluded ones crept in — asserted against `server.py` rather than restated.
+    decided = {403, 421, 503}
+    answered = {status for status, _ in _REFUSAL_STATUS.values()}
+    assert {403, 421} <= answered
+    for shared in (400, 502, 422):
+        assert shared not in decided, shared
+    # The session pair is the same class and is taken by the branch above, so it must not
+    # be duplicated here — two places saying "no turn ran" would be two places to drift.
+    for taken in SESSION_REFUSAL_STATUSES:
+        assert taken not in decided, taken
+
+    # Taken for every refusal head, after the session branch and before the black hole's.
+    assert "if (waiting.refusedWith !== null) {" in abandon
+    assert abandon.index("if (ended !== undefined) {") < abandon.index(
+        "if (waiting.refusedWith !== null) {"
+    )
+    assert abandon.index("if (waiting.refusedWith !== null) {") < abandon.index("const said =")
+    assert (
+        "REFUSED_BEFORE_THE_ENGINE.has(waiting.refusedWith) ? ASK_REFUSED_UNRUN"
+        " : ASK_REFUSED_UNREAD" in " ".join(abandon.split())
+    )
+    # It is a fault rather than re-entry: nothing about the session ended, so the control
+    # comes back into a console that is still the owner's.
+    for reentry in ("sessionLost(", "forgetHeaderHalf(", "showBootstrap("):
+        assert abandon.count(reentry) == (1 if reentry == "sessionLost(" else 0), reentry
+
+    # What each of the two says, and the clause neither may keep: a refusal head is a
+    # reply, so "nothing here read a reply" is false of both.
+    assert "The gateway had already answered that question with a refusal" in script
+    assert "ever acted on the question is not something a refusal on its own says" in script
+    assert "refused that question before the assistant was reached, so no turn ran" in script
+    assert script.count("the question was sent and nothing here read a ") == 1
+    # And the one that knows no turn ran does not send the owner looking for it: the route
+    # back points at the conversations listing, and nothing can be there.
+    assert "there is nothing to look for" in script
+    unrun = script[script.index("const ASK_REFUSED_UNRUN") :]
+    assert "WHERE_TO_LOOK" not in unrun[: unrun.index(";") + 1]
 
 
 def test_the_page_renders_a_notification_in_the_open_page_and_by_no_other_means() -> None:

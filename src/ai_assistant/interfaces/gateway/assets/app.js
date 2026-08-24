@@ -1476,7 +1476,10 @@ const WHERE_TO_LOOK =
   "The conversations listing is where to look for it — though a turn whose record " +
   "could not be written does not appear there, however completely it ran.";
 
-// What stopping the wait says where nothing of the answer came back.
+// What stopping the wait says where **no response head came back at all** — which is the
+// only state its opening clause is true in. A refusal head is a reply this browser read,
+// so the two branches above take every wait that saw one, and what is left here is the
+// black hole #1500 is about: a socket that produced nothing.
 const ASK_ABANDONED =
   "You stopped waiting for that answer, so this browser is no longer listening for it. " +
   "What became of the turn is not known: the question was sent and nothing here read a " +
@@ -1544,6 +1547,60 @@ const REFUSED_AT_THE_DOOR =
   "The question you were waiting on never reached the assistant: the gateway refused it " +
   "at the door, so no turn ran and nothing was left half-done. Asking it again once you " +
   "are back in costs nothing.";
+
+// **And a refusal that is not a session's ending**, which adversarial review found on
+// round 5. `ASK_ABANDONED` opens by saying "the question was sent and nothing here read
+// a reply" — false of *every* refusal head, because a status line is a reply — and goes
+// on to say the assistant "may have carried it out", which for some of those statuses is
+// known to be false. ADR-0139 §4 is the rule in both directions: an act is reported as
+// one of exactly three outcomes "and never as either of the other two", so a known
+// not-landed act announced as not known breaches it exactly as the reverse does. This
+// page already says so of itself, one surface over, in `relay`: "reporting a landed act
+// as 'not known' is forbidden by the same clause that forbids the reverse".
+//
+// **What separates the two sentences is whether the engine could have been reached**,
+// and on the two ask paths that is decided by the status alone for three of them:
+//
+// - `421` — `HOST_NOT_BOUND`, taken by `_check_door` before a session is even looked up.
+// - `403` — `ORIGIN_NOT_OWN` and ADR-0174 §4's `DEVICE_NOT_LISTED`, both taken there too.
+//   The *other* `403`s `server.py` writes — ADR-0177 §3's two connection refusals — are
+//   gated on `_CONNECTION_PATHS`, which neither ask path is, so they are not reachable
+//   here and the status stays decisive on this surface.
+// - `503` — `hub-connection-ceiling`. `_relayed` raises it out of `_take_hub_slot()`
+//   *before* it awaits `call()`, so nothing was relayed.
+//
+// `401` and `409` belong to the same class and never reach here: the branch above takes
+// them, because ADR-0182 §6 gives them a remedy as well as a sentence.
+//
+// **And three statuses are deliberately excluded, each because it is not proof.** `400`
+// is shared — `malformed-request` is refused before the call and `rejected` is a
+// `ValueError` out of it — so it says nothing either way. `502` is `hub-unreachable`,
+// and a `TransportError` can be raised after the request was written, so the turn may
+// well have run. `422` is `assistant-declined`, which ADR-0168 §9 defines as "a request
+// the hub **received** and declined". Guessing in this direction is the expensive one:
+// telling an owner no turn ran when one did is what sends them to ask it a second time.
+const REFUSED_BEFORE_THE_ENGINE = new Set([403, 421, 503]);
+
+// The refusal whose reason went unread, and all that is known of the turn.
+const ASK_REFUSED_UNREAD =
+  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
+  "The gateway had already answered that question with a refusal, and this browser " +
+  "stopped before reading which one — so no answer came back, and whether the assistant " +
+  "ever acted on the question is not something a refusal on its own says. " +
+  "Nothing was re-sent and nothing was cancelled — the assistant was not told to stop. " +
+  "Asking again asks a new question rather than retrying that one. " +
+  WHERE_TO_LOOK;
+
+// The same, where the status settles it. **`WHERE_TO_LOOK` is deliberately absent**: it
+// points at the conversations listing for a turn that may have run, and here none did —
+// sending an owner to look for something that cannot be there is the same wrong
+// explanation in a friendlier register.
+const ASK_REFUSED_UNRUN =
+  "You stopped waiting for that answer, so this browser is no longer listening for it. " +
+  "The gateway refused that question before the assistant was reached, so no turn ran " +
+  "and there is nothing to look for — though this browser stopped before reading which " +
+  "refusal it was. Nothing was re-sent and nothing was cancelled. Asking again is a " +
+  "fresh question, and worth trying once whatever the gateway refused it for has passed.";
 
 // The control, and the line beside it. Built here rather than shipped in `index.html`
 // because it belongs to a request and not to the surface — the page already builds a
@@ -1617,6 +1674,19 @@ function abandonAsk() {
     // reporting one, and this is the same refusal reported through a different door.
     show("answer", false);
     sessionLost(named, `${describe(named, waiting.refusedWith)} ${REFUSED_AT_THE_DOOR}`);
+    return;
+  }
+  // **Every other refusal head, which is a reply this browser read and did not
+  // understand.** It is not re-entry — nothing about the session ended — so the control
+  // simply comes back, with the two things the status does say and without the sentence
+  // below, whose opening clause a refusal head makes false.
+  if (waiting.refusedWith !== null) {
+    // The screen an ordinary refusal leaves, for the reason the branch above leaves it.
+    show("answer", false);
+    fault(
+      REFUSED_BEFORE_THE_ENGINE.has(waiting.refusedWith) ? ASK_REFUSED_UNRUN : ASK_REFUSED_UNREAD,
+      "console"
+    );
     return;
   }
   // **The partial text goes with it, and nothing else does.** ADR-0173 §3 makes the
