@@ -1,7 +1,32 @@
 # 29. The tool invocation contract
 
-- Status: Accepted, §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and Consequences amended by ADR-0032; §8 amended by ADR-0034 and ADR-0039; §7's spend-accumulation deferral discharged by ADR-0194
+- Status: Partially superseded by ADR-0192 (§5's closing paragraph, "An approval is not consumed by executing it")
 - Date: 2026-07-21
+- Partially superseded: 2026-08-24 by ADR-0192 — **one paragraph of §5, and the
+  reasons behind it are kept rather than reversed.** §5 closes by answering
+  ADR-0021 §4's open question — "**An approval is not consumed by executing it**"
+  — with "The answer is **no**, and it is not a deferral." ADR-0192 §1 makes the
+  answer partly yes: on an authorisation whose `ToolDefinition` is
+  `side_effecting` and whose `idempotency` is not `NATURAL`, `invoke` appends a
+  claim to the `AuditTrail` immediately before the callable and a second claim is
+  refused unless the preceding one completed `FAILED`. A reader holding only this
+  ADR would act differently, so it is a supersession and not an amendment
+  (ADR-0070 §1). **Both of §5's stated reasons survive and ADR-0192 §1 is written
+  to keep them.** Retry is unaffected — the retry path is the `FAILED` arm, so the
+  transient `UNAVAILABLE` §5 was written about still does not reach the user as a
+  fresh prompt — and no entry is consumed: a claim is an append, and the only
+  thing spent is the authority to append a second one. **Everything else of §5
+  stands verbatim and ADR-0192 relies on it**: the derived `idempotency_key` and
+  its three properties, the two-part retry conjunction, the two-sided window
+  obligation, the fail-closed elapsed-time reading, and the refusal to auto-retry
+  an `INDETERMINATE` outcome or an `Idempotency.NONE` side-effecting tool. §§1–4
+  and §§6–8 are untouched, and this ADR's Decision text below is not rewritten
+  (ADR-0070 §1). **The three amendment qualifiers this `Status` line carried have
+  moved off it** under ADR-0082 §2, which takes them off a line that gains the
+  leading token and leaves each record whole in the dated note that already
+  carries it: §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and
+  Consequences amended by ADR-0032; §8 amended by ADR-0034 and by ADR-0039 — the
+  four `Amended:` notes below, none of which is altered. Refs #1503, #1544.
 - Amended: 2026-07-21 by ADR-0031 — the corrections first use found
   (PR #188). §4's interrupted-call rule gains a core home and is
   ToolDefinition.interrupted_outcome, a read-only property in core/types.py, so
