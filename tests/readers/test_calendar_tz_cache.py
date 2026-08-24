@@ -136,6 +136,15 @@ def _vtimezone(tzid: str = _HOSTILE, *, offset: str = _HOSTILE_OFFSET) -> str:
     )
 
 
+def _unbuildable(tzid: str = _HOSTILE) -> str:
+    """A ``VTIMEZONE`` carrying a ``TZID`` and nothing a zone can be built from.
+
+    No ``STANDARD`` and no ``DAYLIGHT``, which is ``ValueError: at least one
+    component is needed`` from ``to_tz``.
+    """
+    return "\r\n".join(["BEGIN:VTIMEZONE", f"TZID:{tzid}", "END:VTIMEZONE"])
+
+
 def _entry(tzid: str = _HOSTILE, *, uid: str = "leak") -> str:
     """An entry naming ``tzid`` on both ends, and defining nothing.
 
@@ -402,16 +411,64 @@ async def test_a_definition_this_document_uses_and_cannot_build_refuses_either_w
     if planted:
         await _read(_written(tmp_path, "planted.ics", _vtimezone(), _entry(uid="defined")))
 
-    malformed = "\r\n".join(["BEGIN:VTIMEZONE", f"TZID:{_HOSTILE}", "END:VTIMEZONE"])
+    with pytest.raises(ReaderError) as refusal:
+        await _read(_written(tmp_path, "malformed.ics", _GOOD, _unbuildable(), _entry()))
+
+    assert isinstance(refusal.value.__cause__, SourceNotParseableError)
+    assert _HOSTILE not in str(refusal.value), "ADR-0093 §8's message is payload-free"
+
+
+@pytest.mark.parametrize("planted", [False, True], ids=["fresh", "id-already-cached"])
+async def test_a_definition_nothing_names_and_cannot_build_refuses_either_way(
+    tmp_path: Path, planted: bool
+) -> None:
+    """The same refusal, for a definition no entry in the document references.
+
+    ``cache_timezone_component`` builds every declared id the cache does not already
+    hold, so whether some *value* names it decides nothing about whether the
+    cold-cache parse raises. Building only the ids a value named therefore left
+    exactly this document read-order dependent: refused in a fresh process, and
+    parsed — proposing its UTC entry at full confidence — once any earlier read in
+    the same hub had cached that id. The referenced case above kept passing
+    throughout, because its ``_entry`` is what triggered the lazy build.
+
+    Adversarial review found it on round 3, and the pair of columns here is the
+    assertion: same bytes, same answer, whatever the process read first.
+    """
+    if planted:
+        await _read(_written(tmp_path, "planted.ics", _vtimezone(), _entry(uid="defined")))
 
     with pytest.raises(ReaderError) as refusal:
-        await _read(_written(tmp_path, "malformed.ics", _GOOD, malformed, _entry()))
+        await _read(_written(tmp_path, "unreferenced.ics", _GOOD, _unbuildable()))
 
     assert isinstance(refusal.value.__cause__, SourceNotParseableError)
     assert _HOSTILE not in str(refusal.value), "ADR-0093 §8's message is payload-free"
 
 
 # --- what the re-seating may not cost ----------------------------------------
+
+
+async def test_an_unbuildable_definition_of_an_iana_key_costs_the_read_nothing(
+    tmp_path: Path,
+) -> None:
+    """Validating declared definitions may not reach the ids the cache never holds.
+
+    ``cache_timezone_component`` writes only ids the provider knows neither cleaned
+    nor as written, so a malformed ``VTIMEZONE:TZID=Europe/Rome`` is never built by
+    the library on **any** cache state: this document parses in a fresh process and
+    in a warm one alike, and the definition decides nothing a reading carries. So
+    refusing it would cost real calendars their reads to close a hole that was never
+    open — which is why the eager build is bounded by the id rather than applied to
+    everything the document declares.
+
+    The bound is the same one :func:`test_an_iana_key_is_never_shadowed_by_the_source`
+    asserts for values, read off the id instead, because an unreferenced definition
+    has no resolved value to read it off.
+    """
+    reading = await _read(_written(tmp_path, "rome.ics", _GOOD, _unbuildable(_ROME)))
+
+    assert summaries(reading.proposals) == [_GOOD_RENDERED]
+    assert reading.coverage is not None, "nothing was skipped, so the read is accounted"
 
 
 @pytest.mark.parametrize(

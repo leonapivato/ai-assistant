@@ -75,8 +75,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from enum import Enum
+from functools import cache
 from typing import TYPE_CHECKING, Any, Final
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, available_timezones
 
 from dateutil.rrule import rrulestr
 from icalendar import Calendar
@@ -544,7 +545,7 @@ def _parse(raw: bytes) -> list[Any]:
     try:
         calendar = Calendar.from_ical(raw)
         components = list(calendar.walk("VEVENT"))
-        _rezone(components, _declared_zones(calendar))
+        _rezone(components, _own_zones(_declared_zones(calendar)))
     except Exception as exc:
         msg = "the source is not a readable iCalendar document"
         raise SourceNotParseableError(msg) from exc
@@ -554,9 +555,8 @@ def _parse(raw: bytes) -> list[Any]:
 def _declared_zones(calendar: Any) -> dict[str, Any]:
     """The ``VTIMEZONE`` component this document declares for each ``TZID`` (#1497).
 
-    The components rather than the timezones, because :func:`_rezone` builds only
-    the ones a value actually names — see there for why building the rest would
-    refuse reads that parse today.
+    The components rather than the timezones, because :func:`_own_zones` decides
+    which of them to build from the id alone — see there.
 
     Ids are compared as ``icalendar`` compares them, through its own
     ``clean_timezone_id``, so a definition written ``TZID:/Custom`` still answers a
@@ -573,7 +573,7 @@ def _declared_zones(calendar: Any) -> dict[str, Any]:
     return declared
 
 
-def _rezone(components: list[Any], declared: dict[str, Any]) -> None:
+def _rezone(components: list[Any], zones: dict[str, tzinfo]) -> None:
     """Re-seat every cache-supplied zone on this document's own definition (#1497).
 
     **Only a value the parser already resolved to a non-``ZoneInfo`` zone is
@@ -611,12 +611,10 @@ def _rezone(components: list[Any], declared: dict[str, Any]) -> None:
     read-order dependence this function exists to remove. Adversarial review found
     that on round 2 as well.
 
-    **Built lazily, and only for an id some value names.** A malformed
-    ``VTIMEZONE`` nobody references is not built, so it cannot refuse a read — and
-    eagerly building every declared definition would refuse documents that parse
-    today, since the library skips building one whose id the provider already knows.
+    **The zones are built before this runs**, by :func:`_own_zones`, because which
+    definitions get built may not depend on which ones a value happens to name —
+    see there.
     """
-    built: dict[str, tzinfo | None] = {}
     for component in components:
         for value in component.values():
             for prop, holder in _zone_bearing(value):
@@ -628,11 +626,11 @@ def _rezone(components: list[Any], declared: dict[str, Any]) -> None:
                 key = _declared_id(prop, holder)
                 if not key:
                     continue
-                prop.dt = stated.replace(tzinfo=_own_zone(declared, built, key))
+                prop.dt = stated.replace(tzinfo=zones.get(tzp.clean_timezone_id(key)))
 
 
-def _own_zone(declared: dict[str, Any], built: dict[str, tzinfo | None], key: str) -> tzinfo | None:
-    """This document's own timezone for ``key``, or ``None`` if it declares none.
+def _own_zones(declared: dict[str, Any]) -> dict[str, tzinfo]:
+    """Build this document's own timezone for every id the library's cache can hold.
 
     ``Timezone.to_tz(lookup_tzid=False)`` is ``icalendar``'s documented way to build
     one from a component — "If it is False, a new timezone will be created" — and it
@@ -641,13 +639,70 @@ def _own_zone(declared: dict[str, Any], built: dict[str, tzinfo | None], key: st
     the call, which is what lets the three ``CalendarReader`` instances ADR-0096 §5
     requires parse at the same time without a lock between them.
 
-    ``built`` memoises within the one document, so a series naming its zone on every
-    occurrence builds it once.
+    **Every cache-reachable definition is built, referenced or not**, and that is
+    the clause a lazy build got wrong. ``cache_timezone_component`` calls ``to_tz``
+    for a declared id it does not already hold, so on a *cold* cache a malformed
+    ``VTIMEZONE`` raises inside ``Calendar.from_ical`` however little the document
+    references it — while on a warm one the library skips building it and the same
+    bytes parse. Building only the ids some value named left that difference intact
+    for an unreferenced definition: identical bytes refused in a fresh process and
+    proposed their entries in a hub that had read the id before, which is ADR-0093
+    §5's read-order dependence surviving in the one place §8 turns into a refusal.
+    Building them all makes the refusal unconditional, which is the fresh-process
+    answer made independent of what the process saw first. Adversarial review found
+    this on round 3.
+
+    **A definition that cannot be built therefore refuses the read**, by letting
+    ``to_tz`` raise into :func:`_parse`'s wrapping — the same outcome, and the same
+    ADR-0093 §8 posture, as the cold-cache parse it is standing in for.
+
+    **An id the provider knows is left inert**, because the cache never reaches it:
+    ``cache_timezone_component`` writes only ids the provider knows neither cleaned
+    nor as written, so a source's own ``VTIMEZONE:TZID=Europe/Rome`` is never built
+    by the library on any cache state, and building it here would refuse documents
+    that parse today over a definition that decides nothing. That is the same bound
+    :func:`_rezone` reads off the resolved value, applied here to the id instead —
+    it has to be the id, because an unreferenced definition has no resolved value to
+    read it off.
+
+    The result is keyed as :func:`_declared_zones` keys it, so one build serves a
+    series naming its zone on every occurrence.
     """
-    if key not in built:
-        component = declared.get(tzp.clean_timezone_id(key))
-        built[key] = None if component is None else component.to_tz(lookup_tzid=False)
-    return built[key]
+    built: dict[str, tzinfo] = {}
+    for clean_id, component in declared.items():
+        if not _cache_reachable(str(component.tz_name)):
+            continue
+        built[clean_id] = component.to_tz(lookup_tzid=False)
+    return built
+
+
+def _cache_reachable(tzid: str) -> bool:
+    """Whether ``icalendar``'s ``VTIMEZONE`` cache can hold an entry under ``tzid``.
+
+    ``TZP.cache_timezone_component``'s own condition, which tests the provider
+    against both the cleaned id and the id as written — so this asks it the same way
+    rather than through ``TZP.timezone``, whose answer also folds in the Windows id
+    map and the cache itself. Neither belongs here: the map would call a Windows id
+    provider-owned when ``cache_timezone_component`` still builds and caches it, and
+    reading the cache would make this function's answer depend on the very state it
+    exists to be independent of.
+    """
+    return not (
+        tzid in _provider_zone_keys() or tzp.clean_timezone_id(tzid) in _provider_zone_keys()
+    )
+
+
+@cache
+def _provider_zone_keys() -> frozenset[str]:
+    """The keys ``icalendar``'s default timezone provider answers for.
+
+    Its ``knows_timezone_id`` is ``tzid in zoneinfo.available_timezones()``, so this
+    is that set, read from the same standard library rather than off the provider
+    instance ``TZP`` keeps privately. Cached because it costs a scan of the zone
+    database and the answer cannot change under a running process — which is how
+    ``icalendar`` caches it too, on the provider class.
+    """
+    return frozenset(available_timezones())
 
 
 def _zone_bearing(value: Any) -> Iterator[tuple[Any, Any]]:
