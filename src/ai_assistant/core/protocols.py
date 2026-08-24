@@ -8044,12 +8044,51 @@ class AssistantEngine(Protocol):
     # contract acquiring methods nobody calls (ADR-0021 §4). Both stay additive the
     # day a consumer arrives (ADR-0008 §1).
     #
-    # **Both are served on both listeners and neither is a connection method**
-    # (ADR-0186 §5, read one store over): a ``SourceReadRecord`` carries no
-    # credential and no content — ADR-0185 §10 excludes content from the record by
-    # name — so no new class of data reaches ADR-0124's hop. Neither is one of
-    # ADR-0177 §1's thirty browser operations, and no browser request resolves to
-    # either (ADR-0186 §6).
+    # **The transport and the browser are decided by their own rules and not by
+    # §10's inheritance**, and the distinction is worth stating because §10's
+    # inheritance list is *closed*: it names §2, §3, §7's last two clauses and §8's
+    # three bars, and it does **not** name §5 or §6. Those two sections are written
+    # about the operations §1 mints, and they are cited below as the **precedent**
+    # for identical reasoning one store over rather than as clauses this pair
+    # inherits. What actually governs here:
+    #
+    # * **Both listeners carry both, and neither is a connection method** — by the
+    #   mechanism's own default rather than by any clause about these methods.
+    #   ``wire/surface.py``'s ``METHODS`` is derived from this Protocol and
+    #   ``wire/server.py`` bars a method from the remote listener exactly when it is
+    #   in ``CONNECTION_METHODS``, so a promoted method is carried on both unless a
+    #   decision withholds it. The only decision that withholds any is ADR-0151 §13,
+    #   and its ground does not reach here: the five are withheld because they carry
+    #   a **Tier 0 credential**, which ADR-0124 §3's accepted-disclosure list does
+    #   not cover. A ``SourceReadRecord`` carries no credential and no content —
+    #   ADR-0185 §10 excludes content from the record by name — so no new class of
+    #   data reaches ADR-0124's hop. ADR-0186 §5 reaches the same conclusion for the
+    #   decision pair on the same reasoning.
+    # * **No browser request resolves to either** — by ADR-0177 §1's *first* clause,
+    #   which is an explicit closed enumeration ("exactly these **thirty** … and no
+    #   others") governing every method it does not name. ADR-0186's own Context
+    #   states the general rule: "A method added to the Protocol is therefore
+    #   outside that enumeration until an ADR puts it inside, which is the property
+    #   ADR-0168 §6 wanted when it chose to name what may appear rather than what
+    #   may not." So the bar needs no inheritance to bind, and the count of thirty
+    #   does not move: it counts what a browser may reach, not what this surface
+    #   carries.
+    # * **``PROTOCOL_VERSION`` moves** — by ADR-0124 §9's **first** limb, which
+    #   reaches "any change to the promoted surface's method set" directly.
+    #
+    # **This pair is minted by the lane that adds it, against a merged contract**,
+    # which is ADR-0186 §10 in terms: the read surface "is a **second pair**
+    # mirroring §1's, over ADR-0185 §12's ``SourceReadTrail.recent`` and
+    # ``SourceReadTrail.export``, minted by its own lane against the merged
+    # contract". §11's first clause defines what that lane carries — the Protocol
+    # methods, the shared conformance cases, the ``orchestration`` implementation,
+    # the canonical fake, ``HubClient``'s forwarding methods and the version bump,
+    # "one change under ADR-0137 §2". No further ADR stands between the two, and §6
+    # shows that ADR-0186 says so when it means it: a browser view is "a **later
+    # consumer lane with its own ratified decision**", where §10 says "its own
+    # lane … against the merged contract". What §10 leaves open is the *spelling*,
+    # in ADR-0185 §12's own idiom — "the semantics above are the contract, the
+    # spelling is the lane's".
 
     async def recent_reads(self, *, limit: int = DEFAULT_PAGE_SIZE) -> tuple[SourceReadRecord, ...]:
         """What this system read from a source, newest-recorded first, bounded.

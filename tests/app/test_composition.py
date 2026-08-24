@@ -95,7 +95,7 @@ from ai_assistant.orchestration.upcoming import (
 from ai_assistant.orchestration.upcoming import (
     PRODUCER as UPCOMING_PRODUCER,
 )
-from ai_assistant.permissions import ThresholdActionPolicy
+from ai_assistant.permissions import SqliteSourceReadTrail, ThresholdActionPolicy
 from ai_assistant.planning import SqlitePlanStore
 from ai_assistant.readers import CALENDAR_READER_NAME, EMAIL_READER_NAME
 from ai_assistant.secret_store import backend as secret_store_module
@@ -152,6 +152,58 @@ async def test_build_engine_wires_the_durable_plan_store_as_one_shared_instance(
         assert engine._runner._executor._plans is plans
         # The façade and the runner read the very same audit trail.
         assert engine._trail is engine._runner._trail
+    finally:
+        await engine.aclose()
+
+
+async def test_build_engine_wires_one_read_trail_into_every_driver_and_the_facade(
+    tmp_path: Path,
+) -> None:
+    """The trail the drivers record into is the trail the engine reads (ADR-0186 §10).
+
+    **The single-instance obligation with the most ways to get it wrong**, because
+    this object is passed **four** times and under two different types: narrowed to
+    ``SourceReadRecorder`` at each of the three drivers, and whole as a
+    ``SourceReadTrail`` at the façade (ADR-0185 §4). Structural typing is what makes
+    that sound, and it is also what makes the mistake invisible — a *second*
+    ``SqliteSourceReadTrail`` satisfies both seams just as well, so nothing but
+    identity distinguishes the right wiring from a façade reading an empty store
+    while the drivers write to a full one.
+
+    Nothing catches that but this assertion. It type-checks, every unit test passes
+    against a harness that wires itself correctly, and the deployed failure is the
+    quietest one available: ``recent_reads`` answers ``()``, which is also the
+    truthful answer for a hub that has genuinely read nothing. It is the shape
+    #1485 records for the audit trail one store over — a correct value with no
+    reader — arriving as a wiring slip rather than as a missing surface.
+
+    The calendar source is configured so that all three drivers exist: with it unset
+    the two ingestion stages and the upcoming stage are ``None`` and the case would
+    assert only the façade's half, which is the half that cannot be wrong on its own.
+    """
+    settings = Settings(
+        embedder=EmbedderKind.HASHING,
+        calendar_reader_path=tmp_path / "calendar.ics",
+        calendar_upcoming_interval=timedelta(minutes=15),
+    )
+    engine = build_engine(settings, data_dir=tmp_path)
+    try:
+        trail = engine._reads
+        assert isinstance(trail, SqliteSourceReadTrail)
+
+        # Every driver ADR-0185 §5 wires a recorder into, reached through the engine
+        # rather than rebuilt — so this asserts the object the façade actually holds.
+        assert engine._calendar_ingestion is not None
+        assert engine._calendar_ingestion._reads is trail
+        assert engine._upcoming is not None
+        assert engine._upcoming._reads is trail
+        # The context source's own recorder, the third driver (ADR-0185 §5).
+        provider = engine._loop._context
+        assert isinstance(provider, AssemblingContextProvider)  # narrows the Protocol seam
+        sources = [
+            source for source in provider._sources if isinstance(source, CalendarContextSource)
+        ]
+        assert [source._reads for source in sources] == [trail]
     finally:
         await engine.aclose()
 

@@ -1,18 +1,25 @@
 """No browser route reaches the read trail (ADR-0186 §10, §6, ADR-0177 §1).
 
 ADR-0186 §10 puts two more operations on the promoted engine surface —
-``recent_reads`` and ``export_reads``, over ADR-0185 §12's ``SourceReadTrail`` — and
-binds them to §6 by inheritance rather than by restating it: neither is one of
-ADR-0177 §1's **thirty**, no browser request resolves to either, no browser argument
-reaches either, and the gateway makes neither call of its own.
+``recent_reads`` and ``export_reads``, over ADR-0185 §12's ``SourceReadTrail``. No
+browser request resolves to either, no browser argument reaches either, and the
+gateway makes neither call of its own.
 
-**Inherited rather than restated is exactly why this module exists.** §10's
-inheritance clause is prose in an ADR; the enumeration it points at is a table in
-``gateway/server.py``. A lane reading only §10 could conclude the bar was
-"decided elsewhere" and check nothing, which is the shape of gap ADR-0168 §6 chose
-its closed-enumeration design to make impossible — a method added to the Protocol is
-outside the browser's reach until an ADR puts it inside. This is that design held to
-its promise for the two methods added most recently.
+**That bar is ADR-0177 §1's own and is not inherited from ADR-0186 §6.** §10's
+inheritance list is closed — §2, §3, §7's last two clauses, §8's three bars — and
+does not name §6, whose text is written about the operations §1 mints. It does not
+need to. §1's *first* clause is an explicit closed enumeration, "exactly these
+**thirty** … and no others", which governs every method it does not name, and
+ADR-0186's own Context states the general rule: "A method added to the Protocol is
+therefore outside that enumeration until an ADR puts it inside, which is the
+property ADR-0168 §6 wanted when it chose to name what may appear rather than what
+may not." §6 is that conclusion drawn for the decision pair; this module is the same
+conclusion checked for the read pair.
+
+**A closed enumeration is a claim about a table, so it is worth checking against the
+table.** The rule above makes the bar true by construction, which is exactly the
+condition under which nobody looks — and the table lives in ``gateway/server.py``
+while the rule lives in an ADR. This module is what keeps the two comparable.
 
 **Later rather than never** (ADR-0186 §6). A browser view of either trail is a later
 consumer lane with its own ratified decision, which widens §1's enumeration in its
@@ -64,7 +71,7 @@ async def harness() -> AsyncIterator[Harness]:
 
 
 def test_neither_read_trail_operation_is_in_the_enumeration() -> None:
-    """ADR-0186 §6 through §10: neither is one of ADR-0177 §1's thirty.
+    """ADR-0177 §1: neither is one of the thirty a browser may reach.
 
     Read off the one table the gateway classifies from, so the ADR and the code are
     one thing to compare rather than two.
@@ -84,7 +91,7 @@ def test_neither_read_trail_operation_is_in_the_enumeration() -> None:
 async def test_a_browser_request_naming_the_read_trail_is_refused(
     harness: Harness, path: str
 ) -> None:
-    """ADR-0186 §6 through §10: nothing resolves, and the engine is not reached.
+    """ADR-0177 §1 driven rather than read: nothing resolves, and the engine is untouched.
 
     An admitted browser asking the assistant for nothing it serves is answered
     ``404`` and "the engine is not reached (ADR-0168 §1's biconditional)". The second
