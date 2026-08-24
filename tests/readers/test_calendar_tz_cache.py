@@ -68,6 +68,9 @@ from icalendar import Calendar
 from icalendar.timezone import tzp
 from ics_fixtures import NOW, calendar, reader, source, summaries, utc, vevent
 
+from ai_assistant.core.errors import ReaderError
+from ai_assistant.readers._occurrences import SourceNotParseableError
+
 if TYPE_CHECKING:
     from collections.abc import Iterator
     from pathlib import Path
@@ -334,7 +337,81 @@ async def test_three_readers_parsing_at_once_each_read_their_own_document(
         assert third.coverage is None
 
 
-# --- what the isolation may not cost -----------------------------------------
+# --- what the re-seating may not reach ---------------------------------------
+
+
+async def test_a_dtstamp_naming_a_defined_zone_is_still_no_report_time(
+    tmp_path: Path,
+) -> None:
+    """Re-seating may not make an aware value out of one the parser left naive.
+
+    ``icalendar`` applies a ``TZID`` to six property names and ``DTSTAMP`` is not
+    among them, so ``DTSTAMP;TZID=Tzcache/Hostile:20260803T120000`` is naive because
+    the parser **decided** that, not because a zone failed to resolve. RFC 5545
+    makes ``DTSTAMP`` a UTC value, and ADR-0092 §3 permits no substitute for a
+    report time the source did not make — so a re-seating that read "declared id,
+    this document defines it" and made the stamp aware would hand ``_reported_at``
+    an instant nobody wrote, un-skipping an entry #1491 skips.
+
+    The zone here is one the document **does** define, which is the case an
+    id-keyed check gets wrong: the unresolvable-id version of this is already
+    pinned by ``test_an_unresolvable_zone_on_the_dtstamp_leaves_no_report_time``,
+    and it would have kept passing throughout. Adversarial review found it on
+    round 2.
+    """
+    # Assembled by hand rather than through ``vevent``, which supplies a UTC
+    # ``DTSTAMP`` of its own — two ``DTSTAMP`` lines would leave the reader with the
+    # well-formed one and this case asserting nothing.
+    entry = "\r\n".join(
+        [
+            "BEGIN:VEVENT",
+            "UID:stamped",
+            f"DTSTAMP;TZID={_HOSTILE}:20260803T120000",
+            f"DTSTART;TZID={_HOSTILE}:20260803T123000",
+            f"DTEND;TZID={_HOSTILE}:20260803T130000",
+            "SUMMARY:quarterly review",
+            "END:VEVENT",
+        ]
+    )
+
+    reading = await _read(_written(tmp_path, "stamped.ics", _GOOD, _vtimezone(), entry))
+
+    assert summaries(reading.proposals) == [_GOOD_RENDERED]
+    assert reading.coverage is None
+
+
+@pytest.mark.parametrize("planted", [False, True], ids=["fresh", "id-already-cached"])
+async def test_a_definition_this_document_uses_and_cannot_build_refuses_either_way(
+    tmp_path: Path, planted: bool
+) -> None:
+    """The same bytes take the same path whatever the process cached before.
+
+    A ``VTIMEZONE`` carrying a ``TZID`` and no ``STANDARD`` or ``DAYLIGHT`` cannot
+    be built — ``ValueError: at least one component is needed``. In a fresh process
+    ``cache_timezone_component`` builds every definition whose id the provider does
+    not know, so ``Calendar.from_ical`` raises and ADR-0093 §8 reports a refusal.
+    Once an earlier read has cached that id the library skips building it, and the
+    document parses.
+
+    So the re-seating lets its own build raise rather than swallowing it: the read
+    refuses in both columns, which is the fresh-process answer made independent of
+    what the process saw first. Swallowing would have left this PR closing the
+    read-order dependence for values while leaving it open for refusals. Adversarial
+    review found it on round 2.
+    """
+    if planted:
+        await _read(_written(tmp_path, "planted.ics", _vtimezone(), _entry(uid="defined")))
+
+    malformed = "\r\n".join(["BEGIN:VTIMEZONE", f"TZID:{_HOSTILE}", "END:VTIMEZONE"])
+
+    with pytest.raises(ReaderError) as refusal:
+        await _read(_written(tmp_path, "malformed.ics", _GOOD, malformed, _entry()))
+
+    assert isinstance(refusal.value.__cause__, SourceNotParseableError)
+    assert _HOSTILE not in str(refusal.value), "ADR-0093 §8's message is payload-free"
+
+
+# --- what the re-seating may not cost ----------------------------------------
 
 
 @pytest.mark.parametrize(
