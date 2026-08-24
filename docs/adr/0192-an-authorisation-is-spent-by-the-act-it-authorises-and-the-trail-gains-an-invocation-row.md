@@ -11,7 +11,7 @@
   change.** Golden rule 5 asks that it be flagged. `AuditTrail` gains three
   members, `AssistantEngine` gains two, `ToolInvoker.invoke` gains an obligation
   and a collaborator, `ToolResult` gains a field, and `core/types.py` gains one
-  model and `core/errors.py` one error class. Every structural implementation of
+  model and `core/errors.py` two error classes. Every structural implementation of
   the two Protocols must grow the new members, and one that does not stops
   satisfying them. It adds no Protocol, so it is not a triad (`CONTRIBUTING.md` →
   "Adding a Protocol"); it grows two existing ones, their shared conformance
@@ -112,10 +112,20 @@ surface can state an execution at all, because ADR-0186's two operations return
 > `SUCCEEDED` or `INDETERMINATE`. A claim completed `FAILED` does not refuse a
 > further claim, and is the only completed state that does not.
 
-> **Normative.** A refused claim raises `AuthorisationSpentError` and returns no
-> `ToolResult`. It is a seam fault, never data, and it is never auto-retried. It is
-> raised before the callable is entered, so ADR-0034 §1's pre-invocation rule
-> classifies the step and this ADR adds no rule to the executor.
+> **Normative.** A claim refused because the authorisation is spent raises
+> `AuthorisationSpentError`. A claim refused because the trail holds no such
+> decision, or holds one whose ruling outcome is not `ALLOW`, raises
+> `UnrecordedAuthorisationError`. Both are new classes in `core/errors.py`; both
+> are seam faults, returned as no `ToolResult` and never as data; and neither is
+> ever auto-retried.
+
+> **Normative.** Both are raised **before the callable is entered**, always, and
+> that is a clause of this contract rather than a property of an implementation.
+> Each is therefore an exit in the window ADR-0034 §1 governs, qualifying on that
+> section's **second** ground — "The contract says the exit precedes the callable"
+> — exactly as a `ToolBindingError` does. The executor commits `RUNNING → FAILED`
+> and never retries, under ADR-0034 §1's rule unchanged; what it owes is
+> recognising the two classes, as it already recognises `ToolBindingError`.
 
 > **Normative.** The claim spends the authority to **begin a further act** and
 > nothing else. It removes, rewrites, hides, expires or invalidates no recorded
@@ -177,8 +187,9 @@ one atomic append: one claims, the other is refused.
 
 > **Normative.** `AuditTrail.record_invocation` refuses a claim whose named
 > decision is not recorded in the trail, or whose named decision's ruling outcome
-> is not `ALLOW`. This is the resolution invariant's placement argument applied to
-> a second row kind: the check is made where both records are in hand.
+> is not `ALLOW`, with `UnrecordedAuthorisationError`. This is the resolution
+> invariant's placement argument applied to a second row kind: the check is made
+> where both records are in hand.
 
 **That narrows #259 and does not close it, and the difference is worth stating.**
 #259 records that `StepExecutor` "accepts any valid `ToolCall`", so a caller
@@ -282,11 +293,14 @@ the store's uniqueness constraint, `(decision_id, attempt)`.
 > as `SUCCEEDED`, as `FAILED`, as "did not run", as an omission, or as a row still
 > being written.
 
-> **Normative.** `ToolInvoker.invoke` appends the completion on **every** exit it
-> observes — a returned `ToolResult`, a raised seam fault, an expired deadline, a
-> cancellation — carrying the outcome ADR-0029 §§3–4 already compute for that exit.
-> A completion that is not written because the process did not survive to write it
-> leaves the claim open, which is the state the clause above governs.
+> **Normative.** Once a claim is appended, `ToolInvoker.invoke` appends the
+> completion on **every** exit it observes — a returned `ToolResult`, a raised seam
+> fault, an expired deadline, a cancellation — carrying the outcome ADR-0029 §§3–4
+> already compute for that exit. An exit that occurs **before** the claim completes
+> nothing, because there is no claim: §1's two refusals and the rest of ADR-0034
+> §1's window are that case. A completion that is not written because the process
+> did not survive to write it leaves the claim open, which is the state the clause
+> above governs.
 
 > **Normative.** Where ADR-0014 §4's recovery scan records `INDETERMINATE` on a
 > step, the same act appends the `INDETERMINATE` completion for the open claim
@@ -366,7 +380,8 @@ nothing in this section inherits that nonce or its hazard.
 
 > **Normative.** A surface rendering a `ToolInvocation` renders, for every row: its
 > kind — claim or completion — the instant it was recorded, and the identifier and
-> capability of the `ToolDefinition` carried by the decision the row reaches. For a
+> capability of the `ToolDefinition` carried by the decision the row reaches:
+> directly for a claim, and through the claim it completes for a completion. For a
 > claim it renders the attempt ordinal; for a completion it renders the outcome and
 > the incurred cost, including that the cost is unknown where the basis is
 > `UNKNOWN`. It omits, truncates, summarises, samples and counts in place of none
@@ -452,6 +467,14 @@ the milestone-24 ruling found it.
 > reconciliation and no refusal outcome. Those are the budget ADR's, and it cites
 > the field named above rather than reshaping it.
 
+> **Normative.** The accumulator counts **every** completion row, including one
+> whose incurred cost carried the total past a ceiling. No row is excluded from the
+> total because a refusal followed it, and no lane treats a crossing call as free.
+
+> **Normative.** This row carries no model-token accounting and no model spend.
+> `incurred` is the price of one tool invocation; a ledger over model calls is a
+> different ledger, and no lane folds one into the other on this row.
+
 **The distinction between a declaration and a measurement is the one thing this
 section exists to keep.** ADR-0016 §4 makes `cost` "the price of *one invocation of
 the tool itself*" as **declared**, and ADR-0021 §6 defers spend accumulation
@@ -473,6 +496,20 @@ value that section rejected, at the one place where the total is at stake.
 comparing amounts across currencies needs conversion rates and is out of scope
 entirely", and a ceiling summing rows in two currencies meets that problem head on.
 It is the budget ADR's to answer; naming it here would be deciding the ceiling.
+
+**The two clauses above are written against a surveyed failure rather than an
+imagined one.** #1548 surveys five agent runtimes and finds exactly one spend
+ceiling among them — and that one is over model tokens, is a client-side estimate
+its own documentation says not to bill from, and counts a tool execution as zero.
+The survey's two recorded accounting corners are the ones the clauses close: the
+call that crosses the ceiling is still spent and must be counted rather than
+treated as free, and a budget that is a token budget in disguise misses the axis a
+world budget is about. The same survey records a runtime whose resume "re-executes
+all logic" from the start of a node, so a side effect before an interrupt runs
+twice — which is §1's failure reached by a caller re-check instead of an atomic
+single-use claim, observed in a shipped system. None of those figures is measured
+here; they are what the surveyed projects' own code and documentation say, and
+#1548 carries that caveat in its own terms.
 
 ### 6. Data rights
 
@@ -557,6 +594,18 @@ a reader to work it out.
 ADR-0188 for nothing of the kind. §7's first clause stays true and is extended by
 §4's fourth clause onto a surface that did not exist when §7 was written. §8's gate
 is untouched.
+
+**ADR-0034 §1 — nothing is owed, and the showing is worth writing out because the
+section enumerates.** Its rule is stated over a *window* rather than over one
+exception, and it admits an exit on either of two grounds; §1 above supplies a new
+exit on the second ground, by a contract clause of the same kind ADR-0029 §2
+supplies for `ToolBindingError`. ADR-0034 §1's sentence "Three exits occupy the
+window today" is a count at its own date and is not a closed set — "today" is in
+it — and its rule, its two grounds, its refusal of `INDETERMINATE` in that window
+and its statement that `ToolInvoker` "exposes no 'the callable was reached' fact
+and this ADR introduces none" all stay true. This ADR introduces no such fact on
+the seam either: §3's claim is a durable row in a store, not a value returned from
+`invoke`, and no executor reads it.
 
 **ADR-0148 §9 — nothing is owed, and this is the clause most at risk of being read
 as changed.** The step execution remains the attempt identifier ADR-0017 §3
@@ -664,10 +713,11 @@ row kinds, and the annotation belongs to the kind that was already there.
 - **The trail becomes the busiest store in the system.** Two rows per side-effecting
   call on top of one per gated action, with no retention rule, makes #108 sharper
   than ADR-0021 §4 left it — and #108's own trade is unchanged, only larger.
-- **New `core` surface:** `ToolInvocation` and `AuthorisationSpentError`, one field
-  on `ToolResult`, three members on `AuditTrail`, two on `AssistantEngine`, and one
-  obligation on `ToolInvoker.invoke`. No new Protocol, so no new triad; three
-  conformance suites and three fakes grow.
+- **New `core` surface:** `ToolInvocation`, `AuthorisationSpentError` and
+  `UnrecordedAuthorisationError`, one field on `ToolResult`, three members on
+  `AuditTrail`, two on `AssistantEngine`, and one obligation on
+  `ToolInvoker.invoke`. No new Protocol, so no new triad; three conformance suites
+  and three fakes grow.
 - **Revisit when** the budget ADR lands and finds the field named in §5 does not
   answer it; when #234 changes the executor's classification; when a tool contract
   offers a lookup by idempotency key and reconciliation becomes possible; or when a
