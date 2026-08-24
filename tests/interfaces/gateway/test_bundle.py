@@ -1230,8 +1230,8 @@ def test_the_announcement_is_read_off_what_this_browser_actually_observed() -> N
     assert "how it ended is what is not known" in script
     # What neither of them may drop: the act is the same act, so the three things about
     # it that do not depend on how far the answer got are said in both.
-    assert script.count("nothing was cancelled — the assistant was not told to stop.") == 3
-    assert script.count("new question rather than retrying that one") == 3
+    assert script.count("nothing was cancelled — the assistant was not told to stop.") == 4
+    assert script.count("new question rather than retrying that one") == 4
     # The route back is one constant read by both, so the two endings cannot drift apart
     # on it — and it points rather than promises, because a turn that ran is not thereby
     # a turn that was recorded (`TurnOutcome.capture_degraded`, ADR-0074 §9 item 6).
@@ -1375,10 +1375,7 @@ def test_a_wait_stopped_after_any_other_refusal_head_says_a_reply_was_read() -> 
         "if (waiting.refusedWith !== null) {"
     )
     assert abandon.index("if (waiting.refusedWith !== null) {") < abandon.index("const said =")
-    assert (
-        "REFUSED_BEFORE_THE_ENGINE.has(waiting.refusedWith) ? ASK_REFUSED_UNRUN"
-        " : ASK_REFUSED_UNREAD" in " ".join(abandon.split())
-    )
+    assert 'fault(refusalAbandoned(waiting.refusedWith), "console");' in abandon
     # It is a fault rather than re-entry: nothing about the session ended, so the control
     # comes back into a console that is still the owner's.
     for reentry in ("sessionLost(", "forgetHeaderHalf(", "showBootstrap("):
@@ -1395,6 +1392,49 @@ def test_a_wait_stopped_after_any_other_refusal_head_says_a_reply_was_read() -> 
     assert "there is nothing to look for" in script
     unrun = script[script.index("const ASK_REFUSED_UNRUN") :]
     assert "WHERE_TO_LOOK" not in unrun[: unrun.index(";") + 1]
+
+
+def test_a_declined_turn_is_announced_as_one_the_assistant_did_receive() -> None:
+    """Adversarial review, round 6, blocker, and the other half of round 5's.
+
+    ``422`` is ``assistant-declined``, which ADR-0168 §9 defines as "a request the hub
+    **received** and declined" — the distinction §9 exists to keep. So it settles the
+    same question ``REFUSED_BEFORE_THE_ENGINE`` settles, in the opposite direction, and
+    grouping it with the ambiguous statuses said a status said nothing when it says a
+    great deal. ``server.py`` writes ``422`` once more, for ``_connection_fault``'s
+    ``identity-unusable``, and that serves ADR-0151's connection surface — not either ask
+    path.
+
+    **What it must not say in either direction.** A declined turn produced no answer to
+    record, so ``WHERE_TO_LOOK``'s pointer at the conversations listing would be a
+    promise that cannot hold; and this browser did not read what the hub said, so
+    declaring there is nothing to find would state a state it has not read (ADR-0177 §7).
+    It says neither, and the enumeration is complete: every status these two paths answer
+    with is decided here, taken by the re-entry branch, or deliberately left ambiguous.
+    """
+    script = _code("app.js")
+    choose = _functions(script)["refusalAbandoned"]
+
+    assert "const DECLINED_BY_THE_ASSISTANT = 422;" in script
+    assert "if (status === DECLINED_BY_THE_ASSISTANT) {" in choose
+    assert "return ASK_REFUSED_DECLINED;" in choose
+    # The order is the argument: the pre-engine set is asked first, and what falls past
+    # both is the ambiguous remainder rather than a fourth case nobody wrote.
+    assert choose.index("REFUSED_BEFORE_THE_ENGINE.has(status)") < choose.index(
+        "status === DECLINED_BY_THE_ASSISTANT"
+    )
+    assert choose.rstrip().endswith("return ASK_REFUSED_UNREAD;\n}")
+    # And it is the whole enumeration: three answers, and nothing else decides one.
+    assert choose.count("return ") == 3
+    assert script.count("refusalAbandoned(") == 2
+
+    # What it says, and the two things it may not say.
+    assert "The assistant did receive that question and declined it" in script
+    assert "so no answer was produced" in script
+    declined = script[script.index("const ASK_REFUSED_DECLINED") :]
+    said = declined[: declined.index(";") + 1]
+    assert "WHERE_TO_LOOK" not in said
+    assert "nothing to look for" not in said
 
 
 def test_the_page_renders_a_notification_in_the_open_page_and_by_no_other_means() -> None:
