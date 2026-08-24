@@ -596,8 +596,15 @@ async def test_accepting_an_answer_retires_exactly_what_it_said_it_would() -> No
     ``retires`` scriptable, which is why it is checked now rather than earlier.
 
     The tombstone arm rides along because it is the same rule rather than an exception:
-    a retirement that no longer resolves retires nothing, the record having gone when
-    the store hid its closed window (ADR-0045 §6), and discarding by id is idempotent.
+    a retirement that no longer resolves names a ``record_id`` like any other, the
+    record is already gone (ADR-0045 §6), and discarding by id is idempotent.
+
+    **The live entry carries resolved content and the tombstone names a record that was
+    never held**, which is what makes this a scenario a producer could actually build.
+    An earlier draft tombstoned the *live* record — so the question said "no longer
+    held … would not touch it" about a belief the answer then destroyed, and the
+    assertion passed while describing a state no store produces. Adversarial review
+    caught it on this lane's round 2.
     """
     engine = FakeAssistantEngine()
     engine.hold("live-1", content="the user works from Madrid")
@@ -606,7 +613,10 @@ async def test_accepting_an_answer_retires_exactly_what_it_said_it_would() -> No
         "q-1",
         content="the user works from Lisbon",
         state=QuestionState.OPEN,
-        retires=(engine.retirement("live-1"), engine.retirement("gone-1")),
+        retires=(
+            engine.retirement("live-1", content="the user works from Madrid"),
+            engine.retirement("gone-1"),
+        ),
     )
 
     outcome = await engine.answer("q-1", accept=True)
@@ -638,3 +648,58 @@ async def test_declining_an_answer_retires_nothing_and_writes_nothing() -> None:
     assert outcome.kind is AnswerKind.REJECTED
     assert outcome.record_id is None
     assert await engine.belief("live-1") is not None
+
+
+async def test_an_answer_that_retires_never_writes_over_a_record_it_did_not_name() -> None:
+    """The scope is exact in both directions, and the id is where it stopped being.
+
+    ADR-0078 §8 makes ``retires`` "the exact scope the answer authorises", which forbids
+    retiring less than it named *and* touching anything it did not. The id an accepted
+    answer wrote used to be sized from the store — fine while nothing shrank it, and
+    wrong the moment this method began retiring: with ``rec-1`` and ``rec-2`` held,
+    retiring ``rec-1`` frees the number ``rec-2`` and the next write lands on top of the
+    survivor. Two beliefs become one, silently, with no answer having named the loser.
+
+    Adversarial review found it on this lane's round 2, on the path this lane added.
+    """
+    engine = FakeAssistantEngine()
+    engine.ask("q-1", content="first", state=QuestionState.OPEN)
+    engine.ask("q-2", content="second", state=QuestionState.OPEN)
+    first = await engine.answer("q-1", accept=True)
+    second = await engine.answer("q-2", accept=True)
+    assert first.record_id is not None
+    assert second.record_id is not None
+
+    engine.ask(
+        "q-3",
+        content="third",
+        state=QuestionState.OPEN,
+        retires=(engine.retirement(first.record_id, content="first"),),
+    )
+    third = await engine.answer("q-3", accept=True)
+
+    assert third.record_id not in {first.record_id, second.record_id}
+    survivor = await engine.belief(second.record_id)
+    assert survivor is not None, "the record no answer named is still held"
+    assert survivor.content == "second", "and still says what it said"
+    assert await engine.belief(first.record_id) is None, "the one that was named is gone"
+
+
+async def test_an_explicitly_held_id_is_never_minted_over() -> None:
+    """The other direction of the same rule, where a test holds a ``rec-N`` of its own.
+
+    :meth:`hold` takes the id its caller names, so a suite that seeded ``rec-1`` before
+    answering anything would have the first accepted answer land on top of it. Skipping
+    past an id already held keeps ``answer``'s write additive, which is what every
+    caller of this engine assumes when it reads ``record_id`` back.
+    """
+    engine = FakeAssistantEngine()
+    engine.hold("rec-1", content="seeded by hand")
+    engine.ask("q-1", content="answered", state=QuestionState.OPEN)
+
+    outcome = await engine.answer("q-1", accept=True)
+
+    assert outcome.record_id != "rec-1"
+    seeded = await engine.belief("rec-1")
+    assert seeded is not None
+    assert seeded.content == "seeded by hand"

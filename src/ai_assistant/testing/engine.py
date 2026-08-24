@@ -196,6 +196,13 @@ class FakeAssistantEngine:
         #: ceremony's shape and carries no activity stamp.
         self.activity: dict[str, datetime] = {}
         self._ticks = count(1)
+        #: Where :meth:`answer` draws the id of the belief an accepted answer writes.
+        #: A **counter rather than the store's size**, because the store shrinks: a
+        #: ``forget``, or an answer that retires what it names, frees a number the size
+        #: would then hand to the next write, and the write would land on top of an
+        #: unrelated survivor. Adversarial review found it on this lane's round 2, on
+        #: the retirement path — which is the one that made a shrink routine.
+        self._written = count(1)
         self.parked: dict[str, Confirmation] = {}
         self.turn_outcome: TurnOutcome | None = None
         self.observation: ObservationReport = ObservationReport()
@@ -554,8 +561,18 @@ class FakeAssistantEngine:
         ADR-0106 §2 doing their job rather than this method second-guessing them.
 
         **A retirement that no longer resolves retires nothing**, which is not a special
-        case but the same rule: ``MemoryStore.get`` hid a closed window (ADR-0045 §6),
-        the record is already gone, and discarding by id is idempotent.
+        case but the same rule: the retirement names a ``record_id`` either way, and
+        where ``MemoryStore.get`` hid a closed window (ADR-0045 §6) the record is
+        already gone, so discarding by id is idempotent. The scope is what the answer
+        *names*, not what the projection managed to resolve.
+
+        **The written id comes from a counter and not from the store's size**, because
+        this method now shrinks the store. With ``rec-1`` and ``rec-2`` held, retiring
+        ``rec-1`` and sizing the next id would mint ``rec-2`` and write on top of the
+        unrelated survivor — an answer destroying a record outside the scope it
+        presented, which is the opposite of ADR-0078 §8's guarantee. The loop past an id
+        already held covers the other direction, where a test has held an explicit
+        ``rec-N`` of its own.
         """
         named = identifier(question_id, name="question_id")
         check_arguments(
@@ -575,7 +592,9 @@ class FakeAssistantEngine:
             )
         for retirement in question.retires:
             self.beliefs_held.pop(retirement.record_id, None)
-        record_id = f"rec-{len(self.beliefs_held) + 1}"
+        record_id = f"rec-{next(self._written)}"
+        while record_id in self.beliefs_held:
+            record_id = f"rec-{next(self._written)}"
         self.hold(
             record_id,
             content=question.content,
