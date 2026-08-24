@@ -11,6 +11,14 @@ module's fix a definition that appeared in the source **once** kept resolving th
 ``TZID``, at whatever offset it declared, for every later read — including reads of
 a different file, and reads of the same file after the definition was removed.
 
+**And the id-keyed half is the one an "did it resolve" check cannot see.** The
+cache is written only for an id it does not already hold, so where a later document
+defines the same ``TZID``, the *earlier* file's definition keeps being applied: the
+value is aware, the id is the one the source wrote, and only the offsets are
+another document's. That is why the fix re-seats every custom zone on the
+definition in front of it rather than merely noticing zones that arrived from
+nowhere.
+
 **Why that is this seam's problem rather than a library curiosity.**
 
 * ADR-0183 §1 makes whoever can place bytes in the source the adversary, and §1's
@@ -39,6 +47,12 @@ order, because that is one document read whole and it is how every CalDAV server
 emitting a non-IANA ``TZID`` stays readable (#1499). And an IANA key is never
 shadowed: the cache is consulted after the provider, so a source's own
 ``VTIMEZONE:TZID=Europe/Rome`` was inert before this change and is inert after it.
+
+**What it deliberately leaves alone is the library's cache itself**, and ADR-0096
+§5 decides that: three ``CalendarReader`` instances exist so that no consumer waits
+on another's read, and emptying one shared structure around the parse needs a lock
+that hands that coupling back. The cache therefore still fills; it just no longer
+decides anything a reading carries.
 
 Refs #1497, #1491, ADR-0183 §1/§5, ADR-0093 §5/§7/§7b, ADR-0117 §5.
 """
@@ -205,19 +219,52 @@ async def test_a_definition_planted_by_anything_else_in_the_process_does_not_rea
     assert reading.coverage is None
 
 
-async def test_a_read_leaves_no_definition_behind_for_the_next_caller(tmp_path: Path) -> None:
-    """Isolation in the outward direction, which is the half a per-read clear misses.
+async def test_a_second_definition_of_the_same_id_is_the_one_that_is_applied(
+    tmp_path: Path,
+) -> None:
+    """The half of the leak an id-keyed check would have missed entirely.
 
-    Emptying the cache only on the way *in* would still hand every later caller of
-    ``icalendar`` in this process a zone the source defined — including the next
-    reader instance, whose own clear would then be the only thing standing between
-    them. Restoring on the way out makes the read leave the process as it found it,
-    so the guarantee does not depend on every other caller having one.
+    ``TZP.cache_timezone_component`` writes an id **only when the cache does not
+    already hold it**, so where two reads define the same ``TZID`` the parser keeps
+    answering with the *first* file's definition — same id, the other document's
+    offsets, and no naive value anywhere for a "did it resolve" check to notice.
+    The second read here defines ``-01:00`` for an id an earlier read defined at
+    ``+01:00``, and must be read at the offsets in front of it — two hours' error in
+    the direction that would have gone unnoticed, since both readings are
+    well-formed, in-window, and carry the id the source wrote.
+    """
+    earlier = _written(tmp_path, "earlier.ics", _vtimezone(), _entry(uid="defined"))
+    later = _written(tmp_path, "later.ics", _vtimezone(offset="-0100"), _entry(uid="redefined"))
+
+    await _read(earlier)
+    reading = await _read(later)
+
+    assert summaries(reading.proposals) == [_WESTERN_RENDERED]
+    assert reading.coverage is not None
+
+
+async def test_the_library_cache_is_left_alone_and_no_longer_decides_anything(
+    tmp_path: Path,
+) -> None:
+    """What this fix deliberately does **not** do, pinned so nobody "completes" it.
+
+    Emptying the shared cache around the parse is the shorter repair and it needs a
+    lock: ADR-0093 §7 reserves one outstanding worker *per reader*, and
+    ``app/composition.py`` builds three calendar readers for exactly the reason
+    ADR-0096 §5 gives — "a shared reader would let a scheduled ingestion read
+    suppress the request-path facet for as long as it runs". A lock around the parse
+    hands that coupling straight back, at the most expensive step of the read.
+
+    So the cache is left as it is found, and the definition is still in it
+    afterwards. That is inert rather than tolerable-in-principle, and the cases
+    above are what make it inert: every value is re-seated on this document's own
+    definition or made unreadable. What is left is the library's own memory
+    growth (#1541), which is not this reader's state and is filed rather than fixed here.
     """
     reading = await _read(_written(tmp_path, "defines.ics", _vtimezone(), _entry(uid="defined")))
 
     assert reading.proposals != ()
-    assert tzp.timezone(_HOSTILE) is None
+    assert tzp.timezone(_HOSTILE) is not None, "left alone on purpose — see the docstring"
 
 
 async def test_the_same_bytes_read_twice_produce_the_same_reading(tmp_path: Path) -> None:
@@ -241,47 +288,50 @@ async def test_the_same_bytes_read_twice_produce_the_same_reading(tmp_path: Path
     assert after.coverage == before.coverage
 
 
-async def test_two_readers_parsing_at_once_each_see_only_their_own_zone(
+async def test_three_readers_parsing_at_once_each_read_their_own_document(
     tmp_path: Path,
 ) -> None:
-    """The hazard the isolation's own lock exists for, exercised rather than reasoned.
+    """Concurrent reads, because this reader has three instances by design.
 
-    ADR-0093 §7 reserves one outstanding worker **per reader**, so two readers over
-    two configured sources parse on two threads at the same time — and the cache
-    they clear is one structure shared by both. An unserialised clear empties the
-    other read's in-flight document out from under it, and the other read then
-    skips an entry whose zone its own bytes define.
+    ``app/composition.py`` builds a facet reader, an ingestion reader and an
+    upcoming-event producer over the same path, and ADR-0096 §5 is why: sharing one
+    "would let a scheduled ingestion read suppress the request-path facet for as
+    long as it runs". Each owns a worker thread, so three parses genuinely overlap —
+    which is what rules out the shorter repair of emptying the shared cache around
+    the parse, since serialising it re-couples exactly what those three instances
+    decouple.
 
-    **A witness rather than a proof, and it is written to say so.** Two threads
-    interleaving is the scheduler's decision, so this can only ever demonstrate the
-    hazard, never bound it; the documents are padded and the rounds repeated to make
-    the overlap likely. It is a sharp witness in practice: with the lock replaced by
-    a ``nullcontext`` it failed on the **first** of the twenty rounds, on the padded
-    documents below. With the region serialised it passes deterministically, so it
-    does not trade a real defect for a flaky suite.
+    Re-seating writes nothing outside its own call, so this is deterministic rather
+    than a witness: each read names its own document's offset, and the third — which
+    defines nothing — skips its entry however the other two interleave with it. The
+    documents are padded so the parses do overlap in practice; the assertions would
+    hold at any interleaving, including none.
     """
     padding = [
         vevent(f"DTSTART:{utc(NOW)}", f"SUMMARY:filler {n}", uid=f"pad{n}") for n in range(200)
     ]
-    first = _written(
+    east = _written(
         tmp_path,
         "east.ics",
         _vtimezone("Tzcache/East", offset="+0100"),
         *padding,
         _entry("Tzcache/East"),
     )
-    second = _written(
+    west = _written(
         tmp_path,
         "west.ics",
         _vtimezone("Tzcache/West", offset="-0100"),
         *padding,
         _entry("Tzcache/West"),
     )
+    neither = _written(tmp_path, "neither.ics", _GOOD, *padding, _entry("Tzcache/East"))
 
     for _ in range(20):
-        east, west = await asyncio.gather(_read(first), _read(second))
-        assert _LEAKED_RENDERED in summaries(east.proposals), "east lost its own definition"
-        assert _WESTERN_RENDERED in summaries(west.proposals), "west lost its own definition"
+        first, second, third = await asyncio.gather(_read(east), _read(west), _read(neither))
+        assert _LEAKED_RENDERED in summaries(first.proposals), "east lost its own definition"
+        assert _WESTERN_RENDERED in summaries(second.proposals), "west lost its own definition"
+        assert _LEAKED_RENDERED not in summaries(third.proposals), "a zone it never defined"
+        assert third.coverage is None
 
 
 # --- what the isolation may not cost -----------------------------------------
@@ -386,8 +436,16 @@ def test_the_instants_these_cases_turn_on() -> None:
     proposal, and the defect cases are not passing because the entry fell outside
     the window for an unrelated reason. If the fixture's clock or window ever moved,
     this fails instead of the cases quietly stopping testing anything.
+
+    Both offsets are checked, and the second is not decoration: ``+03:00`` was the
+    first choice for the re-definition case and puts the same entry at 09:30Z to
+    10:00Z — wholly outside a half-open window opening at 10:00Z, so the case passed
+    its skip assertion while testing the window rather than the zone.
     """
     planted = datetime(2026, 8, 3, 12, 30, tzinfo=UTC) - timedelta(hours=1)
+    redefined = datetime(2026, 8, 3, 12, 30, tzinfo=UTC) + timedelta(hours=1)
 
     assert planted == datetime(2026, 8, 3, 11, 30, tzinfo=UTC)
     assert NOW - timedelta(hours=2) <= planted < NOW + timedelta(hours=2)
+    assert redefined == datetime(2026, 8, 3, 13, 30, tzinfo=UTC)
+    assert NOW - timedelta(hours=2) <= redefined < NOW + timedelta(hours=2)
