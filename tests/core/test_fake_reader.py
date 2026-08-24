@@ -373,30 +373,24 @@ def test_an_identity_of_neither_form_is_refused_at_construction(name: str) -> No
         FakeReader(name=name)
 
 
-def test_a_hex_shaped_declared_name_is_admitted_because_nothing_decidable_refuses_it() -> None:
-    """Where ADR-0190 §4's prose and §3's enumerated checks meet, and how they agree.
+def test_a_bare_discriminator_is_refused_by_the_seam_the_suite_cannot_refuse_it_from() -> None:
+    """ADR-0190 §3: ``Reader.name`` is "never a discriminator on its own".
 
-    §4 lists "a bare discriminator" among the values that "are not identities at
-    all". §3 then states the checks a seam makes, exhaustively and "decidably, over
-    the value alone" — UTF-8-encodable, canonical, at most one colon, and the
-    discriminated form wherever a colon appears — and **none of them excludes a
-    declared name that happens to be 32 hexadecimal characters**.
+    §4 lists a bare discriminator among the values that "are not identities at
+    all", and §3 states it as a direct obligation on what ``Reader.name`` returns.
+    A colon-free 32-character hexadecimal value is decidably one, so this
+    constructor — a seam that admits a source identity — refuses it.
 
-    The two are consistent rather than in conflict: §4's sentence enumerates
-    malformed spellings of the **discriminated** form, and a colon-free value is
-    offered as a bare declared name, not as a discriminator. Nothing decidable over
-    the value alone tells those apart — §4's own no-colon clause is what makes the
-    declared half recoverable, and it recovers this one as a declared name. What
-    actually forbids a later source holding a bare hex identity is §1's allocation
-    rule, which is about *which* source of a type carries a discriminator and is
-    not a property of the string.
-
-    Pinned rather than left implicit, because a seam that quietly grew this
-    refusal would refuse a conforming ``Reader`` and §3 would not say why.
+    **``ReaderContract`` does not**, and the asymmetry is §3's own division. The
+    checks §3 enumerates for the suite are made "decidably, over the value alone"
+    and this is not among them; the suite's remit stops exactly where the prefix
+    check does, which §3 spells out in the clause beginning "What that clause
+    **cannot** reach". A ``Reader`` that declared such a value would be caught by
+    the concrete reader's test instead, which is the case below and its siblings in
+    ``tests/readers/``. Pinned in both places so neither reads as an oversight.
     """
-    subject = FakeReader(name=_DISCRIMINATOR)
-
-    assert subject.name == _DISCRIMINATOR
+    with pytest.raises(ValueError, match=r"(?i)never a discriminator on its own"):
+        FakeReader(name=_DISCRIMINATOR)
 
 
 async def test_a_discriminated_identity_reaches_the_reading_and_its_attestation() -> None:

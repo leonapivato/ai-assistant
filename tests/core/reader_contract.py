@@ -266,12 +266,20 @@ class ReaderContract:
         assert reader.name.strip()
 
     async def test_the_declared_identity_is_stable_across_calls(self, reader: Reader) -> None:
-        """Declared, not computed: reading the source must not rename the reader.
+        """Assigned, not computed: reading the source must not rename the reader.
 
-        ``name`` is a **declared constant** rather than a configurable value
-        (ADR-0093 §7), so it cannot depend on what a read found — and a reader
-        whose identity moved would scatter one source's beliefs across two
-        ``reported_by`` values that no later fold could bring back together.
+        An identity is **assigned once, when its source is first configured, and
+        never changes** (ADR-0189 §6) — so it cannot depend on what a read found.
+        That is where the stability comes from after ADR-0190 §1, which partially
+        supersedes ADR-0093 §7's "not a configurable value" clause: a discriminated
+        identity is configured and is still constant across calls, because what
+        fixes it is the moment of assignment rather than its being a class
+        constant.
+
+        The cost of the property failing is unchanged and is why it is pinned: a
+        reader whose identity moved would scatter one source's beliefs across two
+        ``reported_by`` values that no later fold could bring back together, and
+        would orphan every grant keyed on the old one (ADR-0097 §1).
         """
         before = reader.name
 
