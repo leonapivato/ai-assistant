@@ -34,7 +34,7 @@ from __future__ import annotations
 import re
 from datetime import UTC, datetime, timedelta
 from itertools import count
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
 from ai_assistant.core.errors import (
     GrantError,
@@ -49,6 +49,7 @@ from ai_assistant.core.types import (
     ActionPlan,
     AnswerKind,
     AnswerOutcome,
+    Attestation,
     Belief,
     BeliefBand,
     BeliefSummary,
@@ -73,6 +74,7 @@ from ai_assistant.core.types import (
     Question,
     QuestionState,
     ReplyChunk,
+    Retirement,
     SkipReason,
     SourceGrant,
     StepExecution,
@@ -81,7 +83,9 @@ from ai_assistant.core.types import (
     TimeOfDay,
     TurnOutcome,
     TurnResult,
+    Warrant,
     encodable_text,
+    rests_on_recorded_external_content,
     secret_value,
 )
 from ai_assistant.orchestration.payloads import (
@@ -992,7 +996,7 @@ class FakeAssistantEngine:
 
     # --- setting one up ----------------------------------------------------
 
-    def hold(
+    def hold(  # noqa: PLR0913 — a content, a kind, a band, an elision count and ADR-0189 §2's two origin facts; each is one thing a caller decides on its own
         self,
         record_id: str,
         *,
@@ -1000,6 +1004,8 @@ class FakeAssistantEngine:
         kind: MemoryKind = MemoryKind.SEMANTIC,
         band: BeliefBand = BeliefBand.ASSERTED,
         evidence_elided: int = 0,
+        attestation: Attestation | None = None,
+        derived_from_external: bool = False,
     ) -> Belief:
         """Put one belief in memory, and return it.
 
@@ -1011,7 +1017,47 @@ class FakeAssistantEngine:
         can check. It is deliberately **not** derived from anything: it counts
         citations the belief no longer carries, on any band, and is independent of
         the confidence this fake fixes.
+
+        **``attestation`` and ``derived_from_external`` are ADR-0189 §2's two facts,
+        and only one of them is a knob** (#1523). The attestation is scripted, because
+        a surface that names the reporting source and the instant it spoke cannot be
+        tested without one. ``rests_on_recorded_external_content`` is **not**: ADR-0189
+        §2 rules it "the value of
+        :func:`~ai_assistant.core.types.rests_on_recorded_external_content` (ADR-0106
+        §2) applied to the projected record's :class:`~ai_assistant.core.types.Provenance`",
+        and that "no producer supplies it". So this builds the provenance the arguments
+        describe and asks that function — the real projection's own derivation rather
+        than a second spelling of it, which is what stops this fake representing a
+        state no real projection can produce.
+
+        **``Provenance``'s validator is doing work here rather than decorating.** It
+        holds this fake to ADR-0092 §1's *if and only if*: an ``ATTESTED`` belief with
+        no attestation, and an attestation on any other band, are both refused here
+        exactly as the store refuses them — so the state ADR-0189 §2 declines to guard
+        with a validator on :class:`~ai_assistant.core.types.Belief` is unscriptable
+        anyway.
+
+        ``derived_from_external`` is spelled as the ``Provenance`` field it is rather
+        than as the answer it feeds, because it means nothing outside the ``DERIVED``
+        band (ADR-0106 §2) and the band guard belongs to the predicate.
+
+        Args:
+            record_id: The belief's id.
+            content: What the belief says.
+            kind: Which of the four typed memories it is.
+            band: The standing it is held with.
+            evidence_elided: How many citations this record's history displaced.
+            attestation: What reported it and when that source said so. Required on
+                the ``ATTESTED`` band and refused on the other two.
+            derived_from_external: Whether a ``DERIVED`` belief's warrant traces to
+                recorded external content.
+
+        Returns:
+            The belief now held.
         """
+        provenance = _provenance_for(
+            band, attestation=attestation, derived_from_external=derived_from_external
+        )
         held = Belief(
             id=record_id,
             band=band,
@@ -1020,9 +1066,66 @@ class FakeAssistantEngine:
             confidence=1.0 if band is BeliefBand.ASSERTED else _CONFIDENCE,
             last_updated=_AT,
             evidence_elided=evidence_elided,
+            attestation=provenance.attestation,
+            rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
         )
         self.beliefs_held[record_id] = held
         return held
+
+    @staticmethod
+    def retirement(
+        record_id: str,
+        *,
+        content: str | None = None,
+        band: BeliefBand = BeliefBand.ASSERTED,
+        attestation: Attestation | None = None,
+        derived_from_external: bool = False,
+    ) -> Retirement:
+        """Build one record a question's answer would retire (ADR-0189 §2).
+
+        **The producer obligation is structural here rather than remembered.**
+        ADR-0189 §2 rules that a producer sets ``warrant`` "**exactly when** it sets
+        ``content``: both are resolved from one ``MemoryStore.get``, and ``None`` on
+        both is the case ADR-0045 §6 produces" — and it deliberately puts *no*
+        cross-field validator on :class:`~ai_assistant.core.types.Retirement`, for the
+        ordering reason §2 gives. So nothing in ``core`` refuses the half-state, and
+        this builder refuses it by construction instead: a ``content`` yields a whole
+        warrant, no ``content`` yields none, and the two arms a surface must tell
+        apart are the only two that can be scripted through it.
+
+        A test that deliberately wants the half-state builds
+        :class:`~ai_assistant.core.types.Retirement` directly — which is the honest
+        division, since that state is off-contract rather than unrepresentable.
+
+        The warrant's three facts come from one provenance for :meth:`hold`'s reason,
+        and :class:`~ai_assistant.core.types.Warrant`'s own band-keyed validator then
+        refuses every combination the band forecloses (ADR-0189 §3).
+
+        Args:
+            record_id: The retired record's id.
+            content: What it says, or ``None`` where it no longer resolves.
+            band: The standing it was held with.
+            attestation: What reported it and when that source said so.
+            derived_from_external: Whether a ``DERIVED`` record's warrant traces to
+                recorded external content.
+
+        Returns:
+            The retirement, resolved with its whole warrant or tombstoned with none.
+        """
+        if content is None:
+            return Retirement(record_id=record_id, content=None, warrant=None)
+        provenance = _provenance_for(
+            band, attestation=attestation, derived_from_external=derived_from_external
+        )
+        return Retirement(
+            record_id=record_id,
+            content=encodable_text(content),
+            warrant=Warrant(
+                band=band,
+                rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
+                attestation=provenance.attestation,
+            ),
+        )
 
     def _tick(self) -> datetime:
         """The next instant on this engine's logical clock.
@@ -1033,7 +1136,17 @@ class FakeAssistantEngine:
         """
         return _AT + _TICK * next(self._ticks)
 
-    def ask(self, question_id: str, *, content: str, state: QuestionState) -> Question:
+    def ask(  # noqa: PLR0913 — a content, a state, a band, ADR-0189 §2's two origin facts and what accepting would retire; each is one thing a caller decides on its own
+        self,
+        question_id: str,
+        *,
+        content: str,
+        state: QuestionState,
+        band: BeliefBand = BeliefBand.ASSERTED,
+        attestation: Attestation | None = None,
+        derived_from_external: bool = False,
+        retires: Sequence[Retirement] = (),
+    ) -> Question:
         """Put one deferred question in the queue, and return it.
 
         ``state`` decides which enumeration it lands in, and **only ``OPEN`` is
@@ -1042,18 +1155,47 @@ class FakeAssistantEngine:
         present a claim that cannot be taken (ADR-0078 §8); every terminal state —
         declined, applied, stale, re-deferred — appears in neither list and answers
         ``NOT_OPEN``, because those are questions the user has no move left on.
+
+        **``band`` was fixed at ``ASSERTED`` and is now scriptable, because the band
+        is what a surface renders the origin off** (#1523). ``attestation`` and
+        ``derived_from_external`` describe the **proposal** — the record that would be
+        written if the question were accepted — on the same reading ``band`` already
+        has here, and describe no entry in ``retires`` (ADR-0189 §2). Each retirement
+        answers for itself through its own :attr:`Retirement.warrant`, which is why
+        they are built by :meth:`retirement` and passed in whole rather than derived
+        from the question's own arguments: a question proposing the user's own
+        assertion routinely retires an attested record, and a fake that borrowed one
+        answer for the other would make that case unscriptable.
+
+        Args:
+            question_id: The question's id.
+            content: What accepting would have the assistant believe.
+            state: Where the question stands.
+            band: The band the proposal **would** enter if accepted.
+            attestation: What reported the proposal and when that source said so.
+            derived_from_external: Whether a ``DERIVED`` proposal's warrant traces to
+                recorded external content.
+            retires: What accepting would retire, built by :meth:`retirement`.
+
+        Returns:
+            The question now queued.
         """
+        provenance = _provenance_for(
+            band, attestation=attestation, derived_from_external=derived_from_external
+        )
         question = Question(
             id=question_id,
             state=state,
             content=content,
             kind=MemoryKind.SEMANTIC,
-            band=BeliefBand.ASSERTED,
+            band=band,
             rationale="the fake engine was told to ask",
             reason="the policy wants a human answer",
-            retires=(),
+            retires=tuple(retires),
             asked_at=_AT,
             expires_at=None,
+            attestation=provenance.attestation,
+            rests_on_recorded_external_content=rests_on_recorded_external_content(provenance),
         )
         match state:
             case QuestionState.OPEN:
@@ -1255,6 +1397,60 @@ def _ordered_decisions(rows: Sequence[PermissionDecision]) -> tuple[PermissionDe
     return tuple(sorted(by_id, key=lambda decision: decision.decided_at, reverse=True))
 
 
+def _provenance_for(
+    band: BeliefBand,
+    *,
+    attestation: Attestation | None,
+    derived_from_external: bool,
+) -> Provenance:
+    """The provenance a belief in this band, with these facts, would have been stored with.
+
+    **Built so that one function answers ADR-0189 §2's predicate here and in the real
+    engine.** §2 rules ``rests_on_recorded_external_content`` to be
+    :func:`~ai_assistant.core.types.rests_on_recorded_external_content` applied to the
+    projected record's ``Provenance``, and that "no producer supplies it, no surface
+    recomputes it from ``band``". A fake that mapped band to answer directly would be
+    the second spelling ADR-0106 §2 exists to make unwritable — so this reconstructs
+    the input that function takes and lets it decide.
+
+    The band is inverted to a :class:`~ai_assistant.core.types.MemorySource` rather
+    than carried, because ``Provenance`` is keyed on the source and ``band_of`` is the
+    projection (ADR-0072 §4). ``DERIVED`` has two pre-images and ``INFERRED`` is the
+    one chosen: ``OBSERVED`` reaches the same band and the same predicate, so nothing
+    downstream can tell them apart, and picking the other would change no answer.
+
+    Args:
+        band: The standing the record is held with.
+        attestation: What reported it, where the band is ``ATTESTED``.
+        derived_from_external: Whether a ``DERIVED`` warrant traces to recorded
+            external content.
+
+    Returns:
+        A provenance carrying exactly those facts.
+
+    Raises:
+        ValidationError: Where the band and the attestation disagree — ADR-0092 §1's
+            *if and only if*, enforced by ``Provenance`` itself rather than restated
+            here.
+    """
+    match band:
+        case BeliefBand.ASSERTED:
+            source = MemorySource.USER_ASSERTED
+        case BeliefBand.DERIVED:
+            source = MemorySource.INFERRED
+        case BeliefBand.ATTESTED:
+            source = MemorySource.EXTERNAL
+        case _:  # pragma: no cover - exhaustive
+            assert_never(band)
+    return Provenance(
+        source=source,
+        confidence=1.0 if band is BeliefBand.ASSERTED else _CONFIDENCE,
+        last_updated=_AT,
+        attestation=attestation,
+        derived_from_external=derived_from_external,
+    )
+
+
 def _summary_of(belief: Belief) -> BeliefSummary:
     """Project one held belief into the listing's summary (ADR-0085 §4a).
 
@@ -1262,6 +1458,14 @@ def _summary_of(belief: Belief) -> BeliefSummary:
     the real projection agree about it (ADR-0107 §8 item 5). A fake that dropped it
     would let a conformance suite pass against a listing that discloses less than
     the detail view it was drilled into.
+
+    **ADR-0189 §2's two fields are carried for exactly that argument, one field over**
+    (#1523). ADR-0107 §3 refused both "put the field on ``BeliefSummary`` only" and
+    "put it on ``Belief`` only" and required both DTOs to carry it under one name,
+    because "a listing row that answered less than the row it links to is the same
+    projection defective in one place" — and a fake that dropped the attestation here
+    would let a listing render the generic attested line while every single-belief
+    test passed, which is #1517's second finding exactly.
     """
     return BeliefSummary(
         id=belief.id,
@@ -1274,6 +1478,8 @@ def _summary_of(belief: Belief) -> BeliefSummary:
         lost_evidence=belief.lost_evidence,
         valid_until=belief.valid_until,
         evidence_elided=belief.evidence_elided,
+        attestation=belief.attestation,
+        rests_on_recorded_external_content=belief.rests_on_recorded_external_content,
     )
 
 
