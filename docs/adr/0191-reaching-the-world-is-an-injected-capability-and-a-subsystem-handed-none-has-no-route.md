@@ -137,6 +137,36 @@ ADR-0017 §4's honest accounting and a measurement.
 > query, no fragment, no userinfo, no credential and no recipient. An
 > implementation is handed one already parsed and parses no string of its own.
 
+> **Normative.** Every I/O-bearing method on both Protocols is `async`. A
+> synchronous opener or read would block the one event loop the system composes on
+> (`CLAUDE.md`, "I/O-bound methods are `async`") and would put the call outside the
+> reach of ADR-0029 §4's deadline, which is the only bound §2 leaves on it.
+
+> **Normative.** `ByteChannel` carries six operations and no others: a bounded read
+> of one terminated line; a bounded read of at most a caller-stated number of
+> octets; a write; a TLS upgrade; a query of whether TLS has completed; and a
+> close. The raw read is required because §2 rests on a protocol being buildable
+> over the channel, and a line-only channel cannot consume a body that carries no
+> terminator.
+
+The shape those clauses fix, shown rather than imposed — the marked clauses above
+and in §4 are the obligations, and this block is display:
+
+```python
+class OutboundTransport(Protocol):
+    async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel: ...
+
+
+class ByteChannel(Protocol):
+    @property
+    def is_secure(self) -> bool: ...
+    async def read_line(self) -> bytes: ...
+    async def read(self, limit: int, /) -> bytes: ...
+    async def write(self, data: bytes, /) -> None: ...
+    async def start_tls(self) -> None: ...
+    async def close(self) -> None: ...
+```
+
 **The capability is the opener, not the channel, because opening is the act
 being governed.** #85's property is that "a subsystem that was never handed the
 transport cannot open a connection". A channel is the *result* of an opening; a
@@ -306,20 +336,36 @@ quietly creating a second, unbound way to reach the same endpoint.
 > follows no redirect or referral, and offers no way to reach a second host on one
 > call.
 
-> **Normative.** An implementation that establishes TLS verifies the peer's
-> certificate chain and verifies the hostname against the endpoint's host. Neither
-> Protocol exposes a cleartext-only mode, a verification-disabling option or a
-> caller-supplied trust configuration, so no holder can ask for an unverified
-> connection.
+> **Normative.** An implementation that establishes TLS — before the greeting or
+> at the upgrade — verifies the peer's certificate chain and verifies the hostname
+> against the endpoint's host. Neither Protocol exposes a verification-disabling
+> option, a caller-supplied trust configuration, or a way to name a second host for
+> the certificate, so no holder can obtain a TLS connection that was not verified
+> against the endpoint it asked for.
+
+> **Normative.** Where the endpoint's TLS mode is the upgrade one, the channel is
+> cleartext until the upgrade completes, and the capability neither performs the
+> upgrade nor can compel it. The obligation is the holder's: no credential and no
+> user data is written to a channel whose TLS state reads false.
+> `ai_assistant.tools.egress` already refuses on exactly that read before
+> presenting a credential, and refuses a far end that does not offer the upgrade
+> its scheme requires. That refusal is the property; the endpoint's TLS mode is
+> not.
 
 > **Normative.** `ByteChannel.read_line` bounds what it will buffer for one line
 > and refuses beyond that bound rather than growing to whatever the far end sends.
 
-> **Normative.** A refusal raised by the capability is never converted into an
-> indeterminate transmission, and an indeterminate transmission is never expressed
-> as a capability refusal. `IndeterminateTransmissionError`'s separation from
-> `EgressTransportError` in `ai_assistant.tools.egress` is unchanged by this ADR
-> and is not collapsed by moving the transport behind a contract.
+> **Normative.** An `OutboundTransport` and a `ByteChannel` report what happened
+> to the connection and assert nothing about whether a payload was delivered.
+> Which outcome a channel failure produces is the holder's judgement, made from
+> where in its own protocol the failure landed, and this ADR moves none of that
+> judgement into the capability.
+
+> **Normative.** `ai_assistant.tools.egress` therefore continues to convert a
+> channel failure raised after a payload and its terminator were written into
+> `IndeterminateTransmissionError`, as `_SmtpSession.data` does today. Nothing here
+> narrows that window, widens it, or permits such a failure to be recorded as a
+> refusal that transmitted nothing.
 
 These are the properties `open_smtp_channel`, `_tls_context` and `_StreamChannel`
 hold today, restated as obligations on the contract so that they survive the move.
@@ -331,11 +377,18 @@ still compares the binding's endpoint text against the registration's before
 parsing, exactly as ADR-0148 §6 orders it and ADR-0154's condition 5 attests, and
 this ADR adds nothing to and removes nothing from that comparison.
 
-The last clause exists because ADR-0148 §9 maps `IndeterminateTransmissionError`
-onto the step's `INDETERMINATE` outcome and ADR-0014 §4's recovery scan is the
-reconciliation path for it. A contract boundary is exactly where a taxonomy gets
-flattened by accident, and flattening this one would let an unknown disclosure be
-recorded as one that did not happen. `TransportPinError` stays in
+**The outcome clauses are a division of labour, and this ADR's first draft had
+them backwards.** It said a capability refusal is "never converted into an
+indeterminate transmission" — which reads well and is false here. `_SmtpSession.data`
+catches exactly that conversion and must: once the terminator is on the wire, a
+failed read says only that this end stopped listening, which is not evidence about
+what the far end did with the octets. ADR-0148 §9 maps
+`IndeterminateTransmissionError` onto the step's `INDETERMINATE` outcome and
+ADR-0014 §4's recovery scan reconciles it, so a rule forbidding the conversion
+would have had an unknown disclosure recorded as one that did not happen — the
+precise confusion that window exists to prevent. What is true is narrower, and is
+what the clauses now say: the capability is not the party that knows, so it is not
+the party that decides. `TransportPinError` stays in
 `ai_assistant.tools.egress` and is not re-rooted: it names refusals about a
 *binding* as well as about a connection, and only the second half is the
 capability's.
@@ -505,13 +558,38 @@ about whether they are captured.
 > only transport in it, drives a tool that is not the designated seam at the world,
 > and asserts that the fake recorded **no** attempt.
 
+> **Normative.** That assertion is over the **handout**, and is read as nothing
+> wider: an undesignated tool was handed no capability, so it had none to reach. No
+> lane reads the arm as establishing that such a tool could not have opened a
+> connection by some other route.
+
+> **Normative.** The arm also instruments the process's connection-creating
+> boundary for its whole duration — the running event loop's `create_connection`,
+> through which both `asyncio.open_connection` and a direct call on the loop pass —
+> so that an attempt made from inside the arm fails and is recorded, and asserts
+> that none occurred at any point in it, the positive control included. It does not
+> reach a raw `socket`, which stays the nets' ground and #1545's stated residue.
+
 > **Normative.** The same arm, over the same fake in the same composition, drives
 > the designated seam to a bound call and asserts the fake recorded exactly one
 > attempt, to the configured endpoint. A zero that is not accompanied by that
-> positive control does not discharge the exit.
+> positive control does not discharge the exit. The control is an attempt recorded
+> by the fake, which opens nothing, so it moves the connection instrument above by
+> nothing.
 
-> **Normative.** Every assertion in that arm reads the fake's record. No assertion
-> in it is a source scan, an import-graph check or a text search.
+> **Normative.** Every assertion in that arm reads a record the arm's own
+> instruments made — the fake's, or the connection instrument's. No assertion in it
+> is a source scan, an import-graph check or a text search.
+
+**The negative assertion measures the handout, and the arm now says so in its own
+text.** Adversarial review of this ADR's first round showed why the wider reading
+had to be closed off rather than left implied: a non-seam tool calling
+`create_connection` off the running loop bypasses the fake entirely, so the fake
+reads zero, the positive control reads one, and every assertion passes while the
+connection succeeded. That is #1545's residue arriving inside the exit test. The
+answer is both halves — say what the fake measures, and instrument the boundary the
+fake does not sit on — and neither half alone is honest. §7's third clause governs
+what may be claimed from the result either way.
 
 **The positive control is not ceremony.** An assertion that a recorder saw nothing
 is satisfied by a recorder nothing could ever reach, and a harness that mis-wires
