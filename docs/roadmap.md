@@ -223,9 +223,9 @@ consumes what lands here (`track:web-client`), voice keeps spoke-as-sensor
 adversary is already named and mostly answered — ADR-0098 (the injection class,
 escaping, never-authority, ceilings, detection-is-not-a-gate), ADR-0106 (taint
 through consolidation), ADR-0148/0154 (an egress call authorised as one whole,
-at a designated seam). What those rules are applied *to* is a **recorded
-origin**: "a fact the request carries, never an inference about how a model
-produced it" (ADR-0154 §4, item (ii)). Milestone 24's exit names it and the
+at a designated seam). What the lineage and standing-grant gates read is a
+**recorded origin**: "a fact the request carries, never an inference about how a
+model produced it" (ADR-0154 §4, item (ii)). Milestone 24's exit names it and the
 deferred list below waits on it, which is why it takes this track's first
 milestone. Milestones are ordered by **dependency only**, and each closes on a
 QA-driven exit ruling recorded on #1427. Voice holds milestones 19–22 (#1318);
