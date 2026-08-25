@@ -533,25 +533,6 @@ class OutboundTransportContract(ABC):
 
         assert self.held_resources(transport) == before
 
-    #: Whether ``open_channel`` ever holds, across an ``await`` of its own, a
-    #: resource whose safety outlives the coroutine. ADR-0060 §1's clause admits
-    #: two ways to satisfy it — the resource is released, **or** it is "still held
-    #: exclusively by work the method started and can observe finishing" — and an
-    #: implementation whose provisional socket belongs entirely to the call it
-    #: awaits satisfies the second limb by construction. There is then no
-    #: production-owned release for a case to observe, and a case arranged anyway
-    #: would be observing its own substitute clean up: exactly the vacuous proof
-    #: this suite refuses everywhere else. The reduction is the one
-    #: ``PlanStoreContract`` makes for a store that acquires nothing whose safety
-    #: outlives the coroutine.
-    #:
-    #: **An implementation setting this ``False`` still owes the propagation
-    #: half**, which is its own and is not vacuous: it must not absorb the
-    #: cancellation or convert it into a refusal. That case is the
-    #: implementation's to carry beside its binding.
-    holds_a_resource_across_an_await: bool = True
-
-    @pytest.mark.optional_obligation
     async def test_a_cancellation_inside_the_acquisition_releases_and_is_re_raised(
         self, transport: OutboundTransport
     ) -> None:

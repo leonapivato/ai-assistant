@@ -12660,3 +12660,45 @@ class TransportEndpoint(BaseModel):
     implicit_tls: bool = Field(
         description="Whether TLS is established before the greeting, or must be upgraded to.",
     )
+
+    @field_validator("host")
+    @classmethod
+    def _host_carries_no_control_character(cls, value: str) -> str:
+        r"""Refuse a host carrying a control character, ``NUL`` above all.
+
+        **This is the pin, enforced where it cannot be forgotten.** ``getaddrinfo``
+        hands the host to a C library that stops at a ``NUL``, so
+        ``"127.0.0.1\x00mail.example.invalid"`` resolves to ``127.0.0.1`` — a
+        connection to a host that is *not* the one this value names, which is
+        exactly what ADR-0191 §4's "opens a connection to the host and port of the
+        ``TransportEndpoint`` it was handed" forbids and what #83 is about. Under
+        the upgrade TLS mode that yields a cleartext channel to the truncated
+        destination; under implicit TLS the hostname a certificate is verified
+        against is truncated the same way. Adversarial review found it on round 4.
+
+        Refused **here** rather than in an implementation, on this contract's own
+        reasoning about ``read``'s domain: making the spelling unrepresentable
+        closes it, where asking every implementation to remember does not. No host
+        this seam could legitimately be given carries one — a DNS name is letters,
+        digits, hyphens and dots, and an IP literal is narrower still — so the rule
+        costs nothing it should not.
+
+        Args:
+            value: The host, already non-blank.
+
+        Returns:
+            It unchanged.
+
+        Raises:
+            ValueError: If any character is a control character. The message names
+                the offending code point and never the host, which is
+                configuration this type is not the place to render.
+        """
+        offending = next((ch for ch in value if unicodedata.category(ch) == "Cc"), None)
+        if offending is not None:
+            msg = (
+                f"a transport endpoint's host carries no control character; got one at "
+                f"U+{ord(offending):04X}"
+            )
+            raise ValueError(msg)
+        return value

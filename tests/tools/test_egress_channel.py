@@ -67,6 +67,7 @@ class _Writer:
         self.drains = 0
         self.tls: str | None = None
         self.fails = False
+        self.fails_to_close = False
         self.close_gate: LoopSuspension | None = None
         self._ledger = ledger
 
@@ -104,10 +105,20 @@ class _Writer:
         self.tls = server_hostname
 
     def close(self) -> None:
-        """Record that the writer was closed, and give its socket back."""
+        """Record that the writer was closed, and give its socket back.
+
+        Raises:
+            OSError: Where this writer was armed to fail *synchronously*, which a
+                transport that is already broken does. The channel's ``close``
+                must swallow it like any other release failure, and an earlier
+                draft called it outside the guard.
+        """
         if not self.closed and self._ledger is not None:
             self._ledger.open -= 1
         self.closed = True
+        if self.fails_to_close:
+            msg = "the transport was already broken"
+            raise OSError(msg)
 
     async def wait_closed(self) -> None:
         """Wait for the close, suspending or failing where this writer was armed.
@@ -119,9 +130,41 @@ class _Writer:
         gate, self.close_gate = self.close_gate, None
         if gate is not None:
             await gate.hold()
-        if self.fails:
+        if self.fails or self.fails_to_close:
             msg = "the far end had already gone"
             raise OSError(msg)
+
+
+@final
+class _Handoff:
+    """A suspension a cancellation does not reach, and that completes on release.
+
+    :class:`~ai_assistant.testing.cancellation.LoopSuspension` defers a
+    cancellation and then re-raises it, which models work the caller's own task
+    owns. What is wanted here is the opposite: production *shields* the open, so
+    the open is not cancelled and finishes normally while the caller is already
+    gone. This is that shape, and it is the arrangement under which the release
+    being measured can only be production's.
+    """
+
+    def __init__(self) -> None:
+        """Create an unreached, unreleased handoff."""
+        self._entered = asyncio.Event()
+        self._released = asyncio.Event()
+
+    async def held(self) -> None:
+        """Announce arrival and wait, uncancellably from the caller's side."""
+        self._entered.set()
+        await self._released.wait()
+
+    async def reached(self) -> None:
+        """Wait until the open has arrived at its suspension point."""
+        async with asyncio.timeout(5.0):
+            await self._entered.wait()
+
+    def release(self) -> None:
+        """Let the open finish."""
+        self._released.set()
 
 
 @final
@@ -134,13 +177,12 @@ class _Sockets:
     ``held_resources`` hook needs a ledger — and this is the smallest thing that
     is one.
 
-    **It also models where the cancellation window actually is.** The standard
-    library's ``open_connection`` awaits while a socket already exists and closes
-    that socket itself if it is cancelled there; production's ``open_channel``
-    performs no ``await`` of its own after it returns. So the suspension the
-    conformance suite arms goes *here*, and what the case then measures of
-    production is that it neither absorbs the cancellation nor leaves anything of
-    its own behind — which is the half a substitute cannot fake.
+    **It also models where the cancellation window actually is.** The window
+    ADR-0060 §1 has bite over is not inside ``open_connection`` — a cancellation
+    there is one CPython cleans up after — but *between* the open completing and
+    ``open_channel`` receiving its streams. Production shields the open for
+    exactly that reason, and this substitute reproduces the window by suspending
+    while its streams exist and then completing normally, cleaning nothing up.
 
     Attributes:
         open: Pairs of streams handed out and not yet closed.
@@ -154,7 +196,7 @@ class _Sockets:
         self.open = 0
         self.refuses = False
         self.asked: dict[str, object] = {}
-        self.gate: LoopSuspension | None = None
+        self.gate: _Handoff | None = None
 
     async def __call__(
         self, host: str, port: int, **kwargs: object
@@ -183,13 +225,11 @@ class _Sockets:
         writer = _Writer(ledger=self)
         gate, self.gate = self.gate, None
         if gate is not None:
-            try:
-                await gate.hold()
-            except BaseException:
-                # What CPython's own ``create_connection`` does: it closes the
-                # socket it made before letting the cancellation out.
-                writer.close()
-                raise
+            # Held *after* the streams exist and released into a normal return.
+            # It cleans nothing up on the caller's cancellation, deliberately: a
+            # substitute that tidied after itself would be the thing the
+            # conformance case measured.
+            await gate.held()
         return asyncio.StreamReader(limit=TRANSPORT_OCTET_CEILING), writer
 
 
@@ -296,12 +336,18 @@ class TestStreamChannelContract(ByteChannelContract):
         _writer_of(channel).fails = True
 
     def arm_release_failure(self, channel: ByteChannel) -> None:
-        """Arm ``wait_closed`` to fail, as a far end that has already gone makes it.
+        """Arm **both** halves of the release to fail.
+
+        ``close`` is synchronous and ``wait_closed`` is not, and an earlier draft
+        armed only the second — which left the synchronous half outside the
+        channel's guard and untested for two rounds.
 
         Args:
             channel: The subject.
         """
-        _writer_of(channel).fails = True
+        writer = _writer_of(channel)
+        writer.fails = True
+        writer.fails_to_close = True
 
     def suspend_next_close(self, channel: ByteChannel) -> SuspendedCall:
         """Arm the next ``close`` to suspend inside ``wait_closed``.
@@ -324,26 +370,15 @@ class TestStreamChannelContract(ByteChannelContract):
 class TestStreamOutboundTransportContract(OutboundTransportContract):
     """The production opener, run through the opener contract.
 
-    **It opts out of the suite's cancellation-release case, and the ground is
-    ADR-0060 §1's own second limb.** ``open_channel`` holds nothing across an
-    ``await`` of its own: the provisional socket exists only inside
-    ``asyncio.open_connection``, which is work this method started and can observe
-    finishing, and which closes that socket itself if it is cancelled there
-    (CPython's ``_connect_sock`` has a bare ``except:`` that does exactly that).
-    Between that call returning and the channel being constructed there is no
-    suspension point at all. So there is no production-owned release for the case
-    to observe — and arming one inside the substituted opener, which an earlier
-    draft did, made the substitute's own cleanup the thing being measured. Round 2
-    of review rejected the first shape and round 3 the second; what the reduction
-    keeps is the half that is genuinely this implementation's, asserted below:
-    **a cancellation delivered during the open is neither absorbed nor converted.**
-
-    The *release* obligation is not vacuous where production does own it — a
-    channel that could not be constructed after the streams existed — and the
-    suite exercises that unskipped through :meth:`arm_failure_after_acquiring`.
+    **The cancellation case is armed where production is the only party that can
+    release anything**, which took three rounds of review to locate. The
+    substituted opener suspends *after* its streams exist and completes normally
+    when released — it cleans up nothing — so what the case measures is
+    ``open_channel``'s own shield-and-release path: the cancellation takes this
+    frame off the open, the open finishes anyway, and the streams it produced are
+    closed by the callback production registered. An implementation without that
+    path leaves them held and the case fails, which is the whole point.
     """
-
-    holds_a_resource_across_an_await = False
 
     @pytest.fixture(autouse=True)
     def _sockets(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -396,7 +431,7 @@ class TestStreamOutboundTransportContract(OutboundTransportContract):
         self.patch.setattr(egress, "_StreamChannel", refuses)
 
     def suspend_next_open(self, transport: OutboundTransport) -> SuspendedCall:
-        """Hold the next open where the socket already exists.
+        """Hold the next open where its streams already exist.
 
         Args:
             transport: The subject, which holds no state of its own.
@@ -405,7 +440,7 @@ class TestStreamOutboundTransportContract(OutboundTransportContract):
             The lever the suite drives.
         """
         del transport
-        self.sockets.gate = LoopSuspension()
+        self.sockets.gate = _Handoff()
         return self.sockets.gate
 
     def held_resources(self, transport: OutboundTransport) -> int:
@@ -534,32 +569,6 @@ async def test_the_channel_upgrades_against_the_pinned_host_and_never_a_reply() 
     assert _writer_of(channel).tls == ENDPOINT.host
     assert _writer_of(channel).written == b"STARTTLS\r\n"
     assert _writer_of(channel).drains == 1
-
-
-async def test_a_cancellation_during_the_open_is_neither_absorbed_nor_converted(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """ADR-0060 §1: the caller's own control flow arriving, delivered onward.
-
-    The half of the cancellation clause this implementation genuinely owns, and
-    the one an over-broad ``except`` would break: ``open_channel`` catches
-    ``OSError`` and ``UnicodeError`` to convert them, and a ``CancelledError`` is
-    a ``BaseException`` that must pass through both untouched rather than coming
-    back as a refusal the caller would treat as an unreachable endpoint.
-    """
-    sockets = _Sockets()
-    gate = LoopSuspension()
-    sockets.gate = gate
-    monkeypatch.setattr(asyncio, "open_connection", sockets)
-    opening = asyncio.ensure_future(StreamOutboundTransport().open_channel(ENDPOINT))
-    await gate.reached()
-
-    opening.cancel()
-    gate.release()
-
-    with pytest.raises(asyncio.CancelledError):
-        await opening
-    assert sockets.open == 0
 
 
 def test_the_capability_holds_no_state_between_calls() -> None:

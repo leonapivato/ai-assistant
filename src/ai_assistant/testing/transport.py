@@ -451,6 +451,7 @@ class FakeOutboundTransport:
         "_in_flight",
         "_queued",
         "_refusal",
+        "_reserved",
         "_served",
     )
 
@@ -459,6 +460,7 @@ class FakeOutboundTransport:
         self._attempts: list[_Pending] = []
         self._queued: deque[FakeByteChannel] = deque()
         self._served: list[FakeByteChannel] = []
+        self._reserved: list[FakeByteChannel] = []
         self._refusal: TransportError | None = None
         self._failure: TransportError | None = None
         self._gate: LoopSuspension | None = None
@@ -484,7 +486,23 @@ class FakeOutboundTransport:
 
         Returns:
             This transport, so an arrangement reads as one expression.
+
+        Raises:
+            ValueError: If a channel is queued twice, or was already served or
+                reserved. One open yields one channel (ADR-0191 §3), and an
+                arrangement that could not be honoured is better refused here —
+                where the arranger is looking — than at the handout.
         """
+        held = [*self._queued, *self._served, *self._reserved]
+        for channel in channels:
+            if any(other is channel for other in held):
+                msg = (
+                    "the same channel was queued twice, or is already served or "
+                    "reserved by an open in flight; one open yields one channel, and "
+                    "this contract carries no pool (ADR-0191 §3)"
+                )
+                raise ValueError(msg)
+            held.append(channel)
         self._queued.extend(channels)
         return self
 
@@ -514,6 +532,10 @@ class FakeOutboundTransport:
         object that could not be constructed. The release obligation is what such
         a case is for, and it is unobservable against a failure that happens
         before anything was acquired — which is what :meth:`refuse_with` models.
+
+        **Taken by the open that starts next**, before anything can suspend, so a
+        second open beginning while the first is held does not walk off with it.
+        Adversarial review found that on round 4.
 
         Args:
             error: What that open raises, one time.
@@ -577,6 +599,11 @@ class FakeOutboundTransport:
         """
         return self._in_flight + sum(1 for channel in self._served if not channel.closed)
 
+    @property
+    def reserved(self) -> tuple[FakeByteChannel, ...]:
+        """Channels an open in flight has taken and not yet handed to anybody."""
+        return tuple(self._reserved)
+
     def __repr__(self) -> str:
         """Describe the transport by its counts, never by what a channel carried."""
         return (
@@ -616,9 +643,12 @@ class FakeOutboundTransport:
                 * **it is closed.** ``open_channel`` promises an *open* duplex
                   channel, and a holder handed a closed one would be testing
                   against something no opener returns;
-                * **it has already been served.** One open, one channel: handing
-                  the same object to two callers models a pool this contract
-                  deliberately does not have (ADR-0191 §3).
+                * **it has already been served, or is reserved by an open still
+                  in flight.** One open, one channel: handing the same object to
+                  two callers models a pool this contract deliberately does not
+                  have (ADR-0191 §3), and closing either caller's channel would
+                  close both. Checking only *completed* handouts left the
+                  concurrent case open, which review found on round 4.
         """
         if not self._queued:
             return FakeByteChannel(secure=endpoint.implicit_tls), False
@@ -638,10 +668,11 @@ class FakeOutboundTransport:
                 "duplex channel or raises (ADR-0191 §1)"
             )
             raise ValueError(msg)
-        if any(served is channel for served in self._served):
+        if any(held is channel for held in (*self._served, *self._reserved)):
             msg = (
-                "a channel already served was queued again; one open yields one "
-                "channel, and this contract carries no pool (ADR-0191 §3)"
+                "a channel is already served or reserved by an open in flight; one "
+                "open yields one channel, and this contract carries no pool "
+                "(ADR-0191 §3)"
             )
             raise ValueError(msg)
         self._queued.popleft()
@@ -673,25 +704,30 @@ class FakeOutboundTransport:
         self._attempts.append(pending)
         if self._refusal is not None:
             raise self._refusal
-        # Reserved before the modelled socket exists and before anything can
-        # suspend, so an arrangement error is raised having acquired nothing.
+        # **Everything one-shot is taken at the attempt, before anything can
+        # suspend**, so two opens in flight at once get what they were armed and
+        # queued for in the order they were called rather than in the order they
+        # finish. An arrangement error is then raised having acquired nothing.
         channel, queued = self._reserved_for(endpoint)
+        self._reserved.append(channel)
+        gate, self._gate = self._gate, None
+        failure, self._failure = self._failure, None
         self._in_flight += 1
         try:
-            gate, self._gate = self._gate, None
             if gate is not None:
                 await gate.hold()
-            if self._failure is not None:
-                failure, self._failure = self._failure, None
+            if failure is not None:
                 raise failure
         except BaseException:
             self._in_flight -= 1
+            self._reserved.remove(channel)
             if queued:
                 # Put it back at the head: the open that reserved it never handed
                 # it to anybody, so the next open is the one it was queued for.
                 self._queued.appendleft(channel)
             raise
         self._served.append(channel)
+        self._reserved.remove(channel)
         self._in_flight -= 1
         pending.served = True
         return channel

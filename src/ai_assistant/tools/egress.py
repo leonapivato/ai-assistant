@@ -116,7 +116,7 @@ import ssl
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.policy import SMTP as SMTP_POLICY
-from typing import TYPE_CHECKING, Final, final
+from typing import TYPE_CHECKING, Any, Final, final
 
 import structlog
 
@@ -480,11 +480,17 @@ class _StreamChannel:
         replace the exception in flight with one raised here — turning an honest
         ``IndeterminateTransmissionError`` into an internal failure, and recording
         a possible disclosure as one that did not happen.
+
+        **Both halves of the release are inside the guard**, and the synchronous
+        one used to be outside it: ``StreamWriter.close`` can raise on a transport
+        that is already broken, and that exception replaced the one in flight by
+        the route this method exists to close. Adversarial review found it on
+        round 4.
         """
-        self._writer.close()
         try:
+            self._writer.close()
             await self._writer.wait_closed()
-        except OSError as exc:  # pragma: no cover — the far end closed first.
+        except OSError as exc:
             _log.debug("egress_channel_close_failed", error_type=type(exc).__name__)
 
 
@@ -559,14 +565,34 @@ class StreamOutboundTransport:
                 canonical fake raises too — rather than ``asyncio``'s.
             CancelledError: Re-raised after the release below, never absorbed.
         """
-        try:
-            reader, writer = await asyncio.open_connection(
+        # **Shielded, so a cancellation arriving here cannot orphan a connection.**
+        # Without it there is a window ADR-0060 §1 forbids: the open completes,
+        # this frame is scheduled to receive its streams, and a cancellation
+        # delivered before it resumes leaves an established connection nobody
+        # holds and nobody can close. The open is work this method started, so
+        # this method observes it finishing and releases what it produced —
+        # `_release_orphaned_streams` below. Adversarial and architecture review
+        # both pressed on this window across rounds 2 to 4.
+        opening = asyncio.ensure_future(
+            asyncio.open_connection(
                 endpoint.host,
                 endpoint.port,
                 ssl=_tls_context() if endpoint.implicit_tls else None,
                 server_hostname=endpoint.host if endpoint.implicit_tls else None,
                 limit=TRANSPORT_OCTET_CEILING,
             )
+        )
+        try:
+            reader, writer = await asyncio.shield(opening)
+        except asyncio.CancelledError:
+            # **Deferred, and deliberately unbounded** (ADR-0060 §1 permits an
+            # unbounded deferral that is documented as one). The open is not
+            # cancelled: cancelling it would race its own establishment and leave
+            # *its* partial state to it, whereas letting it finish gives this
+            # method one thing to observe and one thing to close. ADR-0029 §4's
+            # invocation deadline is what bounds the call as a whole.
+            opening.add_done_callback(_release_orphaned_streams)
+            raise
         except (OSError, UnicodeError) as exc:
             # ``ssl.SSLError`` is an ``OSError``, so a certificate that did not
             # verify arrives here too. ``UnicodeError`` is **not** — resolving a
@@ -590,6 +616,24 @@ class StreamOutboundTransport:
             # constructing the channel takes the same path.
             writer.close()
             raise
+
+
+def _release_orphaned_streams(opened: asyncio.Future[tuple[Any, asyncio.StreamWriter]]) -> None:
+    """Close streams an open produced that its caller never received.
+
+    Registered by :meth:`StreamOutboundTransport.open_channel` when a cancellation
+    takes it off the open it was awaiting. Nothing else can ever release those
+    streams — no channel reached a holder — so this is ADR-0060 §1's first clause
+    at the one seam where it has bite.
+
+    Args:
+        opened: The finished open. A cancelled or failed one produced nothing to
+            release; ``asyncio`` has closed whatever it had.
+    """
+    if opened.cancelled() or opened.exception() is not None:
+        return
+    _, writer = opened.result()
+    writer.close()
 
 
 def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:

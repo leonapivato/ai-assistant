@@ -305,19 +305,64 @@ async def test_a_closed_channel_is_never_served() -> None:
         await transport.open_channel(ENDPOINT)
 
 
-async def test_a_channel_already_served_is_never_served_again() -> None:
+async def test_the_same_channel_cannot_be_queued_twice() -> None:
     """§3: one open, one channel; this contract carries no pool.
 
     Queuing the same object twice would otherwise model a transport that hands two
     callers the same connection — and after the first holder closed it, an open
-    that reported ``served=True`` for a channel that was already shut.
+    that reported ``served=True`` for a channel that was already shut. Refused at
+    the arrangement, where the arranger is looking, rather than at the handout.
     """
     channel = FakeByteChannel(secure=True)
-    transport = FakeOutboundTransport().serve(channel, channel)
 
-    assert await transport.open_channel(ENDPOINT) is channel
-    with pytest.raises(ValueError, match="already served"):
-        await transport.open_channel(ENDPOINT)
+    with pytest.raises(ValueError, match="queued twice"):
+        FakeOutboundTransport().serve(channel, channel)
+
+
+async def test_a_channel_reserved_by_an_open_in_flight_cannot_be_served_again() -> None:
+    """§3: the duplicate guard covers reservations, not only completed handouts.
+
+    Adversarial and architecture review both found the gap on round 4: a channel
+    reserved by a suspended open was not yet in the served list, so a second open
+    could take the same object and closing either caller's channel would close
+    both.
+    """
+    channel = FakeByteChannel(secure=True)
+    transport = FakeOutboundTransport().serve(channel)
+    gate = transport.suspend_next_open()
+    held = asyncio.ensure_future(transport.open_channel(ENDPOINT))
+    await gate.reached()
+
+    with pytest.raises(ValueError, match="reserved by an open in flight"):
+        transport.serve(channel)
+    assert transport.reserved == (channel,)
+
+    gate.release()
+    assert await held is channel
+
+
+async def test_an_armed_failure_belongs_to_the_open_that_started_next() -> None:
+    """The one-shot arming is taken at the attempt, not at the completion.
+
+    Adversarial review found the earlier shape on round 4: a second open beginning
+    while the first was held consumed the failure armed for the first, so a
+    concurrent case exercised the wrong call in both directions.
+    """
+    transport = FakeOutboundTransport().serve(
+        FakeByteChannel(secure=True), FakeByteChannel(secure=True)
+    )
+    gate = transport.suspend_next_open()
+    transport.fail_after_acquiring(TransportError("the certificate did not verify"))
+    held = asyncio.ensure_future(transport.open_channel(ENDPOINT))
+    await gate.reached()
+
+    following = asyncio.ensure_future(transport.open_channel(ENDPOINT))
+    await settle()
+    gate.release()
+
+    with pytest.raises(TransportError):
+        await held
+    assert (await following).is_secure is True
 
 
 @pytest.mark.parametrize(
