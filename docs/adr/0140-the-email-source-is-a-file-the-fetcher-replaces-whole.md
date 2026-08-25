@@ -3,18 +3,18 @@
 - Status: Accepted
 - Date: 2026-08-12
 - **Note (2026-08-25): §10's second clause is ambiguous about which seam it names,
-  and it does not lift by inference — the reading that would lift it is a
-  supersession, not something an in-place note can record.** #1432 reports the
-  ambiguity: the clause reads "Until ADR-0098 §12's externality-recoverable seam is
-  ratified and implemented, the email source contributes to memory only through §5's
-  envelope field set", and ADR-0106 — "Consolidation inherits taint, lands in the
-  derived band, and **is the seam that makes externality recoverable**" — is
-  `Accepted` (2026-08-05) and implemented, with its field and predicate in
-  `core/types.py` and its §6 ceiling on the `MemoryPolicy` suite. So either the
-  condition is met and this gate lifted a week before this ADR was written, or "the
-  seam" means something ADR-0106 did not supply. **Both readings have real support
-  and this note resolves neither**; what it records is what follows for a lane
-  either way, because the two are not symmetric under ADR-0070 §1.
+  it does not fire on another ADR's title, and the resolution belongs to the lane
+  that would ingest a body.** #1432 reports the ambiguity: the clause reads "Until
+  ADR-0098 §12's externality-recoverable seam is ratified and implemented, the email
+  source contributes to memory only through §5's envelope field set", and ADR-0106
+  — "Consolidation inherits taint, lands in the derived band, and **is the seam
+  that makes externality recoverable**" — is `Accepted` (2026-08-05) and
+  implemented, with its field and predicate in `core/types.py` and its §6 ceiling
+  on the `MemoryPolicy` suite. So either the condition is met and this gate lifted
+  a week before this ADR was written, or "the seam" means something ADR-0106 did
+  not supply. **Both readings have real support and this note resolves neither**;
+  what it records is what follows for a lane either way, and where the resolution
+  is made.
   **The text supporting the narrower reading.** §10's own prose names the residual
   it is bounding — ADR-0098 §5's, where "on the live chain of the Context,
   externality is not recoverable at all", an attacker's sentence reaching a durable
@@ -37,31 +37,33 @@
   ADR-0098 §5 that "Discharging a deferral by the route the deferral specified is
   what the deferral is for". A reader who stops there concludes the condition is
   met.
-  **What this note records, and why only this.** Under ADR-0070 §1 an in-place
-  amendment must change no decision, and of the two readings only one clears that
-  bar. Recording that the gate stands changes nothing: it has stood since
-  ratification, no lane has lifted it, and §5's store has no bodies in it to reach.
-  Recording that it lifted would change what §10 decided about what may reach
-  memory from this source — a reader would act differently, which is ADR-0070 §1's
-  test coming out on the supersession side, and ADR-0082 §1's "**The test controls,
-  not the label**" forbids reaching it through a note however the note is titled.
-  **So: this gate does not lift by inference from another ADR's title, and no lane
-  may read §14's bullet as already fired.** The lane that would ingest a message
-  body resolves the clause in its own text before it does — which is #1432's own
-  disposition and ADR-0181 §12's — and if it concludes the condition is met it says
-  so where that judgement is reviewed. Nothing here forecloses that conclusion; what
-  it forecloses is arriving at it silently.
+  **What this note records, and what it deliberately does not.** It takes neither
+  reading, and it classifies neither in advance. §10's second clause is a
+  conditional, and a conditional whose condition becomes true is the original
+  decision operating rather than a replaced one — ADR-0106 §11 says exactly that of
+  its own case ("a deferral firing on its own stated trigger, not an amendment"), and
+  §15 below applies the same rule to this ADR's deferrals. So a lane that concludes
+  ADR-0106 is the seam §14 names would be *applying* §14, not superseding it, and
+  nothing here is written against that conclusion. What is recorded is that the
+  condition is **contested and has never been resolved by anyone**: no lane has ruled
+  on it; ADR-0181 §12 declined to, because "answering it here would decide a
+  neighbouring lane's scope by a sentence"; and this ADR's own prose reads as though
+  the seam were outstanding. **A bullet is therefore not fired by another ADR's
+  title.** Reading it as fired is a judgement, and it is made and argued where a
+  judgement of that weight is reviewed — in the text of the lane that would ingest a
+  body, before it does, which is #1432's disposition and ADR-0181 §12's routing.
+  Nothing here forecloses either conclusion; what it forecloses is arriving at one
+  silently, which is the shape #663 records.
   **Nothing decided changes and no reader acts differently as to the decision**
-  (ADR-0070 §1). §5's envelope field set, §10's three clauses and §14's body
-  deferral stand exactly as ratified: the firing condition is not narrowed, widened
-  or replaced, no trigger is added, and §14's own obligation on a body lane — "the
-  byte and tier consequences §5 enumerates, not only the injection one" — is
-  untouched. The defect is an ambiguous reference in this ADR's own words, and
-  ADR-0106 — which predates it and amends no clause of it — is not its cause, so
-  this appended dated note is the whole record and no `Status` edit is owed
-  (ADR-0082 §1). ADR-0098 §12's first deferral is tracked there and #663 is the
-  shape this note exists to prevent. Refs #1432, #663, ADR-0098 §5, ADR-0098 §12,
-  ADR-0106 §1, ADR-0106 §8, ADR-0106 §11.
+  (ADR-0070 §1): taking neither reading, this note moves no case across any line. It
+  adds no trigger and narrows no condition; §5's envelope field set, §10's three
+  clauses and §14's body deferral stand exactly as ratified, §14's own obligation on
+  a body lane — "the byte and tier consequences §5 enumerates, not only the injection
+  one" — included. The defect is an ambiguous reference in this ADR's own words, and
+  ADR-0106 — which predates it and amends no clause of it — is not its cause, so this
+  appended dated note is the whole record and no `Status` edit is owed (ADR-0082 §1).
+  Refs #1432, #663, ADR-0098 §5, ADR-0098 §12, ADR-0106 §1, ADR-0106 §8,
+  ADR-0106 §11, ADR-0181 §12.
 
 ## Context
 
