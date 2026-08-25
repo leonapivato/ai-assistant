@@ -28,9 +28,12 @@ import ssl
 from typing import TYPE_CHECKING, Final, cast, final
 
 import pytest
+import structlog
 from transport_contract import ENDPOINT, ByteChannelContract, OutboundTransportContract
 
+from ai_assistant.core.config import Settings
 from ai_assistant.core.errors import TransportError
+from ai_assistant.core.logging import configure_logging
 from ai_assistant.core.types import TRANSPORT_OCTET_CEILING, TransportEndpoint
 from ai_assistant.testing.cancellation import LoopSuspension, settle
 from ai_assistant.tools import egress
@@ -800,6 +803,63 @@ async def test_a_cancelled_close_releases_and_leaves_the_channel_closeable(
     assert writer.close_waiter.cancelled() is False
 
     await channel.close()
+
+
+async def test_a_release_that_fails_beside_a_cancellation_is_still_logged(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§1's two clauses meeting on one call: re-raised, and still reported.
+
+    ADR-0191 §1 has ``close`` suppress **and log** an ordinary release failure,
+    and the cancellation carve-out beside it decides only which exception leaves.
+    So a ``wait_closed`` that completes with an ``OSError`` while a cancellation
+    is in flight — a transport that had already scheduled ``connection_lost(exc)``
+    when the caller went away — owes an ``egress_channel_close_failed`` event just
+    as the uncancelled path does. The earlier code retrieved that outcome only so
+    ``asyncio`` would not report it unread, and then discarded it. Adversarial
+    review found it on round 11, and neither existing case could: they arm the
+    cancellation and the failing release separately.
+
+    The arrangement is the two together — a far end that has stopped reading, so
+    the close is under way and the wait is what the cancellation lands on, and a
+    release that then fails once the gate lets it finish.
+
+    The level is raised for the duration because a failed release is logged at
+    ``debug`` and importing the package configures the chain at ``info``, so the
+    filtering bound logger would drop the event before any processor saw it — the
+    case would then pass on a channel that logged nothing at all. It is put back
+    to the import-time default afterwards, so nothing later in the session
+    inherits the verbosity.
+    """
+    sockets = _Sockets()
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
+    channel = await StreamOutboundTransport().open_channel(ENDPOINT)
+    writer = _writer_of(channel)
+    writer.holds_the_close_waiter = True
+    writer.fails_to_close = True
+    gate = LoopSuspension()
+    writer.close_gate = gate
+
+    configure_logging(Settings(log_level="DEBUG"))
+    try:
+        with structlog.testing.capture_logs() as captured:
+            closing = asyncio.ensure_future(channel.close())
+            await gate.reached()
+            closing.cancel()
+            await settle()
+            gate.release()
+            await settle()
+
+            with pytest.raises(asyncio.CancelledError):
+                await closing
+    finally:
+        configure_logging(Settings(log_level="INFO"))
+
+    assert writer.aborts == 1
+    assert sockets.open == 0
+    failures = [entry for entry in captured if entry["event"] == "egress_channel_close_failed"]
+    assert failures, [entry["event"] for entry in captured]
+    assert failures[0]["error_type"] == "OSError"
 
 
 async def test_a_tls_context_that_cannot_be_built_is_a_transport_error(
