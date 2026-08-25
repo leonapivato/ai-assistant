@@ -279,6 +279,46 @@
   owner of its own residue — are unaffected. This ADR's ratified text below is
   **not** rewritten; the `Status` line above and this note are the whole of the
   record (ADR-0070 §1, ADR-0082 §1 and §2). Refs #1427, ADR-0194 §9, §10.
+- Amended: 2026-08-25 (§7 — "One executor runs at a time" decides the deferred
+  plan executor, and is not a serialisation guarantee at the invocation seam).
+  The **Concurrent execution, leases, and parallel steps** scope-out cites
+  ADR-0014 §7, which is where the sentence comes from and where it does one job:
+  §7 defers execution leases, "which would let a peer reclaim a `RUNNING` step
+  from a dead worker — unnecessary while one executor runs at a time (§4)", and
+  ADR-0014 §4 uses it for the matching presumption that startup recovery scanning
+  `active_executions()` faces no live executor over those rows. That is what it
+  decides here too. **It is not a claim that two invocations cannot interleave**,
+  and the bullet's own next sentence is the one that governs this seam: "`invoke`
+  makes no concurrency promise beyond being `async`, and an implementation is not
+  required to be thread-safe."
+  **The wider reading does not survive the tree, which is why the record is owed.**
+  `Engine.converse` takes no lock — `orchestration/engine.py` says so in as many
+  words, "`converse` does not take `_recovery_lock`" — `Engine._admit_and_reserve`
+  is written for "the **Nth concurrent turn**" in its own contract, and separate
+  hub connections dispatch against one engine, so two turns can each be driving a
+  step and each reach `ToolInvoker.invoke`. Two invocations therefore interleave at
+  their `await`s today. A lane reading the sentence as a guarantee would skip
+  in-process synchronisation at this seam on a premise its own system contradicts,
+  and an earlier draft of ADR-0194 §3 did rest a scope-out on it. That ADR states
+  the corrected reading and stops depending on the sentence — its admission
+  reserves rather than assuming it is alone — and its §9 records that the sentence
+  is "not changed by this ADR and not relied on by it", leaving this record to
+  #1561 rather than making it there.
+  **Nothing decided changes and no reader acts differently as to the decision**
+  (ADR-0070 §1, and its 2026-07-31 §1 note on what "differently" means). The
+  scope-out stands whole: concurrent execution, leases and parallel steps are still
+  out of scope, `invoke` still promises no concurrency and no thread safety, and
+  ADR-0194 §8 keeps spend reservations across *processes* out of scope (#1553)
+  exactly because §3's reservation closes the race "inside one process, which is
+  where it is reachable (#1561)". A reader who read the bullet whole, rather than one sentence of it, reaches the
+  same answer before and after. The defect is a stale phrase in this ADR's own
+  words — ADR-0070 §1's third term, ADR-0082 §1's bucket 1 — over a system that
+  postdates it, and no other ADR is its cause, so this appended dated note is the
+  whole record. No `Status` qualifier is written for it, which ADR-0082 §2 requires
+  independently on a line led by `Partially superseded by`. This ADR's ratified text
+  below is **not** rewritten. The 2026-08-25 note above, recording ADR-0194's
+  discharge of §7's spend-accumulation half, is untouched by this one and neither
+  narrows the other. Refs #1561, ADR-0194 §3, ADR-0194 §9.
 
 ## Context
 
