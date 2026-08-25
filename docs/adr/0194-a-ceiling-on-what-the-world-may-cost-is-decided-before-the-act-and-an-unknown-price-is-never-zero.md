@@ -1059,7 +1059,7 @@ enforce on the two records beside it. Nothing about which recipient, which
 subject, or which argument is needed to explain a ceiling; the numbers are the
 whole explanation.
 
-### 5. `SpendGate` and `SpendLedger`: two `core` Protocols, two `core` types, one holder
+### 5. `SpendGate` and `SpendLedger`: two `core` Protocols, three `core` types, one holder
 
 > **Normative.** `core/protocols.py` gains **two** Protocols. `SpendGate` has
 > **two** `async` members:
@@ -1863,7 +1863,13 @@ the ADRs it depends on rather than replacing them.
 > `UNKNOWN` estimate refused with no allowance configured and admitted at the
 > allowance with one; an `UNKNOWN` completion making the period indeterminate and
 > the next call refused **where no allowance is configured**, and the same
-> completion leaving the period **determinate** at the allowance where one is; an
+> completion leaving the period **determinate** at the allowance where one is; a
+> completion whose outcome is **`INDETERMINATE`** carrying a countable `PER_CALL`
+> cost, which is **counted** — asserted in `spend_totals` *and* in the next
+> admission, since an accumulator filtering that outcome out reports zero for a
+> call the provider charged for and admits spend past the ceiling, and §2's rule
+> that no row is excluded "because the act may not have happened" is exactly what
+> it would be violating; an
 > **open claim** making the period indeterminate whatever the allowance is
 > set to and whatever its decision declared, including the case where the
 > completion append itself failed; a foreign-currency cost taking the `UNKNOWN`
@@ -1895,7 +1901,13 @@ the ADRs it depends on rather than replacing them.
 > observe: `spend_totals` selects a period from the current instant, and no instant
 > selects a skipped date, so the suite pins the two **adjacent** daily periods and
 > the single boundary they share, which is the observable consequence of the
-> skipped date's period being zero-length. A suite that exercises only UTC does not
+> skipped date's period being zero-length. It also places a completion **exactly on**
+> a shared boundary and asserts it contributes to the **following** period and not
+> to the one that ends there, which is §1's half-open `[start, end)` rule and the
+> one thing a row placed only on each *side* of a boundary never tests: an
+> implementation comparing `recorded_at <= period_end` passes every before/after
+> fixture here, counts a midnight completion in both periods, and refuses a call
+> that should be admitted. A suite that exercises only UTC does not
 > discharge this clause.
 
 > **Normative.** The suite pins each refusal to its class under §4: a crossed
@@ -2362,10 +2374,12 @@ the ADRs it depends on rather than replacing them.
 > regression rather than as a promise. The vectors are added to ADR-0087 §5's
 > suite, where a vector for a case no existing vector covers belongs (§8).
 
-> **Normative.** The lane asserts `SpendTotal`'s two string fields are
-> `EncodableText`-based by construction, which
+> **Normative.** The lane asserts `SpendTotal`'s **one** string field, `currency`,
+> is `EncodableText`-based by construction, which
 > `tests/core/test_text_encodability_coverage.py` already does for every model in
-> `core.types` and this ADR claims no exemption from.
+> `core.types` and this ADR claims no exemption from. It is one and not two because
+> §5 carries resolved offsets in place of a zone name; a lane that finds two here
+> has added a field §5's exact schema forbids.
 
 > **Normative.** The lane drives §1's configuration **dependencies** at load,
 > which no admission fixture reaches because a valid fixture supplies a currency
