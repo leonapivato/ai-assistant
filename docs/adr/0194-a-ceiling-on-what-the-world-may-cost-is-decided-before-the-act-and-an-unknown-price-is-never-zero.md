@@ -159,12 +159,12 @@ provider's bill, which is ADR-0014 §7's deferral and stays there.
 > implementation constructs a boundary by naming a wall-clock midnight and
 > accepting whatever `fold` a default supplies.
 
-> **Normative.** Where a period's `end` is not representable as a `UtcInstant` —
-> the calendar month containing the last representable instants, whose exclusive
-> end would be year 10000 — the `end` is the **maximum representable instant** and
-> the period is closed at it. The mechanism does not refuse on that ground; what
-> is lost is the last representable instant's membership of any period, which no
-> clock this system accepts can reach (ADR-0026).
+> **Normative.** Where a period's `end` is not representable — as a `UtcInstant`,
+> or as a civil time in the period's own zone, which `Pacific/Kiritimati` reaches
+> first because its offset carries a late-9999 boundary into year 10000 — the `end`
+> is the **latest instant representable in both**, and the period is closed at it.
+> The mechanism does not refuse on that ground; what is lost is the membership of a
+> handful of instants no clock this system accepts can reach (ADR-0026).
 
 > **Normative.** Both ceilings bind independently and simultaneously where both
 > are set. A call is refused where it would cross **either**. A
@@ -269,9 +269,11 @@ trigger rather than pre-deciding it here.
 > on any well-formed input, and it traps `Inexact`, `Rounded`, `Overflow`,
 > `Underflow` and `Subnormal` so that a failure to size it raises rather than
 > answering quietly. Two conforming implementations therefore return the same
-> admission decision for the same inputs at every magnitude and every exponent;
-> none rounds to a currency's minor unit, and none compares two amounts through
-> `float`.
+> admission decision for the same inputs; none rounds to a currency's minor unit,
+> and none compares two amounts through `float`. The sizing always succeeds because
+> §1 makes every operand countable, so the traps are a backstop against an
+> implementation that failed to size its context rather than a reachable state on
+> well-formed input.
 
 > **Normative.** A trapped computation is a **refusal** under admission and an
 > **indeterminate** total under a read — the same fail-closed direction the rest
@@ -535,13 +537,16 @@ whole explanation.
 > adapter a route to an admission.
 
 > **Normative.** `admit_invocation` raises exactly `SpendCeilingError` and
-> `SpendUndeterminedError` under §4's division and nothing else.
+> `SpendUndeterminedError` under §4's division and no other `Exception`, subject
+> throughout to §4's `BaseException` exemption — a `CancelledError` delivered from
+> outside propagates unchanged, here as on every member below.
 
 > **Normative.** `spend_totals` **returns** an indeterminate period rather than
 > raising on one — that state is `accounted=None` with `currency` present (below).
-> It raises exactly `SpendUndeterminedError`, and only where it cannot produce the
-> values at all: a store read that failed or an injected clock that raised. A
-> backend exception is translated rather than propagated.
+> It raises exactly `SpendUndeterminedError` among `Exception`s, and only where it
+> cannot produce the values at all: a store read that failed or an injected clock
+> that raised. A backend exception is translated rather than propagated, and §4's
+> `BaseException` exemption binds here too.
 
 > **Normative.** `core/types.py` gains `SpendPeriod`, a `StrEnum` with exactly two
 > members, `CALENDAR_DAY` and `CALENDAR_MONTH`, and no ordering semantics.
@@ -624,9 +629,13 @@ is where that lands.
 
 > **Normative.** `AssistantEngine` gains exactly one member, a read, with exactly
 > this signature: `async def spend_totals(self) -> tuple[SpendTotal, ...]`. It
-> relays `SpendLedger.spend_totals`, returns what it returns, and raises what that
-> member raises — `SpendUndeterminedError` and nothing else. It is `async` because
-> the member it relays is I/O-bound, which is `CLAUDE.md`'s rule for one.
+> relays `SpendLedger.spend_totals` and returns what it returns. It raises
+> `SpendUndeterminedError`, and — as every member of that surface does —
+> `OversizedValueError` under ADR-0085 §8, which this ADR does not lift; §1's
+> countability bound makes it unreachable for a two-entry tuple rather than
+> inapplicable. No other `Exception` escapes it, and §4's `BaseException` exemption
+> binds. It is `async` because the member it relays is I/O-bound, which is
+> `CLAUDE.md`'s rule for one.
 
 > **Normative.** `interfaces/cli.py` gains exactly one command, which renders
 > that operation's `SpendTotal` values: each period, its bounds rendered in the
@@ -689,6 +698,15 @@ is true at ruling time.
 > configured no total was stated before the erasure and none is stated after it.
 > Nothing preserves a total across an erasure, and no lane adds a spend counter
 > that outlives one.
+
+> **Normative.** The ordering of `clear()` against an invocation whose claim is
+> already appended is **ADR-0192 §6's** and is inherited unchanged: the erasure
+> wins, and a completion whose claim was erased under it is refused. This ADR adds
+> only the budget consequence, which is the one already stated above — the rows are
+> gone, so the total is what the remaining rows say, and the spend of an erased
+> invocation is not counted. No lane mints a marker, a generation or a carried-over
+> amount to recover it, which would be the spend counter outliving an erasure that
+> the clause above forbids.
 
 > **Normative.** A period boundary is computed from the injected clock at the
 > moment of the read or the admission; rows do not move between periods, and a
@@ -837,6 +855,19 @@ replacing them.
 > adaptation to a contract already landed, none carries substantial new machinery,
 > and they draw one class of finding, which is ADR-0137 §4's own grouping test.
 
+> **Normative.** That group carries the **whole** of the promoted surface's
+> topology, because widening `AssistantEngine` breaks every implementation of it at
+> once: the loopback `HubEngineClient`'s forwarding member, `HubClient`'s, the
+> dispatch and codec entries the operation needs, and the **`PROTOCOL_VERSION` bump
+> in the same change** that ADR-0124 §9 requires of any change to the promoted
+> method set. ADR-0186 §§5 and 11 are the worked precedent for exactly this
+> topology, and a lane that changes only the concrete engine and the canonical fake
+> leaves the loopback client failing its own conformance suite.
+
+> **Normative.** The browser gets nothing from that group. §6's operation is not
+> one of ADR-0177 §1's thirty, and no gateway route, argument or call is added for
+> it.
+
 > **Normative.** The `AssistantEngine` widening carries its own triad obligation in
 > that same change: the shared `AssistantEngine` conformance suite and the
 > canonical `FakeAssistantEngine` gain `spend_totals` alongside the Protocol
@@ -882,15 +913,21 @@ replacing them.
 > admit rather than refuse, because `admit_invocation` returned before it consulted
 > any of them.
 
-> **Normative.** The suite drives an exact sum at a magnitude where a default
-> 28-digit context would round, in **both** directions: one that crosses the
-> ceiling and is refused, and one that stays below it and is admitted. The second
-> is what pins the result rather than a precision, and a suite carrying only the
-> first does not discharge this clause.
+> **Normative.** The suite drives an exact sum whose result needs **more
+> significant digits than a default 28-digit context carries**, built from
+> countable amounts — which takes many rows rather than one large one, since §1
+> bounds each — in **both** directions: one crossing the ceiling and refused, and
+> one staying below it and admitted. The second is what pins the result rather than
+> a precision, and a suite carrying only the first does not discharge this clause.
+
+> **Normative.** The suite drives §1's countability bound from both sides: a
+> configured ceiling and an allowance outside it refused at load, and a declared or
+> reported amount outside it taking the `UNKNOWN` path rather than being summed.
 
 > **Normative.** `SpendTotal` **validates its own invariants** rather than relying
-> on its annotations: `time_zone` is a zone `zoneinfo.ZoneInfo` resolves, so a
-> renderer's lookup cannot fail on a value the model accepted; `period_start` is
+> on its annotations: `time_zone` is a zone `zoneinfo.ZoneInfo` resolves **and
+> both bounds convert into without overflowing**, so neither a renderer's lookup
+> nor its conversion can fail on a value the model accepted; `period_start` is
 > strictly before `period_end` except on §1's zero-length period, where they are
 > equal; `ceiling` is non-`None` only where `currency` is; and `accounted` is
 > non-`None` only where `currency` is. A construction violating any of them raises
@@ -898,8 +935,15 @@ replacing them.
 
 > **Normative.** The lane refuses a zero allowance at load in each of §1's
 > spellings, and asserts the calendar month whose exclusive end is not
-> representable is closed at the maximum representable instant rather than
-> refusing.
+> representable is closed at the latest instant representable in both UTC and the
+> configured zone rather than refusing — driven in a **positive-offset** zone and a
+> **negative-offset** one, with the rendering §6 requires exercised on the clamped
+> bound rather than only its construction.
+
+> **Normative.** The lane drives `clear()` interleaved with an in-flight
+> invocation in both orderings, and asserts ADR-0192 §6's outcome together with
+> this ADR's budget consequence: the erased invocation's spend is not counted, and
+> nothing is minted to recover it.
 
 > **Normative.** The lane asserts that a refused call left **no** claim and no
 > completion in ADR-0192's ledger, and that the refusal reached the executor as
@@ -955,6 +999,12 @@ replacing them.
   what ADR-0021 §5's whole conformance argument rests on.
 - **Erasing the trail resets the ceiling.** Accepted, because the alternative is a
   spend record that outlives the user's own erasure.
+- **Two numbers are now contract.** An amount above 10^15, or with more than nine
+  fractional digits, is not countable: configured, it is refused at load;
+  reported, it takes the `UNKNOWN` path. That is what makes the exact arithmetic
+  computable rather than aspirational — without a bound, an exact sum of two valid
+  `Decimal`s can exhaust memory instead of trapping — and it is stated with its
+  number so a reader can disagree with the number rather than with the principle.
 - **`core` grows by seven names** — `SpendGate`, `SpendLedger`, `SpendPeriod`,
   `SpendTotal`, `SpendError`, `SpendCeilingError`, `SpendUndeterminedError` — plus
   one engine member and four settings. That is the
