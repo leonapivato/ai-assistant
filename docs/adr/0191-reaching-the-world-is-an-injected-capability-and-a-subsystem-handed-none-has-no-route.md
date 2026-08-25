@@ -217,22 +217,29 @@ ADR-0017 §4's honest accounting and a measurement.
 > absorbs such a cancellation and never converts it into a return.
 
 > **Normative.** An `open_channel` that acquires a socket and then leaves by any
-> exceptional path before returning a channel releases what it acquired first. That
-> covers a cancellation delivered from outside, and equally an ordinary failure — a
-> certificate that did not verify, a refused upgrade, a read that overran. No
-> channel reached the caller in any of those cases, so nothing else can ever
-> release it, and ADR-0060 §1's first clause is unsatisfiable at this seam any
-> other way.
+> exceptional path **before returning a channel** releases what it acquired first.
+> That covers a cancellation delivered from outside, and equally an ordinary
+> failure during establishment — a connect that failed after the socket existed, an
+> implicit-TLS certificate that did not verify, a channel object that could not be
+> constructed. No channel reached the caller in any of those cases, so nothing else
+> can ever release it, and ADR-0060 §1's first clause is unsatisfiable at this seam
+> any other way.
+
+> **Normative.** A failure that arises on a channel `open_channel` already
+> returned — a refused `start_tls`, a line that overran, a write to a far end that
+> has gone — is **not** this clause's subject. Releasing there is the holder's,
+> under §3's rule that a channel is closed by whoever opened it.
 
 > **Normative.** Where that exceptional path is a cancellation from outside,
 > `open_channel` re-raises it after the release rather than absorbing it or
 > converting it into a return (ADR-0060 §1's second clause).
 
 > **Normative.** The `OutboundTransport` conformance suite carries two deterministic
-> cases over that obligation: a cancellation in ADR-0060 §3's shape — the call held
-> open *inside* the resource it acquired, cancelled there, and the resource observed
-> afterwards, built on `ai_assistant.testing`'s suspension scaffolding rather than
-> on a sleep — and an ordinary post-acquisition failure, observing the same
+> cases over that obligation, both of them **inside** `open_channel`: a cancellation
+> in ADR-0060 §3's shape — the call held open *inside* the resource it acquired,
+> cancelled there, and the resource observed afterwards, built on
+> `ai_assistant.testing`'s suspension scaffolding rather than on a sleep — and an
+> ordinary establishment failure after the socket exists, observing the same
 > release. A case asserting only that an exception escaped discharges neither.
 
 > **Normative.** A new `TransportError` in `core/errors.py` is what
@@ -283,6 +290,16 @@ standard spelling for "buffer until end of stream" — so a peer that streams
 without closing exhausts memory through a method whose name says it is bounded.
 Refusing every value outside `1..ceiling` closes that by making the unbounded
 spelling unrepresentable rather than by asking implementations to remember.
+
+**The release obligation stops at the return, and the two lenses agreed on that
+in the same round.** An earlier draft offered a refused upgrade and a line overrun
+as examples of what `open_channel` must clean up after — but with `implicit_tls`
+false the channel is *returned* cleartext and the holder calls `start_tls`, and a
+line overrun happens on a channel the holder already has. Neither is reachable
+from inside `open_channel`, so the clause was unsatisfiable for its own examples
+and contradicted §3's rule that a channel is closed by whoever opened it. The
+division is by *where the failure lands*: before the return it is the opener's,
+after it the holder's, and there is no case belonging to both.
 
 **`close` suppressing an ordinary failure is a rule about exception replacement,
 not about tidiness.** The seam closes its channel from a cleanup path, and Python
