@@ -1459,3 +1459,33 @@ class EgressBindingError(AssistantError):
     raised while an argument is revalidated (ADR-0152 §12, issue #1107): this
     class is promised for a chained ``ValidationError`` and for nothing else.
     """
+
+
+class TransportError(AssistantError):
+    """A connection could not be made or could not be continued (ADR-0191 §1).
+
+    What :meth:`~ai_assistant.core.protocols.OutboundTransport.open_channel` and
+    every I/O-bearing method of :class:`~ai_assistant.core.protocols.ByteChannel`
+    raise: an unreachable endpoint, a certificate that did not verify, a failed
+    upgrade, a write to a far end that has gone, or a far end sending more octets
+    for one line than :data:`~ai_assistant.core.types.TRANSPORT_OCTET_CEILING`
+    admits.
+
+    **The shared refusal type**, raised by the production implementation and by
+    the canonical fake alike, so the conformance suites hold both to one taxonomy
+    and the fake needs no ``tools`` import to express a connection failure.
+
+    **A caller-supplied ``limit`` outside its domain is not this class's, and the
+    division is by subject** (ADR-0191 §1). A ``TransportError`` says what
+    happened to the *connection*; an out-of-domain ``limit`` is the caller's own
+    defect and says nothing about it, so ``read`` raises ``ValueError`` for one.
+
+    **It is not re-rooted into `tools`, and `tools` is not re-rooted into it.**
+    ``ai_assistant.tools.egress`` keeps ``EgressTransportError`` and
+    ``TransportPinError`` for refusals about a *binding*; where its ordering
+    requires, that seam wraps or converts one of these into its own hierarchy.
+
+    **It carries no structured state and its message renders no payload.** What a
+    refusal may name is the condition — a host, a port, a bound that was
+    exceeded, an error type — and never an octet that was written or read.
+    """

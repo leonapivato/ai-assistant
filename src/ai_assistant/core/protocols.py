@@ -187,6 +187,7 @@ if TYPE_CHECKING:
         ToolResult,
         TraceChunk,
         TracePosition,
+        TransportEndpoint,
         TurnOutcome,
         UtcInstant,
         WalkPosition,
@@ -9020,5 +9021,230 @@ class ConnectionPurger(Protocol):
                 Every store entry stays in place.
             ConnectionStoreError: If the store cannot be read or its entries
                 cannot be removed.
+        """
+        ...
+
+
+class ByteChannel(Protocol):
+    """A duplex byte stream to one endpoint, with its own TLS state (ADR-0191 §1).
+
+    What :meth:`OutboundTransport.open_channel` returns, contracted here because
+    it crosses the same seam the opener does. Deliberately **not** an HTTP client:
+    it carries no URL, no request or response model, no redirect handling and no
+    notion of a method or a header, and a protocol — SMTP, HTTP, JSON-RPC or
+    anything else — is built on top of it by the module that holds it and never
+    inside the capability (ADR-0191 §2).
+
+    It carries no timeout, no deadline and no retry parameter either. What bounds
+    a call that hangs in the transport is ADR-0029 §4's invocation deadline, which
+    already bounds the whole invocation; a second bound would be a second place a
+    call can be cut, and the two would disagree the first time either was tuned.
+
+    **Six members and no others**, so two implementations cannot disagree about
+    the shape a consumer was written against.
+
+    **``read`` and ``read_line`` consume one shared cursor over one stream**:
+    octets returned by either are never returned again by the other.
+
+    **The holder closes what it opened** (ADR-0191 §3). A channel is opened per
+    call, and neither this Protocol nor :class:`OutboundTransport` carries a pool,
+    a cache or a keep-alive — so no subsystem retains a route to the world between
+    calls.
+
+    **Reaching TLS is the holder's obligation where the endpoint says so**
+    (ADR-0191 §4). Where the endpoint's mode is the upgrade one the channel is
+    cleartext until :meth:`start_tls` completes, and this contract neither performs
+    the upgrade nor can compel it: what it offers is :attr:`is_secure`, read from
+    the channel's own state rather than inferred from the order commands were
+    written in, so a holder that must not present a credential in the clear has
+    something true to refuse on.
+
+    **It reports what happened to the connection and asserts nothing about
+    delivery.** Which outcome a channel failure produces is the holder's
+    judgement, made from where in its own protocol the failure landed; this
+    contract moves none of that judgement into the capability.
+    """
+
+    @property
+    def is_secure(self) -> bool:
+        """Whether a TLS handshake has completed on this channel."""
+        ...
+
+    async def read_line(self) -> bytes:
+        r"""Read one line, terminator included, or empty bytes at end of stream.
+
+        The terminator is a single ``b"\n"`` and the line is returned
+        **including** it — including a preceding ``b"\r"`` where the far end sent
+        one, which is the protocol's to strip and not this contract's.
+
+        **Empty bytes means end of stream and means nothing else.** Octets
+        received before end of stream with no terminator among them are discarded
+        and end of stream is reported in their place: a line with no terminator is
+        not a reply, whatever octets arrived, and reporting it as one would let a
+        truncated stream stand in for an answer.
+
+        Returns:
+            The line including its terminator, or ``b""`` at end of stream.
+
+        Raises:
+            TransportError: If the connection could not be continued, or if the
+                far end sent more than
+                :data:`~ai_assistant.core.types.TRANSPORT_OCTET_CEILING` octets
+                before a terminator. The bound is on the octets **before** the
+                terminator, so a line of exactly that many is accepted and comes
+                back one octet longer. A far end sending an unterminated line is
+                buying memory from a client that is holding a credential, which is
+                a fact about the connection and so is this type's subject.
+        """
+        ...
+
+    async def read(self, limit: int, /) -> bytes:
+        """Read at least one and at most ``limit`` octets, or empty bytes at end of stream.
+
+        A short read is ordinary and is not an error.
+
+        Args:
+            limit: How many octets at most, an integer in
+                ``1..TRANSPORT_OCTET_CEILING`` inclusive.
+
+        Returns:
+            Between one and ``limit`` octets, or ``b""`` at end of stream.
+
+        Raises:
+            ValueError: If ``limit`` is outside that range — zero, negative, or
+                larger — so that **no spelling of ``limit`` means "read until end
+                of stream"**. The obvious implementation delegates to
+                ``asyncio.StreamReader.read``, where ``-1`` is the standard
+                spelling for exactly that, and a peer that streams without closing
+                would then exhaust memory through a method whose name says it is
+                bounded. It is ``ValueError`` and not ``TransportError`` because
+                the two have different subjects: a ``TransportError`` says what
+                happened to the connection, and an out-of-domain limit is the
+                caller's own defect and says nothing about it. This contract
+                states behaviour for integer values; a non-integer is a typing
+                defect the gate catches, and no implementation is obliged to
+                re-check it at runtime.
+            TransportError: If the connection could not be continued.
+        """
+        ...
+
+    async def write(self, data: bytes, /) -> None:
+        """Write ``data`` and flush it.
+
+        Args:
+            data: The octets to send.
+
+        Raises:
+            TransportError: If the connection could not be continued.
+        """
+        ...
+
+    async def start_tls(self) -> None:
+        """Upgrade this channel to TLS, verifying the endpoint's certificate.
+
+        The peer's certificate chain **and** its hostname are verified against the
+        endpoint's host (ADR-0191 §4). This contract exposes no
+        verification-disabling option, no caller-supplied trust configuration and
+        no way to name a second host for the certificate, so no holder can obtain
+        a TLS connection that was not verified against the endpoint it asked for.
+
+        Raises:
+            TransportError: If the upgrade was declined or the certificate did not
+                verify. :attr:`is_secure` stays ``False``.
+        """
+        ...
+
+    async def close(self) -> None:
+        """Release the channel, whatever state it is in.
+
+        **Idempotent**, and it **suppresses and logs an ordinary release failure
+        rather than raising it**: a channel that cannot be released reports that to
+        its logs and not to its caller. That is a rule about exception replacement
+        rather than about tidiness — a holder closes from a cleanup path, where
+        Python replaces the exception in flight with one raised there, so a channel
+        that raised here would turn a holder's honest "this may or may not have
+        been delivered" into an internal failure and record a possible disclosure
+        as one that did not happen.
+
+        **A cancellation delivered from outside the call is exempt from that**, and
+        is governed by ADR-0060 §1 above: this method makes the channel safe and
+        then re-raises. It never absorbs such a cancellation and never converts it
+        into a return. The two rules do not collide once the subject is right: one
+        is about a *release failure*, which the caller can do nothing with, and the
+        other about a *cancellation*, which is the caller's own control flow
+        arriving.
+        """
+        ...
+
+
+class OutboundTransport(Protocol):
+    """The capability of opening a connection off the device (ADR-0191 §1).
+
+    ADR-0017 §8 described this shape and deferred it; ADR-0191 adopts it. **The
+    capability is the opener and not the channel, because opening is the act being
+    governed**: a channel is the *result* of an opening, and a subsystem that holds
+    one already has a connection — so the thing that must be scarce, and therefore
+    the thing that must be injected, is the ability to obtain a channel at all.
+
+    **A subsystem handed none has no route.** Every constructor and factory that
+    needs a transport takes it as a **required** argument, with no default value
+    and no ``None``-means-the-real-one fallback; there is no module-level
+    instance, no accessor function, no registry entry and no import-time
+    construction of one anywhere; and there is no parameter, setting, environment
+    variable, fallback or retry by which a component that was not handed the
+    capability obtains one (ADR-0191 §3). That holds in tests as well as in
+    production: a test receives the canonical fake by the same route the
+    composition root hands the real implementation, and no test-only back door
+    exists for obtaining either.
+
+    **What that buys is a property assertable at runtime, and not a sandbox.**
+    Nothing in Python stops a module importing ``asyncio`` and opening a
+    connection; what is closed by construction is the *handout*. The import
+    contracts and the source-reading nets stay as defence in depth for the case
+    this capability cannot see — a module that never asks (ADR-0191 §7) — and
+    ADR-0017 §4's "an import contract is a net, not a proof" stands as ratified.
+
+    **Its shape is what pins the destination** (ADR-0191 §4). The one method takes
+    an endpoint it was handed, so an implementation performs no name resolution
+    beyond that host, follows no redirect or referral, and offers no way to reach
+    a second host on one call. A URL-shaped capability would hand its holder the
+    world: its argument names a host, so a holder that can build a string can
+    reach any host.
+    """
+
+    async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
+        """Open a channel to ``endpoint``, and to nothing else.
+
+        Args:
+            endpoint: The host, port and TLS mode to connect to, already parsed.
+                An implementation parses no string of its own.
+
+        Returns:
+            A channel already connected to ``endpoint``, and already under TLS
+            where ``endpoint.implicit_tls`` is ``True``.
+
+        Raises:
+            TransportError: If the endpoint could not be connected, or a
+                connection was made and could not be verified. A channel that
+                could not be connected or could not be verified is **raised over
+                rather than returned**, so no holder is ever handed one whose
+                state it would have to interrogate.
+            CancelledError: Re-raised after the release below, never absorbed and
+                never converted into a return (ADR-0060 §1).
+
+        **A call that acquires a socket and then leaves by any exceptional path
+        before returning a channel releases what it acquired first.** That covers
+        a cancellation delivered from outside, and equally an ordinary failure
+        during establishment — a connect that failed after the socket existed, an
+        implicit-TLS certificate that did not verify, a channel object that could
+        not be constructed. No channel reached the caller in any of those cases,
+        so nothing else can ever release it, and ADR-0060 §1's first clause is
+        unsatisfiable at this seam any other way.
+
+        **A failure that arises on a channel this method already returned is not
+        that clause's subject** — a refused ``start_tls``, a line that overran, a
+        write to a far end that has gone. Releasing there is the holder's, under
+        the rule that a channel is closed by whoever opened it: the division is by
+        *where the failure lands*, and there is no case belonging to both.
         """
         ...
