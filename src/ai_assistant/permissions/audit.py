@@ -1524,11 +1524,20 @@ class SqliteAuditTrail:
     async def open_invocations(self, *, decision_id: DurableIdentifier) -> list[ToolInvocation]:
         """Every claim under ``decision_id`` that no completion names, in append order.
 
+        The argument is read as the **type the signature names**, before the lock:
+        :data:`~ai_assistant.core.types.Identifier` strips, so ``"  d-1  "`` and
+        ``"d-1"`` are one identifier to every row that holds one, and looking the
+        raw text up would answer "no open claims" for a decision holding one — with
+        the recovery scan then reserving nothing and leaving the claim open for
+        good. The same guard ``complete_invocation`` puts on ``claim_id``.
+
         Raises:
-            AuditError: If the trail cannot be read.
+            AuditError: If ``decision_id`` is not a usable identifier, or the trail
+                cannot be read.
         """
+        named = _checked_argument("decision_id", lambda: _IDENTIFIER.validate_python(decision_id))
         async with self._lock:
-            return list(await _run_to_completion(self._open_invocations_sync, decision_id))
+            return list(await _run_to_completion(self._open_invocations_sync, named))
 
     def _open_invocations_sync(self, decision_id: str) -> Sequence[ToolInvocation]:
         """Read the open claims and reserve their ids, as **one** operation.
