@@ -16,6 +16,13 @@ what it defers. Where a pointer here and the issue it points at disagree, the
 issue is newer and wins. History does not live here either: git holds this
 file's, and the tracker and the ADR ledger hold the work's (ADR-0019).
 
+**The narrative is bound by that same rule, not just the milestone entries.**
+No sentence here asserts what is or is not built. Where a track's motivation
+needs the state it opened against, that is written as dated history; a
+present-tense claim about the codebase is a defect in this file rather than a
+fact to act on, because nothing marks it as perishable and the precedence rule
+above never fires on it (#1568).
+
 ## Design stances
 
 These are premises this roadmap sets, not measurements (ADR-0019 §3). Each
@@ -83,7 +90,8 @@ not a roadmap rule.
 
 ## `track:web-client` — the browser client
 
-Live record: **#1230**.
+Live record: **#1230** — which milestones have closed, and the exit ruling
+that closed each, are recorded there.
 
 **Purpose:** a spoke that enrols as a device and exposes the hub to a browser —
 gateway, chat, notifications, control surfaces. Milestones are ordered by
@@ -154,22 +162,23 @@ which is the census. Issues are labeled `track:memory` as they are touched.
 
 ## `track:conversation` — the assistant answers
 
-Live record: **#1312**.
+Live record: **#1312** — which milestones have closed, and the exit ruling
+that closed each, are recorded there.
 
 **Purpose:** the hub-side conversational engine — the pipeline's terminal step.
-Today the engine listens, remembers and plans, but a plan ending in "compose a
-reply" halts at "No tool is available": replying was swept up in "tools are
-deferred to MCP" although answering one's own user is not egress — the reply
-travels back on the wire the `ask` arrived on, the shape ADR-0131 gave
-notifications ("an answer the device asked for"). This track owns making the
-assistant *speak*: composing answers from plan + retrieved memory + context,
-streaming them, and eventually routing intents to typed operations. It is
-hub-side work with **no dependency on `track:web-client`'s gateway**; the CLI
-exercises every exit. `track:web-client` milestone 14 (streaming chat in the
-browser) consumes this track's output. Milestones are ordered by **dependency
-only**, and each closes on a QA-driven exit ruling: a QA run
-(`.claude/skills/qa-milestone`) recorded as a `qa` issue, then the owner's ruling
-recorded on #1312.
+The track opened (2026-08-21) against an engine that listened, remembered and
+planned, but whose plan ending in "compose a reply" halted at "No tool is
+available": replying had been swept up in "tools are deferred to MCP" although
+answering one's own user is not egress — the reply travels back on the wire the
+`ask` arrived on, the shape ADR-0131 gave notifications ("an answer the device
+asked for"). This track owns making the assistant *speak*: composing answers
+from plan + retrieved memory + context, streaming them, and eventually routing
+intents to typed operations. It is hub-side work with **no dependency on
+`track:web-client`'s gateway**; the CLI exercises every exit.
+`track:web-client` milestone 14 (streaming chat in the browser) consumes this
+track's output. Milestones are ordered by **dependency only**, and each closes
+on a QA-driven exit ruling: a QA run (`.claude/skills/qa-milestone`) recorded
+as a `qa` issue, then the owner's ruling recorded on #1312.
 
 - **17 — the assistant answers.** An ADR ruling that a reply is not a tool: the
   pipeline's terminal step composes a natural-language answer (model + memory +
@@ -198,7 +207,8 @@ recorded on #1312.
 
 ## `track:world` — the assistant sees and acts on the world
 
-Live record: **#1427**.
+Live record: **#1427** — which milestones have closed, and the exit ruling
+that closed each, are recorded there.
 
 **Purpose:** the assistant sees and acts on the world — the `readers/` (sensor)
 and `tools/` (actuator) seams, hub-side and CLI-driven. The browser client
@@ -207,11 +217,11 @@ consumes what lands here (`track:web-client`), voice keeps spoke-as-sensor
 adversary is already named and mostly answered — ADR-0098 (the injection class,
 escaping, never-authority, ceilings, detection-is-not-a-gate), ADR-0106 (taint
 through consolidation), ADR-0148/0154 (an egress call authorised whole, per
-call, with no standing authorisation) — and the one thing all of them name as
-unbuilt is **origin**, which is why milestone 23 comes first. Milestones are
-ordered by **dependency only**, and each closes on a QA-driven exit ruling
-recorded on #1427. Voice holds milestones 19–22 (#1318); this track starts
-at 23.
+call, with no standing authorisation) — and the one gap all of them named as
+unbuilt was **origin**, which is why it takes this track's first milestone.
+Milestones are ordered by **dependency only**, and each closes on a QA-driven
+exit ruling recorded on #1427. Voice holds milestones 19–22 (#1318); this track
+starts at 23.
 
 - **23 — the origin seam.** Origin recorded at ingestion and carried unchanged
   through proposal, consolidation, facet assembly and tool-argument
@@ -286,9 +296,9 @@ tracker — so the claim decays into them rather than into this document.
 | Free to choose models | ADR-0002/0011/0013/0061/0062 — decided; on no track |
 | Observability and evaluation | ADR-0119/0120 give the instrument: a measure is a rate over the trace stream, read offline while the hub is stopped. The harness and the benchmark exits are `track:memory` (#1029, #1231) |
 
-**Named, but on no track.** An **engagement surface** — nothing here yet makes
-the assistant compelling to open tomorrow, and both tracks buy reach or quality
-rather than a reason; it stays deliberately undesigned, named so its absence is
+**Named, but on no track.** An **engagement surface** — no track owns making
+the assistant compelling to open tomorrow; the tracks buy reach and quality
+rather than a reason. It stays deliberately undesigned, named so its absence is
 a known debt of the plan rather than an oversight. A **commitment ledger** and a
 **portable context graph** sit beside it, unscheduled.
 
