@@ -1014,6 +1014,31 @@ def _once[T](read: Callable[[], T]) -> Callable[[], T]:
     return _read
 
 
+def _named_decision(given: object) -> str:
+    """How a refusal names the decision it refuses, and never a way to raise from it.
+
+    The id is the caller's value, on the caller's object, under a key the caller
+    chose, and the message reporting the fault has to survive all three.
+    ``isinstance`` consults ``__class__``, which can be a property that raises;
+    ``__dict__`` can be one too; and ``__dict__.get("id")`` hashes ``"id"`` and then
+    compares it against whatever collides with it, which can be a ``str`` subclass
+    whose ``__eq__`` raises — reachable exactly where the genuine key has been
+    deleted. So the id is found by a scan that hashes nothing and compares only keys
+    that are *exactly* ``str`` (:func:`_refuse_undeclared` states that discipline in
+    full), and the whole of it is guarded: a diagnostic that raises would replace the
+    ``AuditError`` it is naming with whatever it threw, from inside the ``except``
+    block that exists to report it.
+    """
+    try:
+        if isinstance(given, PermissionDecision):
+            for key, value in given.__dict__.items():
+                if type(key) is str and key == "id":
+                    return describe_untrusted(value)
+    except Exception:  # the value cannot even be named; say so and carry on
+        return "the given value"
+    return "the given value"
+
+
 def _field_state(kind: type[BaseModel], given: object) -> Any:
     """The declared field values of ``given``, read by ``kind``'s **own** serializer.
 
@@ -1029,7 +1054,9 @@ def _field_state(kind: type[BaseModel], given: object) -> Any:
 
     A value that is not a ``kind`` at all is handed back untouched, for
     ``model_validate`` to refuse — nothing is read off it here (ADR-0152 §1's
-    ordering).
+    ordering). That test is **inside** the guard below with everything else, because
+    ``isinstance`` consults the value's ``__class__``, which can be a property that
+    raises: asking what something is is as much a read of it as reading a field.
 
     **Anything the serializer would silently drop is refused instead**, which is
     :func:`_refuse_undeclared`'s whole subject and is what makes the value this
@@ -1055,9 +1082,9 @@ def _field_state(kind: type[BaseModel], given: object) -> Any:
             model-valued field anywhere beneath it holds something other than exactly
             its declared type, or if the value cannot be read as a ``kind`` at all.
     """
-    if not isinstance(given, kind):
-        return given
     try:
+        if not isinstance(given, kind):
+            return given
         _refuse_undeclared(kind, given)
         return kind.__pydantic_serializer__.to_python(given, warnings=False)
     except ValueError:
@@ -1384,11 +1411,7 @@ def _revalidated_decision(decision: PermissionDecision) -> PermissionDecision:
         # `describe_untrusted` and never `repr`: the id is the caller's, and a
         # `__repr__` that raises would replace this `AuditError` with whatever it
         # threw — from inside the `except` block that exists to report it.
-        named = (
-            describe_untrusted(given.__dict__.get("id"))
-            if isinstance(given, PermissionDecision)
-            else "the given value"
-        )
+        named = _named_decision(given)
         # `describe_untrusted` on the cause as well as on the id. `_field_state`
         # re-raises a `ValueError` the caller's own code raised, and a hostile
         # `__str__` on it would replace this `AuditError` with whatever it threw —
