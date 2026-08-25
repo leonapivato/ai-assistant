@@ -24,7 +24,7 @@ import functools
 import itertools
 import os
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol, runtime_checkable
 from uuid import uuid4
 
 from pydantic import ValidationError
@@ -215,6 +215,25 @@ class FakeActionPolicy:
         )
 
 
+@runtime_checkable
+class MintsIdentifiers(Protocol):
+    """What :class:`FakeAuditTrail` mints invocation row ids from (ADR-0192 §2).
+
+    Structural, so a suite can inject a factory that forces a collision, returns
+    a value no row can be built from, or raises on its own account — the three
+    shapes ADR-0192 §2's clauses are about, and none of which a concrete class
+    could be asked to do in production.
+    """
+
+    def __call__(self) -> str:
+        """Return an identifier this process has neither issued nor reserved."""
+        ...
+
+    def reserve(self, ids: Iterable[str]) -> None:
+        """Promise that none of ``ids`` will be returned by any later call."""
+        ...
+
+
 class FakeIdentifierSpace:
     """The per-process state :class:`FakeIdentifiers` draws from (ADR-0192 §2).
 
@@ -318,7 +337,7 @@ class FakeAuditTrail:
         self,
         *,
         now: Callable[[], datetime] = _fake_now,
-        identifiers: FakeIdentifiers | None = None,
+        identifiers: MintsIdentifiers | None = None,
     ) -> None:
         """Create an empty trail.
 
@@ -338,7 +357,9 @@ class FakeAuditTrail:
         # act stop being the most recent one.
         self._invocations: dict[str, ToolInvocation] = {}
         self._clock = checked_clock(now, owner="FakeAuditTrail")
-        self._identifiers = identifiers if identifiers is not None else FakeIdentifiers()
+        self._identifiers: MintsIdentifiers = (
+            identifiers if identifiers is not None else FakeIdentifiers()
+        )
         self._resource = SuspendableResource()
 
     def suspend_next_operation(self) -> LoopSuspension:
@@ -1028,4 +1049,5 @@ __all__ = [
     "FakeIdentifiers",
     "FakeInvocationCompleter",
     "FakeInvocationLedger",
+    "MintsIdentifiers",
 ]

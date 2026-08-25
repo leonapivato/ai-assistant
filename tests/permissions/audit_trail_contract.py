@@ -33,11 +33,13 @@ from ai_assistant.core.errors import (
 from ai_assistant.core.types import (
     BoundAccount,
     CostBasis,
+    Idempotency,
     OriginUnrecordedBinding,
     PermissionDecision,
     PermissionOutcome,
     RiskLevel,
     ToolCost,
+    ToolOutcome,
 )
 from ai_assistant.testing.cancellation import settle
 
@@ -330,6 +332,26 @@ _CANCELLATION_OPS: tuple[Callable[[], _CancellationOp], ...] = (
 )
 
 
+def _allowing(decision_id: str = "d-allow") -> PermissionDecision:
+    """An ``ALLOW`` a claim can be admitted under (ADR-0192 §1)."""
+    return decision(
+        decision_id,
+        request=action(tool=tool(side_effecting=True, idempotency=Idempotency.NATURAL)),
+        ruled=ruling(PermissionOutcome.ALLOW),
+    )
+
+
+def _as_ledger(trail: AuditTrail) -> Any:
+    """Read the subject as the ledger it also is (ADR-0192 §2).
+
+    The composition root injects **one object** implementing ``AuditTrail``,
+    ``InvocationLedger`` and ``InvocationCompleter`` over one store, so every
+    subject of this suite has the ledger's writes on it. Untyped rather than cast
+    to a union of Protocols, because what this suite is about is the trail.
+    """
+    return trail
+
+
 class AuditTrailContract:
     """Behaviour every ``AuditTrail`` implementation must exhibit."""
 
@@ -391,6 +413,50 @@ class AuditTrailContract:
         assert len(succeeded) == 1, f"expected exactly one winner, got {results}"
         assert len(refused) == 1, f"the loser must be refused, got {results}"
         assert len(await trail.export()) == 1
+
+    # --- one id space, both row kinds (ADR-0192 §2) ------------------------
+
+    @pytest.mark.parametrize("complete_it", [False, True], ids=["claim", "completion"])
+    async def test_recording_a_decision_under_an_invocations_id_is_refused(
+        self, trail: AuditTrail, *, complete_it: bool
+    ) -> None:
+        """The write-once invariant binds the store from **both** sides.
+
+        Every collision case in ``InvocationLedgerContract`` drives ids the
+        *ledger* mints; none drives the one a caller chooses. Without this an
+        implementation keeping decisions and invocations in separate tables
+        satisfies all of them while one durable identifier names two records —
+        which ``recent_invocations``' join then resolves to two different rows.
+
+        The subject is one object satisfying ``AuditTrail`` **and**
+        ``InvocationLedger`` over one store, which is what ADR-0192 §2 requires of
+        an implementation, so this suite can reach the ledger's writes.
+        """
+        ledger = _as_ledger(trail)
+        authorisation = _allowing()
+        await trail.record(authorisation)
+        row = await ledger.claim_invocation(decision=authorisation)
+        if complete_it:
+            row = await ledger.complete_invocation(
+                claim_id=row.id,
+                outcome=ToolOutcome.FAILED,
+                incurred_cost=ToolCost(basis=CostBasis.UNKNOWN),
+            )
+
+        await _refuses(trail, decision(row.id), AuditError)
+
+        held = [
+            recorded.invocation
+            for recorded in await ledger.export_invocations()
+            if recorded.invocation.id == row.id
+        ]
+        assert held == [row], "the existing row is left exactly as it stood"
+        assert await trail.get(row.id) is None
+
+    # The **concurrent** arm of the same invariant lives in
+    # ``InvocationLedgerContract``, which is where a case can inject the factory
+    # that forces the collision; this suite has no hook for one, and reaching into
+    # a subject's private allocator would be a case about an attribute name.
 
     # --- the resolution invariant ----------------------------------------
 
