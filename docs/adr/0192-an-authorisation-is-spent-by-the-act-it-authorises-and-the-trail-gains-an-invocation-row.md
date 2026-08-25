@@ -116,6 +116,30 @@ surface can state an execution at all, because ADR-0186's two operations return
 > atomic store operation, and a call whose claim is refused does not reach the
 > callable.
 
+> **Normative.** **"After ADR-0029 §2's three checks" is a floor and not the whole
+> ordering: the claim is appended after every check that can raise a seam fault, and
+> the seam's own callable-shape pairing check is one of them.** `tools/` refuses a
+> `ToolBindingError` where an **egress** callable is reached with no binding, or an
+> **ordinary** callable with one (ADR-0148 §4, ADR-0152 §8). That check reads the
+> registry's callable and not the call alone, so ADR-0029 §2's three do not subsume
+> it, and it moves **before** the claim rather than staying where an implementation
+> happens to have put it. Otherwise a seam fault would be raised **after** a claim,
+> and §3 would owe a completion carrying an outcome ADR-0029 computes for no
+> `ToolBindingError`: that error is given no `ToolResult` at all, only the executor's
+> `FAILED` step. The cost is nothing — the pairing check enters no callable, performs
+> no I/O and opens no deadline — and the gain is that a `ToolBindingError` stays
+> exactly where ADR-0029 and ADR-0034 §1 already put it: a pre-callable exit with no
+> claim appended and no row written. No other ADR is superseded by placing it:
+> which callable a declaration binds, and where the seam checks the pairing, is
+> `tools/`-internal and contracted nowhere (ADR-0152 §10), so this is the first text
+> to place it at all.
+
+> **Normative.** The rule is stated as a **property, not a list**: after the claim,
+> `invoke` performs no check that can raise a seam fault, and a lane adding one moves
+> it above the claim rather than teaching §3 a new outcome. That is what makes §3's
+> completion obligation total — every exit it reaches has an outcome ADR-0029 §§3–4
+> compute — without §3 inventing one.
+
 > **Normative.** Inside that operation the ledger requires the decision it was
 > passed to be **equal to the decision the store holds under that id** — the whole
 > value, by the frozen model's own equality — and refuses
@@ -186,9 +210,32 @@ surface can state an execution at all, because ADR-0186's two operations return
 > and that is a clause of this contract rather than a property of an
 > implementation. Each is therefore an exit in the window ADR-0034 §1 governs,
 > qualifying on that section's **second** ground — "The contract says the exit
-> precedes the callable" — exactly as a `ToolBindingError` does. The executor
-> commits `RUNNING → FAILED` and never retries, on the window and not on a list of
-> causes.
+> precedes the callable" — exactly as a `ToolBindingError` does. **Where that
+> `AssistantError` is what leaves `invoke`**, the executor commits `RUNNING → FAILED`
+> and never retries, on the window and not on a list of causes.
+
+> **Normative.** That qualifier is load-bearing and names the one branch where an
+> `AssistantError` the append raised is **not** what leaves. Where an external
+> cancellation is pending, the clause below has `invoke` re-raise the
+> `CancelledError` with the append's failure as its cause. A `CancelledError` is then
+> what the executor is handed, and **ADR-0034 §1 sends that case away from its own
+> rule in terms**: "Everything else that happens once `invoke` has been entered is
+> outside this rule", and it "stays ADR-0029 §4's, with §4's classification:
+> `interrupted_outcome` on the trusted declaration, which answers `INDETERMINATE` for
+> a side-effecting non-`NATURAL` tool". So that is what the step records here, and
+> ADR-0034 §1's refusal of `INDETERMINATE` is untouched — that refusal is stated over
+> exits qualifying on its **two grounds**, and this branch qualifies on neither: the
+> executor holds no contract clause saying a `CancelledError` leaving `invoke` was
+> pre-callable, and this ADR mints none, because minting one is the reachability fact
+> ADR-0034 §1 and #234 both decline.
+
+> **Normative.** Left unqualified the earlier wording promised `FAILED` on the same
+> branch, which is a **different durable state for one attempt** on any tool whose
+> `interrupted_outcome` is `INDETERMINATE`. The discriminator is **what left
+> `invoke`**, which is the one every other clause of this ADR uses, and §9 pins it at
+> the **executor** — the committed outcome, not the exception class — because an
+> assertion on the exception alone leaves the half the two rules could disagree about
+> untested.
 
 > **Normative.** **No `Exception` leaves `invoke` from the claim path as a
 > non-`AssistantError`, and none of the named refusals is wrapped.** An
@@ -573,7 +620,13 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > were minted and for nothing else, which is a fact about the id space — and nothing
 > reads it to decide anything. It is
 > consulted at no admission, so a decision re-recorded after an erasure still admits
-> a claim exactly as §6 states. What it bounds is which **row** a pointer names,
+> a claim exactly as §6 states. Nor is it **disclosed**: it lives in the process's
+> own memory, no lane persists it, no operation this ADR promotes returns it or any
+> value derived from it, it is on no surface (§4) and in no export (§6), and a
+> counter's value is readable by nothing outside the process holding it. ADR-0004 §7's
+> erasure right is over the **record**, and a value that is never written down, never
+> read back and never shown is not one — which is why the answer here is a scope
+> statement and not a promise that the process forgets. What it bounds is which **row** a pointer names,
 > which is a correctness property of the id space and not a durability of the
 > consume. It is also process-local and survives no restart, which a generation,
 > epoch or high-water mark would have had to in order to do the job §6 refuses to
@@ -942,11 +995,14 @@ the count.
 > being written.
 
 > **Normative.** Once a claim is appended, `ToolInvoker.invoke` calls
-> `complete_invocation` on **every** exit it observes — a returned `ToolResult`, a
-> raised seam fault, an expired deadline, a cancellation — carrying the outcome
-> ADR-0029 §§3–4 already compute for that exit. An exit that occurs **before** the
-> claim completes nothing, because there is no claim: §1's refusals and the rest of
-> ADR-0034 §1's window are that case.
+> `complete_invocation` on **every** exit it observes — a returned `ToolResult`, an
+> expired deadline, a cancellation — carrying the outcome ADR-0029 §§3–4 already
+> compute for that exit. **No seam fault is among them.** §1 places every check that
+> raises one **before** the claim, the callable-shape pairing check included, so
+> there is no post-claim exit for which ADR-0029 computes no outcome and none this
+> ADR has to mint one for. An exit that occurs **before** the claim completes
+> nothing, because there is no claim: §1's refusals, the pairing check and the rest
+> of ADR-0034 §1's window are that case.
 
 > **Normative.** A **`BaseException` that is not a cancellation** — a
 > `KeyboardInterrupt`, a `SystemExit` — is not an exit that clause reaches, and no
@@ -2011,7 +2067,12 @@ it — and its rule, its two grounds, its refusal of `INDETERMINATE` in that win
 and its statement that `ToolInvoker` "exposes no 'the callable was reached' fact
 and this ADR introduces none" all stay true. This ADR introduces no such fact on
 the seam either: §3's claim is a durable row in a store, not a value returned from
-`invoke`, and no executor reads it.
+`invoke`, and no executor reads it. **The refusal of `INDETERMINATE` stays true
+because of where it is scoped**, and §1's cancellation branch is worth naming
+against it: where a claim append fails while an external cancellation is pending, a
+`CancelledError` leaves `invoke`, which qualifies on neither of §1's two grounds and
+which §1 itself routes to ADR-0029 §4 — "Everything else that happens once `invoke`
+has been entered is outside this rule". That is ADR-0034 §1 applied, not narrowed.
 
 **ADR-0060 §1, ADR-0029 §4 and ADR-0031 §2 — nothing is owed, and the showing
 matters because §§1 and 3 look at first like a departure.** They put a collaborator's
@@ -2181,7 +2242,14 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > root injects the same object as each (§2). It is not given a fourth Protocol for
 > the write: `complete_invocation` is already contracted, already conformance-tested
 > and already implemented by that object, and minting a completion-only capability
-> would be a second name for one member. What the scan must **not** do is claim —
+> would be a second name for one member. ADR-0029 §1's own split is the precedent
+> **against** minting one here rather than for it: it gave a registry two faces
+> because the two had **disjoint** consumers, and these do not. `tools/` needs both
+> ledger members, so `claim_invocation` cannot move off the ledger; a recovery-only
+> face would therefore leave `complete_invocation` contracted on two Protocols, one
+> of them a single-member alias for a member the same object already implements, and
+> would buy no consumer a narrower hold than it has. What the scan must **not** do is
+> claim —
 > `claim_invocation` is the seam's act (§1) and no lane outside `tools/` calls it —
 > and that is the same posture `orchestration/` already keeps toward the `record`,
 > `export` and `clear` it holds through `AuditTrail` today. The wiring test asserts
@@ -2352,6 +2420,15 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > renders the reported kind exactly and substitutes nothing. The floor is proved on
 > the shapes hardest to meet it on, which is the only way a floor is proved at all
 > (§4).
+
+> **Normative.** The **ordering of the pairing check against the claim** is pinned,
+> because §1 states it and nothing else would catch an implementation that kept the
+> old order. A call whose registered callable is an egress one while the call carries
+> no binding, and the mirror case, each raise `ToolBindingError` with **no claim
+> appended** — the trail holds no invocation row for that decision afterwards, the
+> callable is never entered, and no completion is attempted. An implementation
+> claiming first passes every other case in this section and then owes §3 a
+> completion for an exit ADR-0029 computes no outcome for.
 
 > **Normative.** Two tests are owed on the claim path's mirror case, one at the seam
 > and one at the **executor**. At the seam: the **claim** clock callable raising
@@ -2689,7 +2766,12 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > divergence §3 states, asserted rather than repaired. **A cancellation delivered
 > while an append that then fails is in flight** reaches the caller as
 > `CancelledError` carrying the append's failure as its cause, and the task ends
-> cancelled — the append failure never stands in its place (§1, ADR-0060 §1). **A
+> cancelled — the append failure never stands in its place (§1, ADR-0060 §1). That
+> one is asserted **at the executor as well as at the seam**, on a side-effecting
+> tool whose `interrupted_outcome` is `INDETERMINATE`: the step is committed
+> `interrupted_outcome` and **not** `FAILED`, because a `CancelledError` is what left
+> `invoke` (§1, ADR-0029 §4). Asserting the exception alone leaves the durable
+> outcome — the half the two rules could disagree about — untested. **A
 > non-cancellation `BaseException` raised from the callable** propagates unchanged,
 > writes no completion, and leaves the claim open (§3).
 
