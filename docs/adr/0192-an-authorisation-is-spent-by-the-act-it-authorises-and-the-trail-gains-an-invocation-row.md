@@ -542,6 +542,10 @@ made once, in its own words: "handing every holder of a lookup the ability to
 execute is the shape ADR-0017 §8 wants to move away from, and a consumer that only
 reads is one a test can double without stubbing execution." A ledger that can append
 two kinds of row and read nothing is the narrowest capability that does the job.
+ADR-0191 has since taken §8's deferred shape for **transport** — an injected
+capability a subsystem either holds or does not — and partially superseded that
+deferral. This is the same discipline one seam over, on a capability that was never
+deferred: the invoker is handed what it must write with and nothing else.
 
 **And one object implements both, which is why the split costs no coherence.** The
 consume is only a bound if every writer goes through it, so two independent stores
@@ -658,7 +662,7 @@ the count.
 > failure it absorbs — the ledger's own refusals, the `AuditError` it translated,
 > and an exception the **clock callable** raised on its own account and the ledger
 > propagated unwrapped (§2). Each is surfaced through the diagnostic below, which
-> names its class; none of them changes what `invoke` returns.
+> names its fault class; none of them changes what `invoke` returns.
 
 > **Normative.** A **`BaseException`** raised on the completion path while no
 > external cancellation is propagating is not absorbed, whatever its class and
@@ -687,19 +691,42 @@ the count.
 > cancellation is what leaves `invoke`. ADR-0060 §1's propagation clause and
 > ADR-0034 §1's precedence for an absorbed cancellation decide this and are not
 > superseded here. The completion-path exception is attached to it as a cause on the
-> exception, and its class reaches the operator through the diagnostic below; it
-> does not stand in the cancellation's place, and the claim is left open as in every
-> other completion failure.
+> exception, and it reaches the operator through the diagnostic below — by fault
+> class where it is an `Exception`, and by the operation and outcome alone where it
+> is a `BaseException` that is not one. It does not stand in the cancellation's
+> place, and the claim is left open as in every other completion failure.
 
 > **Normative.** No such failure is **swallowed**: the implementation surfaces it
 > to the operator as a Tier 2 diagnostic, and it is a diagnostic and never a row.
 
 > **Normative.** That diagnostic carries **enumerated fields and no free text**:
-> the exception's **class**, the ledger operation attempted, and the outcome that
-> was being written. It carries no exception instance, no exception message, no
+> the exception's **fault class**, the ledger operation attempted, and the outcome
+> that was being written. It carries no exception instance, no exception message, no
 > `str()` of one, and no member of a cause chain — not the ledger's own, and not one
 > an injected callable raised. The exception object still preserves its cause (§2);
 > what is bounded here is the **log line**.
+
+> **Normative.** The fault class is `core.types.fault_class_of(exception)` and never
+> a raw `type(exception).__name__`. A class **name** is as attacker-controlled as a
+> message: an injected clock or store can raise
+> `type("recipient@example.com", (RuntimeError,), {})()`, and nothing stops a
+> dynamically built class from carrying Tier 1 content in the one position the
+> clauses above leave open. `fault_class_of` is that hazard already solved, and no
+> lane writes a second classifier for it — the conversion is **total**, an
+> unrepresentable name becoming `UNREPRESENTABLE_FAULT_CLASS`; the rejected name is
+> "dropped here and goes nowhere, log included"; and the `__name__` read is itself
+> guarded, so a hostile metaclass takes down neither the diagnostic nor the call.
+> This is ADR-0119 §2's rule — no string in the record is derived from data — held
+> at one more emitter, with §3's reserved literal as the escape it already minted.
+
+> **Normative.** Where the exception being reported is a `BaseException` that is
+> **not** an `Exception`, the diagnostic carries **no class at all** — the ledger
+> operation and the outcome, and nothing else. That is `fault_class_of`'s own stated
+> rule read forward rather than worked around: its parameter is `Exception` because
+> "a cancellation is not a fault and must never be classified as one", so this ADR
+> neither widens it, nor classifies such an exception by another route, nor
+> substitutes a literal in the field. The operation and the outcome name the fault,
+> which is what the diagnostic is for; the class was never the load-bearing part.
 
 > **Normative.** It carries **no identifier**: not the claim's, not the decision's,
 > not the step's. `DurableIdentifier` is a non-blank encodable string a caller
@@ -861,9 +888,9 @@ irrelevant fault that should not be allowed to do that — the side effect happe
 the tool said so, and the only thing that failed is the bookkeeping. ADR-0026 §2's
 rule binds the **guard**, which must not relabel a callable's failure and destroy
 its type; it says nothing about whether a consumer may act on one, and ADR-0034 §2
-is the precedent for a consumer that does. So the type survives intact — in the
-diagnostic's class field, and on the exception's own cause chain — and `invoke`
-returns the result the call produced. The
+is the precedent for a consumer that does. So the type survives — as a **fault
+class** in the diagnostic, under §3's bound on that field, and intact on the
+exception's own cause chain — and `invoke` returns the result the call produced. The
 clause is written by **class** rather than by origin for the same reason the
 refusal orders are exhaustive over classes: an implementation cannot reliably tell
 which side of the guard an `Exception` came from, and a rule it cannot apply is not
@@ -927,10 +954,21 @@ nothing in this section inherits that nonce or its hazard.
 > **Normative.** A surface rendering a `RecordedInvocation` renders, for every one:
 > the row's kind — claim or completion — the instant it was recorded, and the tool
 > identifier and capability the value itself carries. For a completion it also
-> renders the outcome, the failure kind where the outcome is `FAILED`, and the
-> incurred cost, **including that the cost is unknown** where the basis is
-> `UNKNOWN`. It omits, truncates, summarises, samples and counts in place of none of
-> that, and a surface that cannot render one whole renders **fewer of them**.
+> renders the outcome, the failure kind where the outcome is `FAILED` **and the row
+> carries one**, and the incurred cost, **including that the cost is unknown** where
+> the basis is `UNKNOWN`. It omits, truncates, summarises, samples and counts in
+> place of none of that, and a surface that cannot render one whole renders **fewer
+> of them**.
+
+> **Normative.** Where the outcome is `FAILED` and the row carries **no**
+> `failure_kind` — the cancellation-derived completion §2 permits and forbids any
+> lane to fill — the floor is met by rendering **that no kind was reported**. A
+> surface renders neither a kind it chose nor a blank, and it does not drop the row
+> or the field. This costs no new concept: it is the treatment the clause above
+> already gives an unknown cost, the treatment §3 gives an open claim, and
+> ADR-0184's positively-read absence — an absence stated as one rather than filled
+> or hidden. The floor is therefore satisfiable for every shape §2 admits, which is
+> what a floor has to be.
 
 > **Normative.** Every value a surface renders here comes from the
 > `RecordedInvocation` in hand. No surface joins two operations' answers, reads a
@@ -1063,13 +1101,16 @@ the milestone-24 ruling found it.
 > `UNKNOWN`, and a budget over it fails closed — which is the right interim answer
 > and the reason the field is a `ToolCost` rather than a bare number.
 
-> **Normative.** The implementing lane therefore proves the **path** rather than
-> populating it. `ToolResult.incurred_cost` reaches `ToolInvocation.incurred_cost`
-> unaltered where a figure is supplied at the seam, and a `None` becomes a
-> `ToolCost` whose basis is `UNKNOWN`, both asserted end to end (§9). No lane
-> substitutes `ToolDefinition.cost` at any point on that path to make the test
-> pass — §5's third clause forbids exactly that, and a test that could be satisfied
-> by the declaration would certify the fiction ADR-0016 §4 refused.
+> **Normative.** The implementing lane therefore proves the **mapping** rather than
+> populating it, and the two are not the same claim. `ToolResult.incurred_cost`
+> reaches `ToolInvocation.incurred_cost` unaltered where the result carries a figure,
+> and a `None` becomes a `ToolCost` whose basis is `UNKNOWN` — both asserted at that
+> boundary, which is the seam this ADR decides, and **neither asserted end to end**,
+> because the clause above says no integration can supply the figure an end-to-end
+> case would need (§9). No lane substitutes `ToolDefinition.cost` at any point on
+> that path to make the test pass — §5's third clause forbids exactly that, and a
+> test that could be satisfied by the declaration would certify the fiction
+> ADR-0016 §4 refused.
 
 > **Normative.** Whichever ADR answers #192 supplies the integration-side carrier
 > for this field alongside the six failure kinds, because it is the same missing
@@ -1391,15 +1432,36 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > the row.
 
 > **Normative.** The suite proves the diagnostic bound rather than asserting it,
-> with a Tier 1 sentinel in **three** hostile positions: an exception message, a
-> member of its cause chain, and a claim's or decision's **identifier** — the test
-> failing if the sentinel reaches the log by any route (§3, ADR-0004 §5, ADR-0031
-> §5).
+> with a Tier 1 sentinel in **four** hostile positions: an exception message, a
+> member of its cause chain, a claim's or decision's **identifier**, and the
+> **class name** of a dynamically built exception — the test failing if the sentinel
+> reaches the log by any route (§3, ADR-0004 §5, ADR-0031 §5).
 
-> **Normative.** It pins the cost path end to end: a seam-supplied figure reaching
-> `ToolInvocation.incurred_cost` unaltered, and a `None` arriving as a `ToolCost`
-> whose basis is `UNKNOWN` — with a case asserting that a `ToolDefinition.cost`
-> present on the definition does **not** appear on the row (§5).
+> **Normative.** The class-name position is pinned as three cases, because
+> `fault_class_of`'s totality is what §3 relies on. A collaborator raising
+> `type("<sentinel>", (RuntimeError,), {})()` yields a diagnostic carrying
+> `UNREPRESENTABLE_FAULT_CLASS` and not the name; an exception whose `__name__` read
+> itself raises yields the same literal and neither takes the diagnostic down nor
+> changes what `invoke` returns; and a completion-path `BaseException` that is not an
+> `Exception` yields a diagnostic with **no class field at all** (§3). No test
+> asserts a raw `type(e).__name__` anywhere on this path.
+
+> **Normative.** It pins the cost **mapping** — the `ToolResult` →
+> `ToolInvocation` boundary, which is the part this ADR decides: a `ToolResult`
+> carrying a figure maps to `ToolInvocation.incurred_cost` unaltered, a `ToolResult`
+> carrying `None` maps to a `ToolCost` whose basis is `UNKNOWN`, and a
+> `ToolDefinition.cost` present on the definition appears on **no** row (§5).
+
+> **Normative.** It does **not** pin that path end to end, and no lane writes a test
+> claiming it does. §5 records that no registered integration can supply a figure
+> until #192's carrier lands, so a case asserting a figure traversing the production
+> path would have to construct a `ToolResult` past the seam or patch inside it —
+> proving the mapping the clause above already pins and proving nothing about the
+> path. The end-to-end case is owed by whichever ADR answers #192, alongside the six
+> `ToolFailureKind` members ADR-0031 §3 leaves in the same position. This ADR mints
+> no integration-side carrier to make it writable here: the callable's shape is
+> `tools/`-internal and ADR-0029 §1 declines to contract it, so minting one would be
+> this ADR deciding a surface it has no ADR for.
 
 > **Normative.** It pins the kindless `FAILED`: a completion derived from a
 > cancellation ADR-0029 §4 classifies `FAILED` constructs with **no**
@@ -1407,6 +1469,32 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > of the same classification is pinned beside it (§§1–2). A **completion clock
 > raising `CancelledError` directly**, with no external cancellation pending,
 > propagates it unchanged and attempts no second completion (§3).
+
+> **Normative.** Each adapter the lane writes against §4 is tested on **that row
+> shape**: given a `FAILED` completion carrying no `failure_kind`, it renders that
+> no kind was reported, renders no kind of its own, drops neither the row nor the
+> field, and raises nothing. The floor is proved on the shape that is hardest to
+> meet it on, which is the only way a floor is proved at all (§4).
+
+> **Normative.** One test is owed at the **executor**, not at the seam, for the
+> mirror case on the claim path. With the **claim** clock callable raising
+> `CancelledError` on its own account and `Task.cancelling() == 0` — no external
+> cancellation pending — the test asserts that the tool callable is **never
+> entered**, that **no claim** is appended, and that the step's outcome is whatever
+> `ToolDefinition.interrupted_outcome` computes for a cancellation, unchanged by this
+> ADR. It pins the path and the two absences; it asserts no classification.
+
+> **Normative.** That the executor commits the interrupted-call classification there
+> — `orchestration/executor.py` catches every `CancelledError` leaving `invoke` and
+> commits `interrupted_outcome`, so a call that provably never ran is recorded as an
+> interrupted one — is **not decided by this ADR and is not corrected here**. Telling
+> a collaborator-raised `CancelledError` from an externally delivered one at that
+> seam requires the "the callable was reached" fact ADR-0034 §1 declines to expose
+> and §1 above declines to mint; changing the classification is a change in
+> `orchestration/` and to ADR-0029 §4's rule, which **#234** owns and which this ADR
+> narrows without closing. The test exists so the behaviour is pinned and the
+> residue is visible rather than assumed away — and what the **store** records still
+> tells the two cases apart, which is §1's answer to the same question.
 
 > **Normative.** Four further failure paths are pinned. A **`clear()` landing
 > between a claim and its completion** leaves the call's result standing, emits the
@@ -1512,12 +1600,14 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > write fails the contract — and only a racing test finds that, exactly as ADR-0021
 > §4 found it for two resolutions of one `CONFIRM`.
 
-The lane is sequenced behind the transport-capability lane of this milestone (#85),
-which also touches `core/protocols.py`, and ahead of the recipient-policy lane
-(#68), which writes the same audit surface. Those two are separate ADRs of this
-batch and are referred to here by the issues they answer rather than by number,
-because a decision citation naming an ADR file that does not exist is a Tier 1
-failure of the citation check (ADR-0088 §6).
+The lane is sequenced behind the transport-capability lane of this milestone —
+**ADR-0191**, ratified and merged while this ADR was in review, which also touches
+`core/protocols.py` — and ahead of the recipient-policy lane (#68), which writes the
+same audit surface. ADR-0191 is cited by number because its file is now on `main`;
+the recipient-policy lane is still referred to by the issue it answers, and the
+budget lane by what it decides, because a decision citation naming an ADR file that
+does not exist is a Tier 1 failure of the citation check (ADR-0088 §6) and neither
+has merged.
 
 **The recipient-policy lane's row is a decision annotation, not an execution row,
 and the two do not collide.** That lane populates `PermissionRuling.authorised_by`
@@ -1613,7 +1703,10 @@ row kinds, and the annotation belongs to the kind that was already there.
   rather than admitted against a total that quietly lost a price.
 - **An honest history has a state that is neither success nor failure, and surfaces
   must render it.** A claim with no completion will be visible to users, and a
-  surface that finds it awkward is not permitted to resolve it.
+  surface that finds it awkward is not permitted to resolve it. The same holds one
+  field down: a cancelled act is a `FAILED` row with **no** failure kind, because no
+  member of the enum describes one, and §4's floor is met by saying that none was
+  reported rather than by choosing one or by hiding the row.
 - **The trail becomes the busiest store in the system.** Two rows per side-effecting
   call on top of one per gated action, with no retention rule, makes #108 sharper
   than ADR-0021 §4 left it — and #108's own trade is unchanged, only larger.
