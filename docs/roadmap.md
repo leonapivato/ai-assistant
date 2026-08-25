@@ -17,11 +17,14 @@ issue is newer and wins. History does not live here either: git holds this
 file's, and the tracker and the ADR ledger hold the work's (ADR-0019).
 
 **The narrative is bound by that same rule, not just the milestone entries.**
-No sentence here asserts what is or is not built. Where a track's motivation
-needs the state it opened against, that is written as dated history; a
-present-tense claim about the codebase is a defect in this file rather than a
-fact to act on, because nothing marks it as perishable and the precedence rule
-above never fires on it (#1568).
+No sentence here asserts the current state of the code — what is built, what is
+not, what a subsystem does today. Where a track's motivation needs the state it
+opened against, that is written as **dated** history, so it reads as a snapshot
+someone took rather than a fact to act on. Naming a ratified ADR or a tracker
+issue is not a state claim: those are dated and append-only, which is the
+exemption ADR-0019 §4 rests on. An undated present-tense claim about the
+codebase in this file is a defect, because nothing marks it as perishable and
+the precedence rule above never fires on it (#1568).
 
 ## Design stances
 
@@ -217,8 +220,9 @@ consumes what lands here (`track:web-client`), voice keeps spoke-as-sensor
 adversary is already named and mostly answered — ADR-0098 (the injection class,
 escaping, never-authority, ceilings, detection-is-not-a-gate), ADR-0106 (taint
 through consolidation), ADR-0148/0154 (an egress call authorised whole, per
-call, with no standing authorisation) — and the one gap all of them named as
-unbuilt was **origin**, which is why it takes this track's first milestone.
+call, with no standing authorisation) — and at the track's opening (2026-08-23)
+the one gap all of them named as unbuilt was **origin**, which is why it takes
+this track's first milestone.
 Milestones are ordered by **dependency only**, and each closes on a QA-driven
 exit ruling recorded on #1427. Voice holds milestones 19–22 (#1318); this track
 starts at 23.
@@ -238,7 +242,7 @@ starts at 23.
 - **24 — the record.** What the world did to the assistant and what the
   assistant did to the world, readable: the read-side audit ledger (#1017,
   ADR-0097 §12's deferral), authorised cloud egress in the audit trail (#747),
-  band precedence revisited now a real reader exists (#663).
+  band precedence revisited against a real reader (#663).
   *Exit: every read of a source and every egress is reconstructible from the
   audit trail alone, origin included.*
 - **25 — closed by construction.** Egress through an injected transport
