@@ -928,7 +928,16 @@ class FakeAuditTrail:
         implementation reserving afterwards satisfies the sentence and loses the
         race — an erasure and a fresh claim can land in the gap, and the id it then
         reserves names the **new** claim (ADR-0192 §2).
+
+        ``decision_id`` is read as the type the signature names, before the
+        resource, exactly as the durable store reads it: ``Identifier`` strips, so
+        looking the raw text up would answer "no open claims" for a decision holding
+        one.
+
+        Raises:
+            AuditError: If ``decision_id`` is not a usable identifier.
         """
+        named = _checked_argument("decision_id", lambda: _identifier(decision_id))
         async with self._resource.held():
             completed = {
                 row.completes for row in self._invocations.values() if row.completes is not None
@@ -936,9 +945,7 @@ class FakeAuditTrail:
             claims = [
                 row
                 for row in self._invocations.values()
-                if row.completes is None
-                and row.decision_id == str(decision_id)
-                and row.id not in completed
+                if row.completes is None and row.decision_id == named and row.id not in completed
             ]
             self._identifiers.reserve([claim.id for claim in claims])
             return [claim.model_copy(deep=True) for claim in claims]

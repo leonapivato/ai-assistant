@@ -31,6 +31,7 @@ from ai_assistant.core.errors import (
     InvalidResolutionError,
 )
 from ai_assistant.core.types import (
+    DEFAULT_PAGE_SIZE,
     BoundAccount,
     CostBasis,
     EgressBinding,
@@ -565,6 +566,49 @@ class AuditTrailContract:
 
         assert bounded == whole[:2]
         assert await ledger.recent_invocations() == whole  # the default page holds all six
+
+    async def test_the_default_page_is_bounded_at_the_stated_size(self, trail: AuditTrail) -> None:
+        """``recent_invocations()`` returns a *page*, and the figure is a contract clause.
+
+        A default written in a ``Protocol`` signature binds nobody — each
+        implementation writes its own — so ADR-0085 §3a makes it normative and
+        :data:`~ai_assistant.core.types.DEFAULT_PAGE_SIZE` is the figure. An
+        implementation returning everything passes every other case here, because
+        no other one seeds more rows than the bound: this is the only case that can
+        tell a page from the whole table.
+
+        One row past the bound is what makes the assertion sharp in both directions
+        — it catches the unbounded implementation and an off-by-one alike.
+        """
+        ledger = _as_ledger(trail)
+        authorisation = _allowing()
+        await trail.record(authorisation)
+        for _ in range(DEFAULT_PAGE_SIZE + 1):
+            await ledger.claim_invocation(decision=authorisation)
+
+        whole = await ledger.export_invocations()
+        page = await ledger.recent_invocations()
+
+        assert len(whole) == DEFAULT_PAGE_SIZE + 1
+        assert page == whole[:DEFAULT_PAGE_SIZE]
+
+    async def test_the_open_set_reads_its_decision_as_the_type_the_signature_names(
+        self, trail: AuditTrail
+    ) -> None:
+        """``Identifier`` strips, so ``"  d-1  "`` and ``"d-1"`` name one decision.
+
+        An implementation looking the raw text up answers "no open claims" for a
+        decision that holds one — and the recovery scan then reserves nothing,
+        completes nothing, and leaves the claim open for good, which is the state
+        ADR-0192 §3 exists to clear. It is the same guard the completion path puts
+        on ``claim_id``, on the member that reads by decision instead.
+        """
+        ledger = _as_ledger(trail)
+        authorisation = _allowing()
+        await trail.record(authorisation)
+        claim = await ledger.claim_invocation(decision=authorisation)
+
+        assert await ledger.open_invocations(decision_id=f"  {authorisation.id}  ") == [claim]
 
     @pytest.mark.parametrize("limit", [0, -1], ids=["zero", "negative"])
     async def test_a_limit_that_is_not_strictly_positive_is_refused(
