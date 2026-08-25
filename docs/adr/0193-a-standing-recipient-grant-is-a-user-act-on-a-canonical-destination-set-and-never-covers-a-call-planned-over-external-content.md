@@ -1,6 +1,6 @@
 # 193. A standing recipient grant is a user act on a canonical destination set, and never covers a call planned over external content
 
-- Status: Proposed
+- Status: Accepted
 - Date: 2026-08-24
 - Decides: the standing recipient grant ADR-0021 §6 defers as "a store, not a
   field" and ADR-0148 §3's third clause reserves — what a grant is, how the user
