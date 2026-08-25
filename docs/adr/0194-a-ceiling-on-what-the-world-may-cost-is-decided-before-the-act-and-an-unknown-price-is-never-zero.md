@@ -1938,6 +1938,21 @@ the ADRs it depends on rather than replacing them.
 > argument: with the argument mutated after construction, the call fails ADR-0029's
 > way and the gate is never reached (§3).
 
+> **Normative.** That suite also asserts the invoker **propagates the gate's own
+> exception object**, which is where §4's payload-free rule is driven at this seam:
+> the gate fake refuses a call whose arguments carry **sentinel** values — a
+> recipient and a subject appearing nowhere else in the fixture — and the suite
+> asserts the `SpendCeilingError` the caller catches **is** the instance the gate
+> raised, and that neither its `str()` nor any attribute it carries contains either
+> sentinel. It drives the same for `SpendUndeterminedError`. Without it an invoker
+> that catches the gate's refusal and re-raises the **same class** with the call
+> appended to the message passes every clause above — they assert the class, the
+> untouched callable, the unappended rows, the released handle and the forwarded
+> `ToolCost`, and none of them reads the message — while a `send_email` refusal
+> states the recipient and the subject in the step failure the user reads. §4 makes
+> both messages payload-free where they are **raised**; the seam that can undo it is
+> the one between the gate and the caller, and this is the only clause driving it.
+
 > **Normative.** That group carries the **whole** of the promoted surface's
 > topology, because widening `AssistantEngine` breaks every implementation of it at
 > once: the loopback `HubEngineClient`'s forwarding member, `HubClient`'s, the
