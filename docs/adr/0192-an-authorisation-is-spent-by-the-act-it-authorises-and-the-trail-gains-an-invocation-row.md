@@ -11,10 +11,11 @@
   an attempt's outcome is recorded and not **which four** outcomes there are; §7
   below states the scope and what of §9 stands.
 - **Decides `core/protocols.py` and `core/types.py` surface, and it is a breaking
-  change.** Golden rule 5 asks that it be flagged. It adds one Protocol —
-  `InvocationLedger` — so the implementing lane owes a **triad**: contract, shared
-  conformance suite and canonical fake in `ai_assistant.testing`, in one change and
-  never deferred (`CONTRIBUTING.md` → "Adding a Protocol"). It also grows two
+  change.** Golden rule 5 asks that it be flagged. It adds two Protocols —
+  `InvocationCompleter` and `InvocationLedger`, the second inheriting the first — so
+  the implementing lane owes a **triad**: contract, shared conformance suite and
+  canonical fake in `ai_assistant.testing`, in one change and never deferred
+  (`CONTRIBUTING.md` → "Adding a Protocol"). It also grows two
   existing Protocols: `AuditTrail` gains **three** read members and
   `AssistantEngine` two, so every structural implementation of each must grow them or
   stop satisfying it. `ToolInvoker.invoke` gains an obligation and a collaborator, `ToolResult`
@@ -300,10 +301,16 @@ surface can state an execution at all, because ADR-0186's two operations return
 > `Task.cancelling()` count, and never by the executor, which does not. So nothing
 > is asked of a party that cannot answer, and no marker is minted for one.
 
-> **Normative.** The claim append is performed so that its outcome is **observable
-> before any cancellation is propagated**: a cancellation delivered while the append
-> is in flight is absorbed, the append's result is observed, and the cancellation is
-> then re-raised. This is the treatment ADR-0034 §1 already gives the executor's own
+> **Normative.** The claim append is performed so that **the append task's own
+> outcome — its returned value or its exception — is observed before any cancellation
+> is propagated**: a cancellation delivered while the append is in flight is
+> absorbed, the task's result is observed, and the cancellation is then re-raised.
+> That is a promise about the *task*, and it is deliberately not a promise about the
+> *store*: where the task returns, the claim landed and `invoke` holds its `id`;
+> where it raises, `invoke` learns that it raised and nothing more, and the
+> commit-state clause below governs whether a row nonetheless stands. A draft
+> phrased over "claim landed or did not" promised the second, which no shield can
+> buy. This is the treatment ADR-0034 §1 already gives the executor's own
 > claim — "a cancellation absorbed while the **claim itself** was in flight, where
 > the write is known to have landed" — transcribed to this one, and it is what makes
 > the "claim landed or did not" question answerable at all under ADR-0060.
@@ -543,10 +550,14 @@ claim, and a conforming ledger decides every refusal before the write, so in eve
 case but a failure of the write itself there is no row saying an act may have
 occurred. That is the durable half #234 asks for and the half this ADR can give.
 Where the write *did* commit before failing, §1's commit-state clause says so rather
-than pretending otherwise, and the row that stands is completed `INDETERMINATE` by
-recovery — the fail-closed residue, not a claim that the act ran. The step's
-`INDETERMINATE` in either case is the residue #234 exists for, and this ADR narrows
-it and leaves it, as it says everywhere else that it does.
+than pretending otherwise, and what happens to that row depends on which exit it was:
+the live executor commits the step out of `RUNNING` on the exception it was handed,
+so no scan returns for it and the claim stays open for good, while a process that
+dies before that transition leaves the step `RUNNING` and the ordinary scan completes
+the claim `INDETERMINATE`. Either way it is the fail-closed residue and not a claim
+that the act ran. The step's `INDETERMINATE` where #234's own case reaches it is the
+residue #234 exists for, and this ADR narrows it and leaves it, as it says everywhere
+else that it does.
 
 **Placing the claim immediately before the callable is what keeps two records from
 disagreeing, and the placement is load-bearing.** ADR-0034 §1 rules that an attempt
@@ -597,15 +608,39 @@ available response; that response is ADR-0034 §1's and it is already specified.
 
 ### 2. Two seams, not one, and the row they write
 
-> **Normative.** `core/protocols.py` gains `InvocationLedger`, with exactly two
-> members. `claim_invocation(*, decision: PermissionDecision) -> ToolInvocation`
-> appends a claim and returns the stored row; it stores the decision's `id` and
-> stores no other part of the value it was passed (§1's equality refusal is what it
-> is passed for).
-> `complete_invocation(*, claim_id: DurableIdentifier, outcome: ToolOutcome, incurred_cost: ToolCost, failure_kind: ToolFailureKind | None = None) -> ToolInvocation`
-> appends its completion and returns the stored row. Both are `async`, both stamp
-> `recorded_at` themselves, both mint the row's `id` themselves, and both decide
-> every refusal below inside the same atomic operation as the append.
+> **Normative.** `core/protocols.py` gains **two faces over one write surface**.
+> `InvocationCompleter` carries one member:
+> `complete_invocation(*, claim_id: DurableIdentifier, outcome: ToolOutcome, incurred_cost: ToolCost, failure_kind: ToolFailureKind | None = None) -> ToolInvocation`,
+> which appends its completion and returns the stored row.
+> `InvocationLedger(InvocationCompleter, Protocol)` adds
+> `claim_invocation(*, decision: PermissionDecision) -> ToolInvocation`, which appends
+> a claim and returns the stored row; it stores the decision's `id` and stores no
+> other part of the value it was passed (§1's equality refusal is what it is passed
+> for). Both members are `async`, both stamp `recorded_at` themselves, both mint the
+> row's `id` themselves, and both decide every refusal below inside the same atomic
+> operation as the append. Every clause of this ADR stated about "the ledger" or "the
+> ledger's members" is stated about the implementation behind both faces.
+
+> **Normative.** **The split is a capability distinction and the inheritance is
+> because the wide face genuinely is the narrow one plus the claim.** `tools/` holds
+> `InvocationLedger`, because `invoke` claims and completes. `orchestration/`'s
+> recovery scan holds `InvocationCompleter` and nothing more, because it completes and
+> **must not** claim (§3) — and a dependency that cannot express the call is a type
+> rather than a promise. That is ADR-0029 §1's own rule read where it points: "the
+> surface should not widen to cover a concern its consumers do not have", and
+> "handing every holder of a lookup the ability to execute is the shape ADR-0017 §8
+> wants to move away from". The corpus has paid for the narrow face three times on
+> the identical argument — ADR-0125 §1 for `Secrets` beside `SecretStore`, ADR-0149
+> §1 refusing a tool the power to provision itself, ADR-0153 §2 for
+> `ConnectionPurger` beside `ConnectionProvisioner` — and this is the fourth. The
+> shape is ADR-0125 §1's exactly: `SecretStore(Secrets, Protocol)` inherits because
+> the wide face is the narrow face plus writes, and `InvocationLedger` is
+> `InvocationCompleter` plus the claim. **One object satisfies both**, so the
+> composition root hands each consumer the face its job needs without two classes
+> and without two implementations to drift apart. An earlier draft of this ADR
+> injected the whole ledger into recovery and defended it with a wiring test and a
+> prose prohibition; review raised it three times, and the answer the corpus already
+> has is a face, not a convention.
 
 > **Normative.** The ledger mints each row's `id` from an **injected identifier
 > factory**, and no caller supplies one. The factory is a collaborator of the
@@ -619,7 +654,18 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > the completion's `claim_id`, and holds it nowhere else.
 
 > **Normative.** **The factory never returns a value it has already returned**, for
-> the life of the process it runs in. That is an obligation of the *factory*, marked
+> the life of the process it runs in, **and its uniqueness is fork-safe**: the value
+> is composed so that a process forked after the factory was constructed cannot
+> reissue what the parent issued. ADR-0049 §3 already solved this exact hazard for
+> `execution_id` and its answer is taken unchanged — the current process id is read
+> **at allocation time** and folded in, `f"{os.getpid()}-{…}"`, never frozen at
+> construction — because "a nonce **frozen at construction is copied by `fork`**".
+> Without it a per-process nonce with a counter satisfies the sentence above in both
+> processes and still reissues: the parent claims an id, `clear()` erases the row, the
+> child's copied nonce and counter mint the same value, and the parent's completion
+> lands on the child's claim — the failure this clause exists to prevent, arriving
+> through the one door the redraw cannot see, because the erased row is not there to
+> collide with. That is an obligation of the *factory*, marked
 > here because the ledger relies on it and would otherwise rely on it silently: a
 > completion names its claim by `id` alone, so an id reissued after the row it first
 > named was erased would let a completion held by one call land on a **different**
@@ -651,7 +697,11 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > **Normative.** Process scope is also **testable**, and testability is not what
 > separates the two: the ids of a conforming factory are disjoint across two
 > instances constructed in one process against one store, and §9 pins that case
-> directly rather than leaving the suite weaker than this clause.
+> directly rather than leaving the suite weaker than this clause. The **fork** arm is
+> testable the same way and by the same means ADR-0049 §5 already uses: the nonce
+> comes from an injectable factory, so a case pins two *identical* nonces and asserts
+> the ids still differ — which makes the pid, and not the nonce, the thing under
+> test.
 
 > **Normative.** It is satisfied **by construction and never by improbability**. A
 > per-process nonce with a monotonic counter satisfies it; retaining the issued ids
@@ -804,9 +854,9 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > `orchestration/` already holds an `AuditTrail` for that member's sake, so this
 > costs it no capability it did not have.
 
-> **Normative.** It goes on `AuditTrail` and **never** on `InvocationLedger`, and
-> that is the boundary this ADR does have to defend. The ledger is what `tools/`
-> holds, and the clause below keeps every history read off that seam; a
+> **Normative.** It goes on `AuditTrail` and **never** on `InvocationLedger` or
+> `InvocationCompleter`, and that is the boundary this ADR does have to defend. The
+> ledger is what `tools/` holds, and the clause below keeps every history read off that seam; a
 > by-decision query over past claims is precisely such a read. The recovery scan is
 > the only consumer that calls this member, and it reaches it through the trail it
 > already has.
@@ -970,8 +1020,8 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > **Normative.** A completion's `decision_id` is set by the ledger from the claim it
 > completes, never accepted from a caller, so the two cannot disagree.
 
-**Two Protocols rather than one, because the invoker needs two methods and
-`AuditTrail` has nine.** Handing a `ToolInvoker` the whole trail would put decision
+**A face rather than the trail, because the invoker needs two methods and
+`AuditTrail` would have ten.** Handing a `ToolInvoker` the whole trail would put decision
 writes, history reads, the whole-trail export and `clear()` into `tools/` — a
 subsystem the architecture map gives integrations, not the permission record. That
 is the shape ADR-0017 §8 wants to move away from and the split ADR-0029 §1 already
@@ -991,12 +1041,16 @@ over. ADR-0029 §8 already had this problem between the registry and the invoker
 answered it the same way; the residue is the same too, and it is the composition
 root's.
 
-**`InvocationLedger` is a new Protocol, so it is a triad.** Contract, shared
+**The pair is one new contract surface, so it is one triad.** Contract, shared
 conformance suite and canonical fake in `ai_assistant.testing`, in one change and
 never deferred (`CONTRIBUTING.md` → "Adding a Protocol"), and under ADR-0137 §2 it
 may ride with its primary production implementation — the `permissions` store that
-also satisfies `AuditTrail`, which is the consumer whose demands shape it. §9 is
-where that lands.
+also satisfies `AuditTrail`, which is the consumer whose demands shape it. The two
+faces are one triad and not two, for ADR-0125 §1's reason: one object satisfies both,
+the wide face is the narrow one plus the claim, and a suite written twice over one
+implementation would assert the same completion obligations twice. The suite states
+`complete_invocation`'s obligations once, against the narrow face, and the wide
+face's suite adds the claim's. §9 is where that lands.
 
 **The reads return a joined value because the join cannot be done safely anywhere
 else.** An engine reading rows and then reading their decisions has an `await`
@@ -1613,10 +1667,14 @@ store, and changing it is a Protocol decision of #234's own. So this ADR narrows
 cost — the record distinguishes the two cases even where the step's status does
 not — and leaves the classification exactly as ADR-0029 §4 ratified it.
 
-**#305 does not bear on this and is cited to say so.** Its subject is the
-`execution_id` nonce `planning` mints under a fork. The claim key here is
-`decision_id`, minted by the caller that records the decision under ADR-0021 §1, so
-nothing in this section inherits that nonce or its hazard.
+**#305 bears on this directly, and an earlier draft here dismissed it by looking at
+the wrong key.** That draft answered for `decision_id`, which is minted by the caller
+that records the decision under ADR-0021 §1 and inherits no nonce. But the value the
+hazard is about is `ToolInvocation.id`, which **this** ADR has an injected factory
+mint — the same shape `planning` mints `execution_id` with, and therefore the same
+fork hazard. §2 takes ADR-0049 §3's answer rather than restating the dismissal: the
+pid is read at allocation and folded in, so forked children mint from distinct
+prefixes whatever nonce or counter they copied.
 
 ### 4. The surface: two operations, two sequences, and one word that becomes sayable
 
@@ -2289,7 +2347,8 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 
 > **Normative.** **The paired lane** lands the `core` surface this ADR names —
 > `ToolInvocation`, `RecordedInvocation`, the three error classes, and
-> `ToolResult.incurred_cost` — with `InvocationLedger` as a triad (Protocol, shared
+> `ToolResult.incurred_cost` — with `InvocationCompleter` and `InvocationLedger` as
+> one triad (Protocols, shared
 > conformance suite, canonical fake) and its primary production implementation, the
 > `permissions` store that also satisfies `AuditTrail` (ADR-0137 §2's pairing). It
 > also lands `AuditTrail`'s **three** new read members — the two joined listings and
@@ -2309,27 +2368,22 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > completions and their ordering, the scan's two collaborators and their injection,
 > and the executor-level test below. The scan reads open claims through
 > `AuditTrail.open_invocations` — the trail it already holds — and writes each
-> `INDETERMINATE` completion through `InvocationLedger.complete_invocation`, because
-> that member exists on the ledger and nowhere else. It is the only consumer that
-> calls `open_invocations` (§2).
+> `INDETERMINATE` completion through `InvocationCompleter.complete_invocation`. It is
+> the only consumer that calls `open_invocations` (§2).
 
-> **Normative.** The scan therefore holds **both** Protocols, and the composition
-> root injects the same object as each (§2). It is not given a fourth Protocol for
-> the write: `complete_invocation` is already contracted, already conformance-tested
-> and already implemented by that object, and minting a completion-only capability
-> would be a second name for one member. ADR-0029 §1's own split is the precedent
-> **against** minting one here rather than for it: it gave a registry two faces
-> because the two had **disjoint** consumers, and these do not. `tools/` needs both
-> ledger members, so `claim_invocation` cannot move off the ledger; a recovery-only
-> face would therefore leave `complete_invocation` contracted on two Protocols, one
-> of them a single-member alias for a member the same object already implements, and
-> would buy no consumer a narrower hold than it has. What the scan must **not** do is
-> claim —
-> `claim_invocation` is the seam's act (§1) and no lane outside `tools/` calls it —
-> and that is the same posture `orchestration/` already keeps toward the `record`,
-> `export` and `clear` it holds through `AuditTrail` today. The wiring test asserts
-> the scan is constructed with both and that a recovery pass calls
-> `open_invocations` and `complete_invocation` and **no other ledger member**.
+> **Normative.** The scan therefore holds `AuditTrail` and **`InvocationCompleter`**,
+> and the composition root injects the same object as each (§2). It is **not** handed
+> `InvocationLedger`: `claim_invocation` is the seam's act (§1), no lane outside
+> `tools/` calls it, and the narrow face is what makes that a **type** rather than a
+> prohibition an implementation is trusted to keep. An earlier draft of this clause
+> injected the ledger and defended it with a wiring test and the observation that
+> `orchestration/` already keeps the same posture toward the `record`, `export` and
+> `clear` it holds through `AuditTrail`; that posture is a residue this ADR inherits,
+> not a licence to add one, and ADR-0029 §1's rule against widening a surface past
+> its consumers' concern decides it the other way. The wiring test asserts the scan
+> is constructed with the trail and the **completer**, and that a recovery pass calls
+> `open_invocations` and `complete_invocation` and nothing else — an assertion that
+> now rides on top of a dependency which cannot express the claim at all.
 
 > **Normative.** **The surface group** lands §4's two `AssistantEngine` operations,
 > that Protocol's new conformance obligations and its fake, the `PROTOCOL_VERSION`
@@ -2719,6 +2773,17 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > satisfies every collision case above while one durable identifier names two
 > records.
 
+> **Normative.** The **fork** arm of §2's uniqueness obligation is pinned
+> deterministically and not by running one: two factories are constructed from the
+> **same** injected nonce — the state a `fork` copies — and each allocates against
+> one store; the ids they mint are disjoint, because the pid is read at allocation
+> and folded in (§2). The case is stated over identical nonces on purpose, so that
+> the pid and nothing else is what differentiates them, which is ADR-0049 §5's own
+> shape for the same obligation. A factory that freezes its prefix at construction
+> passes every same-process case above and fails this one. The stale-completion
+> consequence is pinned beside it: with the parent's id reissued, a completion held
+> against an erased claim must not land on the other factory's claim.
+
 > **Normative.** The factory's own **faults** are pinned at that same boundary, by
 > ADR-0026 §2's split and for the same reason the clock's two arms are named apart
 > below: an earlier draft stated the clock's and left the factory's to be inferred,
@@ -2945,10 +3010,12 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > paired lane, so a bump is owed at the surface group whether or not the field
 > reached the wire earlier — ADR-0124 §9's obligation is on whoever moves the set.
 
-> **Normative.** The composition root wires one object as both `InvocationLedger`
-> and `AuditTrail`, and hands the `ToolInvoker` the ledger alone. A composition that
-> hands it the trail is a defect the seam group's own test names, in the shape
-> ADR-0029 §8's pairing test already has.
+> **Normative.** The composition root wires one object as `InvocationLedger`,
+> `InvocationCompleter` and `AuditTrail`, and hands each consumer one face: the
+> `ToolInvoker` the ledger alone, the recovery scan the completer and the trail. A
+> composition that hands the invoker the trail, or the scan the ledger, is a defect
+> the owning group's own test names, in the shape ADR-0029 §8's pairing test already
+> has.
 
 > **Normative.** The conformance suite exercises the consume under **concurrent**
 > invocation rather than assuming a single-threaded caller, as ADR-0021 §4's suite
@@ -3133,8 +3200,8 @@ row kinds, and the annotation belongs to the kind that was already there.
   `orchestration/` already holds — ADR-0044 §3's move, made again for the same
   reason. Without it the scan would page a bounded listing or export the whole trail
   and rebuild the claim-to-completion relation `permissions/` owns, materialising
-  unrelated Tier 1 history in the wrong subsystem to do it. It is deliberately not on
-  `InvocationLedger`, so `tools/` still holds two write members and no history read.
+  unrelated Tier 1 history in the wrong subsystem to do it. It is deliberately on
+  neither write face, so `tools/` still holds two write members and no history read.
 - **An append may now mint more than once, and the ledger reads its own live rows
   to know when to stop.** A minted id naming a row the store currently holds is
   drawn again rather than refused, bounded by the rows held plus one, with an
@@ -3146,11 +3213,15 @@ row kinds, and the annotation belongs to the kind that was already there.
   the step would stay `RUNNING`, and every restart would repeat the failure. The
   bound holds nothing across an erasure, so §6 is untouched, and the answer is
   certain rather than probable, which is what ADR-0045 §4 requires of this corpus.
-- **A `ToolInvoker` implementation now holds an `InvocationLedger`.** That is a new
-  collaborator on a seam whose whole design was that it holds a registry binding and
-  nothing else — the cost #259 priced when it described closing the same hole one
-  level up — but it is two append methods and not the audit trail, so no decision
-  write, history read or erasure reaches `tools/`.
+- **A `ToolInvoker` implementation now holds an `InvocationLedger`, and recovery
+  holds only the narrow face.** That is a new collaborator on a seam whose whole
+  design was that it holds a registry binding and nothing else — the cost #259 priced
+  when it described closing the same hole one level up — but it is two append methods
+  and not the audit trail, so no decision write, history read or erasure reaches
+  `tools/`. `orchestration/` is handed `InvocationCompleter` instead, so the one
+  member it must never call is not on the type it holds; the cost is a second name in
+  `core/protocols.py`, and ADR-0125 §1's `Secrets`/`SecretStore` pair is what that
+  costs elsewhere in this corpus.
 - **A hung audit store now blocks the call, and `invoke` waits with it.** Neither
   ledger append carries a deadline of the seam's (§§1, 3), so a store that has
   stopped answering blocks the request before the callable and withholds the
@@ -3226,7 +3297,9 @@ row kinds, and the annotation belongs to the kind that was already there.
   `permissions` store merge first and the seam, recovery and surface groups are
   briefed against the merged text (§9). The cost is three extra round trips; what
   it buys is that no single PR carries new machinery in four subsystems.
-- **New `core` surface:** the `InvocationLedger` Protocol with two members;
+- **New `core` surface:** the `InvocationCompleter` Protocol with one member and
+  `InvocationLedger`, which inherits it and adds the claim — two faces over one write
+  surface, so each consumer holds only what it may do;
   `ToolInvocation` and `RecordedInvocation`; `AuthorisationSpentError`,
   `UnrecordedAuthorisationError` and `InvalidCompletionError`, all three under
   `AuditError`; one field on `ToolResult`;
@@ -3306,7 +3379,9 @@ refused once review named what it hands over: decision writes, history reads, th
 whole-trail export and `clear()`, into `tools/`. The architecture map gives that
 subsystem integrations, not the permission record, and ADR-0029 §1 already split a
 capability by consumer for the same reason. `InvocationLedger` is the two methods
-the invoker needs and nothing else.
+the invoker needs and nothing else — and the same rule, applied a second time in the
+other direction, is why recovery holds `InvocationCompleter` and cannot name the
+claim (§2, §9).
 
 **Let the caller mint `recorded_at` and have the store enforce the window over it.**
 The second draft's shape, and wrong twice: the window would be measured against a
