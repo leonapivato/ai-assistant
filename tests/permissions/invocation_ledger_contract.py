@@ -136,6 +136,21 @@ class HostileKey(str):
         return False
 
 
+class HostileClass:
+    """An object that refuses to say what it is, which ``isinstance`` has to ask.
+
+    ``isinstance`` consults ``__class__`` when ``type()`` does not settle the
+    question, so a property that raises turns the *type probe* into a way out of
+    ADR-0192 §2's refusal classes — before any field has been read at all.
+    """
+
+    @property  # type: ignore[misc]  # a read-only `__class__` is the whole point
+    def __class__(self) -> type:
+        """Refuse to say what this is."""
+        msg = "this value refuses to say what it is"
+        raise RuntimeError(msg)
+
+
 class UnspeakableError(ValueError):
     """A ``ValueError`` that cannot be described, which is the caller's to raise.
 
@@ -1929,6 +1944,50 @@ class InvocationLedgerContract(InvocationCompleterContract):
             handed.__dict__["step_id"] = Unspeakably([1])
         else:
             _undeclared(handed, {1: "one", "extra": "text"})
+
+        with pytest.raises(AuditError) as raised:
+            await ledger.claim_invocation(decision=handed)
+
+        assert not isinstance(raised.value, UnrecordedAuthorisationError | AuthorisationSpentError)
+        assert await _rows(ledger) == []
+
+    @pytest.mark.parametrize(
+        "hostility",
+        [
+            pytest.param("type-probe", id="a-value-that-refuses-to-say-what-it-is"),
+            pytest.param("colliding-id", id="a-key-spelling-id-in-place-of-the-real-one"),
+        ],
+    )
+    async def test_a_hostile_value_cannot_escape_through_the_refusal_itself(
+        self, ledger: LedgerSubject, hostility: str
+    ) -> None:
+        """:meth:`test_a_malformed_decision_is_still_an_argument_fault`, one step earlier.
+
+        Those cases are about reading the *fields* of a hostile value. These two are
+        about the two things an implementation does around that read — asking what the
+        value is, and naming it in the refusal — and either can be made to raise on
+        its own.
+
+        ``isinstance`` consults ``__class__`` when ``type()`` leaves the question
+        open, so a property that raises turns the type probe into a way out of §2's
+        classes before a field has been read at all. And naming the decision by
+        ``__dict__["id"]`` hashes ``"id"`` and compares it against whatever collides
+        with it: delete the genuine key, leave a ``str`` subclass spelling ``"id"``
+        whose ``__eq__`` raises, and the *diagnostic* raises from inside the
+        ``except`` block that exists to report the fault. With the genuine key still
+        present the lookup may never probe past it, which is why the hostile-key case
+        above does not reach this one.
+        """
+        authorisation = allowed()
+        await ledger.record(authorisation)
+        if hostility == "type-probe":
+            handed = cast("PermissionDecision", HostileClass())
+        else:
+            handed = authorisation.model_copy()
+            spelling = HostileKey("id")
+            del handed.__dict__["id"]
+            _undeclared(handed, {spelling: "shadow"})
+            spelling.arm()
 
         with pytest.raises(AuditError) as raised:
             await ledger.claim_invocation(decision=handed)
