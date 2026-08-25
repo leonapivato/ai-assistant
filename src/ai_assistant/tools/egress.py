@@ -518,7 +518,18 @@ class _StreamChannel:
                 with suppress(asyncio.CancelledError):
                     await asyncio.wait((waiting,))
             if not waiting.cancelled():
-                waiting.exception()  # retrieved, so asyncio does not report it unread
+                # **Retrieved, and read.** ADR-0191 §1 has an ordinary release
+                # failure suppressed *and logged*, and a cancellation changes
+                # which exception leaves rather than whether a release that
+                # failed beside it is reported: a transport that had already
+                # scheduled ``connection_lost(exc)`` when the cancellation
+                # arrived is exactly that pair. So the outcome is read rather
+                # than only marked retrieved — and logged **without** taking the
+                # transport a second time, because the abort above has run.
+                # Adversarial review found it on round 11.
+                failure = waiting.exception()
+                if isinstance(failure, OSError):
+                    self._log_release_failure(failure)
             raise
         except OSError as exc:
             self._abort_after(exc)
@@ -535,9 +546,23 @@ class _StreamChannel:
         Args:
             failure: What the release raised, logged by type alone.
         """
-        _log.debug("egress_channel_close_failed", error_type=type(failure).__name__)
+        self._log_release_failure(failure)
         with suppress(OSError):
             self._writer.transport.abort()
+
+    def _log_release_failure(self, failure: OSError) -> None:
+        """Report a release that failed, by type alone.
+
+        One site for the event, because two paths owe it: an ordinary release
+        failure, and one that completed while a cancellation was in flight. Only
+        the type is recorded — an ``OSError`` from a far end can carry that far
+        end's own words, and ADR-0152 §11's discipline applies to this
+        neighbouring surface.
+
+        Args:
+            failure: What the release raised.
+        """
+        _log.debug("egress_channel_close_failed", error_type=type(failure).__name__)
 
 
 def _tls_context() -> ssl.SSLContext:
