@@ -176,8 +176,11 @@ surface can state an execution at all, because ADR-0186's two operations return
 > requires, an `AuditError` the ledger translated likewise — because §2's exhaustive
 > refusal orders would mean nothing if a caller could not catch the class they name.
 > Only an exception that is **not** an `AssistantError` is translated, and then to an
-> `AuditError` carrying it as the cause: that is the `RuntimeError` a wired-wrong
-> clock callable raises, and nothing else. ADR-0026 §2's split binds the **ledger**,
+> `AuditError` carrying it as the cause. That reaches **any** exception outside
+> `AssistantError`, whatever its class, because ADR-0026 §2 lets a clock callable
+> raise anything and §2 above preserves that: a `ValueError`, a `RuntimeError` and a
+> third-party client's own error class are one case here and are translated alike.
+> What the rule turns on is the class boundary and nothing narrower. ADR-0026 §2's split binds the **ledger**,
 > which propagates such an exception without relabelling it (§2); `invoke` is one
 > frame out and a consumer rather than a guard, which ADR-0034 §2 is the precedent
 > for. Either way what reaches the caller is an `AssistantError`, so the clause above
@@ -843,11 +846,19 @@ the count.
 > to the operator as a Tier 2 diagnostic, and it is a diagnostic and never a row.
 
 > **Normative.** That diagnostic carries **enumerated fields and no free text**:
-> the exception's **fault class**, the ledger operation attempted, and the outcome
-> that was being written. It carries no exception instance, no exception message, no
-> `str()` of one, and no member of a cause chain — not the ledger's own, and not one
-> an injected callable raised. The exception object still preserves its cause (§2);
-> what is bounded here is the **log line**.
+> the exception's **fault class**, the ledger operation attempted, and — on a
+> completion only — the outcome that was being written. It carries no exception
+> instance, no exception message, no `str()` of one, and no member of a cause chain —
+> not the ledger's own, and not one an injected callable raised. The exception object
+> still preserves its cause (§2); what is bounded here is the **log line**.
+
+> **Normative.** The outcome field is **absent on a claim-path diagnostic**, and its
+> absence is required rather than tolerated. A claim carries no `ToolOutcome` — §2's
+> shape leaves `outcome` unset on that row — so there is nothing to report, and a
+> lane that filled the field would be inventing the one value this ADR is most
+> careful never to invent. The **operation** field already says which append failed,
+> which is what a reader needs to know why the outcome is missing; nothing else
+> stands in for it, and no literal, sentinel or "n/a" is minted for the position.
 
 > **Normative.** The fault class is `core.types.fault_class_of(exception)` and never
 > a raw `type(exception).__name__`. A class **name** is as attacker-controlled as a
@@ -1883,6 +1894,17 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > write fails the contract — and only a racing test finds that, exactly as ADR-0021
 > §4 found it for two resolutions of one `CONFIRM`.
 
+> **Normative.** That race is **parameterised by spendability**, because the
+> one-winner assertion alone is satisfied by an implementation that consumes every
+> `ALLOW` — which would refuse the second gated read and the second `NATURAL`
+> invocation that §1 says are never refused on this ground. Two coroutines claiming
+> under a **spendable** decision produce exactly one appended claim and one
+> `AuthorisationSpentError`. Two claiming under a decision that is **not**
+> side-effecting, and two under one whose `idempotency` is `NATURAL`, each produce
+> **two appended claims and no refusal**. The non-spendable arms are the half a
+> one-winner test cannot see, and omitting them is how a store silently becomes a
+> lock on reads.
+
 > **Normative.** The racing suite also exercises the **join against `clear()`**,
 > because that race is the reason §2 puts the join inside one store operation. Under
 > a barrier, `recent_invocations` and `export_invocations` each run against a
@@ -1893,6 +1915,13 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > reads rows and decisions in two operations passes the claim and completion races
 > above and fails this one, which is the point of testing it: the two-read
 > implementation is the natural one, and only this race distinguishes it.
+
+> **Normative.** `clear()`'s **returned count** is pinned over both kinds, on a
+> store holding a decision, a claim and a completion: the call returns **3** and the
+> store is then empty by every read this ADR names. Asserting emptiness alone leaves
+> a store free to erase all three and report the decision-only count it returned
+> before this ADR, which every race above still passes; the count is what the caller
+> is shown, so it is what the suite checks (§6).
 
 > **Normative.** The **writes** race `clear()` as well, and this is a different test
 > from the one above rather than a restatement of it: an implementation may
