@@ -8601,6 +8601,16 @@ class ToolResult(BaseModel):
     :attr:`output` is :data:`FrozenJsonValue`, matching ``StepExecution.output``
     exactly, so a result is recordable without translation and a tool cannot
     return a live object that mutates after the step recorded it.
+
+    :attr:`incurred_cost` is ADR-0192 §5's, and it partially supersedes ADR-0029
+    §3's "``ToolResult`` carries no cost". That section's reason — billing is
+    asynchronous, so a ``spent`` field would hold a number the tool made up — is
+    answered rather than waived: the field is a :class:`ToolCost`, so a tool that
+    cannot know reports ``UNKNOWN`` and an accumulator fails closed on it, which
+    is ADR-0016 §4's own distinction between *free* and *unknown*. **Nothing
+    populates it yet**: ``ToolImplementation`` returns ``FrozenJson`` and no ADR
+    owns minting a carrier, which is #1558's. The disclosure-report half of §3's
+    sentence stands and issue #57 is untouched.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
@@ -8608,6 +8618,18 @@ class ToolResult(BaseModel):
     outcome: ToolOutcome
     output: FrozenJsonValue = Field(default=None, description="Only meaningful when SUCCEEDED.")
     failure: ToolFailure | None = Field(default=None, description="Required unless SUCCEEDED.")
+    incurred_cost: ToolCost | None = Field(
+        default=None,
+        description=(
+            "What *this* invocation cost, as the tool reports it (ADR-0192 §5). "
+            "``None`` states that the tool reported no figure, and the row then "
+            "records a ``ToolCost`` whose basis is ``UNKNOWN``. Named apart from "
+            "``ToolDefinition.cost`` so that a declaration and a measurement are "
+            "never one word: no lane copies the declaration into it, and a tool "
+            "whose price is settled asynchronously reports ``UNKNOWN`` rather than "
+            "a number it constructed to fill the field."
+        ),
+    )
 
     @model_validator(mode="after")
     def _outcome_fields_match(self) -> ToolResult:
@@ -8707,6 +8729,174 @@ class ToolCall(BaseModel):
         if self.decision.tool.idempotency is not Idempotency.KEYED:
             return None
         return self.decision.id
+
+
+# --- what a call spent, and what it did (ADR-0192 §§1-2) ---------------------
+# The trail's second row kind. A `ToolInvocation` is appended twice per attempt —
+# a **claim** immediately before the callable is entered, and a **completion**
+# pointing back at it — so the record says an act was begun even where the process
+# died mid-effect, and so the claim can be the atomic consume ADR-0021 §4 deferred
+# to "the invocation contract". A `RecordedInvocation` is that row joined to the
+# decision it names, which is the shape every reader gets: the tool's identity
+# lives on the decision, and a bounded page can hold a completion whose claim and
+# whose decision are not on it (ADR-0192 §2).
+#
+# Declared here rather than inside the promoted block below because that is what
+# they are: `core` leaves the engine surface *reaches*, exactly as
+# `SourceReadRecord` and `ReadOutcome` are for ADR-0186 §10's audit reads. The
+# operations that name them are ADR-0192 §4's and land with the surface group.
+
+
+class ToolInvocation(BaseModel):
+    """One append to the trail's record of an act (ADR-0192 §2).
+
+    **Exactly two well-formed shapes, and a validator refuses every other
+    combination at construction.** A *claim* carries :attr:`completes`,
+    :attr:`outcome`, :attr:`incurred_cost` and :attr:`failure_kind` all unset. A
+    *completion* carries the first three set, and :attr:`failure_kind` only where
+    the outcome is not ``SUCCEEDED`` — where it may be set and may be absent.
+    :attr:`completes` is the discriminator. Two shapes inside one model is what
+    :class:`CanonicalDestination` already does and for the same reason: the
+    variants are exactly two and a validator makes every other combination
+    unconstructable.
+
+    **A claim carrying no completion states that the act may have executed**,
+    positively and as its own state (ADR-0192 §3). No lane, store or surface reads
+    it as ``SUCCEEDED``, as ``FAILED``, as "did not run", as an omission, or as a
+    row still being written — ADR-0184's third state, one store over.
+
+    **It restates nothing its decision already fixes.** No ``ToolDefinition``, no
+    ``parameters_digest``, no ``step_id``, no ``execution_id``, no account, no
+    transport endpoint and no destination: what a call transmitted to is the
+    decision's own ``EgressBinding.canonical_destination_set``, reached through
+    :attr:`decision_id`, and copying it here would be the second shape that must
+    agree ADR-0184 §2 refused. It carries **no content** — not an argument value,
+    not a payload, not an output, not a failure message, and not a digest of any of
+    them (ADR-0004 §5). And it carries **no ordinal**: how many acts a decision has
+    backed is read from the claims themselves, in the ledger's own order.
+
+    Both row kinds are Tier 1 and persist locally only (ADR-0004 §2, §7).
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    id: DurableIdentifier = Field(
+        description=(
+            "The row's own id, minted by the ledger from an injected factory and "
+            "never supplied by a caller (ADR-0192 §2). It names nothing outside the "
+            "store: it is learned from the returned row and used once, to point a "
+            "completion at its claim."
+        )
+    )
+    decision_id: DurableIdentifier = Field(
+        description=(
+            "The authorisation this act ran under. On a completion the ledger sets "
+            "it from the claim being completed, so the two cannot disagree."
+        )
+    )
+    recorded_at: UtcInstant = Field(
+        description=(
+            "When the append happened, stamped by the ledger from a guarded clock "
+            "and never supplied by a caller. **Not** the order any rule is decided "
+            "on: that is the ledger's own durable append order, so a wall clock "
+            "that steps backwards cannot make a completed act stop being the most "
+            "recent one (ADR-0192 §1)."
+        )
+    )
+    completes: DurableIdentifier | None = Field(
+        default=None, description="The claim this row completes; unset on a claim."
+    )
+    outcome: ToolOutcome | None = Field(
+        default=None, description="How the act finished; set on a completion only."
+    )
+    incurred_cost: ToolCost | None = Field(
+        default=None,
+        description=(
+            "What this invocation cost, as the tool reported it — a ``ToolCost`` "
+            "whose basis is ``UNKNOWN`` where it reported none (ADR-0192 §5). Set "
+            "on a completion only, and never derived from ``ToolDefinition.cost``."
+        ),
+    )
+    failure_kind: ToolFailureKind | None = Field(
+        default=None,
+        description=(
+            "Transcribed from the ``ToolResult`` that carried one, never "
+            "synthesised. Absent on a completion derived from an exception, "
+            "because no result was produced to transcribe from."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _is_a_claim_or_a_completion(self) -> ToolInvocation:
+        """Refuse every combination but the two shapes ADR-0192 §2 declares.
+
+        ``INDETERMINATE`` carries a kind on the same terms as ``FAILED`` and the
+        row does not drop it: ADR-0029 §3's ``ToolResult`` validator *requires* a
+        ``ToolFailure`` on every result that is not ``SUCCEEDED``, so a keyed
+        side-effecting call that timed out arrives at this seam carrying
+        ``TIMED_OUT``. A ``SUCCEEDED`` completion carries none, because a
+        ``SUCCEEDED`` result carries no failure to transcribe.
+
+        A completion with :attr:`incurred_cost` unset is refused here rather than
+        left to a validator checking :attr:`completes` against :attr:`outcome`
+        alone: such a row reaches a spend accumulator and ADR-0192 §4's rendering
+        floor as a completion with no cost, which is the absence §5 exists to make
+        unrepresentable.
+        """
+        if self.completes is None:
+            unset = {
+                "outcome": self.outcome,
+                "incurred_cost": self.incurred_cost,
+                "failure_kind": self.failure_kind,
+            }
+            carried = sorted(name for name, value in unset.items() if value is not None)
+            if carried:
+                msg = f"a claim carries no {', '.join(carried)}"
+                raise ValueError(msg)
+            return self
+        if self.outcome is None:
+            msg = "a completion requires an outcome"
+            raise ValueError(msg)
+        if self.incurred_cost is None:
+            msg = "a completion requires an incurred_cost"
+            raise ValueError(msg)
+        if self.failure_kind is not None and self.outcome is ToolOutcome.SUCCEEDED:
+            msg = "a SUCCEEDED completion carries no failure_kind"
+            raise ValueError(msg)
+        return self
+
+
+class RecordedInvocation(BaseModel):
+    """An invocation row joined to the decision it names (ADR-0192 §2).
+
+    **The join is the store's**, taken inside one atomic operation, so every value
+    a reader is handed is complete. An engine reading rows and then reading their
+    decisions has an ``await`` between the two, and a ``clear()`` landing in that
+    gap leaves it holding rows whose decisions are gone — with nothing to do but
+    drop them, fabricate the identifiers, or fail.
+
+    **It carries a boolean and not the binding.** Who received the bytes is
+    ``recent_decisions``' to render from the binding itself (ADR-0186 §7); putting
+    a second copy of the destination set here would be the drift ADR-0184 §2
+    refuses, in service of a rendering another operation already owes.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    invocation: ToolInvocation = Field(description="The row, verbatim.")
+    tool: VisibleIdentifier = Field(
+        description="``ToolDefinition.id`` from the decision this row names."
+    )
+    capability: VisibleIdentifier = Field(
+        description="``ToolDefinition.capability`` from that same decision."
+    )
+    egress_call: bool = Field(
+        description=(
+            "True when and only when the named decision's ``egress_binding`` is "
+            "not ``None``. It states that the call was an egress call and states "
+            "nothing about whose bytes went where."
+        )
+    )
 
 
 # --- the promoted engine surface (ADR-0084 §4, ADR-0085) ---------------------

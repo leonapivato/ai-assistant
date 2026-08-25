@@ -57,7 +57,14 @@ from ai_assistant.testing.observation import (
     ObservationGate,
     ObservedBelief,
 )
-from ai_assistant.testing.permissions import FakeActionPolicy, FakeAuditTrail
+from ai_assistant.testing.permissions import (
+    FakeActionPolicy,
+    FakeAuditTrail,
+    FakeIdentifiers,
+    FakeIdentifierSpace,
+    FakeInvocationCompleter,
+    FakeInvocationLedger,
+)
 from ai_assistant.testing.planning import FakePlanner, FakePlanStore
 from ai_assistant.testing.policy import FakeMemoryPolicy, PolicyCall
 from ai_assistant.testing.readers import (
@@ -145,6 +152,10 @@ __all__ = [
     "FakeEgressBinder",
     "FakeEmbedder",
     "FakeFeedbackProcessor",
+    "FakeIdentifierSpace",
+    "FakeIdentifiers",
+    "FakeInvocationCompleter",
+    "FakeInvocationLedger",
     "FakeMemoryPolicy",
     "FakeMemoryStore",
     "FakeMemoryWriter",

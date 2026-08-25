@@ -26,27 +26,40 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import functools
 import json
 import sqlite3
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Final
 
 import structlog
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 
+from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
     AuditError,
+    AuthorisationSpentError,
     DuplicateDecisionError,
+    InvalidCompletionError,
     InvalidResolutionError,
+    UnrecordedAuthorisationError,
 )
 from ai_assistant.core.types import (
+    DurableIdentifier,
+    Idempotency,
     OriginUnrecordedBinding,
     PermissionDecision,
     PermissionOutcome,
+    RecordedInvocation,
+    ToolCost,
+    ToolFailureKind,
+    ToolInvocation,
+    ToolOutcome,
 )
 from ai_assistant.permissions._transactions import transaction
+from ai_assistant.permissions.identifiers import IdentifierFactory, ProcessIdentifiers
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -196,6 +209,95 @@ _INDEXES = (
 
 _ORDERED = "SELECT data FROM decisions ORDER BY decided_at_us DESC, id ASC"
 
+# --- the invocation rows (ADR-0192 §2) ---------------------------------------
+# The trail's second row kind, in the same store and under the same ``clear()``.
+# As with ``decisions``, the columns beside ``data`` exist only so SQLite can
+# order and constrain; the blob is the record.
+#
+# ``seq`` is the **durable append order** every admission rule in ADR-0192 §1 is
+# decided on. It is deliberately not ``recorded_at_us``: a stored instant is what a
+# reader is shown, and a wall clock that steps backwards must not be able to make a
+# completed act stop being the most recent one. Allocated inside the same
+# transaction as the insert, from the table's own maximum.
+#
+# **No schema-version bump.** :data:`_SCHEMA_VERSION` marks the *shape this code
+# can read*, and ``CREATE TABLE IF NOT EXISTS`` is additive and idempotent exactly
+# as :meth:`SqliteAuditTrail._migrate`'s ``ALTER``s are — so a version-1 file
+# written before this table existed opens, gains it, and is still version 1. A bump
+# would refuse every trail already on disk (:meth:`_check_schema_version`), which is
+# the failure that method exists to avoid.
+_CREATE_INVOCATIONS = (
+    "CREATE TABLE IF NOT EXISTS invocations("
+    "id TEXT PRIMARY KEY, seq INTEGER NOT NULL, decision_id TEXT NOT NULL, "
+    "recorded_at_us INTEGER NOT NULL, completes TEXT, outcome TEXT, "
+    "data TEXT NOT NULL)"
+)
+
+_INVOCATION_INDEXES = (
+    # A *unique* index, so "a claim is completed once" survives even a bug in the
+    # checked read. SQLite treats NULLs as distinct, so it constrains completions
+    # only and leaves claims unaffected.
+    "CREATE UNIQUE INDEX IF NOT EXISTS invocations_completes ON invocations(completes)",
+    # The append order, and the per-decision scan every admission rule reads.
+    "CREATE UNIQUE INDEX IF NOT EXISTS invocations_seq ON invocations(seq)",
+    "CREATE INDEX IF NOT EXISTS invocations_decision ON invocations(decision_id, seq)",
+    "CREATE INDEX IF NOT EXISTS invocations_order ON invocations(recorded_at_us DESC, id ASC)",
+)
+
+#: The two joined listings, in ``recent``'s own total order. A **LEFT** join, so an
+#: invocation row whose decision is missing comes back with a NULL rather than
+#: silently vanishing: ADR-0192 §2 requires that no implementation return a row it
+#: could not pair, and an inner join would meet that by dropping the evidence.
+_JOINED_INVOCATIONS = (
+    "SELECT i.data, d.data FROM invocations i "
+    "LEFT JOIN decisions d ON d.id = i.decision_id "
+    "ORDER BY i.recorded_at_us DESC, i.id ASC"
+)
+
+#: Every claim under one decision, in append order — the set ADR-0192 §1's
+#: conjunction is decided over.
+_CLAIMS_UNDER = (
+    "SELECT data FROM invocations WHERE decision_id = ? AND completes IS NULL ORDER BY seq ASC"
+)
+
+#: Every completion under one decision. Read whole rather than by claim, because
+#: the conjunction asks three questions of the set at once.
+_COMPLETIONS_UNDER = "SELECT data FROM invocations WHERE decision_id = ? AND completes IS NOT NULL"
+
+#: The claims under one decision that no completion names, in append order — the
+#: exact set ADR-0192 §3's recovery rule is written against.
+_OPEN_UNDER = (
+    "SELECT id, data FROM invocations "
+    "WHERE decision_id = ? AND completes IS NULL "
+    "AND id NOT IN (SELECT completes FROM invocations WHERE completes IS NOT NULL) "
+    "ORDER BY seq ASC"
+)
+
+#: Whether an identifier is already taken, over **one id space and it is every row
+#: the store holds** — decisions and invocations alike (ADR-0192 §2). A narrower
+#: space would let an invocation be appended under a decision's id, which the
+#: joined reads then resolve to two different rows under one identifier.
+_ID_IS_HELD = (
+    "SELECT 1 FROM decisions WHERE id = ? UNION ALL SELECT 1 FROM invocations WHERE id = ? LIMIT 1"
+)
+
+#: The redraw bound: as many draws as the store holds rows, plus one. A bound the
+#: store's own *current* contents fix, so any draw sequence that can clear does
+#: clear within it — and so it consults no generation, epoch or high-water mark and
+#: holds nothing across an erasure (ADR-0192 §6).
+_ROWS_HELD = "SELECT (SELECT COUNT(*) FROM decisions) + (SELECT COUNT(*) FROM invocations)"
+
+#: A validator for whatever the injected factory returned. A factory that *returns*
+#: a value no row can be built from is a non-conforming collaborator's **output**
+#: and not an exception of its own, so it is the guard-rejection arm (ADR-0026 §2).
+_IDENTIFIER: Final[TypeAdapter[str]] = TypeAdapter(DurableIdentifier)
+
+
+def _utc_now() -> datetime:
+    """The default clock: the real one, read in UTC."""
+    return datetime.now(UTC)
+
+
 #: A binding's CONFIRMs, newest first — the candidates ``pending_confirmation``
 #: chooses from once it knows the binding is undecided.
 _BINDING_CONFIRMS = (
@@ -273,7 +375,13 @@ class SqliteAuditTrail:
     clause exists for.
     """
 
-    def __init__(self, *, path: Path | str) -> None:
+    def __init__(
+        self,
+        *,
+        path: Path | str,
+        now: Callable[[], datetime] = _utc_now,
+        identifiers: IdentifierFactory | None = None,
+    ) -> None:
         """Open (or create) the trail at ``path``.
 
         Args:
@@ -284,11 +392,26 @@ class SqliteAuditTrail:
                 everything on restart — the failure the ADR argues against,
                 reachable by omitting an argument. An ephemeral trail is
                 available and has to be asked for.
+            now: The clock the ledger stamps ``recorded_at`` from, wrapped by
+                ``checked_clock`` (ADR-0026). Injected so a suite pins the window
+                boundary rather than racing it, which is ``CONTRIBUTING.md``'s
+                determinism rule satisfied the way the rest of the tree satisfies
+                it. **No caller supplies an instant** (ADR-0192 §1): a store that
+                enforced a window against a number the party being bounded chose
+                would enforce nothing.
+            identifiers: The factory each row's ``id`` is minted from. Defaults to
+                the process's own, so two stores in one process never mint from
+                independent sequences (ADR-0192 §2). Injected so a suite can force
+                a collision or pin a sequence.
 
         Raises:
             AuditError: If the database cannot be opened or initialised.
         """
         self._path = path if path == ":memory:" else str(Path(path))
+        self._clock = checked_clock(now, owner="SqliteAuditTrail")
+        self._identifiers: IdentifierFactory = (
+            identifiers if identifiers is not None else ProcessIdentifiers()
+        )
         self._lock = asyncio.Lock()
         self._conn = self._setup()
 
@@ -325,7 +448,8 @@ class SqliteAuditTrail:
                 labelled = self._check_schema_version(conn)
                 conn.execute(_CREATE_TABLE)
                 self._migrate(conn)
-                for statement in _INDEXES:
+                conn.execute(_CREATE_INVOCATIONS)
+                for statement in (*_INDEXES, *_INVOCATION_INDEXES):
                     conn.execute(statement)
                 if not labelled:
                     # Stamped *after* the create/migrate above, so the marker is
@@ -574,6 +698,19 @@ class SqliteAuditTrail:
                     f"append-only, so history cannot be rewritten by replaying a write"
                 )
                 raise DuplicateDecisionError(msg)
+            if conn.execute(
+                "SELECT 1 FROM invocations WHERE id = ? LIMIT 1", (snapshot.id,)
+            ).fetchone():
+                # ADR-0192 §2: the write-once invariant binds the store from both
+                # sides, over one id space and every row in it. Refused inside this
+                # same atomic act, and as an ``AuditError`` rather than a
+                # ``DuplicateDecisionError``: what is already present is not a
+                # decision, so "re-recording a decision" is not what happened.
+                msg = (
+                    f"decision {snapshot.id!r} names a row the trail already holds as an "
+                    f"invocation; one identifier names one record, of either kind"
+                )
+                raise AuditError(msg)
             if snapshot.resolves is not None:
                 self._check_resolution(snapshot)
             conn.execute(
@@ -920,13 +1057,369 @@ class SqliteAuditTrail:
             raise AuditError(msg) from exc
         return [str(row[0]) for row in rows]
 
+    # --- the ledger: the consume, and the two appends (ADR-0192 §§1-2) ----
+
+    async def claim_invocation(self, *, decision: PermissionDecision) -> ToolInvocation:
+        """Append a claim under ``decision`` and return the stored row.
+
+        The revalidation runs **before the lock**, so the decision is observed
+        once, before this call's first suspension point (ADR-0065): an
+        implementation that validated, suspended and then re-read the caller's
+        object could admit a claim under a decision that was spent when it looked.
+
+        Raises:
+            AuditError: If the decision is not a valid record, the guard rejects
+                the clock's reading, the redraw bound is spent, or the store
+                cannot be read or written.
+            UnrecordedAuthorisationError: If the trail holds no decision under
+                that id, holds one that is not equal to it, or holds one whose
+                ruling is not ``ALLOW``.
+            AuthorisationSpentError: If ADR-0192 §1's consume refuses.
+        """
+        snapshot = _revalidated(decision)
+        async with self._lock:
+            data = await _run_to_completion(self._claim_sync, snapshot)
+        return _decode_invocation(data)
+
+    def _claim_sync(self, snapshot: PermissionDecision) -> str:
+        """Decide every refusal and append, as one transaction.
+
+        The order is ADR-0192 §2's and no other: the argument fault is already
+        past (:func:`_revalidated`), then the unrecorded authorisation, then the
+        spend. The clock is read **after** the authority is established and
+        **once** — that one reading is both what the admission is decided on and
+        what the row stores, so a retry cannot be admitted inside the window and
+        stamped outside it.
+        """
+        with self._transaction(f"claim an invocation under decision {snapshot.id!r}") as conn:
+            row = conn.execute("SELECT data FROM decisions WHERE id = ?", (snapshot.id,)).fetchone()
+            if row is None or _decode(row[0]) != snapshot:
+                # One class for both grounds, and for the ruling below: they are
+                # all "the authority this call claims is not one this store
+                # recorded", and separating them would tell a caller which half of
+                # a forgery was detected (ADR-0192 §2).
+                msg = (
+                    f"the trail records no decision equal to {snapshot.id!r}; an "
+                    f"authorisation it did not record authorises nothing"
+                )
+                raise UnrecordedAuthorisationError(msg)
+            if snapshot.ruling.outcome is not PermissionOutcome.ALLOW:
+                msg = (
+                    f"the trail records no decision equal to {snapshot.id!r}; an "
+                    f"authorisation it did not record authorises nothing"
+                )
+                raise UnrecordedAuthorisationError(msg)
+            recorded_at = self._reading()
+            self._refuse_if_spent(conn, snapshot, recorded_at)
+            claim = ToolInvocation(
+                id=self._mint(conn),
+                decision_id=snapshot.id,
+                recorded_at=recorded_at,
+            )
+            self._append(conn, claim)
+            return claim.model_dump_json()
+
+    async def complete_invocation(
+        self,
+        *,
+        claim_id: DurableIdentifier,
+        outcome: ToolOutcome,
+        incurred_cost: ToolCost,
+        failure_kind: ToolFailureKind | None = None,
+    ) -> ToolInvocation:
+        """Append the completion of ``claim_id`` and return the stored row.
+
+        Every argument is validated and detached **before the lock**, for
+        ADR-0065's reason and for ADR-0021 §4's: ``incurred_cost`` is the live
+        object at the end of the chain that clause names, so a store retaining it
+        would let ``cost.__dict__["amount"] = ...`` rewrite an appended row.
+
+        Raises:
+            AuditError: If an argument is not valid — a ``failure_kind`` with a
+                ``SUCCEEDED`` outcome among them — the guard rejects the clock's
+                reading, the redraw bound is spent, or the store cannot be read or
+                written.
+            InvalidCompletionError: If ``claim_id`` names no recorded claim or
+                names one a completion already names.
+        """
+        named = _checked_argument("claim_id", lambda: _IDENTIFIER.validate_python(claim_id))
+        settled = _checked_argument("outcome", lambda: ToolOutcome(outcome))
+        cost = _checked_argument(
+            "incurred_cost", lambda: ToolCost.model_validate_json(incurred_cost.model_dump_json())
+        )
+        kind = (
+            None
+            if failure_kind is None
+            else _checked_argument("failure_kind", lambda: ToolFailureKind(failure_kind))
+        )
+        if kind is not None and settled is ToolOutcome.SUCCEEDED:
+            msg = "a SUCCEEDED completion carries no failure_kind"
+            raise AuditError(msg)
+        async with self._lock:
+            data = await _run_to_completion(self._complete_sync, named, settled, cost, kind)
+        return _decode_invocation(data)
+
+    def _complete_sync(
+        self,
+        claim_id: str,
+        outcome: ToolOutcome,
+        incurred_cost: ToolCost,
+        failure_kind: ToolFailureKind | None,
+    ) -> str:
+        """Check the claim and append the completion, as one transaction."""
+        with self._transaction(f"complete the invocation claimed as {claim_id!r}") as conn:
+            row = conn.execute(
+                "SELECT data FROM invocations WHERE id = ? AND completes IS NULL", (claim_id,)
+            ).fetchone()
+            if row is None:
+                msg = f"the trail holds no open claim {claim_id!r} to complete"
+                raise InvalidCompletionError(msg)
+            claim = _decode_invocation(row[0])
+            if conn.execute(
+                "SELECT 1 FROM invocations WHERE completes = ? LIMIT 1", (claim_id,)
+            ).fetchone():
+                msg = (
+                    f"claim {claim_id!r} is already completed; the trail is append-only, "
+                    f"so an outcome cannot be written twice"
+                )
+                raise InvalidCompletionError(msg)
+            completion = ToolInvocation(
+                id=self._mint(conn),
+                # Set from the claim and never accepted from a caller, so the two
+                # cannot disagree (ADR-0192 §2).
+                decision_id=claim.decision_id,
+                recorded_at=self._reading(),
+                completes=claim.id,
+                outcome=outcome,
+                incurred_cost=incurred_cost,
+                failure_kind=failure_kind,
+            )
+            self._append(conn, completion)
+            return completion.model_dump_json()
+
+    def _reading(self) -> datetime:
+        """Take the append's one guarded clock reading.
+
+        ADR-0026 §2's split is drawn here and nowhere else: the guard's **own**
+        rejection is a ``ClockReadingError``, a ``ValueError`` and not an
+        ``AssistantError``, so it is translated — a caller never meets a
+        non-``AssistantError`` this store produced. An exception the clock
+        **callable itself** raises propagates unwrapped, its type and cause
+        intact, because relabelling it would destroy exactly what that rule
+        preserves.
+        """
+        try:
+            return self._clock()
+        except ClockReadingError as exc:
+            msg = f"the audit trail's clock returned a reading it cannot record: {exc}"
+            raise AuditError(msg) from exc
+
+    def _mint(self, conn: sqlite3.Connection) -> str:
+        """Draw an identifier no row currently holds, or refuse (ADR-0192 §2).
+
+        **A collision is drawn away from rather than refused.** The store holds
+        each id once, so a colliding id cannot be appended — but a collision is not
+        by itself evidence of a broken collaborator, and the append that meets one
+        is not thereby doomed. What that buys is the case a refusing implementation
+        deadlocks on: after a restart the store holds claims a *new*, conforming,
+        process-scoped factory may legally mint over, and a store refusing the
+        first collision would fail there and on every subsequent restart.
+
+        Only an **exhausted** bound is a refusal, and it is an ``AuditError`` and
+        never one of §1's three named classes: those are statements about the
+        authorisation and say nothing about the store.
+        """
+        held = int(conn.execute(_ROWS_HELD).fetchone()[0])
+        for _ in range(held + 1):
+            # Outside the guard below: an exception the factory callable raises on
+            # its own account is its own failure and propagates unwrapped
+            # (ADR-0026 §2), exactly as the clock callable's does.
+            drawn = self._identifiers()
+            candidate: str = _checked_argument(
+                "identifier", functools.partial(_IDENTIFIER.validate_python, drawn)
+            )
+            if not conn.execute(_ID_IS_HELD, (candidate, candidate)).fetchone():
+                return candidate
+        msg = (
+            f"the audit trail's identifier factory returned an identifier the store "
+            f"already holds on every one of {held + 1} draws; no row was appended"
+        )
+        raise AuditError(msg)
+
+    @staticmethod
+    def _append(conn: sqlite3.Connection, row: ToolInvocation) -> None:
+        """Insert ``row``, allocating the next durable append ordinal for it."""
+        next_seq = conn.execute("SELECT COALESCE(MAX(seq), 0) + 1 FROM invocations").fetchone()
+        ordinal = int(next_seq[0])
+        conn.execute(
+            "INSERT INTO invocations("
+            "id, seq, decision_id, recorded_at_us, completes, outcome, data"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                row.id,
+                ordinal,
+                row.decision_id,
+                _sort_key(row.recorded_at),
+                row.completes,
+                None if row.outcome is None else row.outcome.value,
+                row.model_dump_json(),
+            ),
+        )
+
+    @staticmethod
+    def _refuse_if_spent(
+        conn: sqlite3.Connection, decision: PermissionDecision, now: datetime
+    ) -> None:
+        """Apply ADR-0192 §1's conjunction to the claims already under ``decision``.
+
+        **Spendability is ADR-0029 §5's own discriminator**: side-effecting and not
+        ``NATURAL``. On anything else no claim is ever refused on this ground — a
+        read gated by ADR-0016 §3 is invoked under one ``ALLOW`` as often as the
+        pipeline needs it, and refusing the second read would break working
+        behaviour to protect nothing.
+
+        Raises:
+            AuthorisationSpentError: If a further claim is not admitted.
+        """
+        spendable = decision.tool.side_effecting and decision.tool.idempotency is not (
+            Idempotency.NATURAL
+        )
+        if not spendable:
+            return
+        claims = [_decode_invocation(row[0]) for row in conn.execute(_CLAIMS_UNDER, (decision.id,))]
+        if not claims:
+            return
+        completions = {
+            completion.completes: completion
+            for completion in (
+                _decode_invocation(row[0])
+                for row in conn.execute(_COMPLETIONS_UNDER, (decision.id,))
+            )
+        }
+        _refuse = _spend_refusal(decision.id)
+        if any(claim.id not in completions for claim in claims):
+            # Stated positively rather than composed out of the conjunction: an
+            # open claim is an act that may have run at an outcome nobody
+            # observed, and admitting a second act under the same authorisation is
+            # the one thing this rule exists to prevent. It is why completion
+            # durability is a third prerequisite for ADR-0029 §5's retry.
+            raise _refuse("a claim under it is open")
+        settled = {completions[claim.id].outcome for claim in claims}
+        if settled & {ToolOutcome.SUCCEEDED, ToolOutcome.INDETERMINATE}:
+            raise _refuse("an act under it has already succeeded or may have")
+        last = completions[claims[-1].id]
+        if last.outcome is not ToolOutcome.FAILED:
+            raise _refuse("its last act did not fail")
+        if last.failure_kind is None or not last.failure_kind.retryable:
+            # A kindless FAILED admits nothing: a cancelled act is not
+            # auto-retried, which falls out of the rule rather than needing a
+            # clause of its own (ADR-0192 §2).
+            raise _refuse("its last failure reported no retryable kind")
+        if decision.tool.idempotency is not Idempotency.KEYED:
+            # ADR-0029 §5's "an ``Idempotency.NONE`` side-effecting tool is
+            # therefore **never** auto-retried, whatever the failure kind", made a
+            # property of the store.
+            raise _refuse("the tool offers no keyed idempotency")
+        window = decision.tool.idempotency_window
+        elapsed = now - claims[0].recorded_at
+        if window is None or elapsed <= timedelta(0) or elapsed >= window:
+            # Measured from the **first** claim in the append order and never from
+            # the last: measuring from the most recent one would renew the window
+            # indefinitely, one retryable failure at a time. Any reading that is
+            # not a positive duration is treated as the window having lapsed —
+            # ADR-0029 §5's fail-closed rule for the same measurement.
+            raise _refuse("its idempotency window has lapsed")
+
+    # --- reading what ran (ADR-0192 §2) -----------------------------------
+
+    async def recent_invocations(self, *, limit: int = 50) -> list[RecordedInvocation]:
+        """Return up to ``limit`` invocation rows, newest first, ties broken by id.
+
+        Raises:
+            ValueError: If ``limit`` is not strictly positive — ``recent``'s own
+                refusal, for ``recent``'s own reason.
+            AuditError: If the trail cannot be read, or holds an invocation row it
+                could not pair with a decision.
+        """
+        if limit <= 0:
+            msg = f"limit must be strictly positive, got {limit}"
+            raise ValueError(msg)
+        async with self._lock:
+            rows = await _run_to_completion(self._joined_sync, min(limit, _MAX_SQLITE_INT))
+        return [_join(invocation, decision) for invocation, decision in rows]
+
+    async def export_invocations(self) -> list[RecordedInvocation]:
+        """Return every invocation row, in the same order as :meth:`recent_invocations`.
+
+        Raises:
+            AuditError: If the trail cannot be read, or holds an invocation row it
+                could not pair with a decision.
+        """
+        async with self._lock:
+            rows = await _run_to_completion(self._joined_sync, None)
+        return [_join(invocation, decision) for invocation, decision in rows]
+
+    def _joined_sync(self, limit: int | None) -> Sequence[tuple[str, str | None]]:
+        """Read rows and their decisions in **one** statement, optionally bounded.
+
+        One operation is what makes the join safe: an implementation reading rows
+        and then reading decisions has an ``await`` between them, and a
+        :meth:`clear` landing in that gap leaves it holding rows whose decisions
+        are gone — with nothing to do but drop them, fabricate the identifiers, or
+        fail, all three of which contradict a total projection.
+        """
+        try:
+            rows = (
+                self._conn.execute(_JOINED_INVOCATIONS).fetchall()
+                if limit is None
+                else self._conn.execute(f"{_JOINED_INVOCATIONS} LIMIT ?", (limit,)).fetchall()
+            )
+        except sqlite3.Error as exc:
+            msg = f"failed to read the audit trail's invocations: {exc}"
+            raise AuditError(msg) from exc
+        return [(str(row[0]), None if row[1] is None else str(row[1])) for row in rows]
+
+    async def open_invocations(self, *, decision_id: DurableIdentifier) -> list[ToolInvocation]:
+        """Every claim under ``decision_id`` that no completion names, in append order.
+
+        Raises:
+            AuditError: If the trail cannot be read.
+        """
+        async with self._lock:
+            rows = await _run_to_completion(self._open_invocations_sync, decision_id)
+        return [_decode_invocation(row) for row in rows]
+
+    def _open_invocations_sync(self, decision_id: str) -> Sequence[str]:
+        """Read the open claims and reserve their ids, as **one** operation.
+
+        The transaction is ``IMMEDIATE`` although this reads: the reservation joins
+        the read on the same serialisation boundary ``clear()`` and every append
+        take, never following it. An implementation that read the set, released the
+        boundary and reserved afterwards satisfies "reserves every claim id it
+        returns" as a sentence and loses the race the rule exists to close — an
+        erasure and a fresh claim can land in the gap, and the id it then reserves
+        names the **new** claim (ADR-0192 §2).
+        """
+        with self._transaction(f"read the open invocations under {decision_id!r}") as conn:
+            rows = conn.execute(_OPEN_UNDER, (decision_id,)).fetchall()
+            self._identifiers.reserve([str(row[0]) for row in rows])
+            return [str(row[1]) for row in rows]
+
     # --- erasure ----------------------------------------------------------
 
     async def clear(self) -> int:
-        """Delete every decision, returning the number removed.
+        """Delete every row of either kind, returning the number removed.
 
         Wholesale by design (ADR-0021 §4): the user may burn the book, and
-        nobody may tear out a page.
+        nobody may tear out a page. **Both kinds, and the count is over both**
+        (ADR-0192 §6) — two erasure acts over one store would let a user destroy
+        the executions and keep the rulings, which is selective erasure with an
+        extra step.
+
+        **It erases the consume with everything else.** No generation, epoch,
+        tombstone or high-water mark is minted to narrow that: any value that let a
+        post-erasure claim be judged against a pre-erasure one would be a second,
+        undeletable record of an act the user asked to have erased.
 
         Raises:
             AuditError: If the trail cannot be cleared.
@@ -950,7 +1443,11 @@ class SqliteAuditTrail:
         database this code can still open (and would still count as version 1).
         """
         with self._transaction("clear the audit trail") as conn:
-            removed = conn.execute("DELETE FROM decisions").rowcount
+            # Invocations first: a decision whose invocation rows outlived it
+            # would be an unjoinable row for however long the two statements are
+            # apart, and one transaction makes the order invisible either way.
+            removed = conn.execute("DELETE FROM invocations").rowcount
+            removed += conn.execute("DELETE FROM decisions").rowcount
         return int(removed)
 
     def close(self) -> None:
@@ -1040,6 +1537,76 @@ def _decode(data: str) -> PermissionDecision:
     except ValidationError as exc:
         msg = f"the audit trail holds a record that no longer validates: {exc}"
         raise AuditError(msg) from exc
+
+
+def _decode_invocation(data: str) -> ToolInvocation:
+    """Rebuild a stored invocation row from its JSON.
+
+    Serialising and rebuilding is how ADR-0021 §4's "detached, validated snapshot"
+    is obtained here without a copy step to forget, on this row kind as on the
+    other: every reachable value is rebuilt, so no object graph is shared with the
+    caller in either direction — the ``ToolCost`` a completion carries included.
+
+    Raises:
+        AuditError: If the stored row no longer validates.
+    """
+    try:
+        return ToolInvocation.model_validate_json(data)
+    except ValidationError as exc:
+        msg = f"the audit trail holds an invocation row that no longer validates: {exc}"
+        raise AuditError(msg) from exc
+
+
+def _join(invocation: str, decision: str | None) -> RecordedInvocation:
+    """Pair a stored row with the decision it names (ADR-0192 §2).
+
+    Raises:
+        AuditError: If the decision is absent — a row the store could not pair,
+            which is a corrupt trail and reported rather than silently dropped.
+    """
+    row = _decode_invocation(invocation)
+    if decision is None:
+        msg = (
+            f"the audit trail holds invocation {row.id!r} naming decision "
+            f"{row.decision_id!r}, which it does not hold; the store is corrupt"
+        )
+        raise AuditError(msg)
+    named = _decode(decision)
+    return RecordedInvocation(
+        invocation=row,
+        tool=named.tool.id,
+        capability=named.tool.capability,
+        egress_call=named.egress_binding is not None,
+    )
+
+
+def _checked_argument[T](name: str, build: Callable[[], T]) -> T:
+    """Run ``build``, reporting a rejected value as this layer's own error.
+
+    The guard-rejection arm of ADR-0026 §2, applied to every value a ledger member
+    is handed or a collaborator returns: a non-conforming *output* is translated,
+    while an exception a collaborator's callable raises on its own account is not
+    routed through here at all.
+
+    Raises:
+        AuditError: If ``build`` rejects the value.
+    """
+    try:
+        return build()
+    except (ValidationError, ValueError) as exc:
+        msg = f"the audit trail was given a {name} it cannot record: {exc}"
+        raise AuditError(msg) from exc
+
+
+def _spend_refusal(decision_id: str) -> Callable[[str], AuthorisationSpentError]:
+    """Build this decision's refusal, so every arm reads the same but for its cause."""
+
+    def _refuse(because: str) -> AuthorisationSpentError:
+        return AuthorisationSpentError(
+            f"the authorisation recorded as {decision_id!r} is spent: {because}"
+        )
+
+    return _refuse
 
 
 def _check_authorisation(decision: PermissionDecision) -> None:
