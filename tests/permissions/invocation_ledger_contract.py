@@ -731,6 +731,7 @@ class InvocationCompleterContract:
             pytest.param("undescribable", id="a-field-that-cannot-be-described"),
             pytest.param("undeclared", id="undeclared-state-of-mixed-key-types"),
             pytest.param("hostile-key", id="a-key-that-refuses-to-be-compared"),
+            pytest.param("cycle", id="a-container-that-contains-itself"),
         ],
     )
     async def test_malformed_model_state_is_still_an_argument_fault(
@@ -757,6 +758,17 @@ class InvocationCompleterContract:
             hostile = HostileKey("basis")
             _undeclared(cost, {hostile: "shadow"})
             hostile.arm()
+        elif tamper == "cycle":
+            # A container that contains itself, in a field the model declares. An
+            # implementation walking the value to check it must **terminate**: the
+            # walk runs before the first ``await``, so one that re-expands the same
+            # container spins on the event loop and the refusal never arrives at
+            # all. It is nothing the serializer can render either — on a value like
+            # this it raises ``AttributeError``, outside the classes §2's order
+            # admits.
+            cyclic: list[object] = []
+            cyclic.append(cyclic)
+            cost.__dict__["amount"] = cyclic
         else:
             _undeclared(cost, {1: "one", "extra": "text"})
 
@@ -1732,11 +1744,60 @@ class InvocationLedgerContract(InvocationCompleterContract):
         assert await _rows(ledger) == []
 
     @pytest.mark.parametrize(
+        "shape",
+        [
+            pytest.param("root-subclass", id="a-subclass-that-declares-nothing-of-its-own"),
+            pytest.param("list-for-tuple", id="a-list-where-the-model-declares-a-tuple"),
+        ],
+    )
+    async def test_a_decision_the_rebuild_would_normalise_is_not_the_one_it_was_passed(
+        self, ledger: LedgerSubject, shape: str
+    ) -> None:
+        """§1's equality is on the value passed, and a rebuild can *normalise* as well as drop.
+
+        The companion above is about state a rebuild would **drop**. These two lose
+        nothing at all: every field of the first is identical and only the runtime
+        model type differs, and the second differs only in the container the values
+        sit in. Both are nonetheless unequal by the frozen model's own equality —
+        asserted below rather than assumed — so §1 says the trail records no decision
+        equal to what was passed, and the claim is refused as an authorisation the
+        store never recorded.
+
+        An implementation that decides the admission over a snapshot alone admits
+        both, because normalising is exactly what building the snapshot does. The way
+        out is not to compare the caller's live object inside the atomic operation —
+        ADR-0065 forbids that re-read — but to establish that the value *is* its own
+        snapshot before the first suspension, and then compare snapshots.
+        """
+        recorded = allowed("d-1", egress=shape == "list-for-tuple")
+        await ledger.record(recorded)
+
+        if shape == "root-subclass":
+
+            class _Restated(PermissionDecision):
+                """Declares nothing of its own, so no field state can differ."""
+
+            handed: PermissionDecision = _Restated(**dict(recorded))
+        else:
+            handed = recorded.model_copy(deep=True)
+            assert handed.egress_binding is not None
+            handed.egress_binding.__dict__["spans"] = []
+
+        assert handed != recorded
+
+        with pytest.raises(UnrecordedAuthorisationError):
+            await ledger.claim_invocation(decision=handed)
+
+        assert await _rows(ledger) == []
+        assert await ledger.get("d-1") == recorded, "the recorded decision is untouched"
+
+    @pytest.mark.parametrize(
         "tamper",
         [
             pytest.param("undescribable", id="a-field-that-cannot-be-described"),
             pytest.param("undeclared", id="undeclared-state-of-mixed-key-types"),
             pytest.param("hostile-key", id="a-key-that-refuses-to-be-compared"),
+            pytest.param("cycle", id="a-container-that-contains-itself"),
         ],
     )
     async def test_a_malformed_decision_is_still_an_argument_fault(
@@ -1757,6 +1818,15 @@ class InvocationLedgerContract(InvocationCompleterContract):
             hostile = HostileKey("id")
             _undeclared(handed, {hostile: "shadow"})
             hostile.arm()
+        elif tamper == "cycle":
+            # As above, one level up: a container that contains itself, in a field
+            # the decision declares. An implementation walking the value must
+            # **terminate** — and the walk runs before the first ``await``, so one
+            # that re-expands the same container spins on the event loop and the
+            # refusal never arrives at all.
+            cyclic: list[object] = []
+            cyclic.append(cyclic)
+            handed.__dict__["step_id"] = cyclic
         else:
             _undeclared(handed, {1: "one", "extra": "text"})
 

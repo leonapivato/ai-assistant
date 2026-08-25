@@ -1202,6 +1202,13 @@ class SqliteAuditTrail:
         implementation that validated, suspended and then re-read the caller's
         object could admit a claim under a decision that was spent when it looked.
 
+        §1's equality is against the decision the ledger was **passed**, and that is
+        why it is asked in two halves: ``passed == snapshot`` here, before the first
+        suspension, and ``snapshot == stored`` inside the operation
+        (:func:`_refuse_unless_as_passed`). Comparing the caller's live object inside
+        the lock would be the same clause read literally and is the ADR-0065 breach
+        above.
+
         Raises:
             AuditError: If the decision is not a valid record, the guard rejects
                 the clock's reading, the redraw bound is spent, or the store
@@ -1212,6 +1219,7 @@ class SqliteAuditTrail:
             AuthorisationSpentError: If ADR-0192 §1's consume refuses.
         """
         snapshot = _revalidated(decision)
+        _refuse_unless_as_passed(snapshot, decision)
         async with self._lock:
             data = await _run_to_completion(self._claim_sync, snapshot)
         return _decode_invocation(data)
@@ -1737,9 +1745,16 @@ def _refuse_undeclared(kind: type[BaseModel], given: BaseModel) -> None:
     ADR-0192 §1's own attack shape: an ``ALLOW`` the trail recorded would admit a
     claim under a tool carrying state it never approved, where §1 requires the
     decision the ledger was *passed* to equal the one the store holds under that id —
-    "the whole value, by the frozen model's own equality". Refusing here makes
-    ``snapshot == passed`` true *by construction*, so the equality
-    ``claim_invocation`` runs over the snapshot **is** the equality §1 asks for.
+    "the whole value, by the frozen model's own equality".
+
+    This refusal is the half of that equality about state the rebuild would **drop**,
+    and it is the half ``record`` owes as well, because a record smaller than the
+    value it was handed is wrong whether or not anything is later admitted over it.
+    The other half — a rebuild that *normalises* rather than drops, so the value is
+    not the one that was passed even though nothing was lost — is
+    :func:`_refuse_unless_as_passed`, on the claim path alone. Neither is the other's
+    subset: this one refuses a value the trail must not store at all, and that one
+    refuses an admission for a value the trail stores perfectly well.
 
     Both alternatives are worse. Comparing the caller's live object inside the lock
     satisfies §1 literally and re-reads the decision after a suspension point, which
@@ -1805,6 +1820,68 @@ def _refuse_undeclared(kind: type[BaseModel], given: BaseModel) -> None:
             _refuse_undeclared(held, nested)
 
 
+def _refuse_unless_as_passed(snapshot: PermissionDecision, given: object) -> None:
+    """Refuse unless ``snapshot`` is the decision that was passed (ADR-0192 §1).
+
+    §1 decides the admission on "the decision it was **passed** ... the whole value,
+    by the frozen model's own equality", and decides it *inside* the atomic
+    operation. Re-reading the caller's object in there is what ADR-0065 forbids — it
+    can change across the suspension the lock is — so the equality is composed of two
+    halves instead: this call establishes ``passed == snapshot`` before the first
+    ``await``, and the operation establishes ``snapshot == stored``. Together they are
+    §1's clause, decided inside the operation over a value observed before any
+    suspension point.
+
+    This half is the one :func:`_refuse_undeclared` cannot give. That refusal stops
+    the rebuild **dropping** state; this one stops it **normalising** the value into a
+    different one. A root subclass whose fields are all identical is unequal by the
+    frozen model's own equality, and so is a ``list`` where the model declares a
+    ``tuple``; either would otherwise be admitted as the decision the store holds.
+
+    Nothing is refused here that the trail would not accept — a value the two clauses
+    disagree about does not exist. It is *placed* here rather than in
+    :func:`_revalidated` because ``record`` has no equality to keep: its obligation is
+    on the declared type, which is why ``AuditTrailContract`` requires it to accept a
+    caller's subclass and store a ``PermissionDecision``. §1's equality is an
+    admission, and an admission is the ledger's.
+
+    **The type test comes first and is by identity**, because Python gives a
+    subclass's ``__eq__`` reflected priority: a caller's subclass would otherwise
+    answer the question that decides its own admission. Once ``given`` is exactly a
+    ``PermissionDecision`` the comparison is this model's own, over field values whose
+    model types :func:`_refuse_undeclared` has already fixed.
+
+    **A comparison that raises is an argument fault rather than an admission.** A
+    field can hold a ``str`` subclass whose ``__eq__`` raises, and this refusal must
+    not leave as whatever that threw; §2's order is exhaustive over the classes a
+    refusal arrives in. Nothing of the caller's is interpolated into the message for
+    the same reason.
+
+    Raises:
+        AuditError: If the comparison cannot be made at all.
+        UnrecordedAuthorisationError: If what was passed is not what the snapshot is,
+            so no decision the store holds can be equal to it.
+    """
+    try:
+        as_passed = type(given) is PermissionDecision and snapshot == given
+    except Exception as exc:
+        msg = (
+            f"decision {snapshot.id!r} is not a valid record: it cannot be compared "
+            f"with the value it was built from"
+        )
+        raise AuditError(msg) from exc
+    if not as_passed:
+        # One class and one message for every ground, as `_claim_sync`'s own two
+        # have: they are all "the authority this call claims is not one this store
+        # recorded", and separating them would tell a caller which half of a forgery
+        # was detected (ADR-0192 §2).
+        msg = (
+            f"the trail records no decision equal to {snapshot.id!r}; an "
+            f"authorisation it did not record authorises nothing"
+        )
+        raise UnrecordedAuthorisationError(msg)
+
+
 def _declared_models(annotation: object) -> tuple[type[BaseModel], ...]:
     """Every model class ``annotation`` admits, flattened out of unions and containers.
 
@@ -1837,16 +1914,39 @@ def _models_within(value: object) -> Iterator[BaseModel]:
     ADR-0192 §2's refusal order admits. A container that refuses to be iterated
     raises here exactly as it would inside the serializer one call later, so this
     walk widens nothing that can leave.
+
+    **A container reached twice on the way down is refused**, which is what keeps an
+    iterative walk from being worse than a recursive one. ``spans[0] is spans`` is a
+    single ``__dict__`` write away, and a stack that simply re-expanded it would spin
+    for good — synchronously, before the first ``await``, so the event loop stops
+    being serviced and the ``AuditError`` §2 requires never arrives. Refusing is also
+    the only *correct* answer: the serializer below cannot render a cycle either, and
+    on ``main`` it leaves as an ``AttributeError``, which is outside the classes §2's
+    order admits. Empty containers are skipped rather than tracked, because they can
+    be part of no cycle and ``()`` is interned; a value holding the same non-empty
+    container twice is refused with the cycle, a shape none of these models has and
+    the fail-closed direction to be wrong in.
     """
     pending: list[object] = [value]
+    expanded: list[int] = []
     while pending:
         item = pending.pop()
         if isinstance(item, BaseModel):
             yield item
-        elif isinstance(item, list | tuple | set | frozenset):
-            pending.extend(item)
-        elif isinstance(item, dict):
-            pending.extend(item.values())
+            continue
+        if not isinstance(item, list | tuple | set | frozenset | dict):
+            continue
+        if not item:
+            continue
+        # `id` and never the container itself: membership by equality would compare
+        # two caller-supplied values, and on a cycle that comparison does not
+        # terminate either.
+        marker = id(item)
+        if marker in expanded:
+            msg = "the value holds a container reached twice on the way down: a cycle"
+            raise ValueError(msg)
+        expanded.append(marker)
+        pending.extend(item.values() if isinstance(item, dict) else item)
 
 
 def _detached_cost(value: ToolCost) -> ToolCost:
