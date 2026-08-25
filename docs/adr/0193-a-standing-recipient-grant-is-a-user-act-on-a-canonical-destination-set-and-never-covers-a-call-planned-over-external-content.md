@@ -539,11 +539,22 @@ is **#1551**'s, answered there for the pair rather than for one of them here.
 > the clause fixes is that a ceiling exists, that it is read from `Settings`, and
 > that reaching it refuses rather than widens.
 
-> **Normative.** `recipient_grant_max_outstanding` of zero is the way a
-> deployment turns route (b) off, and it is the only one this ADR states: no grant
-> can be established, so `covering` answers `None` for every request. No lane adds
-> a second switch beside it, and no lane reads a non-zero ceiling as licence to
-> skip any other clause of this ADR.
+> **Normative.** `recipient_grant_max_outstanding` of **zero** is admitted and is
+> the way a deployment declines route (b): no granting record can be recorded, so
+> a deployment that has never established one never reaches a route-(b) `ALLOW`.
+> It is **admission-only like every other value** and is not a kill switch: a
+> store already holding live grants keeps them, `covering` keeps returning them,
+> and the rows they source keep being written. Zero forbids the *next* grant and
+> retracts none. No lane adds a second switch beside it, and no lane reads a
+> non-zero ceiling as licence to skip any other clause of this ADR.
+
+> **Normative.** The way to make an existing grant stop covering is the way it has
+> always been: the user **revokes** it, or clears the store (§9). No lane makes a
+> `Settings` value do that work. A configuration that silently stopped honouring
+> authorisations the user had given — without a record, without an act, and
+> without anything in the trail to show it — is the shape ADR-0097 §8 refuses when
+> it forbids a grant minted from configuration, read in the other direction: what
+> may not be created by configuration may not be destroyed by it either.
 
 **The ceiling is stated over *outstanding* rather than over *live*, and the
 substitution is deliberate and in the tighter direction.** Live is outstanding
@@ -558,8 +569,8 @@ recourse is the revocation §9 already gives the user, on any surface that shows
 them their grants. A ceiling evaluated against a caller-supplied `decided_at`
 instead is the round-4 draft, breakable by clock skew in both directions at once.
 
-> **Normative.** Both ceilings govern **admission and never eviction**. Lowering
-> either one deletes nothing, expires nothing, hides nothing, and omits nothing
+> **Normative.** The ceiling governs **admission and never eviction**. Lowering
+> it deletes nothing, expires nothing, hides nothing, and omits nothing
 > from `standing`, `recent` or `export`. A store holding records a newly lowered
 > ceiling would not admit is a **legal** state: every record in it was admitted
 > under the ceiling in force at the time. A query that hid records to make the
@@ -640,9 +651,21 @@ never clears grows there, and the recourse is `clear` (§9), which is the user's
 > **Normative.** Two words are used precisely and are not interchangeable. A
 > granting record is **outstanding** while no revoking record names it — a fact
 > about the store's own contents, needing no clock. It is **live** while it is
-> outstanding **and** its `expires_at` has not passed — outstanding plus the
-> clock. `record` decides over *outstanding*; `covering` and `standing` answer
-> over *live* (§9).
+> outstanding **and** the instant read from the clock is **at or after its
+> `decided_at` and strictly before its `expires_at`** — outstanding plus the
+> clock, over the whole interval and not only its upper end. `record` decides over
+> *outstanding*; `covering` and `standing` answer over *live* (§9).
+
+> **Normative.** Liveness is bounded **below as well as above**, and the two ends
+> match §6's exactly: a grant whose `decided_at` is in the future covers nothing
+> and is returned by neither `covering` nor `standing`. Without that half the two
+> seams disagree — the store would call a future-dated grant live, the policy would
+> author an `ALLOW` on it, and `record` would refuse that `ALLOW` because the grant
+> post-dates the decision. Adversarial review found exactly that at round 15, and
+> the repair is here rather than at `record`, because a rule the store applies is
+> one the policy cannot skip. Instants are caller-supplied and a host clock can be
+> corrected backwards (§1), so a future-dated grant is a state this store can
+> genuinely hold and not a hypothetical.
 
 > **Normative.** `record` refuses a **granting** record whose `tool`, `account`
 > and `destinations` all equal those of an **outstanding** granting record.
@@ -662,10 +685,10 @@ never clears grows there, and the recourse is `clear` (§9), which is the user's
 > **Normative.** `record` is **write-once and atomic**, on `AuditTrail.record`'s
 > and `SourceGrantStore.record`'s shape and for their reason. Re-recording an id
 > already present raises rather than overwriting; the duplicate-id check, the
-> duplicate-**subject** refusal, **both ceiling counts**, the revocation
+> duplicate-**subject** refusal, the **ceiling count**, the revocation
 > invariants and the append are **one** operation, not a read followed by a
 > write, so two concurrent writes cannot both observe the store as they found
-> it. The ceilings are named explicitly because a count read outside the
+> it. The ceiling is named explicitly because a count read outside the
 > operation is the one that fails the way a duplicate-id check does not: two
 > writers of **different** subjects at one below the ceiling both see room, both
 > append, and the store ends one over — a race the duplicate-subject refusal
@@ -1690,8 +1713,9 @@ has four recipients.
 > `recent` and `export` as the record of an act, which is what it is.
 
 > **Normative.** A granting record is **outstanding** when no revoking record
-> names it, and **live** when it is outstanding and its `expires_at` has not
-> passed (§1). An expired grant is still outstanding, so it can still be revoked
+> names it, and **live** when it is outstanding and the clock stands at or after
+> its `decided_at` and strictly before its `expires_at` (§1). An expired grant —
+> and a future-dated one — is still outstanding, so it can still be revoked
 > and it still blocks an identical new one until it is. Liveness is evaluated by
 > the store at read time, so the store reads the clock and the policy does not
 > (ADR-0021 §3, ADR-0007 §2's read-time enforcement). `outstanding` and
@@ -1699,10 +1723,13 @@ has four recipients.
 > records, and the trail decides expiry against the decision's own `decided_at`
 > (§1, §6).
 
-> **Normative.** A query operation reads the clock **exactly once** and evaluates
-> every record it considers against that one instant. A `standing` that read an
-> advancing clock per row could return one of two grants sharing an `expires_at`
-> and omit the other, which is a set true at no real instant.
+> **Normative.** A query that **evaluates liveness** — `covering` and `standing`,
+> and no others — reads the clock **exactly once** and evaluates every record it
+> considers against that one instant. A `standing` that read an advancing clock per
+> row could return one of two grants sharing an `expires_at` and omit the other,
+> which is a set true at no real instant. `outstanding` reads **no** clock and is
+> not an exception to this clause but outside it (§1); `recent` and `export`
+> evaluate no liveness and read none either.
 
 > **Normative.** An expired or revoked grant is **not deleted** by expiry, by
 > revocation, or by any operation but `clear`. It stays in the store, outstanding
@@ -2146,6 +2173,18 @@ narrowings of one store, not three implementations.
 > `expires_at` could be rewritten in place after a query is a widening of what the
 > user authorised.
 
+> **Normative.** The lane ships the **successful handoff** test, which is the one
+> that pins the production path end to end and which no other test in this section
+> reaches: a policy given a `RecipientGrants` holding a grant covering the request
+> returns an `ALLOW` whose `authorised_by` equals **that grant's `id`** and whose
+> `authorised_subject` equals **that grant's recomputed `subject_digest`**, and the
+> decision built from that ruling is then **recorded** by an `AuditTrail` over the
+> matching resolution face without refusal. A policy stamping a fixed well-formed
+> digest passes every origin, error and call-count test in this section while
+> making every ordinary route-(b) decision unrecordable, and every audit-side
+> digest test in this section can be satisfied with hand-built rulings that never
+> exercise a policy at all — so the two halves are only joined here.
+
 > **Normative.** The lane ships a test asserting that an `ActionPolicy` whose
 > `RecipientGrants.covering` raises `RecipientGrantError` returns **no** `ALLOW`
 > on route (b), and does not answer from a cached, earlier or absent result (§1's
@@ -2155,10 +2194,16 @@ narrowings of one store, not three implementations.
 > **Normative.** The lane ships the **call-count** tests for §7's lookup clause,
 > against a seam that records its calls and fails the test if called: on every
 > path the request alone settles — a binding carrying
-> `planned_with_external_content`, an `OriginUnrecordedBinding`, a request with no
-> `egress_binding` — `covering` is called **zero** times; and on a path where a
-> grant could apply it is called **at most once**, asserted over the recorded
-> count rather than over the outcome. Without the zero-call half, an
+> `planned_with_external_content`, and a request with no `egress_binding` —
+> `covering` is called **zero** times; and on a path where a grant could apply it
+> is called **at most once**, asserted over the recorded count rather than over
+> the outcome. `OriginUnrecordedBinding` is **not** among the policy's cases and
+> the lane does not write one: `ActionRequest.egress_binding` is
+> `EgressBinding | None` and `core/types.py` records that arm as
+> "unconstructable from any live path", so a policy test reaching it could only do
+> so by forcing a frozen model and would prove nothing about a conforming input.
+> Its coverage is owed at `AuditTrail.record`, where a `PermissionDecision`
+> legitimately admits the arm, and that test is already required above. Without the zero-call half, an
 > implementation that consults the seam first and then refuses on the request's
 > own facts passes every other policy test here while letting a store failure
 > disturb an outcome the request had already settled.
@@ -2249,11 +2294,18 @@ narrowings of one store, not three implementations.
 
 > **Normative.** The lane ships the `Settings` construction tests for the
 > ceiling, over **three** values: `recipient_grant_max_outstanding` refuses a
-> negative, accepts one, and **accepts** zero, which turns route (b) off —
-> `covering` answering `None` for every request against an empty store. The
-> negative case is named because an implementation special-casing only zero
-> satisfies every other assertion here while accepting `-1`, which would refuse
-> every granting write for a reason no message explains.
+> negative, accepts one, and **accepts** zero. The negative case is named because
+> an implementation special-casing only zero satisfies every other assertion here
+> while accepting `-1`, which would refuse every granting write for a reason no
+> message explains.
+
+> **Normative.** The lane ships the zero ceiling over a **populated** store, and
+> the empty-store case alone does not satisfy this clause: a store holding a live
+> grant, reopened at zero, still returns it from `covering` and `standing`, still
+> sources a recordable route-(b) `ALLOW`, and refuses every **new** granting
+> record. It fails against an implementation that read zero as a kill switch —
+> which would be a `Settings` value retracting an authorisation the user gave,
+> with no act and nothing in the trail to show it (§1).
 
 > **Normative.** The lane ships the `expires_at` ordering tests: a **granting**
 > record whose `expires_at` equals its `decided_at` is refused at construction, one
@@ -2326,7 +2378,10 @@ narrowings of one store, not three implementations.
 
 > **Normative.** The lane ships tests over **liveness**: a revoked grant covers
 > nothing; a grant covers nothing at and after its `expires_at` and covers
-> normally before it; and a read concurrent with a revocation returns one answer
+> normally before it; a **future-dated** grant — one whose `decided_at` is after
+> the instant the query reads — covers nothing and is absent from `standing`,
+> which fails against an implementation that bounded liveness only above and
+> would otherwise hand the policy a grant `AuditTrail.record` must refuse (§1, §6); and a read concurrent with a revocation returns one answer
 > or the other and never a torn one. Every one of them is a test the policy tests
 > above pass without.
 
@@ -2477,9 +2532,11 @@ obligation (ADR-0089 §1).
   record, by the same component.
 
 **Why the injected read seam is not a supersession of ADR-0021 §3's purity
-clauses.** Adversarial review raised the question at rounds 8 and 9 and it was
-ruled rejected; the grounds are in ADR-0021's own text, and they are recorded here
-so it does not have to be re-argued at every later reading.
+clauses.** Review has raised this at rounds 9, 11 and 15, on two different
+groundings, and it has been ruled **rejected**; the grounds are in ADR-0021's and
+ADR-0097's own text and are recorded here so it does not have to be re-argued at
+every later reading. A reader meeting the question again should read the four
+bullets below before treating it as open.
 
 - **The clause carries its own condition.** §3's first bullet is "**`decide` must
   return `authorised_by is None`** from a policy constructed **with no
