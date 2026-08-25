@@ -27,7 +27,7 @@ Nothing here opens a socket: see :mod:`egress_transport_harness`.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, final
 
 import pytest
 from egress_transport_harness import (
@@ -64,14 +64,18 @@ from ai_assistant.tools.egress import (
     BoundCallChangedError,
     EgressTransportError,
     IndeterminateTransmissionError,
+    SmtpEgressTransport,
     TransportPinError,
 )
+from ai_assistant.tools.egress_binder import EgressRegistration
 from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
 
 if TYPE_CHECKING:
     from egress_transport_harness import Keyring
 
-    from ai_assistant.tools.egress import SmtpEgressTransport
+    from ai_assistant.core.protocols import ByteChannel
+    from ai_assistant.core.types import TransportEndpoint
+    from ai_assistant.testing import FakeByteChannel
 
 #: The arguments the rows send or try to send, so that what differs between them is
 #: the arrangement rather than the payload. The recipient is in its **supplied**
@@ -835,6 +839,143 @@ async def test_a_read_that_raises_after_the_payload_is_indeterminate_too(
         await subject.transmit(binding(), ARGUMENTS)
 
     assert payload(channel).endswith("\r\n.\r\n")
+
+
+@final
+class _StopsWithARawOsError:
+    """A channel that stops answering in the standard library's own type.
+
+    Deliberately **not** conforming, and deliberately not the canonical fake:
+    ADR-0191 §1 makes ``TransportError`` the shared refusal type, so
+    ``FakeByteChannel`` raises that and nothing else — which is right, and which
+    leaves the ``OSError`` arm of the seam's ``except`` with no case at all. The
+    arm is not dead code: ADR-0191 §4 requires the catch to cover a channel that
+    has *not* converted, and this is one, held here rather than in the fake so the
+    contract the fake carries is untouched. Adversarial review found the gap on
+    round 12.
+
+    Everything but the failing read is the inner channel's, so what the exchange
+    writes is still readable through :func:`payload`.
+    """
+
+    def __init__(self, inner: FakeByteChannel) -> None:
+        """Wrap ``inner``, failing its first read past the end of the script.
+
+        Args:
+            inner: The scripted channel this delegates to.
+        """
+        self._inner = inner
+
+    @property
+    def is_secure(self) -> bool:
+        """Whether the inner channel is under TLS."""
+        return self._inner.is_secure
+
+    async def read_line(self) -> bytes:
+        """The next scripted line, or a raw ``OSError`` where the script ran out.
+
+        Returns:
+            The line, terminator included, while the script has one.
+
+        Raises:
+            ConnectionResetError: Once it does not — the unconverted spelling of
+                a far end that stopped answering.
+        """
+        line = await self._inner.read_line()
+        if line:
+            return line
+        msg = "the peer reset the connection"
+        raise ConnectionResetError(msg)
+
+    async def read(self, limit: int, /) -> bytes:
+        """Read up to ``limit`` octets from the inner channel.
+
+        Args:
+            limit: The ceiling, in ``1..4096``.
+
+        Returns:
+            What the inner channel returns.
+        """
+        return await self._inner.read(limit)
+
+    async def write(self, data: bytes, /) -> None:
+        """Write ``data`` to the inner channel.
+
+        Args:
+            data: The octets to send.
+        """
+        await self._inner.write(data)
+
+    async def start_tls(self) -> None:
+        """Upgrade the inner channel."""
+        await self._inner.start_tls()
+
+    async def close(self) -> None:
+        """Close the inner channel."""
+        await self._inner.close()
+
+
+@final
+class _Hands:
+    """An opener that hands out one channel and opens nothing.
+
+    The canonical fake serves :class:`~ai_assistant.testing.FakeByteChannel` and
+    refuses anything else, which is the guarantee ADR-0191 §8 asks of it. A case
+    whose subject is a channel that *breaks* the contract therefore cannot go
+    through it, and this is the two-line opener that stands in its place.
+    """
+
+    def __init__(self, channel: ByteChannel) -> None:
+        """Hold the channel every open returns.
+
+        Args:
+            channel: What :meth:`open_channel` hands out.
+        """
+        self._channel = channel
+
+    async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
+        """Hand out the held channel.
+
+        Args:
+            endpoint: Ignored; nothing here connects to anything.
+
+        Returns:
+            The channel this was constructed with.
+        """
+        del endpoint
+        return self._channel
+
+
+async def test_a_raw_oserror_after_the_payload_is_indeterminate_too() -> None:
+    """The ``OSError`` arm of the window's ``except``, exercised rather than assumed.
+
+    Every row above now arms a ``TransportError``, because that is what a
+    conforming channel raises and what ``_StreamChannel`` converts each socket
+    error into before the seam sees one. But ADR-0191 §4 requires the catch to
+    keep naming ``OSError`` beside it, for a channel that has not converted — and
+    with no case over that arm, deleting it would leave the whole matrix green
+    while a raw ``ConnectionResetError`` after the terminator escaped as
+    ``FAILED``/``INTERNAL`` (ADR-0029 §3): a possibly-completed disclosure
+    recorded as a call that did nothing.
+
+    So the subject here is a channel that breaks the shared taxonomy on purpose.
+    It is local to this case rather than an arming on the canonical fake, whose
+    ``TransportError``-only refusal is a contract the suites hold it to.
+    """
+    inner = scripted(*implicit_tls_script()[:-2])
+    subject = SmtpEgressTransport(
+        registration=EgressRegistration(
+            tool_id=TOOL_ID, reference=REFERENCE, transport_endpoint=ENDPOINT
+        ),
+        records=Records(entry()),
+        secrets=await keyring(),
+        transport=_Hands(_StopsWithARawOsError(inner)),
+    )
+
+    with pytest.raises(IndeterminateTransmissionError, match="unknown"):
+        await subject.transmit(binding(), ARGUMENTS)
+
+    assert payload(inner).endswith("\r\n.\r\n")
 
 
 @pytest.mark.parametrize(

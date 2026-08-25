@@ -473,6 +473,32 @@ def _refuse_unless_servable(
         raise ValueError(msg)
 
 
+def _again(refusal: TransportError) -> TransportError:
+    """A fresh refusal carrying the armed one's words, for a *standing* arming.
+
+    **Re-raising one exception object grows it.** Every ``raise`` sets the
+    instance's ``__traceback__`` to a new traceback whose tail is the old one, and
+    each of those frames keeps its locals alive — so a transport armed to refuse
+    everything hands back an exception that gets longer on every attempt, and that
+    holds every earlier caller's frame. At this seam the caller is
+    ``SmtpEgressTransport._send``, whose locals include a credential, and a
+    milestone arm opens against a standing refusal many times over. Adversarial
+    review found it on round 12.
+
+    A fresh instance per attempt keeps the arming's message and its type — nothing
+    a case can read changes — while each refusal carries only the frames of the
+    open that raised it.
+
+    Args:
+        refusal: What :meth:`FakeOutboundTransport.refuse_with` was armed with.
+
+    Returns:
+        A new :class:`~ai_assistant.core.errors.TransportError` with its
+        arguments.
+    """
+    return TransportError(*refusal.args)
+
+
 @final
 class FakeOutboundTransport:
     """An :class:`~ai_assistant.core.protocols.OutboundTransport` that opens nothing.
@@ -562,9 +588,14 @@ class FakeOutboundTransport:
         recorded attempts are the whole account of what this system reached for.
         :meth:`serve_again` lifts it.
 
+        **Its words are kept, its instance is not**: each refused open raises a
+        fresh :class:`~ai_assistant.core.errors.TransportError` carrying this
+        one's arguments, because re-raising a single object accumulates a
+        traceback — and its frames' locals — on every attempt (:func:`_again`).
+
         Args:
-            error: What every subsequent :meth:`open_channel` raises, after the
-                attempt has been recorded.
+            error: What every subsequent :meth:`open_channel` refuses with, after
+                the attempt has been recorded.
         """
         self._refusal = error
 
@@ -733,7 +764,7 @@ class FakeOutboundTransport:
         pending = _Pending(endpoint=endpoint)
         self._attempts.append(pending)
         if self._refusal is not None:
-            raise self._refusal
+            raise _again(self._refusal)
         # **Everything one-shot is taken at the attempt, before anything can
         # suspend**, so two opens in flight at once get what they were armed and
         # queued for in the order they were called rather than in the order they
