@@ -523,8 +523,20 @@ the two properties it has rather than letting a reader assume the stronger one.
 > detached; the definition on the detached copy matches the registry's original;
 > `decision.authorises(request)` is re-evaluated on that same copy. Only then is
 > `admit_invocation` called, and the estimate it is given is read off **that
-> detached, checked copy** — never off the argument the caller passed. This ADR
-> adds a fourth check to the end of that sequence and nothing to its middle.
+> detached, checked copy** — never off the argument the caller passed.
+
+> **Normative.** The admission is **not** a fourth member of ADR-0029 §2's
+> enumeration, and that section stays exhaustive at three. §2 enumerates the checks
+> that establish the call is the one the user authorised, each raising
+> `ToolBindingError`; the admission establishes something else entirely, raises
+> neither that class nor into that sequence, and is ordered *after* it the way any
+> later obligation on `invoke` is. A reader holding only ADR-0029 implements those
+> three binding checks correctly and completely; what they do not implement is an
+> obligation **this** ADR states, which is an addition to `invoke`'s work rather
+> than a change to §2's decision — ADR-0082 §1's stacked addition, and the same
+> shape by which ADR-0192's claim append reaches `invoke` without replacing that
+> enumeration either. No sentence of §2 becomes false, so no record is owed against
+> it (§9), and no lane may read this clause as licence to add a fifth.
 
 > **Normative.** The order is fail-closed in one direction and that is why it is
 > marked rather than assumed. A `ToolCall` mutated after construction — the
@@ -697,7 +709,7 @@ the two properties it has rather than letting a reader assume the stronger one.
 > the whole of what else the member touches.
 
 > **Normative.** The `ToolCost` is not an exception to that and is the reason it is
-> stated as three things rather than as "nothing from the request". It is the
+> stated as four things rather than as "nothing from the request". It is the
 > **pinned declaration** — the `cost` on the `ToolDefinition` the call's recorded
 > `PermissionDecision` pins (§2), which ADR-0016 §5 binds to the tool id for the
 > life of the process and ADR-0021 §2 freezes onto the decision — so a `FREE` call
