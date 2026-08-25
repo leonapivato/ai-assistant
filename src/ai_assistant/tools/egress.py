@@ -113,6 +113,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import ssl
+from contextlib import suppress
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.policy import SMTP as SMTP_POLICY
@@ -586,15 +587,31 @@ class StreamOutboundTransport:
         try:
             reader, writer = await asyncio.shield(opening)
         except asyncio.CancelledError:
-            # **Delivery is not deferred — this re-raises at once.** What ADR-0060
-            # §1's resource clause is satisfied by here is its *second* limb: the
-            # streams are "still held exclusively by work the method started and
-            # can observe finishing", and the callback is that observation. The
-            # open is deliberately not cancelled: cancelling it would race its own
-            # establishment and leave *its* partial state to it, whereas letting
-            # it finish gives this method one thing to observe and one thing to
-            # close. ADR-0029 §4's invocation deadline bounds the call as a whole.
-            opening.add_done_callback(_release_orphaned_streams)
+            # **Delivery is deferred until the release is done, and then the
+            # cancellation is re-raised.** That order is ADR-0191 §1's, in as many
+            # words — "releases what it acquired first", and "re-raises it after
+            # the release" — and ADR-0060 §1's second clause is what permits the
+            # deferral: "a method may defer delivery while it makes its resources
+            # safe, but it re-raises". Both review lenses found round 5's shape
+            # doing the opposite: a done-callback released *after* the caller
+            # already held its cancellation, which is the orphan window read from
+            # the caller's end rather than closed.
+            #
+            # The open itself is deliberately not cancelled. Cancelling it would
+            # race its own establishment and leave *its* partial state to it,
+            # whereas letting it finish gives this method one thing to observe and
+            # one thing to close. So the wait is on work this method started and
+            # can observe completing, and it is **unbounded** — stated as such,
+            # which is the form ADR-0060 §1 requires. ADR-0029 §4's invocation
+            # deadline is what bounds the call as a whole (ADR-0191 §2).
+            #
+            # A further cancellation arriving during that wait is suppressed and
+            # the wait resumed: the caller's cancellation is already in hand and
+            # is what leaves below, and abandoning the wait is the orphan again.
+            while not opening.done():
+                with suppress(asyncio.CancelledError):
+                    await asyncio.wait((opening,))
+            _release_orphaned_streams(opening)
             raise
         except (OSError, UnicodeError) as exc:
             # ``ssl.SSLError`` is an ``OSError``, so a certificate that did not
@@ -617,8 +634,34 @@ class StreamOutboundTransport:
             # (ADR-0191 §1). A cancellation delivered here is re-raised after the
             # release rather than absorbed (ADR-0060 §1); an ordinary failure
             # constructing the channel takes the same path.
-            writer.close()
+            _release(writer)
             raise
+
+
+def _release(writer: asyncio.StreamWriter) -> None:
+    """Give back streams no channel reached, swallowing a failed release.
+
+    **Both pre-return release paths go through here, and the guard is the point.**
+    ``StreamWriter.close`` can raise on a transport that is already broken, and a
+    release that raised would replace the exception in flight — turning the
+    ``TransportError`` a failed establishment owes, or the caller's own
+    ``CancelledError``, into an ``OSError`` from the cleanup. That is the same
+    exception-replacement rule ADR-0191 §1 states for
+    :meth:`~ai_assistant.core.protocols.ByteChannel.close`, applied where no
+    channel exists to state it on. Adversarial review found both paths unguarded
+    on round 5.
+
+    There is no ``wait_closed`` here: this is called from an exceptional path that
+    is about to raise, and awaiting a far end's acknowledgement there would put an
+    unbounded wait between the failure and its delivery.
+
+    Args:
+        writer: The write half of a pair no holder received.
+    """
+    try:
+        writer.close()
+    except OSError as exc:
+        _log.debug("egress_orphaned_streams_release_failed", error_type=type(exc).__name__)
 
 
 def _release_orphaned_streams(
@@ -626,10 +669,10 @@ def _release_orphaned_streams(
 ) -> None:
     """Close streams an open produced that its caller never received.
 
-    Registered by :meth:`StreamOutboundTransport.open_channel` when a cancellation
-    takes it off the open it was awaiting. Nothing else can ever release those
-    streams — no channel reached a holder — so this is ADR-0060 §1's first clause
-    at the one seam where it has bite.
+    Called by :meth:`StreamOutboundTransport.open_channel` once a cancellation has
+    taken it off the open it was awaiting and that open has finished. Nothing else
+    can ever release those streams — no channel reached a holder — so this is
+    ADR-0060 §1's first clause at the one seam where it has bite.
 
     Args:
         opened: The finished open. A cancelled or failed one produced nothing to
@@ -638,7 +681,7 @@ def _release_orphaned_streams(
     if opened.cancelled() or opened.exception() is not None:
         return
     _, writer = opened.result()
-    writer.close()
+    _release(writer)
 
 
 def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:

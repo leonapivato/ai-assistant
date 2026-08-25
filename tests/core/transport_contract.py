@@ -536,18 +536,30 @@ class OutboundTransportContract(ABC):
     async def test_a_cancellation_inside_the_acquisition_releases_and_is_re_raised(
         self, transport: OutboundTransport
     ) -> None:
-        """§1 and ADR-0060 §1, §3: cancelled inside the resource, observed afterwards.
+        """§1 and ADR-0060 §1, §3: cancelled inside the resource, released first.
 
         ADR-0060 §3 is explicit that the weaker version is worthless — a case that
         only asserts ``CancelledError`` escapes passes an implementation that
         raised correctly and orphaned the socket anyway. So the resource is read
-        after the scenario has finished, and the assertion is about what was left
-        behind rather than about what came out.
+        rather than the exception, and the assertion is about what was left behind.
+
+        **It is read at the moment the caller's call completes**, which is the
+        half a reading taken afterwards cannot make. ADR-0191 §1 fixes an order —
+        "releases what it acquired first", then "re-raises it after the release" —
+        and an implementation that hands the cancellation over and tidies up
+        somewhere later satisfies a reading taken after everything settles while
+        leaving the caller holding a cancellation over a socket that is still
+        open. Both review lenses found exactly that shape in this lane's
+        production binding on round 5; the snapshot below is what refuses it, and
+        it constrains only the *order*, not when an implementation chooses to
+        release.
         """
         before = self.held_resources(transport)
         gate = self.suspend_next_open(transport)
         opening = asyncio.ensure_future(transport.open_channel(ENDPOINT))
         await gate.reached()
+        at_completion: list[int] = []
+        opening.add_done_callback(lambda _: at_completion.append(self.held_resources(transport)))
 
         opening.cancel()
         gate.release()
@@ -555,6 +567,7 @@ class OutboundTransportContract(ABC):
 
         with pytest.raises(asyncio.CancelledError):
             await opening
+        assert at_completion == [before]
         assert self.held_resources(transport) == before
 
     async def test_the_release_obligation_stops_at_the_return(
