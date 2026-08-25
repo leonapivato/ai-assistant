@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final
 
 import structlog
-from pydantic import TypeAdapter, ValidationError
+from pydantic import BaseModel, TypeAdapter, ValidationError
 
 from ai_assistant.core.clock import ClockReadingError, checked_clock
 from ai_assistant.core.errors import (
@@ -1656,10 +1656,13 @@ def _revalidated(decision: PermissionDecision) -> PermissionDecision:
     """
     given: object = decision
     try:
-        raw = given.model_dump() if isinstance(given, PermissionDecision) else given
-        snapshot = PermissionDecision.model_validate(raw)
-    except ValidationError as exc:
-        named = repr(given.id) if isinstance(given, PermissionDecision) else "the given value"
+        snapshot = PermissionDecision.model_validate(_field_state(PermissionDecision, given))
+    except (ValidationError, ValueError) as exc:
+        named = (
+            repr(given.__dict__.get("id"))
+            if isinstance(given, PermissionDecision)
+            else "the given value"
+        )
         msg = f"decision {named} is not a valid record: {exc}"
         raise AuditError(msg) from exc
     if isinstance(snapshot.egress_binding, OriginUnrecordedBinding):
@@ -1670,6 +1673,45 @@ def _revalidated(decision: PermissionDecision) -> PermissionDecision:
         )
         raise AuditError(msg)
     return snapshot
+
+
+def _field_state(kind: type[BaseModel], given: object) -> Any:
+    """The declared field values of ``given``, read by ``kind``'s **own** serializer.
+
+    ``given.model_dump()`` is an ordinary attribute: a subclass can override the
+    method and an instance can shadow it through ``__dict__``, and either can return
+    a valid-but-false mapping. Everything downstream then rebuilds *that* — so the
+    equality check ``claim_invocation`` runs would compare the store's row against a
+    decision the caller never held, and a completion would record a cost nobody
+    submitted. ``orchestration/executor.py`` states the same reasoning for
+    ``ToolResult`` and is the precedent this follows: the class serializer is
+    resolved on the class, reads the instance's field values, and consults no
+    instance attribute.
+
+    A value that is not a ``kind`` at all is handed back untouched, for
+    ``model_validate`` to refuse — nothing is read off it here (ADR-0152 §1's
+    ordering).
+
+    **State the class declares no field for is refused rather than dropped.** The
+    class serializer would silently leave a subclass's extra fields out, and a
+    caller whose value carried them would get a record that is not the value it
+    passed. Refusing keeps the guarantee the declared type already carries: what is
+    stored is what was handed over, or nothing is.
+
+    ``warnings=False`` because a ``__dict__``-tampered enum serialises with a
+    ``PydanticSerializationUnexpectedValue`` warning that is noise here; the
+    ``model_validate`` downstream is what rejects it.
+
+    Raises:
+        ValueError: If ``given`` carries state ``kind`` declares no field for.
+    """
+    if not isinstance(given, kind):
+        return given
+    undeclared = sorted(set(given.__dict__) - set(kind.model_fields))
+    if undeclared:
+        msg = f"the value carries state {kind.__name__} has no field for: {undeclared}"
+        raise ValueError(msg)
+    return kind.__pydantic_serializer__.to_python(given, warnings=False)
 
 
 def _detached_cost(value: ToolCost) -> ToolCost:
@@ -1688,8 +1730,7 @@ def _detached_cost(value: ToolCost) -> ToolCost:
     Raises:
         ValidationError: If it is not a cost this store can record.
     """
-    given: object = value
-    checked = ToolCost.model_validate(given.model_dump() if isinstance(given, ToolCost) else given)
+    checked = ToolCost.model_validate(_field_state(ToolCost, value))
     return ToolCost.model_validate_json(checked.model_dump_json())
 
 
