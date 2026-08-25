@@ -547,13 +547,20 @@ is **#1551**'s, answered there for the pair rather than for one of them here.
 > outright — nothing can be established, so `covering` answers `None` for every
 > request — and that is the whole of its reach: over a store that already holds
 > grants it forbids the next one and retracts none, on the admission-only
-> semantics the clause below fixes. It is the **only** switch this ADR provides
+> semantics the zero clause below fixes. It is the **only** switch this ADR provides
 > against route (b) — no lane adds a second boolean beside it, and no lane reads a
-> non-zero ceiling as licence to skip any other clause of this ADR. This
-> ADR fixes **no default**: the number is a deployment shape like every other
-> `_IntegerSetting` in `core.config`, and §13 records it as undecided here. What
-> the clause fixes is that a ceiling exists, that it is read from `Settings`, and
+> non-zero ceiling as licence to skip any other clause of this ADR. What the
+> clause fixes is that a ceiling exists, that it is read from `Settings`, and
 > that reaching it refuses rather than widens.
+
+> **Normative.** The setting carries a **default of 64**, in the shape every other
+> `_IntegerSetting` in `core.config` takes — a `Field` with a `default`, a `ge=0`
+> bound and a description — so a `Settings` constructed with nothing supplied has
+> a defined answer and no lane invents one. Sixty-four bounds a Tier 1 store the
+> user reads: high enough that ordinary use never reaches it, low enough that this
+> store's `standing()` stays small in practice while **#1551** answers the
+> unbounded-read question for the pair. What a **deployment** sets instead is a
+> deployment's, and §13 records that this ADR recommends no number to it.
 
 > **Normative.** `recipient_grant_max_outstanding` of **zero** is admitted and is
 > the way a deployment declines route (b): no granting record can be recorded, so
@@ -2226,12 +2233,13 @@ token and the record living in its appended dated note (ADR-0082 §2).
 > grant may never be cited as `PermissionRuling.authorised_by`, and no
 > `ActionPolicy` may consult either source-grant seam.
 
-> **Normative.** This ADR does not fix the **value** of
-> `Settings.recipient_grant_max_outstanding`, nor a default for it. §1 decides
-> that the ceiling exists, is configured, is counted inside `record`'s atomic
+> **Normative.** This ADR does not decide what **value** a deployment should set
+> `Settings.recipient_grant_max_outstanding` to, and recommends none. §1 decides
+> that the ceiling exists, is configured, carries the shipped default a
+> `_IntegerSetting` cannot go without, is counted inside `record`'s atomic
 > operation, governs admission rather than eviction, and never refuses a
-> revocation; the number a deployment chooses is a deployment's, and no lane reads
-> §1 as naming one. Nor does this ADR decide any migration for a store holding
+> revocation; what a deployment chooses over that default is a deployment's, and
+> no lane reads §1's default as a recommendation. Nor does this ADR decide any migration for a store holding
 > records a lowered ceiling would not admit: §1 says such a store is legal and
 > stays whole, and anything beyond that is a later decision with an
 > implementation in hand.
@@ -2335,7 +2343,13 @@ narrowings of one store, not three implementations.
 > "never converts a `DENY` into anything" and satisfies no floor stated over any
 > fact but recipient authorisation). A policy returning `ALLOW` the moment
 > `covering` succeeds passes the successful-handoff, origin and call-count tests
-> above while converting both, and the `ActionPolicy` suite it also runs does not
+> above while converting both. Each case asserts **zero** `covering` calls beside
+> its outcome, against the same recording seam the call-count clause uses: both
+> outcomes are settled by the request alone, so §7's lookup clause puts them on
+> the far side of the seam, and a policy that consults the store first and then
+> refuses on the request's own facts lets a store failure disturb an answer the
+> request had already given. A policy returning `ALLOW` the moment
+> `covering` succeeds also converts both, and the `ActionPolicy` suite it runs does not
 > catch it: `test_an_undeclared_cost_is_never_auto_granted` asserts
 > `not (ALLOW and authorised_by is None)`, and a route-(b) `ALLOW` sets
 > `authorised_by`. ADR-0021 §5's floors are about a policy deciding **by itself**;
@@ -2449,11 +2463,14 @@ narrowings of one store, not three implementations.
 > that invariant never fires (§1's atomicity clause).
 
 > **Normative.** The lane ships the `Settings` construction tests for the
-> ceiling, over **three** values: `recipient_grant_max_outstanding` refuses a
-> negative, accepts one, and **accepts** zero. The negative case is named because
+> ceiling, over **four** cases: `recipient_grant_max_outstanding` refuses a
+> negative, accepts a positive, **accepts** zero, and — constructed with the value
+> **omitted** — carries the default §1 names. The negative case is named because
 > an implementation special-casing only zero satisfies every other assertion here
 > while accepting `-1`, which would refuse every granting write for a reason no
-> message explains.
+> message explains. The omitted case is named because a `_IntegerSetting` without
+> a default leaves a fresh `Settings()` undefined, and a lane free to pick would
+> be picking whether route (b) is reachable at all.
 
 > **Normative.** The lane ships the zero ceiling over a **populated** store, and
 > the empty-store case alone does not satisfy this clause: a store holding a live
