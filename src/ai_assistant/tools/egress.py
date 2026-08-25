@@ -384,6 +384,8 @@ class _StreamChannel:
         except asyncio.LimitOverrunError as exc:
             msg = "the endpoint sent a reply line this channel will not buffer"
             raise TransportError(msg) from exc
+        except OSError as exc:
+            raise self._failed("reading a line") from exc
 
     async def read(self, limit: int, /) -> bytes:
         """Read at most ``limit`` octets from the same cursor :meth:`read_line` uses.
@@ -411,21 +413,64 @@ class _StreamChannel:
         if not 1 <= limit <= TRANSPORT_OCTET_CEILING:
             msg = f"read limit must be an integer in 1..{TRANSPORT_OCTET_CEILING}; got {limit}"
             raise ValueError(msg)
-        return await self._reader.read(limit)
+        try:
+            return await self._reader.read(limit)
+        except OSError as exc:
+            raise self._failed("reading") from exc
 
     async def write(self, data: bytes, /) -> None:
         """Write ``data`` and flush it.
 
         Args:
             data: The octets to send.
+
+        Raises:
+            TransportError: If the connection could not be continued.
         """
-        self._writer.write(data)
-        await self._writer.drain()
+        try:
+            self._writer.write(data)
+            await self._writer.drain()
+        except OSError as exc:
+            raise self._failed("writing") from exc
 
     async def start_tls(self) -> None:
-        """Upgrade to TLS, verifying the certificate against the pinned host."""
-        await self._writer.start_tls(_tls_context(), server_hostname=self._host)
+        """Upgrade to TLS, verifying the certificate against the pinned host.
+
+        Raises:
+            TransportError: If the far end declined the upgrade or its certificate
+                did not verify against the pinned host. :attr:`is_secure` stays
+                ``False``, which is the read the seam refuses to present a
+                credential on (ADR-0191 §4).
+        """
+        try:
+            await self._writer.start_tls(_tls_context(), server_hostname=self._host)
+        except OSError as exc:
+            raise self._failed("upgrading to TLS") from exc
         self._secure = True
+
+    def _failed(self, doing: str) -> TransportError:
+        """The one refusal type every I/O-bearing method of this channel raises.
+
+        ADR-0191 §1 makes ``TransportError`` the **shared** taxonomy: the
+        production implementation and the canonical fake raise it, so the
+        conformance suite holds both to one vocabulary and a consumer that catches
+        it does not have to know this channel happens to sit on ``asyncio``.
+        Leaving a raw ``ConnectionResetError`` or ``ssl.SSLError`` through would
+        make the promise false for exactly the failures it exists for — both review
+        lenses found that on round 1.
+
+        ``ssl.SSLError`` is an ``OSError`` and needs no clause of its own; a
+        ``CancelledError`` is a ``BaseException`` and is not converted, which is
+        ADR-0060 §1's propagation rule.
+
+        Args:
+            doing: What the channel was doing, for the message. Never an octet:
+                ADR-0152 §11's discipline applies to this neighbouring surface.
+
+        Returns:
+            The refusal to raise, so the caller writes ``raise … from exc``.
+        """
+        return TransportError(f"the connection to {self._host} failed while {doing}")
 
     async def close(self) -> None:
         """Close the writer, tolerating a far end that has already gone.
@@ -522,9 +567,11 @@ class StreamOutboundTransport:
                 server_hostname=endpoint.host if endpoint.implicit_tls else None,
                 limit=TRANSPORT_OCTET_CEILING,
             )
-        except (OSError, ssl.SSLError) as exc:
-            # Nothing reached this frame, so there is nothing to release: the
-            # standard library closes what it opened before raising.
+        except OSError as exc:
+            # ``ssl.SSLError`` is an ``OSError``, so a certificate that did not
+            # verify arrives here too. Nothing reached this frame, so there is
+            # nothing to release: the standard library closes what it opened
+            # before raising.
             msg = f"the endpoint {endpoint.host}:{endpoint.port} could not be connected"
             raise TransportError(msg) from exc
         try:

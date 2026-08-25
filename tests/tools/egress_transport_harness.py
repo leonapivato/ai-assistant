@@ -206,8 +206,8 @@ async def keyring(*, holds: str | None = CREDENTIAL, slot: SecretName = SLOT) ->
 def scripted(
     *replies: str,
     secure: bool = True,
-    on_exhausted: Exception | None = None,
-    on_payload_write: Exception | None = None,
+    on_exhausted: TransportError | None = None,
+    on_payload_write: TransportError | None = None,
 ) -> FakeByteChannel:
     """An SMTP endpoint's scripted replies, on the canonical channel fake.
 
@@ -223,8 +223,11 @@ def scripted(
             implicit-TLS endpoint.
         on_exhausted: Raised once the script runs out, instead of the empty bytes
             that stand for a clean end of stream. A far end can stop answering
-            either way, and the two arrive at a caller as different types — which
-            is exactly the distinction one case is about.
+            either way, and a caller has to be able to tell them apart. It is a
+            ``TransportError`` because that is what a conforming channel raises
+            for a connection that could not be continued (ADR-0191 §1): the raw
+            ``ConnectionResetError`` this used to be armed with is what
+            ``_StreamChannel`` now converts *before* the seam sees it.
         on_payload_write: Raised by the write of the ``DATA`` block, after the
             octets have been recorded. Armed against the block's ``CRLF.CRLF``
             terminator rather than against a write *count*, because the count is

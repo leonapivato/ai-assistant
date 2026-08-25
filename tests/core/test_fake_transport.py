@@ -25,7 +25,7 @@ from transport_contract import (
 )
 
 from ai_assistant.core.errors import TransportError
-from ai_assistant.core.types import TRANSPORT_OCTET_CEILING
+from ai_assistant.core.types import TRANSPORT_OCTET_CEILING, TransportEndpoint
 from ai_assistant.testing import FakeByteChannel, FakeOutboundTransport, TransportAttempt
 
 if TYPE_CHECKING:
@@ -75,14 +75,28 @@ class TestFakeByteChannelContract(ByteChannelContract):
         """
         return FakeByteChannel()
 
-    def deliver(self, channel: ByteChannel, octets: bytes) -> None:
-        """Append ``octets`` to what the far end has sent.
+    def far_end_sent(self, channel: ByteChannel, octets: bytes) -> None:
+        """Put ``octets`` on the fake's inbound stream.
+
+        The close needs no modelling here: this fake's inbound buffer is complete
+        by construction, so a read past the end of it *is* end of stream.
 
         Args:
             channel: The subject.
-            octets: What arrives on the stream.
+            octets: Everything the far end sends.
         """
         _fake(channel).deliver(octets)
+
+    def arm_connection_failure(self, channel: ByteChannel) -> None:
+        """Arm the next read, write and upgrade to report a failed connection.
+
+        Args:
+            channel: The subject.
+        """
+        subject = _fake(channel)
+        subject.fail_when_exhausted(TransportError("the peer reset the connection"))
+        subject.fail_write_after(b"", error=TransportError("the peer reset the connection"))
+        subject.fail_upgrade_with(TransportError("the endpoint declined the upgrade"))
 
     def arm_release_failure(self, channel: ByteChannel) -> None:
         """Arm an ordinary release failure for ``close`` to swallow.
@@ -224,12 +238,38 @@ async def test_a_failure_after_acquiring_is_recorded_as_an_unserved_attempt() ->
 
 async def test_queued_channels_are_served_in_order() -> None:
     """The arranger decides what a case's far end says, one channel per open."""
-    first, second = FakeByteChannel(), FakeByteChannel()
+    first, second = FakeByteChannel(secure=True), FakeByteChannel(secure=True)
     transport = FakeOutboundTransport().serve(first, second)
 
     assert await transport.open_channel(ENDPOINT) is first
     assert await transport.open_channel(ENDPOINT) is second
     assert transport.channels == (first, second)
+
+
+@pytest.mark.parametrize(
+    ("endpoint", "secure"),
+    [
+        pytest.param(ENDPOINT, False, id="cleartext-channel-for-implicit-tls"),
+        pytest.param(UPGRADE_ENDPOINT, True, id="secure-channel-for-an-upgrade"),
+    ],
+)
+async def test_a_queued_channel_whose_tls_contradicts_the_endpoint_is_refused(
+    endpoint: TransportEndpoint, *, secure: bool
+) -> None:
+    """§1: an implicit-TLS open returns a secure channel and an upgrade open does not.
+
+    A fake that served either for the other would let a consumer be tested against
+    a state the production capability can never produce — the canonical fake
+    certifying behaviour that does not exist, which is the one failure a canonical
+    fake must not have. Both review lenses found it on round 1.
+
+    It is the arranger's error rather than a connection's, so it is a
+    ``ValueError`` and never a ``TransportError``.
+    """
+    transport = FakeOutboundTransport().serve(FakeByteChannel(secure=secure))
+
+    with pytest.raises(ValueError, match="conforming transport"):
+        await transport.open_channel(endpoint)
 
 
 async def test_forgetting_attempts_keeps_every_arming_in_place() -> None:
@@ -286,9 +326,9 @@ async def test_an_armed_write_failure_records_the_octets_before_it_raises() -> N
     exactly this.
     """
     channel = FakeByteChannel()
-    channel.fail_write_after(b"\r\n.\r\n", error=ConnectionResetError("the far end went"))
+    channel.fail_write_after(b"\r\n.\r\n", error=TransportError("the far end went"))
 
-    with pytest.raises(ConnectionResetError):
+    with pytest.raises(TransportError):
         await channel.write(b"the message\r\n.\r\n")
 
     assert channel.written == b"the message\r\n.\r\n"
@@ -298,10 +338,10 @@ async def test_an_exhausted_far_end_can_stop_answering_either_way() -> None:
     """A clean close and a reset arrive at a caller as different types."""
     clean = FakeByteChannel()
     reset = FakeByteChannel()
-    reset.fail_when_exhausted(ConnectionResetError("reset on the greeting"))
+    reset.fail_when_exhausted(TransportError("reset on the greeting"))
 
     assert await clean.read_line() == b""
-    with pytest.raises(ConnectionResetError):
+    with pytest.raises(TransportError):
         await reset.read_line()
 
 

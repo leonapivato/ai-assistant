@@ -11,14 +11,21 @@ and :class:`~ai_assistant.core.protocols.ByteChannel` must pass the suite that
 names it. A concrete test subclasses one and supplies the fixtures and the arming
 hooks.
 
-**Why the hooks.** Three of ADR-0191 §1's clauses are about what an
-implementation does on a path a caller cannot reach from the outside: a release
-after an establishment failure, a release after a cancellation delivered inside
-the acquisition, and a release failure at ``close`` that must be swallowed rather
-than raised. None of those is arrangeable through the Protocol — a contract whose
-whole point is that it exposes no such lever — so each suite takes the lever from
-its binding instead, in the shape ``tests/memory``'s cancellation cases already
-use (``ai_assistant.testing.cancellation``).
+**Why the hooks.** Several of ADR-0191 §1's clauses are about what an
+implementation does on a path a caller cannot reach from the outside: a connection
+that fails under it, a release after an establishment failure, a release after a
+cancellation delivered inside the acquisition, and a release failure at ``close``
+that must be swallowed rather than raised. None of those is arrangeable through
+the Protocol — a contract whose whole point is that it exposes no such lever — so
+each suite takes the lever from its binding instead, in the shape
+``tests/memory``'s cancellation cases already use
+(``ai_assistant.testing.cancellation``).
+
+**Every read case says what the far end sent, including when it sent nothing.**
+``far_end_sent`` is called exactly once by each case that reads, with ``b""``
+where the case is about end of stream, because a stream-backed implementation
+cannot distinguish "nothing yet" from "nothing ever" without being told — a
+subject left waiting for octets that are not coming would hang rather than fail.
 
 **No assertion message in either suite renders an octet a channel carried.** An
 SMTP exchange carries an ``AUTH`` line, and a suite that failed by printing what
@@ -78,12 +85,29 @@ class ByteChannelContract(ABC):
         """The subject: an open channel, in the clear, over an empty far end."""
 
     @abstractmethod
-    def deliver(self, channel: ByteChannel, octets: bytes) -> None:
-        """Make the far end have sent ``octets``, appended to what it already sent.
+    def far_end_sent(self, channel: ByteChannel, octets: bytes) -> None:
+        """Make the far end have sent exactly ``octets`` and then closed.
+
+        Called **once** by every case that reads, ``b""`` included. Both halves
+        matter: the octets are what the case will read back, and the close is what
+        lets a stream-backed subject answer at all rather than waiting for more.
 
         Args:
             channel: The subject.
-            octets: What arrives on the stream.
+            octets: Everything the far end sends, in one go.
+        """
+
+    @abstractmethod
+    def arm_connection_failure(self, channel: ByteChannel) -> None:
+        """Arm the connection under ``channel`` to fail on its next use.
+
+        However this implementation's connection fails — a reset from a socket, a
+        scripted refusal from a fake — the *next* read, write and upgrade must
+        report it as a ``TransportError``. What the failure is underneath is the
+        implementation's business; that it arrives as one type is the contract's.
+
+        Args:
+            channel: The subject.
         """
 
     @abstractmethod
@@ -116,7 +140,7 @@ class ByteChannelContract(ABC):
         not speak, and two implementations disagreeing about it is exactly what
         ADR-0089 §3 says an unmarked signature block would have permitted.
         """
-        self.deliver(channel, b"220 ready\r\n250 ok\r\n")
+        self.far_end_sent(channel, b"220 ready\r\n250 ok\r\n")
 
         assert await channel.read_line() == b"220 ready\r\n"
 
@@ -124,7 +148,7 @@ class ByteChannelContract(ABC):
         self, channel: ByteChannel
     ) -> None:
         """§1: a preceding ``\\r`` is the protocol's to strip and not this contract's."""
-        self.deliver(channel, b"hello\r\n")
+        self.far_end_sent(channel, b"hello\r\n")
 
         assert (await channel.read_line()).endswith(b"\r\n")
 
@@ -132,6 +156,8 @@ class ByteChannelContract(ABC):
         self, channel: ByteChannel
     ) -> None:
         """§1: empty bytes means end of stream, and means nothing else."""
+        self.far_end_sent(channel, b"")
+
         assert await channel.read_line() == b""
 
     async def test_read_line_discards_an_unterminated_tail_and_reports_end_of_stream(
@@ -142,7 +168,7 @@ class ByteChannelContract(ABC):
         Reporting it as one would let a truncated stream stand in for an answer —
         a far end that died mid-reply would deliver its half-reply as the verdict.
         """
-        self.deliver(channel, b"250 the far end stopped here")
+        self.far_end_sent(channel, b"250 the far end stopped here")
 
         assert await channel.read_line() == b""
 
@@ -156,7 +182,7 @@ class ByteChannelContract(ABC):
         them, because those two are the only values at which an implementation can
         be off by one.
         """
-        self.deliver(channel, b"a" * TRANSPORT_OCTET_CEILING + b"\n")
+        self.far_end_sent(channel, b"a" * TRANSPORT_OCTET_CEILING + b"\n")
 
         assert len(await channel.read_line()) == TRANSPORT_OCTET_CEILING + 1
 
@@ -169,7 +195,7 @@ class ByteChannelContract(ABC):
         ``TransportError`` — a fact about the connection — rather than something
         the holder has to remember to bound for itself.
         """
-        self.deliver(channel, b"a" * (TRANSPORT_OCTET_CEILING + 1) + b"\n")
+        self.far_end_sent(channel, b"a" * (TRANSPORT_OCTET_CEILING + 1) + b"\n")
 
         with pytest.raises(TransportError):
             await channel.read_line()
@@ -178,12 +204,14 @@ class ByteChannelContract(ABC):
 
     async def test_read_returns_at_most_the_limit(self, channel: ByteChannel) -> None:
         """§1: at least one and at most ``limit`` octets; a short read is ordinary."""
-        self.deliver(channel, b"0123456789")
+        self.far_end_sent(channel, b"0123456789")
 
         assert await channel.read(4) == b"0123"
 
     async def test_read_reports_end_of_stream_as_empty_bytes(self, channel: ByteChannel) -> None:
         """§1: the same spelling of end of stream ``read_line`` uses."""
+        self.far_end_sent(channel, b"")
+
         assert await channel.read(TRANSPORT_OCTET_CEILING) == b""
 
     @pytest.mark.parametrize("limit", [0, -1, TRANSPORT_OCTET_CEILING + 1])
@@ -198,7 +226,7 @@ class ByteChannelContract(ABC):
         bounded. Refusing the whole domain outside ``1..ceiling`` closes it by
         making the unbounded spelling unrepresentable.
         """
-        self.deliver(channel, b"0123456789")
+        self.far_end_sent(channel, b"0123456789")
 
         with pytest.raises(ValueError, match="limit"):
             await channel.read(limit)
@@ -208,7 +236,7 @@ class ByteChannelContract(ABC):
         self, channel: ByteChannel, limit: int
     ) -> None:
         """§1: the domain is inclusive at both ends."""
-        self.deliver(channel, b"0123456789")
+        self.far_end_sent(channel, b"0123456789")
 
         assert await channel.read(limit) != b""
 
@@ -220,6 +248,8 @@ class ByteChannelContract(ABC):
         ``TransportError`` around a read would otherwise swallow its own defect as
         a network condition.
         """
+        self.far_end_sent(channel, b"")
+
         with pytest.raises(ValueError, match="limit") as raised:
             await channel.read(0)
 
@@ -227,10 +257,57 @@ class ByteChannelContract(ABC):
 
     async def test_read_and_read_line_share_one_cursor(self, channel: ByteChannel) -> None:
         """§1: octets returned by either are never returned again by the other."""
-        self.deliver(channel, b"220 ready\r\n")
+        self.far_end_sent(channel, b"220 ready\r\n")
 
         assert await channel.read(4) == b"220 "
         assert await channel.read_line() == b"ready\r\n"
+
+    # --- §1: the shared refusal taxonomy -----------------------------------
+
+    async def test_a_failing_connection_is_reported_as_a_transport_error(
+        self, channel: ByteChannel
+    ) -> None:
+        """§1: one type for what happened to the connection, whatever caused it.
+
+        ``TransportError`` is the **shared** refusal type: the production
+        implementation and the canonical fake raise it, so a consumer that catches
+        it does not have to know which one it was handed. An implementation that
+        let its backend's own exception through — a raw ``ConnectionResetError``
+        out of a stream reader, say — would make the promise false for exactly the
+        failures it exists for, and a holder catching ``TransportError`` around a
+        read would miss every real one. Both review lenses found that on ADR-0191's
+        implementation round 1.
+        """
+        self.far_end_sent(channel, b"")
+        self.arm_connection_failure(channel)
+
+        with pytest.raises(TransportError):
+            await channel.read_line()
+
+    async def test_a_failing_write_is_reported_as_a_transport_error(
+        self, channel: ByteChannel
+    ) -> None:
+        """§1: the same type on the write half, which fails for its own reasons."""
+        self.arm_connection_failure(channel)
+
+        with pytest.raises(TransportError):
+            await channel.write(b"EHLO example.invalid\r\n")
+
+    async def test_a_refused_upgrade_is_reported_as_a_transport_error(
+        self, channel: ByteChannel
+    ) -> None:
+        """§1, §4: a refused upgrade leaves the channel in the clear.
+
+        The holder's obligation is to write no credential to a channel whose TLS
+        state reads false, and it reads that state rather than inferring it — so an
+        upgrade that failed has to be both reported *and* visible.
+        """
+        self.arm_connection_failure(channel)
+
+        with pytest.raises(TransportError):
+            await channel.start_tls()
+
+        assert channel.is_secure is False
 
     # --- §4: the TLS state the holder reads --------------------------------
 
@@ -343,7 +420,11 @@ class OutboundTransportContract(ABC):
 
     @abstractmethod
     def arm_failure_after_acquiring(self, transport: OutboundTransport) -> None:
-        """Arm the next open to fail *after* the connection resource exists.
+        """Arm the next open to raise a ``TransportError`` after the resource exists.
+
+        The type is fixed so the case can assert on it; what is on test is the
+        **release**, which is unobservable against a failure that happened before
+        anything was acquired — that being what :meth:`arm_refusal` models.
 
         Args:
             transport: The subject.
@@ -434,6 +515,15 @@ class OutboundTransportContract(ABC):
 
         assert self.held_resources(transport) == before
 
+    #: Whether this implementation ever suspends while holding what
+    #: ``open_channel`` acquired. An implementation whose acquisition and whose
+    #: return are separated by no ``await`` has no window for a cancellation to
+    #: land in, so ADR-0060 §1's clause is vacuous over it rather than unmet — the
+    #: same reduction ``PlanStoreContract`` makes for a store that acquires nothing
+    #: whose safety outlives the coroutine.
+    suspends_inside_its_acquisition: bool = True
+
+    @pytest.mark.optional_obligation
     async def test_a_cancellation_inside_the_acquisition_releases_and_is_re_raised(
         self, transport: OutboundTransport
     ) -> None:
@@ -445,6 +535,9 @@ class OutboundTransportContract(ABC):
         after the scenario has finished, and the assertion is about what was left
         behind rather than about what came out.
         """
+        if not self.suspends_inside_its_acquisition:
+            pytest.skip("open_channel holds what it acquired across no await")
+
         before = self.held_resources(transport)
         gate = self.suspend_next_open(transport)
         opening = asyncio.ensure_future(transport.open_channel(ENDPOINT))

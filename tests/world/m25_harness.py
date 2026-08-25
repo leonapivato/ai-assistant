@@ -39,27 +39,18 @@ directory, the model seam is constructed and never called, the embedder is the
 hashing one, and the transport is the fake. That is a property of this arrangement
 and is not a rule about what any composition may open.
 
-**Where this arm departs from a literal reading of §9, and why** — the one place.
-§9 asks the positive control to drive "the designated seam to a bound call" in the
-same composition. Reaching the seam's own ``transmit`` end to end requires a
-credential, and the production root wires
+**Where this arm departs from a literal reading of §9, and why** — the one place,
+narrowed after round 1. The bound call is driven through the composition's **own**
+registered ``SmtpEgressTransport`` (:func:`drive_a_bound_call`), so the seam, the
+registration, the endpoint and the capability are all this deployment's. What an
+offline gate cannot supply is the credential: the seam reads a connection record
+and a keyring entry before it opens anything, and the production root wires
 :class:`~ai_assistant.secret_store.KeyringSecretStore`, which ADR-0125 §7 forbids
-to fall back to a file, an environment variable or an in-memory map — so an
-end-to-end bound call through the built composition is not reachable in an offline
-gate without exactly the escape hatch that ADR is written against. The control is
-therefore asserted in two halves that are together as strong as the one clause:
-
-1. :func:`the_capability_the_root_handed_out` reads the transport out of the
-   composition's *own* registered ``SmtpEgressTransport`` and the arm asserts by
-   **identity** that it is the fake — which is the handout §9's negative arm is
-   stated over, established rather than assumed;
-2. :func:`drive_a_bound_call` drives the real seam class, over that same object and
-   over the composition's own ``EgressRegistration``, to a bound call — and the
-   fake records one attempt to the configured endpoint.
-
-Separately neither is enough: (1) alone shows the wiring and not that the fake
-fires, (2) alone shows the fake fires and not that the composition's seam holds it.
-Filed against ADR-0191 §9 rather than edited into it.
+to fall back to a file, an environment variable or an in-memory map. So those two
+collaborators — and nothing else — are displaced on the registered object by
+:func:`arrange_the_seams_collaborators`, which asserts the wiring it displaces
+before displacing it. Recorded as an issue against ADR-0191 §9 rather than edited
+into the ADR.
 """
 
 from __future__ import annotations
@@ -98,6 +89,7 @@ from ai_assistant.core.types import (
 from ai_assistant.testing import FakeByteChannel, FakeOutboundTransport
 from ai_assistant.tools.connection_store import ConnectionEntry, StoredEntry
 from ai_assistant.tools.egress import SmtpEgressTransport
+from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
 from ai_assistant.tools.registry import InMemoryToolRegistry
 from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
 
@@ -108,7 +100,6 @@ if TYPE_CHECKING:
     from ai_assistant.app import Composition
     from ai_assistant.core.protocols import OutboundTransport
     from ai_assistant.core.types import FrozenJson, ToolResult
-    from ai_assistant.tools.egress_binder import EgressRegistration
 
 # --- the deployment this arm builds -----------------------------------------
 
@@ -246,40 +237,57 @@ def _seam(composition: Composition) -> SmtpEgressTransport:
     return transport
 
 
-def the_registration_the_root_built(composition: Composition) -> EgressRegistration:
-    """The registration the composition bound its tool to.
+async def drive_a_bound_call(composition: Composition) -> None:
+    """Drive **the composition's own registered seam** to one bound call.
+
+    The positive control for the fake (ADR-0191 §9). The object driven is the
+    ``SmtpEgressTransport`` the production root constructed and registered — not a
+    second one arranged beside it — so the registration it pins against, the
+    endpoint it parses and the capability it opens with are all this deployment's.
+
+    What this displaces first, and only this, is the pair of collaborators an
+    offline gate cannot supply: the connection record and the ``INTEGRATION``
+    keyring face. See :func:`arrange_the_seams_collaborators`, which asserts what
+    was there before displacing it, so the wiring is still measured rather than
+    merely assumed.
 
     Args:
         composition: The built deployment.
-
-    Returns:
-        The tool id, connection reference and configured endpoint, as one value —
-        the **same object** the seam compares a binding against, so the control
-        below cannot drift from what the deployment configured.
     """
-    return _seam(composition)._registration
+    await _seam(composition).transmit(binding(), arguments())
 
 
-async def drive_a_bound_call(composition: Composition, capability: OutboundTransport) -> None:
-    """Drive the designated seam to one bound call over ``capability``.
+def arrange_the_seams_collaborators(composition: Composition) -> None:
+    """Give the registered seam a connection record and a credential to read.
 
-    The positive control for the fake (ADR-0191 §9). The seam class is the real
-    one and the registration is the composition's own; what this supplies is the
-    connection record and the credential face, which the module docstring explains
-    and which are not this arm's subject either way.
+    **The one thing in this arm that an offline gate forces.** The seam reads the
+    connection record twice around a credential read (ADR-0148 §6) and refuses
+    before opening a channel unless both answer, and the production root wires
+    :class:`~ai_assistant.secret_store.KeyringSecretStore` — which ADR-0125 §7
+    forbids to fall back to a file, an environment variable or an in-memory map.
+    Provisioning a credential here would either put one in the developer's own OS
+    keyring or need exactly the escape hatch that ADR is written against, so the
+    two faces are displaced on the seam itself instead.
+
+    **The wiring they displace is asserted before they displace it**, which is what
+    keeps this from hiding the thing it touches: the store the seam was reading is
+    the *same object* the provisioner writes through (ADR-0102 §7, ADR-0152 §10),
+    and a deployment that had wired a second handle would fail here rather than
+    silently pass the control.
 
     Args:
         composition: The built deployment.
-        capability: The transport read out of it, so the attempt lands on the same
-            record the negative arm reads.
     """
-    control = SmtpEgressTransport(
-        registration=the_registration_the_root_built(composition),
-        records=_Records(),
-        secrets=_Keyring(),
-        transport=capability,
-    )
-    await control.transmit(binding(), arguments())
+    seam = _seam(composition)
+    provisioner = composition.engine._connections._provisioner
+    # Narrowed to the concrete provisioner, which is itself part of the claim:
+    # ADR-0151 §10 says the root wires "the one implementation", and it is reached
+    # through a Protocol everywhere else.
+    assert isinstance(provisioner, KeyringConnectionProvisioner)
+    assert seam._records is provisioner._store
+
+    seam._records = _Records()
+    seam._secrets = _Keyring()
 
 
 def channel() -> FakeByteChannel:
