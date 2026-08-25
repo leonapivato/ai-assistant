@@ -135,10 +135,10 @@ class FakeByteChannel:
         self._closed = False
         self._tls_upgrades = 0
         self._suppressed = 0
-        self._exhausted_error: Exception | None = None
-        self._write_error: Exception | None = None
+        self._exhausted_error: TransportError | None = None
+        self._write_error: TransportError | None = None
         self._write_marker: bytes = b""
-        self._upgrade_error: Exception | None = None
+        self._upgrade_error: TransportError | None = None
         self._release_error: Exception | None = None
         self._close_gate: LoopSuspension | None = None
 
@@ -159,19 +159,26 @@ class FakeByteChannel:
             self._inbound += chunk
         return self
 
-    def fail_when_exhausted(self, error: Exception) -> None:
+    def fail_when_exhausted(self, error: TransportError) -> None:
         """Arm a read past the end of the script to raise instead of ending cleanly.
 
-        A far end can stop answering two ways — a clean close and a reset — and the
-        two arrive at a caller as different types. Without this a fake could only
+        A far end can stop answering two ways — a clean close and a reset — and a
+        caller has to be able to tell them apart. Without this a fake could only
         ever model the first.
+
+        **The armed failure is a ``TransportError`` and cannot be anything else**
+        (ADR-0191 §1). That is the shared refusal type both this fake and the
+        production channel raise, so a fake armed with a raw ``OSError`` would let
+        a consumer's test pass against a failure the real channel converts before
+        the consumer ever sees it — which is the taxonomy clause failing in the one
+        place it is supposed to be enforced.
 
         Args:
             error: What a read finding nothing left raises.
         """
         self._exhausted_error = error
 
-    def fail_write_after(self, marker: bytes, *, error: Exception) -> None:
+    def fail_write_after(self, marker: bytes, *, error: TransportError) -> None:
         """Arm the write whose data ends with ``marker`` to fail once recorded.
 
         **The octets are recorded before the failure is raised**, which is the
@@ -183,16 +190,19 @@ class FakeByteChannel:
         Args:
             marker: The trailing octets that identify the write to fail. Empty
                 fails the next write whatever it carries.
-            error: What that write raises.
+            error: What that write raises — a ``TransportError``, for the reason
+                :meth:`fail_when_exhausted` gives.
         """
         self._write_marker = marker
         self._write_error = error
 
-    def fail_upgrade_with(self, error: Exception) -> None:
+    def fail_upgrade_with(self, error: TransportError) -> None:
         """Arm :meth:`start_tls` to refuse, leaving the channel in the clear.
 
         Args:
-            error: What the upgrade raises. :attr:`is_secure` stays ``False``.
+            error: What the upgrade raises — a ``TransportError``, for the reason
+                :meth:`fail_when_exhausted` gives. :attr:`is_secure` stays
+                ``False``, which is the read a holder refuses on.
         """
         self._upgrade_error = error
 
@@ -205,8 +215,12 @@ class FakeByteChannel:
         suppression rather than assuming it.
 
         Args:
-            error: The release failure. It is counted in
-                :attr:`suppressed_release_failures` and never reaches a caller.
+            error: The release failure. **Any exception**, and deliberately not
+                narrowed to ``TransportError`` like the arming above: this one is
+                never raised to a caller, so no taxonomy is being promised about
+                it, and the real channel's own suppressed failure is an ``OSError``
+                from ``wait_closed``. It is counted in
+                :attr:`suppressed_release_failures`.
         """
         self._release_error = error
 
@@ -315,7 +329,7 @@ class FakeByteChannel:
         Raises:
             ValueError: If ``limit`` is outside that range, so that no spelling of
                 it means "read until end of stream".
-            Exception: Whatever :meth:`fail_when_exhausted` armed, where the
+            TransportError: Whatever :meth:`fail_when_exhausted` armed, where the
                 stream is exhausted and one was.
         """
         if not 1 <= limit <= TRANSPORT_OCTET_CEILING:
@@ -334,8 +348,8 @@ class FakeByteChannel:
             data: The octets to send.
 
         Raises:
-            Exception: Whatever :meth:`fail_write_after` armed, once this write's
-                octets have been recorded.
+            TransportError: Whatever :meth:`fail_write_after` armed, once this
+                write's octets have been recorded.
         """
         self._written += data
         if self._write_error is not None and data.endswith(self._write_marker):
@@ -346,9 +360,9 @@ class FakeByteChannel:
         """Mark the channel secure, as a completed handshake would.
 
         Raises:
-            Exception: Whatever :meth:`fail_upgrade_with` armed. The channel stays
-                in the clear, so a holder reading :attr:`is_secure` still refuses
-                to present a credential.
+            TransportError: Whatever :meth:`fail_upgrade_with` armed. The channel
+                stays in the clear, so a holder reading :attr:`is_secure` still
+                refuses to present a credential.
         """
         if self._upgrade_error is not None:
             error, self._upgrade_error = self._upgrade_error, None
@@ -381,7 +395,7 @@ class FakeByteChannel:
             Empty bytes.
 
         Raises:
-            Exception: Whatever :meth:`fail_when_exhausted` armed.
+            TransportError: Whatever :meth:`fail_when_exhausted` armed.
         """
         if self._exhausted_error is not None:
             error, self._exhausted_error = self._exhausted_error, None
@@ -423,8 +437,8 @@ class FakeOutboundTransport:
         self._attempts: list[TransportAttempt] = []
         self._queued: deque[FakeByteChannel] = deque()
         self._served: list[FakeByteChannel] = []
-        self._refusal: Exception | None = None
-        self._failure: Exception | None = None
+        self._refusal: TransportError | None = None
+        self._failure: TransportError | None = None
         self._gate: LoopSuspension | None = None
         self._in_flight = 0
 
@@ -436,8 +450,11 @@ class FakeOutboundTransport:
         An empty queue is not an error: a call past the end is served a fresh
         :class:`FakeByteChannel` over an empty far end — already secure where the
         endpoint's TLS is the implicit kind, which is the contract's own clause
-        rather than a convenience. A queued channel is the arranger's, TLS state
-        included.
+        rather than a convenience.
+
+        **A queued channel's TLS state has to agree with the endpoint it is served
+        for**, and a handout that would not raises rather than proceeding: see
+        :meth:`_served_for`.
 
         Args:
             channels: The channels to hand out.
@@ -448,7 +465,7 @@ class FakeOutboundTransport:
         self._queued.extend(channels)
         return self
 
-    def refuse_with(self, error: Exception) -> None:
+    def refuse_with(self, error: TransportError) -> None:
         """Arm this transport to record every attempt and serve none.
 
         **Standing rather than one-shot**, because that is the arrangement a
@@ -466,7 +483,7 @@ class FakeOutboundTransport:
         """Lift a standing refusal armed by :meth:`refuse_with`."""
         self._refusal = None
 
-    def fail_after_acquiring(self, error: Exception) -> None:
+    def fail_after_acquiring(self, error: TransportError) -> None:
         """Arm the next open to fail *after* the modelled socket exists.
 
         ADR-0191 §1's ordinary-establishment-failure case: a connect that failed
@@ -531,6 +548,40 @@ class FakeOutboundTransport:
 
     # --- the contract -------------------------------------------------------
 
+    def _served_for(self, endpoint: TransportEndpoint) -> FakeByteChannel:
+        """The channel this open hands out, or a refusal of the arrangement.
+
+        Args:
+            endpoint: The endpoint asked for.
+
+        Returns:
+            The next queued channel, or a fresh one already in the endpoint's TLS
+            state.
+
+        Raises:
+            ValueError: If a queued channel's TLS state contradicts ``endpoint``.
+                ADR-0191 §1 has an implicit-TLS open return a channel *already*
+                under TLS and an upgrade open return one in the clear, so a fake
+                that served either for the other would let a consumer be tested
+                against a state the production capability can never produce — the
+                canonical fake certifying behaviour that does not exist. It is the
+                arranger's error rather than a connection's, so it is a
+                ``ValueError`` and not a ``TransportError``.
+        """
+        if not self._queued:
+            return FakeByteChannel(secure=endpoint.implicit_tls)
+        channel = self._queued.popleft()
+        if channel.is_secure is not endpoint.implicit_tls:
+            state = "already under TLS" if channel.is_secure else "in the clear"
+            mode = "implicit TLS" if endpoint.implicit_tls else "an upgrade"
+            msg = (
+                f"a channel {state} was queued for an endpoint whose mode is {mode}; "
+                f"a conforming transport returns a channel already under TLS for an "
+                f"implicit-TLS endpoint and a cleartext one otherwise (ADR-0191 §1)"
+            )
+            raise ValueError(msg)
+        return channel
+
     async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
         """Record the attempt, then serve a channel or refuse.
 
@@ -542,10 +593,13 @@ class FakeOutboundTransport:
             far end.
 
         Raises:
-            Exception: Whatever :meth:`refuse_with` or :meth:`fail_after_acquiring`
-                armed. In the second case the modelled socket is released before
-                the failure leaves, so :attr:`open_sockets` reads what it did
-                before the call.
+            TransportError: Whatever :meth:`refuse_with` or
+                :meth:`fail_after_acquiring` armed — the shared refusal type the
+                production implementation raises too (ADR-0191 §1). In the second
+                case the modelled socket is released before the failure leaves, so
+                :attr:`open_sockets` reads what it did before the call.
+            ValueError: If a queued channel's TLS state contradicts the endpoint
+                asked for; see :meth:`serve`.
             CancelledError: Re-raised after that same release, never absorbed
                 (ADR-0060 §1).
         """
@@ -561,11 +615,7 @@ class FakeOutboundTransport:
             if self._failure is not None:
                 failure, self._failure = self._failure, None
                 raise failure
-            channel = (
-                self._queued.popleft()
-                if self._queued
-                else FakeByteChannel(secure=endpoint.implicit_tls)
-            )
+            channel = self._served_for(endpoint)
         except BaseException:
             self._in_flight -= 1
             raise

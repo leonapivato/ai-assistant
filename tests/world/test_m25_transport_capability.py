@@ -84,10 +84,12 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             assert list(capability.attempts) == []
             assert creators.calls == []
 
-            # 4. The positive control for the fake, over the same fake in the same
-            #    composition. Without it the zero above is satisfied by a recorder
-            #    nothing could ever reach.
-            await m25.drive_a_bound_call(composition, capability)
+            # 4. The positive control for the fake, over the same fake in the
+            #    same composition and through that composition's **own**
+            #    registered seam. Without it the zero above is satisfied by a
+            #    recorder nothing could ever reach.
+            m25.arrange_the_seams_collaborators(composition)
+            await m25.drive_a_bound_call(composition)
 
             assert list(capability.attempts) == [TransportAttempt(endpoint=CONFIGURED, served=True)]
             # The control moves the connection instrument by nothing, because the

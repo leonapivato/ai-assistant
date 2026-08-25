@@ -49,7 +49,7 @@ from egress_transport_harness import (
     transport,
 )
 
-from ai_assistant.core.errors import ConnectionStoreError
+from ai_assistant.core.errors import ConnectionStoreError, TransportError
 from ai_assistant.core.types import (
     ActionRequest,
     DataTier,
@@ -802,13 +802,13 @@ async def test_a_non_250_verdict_after_the_payload_is_also_indeterminate() -> No
 @pytest.mark.parametrize(
     "failure",
     [
-        pytest.param(ConnectionResetError("the peer reset the connection"), id="reset"),
-        pytest.param(TimeoutError("the read timed out"), id="timeout"),
-        pytest.param(OSError("the socket went away"), id="oserror"),
+        pytest.param(TransportError("the peer reset the connection"), id="reset"),
+        pytest.param(TransportError("the read timed out"), id="timeout"),
+        pytest.param(TransportError("the socket went away"), id="oserror"),
     ],
 )
 async def test_a_read_that_raises_after_the_payload_is_indeterminate_too(
-    failure: Exception,
+    failure: TransportError,
 ) -> None:
     """A socket error after the terminator is not evidence about the far end.
 
@@ -819,10 +819,14 @@ async def test_a_read_that_raises_after_the_payload_is_indeterminate_too(
     failed. The exception says this end stopped listening and says nothing about
     what the endpoint did with the octets it already has.
 
-    Three types because they arrive from three real places and only one of them
-    is obvious; ``TimeoutError`` is a subclass of ``OSError`` and is included so
-    that a later narrowing of the ``except`` clause fails here rather than in
-    production.
+    Three rows because the underlying fault arrives from three real places — a
+    reset, a timeout, a socket that went away — and only the first is obvious.
+    They are all ``TransportError`` now rather than the raw ``OSError``
+    subclasses this case used to arm: ADR-0191 §1 makes that the shared refusal
+    type, and ``_StreamChannel`` converts each of those three before the seam sees
+    it. ADR-0191 §4 nonetheless requires the ``except`` clause to keep naming
+    ``OSError`` beside it, for a channel that has not converted — that arm is not
+    reachable through a conforming fake and must not be deleted as dead.
     """
     channel = scripted(*implicit_tls_script()[:-2], on_exhausted=failure)
     subject = transport(channel, secrets=await keyring())
@@ -836,12 +840,12 @@ async def test_a_read_that_raises_after_the_payload_is_indeterminate_too(
 @pytest.mark.parametrize(
     "failure",
     [
-        pytest.param(ConnectionResetError("the peer reset during the flush"), id="reset"),
-        pytest.param(TimeoutError("the flush timed out"), id="timeout"),
+        pytest.param(TransportError("the peer reset during the flush"), id="reset"),
+        pytest.param(TransportError("the flush timed out"), id="timeout"),
     ],
 )
 async def test_a_write_that_fails_while_sending_the_payload_is_indeterminate(
-    failure: Exception,
+    failure: TransportError,
 ) -> None:
     """The window opens at the write, not after it.
 
@@ -873,10 +877,10 @@ async def test_a_socket_error_before_the_payload_stays_a_failure() -> None:
     Converting *that* into an indeterminate outcome would make every network blip
     an unresolvable step, which is the opposite error and is just as expensive.
     """
-    channel = scripted(on_exhausted=ConnectionResetError("reset on the greeting"))
+    channel = scripted(on_exhausted=TransportError("reset on the greeting"))
     subject = transport(channel, secrets=await keyring())
 
-    with pytest.raises(ConnectionResetError):
+    with pytest.raises(TransportError):
         await subject.transmit(binding(), ARGUMENTS)
 
     assert payload(channel) == ""

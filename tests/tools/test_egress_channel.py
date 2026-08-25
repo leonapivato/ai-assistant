@@ -1,24 +1,24 @@
-"""The seam's own channel and opener, held to the contract they implement.
+"""The seam's own channel and opener, run through the shared conformance suites.
 
-ADR-0191 §1 fixes one buffering ceiling in ``core`` "so the canonical fake and the
-production implementation refuse the same inputs and a consumer tested against one
-behaves against the other". ``tests/core/test_fake_transport.py`` holds the fake to
-it through the shared conformance suite; this module holds the production pair —
-``_StreamChannel`` and :class:`~ai_assistant.tools.egress.StreamOutboundTransport`
-— to the same boundaries.
+ADR-0191 §1 fixes one buffering ceiling and one refusal type in ``core`` "so the
+canonical fake and the production implementation refuse the same inputs and a
+consumer tested against one behaves against the other", and ``CONTRIBUTING.md``
+makes the shared suite what every implementation is held to. So the two production
+implementations — ``_StreamChannel`` and
+:class:`~ai_assistant.tools.egress.StreamOutboundTransport` — are bound to
+``ByteChannelContract`` and ``OutboundTransportContract`` here, exactly as
+``tests/core/test_fake_transport.py`` binds the canonical fakes.
 
-**Why these are cases here rather than a second binding of ``ByteChannelContract``.**
-The suite's subject is a channel whose far end has already sent what a case wants
-to read, and it takes the octets through a ``deliver`` hook after the subject
-exists. An ``asyncio.StreamReader`` cannot model that: a case that delivers nothing
-needs the reader already at end of stream, and one that delivers something needs it
-*not* to be — so a single fixture cannot serve both, and a binding that fed end of
-stream eagerly would hang every case that then delivered. What is on test is the
-boundary arithmetic and the refusals, and those are the same assertions either way.
+**Nothing here opens a socket.** The read half is an ``asyncio.StreamReader`` fed
+in memory, the write half is a double, and ``asyncio.open_connection`` is
+substituted by a ledger that models the acquisition and the release without one.
+The substitution is what lets the opener's release obligations be observed at all:
+the resource ``open_channel`` acquires is a pair of streams, and nothing on the
+public surface says whether they were given back.
 
-**Nothing here opens a socket.** The reader is fed in memory and the writer is a
-double, so ``_StreamChannel`` is exercised whole while
-``asyncio.open_connection`` is reached only through a substitute that raises.
+Beside the two bindings are the properties that are the *seam's own* rather than
+the contract's — which endpoint the opener asks for, and that the capability holds
+nothing between calls.
 """
 
 from __future__ import annotations
@@ -28,242 +28,426 @@ import ssl
 from typing import TYPE_CHECKING, Final, cast, final
 
 import pytest
+from transport_contract import ENDPOINT, ByteChannelContract, OutboundTransportContract
 
 from ai_assistant.core.errors import TransportError
 from ai_assistant.core.types import TRANSPORT_OCTET_CEILING, TransportEndpoint
+from ai_assistant.testing.cancellation import LoopSuspension
 from ai_assistant.tools import egress
 from ai_assistant.tools.egress import StreamOutboundTransport
 
 if TYPE_CHECKING:
-    from ai_assistant.core.protocols import ByteChannel
+    from ai_assistant.core.protocols import ByteChannel, OutboundTransport
+    from ai_assistant.testing.cancellation import SuspendedCall
 
-#: The endpoint the opener cases ask for. ``.invalid`` (RFC 6761 §6.4), so a case
-#: that somehow reached a resolver would fail rather than connect.
-ENDPOINT: Final = TransportEndpoint(host="mail.example.invalid", port=465, implicit_tls=True)
+#: The upgrade-mode endpoint, for the cases that branch on the TLS mode.
+UPGRADE: Final = TransportEndpoint(host=ENDPOINT.host, port=587, implicit_tls=False)
 
 
 @final
 class _Writer:
     """The write half, without a transport under it.
 
-    Enough of ``asyncio.StreamWriter`` for the channel to drive: what it wrote,
-    whether it was closed, whether TLS was started, and an armable failure from
-    ``wait_closed`` — which is the ordinary release failure ADR-0191 §1 has
-    ``close`` swallow.
+    Enough of ``asyncio.StreamWriter`` for the channel to drive, plus the two
+    levers ``ByteChannelContract`` needs: an armable connection failure and a
+    suspension inside ``wait_closed``, which is where a cancellation delivered to
+    ``close`` actually lands.
     """
 
-    def __init__(self, *, fails_to_close: bool = False) -> None:
+    def __init__(self, *, ledger: _Sockets | None = None) -> None:
         """Start open, having written nothing.
 
         Args:
-            fails_to_close: Whether ``wait_closed`` raises, as a far end that has
-                already gone makes it.
+            ledger: The acquisition ledger to report this writer's release to, for
+                the opener's cases. ``None`` for the channel's own cases, which
+                have nothing to count.
         """
         self.written = bytearray()
         self.closed = False
         self.drains = 0
         self.tls: str | None = None
-        self._fails_to_close = fails_to_close
+        self.fails = False
+        self.close_gate: LoopSuspension | None = None
+        self._ledger = ledger
 
     def write(self, data: bytes) -> None:
         """Record ``data``."""
         self.written += data
 
     async def drain(self) -> None:
-        """Record that the caller flushed."""
+        """Record that the caller flushed, or fail as a reset connection would.
+
+        Raises:
+            ConnectionResetError: Where this writer was armed to fail.
+        """
+        if self.fails:
+            msg = "the peer reset the connection"
+            raise ConnectionResetError(msg)
         self.drains += 1
 
     async def start_tls(self, context: ssl.SSLContext, *, server_hostname: str) -> None:
-        """Record which host the certificate would have been verified against."""
+        """Record which host the certificate would have been verified against.
+
+        Args:
+            context: The TLS settings, asserted here so a later weakening of
+                ``_tls_context`` fails a case rather than a deployment.
+            server_hostname: The name the certificate is verified against.
+
+        Raises:
+            ssl.SSLError: Where this writer was armed to fail.
+        """
         assert context.check_hostname is True
         assert context.verify_mode is ssl.CERT_REQUIRED
+        if self.fails:
+            msg = "the certificate did not verify"
+            raise ssl.SSLError(msg)
         self.tls = server_hostname
 
     def close(self) -> None:
-        """Record that the writer was closed."""
+        """Record that the writer was closed, and give its socket back."""
+        if not self.closed and self._ledger is not None:
+            self._ledger.open -= 1
         self.closed = True
 
     async def wait_closed(self) -> None:
-        """Wait for the close, failing where a far end had already gone.
+        """Wait for the close, suspending or failing where this writer was armed.
 
         Raises:
-            OSError: Where this writer was armed to fail.
+            OSError: Where this writer was armed to fail, which is the ordinary
+                release failure ADR-0191 §1 has ``close`` swallow.
         """
-        if self._fails_to_close:
+        gate, self.close_gate = self.close_gate, None
+        if gate is not None:
+            await gate.hold()
+        if self.fails:
             msg = "the far end had already gone"
             raise OSError(msg)
 
 
-def _channel(
-    *fed: bytes, end_of_stream: bool = True, writer: _Writer | None = None
-) -> tuple[ByteChannel, _Writer]:
-    """A production channel over a reader that has already been fed.
+@final
+class _Sockets:
+    """A stand-in for ``asyncio.open_connection`` that counts what it hands out.
+
+    The opener's release clauses are stated over a resource the production
+    ``open_channel`` obtains from the standard library and gives back by closing
+    the writer. Nothing on the public surface reports that, so the suite's
+    ``held_resources`` hook needs a ledger — and this is the smallest thing that
+    is one.
+
+    Attributes:
+        open: Pairs of streams handed out and not yet closed.
+        refuses: Whether the next open fails before anything is acquired.
+        asked: The arguments the last open was called with.
+    """
+
+    def __init__(self) -> None:
+        """Start having opened nothing and refusing nothing."""
+        self.open = 0
+        self.refuses = False
+        self.asked: dict[str, object] = {}
+
+    async def __call__(
+        self, host: str, port: int, **kwargs: object
+    ) -> tuple[asyncio.StreamReader, _Writer]:
+        """Hand out a pair of streams, or refuse as an unreachable endpoint would.
+
+        Args:
+            host: The host asked for.
+            port: The port asked for.
+            kwargs: Whatever else the caller passed, recorded for the cases that
+                assert on it.
+
+        Returns:
+            A reader fed nothing and a writer that reports its release here.
+
+        Raises:
+            ConnectionRefusedError: Where this ledger was armed to refuse. Nothing
+                is acquired first, which is what distinguishes it from
+                ``arm_failure_after_acquiring``.
+        """
+        self.asked = {"host": host, "port": port, **kwargs}
+        if self.refuses:
+            msg = "nothing is listening"
+            raise ConnectionRefusedError(msg)
+        self.open += 1
+        return asyncio.StreamReader(limit=TRANSPORT_OCTET_CEILING), _Writer(ledger=self)
+
+
+def _reader_of(channel: ByteChannel) -> asyncio.StreamReader:
+    """The read half under ``channel``.
 
     Args:
-        fed: Octets the far end sent, in order.
-        end_of_stream: Whether the far end then closed. ``False`` leaves the
-            stream open, which is only useful for a case that reads less than it
-            was fed.
-        writer: The write half, or a fresh one.
+        channel: The subject, which is a ``_StreamChannel``.
 
     Returns:
-        The channel and its writer, so a case can read what was written.
+        Its reader, so a binding can say what the far end sent.
     """
-    reader = asyncio.StreamReader(limit=TRANSPORT_OCTET_CEILING)
-    for chunk in fed:
-        reader.feed_data(chunk)
-    if end_of_stream:
-        reader.feed_eof()
-    half = writer if writer is not None else _Writer()
-    channel = egress._StreamChannel(
-        reader,
-        cast("asyncio.StreamWriter", half),
-        host=ENDPOINT.host,
-        secure=False,
+    assert isinstance(channel, egress._StreamChannel)
+    return channel._reader
+
+
+def _writer_of(channel: ByteChannel) -> _Writer:
+    """The write half under ``channel``.
+
+    Args:
+        channel: The subject, which is a ``_StreamChannel``.
+
+    Returns:
+        Its writer double, so a binding can arm it.
+    """
+    assert isinstance(channel, egress._StreamChannel)
+    # The channel's annotation says ``StreamWriter``; what it was handed is the
+    # double above, which cannot be a subclass of one and so cannot be narrowed by
+    # ``isinstance``. The cast is the seam between the two, and a channel handed
+    # anything else fails on the attribute rather than silently.
+    writer = cast("_Writer", channel._writer)
+    assert isinstance(writer.written, bytearray)
+    return writer
+
+
+def _channel(*, secure: bool = False, ledger: _Sockets | None = None) -> ByteChannel:
+    """One production channel over an in-memory read half and a writer double.
+
+    Args:
+        secure: Whether TLS was established before the greeting.
+        ledger: Where the writer reports its release, for a case that counts.
+
+    Returns:
+        The channel.
+    """
+    return cast(
+        "ByteChannel",
+        egress._StreamChannel(
+            asyncio.StreamReader(limit=TRANSPORT_OCTET_CEILING),
+            cast("asyncio.StreamWriter", _Writer(ledger=ledger)),
+            host=ENDPOINT.host,
+            secure=secure,
+        ),
     )
-    return channel, half
 
 
-# --- §1: read_line's terminator, end of stream and ceiling ------------------
+class TestStreamChannelContract(ByteChannelContract):
+    """The production channel, run through the channel contract."""
+
+    @pytest.fixture
+    async def channel(self) -> ByteChannel:
+        """A channel in the clear over a reader nothing has been fed to yet.
+
+        **Asynchronous where the canonical fake's binding is synchronous**, because
+        ``asyncio.StreamReader`` binds the running loop at construction and there
+        is none inside a synchronous fixture. The canonical fake's binding has to
+        stay synchronous — ``tests/core/test_protocol_triad.py`` evaluates a
+        subject fixture to prove the fake reached the suite — and this one has no
+        such obligation.
+
+        Returns:
+            The one production ``ByteChannel``.
+        """
+        return _channel()
+
+    def far_end_sent(self, channel: ByteChannel, octets: bytes) -> None:
+        """Feed ``octets`` to the read half and then close it.
+
+        The close is not decoration: a ``StreamReader`` that has been fed nothing
+        and told nothing is a stream still waiting, so a case about end of stream
+        would hang instead of failing.
+
+        Args:
+            channel: The subject.
+            octets: Everything the far end sends.
+        """
+        reader = _reader_of(channel)
+        if octets:
+            reader.feed_data(octets)
+        reader.feed_eof()
+
+    def arm_connection_failure(self, channel: ByteChannel) -> None:
+        """Arm the connection under ``channel`` to fail as a reset one does.
+
+        Raw ``OSError`` subclasses on purpose — a ``ConnectionResetError`` from
+        the reader, another from the flush, an ``ssl.SSLError`` from the upgrade —
+        because what the contract requires is that *this* implementation converts
+        them. Arming it with a ``TransportError`` would be arming the answer.
+
+        Args:
+            channel: The subject.
+        """
+        _reader_of(channel).set_exception(ConnectionResetError("the peer reset the connection"))
+        _writer_of(channel).fails = True
+
+    def arm_release_failure(self, channel: ByteChannel) -> None:
+        """Arm ``wait_closed`` to fail, as a far end that has already gone makes it.
+
+        Args:
+            channel: The subject.
+        """
+        _writer_of(channel).fails = True
+
+    def suspend_next_close(self, channel: ByteChannel) -> SuspendedCall:
+        """Arm the next ``close`` to suspend inside ``wait_closed``.
+
+        Which is where a cancellation delivered to ``close`` actually lands: the
+        writer is closed synchronously first, so the channel is already safe by the
+        time the suspension is reached — and that is the property, not a detail.
+
+        Args:
+            channel: The subject.
+
+        Returns:
+            The lever the suite drives.
+        """
+        gate = LoopSuspension()
+        _writer_of(channel).close_gate = gate
+        return gate
 
 
-async def test_read_line_returns_the_line_including_its_terminator() -> None:
-    """§1: the line comes back with its ``\\n``, and with the ``\\r`` before it."""
-    channel, _ = _channel(b"220 ready\r\n250 ok\r\n")
+class TestStreamOutboundTransportContract(OutboundTransportContract):
+    """The production opener, run through the opener contract.
 
-    assert await channel.read_line() == b"220 ready\r\n"
-
-
-async def test_read_line_reports_end_of_stream_as_empty_bytes() -> None:
-    """§1: empty bytes means end of stream and means nothing else."""
-    channel, _ = _channel()
-
-    assert await channel.read_line() == b""
-
-
-async def test_read_line_discards_an_unterminated_tail() -> None:
-    """§1: a line with no terminator is not a reply, whatever octets arrived."""
-    channel, _ = _channel(b"250 the far end stopped here")
-
-    assert await channel.read_line() == b""
-
-
-async def test_read_line_accepts_a_line_of_exactly_the_ceiling() -> None:
-    """§1: the bound is on the octets **before** the terminator.
-
-    So the production channel and the canonical fake agree at the one value an
-    implementation can be off by one at. ``StreamReader.readuntil`` applies its
-    ``limit`` to the buffer ahead of the separator, which is why the channel states
-    the boundary rather than re-deriving it.
+    **It opts out of exactly one obligation, and states why.**
+    ``open_channel``'s acquisition and its return are separated by no ``await``:
+    the standard library's ``open_connection`` hands back a pair of streams and the
+    channel is constructed synchronously, so there is no window for a cancellation
+    to land in while *this* implementation holds them. ADR-0060 §1's clause is
+    vacuous over it rather than unmet — the reduction ``PlanStoreContract`` makes
+    for a store that acquires nothing whose safety outlives the coroutine. The
+    *release* obligation is not vacuous and is exercised by the ordinary
+    establishment failure the suite arms below.
     """
-    channel, _ = _channel(b"a" * TRANSPORT_OCTET_CEILING + b"\n")
 
-    assert len(await channel.read_line()) == TRANSPORT_OCTET_CEILING + 1
+    suspends_inside_its_acquisition = False
+
+    @pytest.fixture(autouse=True)
+    def _sockets(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Substitute the standard library's opener with a counting one.
+
+        Args:
+            monkeypatch: pytest's own, so every substitution is undone per case.
+        """
+        self.sockets = _Sockets()
+        self.patch = monkeypatch
+        monkeypatch.setattr(asyncio, "open_connection", self.sockets)
+
+    @pytest.fixture
+    def transport(self) -> OutboundTransport:
+        """The subject.
+
+        Returns:
+            The one production ``OutboundTransport``.
+        """
+        return StreamOutboundTransport()
+
+    def arm_refusal(self, transport: OutboundTransport) -> None:
+        """Arm the next open to fail before anything is acquired.
+
+        Args:
+            transport: The subject, which holds no state of its own.
+        """
+        del transport
+        self.sockets.refuses = True
+
+    def arm_failure_after_acquiring(self, transport: OutboundTransport) -> None:
+        """Arm the next open to fail once the pair of streams exists.
+
+        ADR-0191 §1 names "a channel object that could not be constructed" among
+        the establishment failures the release clause covers, and that is the one
+        step of ``open_channel`` that runs after the acquisition — so substituting
+        the channel's constructor models the ADR's own named case rather than
+        inventing one.
+
+        Args:
+            transport: The subject, which holds no state of its own.
+        """
+        del transport
+
+        def refuses(*args: object, **kwargs: object) -> object:
+            del args, kwargs
+            msg = "the channel could not be constructed"
+            raise TransportError(msg)
+
+        self.patch.setattr(egress, "_StreamChannel", refuses)
+
+    def suspend_next_open(self, transport: OutboundTransport) -> SuspendedCall:
+        """Unreachable: this implementation suspends inside no acquisition.
+
+        Args:
+            transport: The subject.
+
+        Returns:
+            Never; this raises.
+
+        Raises:
+            NotImplementedError: Always. The case that would call it opts out on
+                :attr:`suspends_inside_its_acquisition`.
+        """
+        del transport
+        msg = "open_channel holds what it acquired across no await"
+        raise NotImplementedError(msg)
+
+    def held_resources(self, transport: OutboundTransport) -> int:
+        """Pairs of streams acquired and not given back.
+
+        Args:
+            transport: The subject, which holds no state of its own.
+
+        Returns:
+            The ledger's count.
+        """
+        del transport
+        return self.sockets.open
 
 
-async def test_read_line_refuses_a_line_one_octet_past_the_ceiling() -> None:
-    """§1: the refusal is a ``TransportError`` and not the seam's own pin error.
+# --- what is the seam's own rather than the contract's ----------------------
 
-    ``TransportError``'s subject is what happened to the connection, and a far end
-    buying memory from a client that is holding a credential is exactly that. The
-    seam converts it where its own ordering requires — inside the window
-    ``_SmtpSession.data`` owns — and nowhere else.
+
+async def test_the_opener_asks_for_the_endpoint_it_was_handed_and_nothing_else(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§4: the host and port are the ones handed in, with the ceiling as the limit.
+
+    No name resolution beyond that host, no redirect, no second host on one call —
+    all of which this implementation gets by having nothing else to resolve from.
+    The ``limit`` is asserted because it is what makes ``read_line``'s ceiling the
+    contract's rather than this call site's.
     """
-    channel, _ = _channel(b"a" * (TRANSPORT_OCTET_CEILING + 1) + b"\n")
+    sockets = _Sockets()
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
 
-    with pytest.raises(TransportError):
-        await channel.read_line()
+    channel = await StreamOutboundTransport().open_channel(ENDPOINT)
 
-
-# --- §1: read's bounded domain ----------------------------------------------
-
-
-@pytest.mark.parametrize("limit", [0, -1, TRANSPORT_OCTET_CEILING + 1])
-async def test_read_refuses_a_limit_outside_its_domain(limit: int) -> None:
-    """§1: no spelling of ``limit`` means "read until end of stream".
-
-    ``-1`` is exactly that spelling for ``StreamReader.read``, so the refusal is
-    what stops a peer that streams without closing from exhausting memory through
-    a method whose name says it is bounded.
-    """
-    channel, _ = _channel(b"0123456789")
-
-    with pytest.raises(ValueError, match="limit"):
-        await channel.read(limit)
-
-
-@pytest.mark.parametrize("limit", [1, TRANSPORT_OCTET_CEILING])
-async def test_read_accepts_both_ends_of_its_domain(limit: int) -> None:
-    """§1: the domain is inclusive at both ends."""
-    channel, _ = _channel(b"0123456789")
-
-    assert await channel.read(limit) != b""
-
-
-async def test_read_reports_end_of_stream_as_empty_bytes() -> None:
-    """§1: the same spelling of end of stream ``read_line`` uses."""
-    channel, _ = _channel()
-
-    assert await channel.read(TRANSPORT_OCTET_CEILING) == b""
-
-
-async def test_read_and_read_line_share_one_cursor() -> None:
-    """§1: octets returned by either are never returned again by the other."""
-    channel, _ = _channel(b"220 ready\r\n")
-
-    assert await channel.read(4) == b"220 "
-    assert await channel.read_line() == b"ready\r\n"
-
-
-# --- §1, §4: TLS state, writing and release ---------------------------------
-
-
-async def test_write_flushes_and_start_tls_verifies_against_the_pinned_host() -> None:
-    """§4: the certificate is verified against the endpoint, never against a reply."""
-    channel, writer = _channel()
-
-    await channel.write(b"EHLO mail.example.invalid\r\n")
-    assert channel.is_secure is False
-
-    await channel.start_tls()
-
-    assert writer.written == b"EHLO mail.example.invalid\r\n"
-    assert writer.drains == 1
-    assert writer.tls == ENDPOINT.host
+    assert sockets.asked["host"] == ENDPOINT.host
+    assert sockets.asked["port"] == ENDPOINT.port
+    assert sockets.asked["limit"] == TRANSPORT_OCTET_CEILING
+    assert sockets.asked["server_hostname"] == ENDPOINT.host
     assert channel.is_secure is True
 
 
-async def test_close_is_idempotent_and_suppresses_an_ordinary_release_failure() -> None:
-    """§1: a channel that cannot be released tells its logs and not its caller.
+async def test_an_upgrade_endpoint_is_connected_in_the_clear(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§1, §4: TLS before the greeting only where the endpoint's mode says so."""
+    sockets = _Sockets()
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
 
-    The seam closes from a ``finally``, where Python replaces the exception in
-    flight with one raised there — so a channel that raised here would turn an
-    ``IndeterminateTransmissionError`` into an internal failure and record a
-    possible disclosure as one that did not happen.
-    """
-    channel, writer = _channel(writer=_Writer(fails_to_close=True))
+    channel = await StreamOutboundTransport().open_channel(UPGRADE)
 
-    await channel.close()
-    await channel.close()
-
-    assert writer.closed is True
-
-
-# --- §1: what the opener converts -------------------------------------------
+    assert sockets.asked["ssl"] is None
+    assert sockets.asked["server_hostname"] is None
+    assert channel.is_secure is False
 
 
 @pytest.mark.parametrize(
     "raised",
     [ConnectionRefusedError("nothing is listening"), ssl.SSLError("the certificate is not valid")],
 )
-async def test_the_opener_converts_a_connection_failure_into_a_transport_error(
+async def test_the_opener_names_the_endpoint_and_no_octet_in_its_refusal(
     monkeypatch: pytest.MonkeyPatch, raised: Exception
 ) -> None:
-    """§1: one taxonomy for every holder of the capability.
+    """§1: the message states a condition an operator can act on, and nothing else.
 
-    A ``TransportError`` is the shared refusal type the canonical fake raises too,
-    so a consumer written against one behaves against the other — and a holder does
-    not have to know that this implementation happens to sit on ``asyncio``.
+    ``ssl.SSLError`` is an ``OSError``, so a certificate that did not verify and a
+    connection that was refused arrive by one path and leave as one type — which is
+    the point of the taxonomy and is why there is no second clause for it.
     """
 
     async def refuses(*args: object, **kwargs: object) -> object:
@@ -276,64 +460,27 @@ async def test_the_opener_converts_a_connection_failure_into_a_transport_error(
         await StreamOutboundTransport().open_channel(ENDPOINT)
 
     assert failure.value.__cause__ is raised
-    # The message names the condition an operator can act on and no octet.
-    assert (
-        str(failure.value) == f"the endpoint {ENDPOINT.host}:{ENDPOINT.port} could not be connected"
+    assert str(failure.value) == (
+        f"the endpoint {ENDPOINT.host}:{ENDPOINT.port} could not be connected"
     )
 
 
-async def test_the_opener_asks_for_the_endpoint_it_was_handed_and_nothing_else(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """§4: the host and port are the ones handed in, with the ceiling as the limit.
+async def test_the_channel_upgrades_against_the_pinned_host_and_never_a_reply() -> None:
+    """§4: the certificate is verified against the endpoint that was handed in.
 
-    No name resolution beyond that host, no redirect, no second host on one call —
-    all of which this implementation gets by having nothing else to resolve from.
+    Not against anything the far end says about itself — there is no reply this
+    channel could learn a hostname from, because it keeps the one it was opened
+    with and offers no way to name a second.
     """
-    seen: dict[str, object] = {}
+    channel = _channel()
 
-    async def records(
-        host: str, port: int, **kwargs: object
-    ) -> tuple[asyncio.StreamReader, object]:
-        seen.update(host=host, port=port, **kwargs)
-        return asyncio.StreamReader(), _Writer()
+    await channel.write(b"STARTTLS\r\n")
+    await channel.start_tls()
 
-    monkeypatch.setattr(asyncio, "open_connection", records)
-
-    channel = await StreamOutboundTransport().open_channel(ENDPOINT)
-
-    assert seen["host"] == ENDPOINT.host
-    assert seen["port"] == ENDPOINT.port
-    assert seen["limit"] == TRANSPORT_OCTET_CEILING
-    assert seen["server_hostname"] == ENDPOINT.host
     assert channel.is_secure is True
-
-
-async def test_an_upgrade_endpoint_is_connected_in_the_clear(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """§1, §4: TLS before the greeting only where the endpoint's mode says so.
-
-    Where it does not, the channel is returned cleartext and the obligation is the
-    holder's — the seam refuses to present a credential on a channel whose TLS
-    state reads false, which is the property rather than the endpoint's mode.
-    """
-    upgrade = TransportEndpoint(host=ENDPOINT.host, port=587, implicit_tls=False)
-    seen: dict[str, object] = {}
-
-    async def records(
-        host: str, port: int, **kwargs: object
-    ) -> tuple[asyncio.StreamReader, object]:
-        seen.update(host=host, port=port, **kwargs)
-        return asyncio.StreamReader(), _Writer()
-
-    monkeypatch.setattr(asyncio, "open_connection", records)
-
-    channel = await StreamOutboundTransport().open_channel(upgrade)
-
-    assert seen["ssl"] is None
-    assert seen["server_hostname"] is None
-    assert channel.is_secure is False
+    assert _writer_of(channel).tls == ENDPOINT.host
+    assert _writer_of(channel).written == b"STARTTLS\r\n"
+    assert _writer_of(channel).drains == 1
 
 
 def test_the_capability_holds_no_state_between_calls() -> None:
