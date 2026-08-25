@@ -341,6 +341,52 @@ async def test_a_channel_reserved_by_an_open_in_flight_cannot_be_served_again() 
     assert await held is channel
 
 
+async def test_a_channel_upgraded_while_its_open_was_suspended_is_not_served() -> None:
+    """§1: what is handed over is read at the handoff, not only at the reservation.
+
+    An arrangement holds the object it queued, so it can upgrade it while the open
+    is held — and the reservation's reading is stale from that moment. Serving it
+    anyway would report ``served=True`` for a handout no conforming opener could
+    make: a channel already under TLS for an endpoint whose mode is the upgrade
+    one. Adversarial review found the gap on round 5.
+    """
+    channel = FakeByteChannel(secure=False)
+    transport = FakeOutboundTransport().serve(channel)
+    gate = transport.suspend_next_open()
+    held = asyncio.ensure_future(transport.open_channel(UPGRADE_ENDPOINT))
+    await gate.reached()
+    await channel.start_tls()
+
+    gate.release()
+
+    with pytest.raises(ValueError, match="is being served"):
+        await held
+    assert transport.open_sockets == 0
+    assert [attempt.served for attempt in transport.attempts] == [False]
+
+
+async def test_a_channel_closed_while_its_open_was_suspended_is_not_served() -> None:
+    """§1: the same reading, over the other mutation an arrangement can make.
+
+    ``open_channel`` promises an *open* duplex channel; a holder handed a closed
+    one would be testing against something no opener returns, and the reservation
+    cannot see a close that happens after it.
+    """
+    channel = FakeByteChannel(secure=True)
+    transport = FakeOutboundTransport().serve(channel)
+    gate = transport.suspend_next_open()
+    held = asyncio.ensure_future(transport.open_channel(ENDPOINT))
+    await gate.reached()
+    await channel.close()
+
+    gate.release()
+
+    with pytest.raises(ValueError, match="closed channel"):
+        await held
+    assert transport.open_sockets == 0
+    assert transport.reserved == ()
+
+
 async def test_an_armed_failure_belongs_to_the_open_that_started_next() -> None:
     """The one-shot arming is taken at the attempt, not at the completion.
 

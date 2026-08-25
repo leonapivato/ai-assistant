@@ -32,7 +32,7 @@ from transport_contract import ENDPOINT, ByteChannelContract, OutboundTransportC
 
 from ai_assistant.core.errors import TransportError
 from ai_assistant.core.types import TRANSPORT_OCTET_CEILING, TransportEndpoint
-from ai_assistant.testing.cancellation import LoopSuspension
+from ai_assistant.testing.cancellation import LoopSuspension, settle
 from ai_assistant.tools import egress
 from ai_assistant.tools.egress import StreamOutboundTransport
 
@@ -189,6 +189,9 @@ class _Sockets:
         refuses: Whether the next open fails before anything is acquired.
         asked: The arguments the last open was called with.
         gate: A suspension to hold the next open at, after its socket exists.
+        breaks_on_close: Whether the writer it hands out raises from its
+            *synchronous* ``close``, as one over an already-broken transport
+            does. It gives the socket back first, so the ledger still falls.
     """
 
     def __init__(self) -> None:
@@ -197,6 +200,7 @@ class _Sockets:
         self.refuses = False
         self.asked: dict[str, object] = {}
         self.gate: _Handoff | None = None
+        self.breaks_on_close = False
 
     async def __call__(
         self, host: str, port: int, **kwargs: object
@@ -223,6 +227,7 @@ class _Sockets:
             raise ConnectionRefusedError(msg)
         self.open += 1
         writer = _Writer(ledger=self)
+        writer.fails_to_close = self.breaks_on_close
         gate, self.gate = self.gate, None
         if gate is not None:
             # Held *after* the streams exist and released into a normal return.
@@ -371,13 +376,17 @@ class TestStreamOutboundTransportContract(OutboundTransportContract):
     """The production opener, run through the opener contract.
 
     **The cancellation case is armed where production is the only party that can
-    release anything**, which took three rounds of review to locate. The
+    release anything**, which took four rounds of review to locate. The
     substituted opener suspends *after* its streams exist and completes normally
     when released — it cleans up nothing — so what the case measures is
     ``open_channel``'s own shield-and-release path: the cancellation takes this
-    frame off the open, the open finishes anyway, and the streams it produced are
-    closed by the callback production registered. An implementation without that
-    path leaves them held and the case fails, which is the whole point.
+    frame off the open, the open is waited out rather than cancelled, and the
+    streams it produced are released *before* the cancellation is delivered on.
+    An implementation without that path leaves them held and the case fails,
+    which is the whole point. Round 5 of both lenses is why the suite reads the
+    ledger at the moment the caller's call completes rather than afterwards: the
+    shape that released from a done-callback passed the later reading while the
+    caller held a cancellation over an open socket.
     """
 
     @pytest.fixture(autouse=True)
@@ -569,6 +578,63 @@ async def test_the_channel_upgrades_against_the_pinned_host_and_never_a_reply() 
     assert _writer_of(channel).tls == ENDPOINT.host
     assert _writer_of(channel).written == b"STARTTLS\r\n"
     assert _writer_of(channel).drains == 1
+
+
+async def test_an_establishment_failure_survives_a_release_that_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure the caller owes is the one that leaves, not the cleanup's.
+
+    ``StreamWriter.close`` can raise on a transport that is already broken. On
+    the pre-return release paths that exception would *replace* the one in
+    flight — so a ``TransportError`` saying the channel could not be established
+    would reach the seam as an ``OSError`` from the tidy-up, which is the
+    exception-replacement rule ADR-0191 §1 states for ``ByteChannel.close``
+    arriving one layer up. Adversarial review found both paths unguarded on
+    round 5.
+    """
+    sockets = _Sockets()
+    sockets.breaks_on_close = True
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
+
+    def refuses(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        msg = "the channel could not be constructed"
+        raise TransportError(msg)
+
+    monkeypatch.setattr(egress, "_StreamChannel", refuses)
+
+    with pytest.raises(TransportError, match="could not be constructed"):
+        await StreamOutboundTransport().open_channel(ENDPOINT)
+
+    assert sockets.open == 0
+
+
+async def test_a_cancellation_survives_a_release_that_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller's own control flow arrives, whatever the cleanup did.
+
+    The same guard read from the other pre-return path: a release that raised
+    here would convert a ``CancelledError`` into an ``OSError``, which ADR-0060
+    §1 forbids in the strongest terms — the caller would be told the endpoint
+    broke when what happened is that the caller cancelled.
+    """
+    sockets = _Sockets()
+    sockets.breaks_on_close = True
+    gate = _Handoff()
+    sockets.gate = gate
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
+    opening = asyncio.ensure_future(StreamOutboundTransport().open_channel(ENDPOINT))
+    await gate.reached()
+
+    opening.cancel()
+    gate.release()
+    await settle()
+
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    assert sockets.open == 0
 
 
 def test_the_capability_holds_no_state_between_calls() -> None:

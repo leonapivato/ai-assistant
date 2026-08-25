@@ -425,6 +425,54 @@ class FakeByteChannel:
         return b""
 
 
+def _refuse_unless_servable(
+    channel: FakeByteChannel, endpoint: TransportEndpoint, *, moment: str
+) -> None:
+    """Refuse a channel no conforming opener could hand out for ``endpoint``.
+
+    Read twice per open — once when the channel is reserved, once immediately
+    before it is handed over — because an arrangement holds the object it queued
+    and can mutate it while the open is suspended (ADR-0191 §1's "an open duplex
+    channel", §3's one open one channel). A single reading at the reservation is
+    stale by the handoff, which is what adversarial review found on round 5.
+
+    Args:
+        channel: The channel this open would hand out.
+        endpoint: The endpoint asked for, whose mode fixes the TLS state.
+        moment: Which reading this is, so the refusal says whether the
+            arrangement queued something unservable or made it so mid-open.
+
+    Raises:
+        ValueError: If the channel's TLS state contradicts the endpoint's mode,
+            or if it is closed. Both are the arranger's error rather than a
+            connection's — hence ``ValueError`` and never ``TransportError``:
+
+            * ADR-0191 §1 has an implicit-TLS open return a channel *already*
+              under TLS and an upgrade open return one in the clear, so serving
+              either for the other would let a consumer be tested against a state
+              the production capability can never produce;
+            * ``open_channel`` promises an *open* duplex channel, and a holder
+              handed a closed one would be testing against something no opener
+              returns.
+    """
+    if channel.is_secure is not endpoint.implicit_tls:
+        state = "already under TLS" if channel.is_secure else "in the clear"
+        mode = "implicit TLS" if endpoint.implicit_tls else "an upgrade"
+        msg = (
+            f"a channel {state} is being {moment} for an endpoint whose mode is "
+            f"{mode}; a conforming transport returns a channel already under TLS "
+            f"for an implicit-TLS endpoint and a cleartext one otherwise "
+            f"(ADR-0191 §1)"
+        )
+        raise ValueError(msg)
+    if channel.closed:
+        msg = (
+            f"a closed channel is being {moment}; a conforming transport returns "
+            f"an open duplex channel or raises (ADR-0191 §1)"
+        )
+        raise ValueError(msg)
+
+
 @final
 class FakeOutboundTransport:
     """An :class:`~ai_assistant.core.protocols.OutboundTransport` that opens nothing.
@@ -631,43 +679,22 @@ class FakeOutboundTransport:
 
         Raises:
             ValueError: If the queued channel is not one a conforming transport
-                could return for ``endpoint``. Three ways, all of them the
-                arranger's error rather than a connection's — hence ``ValueError``
-                and never ``TransportError``:
-
-                * **its TLS state contradicts the endpoint.** ADR-0191 §1 has an
-                  implicit-TLS open return a channel *already* under TLS and an
-                  upgrade open return one in the clear, so serving either for the
-                  other would let a consumer be tested against a state the
-                  production capability can never produce;
-                * **it is closed.** ``open_channel`` promises an *open* duplex
-                  channel, and a holder handed a closed one would be testing
-                  against something no opener returns;
-                * **it has already been served, or is reserved by an open still
-                  in flight.** One open, one channel: handing the same object to
-                  two callers models a pool this contract deliberately does not
-                  have (ADR-0191 §3), and closing either caller's channel would
-                  close both. Checking only *completed* handouts left the
-                  concurrent case open, which review found on round 4.
+                could return for ``endpoint``. Two of the three ways are
+                :func:`_refuse_unless_servable`'s — its TLS state contradicts the
+                endpoint's mode, or it is closed — and are read again at the
+                handoff. The third is this method's own: **it has already been
+                served, or is reserved by an open still in flight.** One open, one
+                channel: handing the same object to two callers models a pool this
+                contract deliberately does not have (ADR-0191 §3), and closing
+                either caller's channel would close both. Checking only
+                *completed* handouts left the concurrent case open, which review
+                found on round 4. All three are the arranger's error rather than a
+                connection's — hence ``ValueError`` and never ``TransportError``.
         """
         if not self._queued:
             return FakeByteChannel(secure=endpoint.implicit_tls), False
         channel = self._queued[0]
-        if channel.is_secure is not endpoint.implicit_tls:
-            state = "already under TLS" if channel.is_secure else "in the clear"
-            mode = "implicit TLS" if endpoint.implicit_tls else "an upgrade"
-            msg = (
-                f"a channel {state} was queued for an endpoint whose mode is {mode}; "
-                f"a conforming transport returns a channel already under TLS for an "
-                f"implicit-TLS endpoint and a cleartext one otherwise (ADR-0191 §1)"
-            )
-            raise ValueError(msg)
-        if channel.closed:
-            msg = (
-                "a closed channel was queued; a conforming transport returns an open "
-                "duplex channel or raises (ADR-0191 §1)"
-            )
-            raise ValueError(msg)
+        _refuse_unless_servable(channel, endpoint, moment="queued")
         if any(held is channel for held in (*self._served, *self._reserved)):
             msg = (
                 "a channel is already served or reserved by an open in flight; one "
@@ -695,8 +722,11 @@ class FakeOutboundTransport:
                 case the modelled socket is released before the failure leaves, so
                 :attr:`open_sockets` reads what it did before the call.
             ValueError: If the queued channel is not one a conforming transport
-                could return for ``endpoint``; see :meth:`_reserved_for`. Raised
-                before anything is acquired, so nothing is left held.
+                could return for ``endpoint``; see :meth:`_reserved_for` and
+                :func:`_refuse_unless_servable`. Raised before anything is
+                acquired, or — where the arrangement mutated the channel while
+                this open was suspended — after the reservation is given back, so
+                nothing is left held either way.
             CancelledError: Re-raised after that same release, never absorbed
                 (ADR-0060 §1).
         """
@@ -718,6 +748,15 @@ class FakeOutboundTransport:
                 await gate.hold()
             if failure is not None:
                 raise failure
+            # **Read again here, and the gap this closes is the suspension
+            # itself.** The reading at the reservation is made before anything
+            # can suspend, and an arrangement holds the channel it queued: it can
+            # upgrade or close it while this open is held, after which the
+            # reservation's answer is stale and a ``served=True`` attempt would
+            # report a handout no conforming opener could make. Adversarial
+            # review found it on round 5. It is inside this ``try`` so that the
+            # refusal releases the reservation like any other failed open.
+            _refuse_unless_servable(channel, endpoint, moment="served")
         except BaseException:
             self._in_flight -= 1
             self._reserved.remove(channel)
