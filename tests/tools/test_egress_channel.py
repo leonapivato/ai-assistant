@@ -71,7 +71,28 @@ class _Writer:
         self.releases_before_it_fails = True
         self.aborts = 0
         self.close_gate: LoopSuspension | None = None
+        self.holds_the_close_waiter = False
+        self.released = False
+        self._waiter: asyncio.Future[None] | None = None
         self._ledger = ledger
+
+    @property
+    def close_waiter(self) -> asyncio.Future[None]:
+        """The **shared** future ``wait_closed`` awaits, as the standard library has.
+
+        ``StreamWriter.wait_closed`` awaits the protocol's one close waiter rather
+        than a fresh awaitable per call, which is why a cancellation delivered
+        there is not confined to the call that took it: the future itself ends up
+        cancelled and every later ``wait_closed`` raises. A double that suspended
+        on something private per call could not reproduce that, and round 10 of
+        review is where it mattered.
+
+        Returns:
+            The waiter, made on first use so it belongs to the running loop.
+        """
+        if self._waiter is None:
+            self._waiter = asyncio.get_running_loop().create_future()
+        return self._waiter
 
     @property
     def transport(self) -> _Transport:
@@ -138,16 +159,29 @@ class _Writer:
         if self.fails_to_close and not self.releases_before_it_fails:
             msg = "the transport was already broken"
             raise OSError(msg)
+        if self.holds_the_close_waiter:
+            # A far end that has stopped reading: the socket is closing and the
+            # waiter stays unsettled until something drops the transport.
+            self.closed = True
+            return
         self.give_the_socket_back()
         if self.fails_to_close:
             msg = "the transport was already broken"
             raise OSError(msg)
 
     def give_the_socket_back(self) -> None:
-        """Report this writer's release to the ledger, once."""
-        if not self.closed and self._ledger is not None:
+        """Report this writer's release to the ledger, once, and settle the waiter.
+
+        Settling it is what the standard library's ``connection_lost`` does, and
+        it is why an ``abort`` unblocks a ``wait_closed`` that a far end was
+        holding open.
+        """
+        if not self.released and self._ledger is not None:
             self._ledger.open -= 1
+        self.released = True
         self.closed = True
+        if self._waiter is not None and not self._waiter.done():
+            self._waiter.set_result(None)
 
     async def wait_closed(self) -> None:
         """Wait for the close, suspending or failing where this writer was armed.
@@ -162,6 +196,9 @@ class _Writer:
         if self.fails or self.fails_to_close:
             msg = "the far end had already gone"
             raise OSError(msg)
+        if self.released:
+            return
+        await self.close_waiter
 
 
 @final
@@ -725,6 +762,44 @@ async def test_the_channels_close_aborts_a_release_that_failed_before_releasing(
 
     assert writer.aborts == 1
     assert sockets.open == 0
+
+
+async def test_a_cancelled_close_releases_and_leaves_the_channel_closeable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """§1: safe first, re-raised second — and still idempotent afterwards.
+
+    ``StreamWriter.wait_closed`` awaits the protocol's **shared** close waiter, so
+    a cancellation delivered while this method awaited it directly cancelled that
+    future for good: the socket could stay held by a far end that had stopped
+    reading, and every later ``close`` awaiting the same future raised
+    ``CancelledError`` out of a call nobody cancelled. That is the idempotency
+    ADR-0191 §1 requires, broken by the cleanup path. Adversarial review found it
+    on round 10, and the conformance hook could not: its suspension is per-call
+    and absorbs the cancellation until it is released.
+
+    So the double now holds the shared waiter the standard library holds, and the
+    arrangement is a far end that has stopped reading: the close is under way and
+    the waiter settles only when something drops the transport.
+    """
+    sockets = _Sockets()
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
+    channel = await StreamOutboundTransport().open_channel(ENDPOINT)
+    writer = _writer_of(channel)
+    writer.holds_the_close_waiter = True
+    closing = asyncio.ensure_future(channel.close())
+    await settle()
+
+    closing.cancel()
+    await settle()
+
+    with pytest.raises(asyncio.CancelledError):
+        await closing
+    assert writer.aborts == 1
+    assert sockets.open == 0
+    assert writer.close_waiter.cancelled() is False
+
+    await channel.close()
 
 
 async def test_a_tls_context_that_cannot_be_built_is_a_transport_error(
