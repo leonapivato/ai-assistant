@@ -19,8 +19,10 @@
   two, so every structural implementation of each must grow them or stop satisfying
   it. `ToolInvoker.invoke` gains an obligation and a collaborator, `ToolResult`
   gains a field, `core/types.py` gains two models and `core/errors.py` three error
-  classes. Because the promoted surface's method set changes, the implementing lane
-  also **bumps `PROTOCOL_VERSION` in the same change** (ADR-0124 §9; §9 below).
+  classes. Because the promoted surface's method set changes, the group that lands
+  §4's two operations also **bumps `PROTOCOL_VERSION` in that same change**
+  (ADR-0124 §9; §9 below, which splits the work into a paired lane and three
+  consumer groups under ADR-0137 §4).
   ADR-0015 §5 and golden rule 5 put it in its own PR, ratified before
   anything implements against it.
 - **Required review set: adversarial *and* architecture.** Compelled rather than
@@ -185,6 +187,12 @@ surface can state an execution at all, because ADR-0186's two operations return
 > the whole point of this ADR: a `BaseException` before the claim leaves no row, and
 > one after it leaves an open claim (§3).
 
+> **Normative.** A `CancelledError` is the one class where that reasoning does not
+> apply, and the clauses below treat it separately for that reason. It is resolved by
+> **`invoke`**, which knows which callable it awaited and already holds the
+> `Task.cancelling()` count, and never by the executor, which does not. So nothing
+> is asked of a party that cannot answer, and no marker is minted for one.
+
 > **Normative.** The claim append is performed so that its outcome is **observable
 > before any cancellation is propagated**: a cancellation delivered while the append
 > is in flight is absorbed, the append's result is observed, and the cancellation is
@@ -206,6 +214,36 @@ surface can state an execution at all, because ADR-0186's two operations return
 > enumerated-fields bound. No claim landed, so
 > the trail records nothing — which is the true thing to record — and this ADR gives
 > the seam no returned reachability fact and the executor no new rule to apply.
+
+> **Normative.** A `CancelledError` the **claim path's own collaborator** raises —
+> the ledger's clock, its store — where **no external cancellation is pending** is
+> not a cancellation of this call and does not leave `invoke` as one. `invoke` raises
+> an `AuditError` carrying it as the cause, on the pre-callable path this section
+> already defines, so ADR-0034 §1's second ground classifies the step and no retry
+> follows. No callable was entered, no claim landed, the trail records nothing, and
+> the diagnostic §3 requires is emitted.
+
+> **Normative.** The discriminator is the one the seam already computes and no new
+> fact: ADR-0031 §2's `Task.cancelling()` **delta**, captured before the collaborator
+> is awaited and read as an *increase*, never as a truth value — that section spells
+> out why the boolean reading fails, and one of its two named failures is exactly
+> this one, "a tool's invented `CancelledError` … promoted to an external
+> cancellation on the strength of something that happened before the seam was
+> entered". Where the count did increase, an external cancellation **is** pending and
+> the `CancelledError` propagates untouched: ADR-0060 §1's propagation clause turns
+> on provenance — "*from outside* is load-bearing" — and this ADR supersedes no part
+> of it.
+
+> **Normative.** This is ADR-0029 §4's own rule applied one collaborator over, not a
+> new one. That section reserves propagation for "a cancellation delivered from
+> outside" and makes an invented one an ordinary failure — "anything else escaping
+> the callable is an exception like any other" — and ADR-0031 §2 names the invented
+> case in terms as `INTERNAL`. **Nothing new crosses the seam:** what changes is the
+> *class* `invoke` raises, which its contract already enumerates. The executor is
+> untouched, keeps its standing rule that a `CancelledError` leaving `invoke` is an
+> interrupted call, and is simply no longer handed one for a call that was never
+> cancelled. The reachability fact ADR-0034 §1 declines is still not minted, and
+> #234's residue is unchanged.
 
 > **Normative.** The step's outcome in that case is whatever
 > `ToolDefinition.interrupted_outcome` already computes for a cancellation
@@ -421,14 +459,29 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > every other combination at construction. A **claim** carries `completes`,
 > `outcome`, `incurred_cost` and `failure_kind` all unset. A **completion** carries
 > `completes`, `outcome` and `incurred_cost` all set, and `failure_kind` set **only
-> where** `outcome` is `FAILED`. `completes` is the discriminator.
+> where `outcome` is not `SUCCEEDED`** — where it may be set and may be absent.
+> `completes` is the discriminator.
+
+> **Normative.** `INDETERMINATE` carries a kind on the same terms as `FAILED`, and
+> the row does not drop it. ADR-0029 §3's `ToolResult` validator **requires** a
+> `ToolFailure` on every result that is not `SUCCEEDED` — "when it is FAILED or
+> INDETERMINATE and `failure` is None" is a rejection in terms — so a keyed
+> side-effecting call that timed out arrives at this seam carrying `TIMED_OUT`, and a
+> row that refused to hold it would either fail validation and leave the claim open
+> or discard a kind the seam was handed. ADR-0039 already settled the same question
+> one layer up when it made a tool-reported failure "land durably on an INDETERMINATE
+> step too, by value — kind and message unedited"; this row takes the kind and not
+> the message, because §2 carries no content.
 
 > **Normative.** A `failure_kind` is **transcribed from the `ToolResult` that
-> carried one and is never synthesised**. So a `FAILED` completion derived from a
-> `ToolResult` carries its kind, and a `FAILED` completion derived from an
-> **exception** — a cancellation ADR-0029 §4 classifies `FAILED` through
-> `ToolDefinition.interrupted_outcome` — carries **none**. That is why the shape
-> above permits `FAILED` without a kind rather than requiring one.
+> carried one and is never synthesised**. So a completion derived from a
+> `ToolResult` carries that result's kind, whichever of the two non-`SUCCEEDED`
+> outcomes it holds; and a completion derived from an **exception** — a cancellation
+> ADR-0029 §4 classifies through `ToolDefinition.interrupted_outcome`, which may
+> compute either `FAILED` or `INDETERMINATE` — carries **none**, because no
+> `ToolResult` was produced to transcribe from. That is why the shape above permits
+> a kindless completion rather than requiring a kind, and why it permits one on both
+> outcomes rather than on neither.
 
 > **Normative.** No lane fills that absence. ADR-0031 §3 rules that "The seam never
 > synthesises" `CANCELLED`, and no other member of `ToolFailureKind` describes an
@@ -436,14 +489,17 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > `REFUSED` is an upstream declining, `UNAVAILABLE` is one that could not be
 > reached. Writing any of them here would be the seam inventing a cause, which is
 > the failure ADR-0031 §3 corrected. The absence is the honest value and it is
-> readable as one: a `FAILED` with no kind is a failure this system observed
+> readable as one: a completion with no kind is a non-success this system observed
 > without a reported cause.
 
 > **Normative.** A kindless `FAILED` therefore **admits no further claim** under
 > §1, whose conjunction requires "a recorded `failure_kind` whose `retryable` is
 > true". A cancelled act is not auto-retried, which is the direction ADR-0029 §5 and
 > ADR-0014 §4 already take, and it falls out of the rule rather than needing a
-> clause of its own.
+> clause of its own. An `INDETERMINATE` completion, kind or no kind, is refused by
+> §1's completed-outcome arm before the conjunction is reached, so the kind it now
+> carries changes nothing about what may follow it — it is recorded because the seam
+> was handed it, not because anything reads it to decide a retry.
 
 > **Normative.** `core/types.py` gains `RecordedInvocation`, frozen with
 > `extra="forbid"`, whose fields are exactly: `invocation: ToolInvocation`;
@@ -473,8 +529,9 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > of a forgery was detected.
 
 > **Normative.** `complete_invocation` refuses in this order and no other:
-> `AuditError` where an argument is not valid, which includes a `failure_kind` that
-> disagrees with `outcome`; then `InvalidCompletionError` where `claim_id` names no
+> `AuditError` where an argument is not valid, which includes a `failure_kind`
+> supplied with a `SUCCEEDED` outcome — the one combination the shape above forbids,
+> an absent kind being well-formed on either other outcome; then `InvalidCompletionError` where `claim_id` names no
 > recorded claim or names one already completed. It never raises
 > `UnrecordedAuthorisationError`: a completion names a claim, and the claim already
 > names the decision.
@@ -664,22 +721,51 @@ the count.
 > propagated unwrapped (§2). Each is surfaced through the diagnostic below, which
 > names its fault class; none of them changes what `invoke` returns.
 
-> **Normative.** A **`BaseException`** raised on the completion path while no
-> external cancellation is propagating is not absorbed, whatever its class and
-> wherever it arose — a `KeyboardInterrupt`, a `SystemExit`, and a `CancelledError`
-> a collaborator raised on its own account alike. It propagates unchanged, the
-> `ToolResult` does not reach the caller, and no diagnostic stands in for it: a
-> process being torn down is not a refusal, and converting a `KeyboardInterrupt`
-> into a returned result is the conversion ADR-0029 §3 forbids. The claim is left
-> open by that exit as by any other.
+> **Normative.** "By class, not by origin" is exact and has exactly one companion
+> rule, stated below rather than folded in here: a `CancelledError` is not an
+> `Exception`, so this clause does not reach it, and whether it is absorbed turns on
+> the `Task.cancelling()` **count** and not on its class or its origin either. That
+> is the one place in this section where a fact outside the exception decides the
+> arm, and it is the one place where the exception's class is not evidence of
+> anything — a cancellation with nothing cancelled says only that a collaborator
+> raised the wrong thing.
 
-> **Normative.** A `CancelledError` **a collaborator raised** — the ledger's clock,
-> its store — is not an external cancellation of this call and is never read as one.
-> `invoke` does not classify it through `ToolDefinition.interrupted_outcome`, does
-> not treat it as a new cancellation exit, and **attempts no second completion**:
-> §3's obligation is to call `complete_invocation` once per claim, and a completion
-> path that failed has discharged it. ADR-0060 §1's "*from outside* is load-bearing"
-> is the distinction being drawn, applied one collaborator down.
+> **Normative.** A **`BaseException` that is not a `CancelledError`** raised on the
+> completion path while no external cancellation is propagating is not absorbed,
+> whatever its class and wherever it arose — a `KeyboardInterrupt` and a `SystemExit`
+> alike. It propagates unchanged, the `ToolResult` does not reach the caller, and no
+> diagnostic stands in for it: a process being torn down is not a refusal, and
+> converting a `KeyboardInterrupt` into a returned result is the conversion ADR-0029
+> §3 forbids. The claim is left open by that exit as by any other.
+
+> **Normative.** A `CancelledError` **a collaborator raised** on the completion path
+> — the ledger's clock, its store — where the `Task.cancelling()` delta shows **no
+> external cancellation pending** is not a cancellation of this call, is never read
+> as one, and is **absorbed exactly as any other completion failure is**. `invoke`
+> returns the call's own `ToolResult` unchanged, the claim is left open, the
+> diagnostic is emitted carrying no class (the clause above governs that field), and
+> `invoke` attempts no second completion: the obligation is to call
+> `complete_invocation` once per claim, and a completion path that failed has
+> discharged it.
+
+> **Normative.** It is **absorbed rather than propagated**, and an earlier draft of
+> this section had it the other way. Propagating it would discard a `ToolResult` the
+> tool had already produced and hand the executor a `CancelledError` for a call
+> nothing cancelled, which the executor commits as an interrupted call — a
+> known-successful side effect recorded as interrupted, the outcome this section
+> calls the one worse than an incomplete record. ADR-0060 §1's propagation clause
+> does not reach it: that clause binds a cancellation delivered *from outside the
+> call*, and this one was raised inside `invoke`'s own frame by something `invoke`
+> awaited. ADR-0029 §4 decides the rest, reserving propagation for the outside case
+> and making an invented cancellation an ordinary failure. `invoke` mints no outcome
+> from it and does not classify it through `ToolDefinition.interrupted_outcome`; the
+> outcome was already decided by the call itself.
+
+> **Normative.** Where the delta shows an external cancellation **is** pending, that
+> cancellation is what leaves `invoke`, by the clause below and by ADR-0060 §1. The
+> two cases are told apart by the count and by nothing else — never by the
+> exception's class, never by its identity, and never by where in the body it
+> surfaced.
 
 > **Normative.** No exit ever attempts a second completion for one claim. That is
 > stated on its own because three of the arms above are reached *from inside* the
@@ -896,6 +982,33 @@ refusal orders are exhaustive over classes: an implementation cannot reliably te
 which side of the guard an `Exception` came from, and a rule it cannot apply is not
 a rule.
 
+**The collaborator's own `CancelledError` is absorbed, and this reverses an earlier
+draft rather than refining it.** An earlier round had it propagate unchanged, on the
+reading that a `CancelledError` is always delivered onward. That reading takes
+ADR-0060 §1's propagation clause without its qualifier: "*from outside* is
+load-bearing", and the clause is explicitly scoped to a cancellation *delivered from
+outside the call*. A clock this system injected, raising inside `invoke`'s own frame
+with nothing cancelled, is not that. Two ratified sections already decide the case
+the other way — ADR-0029 §4 reserves propagation for the outside case and makes
+anything else "an exception like any other", and ADR-0031 §2 names the invented
+cancellation in terms and gives the `Task.cancelling()` delta as the discriminator
+precisely so it is not "promoted to an external cancellation on the strength of
+something that happened before the seam was entered". Propagating it also produced
+the concrete harm §3 exists to prevent: a `ToolResult` already in hand discarded, and
+a successful side effect committed by the executor as an interrupted call. So the arm
+is absorbed on the completion path and translated to an `AuditError` on the claim
+path, and neither is a new rule — both are ADR-0029 §4's, applied one collaborator
+over.
+
+**And it is `invoke` that resolves it, which is why it is not #234's.** The executor
+cannot tell a collaborator's cancellation from a caller's, and asking it to would
+mint the reachability fact ADR-0034 §1 declines. `invoke` can: it knows which
+callable it awaited, and it already captures the `Task.cancelling()` count for
+ADR-0031 §2's delta. So the resolution sits where the fact already lives, the
+executor's rule is untouched, and nothing new crosses the seam — what changes is the
+class of exception `invoke` raises, which its contract already enumerates. #234's
+residue is narrowed by exactly one case and otherwise stands (§9).
+
 **A claim with no completion is ADR-0184's third state, one store over.** That ADR
 minted a value rather than a marker precisely so "the absence is its own value", and
 ADR-0188 §4 states the same rule positively for a record whose process died. The
@@ -954,13 +1067,13 @@ nothing in this section inherits that nonce or its hazard.
 > **Normative.** A surface rendering a `RecordedInvocation` renders, for every one:
 > the row's kind — claim or completion — the instant it was recorded, and the tool
 > identifier and capability the value itself carries. For a completion it also
-> renders the outcome, the failure kind where the outcome is `FAILED` **and the row
-> carries one**, and the incurred cost, **including that the cost is unknown** where
+> renders the outcome, the failure kind where the row **carries one**, and the
+> incurred cost, **including that the cost is unknown** where
 > the basis is `UNKNOWN`. It omits, truncates, summarises, samples and counts in
 > place of none of that, and a surface that cannot render one whole renders **fewer
 > of them**.
 
-> **Normative.** Where the outcome is `FAILED` and the row carries **no**
+> **Normative.** Where the outcome is not `SUCCEEDED` and the row carries **no**
 > `failure_kind` — the cancellation-derived completion §2 permits and forbids any
 > lane to fill — the floor is met by rendering **that no kind was reported**. A
 > surface renders neither a kind it chose nor a blank, and it does not drop the row
@@ -1004,8 +1117,8 @@ nothing in this section inherits that nonce or its hazard.
 > **Normative.** Every value rendered is inserted into the surface's output as
 > **data**, neutralised for that target on render (ADR-0042 §4).
 
-> **Normative.** Which adapters render these operations is the implementing lane's,
-> and the rendering floor above binds each that does. This ADR promotes no CLI
+> **Normative.** Which adapters render these operations is the surface group's
+> (§9), and the rendering floor above binds each that does. This ADR promotes no CLI
 > command and reserves no command name.
 
 **Separate operations rather than one interleaved listing, and ADR-0186 §1 is why
@@ -1095,13 +1208,22 @@ the milestone-24 ruling found it.
 
 > **Normative.** **No integration can populate this field yet, and this ADR mints
 > no channel by which one could.** `ToolImplementation` returns `FrozenJson` and
-> nothing else, ADR-0029 §1 leaves the callable's shape to `tools/` and "does not
-> contract it", and ADR-0031 §3 records the same gap for six `ToolFailureKind`
-> members as issue #192. So a registered integration reports `None`, the row records
+> nothing else, and ADR-0029 §1 leaves the callable's shape to `tools/` and "does
+> not contract it". So a registered integration reports `None`, the row records
 > `UNKNOWN`, and a budget over it fails closed — which is the right interim answer
 > and the reason the field is a `ToolCost` rather than a bare number.
 
-> **Normative.** The implementing lane therefore proves the **mapping** rather than
+> **Normative.** **That gap is not #192's and is not answered by ADR-0032.** #192
+> asked for a *failure* transport and is closed; ADR-0032 answers it with
+> `ClassifiedToolError`, an exception carrying a `ToolFailure`, and its "What is not
+> contracted here" keeps `ToolImplementation`'s `FrozenJson` return type on purpose —
+> rejecting both a widened return type and a returned `ToolResult`, the second
+> because ADR-0031 §2 will not hand a callable the outcome field. An exception is by
+> construction unavailable to a call that **succeeded**, which is the case a cost
+> matters for. So nothing carries a successful call's cost today and no ADR owns
+> minting one; **#1558** owns it, and it also owes the end-to-end case §9 defers.
+
+> **Normative.** The seam group (§9) therefore proves the **mapping** rather than
 > populating it, and the two are not the same claim. `ToolResult.incurred_cost`
 > reaches `ToolInvocation.incurred_cost` unaltered where the result carries a figure,
 > and a `None` becomes a `ToolCost` whose basis is `UNKNOWN` — both asserted at that
@@ -1112,10 +1234,12 @@ the milestone-24 ruling found it.
 > test that could be satisfied by the declaration would certify the fiction
 > ADR-0016 §4 refused.
 
-> **Normative.** Whichever ADR answers #192 supplies the integration-side carrier
-> for this field alongside the six failure kinds, because it is the same missing
-> channel and splitting it would give `tools/` two ways for a callable to report
-> what it knows. This ADR neither pre-empts that shape nor blocks on it.
+> **Normative.** This ADR neither pre-empts the shape #1558 lands nor blocks on it,
+> and it forecloses none of the options: a return-side channel narrower than
+> `ToolResult`, a figure the seam computes, or a measured per-registration
+> declaration. What it fixes is the **destination** — the field on the row and the
+> `UNKNOWN` that stands until something reaches it — so that whatever carrier lands
+> has somewhere to arrive and the budget ADR has something stable to cite.
 
 > **Normative.** This ADR decides no ceiling, no budget period, no currency
 > reconciliation and no refusal outcome. Those are the budget ADR's, and it cites
@@ -1338,6 +1462,22 @@ and this ADR introduces none" all stay true. This ADR introduces no such fact on
 the seam either: §3's claim is a durable row in a store, not a value returned from
 `invoke`, and no executor reads it.
 
+**ADR-0060 §1, ADR-0029 §4 and ADR-0031 §2 — nothing is owed, and the showing
+matters because §§1 and 3 look at first like a departure.** They put a collaborator's
+own `CancelledError` on a non-cancellation path, which reads as absorbing a
+cancellation until the three clauses are read as written. ADR-0060 §1's propagation
+clause binds "a cancellation delivered **from outside the call**" and says in terms
+that "*from outside* is load-bearing"; a clock this system injected, raising inside
+`invoke`'s frame with nothing cancelled, is not one, and every other limb of §1 —
+the resource clause, the deferred-delivery clause, the indeterminate-effect clause —
+is untouched and relied on. ADR-0029 §4 already rules the same way twice over: it
+reserves propagation for the outside case, and it makes anything else escaping "an
+exception like any other". ADR-0031 §2 supplies the discriminator and names this very
+failure as one of the two the boolean reading produces — an invented `CancelledError`
+"promoted to an external cancellation on the strength of something that happened
+before the seam was entered". So §§1 and 3 apply those three sections rather than
+changing any of them, and no sentence of any becomes false or over-wide.
+
 **ADR-0148 §9 — partially superseded, on *where* an attempt's outcome is recorded
 and not on *which four* outcomes there are.** Its third clause rules that "The four
 outcomes ADR-0017 §3 requires are the step's and no others", and its reasoning gives
@@ -1418,13 +1558,39 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 
 ### 9. What the implementing lane owes, and what it is sequenced behind
 
-> **Normative.** The implementing lane lands the `core` surface this ADR names:
-> `InvocationLedger` as a triad — Protocol, shared conformance suite and canonical
-> fake — together with its primary production implementation, the `permissions`
-> store that also satisfies `AuditTrail` (ADR-0137 §2's pairing); the new
-> obligations in the existing conformance suites for `AuditTrail`, `ToolInvoker`
-> and `AssistantEngine`; and the fakes for each. No lane implements against this
-> ADR before it is ratified and merged (ADR-0015 §5).
+> **Normative.** This ADR is implemented by **one paired lane and three consumer
+> groups**, not by a single lane. ADR-0137 §4 binds it: every consumer beyond the
+> primary implementation is briefed only after the paired lane has merged, and the
+> merged contract text is that brief's authority. An earlier draft of this section
+> put all of them in one lane, which would have put substantial new machinery into
+> four subsystems at once — the widening ADR-0137 §2 grants is the triad *plus its
+> primary implementation* and reaches no further.
+
+> **Normative.** **The paired lane** lands the `core` surface this ADR names —
+> `ToolInvocation`, `RecordedInvocation`, the three error classes, and
+> `ToolResult.incurred_cost` — with `InvocationLedger` as a triad (Protocol, shared
+> conformance suite, canonical fake) and its primary production implementation, the
+> `permissions` store that also satisfies `AuditTrail` (ADR-0137 §2's pairing). It
+> also lands `AuditTrail`'s two new read members with the store-side join, their
+> obligations in that Protocol's existing conformance suite, and its fake, because
+> those are the same object and the same store. No lane implements against this ADR
+> before it is ratified and merged (ADR-0015 §5).
+
+> **Normative.** **The seam group** (`tools/`) lands `ToolInvoker.invoke`'s new
+> obligation and its ledger collaborator, the `ToolResult` → `ToolInvocation`
+> mapping, that Protocol's new conformance obligations and its fake, and the
+> composition-root wiring §9 requires below — the wiring rides here because this is
+> the group that first needs an invoker holding a ledger.
+
+> **Normative.** **The recovery group** (`orchestration/`) lands §3's recovery-scan
+> completions and their ordering, and the executor-level test below.
+
+> **Normative.** **The surface group** lands §4's two `AssistantEngine` operations,
+> that Protocol's new conformance obligations and its fake, the `PROTOCOL_VERSION`
+> bump with its wire tests, and whichever adapters render the rows. These are
+> relays and adaptation rather than new machinery, which is why ADR-0137 §4's
+> grouping test admits them as one group; that test, and not this list, governs any
+> resplit the dispatcher judges necessary.
 
 > **Normative.** The suite asserts **one guarded reading per append**, with a clock
 > that advances on every call and a test that fails if the append reads it twice,
@@ -1452,56 +1618,76 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > carrying `None` maps to a `ToolCost` whose basis is `UNKNOWN`, and a
 > `ToolDefinition.cost` present on the definition appears on **no** row (§5).
 
-> **Normative.** It does **not** pin that path end to end, and no lane writes a test
-> claiming it does. §5 records that no registered integration can supply a figure
-> until #192's carrier lands, so a case asserting a figure traversing the production
-> path would have to construct a `ToolResult` past the seam or patch inside it —
-> proving the mapping the clause above already pins and proving nothing about the
-> path. The end-to-end case is owed by whichever ADR answers #192, alongside the six
-> `ToolFailureKind` members ADR-0031 §3 leaves in the same position. This ADR mints
-> no integration-side carrier to make it writable here: the callable's shape is
-> `tools/`-internal and ADR-0029 §1 declines to contract it, so minting one would be
-> this ADR deciding a surface it has no ADR for.
+> **Normative.** It does **not** pin that path end to end, and no group writes a
+> test claiming it does. §5 records that no registered integration can supply a
+> figure at all, so a case asserting one traversing the production path would have to
+> construct a `ToolResult` past the seam or patch inside it — proving the mapping the
+> clause above already pins and proving nothing about the path. The end-to-end case
+> is owed by whichever ADR answers **#1558**. This ADR mints no integration-side
+> carrier to make it writable here: the callable's shape is `tools/`-internal and
+> ADR-0029 §1 declines to contract it, so minting one would be this ADR deciding a
+> surface it has no ADR for.
 
-> **Normative.** It pins the kindless `FAILED`: a completion derived from a
-> cancellation ADR-0029 §4 classifies `FAILED` constructs with **no**
-> `failure_kind`, admits no further claim under §1, and the `INDETERMINATE` branch
-> of the same classification is pinned beside it (§§1–2). A **completion clock
-> raising `CancelledError` directly**, with no external cancellation pending,
-> propagates it unchanged and attempts no second completion (§3).
+> **Normative.** It pins the **kindless** completion on both outcomes: a completion
+> derived from a cancellation ADR-0029 §4 classifies `FAILED` constructs with **no**
+> `failure_kind` and admits no further claim under §1, and the `INDETERMINATE`
+> branch of the same classification is pinned beside it, kindless too (§§1–2). It
+> pins the **kinded** `INDETERMINATE` in the same place: a `ToolResult` whose
+> outcome is `INDETERMINATE` and whose `ToolFailure.kind` is `TIMED_OUT` — the shape
+> ADR-0029 §3's validator requires and §4's deadline produces — constructs a
+> completion carrying that kind, unaltered, and one carrying a kind under a
+> `SUCCEEDED` outcome is refused at construction (§2). A **completion clock raising
+> `CancelledError` directly**, with no external cancellation pending, is **absorbed**:
+> `invoke` returns the call's own `ToolResult` unchanged, the claim is left open, the
+> diagnostic carries no class, and no second completion is attempted (§3). The same
+> clock raising it while an external cancellation **is** pending propagates instead,
+> and the test distinguishes the two by the `Task.cancelling()` count alone (§3).
 
-> **Normative.** Each adapter the lane writes against §4 is tested on **that row
-> shape**: given a `FAILED` completion carrying no `failure_kind`, it renders that
+> **Normative.** Each adapter the surface group writes against §4 is tested on
+> **that row shape**: given a `FAILED` completion carrying no `failure_kind`, it renders that
 > no kind was reported, renders no kind of its own, drops neither the row nor the
 > field, and raises nothing. The floor is proved on the shape that is hardest to
 > meet it on, which is the only way a floor is proved at all (§4).
 
-> **Normative.** One test is owed at the **executor**, not at the seam, for the
-> mirror case on the claim path. With the **claim** clock callable raising
-> `CancelledError` on its own account and `Task.cancelling() == 0` — no external
-> cancellation pending — the test asserts that the tool callable is **never
-> entered**, that **no claim** is appended, and that the step's outcome is whatever
-> `ToolDefinition.interrupted_outcome` computes for a cancellation, unchanged by this
-> ADR. It pins the path and the two absences; it asserts no classification.
+> **Normative.** Two tests are owed on the claim path's mirror case, one at the seam
+> and one at the **executor**. At the seam: the **claim** clock callable raising
+> `CancelledError` with `Task.cancelling()` unchanged leaves `invoke` as an
+> `AuditError` carrying it as the cause — **not** as a `CancelledError` — with the
+> tool callable never entered and no claim appended (§1). At the executor: the same
+> wiring commits the step **`FAILED`** on ADR-0034 §1's second ground and **never**
+> `interrupted_outcome`, and the test asserts the step's committed outcome rather
+> than the exception type alone, because the exception type is what an earlier draft
+> got right while the outcome stayed wrong.
 
-> **Normative.** That the executor commits the interrupted-call classification there
-> — `orchestration/executor.py` catches every `CancelledError` leaving `invoke` and
-> commits `interrupted_outcome`, so a call that provably never ran is recorded as an
-> interrupted one — is **not decided by this ADR and is not corrected here**. Telling
-> a collaborator-raised `CancelledError` from an externally delivered one at that
-> seam requires the "the callable was reached" fact ADR-0034 §1 declines to expose
-> and §1 above declines to mint; changing the classification is a change in
-> `orchestration/` and to ADR-0029 §4's rule, which **#234** owns and which this ADR
-> narrows without closing. The test exists so the behaviour is pinned and the
-> residue is visible rather than assumed away — and what the **store** records still
-> tells the two cases apart, which is §1's answer to the same question.
+> **Normative.** A third case pins the other side of the discriminator: the same
+> claim clock raising `CancelledError` while an external cancellation **is** pending
+> leaves `invoke` as the `CancelledError`, the executor commits
+> `interrupted_outcome` exactly as it does today, and nothing about ADR-0029 §4's
+> classification of a genuinely cancelled call is changed (§1, ADR-0060 §1).
+
+> **Normative.** **#234 is narrowed by this and is not closed.** What §1 removes is
+> one way `invoke` could hand the executor a `CancelledError` for a call nothing
+> cancelled. What remains is #234's own subject: for a call that *was* cancelled,
+> the executor still cannot tell how far it got, so `interrupted_outcome` may compute
+> `INDETERMINATE` for a call that provably did not run. That fact is not exposed here
+> — ADR-0034 §1 declines it ("exposes no 'the callable was reached' fact and this ADR
+> introduces none") and §1 above declines to mint it — and changing that
+> classification is a change in `orchestration/` that #234 owns. What the **store**
+> records still tells the two apart, which is §1's answer to the same question.
 
 > **Normative.** Four further failure paths are pinned. A **`clear()` landing
 > between a claim and its completion** leaves the call's result standing, emits the
 > diagnostic, refuses the completion `InvalidCompletionError`, and leaves **no
 > claim** — nothing recreated (§§3, 6). A **completion-path clock callable raising
-> an `Exception`** is absorbed: `invoke` returns the call's own `ToolResult` and the
-> exception reaches the operator with its own type and cause (§3). The **same clock
+> an `Exception`** is absorbed: `invoke` returns the call's own `ToolResult`, and the
+> operator gets the diagnostic and **only** the diagnostic — the fault class, the
+> operation and the outcome, asserted field by field, with the test failing if the
+> instance, the message or any cause reaches the log. Nothing asserts that the
+> exception's own type or cause reaches the operator on this path, because the
+> exception is absorbed and no channel carries it: §3's "the exception object still
+> preserves its cause" is a statement about the object where one survives, and here
+> none does. Cause preservation is pinned on the paths where the object **does**
+> propagate — the two below (§3). The **same clock
 > raising `KeyboardInterrupt`** is not absorbed: it propagates unchanged and no
 > `ToolResult` reaches the caller (§3). **An external cancellation already
 > propagating when the completion path raises**, in either class, leaves `invoke` as
@@ -1517,7 +1703,7 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > **Normative.** Two writes here run from paths that may themselves be cancelled:
 > the claim append, whose outcome §1 requires to be observable before a cancellation
 > is propagated, and the completion, which §3 requires on the cancellation and
-> deadline exits. The implementing lane owes both a write that survives that path.
+> deadline exits. The paired lane owes both a write that survives that path.
 > Where the completion cannot be written the claim is left open, which is the honest
 > state and not a licence to write a wrong outcome; where the **claim**'s outcome
 > cannot be observed, the implementation does not satisfy §1 and the conformance
@@ -1570,25 +1756,28 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > **Normative.** `ToolInvocation` and `RecordedInvocation` join the promoted set
 > `tests/core/test_engine_surface_closure.py` walks, together with the transitive
 > closure of what their fields reach (ADR-0085 §5), and every string among them is
-> `EncodableText` (ADR-0085 §4c). The lane adds no figure to a comment for either
-> count; those checks own them.
+> `EncodableText` (ADR-0085 §4c). The paired lane adds no figure to a comment for
+> either count; those checks own them.
 
 > **Normative.** §4's two operations change the promoted surface's **method set**,
-> so the implementing lane **bumps `PROTOCOL_VERSION` in the same change**. That is
+> so the **surface group** — the one that lands them — **bumps `PROTOCOL_VERSION` in
+> that same change**. That is
 > ADR-0124 §9's rule in terms — it reaches "any change to the promoted surface's
 > method set or to a method's arguments or results (ADR-0085 §3)", and the
 > obligation is "on whoever makes the change, in the same change". Without the bump
 > a client at the new version and a hub at the old pass the exact-version handshake
 > and `recent_invocations` then fails as an unknown method rather than as an
-> incompatible peer, which is the failure the handshake exists to prevent. The
-> lane's wire tests cover the mixed-version rejection. The lane also applies
+> incompatible peer, which is the failure the handshake exists to prevent. That
+> group's wire tests cover the mixed-version rejection, and it also applies
 > ADR-0124 §9's second limb to `ToolResult.incurred_cost` where that type is
-> wire-carried; one bump discharges both grounds.
+> wire-carried; one bump discharges both grounds. `ToolResult` gains its field in the
+> paired lane, so a bump is owed at the surface group whether or not the field
+> reached the wire earlier — ADR-0124 §9's obligation is on whoever moves the set.
 
 > **Normative.** The composition root wires one object as both `InvocationLedger`
 > and `AuditTrail`, and hands the `ToolInvoker` the ledger alone. A composition that
-> hands it the trail is a defect the lane's own test names, in the shape ADR-0029
-> §8's pairing test already has.
+> hands it the trail is a defect the seam group's own test names, in the shape
+> ADR-0029 §8's pairing test already has.
 
 > **Normative.** The conformance suite exercises the consume under **concurrent**
 > invocation rather than assuming a single-threaded caller, as ADR-0021 §4's suite
@@ -1600,7 +1789,18 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > write fails the contract — and only a racing test finds that, exactly as ADR-0021
 > §4 found it for two resolutions of one `CONFIRM`.
 
-The lane is sequenced behind the transport-capability lane of this milestone —
+> **Normative.** The racing suite also exercises the **join against `clear()`**,
+> because that race is the reason §2 puts the join inside one store operation. Under
+> a barrier, `recent_invocations` and `export_invocations` each run against a
+> concurrent `clear()`, and each must return either the complete pre-clear snapshot
+> or the empty post-clear one — never a row without its decision, never a row whose
+> `tool` or `capability` was read from a decision the erasure had already removed,
+> and never a raised error standing in for either answer. An implementation that
+> reads rows and decisions in two operations passes the claim and completion races
+> above and fails this one, which is the point of testing it: the two-read
+> implementation is the natural one, and only this race distinguishes it.
+
+The paired lane is sequenced behind the transport-capability lane of this milestone —
 **ADR-0191**, ratified and merged while this ADR was in review, which also touches
 `core/protocols.py` — and ahead of the recipient-policy lane (#68), which writes the
 same audit surface. ADR-0191 is cited by number because its file is now on `main`;
@@ -1679,7 +1879,7 @@ row kinds, and the annotation belongs to the kind that was already there.
   it is chosen deliberately.
 - **`ToolResult` gains a field, so every tool implementation may report a cost and
   none must — and for now none can.** `ToolImplementation` returns `FrozenJson`, so
-  until #192's integration channel lands, every registered tool reports `None`, every
+  until #1558's carrier lands, every registered tool reports `None`, every
   row records `UNKNOWN`, and a budget over them fails closed. That is the honest
   interim state rather than a silent zero, and it is why the field is a `ToolCost`
   and not a number. The contract lands now because the ceiling ADR needs something
@@ -1694,6 +1894,14 @@ row kinds, and the annotation belongs to the kind that was already there.
   pairs each with its tool identity and one egress fact, atomically, because the
   rendering floor cannot be met otherwise and because the pairing has no safe home
   above the store; the engine stays the relay ADR-0186 §1 made it.
+- **A cancellation nothing requested no longer leaves the seam as a cancellation.**
+  A ledger clock or store raising `CancelledError` on its own account, with the
+  `Task.cancelling()` count unmoved, becomes an `AuditError` before the callable and
+  is absorbed after it — so the executor is never handed a `CancelledError` for a
+  call nothing cancelled, and a successful side effect is never committed as an
+  interrupted one. Nothing new crosses the seam and the executor's own rule is
+  unchanged; what changes is which class `invoke` raises. It narrows #234 by one
+  case and closes none of it.
 - **An audit write can now fail without failing the call**, and that asymmetry is
   deliberate. A completion that will not write leaves an open claim and an operator
   diagnostic, and the tool's own result is returned unchanged — because reporting a
@@ -1704,12 +1912,19 @@ row kinds, and the annotation belongs to the kind that was already there.
 - **An honest history has a state that is neither success nor failure, and surfaces
   must render it.** A claim with no completion will be visible to users, and a
   surface that finds it awkward is not permitted to resolve it. The same holds one
-  field down: a cancelled act is a `FAILED` row with **no** failure kind, because no
-  member of the enum describes one, and §4's floor is met by saying that none was
-  reported rather than by choosing one or by hiding the row.
+  field down: a cancelled act is a `FAILED` or `INDETERMINATE` row with **no**
+  failure kind, because no member of the enum describes one, and §4's floor is met
+  by saying that none was reported rather than by choosing one or by hiding the row.
+  A kind the tool *did* report is kept on either outcome, because ADR-0029 §3
+  requires one on both and ADR-0039 already ruled that it survives the trip.
 - **The trail becomes the busiest store in the system.** Two rows per side-effecting
   call on top of one per gated action, with no retention rule, makes #108 sharper
   than ADR-0021 §4 left it — and #108's own trade is unchanged, only larger.
+- **This lands as four changes, not one.** ADR-0137 §4 puts every consumer beyond
+  the primary implementation in its own follow-on lane, so the contract and the
+  `permissions` store merge first and the seam, recovery and surface groups are
+  briefed against the merged text (§9). The cost is three extra round trips; what
+  it buys is that no single PR carries new machinery in four subsystems.
 - **New `core` surface:** the `InvocationLedger` Protocol with two members;
   `ToolInvocation` and `RecordedInvocation`; `AuthorisationSpentError`,
   `UnrecordedAuthorisationError` and `InvalidCompletionError`, all three under
@@ -1774,6 +1989,15 @@ ADR of its own", and doing it here would put this ADR's row (`FAILED`) and the s
 status (`INDETERMINATE`) in disagreement about one attempt unless ADR-0029 §4 moved
 with it. §1's shielded append — the half of the finding that is this ADR's — is
 adopted in full; the classification is left where #234 put it.
+
+**This is a different case from the collaborator's own `CancelledError`, and the two
+are easy to run together.** There, the task was never cancelled at all — the
+`Task.cancelling()` count did not move, and §1 raises an `AuditError` rather than
+letting a cancellation that never happened leave `invoke`. Here, the task **was**
+cancelled from outside; the only question is how far the call got, which is the fact
+ADR-0034 §1 declines to expose and #234 owns. The first is decided by a count
+`invoke` already holds; the second would need a fact nothing exposes. That is why one
+is taken and the other is not.
 
 **Hand the `ToolInvoker` the whole `AuditTrail`.** The first draft's shape, and
 refused once review named what it hands over: decision writes, history reads, the
