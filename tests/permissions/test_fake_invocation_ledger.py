@@ -79,17 +79,32 @@ def cast_subject(trail: FakeAuditTrail) -> LedgerSubject:
     return subject
 
 
-class TestFakeInvocationCompleterContract(InvocationCompleterContract):
+class FakeLedgerFixtures:
+    """The subject and the harness, supplied to both suites the same way.
+
+    ``ledger`` is overridden here rather than left to the suite's default —
+    which builds one through ``harness`` — so it takes ``self`` alone and the
+    Protocol-triad check can *evaluate* it. That check reads what a fixture
+    produces rather than what its body mentions (``tests/core/test_protocol_triad.py``),
+    and a subject fixture needing another fixture is a deliberate false negative
+    there. The harness stays for the cases that inject a clock, a factory or a
+    second instance.
+    """
+
+    @pytest.fixture
+    def harness(self) -> FakeLedgerHarness:
+        """The binding's way of building further subjects."""
+        return FakeLedgerHarness()
+
+    @pytest.fixture
+    def ledger(self) -> LedgerSubject:
+        """The canonical fake itself."""
+        return cast_subject(FakeAuditTrail())
+
+
+class TestFakeInvocationCompleterContract(FakeLedgerFixtures, InvocationCompleterContract):
     """Runs the fake through the narrow face's shared conformance suite."""
 
-    @pytest.fixture
-    def harness(self) -> FakeLedgerHarness:
-        return FakeLedgerHarness()
 
-
-class TestFakeInvocationLedgerContract(InvocationLedgerContract):
+class TestFakeInvocationLedgerContract(FakeLedgerFixtures, InvocationLedgerContract):
     """Runs the fake through the wide face's shared conformance suite."""
-
-    @pytest.fixture
-    def harness(self) -> FakeLedgerHarness:
-        return FakeLedgerHarness()

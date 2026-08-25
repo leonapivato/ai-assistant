@@ -1554,6 +1554,7 @@ class InvocationLedgerContract(InvocationCompleterContract):
         assert len(rows) in {0, 2}
         assert all(row.tool == "smtp" for row in rows)
 
+    @pytest.mark.optional_obligation
     async def test_two_instances_over_one_store_admit_one_spendable_claim(
         self, harness: LedgerHarness
     ) -> None:
@@ -1564,6 +1565,11 @@ class InvocationLedgerContract(InvocationCompleterContract):
         implementation whose exclusion is an ``asyncio.Lock`` on the object
         satisfies every single-object race above while two instances each observe
         no claim and each append.
+
+        **Optional, and ADR-0192 §9 says so in terms**: "Where a store under test
+        cannot be opened twice, the suite **skips with its reason stated**, as the
+        conformance suites in this corpus already do, and never by omitting the
+        case." A subject whose store is a dict cannot reach it at all.
         """
         first = harness.open()
         store = harness.store_of(first)
@@ -1583,6 +1589,7 @@ class InvocationLedgerContract(InvocationCompleterContract):
         assert len(appended) == 1, f"expected exactly one winner, got {results}"
         assert len(await _rows(first)) == 1
 
+    @pytest.mark.optional_obligation
     async def test_a_new_process_draws_away_from_a_claim_a_previous_one_left(
         self, harness: LedgerHarness
     ) -> None:
