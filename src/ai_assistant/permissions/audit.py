@@ -301,6 +301,40 @@ _INVOCATION_INDEXES = (
     "CREATE INDEX IF NOT EXISTS invocations_order ON invocations(recorded_at_us DESC, id ASC)",
 )
 
+#: **The table is append-only, said to SQLite rather than only to the reader.**
+#: ADR-0021 §4's guarantee is that nothing recorded is rewritten, and this store
+#: never issues an ``UPDATE`` against ``invocations`` — ``clear()`` deletes, and
+#: every other write appends. Stating that as a trigger closes the two columns a
+#: comparison cannot reach, and it closes them in the direction validation cannot:
+#:
+#: * ``seq`` is the durable append order §1's "first" and "last" are decided on. It
+#:   is allocated at insert and is absent from :class:`ToolInvocation`, so no read
+#:   can hold it to anything — and swapping two claims' ordinals moves the claim a
+#:   retry window is measured from, which is an admission decided on a value nothing
+#:   revalidates.
+#: * ``recorded_at_us`` orders a listing, and a *bounded* listing applies its
+#:   ``LIMIT`` in the same statement that orders. A row whose key was altered to sort
+#:   late falls beyond the cut, so it is never decoded and never compared — the
+#:   caller is handed a wrong page with every row on it valid. Validating rows the
+#:   bound excludes would mean reading the whole table to serve a page, which is the
+#:   bound defeated rather than enforced.
+#:
+#: Rewriting ``data`` is refused here too, which is what makes the derived columns
+#: whole: they cannot disagree with the blob, so the remaining move against them was
+#: to move the blob.
+#:
+#: **What it is and is not.** It is this store's invariant enforced by the store,
+#: the way a ``UNIQUE`` index enforces write-once; it is not a boundary against an
+#: actor who can already run arbitrary SQL against the file, who could drop it as
+#: easily as run the ``UPDATE``. Nothing at this layer can be, and ADR-0004 §4's
+#: owner-only mode is where that question is answered.
+_INVOCATIONS_APPEND_ONLY = (
+    "CREATE TRIGGER IF NOT EXISTS invocations_append_only "
+    "BEFORE UPDATE ON invocations "
+    "BEGIN SELECT RAISE(ABORT, 'the audit trail is append-only; invocation rows are never "
+    "updated'); END"
+)
+
 #: **Every column the blob also carries**, selected beside it on every read so
 #: :func:`_as_projected` can hold one to the other. The columns are a filter and an
 #: order, never the record: an admission decided on ``decision_id`` or ``completes``
@@ -535,6 +569,7 @@ class SqliteAuditTrail:
                 conn.execute(_CREATE_INVOCATIONS)
                 for statement in (*_INDEXES, *_INVOCATION_INDEXES):
                     conn.execute(statement)
+                conn.execute(_INVOCATIONS_APPEND_ONLY)
                 if stored is None:
                     # Stamped *after* the create/migrate above, so the marker is
                     # only written for a file this open has actually brought to
