@@ -30,6 +30,7 @@ import functools
 import json
 import sqlite3
 import threading
+from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Final, get_args
@@ -1712,15 +1713,32 @@ def _field_state(kind: type[BaseModel], given: object) -> Any:
     ``PydanticSerializationUnexpectedValue`` warning that is noise here; the
     ``model_validate`` downstream is what rejects it.
 
+    **Every other way this can fail is an argument fault too**, and that is why the
+    read is wrapped. The value is the caller's from top to bottom, so a container
+    whose ``__len__`` or ``__iter__`` raises, a ``__dict__``-tampered field the
+    serializer cannot render — it raises ``AttributeError`` on one, which ``main``
+    lets through — and anything else reached while reading it are all faults *of the
+    argument*. ADR-0192 §2's order is exhaustive over the classes a refusal arrives
+    in, so none of them may leave as itself. ``Exception`` and never
+    ``BaseException``: a cancellation is not a fault of the argument and is never
+    absorbed (ADR-0060 §1). Nothing of the caller's is interpolated into the message,
+    for :func:`_refuse_undeclared`'s reason.
+
     Raises:
-        ValueError: If ``given`` carries state ``kind`` declares no field for, or a
-            model-valued field anywhere beneath it holds something other than
-            exactly its declared type.
+        ValueError: If ``given`` carries state ``kind`` declares no field for, if a
+            model-valued field anywhere beneath it holds something other than exactly
+            its declared type, or if the value cannot be read as a ``kind`` at all.
     """
     if not isinstance(given, kind):
         return given
-    _refuse_undeclared(kind, given)
-    return kind.__pydantic_serializer__.to_python(given, warnings=False)
+    try:
+        _refuse_undeclared(kind, given)
+        return kind.__pydantic_serializer__.to_python(given, warnings=False)
+    except ValueError:
+        raise  # this module's own refusals, and pydantic's, already the right class
+    except Exception as exc:
+        msg = f"the value cannot be read as a {kind.__name__} at all"
+        raise ValueError(msg) from exc
 
 
 def _refuse_undeclared(kind: type[BaseModel], given: BaseModel) -> None:
@@ -1922,31 +1940,43 @@ def _models_within(value: object) -> Iterator[BaseModel]:
     being serviced and the ``AuditError`` §2 requires never arrives. Refusing is also
     the only *correct* answer: the serializer below cannot render a cycle either, and
     on ``main`` it leaves as an ``AttributeError``, which is outside the classes §2's
-    order admits. Empty containers are skipped rather than tracked, because they can
-    be part of no cycle and ``()`` is interned; a value holding the same non-empty
-    container twice is refused with the cycle, a shape none of these models has and
-    the fail-closed direction to be wrong in.
+    order admits. A value holding the same container twice over is refused with it —
+    a shape none of these models has, and the fail-closed direction to be wrong in.
+
+    ``Mapping`` and not ``dict``, because :data:`~ai_assistant.core.types.FrozenJson`
+    renders a mapping as a ``FrozenDict``, which is a ``Mapping`` and not a ``dict``
+    at all: a field declared :data:`~ai_assistant.core.types.FrozenJsonMapping` would
+    otherwise be walked past.
+
+    **The recognised containers are a list and not a universe, and what is outside it
+    is safe by two other clauses rather than by this one.** A model hidden inside some
+    other container type is not found here — and it cannot be *admitted*, because the
+    claim path compares the value as passed (:func:`_refuse_unless_as_passed`), and it
+    cannot *leak*, because every failure of this walk or of the rebuild after it is an
+    argument fault (:func:`_field_state`). What is left is that ``record`` stores the
+    validated snapshot ADR-0021 §4 asks for rather than the caller's exact object,
+    which is what that clause promises.
     """
     pending: list[object] = [value]
-    expanded: list[int] = []
+    expanded: set[int] = set()
     while pending:
         item = pending.pop()
         if isinstance(item, BaseModel):
             yield item
             continue
-        if not isinstance(item, list | tuple | set | frozenset | dict):
+        if not isinstance(item, list | tuple | set | frozenset | Mapping):
             continue
-        if not item:
-            continue
-        # `id` and never the container itself: membership by equality would compare
-        # two caller-supplied values, and on a cycle that comparison does not
-        # terminate either.
+        # `id` and never the container itself: a `set` of the containers would hash
+        # and compare two caller-supplied values, and on a cycle that comparison
+        # does not terminate either. A `set` of the *ids* hashes machine integers,
+        # whose hash and equality are the interpreter's, and answers in constant
+        # time however deep the nesting goes.
         marker = id(item)
         if marker in expanded:
             msg = "the value holds a container reached twice on the way down: a cycle"
             raise ValueError(msg)
-        expanded.append(marker)
-        pending.extend(item.values() if isinstance(item, dict) else item)
+        expanded.add(marker)
+        pending.extend(item.values() if isinstance(item, Mapping) else item)
 
 
 def _detached_cost(value: ToolCost) -> ToolCost:

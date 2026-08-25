@@ -53,6 +53,7 @@ from ai_assistant.core.types import (
     BoundAccount,
     CostBasis,
     EgressBinding,
+    FrozenDict,
     Idempotency,
     PermissionDecision,
     PermissionOutcome,
@@ -66,7 +67,7 @@ from ai_assistant.core.types import (
 from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable, Sequence
+    from collections.abc import Awaitable, Callable, Iterable, Iterator, Sequence
 
     from pydantic import BaseModel
 
@@ -1798,6 +1799,9 @@ class InvocationLedgerContract(InvocationCompleterContract):
             pytest.param("undeclared", id="undeclared-state-of-mixed-key-types"),
             pytest.param("hostile-key", id="a-key-that-refuses-to-be-compared"),
             pytest.param("cycle", id="a-container-that-contains-itself"),
+            pytest.param("hidden-model", id="a-model-hidden-in-a-frozen-mapping"),
+            pytest.param("unwalkable", id="a-container-that-refuses-to-be-iterated"),
+            pytest.param("deep", id="a-model-under-two-thousand-containers"),
         ],
     )
     async def test_a_malformed_decision_is_still_an_argument_fault(
@@ -1827,6 +1831,38 @@ class InvocationLedgerContract(InvocationCompleterContract):
             cyclic: list[object] = []
             cyclic.append(cyclic)
             handed.__dict__["step_id"] = cyclic
+        elif tamper == "hidden-model":
+            # A model where the field declares none, inside a `FrozenDict` — which
+            # is a `Mapping` and not a `dict`, so a walk written for `dict` alone
+            # goes straight past it and the stored record is not the value passed.
+            hidden = tool()
+            hidden.__dict__["parameters_schema"] = FrozenDict(
+                {"cost": cast("Any", ToolCost(basis=CostBasis.FREE))}
+            )
+            handed.__dict__["tool"] = hidden
+        elif tamper == "unwalkable":
+
+            class _Unwalkable(list[object]):
+                """A container whose own iteration raises, which is the caller's code."""
+
+                def __iter__(self) -> Iterator[object]:
+                    msg = "this container refuses to be read"
+                    raise RuntimeError(msg)
+
+            handed.__dict__["step_id"] = _Unwalkable([1])
+        elif tamper == "deep":
+            # Acyclic but deep, with a model at the bottom: the walk has to reach
+            # it, so a check that gives up at a depth — or that pays for depth
+            # quadratically, before the first `await` and on the shared event loop
+            # — is not one this suite admits.
+            deep: list[object] = []
+            cursor = deep
+            for _ in range(2000):
+                inner: list[object] = []
+                cursor.append(inner)
+                cursor = inner
+            cursor.append(ToolCost(basis=CostBasis.FREE))
+            handed.__dict__["step_id"] = deep
         else:
             _undeclared(handed, {1: "one", "extra": "text"})
 
