@@ -2282,9 +2282,23 @@ the ADRs it depends on rather than replacing them.
 > **Normative.** The suite drives `spend_totals`' coherence: with a clock that
 > steps between reads, both returned entries carry bounds selected from **one**
 > instant; and with a completion appended between the two aggregations an
-> implementation would perform, the day total is never larger than the month total
-> that contains it. A suite reading the two entries without moving anything between
-> them does not discharge this clause.
+> implementation would perform, the pair is the one **a single snapshot could have
+> produced**. The fixture is built so that there are exactly two such pairs and it
+> names them: no rows in any earlier day of the month, one current-day completion
+> of 10 appended between the aggregations, and the returned `(day, month)` asserted
+> to be **either `(0, 0)` or `(10, 10)`** and nothing else. A suite reading the two
+> entries without moving anything between them does not discharge this clause.
+
+> **Normative.** That is asserted as the pair and **not** as "the day total is
+> never larger than the month total that contains it", which is the weaker
+> statement the same fixture invites and which the mixed read satisfies: a
+> `(0, 10)` produced by aggregating the day before the append and the month after
+> it is monotone, is not a state any snapshot of the rows was ever in, and is
+> exactly what §5's one-snapshot rule forbids. The containment inequality is a
+> consequence of one snapshot rather than a test for it, and an implementation
+> aggregating each period with its own read passes every inequality this suite
+> could write while reporting a day and a month that disagree about whether a call
+> has happened.
 
 > **Normative.** The suite drives the double-count window §3 states rather than
 > leaving it to be discovered: with a reservation outstanding **and** its completion
