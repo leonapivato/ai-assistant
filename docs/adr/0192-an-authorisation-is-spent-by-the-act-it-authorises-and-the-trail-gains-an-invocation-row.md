@@ -524,11 +524,20 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > recovery scan reads back **out of the store**, and a claim `clear()` erased is not
 > among them.
 
+> **Normative.** It is satisfied **by construction and never by improbability**. A
+> per-process nonce with a monotonic counter satisfies it; retaining the issued ids
+> satisfies it; a bare probabilistic draw does **not**, and no lane may offer one
+> here. ADR-0045 §4 already rules on that shape in this corpus — a "probabilistic
+> generator (`uuid4`) makes a collision unlikely, not impossible" — and this is not a
+> property an unlikely failure is acceptable in: the collision it prevents records
+> one call's outcome and cost against another call's claim, silently.
+
 > **Normative.** This obligation is **not** the erasure residue §6 refuses, and the
 > difference is what the factory remembers. Its memory is about **identifiers it has
-> issued**, not about acts: it holds no row, no decision and no count of executions
-> the user erased — an implementation satisfying it by drawing wide random values
-> remembers nothing whatever — and nothing reads it to decide anything. It is
+> issued**, not about acts: it holds no row, no decision, no outcome and no count of
+> executions the user erased — a nonce and a counter can be read for how many ids
+> were minted and for nothing else, which is a fact about the id space — and nothing
+> reads it to decide anything. It is
 > consulted at no admission, so a decision re-recorded after an erasure still admits
 > a claim exactly as §6 states. What it bounds is which **row** a pointer names,
 > which is a correctness property of the id space and not a durability of the
@@ -1364,8 +1373,8 @@ nothing in this section inherits that nonce or its hazard.
 > reporting an outcome back through the seam, which is unreachable without the
 > callable. Where such a completion's `RecordedInvocation` also carries
 > `egress_call` true, a surface may say that the call was **sent**. It says this on
-> no other row and in no other state, and on every other state it says what the row
-> says: attempted, and how it finished, or that it has no completion yet (§3).
+> no other row and in no other state, and on every other row it says what that row
+> says and no more.
 
 > **Normative.** No surface says or implies that anything was **read**, **received**,
 > **delivered**, **seen** or **acted on** by any recipient, on any row, in any
@@ -1378,6 +1387,16 @@ nothing in this section inherits that nonce or its hazard.
 > destination on an invocation row. `egress_call` states that the call was an egress
 > call and states nothing about whose bytes went where; the recipients are
 > `recent_decisions`' to render, under ADR-0186 §7's floor, from the binding itself.
+
+> **Normative.** One attempt appears as **up to two rows**, and a surface presents
+> them as the two rows they are. It renders a claim as a call begun and a completion
+> as how a call finished; it does **not** render a claim as *pending*, *open*, *in
+> flight* or *awaiting an outcome*, because no row carries that fact and the clause
+> above forbids the join that would establish it. An earlier draft let a surface say
+> a claim "has no completion yet", which is that inference wearing different words: a
+> completed call's claim row says nothing about its completion, and a page holding
+> one without the other is telling the reader about the page (below) and not about
+> the call.
 
 > **Normative.** A surface that renders both kinds together states each row's kind
 > and renders neither in the other's vocabulary. It presents no decision row as a
@@ -2145,11 +2164,15 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > conformance case, separate from the ledger's, because it is the collaborator that
 > owes it: a factory conforms only where no value it returns repeats for the life of
 > the **instance**, which §2's one-factory-per-store rule makes the life of the
-> process for the store it serves. It is asserted over a run long enough to catch a
-> per-call or per-decision reset, and over calls that **straddle a `clear()`** — a
-> claim, an erasure, and a further claim receive three distinct ids. The canonical fake's factory satisfies
-> it. A factory that repeats is a non-conforming collaborator, not a store the suite
-> may pass.
+> process for the store it serves. The cases are the ones that catch a **reset** —
+> the failure a construction actually has — and not a long draw that could only catch
+> a collision by luck: ids drawn either side of a `clear()` differ (a claim, an
+> erasure, a further claim, three distinct ids), ids drawn under two different
+> decisions differ, and ids drawn across two claims under one decision differ. The
+> canonical fake's factory is a per-process nonce and a monotonic counter, and
+> satisfies it. **A factory whose non-repetition is only probable does not**, and the
+> suite is not where that failure is caught — §2 puts the obligation on the
+> collaborator for exactly that reason.
 
 > **Normative.** The **ledger's** refusal is pinned beside it, because the two
 > obligations fail apart and the suite that tested only distinct factory outputs saw
@@ -2213,9 +2236,12 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > **Normative.** The **shield** is pinned against the store's real behaviour and not
 > against a convenient fake. The ledger the test injects re-raises an absorbed
 > cancellation **in place of** the row it produced, which is what `permissions/audit.py`
-> does (ADR-0054): with a cancellation delivered while the claim append is in flight,
-> `invoke` must still hold the claim's `id`, still append the completion §3 requires,
-> leave **no** claim open, and re-raise the `CancelledError` last. An implementation
+> does (ADR-0054): with **at least two** cancellations delivered while the claim
+> append is held — one is passed by an implementation that shields the first await
+> and then awaits the retained task bare — `invoke` must still hold the claim's `id`,
+> still append the completion §3 requires, leave **no** claim open, and re-raise the
+> `CancelledError` last. The test asserts that `invoke` was still waiting after the
+> second cancellation, so absorbing exactly one is a failure and not a pass. An implementation
 > that awaits the ledger call directly passes every unshielded test and fails this
 > one, leaving a landed claim it can never name.
 
