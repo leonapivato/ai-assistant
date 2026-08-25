@@ -5,7 +5,10 @@
 - **Decides `core` contract surface and implements none of it (golden rule 5).**
   It adds **two** Protocols, three `core/types.py` models and three
   `core/errors.py` classes, and it lands none of them: the triad and its primary
-  implementation are separate lanes, sequenced behind ADR-0192's (§11). **Because this ADR decides a
+  production implementation land **together, in one paired lane**, separate from
+  this ADR and sequenced behind ADR-0192's (§11). That pairing is ADR-0137 §2's
+  and is not this ADR's choice to make otherwise; splitting them would produce the
+  contract-only PR followed by an implementation PR that §2 exists to prevent. **Because this ADR decides a
   contract surface, its required review set is adversarial *and* architecture**,
   even though the PR carrying it is prose only — `CONTRIBUTING.md` → "Stop when
   the required reviews are green" and ADR-0015 §1.
@@ -2256,7 +2259,11 @@ the ADRs it depends on rather than replacing them.
 > non-`None` only where `currency` is. A construction violating any of them raises
 > at validation, and the shared contract drives each as a hostile construction:
 > an offset of `±24` hours exactly and one beyond it each **raise**, beside the
-> currency and absence cases.
+> currency and absence cases. It drives the **bound order** the same way, which no
+> offset or producer fixture reaches: reversed bounds — `period_start` after
+> `period_end` — **raise**, and equal bounds **construct**, since §1's zero-length
+> period is a value the model must accept. A validator that admitted the reversed
+> pair, or refused the equal one, passes every other clause in this section.
 
 > **Normative.** The suite drives the offsets' **resolution** in the accepting
 > direction, because a whole-minute validator passes every refusing fixture above:
@@ -2400,6 +2407,13 @@ the ADRs it depends on rather than replacing them.
 > three-character non-ASCII value each refused, `"USD"` accepted — since §5's
 > hostile constructions test `SpendTotal` and not `Settings`.
 
+> **Normative.** The lane loads a **day ceiling above the month ceiling** — §1's
+> `day=100` beside `month=10` — asserting it is **accepted** and that the month is
+> simply the binding one, with an estimate of 20 refused on the month while the day
+> is nowhere near crossed. §1 says nothing refuses a configuration on that ground;
+> a settings validator quietly imposing `day <= month` passes every dependency and
+> crossing fixture here and rejects a configuration this ADR calls valid.
+
 > **Normative.** The lane refuses a zero allowance at load in each of §1's
 > spellings, and asserts the calendar month whose exclusive end is not
 > representable is closed at the latest instant representable in both UTC and the
@@ -2417,6 +2431,17 @@ the ADRs it depends on rather than replacing them.
 > returned, so the fixture pins the clamp to the case that needs it. An
 > implementation clamping only the late boundary passes every fixture above this
 > one and crashes here.
+
+> **Normative.** The lane **reopens the primary holder** on a persistent store that
+> already carries completion rows, and asserts both `spend_totals` and the next
+> admission reconstruct the accounted total from those rows. §7 makes the total
+> derived and says no cache is authoritative; nothing else here tests it, because a
+> holder that keeps a correct in-process cache and initialises it to zero on
+> construction passes every aggregation, rollover and erasure fixture above, then
+> reports zero after a restart and admits calls against spend the store still
+> holds. The fixture asserts the reconstructed figure equals the one the same rows
+> produced before the reopen, and that a call which was refused before it is
+> refused after it.
 
 > **Normative.** The lane drives `clear()` interleaved with an in-flight
 > invocation in both orderings, and asserts ADR-0192 §6's outcome together with
