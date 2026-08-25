@@ -242,7 +242,26 @@ def _frames(error: BaseException) -> int:
     return depth
 
 
-async def test_a_standing_refusal_raises_a_fresh_error_with_a_traceback_of_its_own() -> None:
+class _NarrowerTransportError(TransportError):
+    """A refusal type an arrangement might arm, so the clone's type can be read.
+
+    ``TransportError`` is the shared taxonomy (ADR-0191 §1), and nothing forbids
+    an arrangement arming something narrower to assert on. A clone that flattened
+    it to the base class would leave a case catching this type never firing, which
+    is why the case below arms one.
+    """
+
+
+@pytest.mark.parametrize(
+    "refusal_type",
+    [
+        pytest.param(TransportError, id="the-shared-type"),
+        pytest.param(_NarrowerTransportError, id="a-subclass"),
+    ],
+)
+async def test_a_standing_refusal_raises_a_fresh_error_with_a_traceback_of_its_own(
+    refusal_type: type[TransportError],
+) -> None:
     """A standing arming is raised many times, and one instance would grow each time.
 
     ``raise exc`` on an object that has already been raised sets its
@@ -253,19 +272,27 @@ async def test_a_standing_refusal_raises_a_fresh_error_with_a_traceback_of_its_o
     accumulation is not only unbounded, it retains exactly what this seam is most
     careful about. Adversarial review found it on round 12.
 
-    What a case can read is unchanged: the type and the words are the arming's.
+    What a case can read is unchanged: the words **and the concrete type** are the
+    arming's, which is why the subclass row is here — a clone that built a bare
+    ``TransportError`` would pass the other row and silently stop firing a case
+    that catches something narrower. Adversarial review noted the type on round 13
+    and that the case did not check it on round 14.
+
+    Args:
+        refusal_type: What the arrangement arms.
     """
     transport = FakeOutboundTransport()
-    armed = TransportError("this fake opens nothing")
+    armed = refusal_type("this fake opens nothing")
     transport.refuse_with(armed)
 
     raised: list[TransportError] = []
     for _ in range(3):
-        with pytest.raises(TransportError) as refusal:
+        with pytest.raises(refusal_type) as refusal:
             await transport.open_channel(ENDPOINT)
         raised.append(refusal.value)
 
-    assert [str(error) for error in raised] == [str(armed)] * 3
+    assert [type(error) for error in raised] == [refusal_type] * 3
+    assert [error.args for error in raised] == [armed.args] * 3
     assert armed.__traceback__ is None  # the arming itself is never the one raised
     assert len({id(error) for error in raised}) == 3
     assert [_frames(error) for error in raised] == [_frames(raised[0])] * 3
@@ -313,6 +340,53 @@ async def test_two_opens_in_flight_take_their_channels_in_call_order() -> None:
 
     assert await held is first
     assert await following is second
+
+
+@pytest.mark.parametrize(
+    "second_fails_first",
+    [pytest.param(False, id="in-reservation-order"), pytest.param(True, id="in-reverse")],
+)
+async def test_two_reservations_given_back_keep_the_order_they_were_queued_in(
+    *, second_fails_first: bool
+) -> None:
+    """Two opens in flight, both cancelled, and the queue must survive it.
+
+    A reservation given back is owed to the next open — but with two of them in
+    flight, pushing each onto the *head* as it unwinds reverses the pair whenever
+    they unwind in the order they were taken. The next open would then be served
+    the second arrangement's scripted replies while every case still read as
+    though it had the first, which is the failure mode a consumer is least likely
+    to notice. Adversarial review found it on round 14.
+
+    Both unwind orders are rows because only one of them is wrong, and a case
+    that ran the harmless one alone would have passed the bug.
+
+    Args:
+        second_fails_first: Whether the later reservation unwinds before the
+            earlier one.
+    """
+    first, second = FakeByteChannel(secure=True), FakeByteChannel(secure=True)
+    transport = FakeOutboundTransport().serve(first, second)
+
+    earlier_gate = transport.suspend_next_open()
+    earlier = asyncio.ensure_future(transport.open_channel(ENDPOINT))
+    await earlier_gate.reached()
+    later_gate = transport.suspend_next_open()
+    later = asyncio.ensure_future(transport.open_channel(ENDPOINT))
+    await later_gate.reached()
+
+    unwinding = [(later, later_gate), (earlier, earlier_gate)]
+    if not second_fails_first:
+        unwinding.reverse()
+    for opening, gate in unwinding:
+        opening.cancel()
+        gate.release()
+        await settle()
+        with pytest.raises(asyncio.CancelledError):
+            await opening
+
+    assert await transport.open_channel(ENDPOINT) is first
+    assert await transport.open_channel(ENDPOINT) is second
 
 
 async def test_a_cancelled_open_puts_its_queued_channel_back() -> None:

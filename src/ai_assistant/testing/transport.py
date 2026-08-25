@@ -521,6 +521,7 @@ class FakeOutboundTransport:
     """
 
     __slots__ = (
+        "_armed",
         "_attempts",
         "_failure",
         "_gate",
@@ -534,6 +535,11 @@ class FakeOutboundTransport:
     def __init__(self) -> None:
         """Start with nothing attempted, nothing queued and nothing armed."""
         self._attempts: list[_Pending] = []
+        #: Every channel ever queued, in the order it was queued, and never
+        #: reordered. :meth:`_requeue` rebuilds the pending queue from it, which
+        #: is what keeps a reservation given back under concurrency landing where
+        #: it was rather than at the head.
+        self._armed: list[FakeByteChannel] = []
         self._queued: deque[FakeByteChannel] = deque()
         self._served: list[FakeByteChannel] = []
         self._reserved: list[FakeByteChannel] = []
@@ -579,6 +585,7 @@ class FakeOutboundTransport:
                 )
                 raise ValueError(msg)
             held.append(channel)
+        self._armed.extend(channels)
         self._queued.extend(channels)
         return self
 
@@ -738,6 +745,22 @@ class FakeOutboundTransport:
         self._queued.popleft()
         return channel, True
 
+    def _requeue(self) -> None:
+        """Rebuild the pending queue in arming order, from what is not spoken for.
+
+        The queue is a *view* of :attr:`_armed` rather than a structure of its
+        own: at any moment every armed channel is queued, reserved by an open in
+        flight, or served, and nothing moves between those three except through
+        this class. Rebuilding therefore restores the arming order exactly,
+        whatever order the reservations happened to be given back in — where
+        pushing each one back onto the head restores it only when at most one open
+        can fail at a time.
+        """
+        spoken_for = [*self._served, *self._reserved]
+        self._queued = deque(
+            channel for channel in self._armed if not any(other is channel for other in spoken_for)
+        )
+
     async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
         """Record the attempt, then serve a channel or refuse.
 
@@ -794,9 +817,14 @@ class FakeOutboundTransport:
             self._in_flight -= 1
             self._reserved.remove(channel)
             if queued:
-                # Put it back at the head: the open that reserved it never handed
-                # it to anybody, so the next open is the one it was queued for.
-                self._queued.appendleft(channel)
+                # **Put it back where it was, which is not the same as putting it
+                # at the head.** The open that reserved it handed it to nobody, so
+                # it is owed to the next open — but under two opens in flight the
+                # one that fails *second* would then sit ahead of the one that
+                # failed first, and a consumer would be driven against the wrong
+                # scripted replies in the order it was least likely to check.
+                # Adversarial review found it on round 14.
+                self._requeue()
             raise
         self._served.append(channel)
         self._reserved.remove(channel)
