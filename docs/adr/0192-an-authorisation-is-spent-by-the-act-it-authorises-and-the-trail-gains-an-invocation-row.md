@@ -318,17 +318,51 @@ surface can state an execution at all, because ADR-0186's two operations return
 > **Normative.** The append's failure is not lost by that. It is attached to the
 > propagating `CancelledError` as its cause, and it reaches the operator as the
 > Tier 2 diagnostic §3 requires of every audit-write failure, under that section's
-> enumerated-fields bound. No claim landed, so
-> the trail records nothing — which is the true thing to record — and this ADR gives
-> the seam no returned reachability fact and the executor no new rule to apply.
+> enumerated-fields bound. `invoke` observed **no** claim, so it holds no `id`, enters
+> no callable and attempts no completion — and this ADR gives the seam no returned
+> reachability fact and the executor no new rule to apply. What it does **not** say
+> is that no row landed; the clause below says why, and says it once for every
+> failure of this append.
+
+> **Normative.** **What the store already committed, stands — on the claim append
+> too, and this section states it rather than leaving it to §3.** The append is one
+> atomic store operation, so where it **returns** the claim landed and `invoke` holds
+> its `id`. Where it **raises**, `invoke` did not observe a claim, and that is all
+> `invoke` may say: the write may have committed before the failure reached the
+> frame — ADR-0060 §1 already rules that an abandoned write may have — §6 offers no
+> selective delete, and no lane writes a compensating delete, a tombstone or a marker
+> to tell the two apart. A draft promising "no claim landed" promised a rollback this
+> store does not have, which is the identical error §3's commit-state clause was
+> written to correct one append later.
+
+> **Normative.** **The window is narrowed by the ledger and closed by nobody.** Every
+> refusal §2 enumerates is decided **before** the store write, so a conforming
+> ledger raising one of them has not written; what remains is a failure of the write
+> itself, or a `BaseException` in that frame, and those are exactly the cases
+> ADR-0060 §1 governs. This ADR does **not** ask the ledger to raise only on a proven
+> rollback: proving one would take a compensating delete §6 refuses to offer, so the
+> obligation would be unmeetable against this corpus's store and a lane meeting it in
+> appearance would be inventing the certainty.
+
+> **Normative.** **Where a row did land, it is an open claim for an act that
+> certainly never ran, and every reader already has its rule.** Nothing is repaired:
+> ADR-0014 §4's recovery scan completes it `INDETERMINATE` like any other (§3), a
+> further claim under that decision is refused while it is open and after it
+> completes (§1), and a spend evaluation over that scope fails closed (§5). That is a
+> **spent authorisation**, which is the direction this section fails in everywhere
+> else — never an unrecorded act — and it is the residue of a store that answered
+> neither yes nor no. It is stated here rather than discovered by an implementer,
+> because an implementation that instead re-entered the callable, re-claimed, or
+> deleted the row to "clean up" would be defeating §1's whole guarantee.
 
 > **Normative.** A `CancelledError` the **claim path's own collaborator** raises —
 > the ledger's clock, its store — where **no external cancellation is pending** is
 > not a cancellation of this call and does not leave `invoke` as one. `invoke` raises
 > an `AuditError` carrying it as the cause, on the pre-callable path this section
 > already defines, so ADR-0034 §1's second ground classifies the step and no retry
-> follows. No callable was entered, no claim landed, the trail records nothing, and
-> the diagnostic §3 requires is emitted.
+> follows. No callable was entered, `invoke` observed no claim, and the diagnostic §3
+> requires is emitted — with the commit-state clause above governing whether a row
+> landed, here as on every other failure of this append.
 
 > **Normative.** The discriminator is the one the seam already computes and no new
 > fact: ADR-0031 §2's `Task.cancelling()` **delta**, captured before the collaborator
@@ -494,11 +528,15 @@ never absorbed" and that a method "never converts such a cancellation into a ret
 value"; raising a different exception in its place is that conversion by another
 route. ADR-0034 §1 gives the absorbed cancellation precedence over a competing
 failure in this very window, and ADR-0029 §4 owns the classification. Three
-supersessions to buy a distinction the **store already makes**: no claim landed, so
-there is no row saying an act may have occurred, which is the durable half #234
-asks for and the half this ADR can give. The step's `INDETERMINATE` in that case is
-the residue #234 exists for, and this ADR narrows it and leaves it, as it says
-everywhere else that it does.
+supersessions to buy a distinction the **store already makes**: `invoke` observed no
+claim, and a conforming ledger decides every refusal before the write, so in every
+case but a failure of the write itself there is no row saying an act may have
+occurred. That is the durable half #234 asks for and the half this ADR can give.
+Where the write *did* commit before failing, §1's commit-state clause says so rather
+than pretending otherwise, and the row that stands is completed `INDETERMINATE` by
+recovery — the fail-closed residue, not a claim that the act ran. The step's
+`INDETERMINATE` in either case is the residue #234 exists for, and this ADR narrows
+it and leaves it, as it says everywhere else that it does.
 
 **Placing the claim immediately before the callable is what keeps two records from
 disagreeing, and the placement is load-bearing.** ADR-0034 §1 rules that an attempt
@@ -2430,6 +2468,16 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > claiming first passes every other case in this section and then owes §3 a
 > completion for an exit ADR-0029 computes no outcome for.
 
+> **Normative.** The same assertion is **parameterised over ADR-0029 §2's three
+> checks**, not written for the pairing check alone: a call that fails revalidation,
+> one whose definition does not match the registry's original, and one
+> `decision.authorises` refuses each raise `ToolBindingError` with **no invocation
+> row** in the trail afterwards. A suite that inspects only the exception and the
+> untouched callable certifies an implementation that claims first and then refuses —
+> which enters no callable, raises the expected class, and has nonetheless spent the
+> authorisation and left an open claim for a call that was never made. The five
+> orderings are one case with five wirings, and §1 states the rule over all of them.
+
 > **Normative.** Two tests are owed on the claim path's mirror case, one at the seam
 > and one at the **executor**. At the seam: the **claim** clock callable raising
 > `CancelledError` with `Task.cancelling()` unchanged leaves `invoke` as an
@@ -2462,9 +2510,21 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 
 > **Normative.** That case is the **append-lands** twin of the append-fails one
 > below, and the two are separate tests because the exits differ: there, the caller
-> gets a `CancelledError` carrying the append's failure as its cause and there is no
-> claim to complete; here the append succeeded, so a completion is owed and its
-> absence is the defect. An implementation can pass either and fail the other.
+> gets a `CancelledError` carrying the append's failure as its cause and `invoke`
+> observed no claim, so it completes nothing; here the append succeeded, so a
+> completion is owed and its absence is the defect. An implementation can pass either
+> and fail the other.
+
+> **Normative.** A third timing is owed on this append, and it is §1's commit-state
+> clause under test: the ledger **commits the row and then raises**, with the store
+> gated so the write is durable before the failure reaches the frame. The test
+> asserts that the callable is **never entered**, that `invoke` attempts **no**
+> completion and raises as §1 requires, that the committed row **stands** — nothing
+> deleted, no compensating append, no marker — and that a recovery pass then finds
+> that claim open and completes it `INDETERMINATE`. Without it a suite certifies an
+> implementation that cleans up after itself, which is the rollback §6 refuses to
+> offer, and it leaves §1's honest statement about this append untested on the one
+> branch it was written for.
 
 > **Normative.** **#234 is narrowed by this and is not closed.** What §1 removes is
 > one way `invoke` could hand the executor a `CancelledError` for a call nothing
