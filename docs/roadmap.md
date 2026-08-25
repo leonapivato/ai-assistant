@@ -224,12 +224,14 @@ adversary is already named and mostly answered — ADR-0098 (the injection class
 escaping, never-authority, ceilings, detection-is-not-a-gate), ADR-0106 (taint
 through consolidation), ADR-0148/0154 (an egress call authorised as one whole,
 at a designated seam). What the lineage and standing-grant gates read is a
-**recorded origin**: "a fact the request carries, never an inference about how a
-model produced it" (ADR-0154 §4, item (ii)). Milestone 24's exit names it and the
-deferred list below waits on it, which is why it takes this track's first
-milestone. Milestones are ordered by **dependency only**, and each closes on a
-QA-driven exit ruling recorded on #1427. Voice holds milestones 19–22 (#1318);
-this track starts at 23.
+**recorded origin**, in two representations: the externality a proposal's
+`Provenance` carries, at the lineage gate in `MemoryPolicy` (ADR-0106 §6), and
+"a fact the request carries, never an inference about how a model produced it"
+(ADR-0154 §4, item (ii)), at the standing-grant gate on the call itself.
+Milestone 24's exit names it and the deferred list below waits on it, which is
+why it takes this track's first milestone. Milestones are ordered by
+**dependency only**, and each closes on a QA-driven exit ruling recorded on
+#1427. Voice holds milestones 19–22 (#1318); this track starts at 23.
 
 - **23 — the origin seam.** Origin recorded at ingestion and carried unchanged
   through proposal, consolidation, facet assembly and tool-argument
