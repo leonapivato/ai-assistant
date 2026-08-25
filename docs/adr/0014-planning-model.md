@@ -69,6 +69,31 @@
   reversed — and the default limit (4300 digits, ~10^4300) is already far beyond
   any legitimate application datum. Clarification only; it changes no decision
   (#408).
+- Note (2026-08-25): §7's "unnecessary while one executor runs at a time", and
+  §4's "presumes no executor is live for those states — true for a single-user
+  local app with one executor", decide what they are written for and are not a
+  serialisation guarantee for the system at large. Both carry the execution-leases
+  scope-out and nothing wider: recovery scans `active_executions()` at startup,
+  and a lease reclaiming a RUNNING step from a dead worker is unnecessary while no
+  *other* executor is live over those rows. ADR-0083 §1 turned that presumption
+  into a guarantee for exactly that reading — "with one process holding the lock,
+  no other executor can be live over those rows, whatever the deployment" — which
+  is a property of processes and says nothing about two turns interleaving inside
+  one. The orchestration engine that arrived later does interleave: `converse`
+  takes no lock, `Engine._admit_and_reserve` is written for "the Nth concurrent
+  turn" in its own contract, and separate hub connections dispatch against one
+  engine (#1561). So neither sentence is licence to skip in-process
+  synchronisation; ADR-0029 §7 repeats it from the invocation side and carries the
+  twin of this note. Everything both sections decide stands as ratified — §4's
+  transition graph, the retry ceiling and INDETERMINATE's never-auto-retried,
+  resolved-explicitly treatment, and §7's scope-outs, execution leases included,
+  which ADR-0083 §1 declines deliberately rather than by omission and which become
+  owed again the day exclusivity is relaxed. Nothing decided changes and no reader
+  acts differently as to the decision (ADR-0070 §1): the defect is a stale phrase
+  in this ADR's own words about a system that postdates it, and no other ADR is
+  its cause — ADR-0194 §9 states that it neither changes nor relies on the
+  sentence — so this appended dated note is the whole record and no Status edit is
+  owed (ADR-0082 §1). Refs #1561, ADR-0194 §3.
 
 ## Context
 
