@@ -62,12 +62,11 @@ from ai_assistant.tools.registry import InMemoryToolRegistry
 from ai_assistant.tools.send_email import SEND_EMAIL, SendEmail
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Mapping
+    from collections.abc import Collection, Mapping
 
     from ai_assistant.core.clock import Clock
-    from ai_assistant.core.protocols import MemoryStore, Secrets
+    from ai_assistant.core.protocols import MemoryStore, OutboundTransport, Secrets
     from ai_assistant.core.types import FrozenJson
-    from ai_assistant.tools.egress import ByteChannel, SmtpEndpoint
     from ai_assistant.tools.egress_binder import ConnectionRecords
     from ai_assistant.tools.invocation import BoundImplementation, EgressToolImplementation
 
@@ -307,7 +306,7 @@ def build_send_email_integration(
     endpoint: str,
     records: ConnectionRecords,
     secrets: Secrets,
-    connect: Callable[[SmtpEndpoint], Awaitable[ByteChannel]] | None = None,
+    transport: OutboundTransport,
 ) -> EgressIntegration:
     """Register ``send_email`` against one connected account (ADR-0148 §6, ADR-0152 §10).
 
@@ -351,9 +350,15 @@ def build_send_email_integration(
         secrets: The ``INTEGRATION``-scoped reading face (ADR-0125 §8). Never a
             ``SecretStore``: a transport handed a writing face could delete the
             credential it reads.
-        connect: How a channel is obtained, for a test that substitutes a local
-            double. ``None`` leaves the transport's own default, which is the one
-            function in the tree that opens a socket.
+        transport: The injected capability of reaching the world (ADR-0191 §1),
+            **required**. It used to be an optional keyword whose absence left the
+            transport's own default — so a deployment that passed nothing reached
+            the world through a default argument, which is the state ADR-0191 §3
+            calls "an ambient capability wearing an injection's clothes". The one
+            place that constructs the real implementation is
+            ``app/composition.py`` (§3); a test hands
+            :class:`~ai_assistant.testing.FakeOutboundTransport` by that same
+            route, and there is no other route.
 
     Returns:
         The declaration, the callable and the registration as one value.
@@ -369,16 +374,16 @@ def build_send_email_integration(
     registration = EgressRegistration(
         tool_id=SEND_EMAIL.id, reference=connection, transport_endpoint=endpoint
     )
-    transport = (
-        SmtpEgressTransport(registration=registration, records=records, secrets=secrets)
-        if connect is None
-        else SmtpEgressTransport(
-            registration=registration, records=records, secrets=secrets, connect=connect
-        )
-    )
     return EgressIntegration(
         definition=SEND_EMAIL,
-        implementation=SendEmail(transport),
+        implementation=SendEmail(
+            SmtpEgressTransport(
+                registration=registration,
+                records=records,
+                secrets=secrets,
+                transport=transport,
+            )
+        ),
         registration=registration,
     )
 

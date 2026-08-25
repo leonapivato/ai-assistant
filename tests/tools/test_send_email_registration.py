@@ -23,9 +23,10 @@ Four of them, and they are not the same property:
    nothing re-derived.
 
 **Nothing here opens a socket.** The channel is
-:class:`~egress_transport_harness.ScriptedChannel` and the connector is passed, so
-the one function in the tree that reaches the network is never the one called —
-see :mod:`egress_transport_harness`.
+:class:`~ai_assistant.testing.FakeByteChannel`, served by a
+:class:`~ai_assistant.testing.FakeOutboundTransport` the integration is handed as a
+required argument (ADR-0191 §3), so the one function in the tree that reaches the
+network is not merely never called — it is not reachable from here at all.
 """
 
 from __future__ import annotations
@@ -41,14 +42,14 @@ from egress_transport_harness import (
     REFERENCE,
     SLOT,
     Records,
-    ScriptedChannel,
     arguments,
     entry,
     implicit_tls_script,
     keyring,
+    scripted,
 )
 
-from ai_assistant.core.errors import EgressBindingError, ToolBindingError
+from ai_assistant.core.errors import EgressBindingError, ToolBindingError, TransportError
 from ai_assistant.core.types import (
     ActionRequest,
     BoundAccount,
@@ -62,7 +63,7 @@ from ai_assistant.core.types import (
     parameter_violations,
 )
 from ai_assistant.orchestration.selection import Preference, eligible_candidates, select
-from ai_assistant.testing import FakeMemoryStore
+from ai_assistant.testing import FakeByteChannel, FakeMemoryStore, FakeOutboundTransport
 from ai_assistant.tools import (
     CURRENT_TIME,
     RECALL_MEMORY,
@@ -75,7 +76,7 @@ from ai_assistant.tools.egress_binder import EgressBindingSeam
 from ai_assistant.tools.send_email import SEND_EMAIL, SEND_EMAIL_ID
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from egress_transport_harness import Keyring
 
@@ -90,13 +91,14 @@ TIMEOUT: Final = timedelta(seconds=30)
 
 
 async def _configured(
-    *, channel: ScriptedChannel | None = None, records: Records | None = None
+    *, channel: FakeByteChannel | None = None, records: Records | None = None
 ) -> tuple[EgressIntegration, Keyring]:
     """One deployment that configured the integration, wired to a scripted endpoint.
 
     Args:
-        channel: The byte channel the transport is handed, or ``None`` for one no
-            case reaches.
+        channel: The byte channel the capability hands out, or ``None`` for a
+            capability armed to refuse — which is what a case no transmission
+            reaches wants, since the refusal is still recorded as an attempt.
         records: The connection store's scripted answers; defaults to one active
             record that never moves.
 
@@ -104,31 +106,19 @@ async def _configured(
         The integration and the recording keyring, so a case can assert on both.
     """
     ring = await keyring()
+    capability = FakeOutboundTransport()
+    if channel is None:
+        capability.refuse_with(TransportError("this file opens nothing"))
+    else:
+        capability.serve(channel)
     integration = build_send_email_integration(
         connection=REFERENCE,
         endpoint=ENDPOINT,
         records=Records(entry()) if records is None else records,
         secrets=ring,
-        connect=None if channel is None else _connector(channel),
+        transport=capability,
     )
     return integration, ring
-
-
-def _connector(channel: ScriptedChannel) -> Callable[[object], Awaitable[ScriptedChannel]]:
-    """A connector that hands back ``channel`` and never opens anything.
-
-    Args:
-        channel: The scripted endpoint every case in this file talks to.
-
-    Returns:
-        Something shaped like the transport's own connector, which is the whole
-        reason that is a constructor argument.
-    """
-
-    async def connect(endpoint: object) -> ScriptedChannel:
-        return channel
-
-    return connect
 
 
 def _seam(integration: EgressIntegration | None, registry: object) -> EgressBindingSeam:
@@ -243,6 +233,7 @@ def test_an_endpoint_this_seam_will_not_pin_is_refused_at_wiring_rather_than_at_
             endpoint="https://mail.example.invalid",
             records=Records(entry()),
             secrets=None,  # type: ignore[arg-type]  # never reached; the parse refuses first
+            transport=FakeOutboundTransport(),
         )
 
 
@@ -328,7 +319,7 @@ async def test_an_authorised_call_reaches_the_transport_and_the_message_goes_out
     ``SUCCEEDED`` result alone would be satisfiable by a callable that returned
     without doing anything.
     """
-    channel = ScriptedChannel(*implicit_tls_script())
+    channel = scripted(*implicit_tls_script())
     integration, ring = await _configured(channel=channel)
     registry = build_default_registry(memory=FakeMemoryStore(), egress=integration)
     seam = _seam(integration, registry)
@@ -378,7 +369,7 @@ async def test_the_singular_phrasing_validates_binds_and_reaches_the_wire() -> N
     single indexless span ADR-0150 §4 gives a string (ADR-0157 §3); and the octets
     reach the scripted endpoint.
     """
-    channel = ScriptedChannel(*implicit_tls_script())
+    channel = scripted(*implicit_tls_script())
     integration, ring = await _configured(channel=channel)
     registry = build_default_registry(memory=FakeMemoryStore(), egress=integration)
     seam = _seam(integration, registry)

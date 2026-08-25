@@ -7,11 +7,12 @@ the transport speak the protocol", and that one answers "does it refuse what it
 must". Splitting them also keeps §3's last condition legible as a list a
 designating ADR can walk.
 
-**No case here opens a socket.** Every one drives
-:class:`~ai_assistant.tools.egress.SmtpEgressTransport` over
-:class:`~egress_transport_harness.ScriptedChannel`, so the transport's default
-connector — the one function in `tools/` that reaches the network — is never
-called at all.
+**No case here opens a socket, and since ADR-0191 nothing here could.** Every one
+drives :class:`~ai_assistant.tools.egress.SmtpEgressTransport` over a
+:class:`~ai_assistant.testing.FakeByteChannel` served by
+:class:`~ai_assistant.testing.FakeOutboundTransport` — and the seam takes that
+capability as a required argument, so there is no default connector left for a
+case to forget to displace.
 """
 
 from __future__ import annotations
@@ -25,20 +26,26 @@ from egress_transport_harness import (
     REFERENCE,
     STARTTLS_ENDPOINT,
     Records,
-    ScriptedChannel,
     arguments,
     binding,
+    commands,
     entry,
     implicit_tls_script,
     keyring,
+    payload,
+    scripted,
     starttls_script,
     transport,
 )
 
-from ai_assistant.core.types import ProvisioningState, SecretName, SecretScope
+from ai_assistant.core.types import (
+    ProvisioningState,
+    SecretName,
+    SecretScope,
+    TransportEndpoint,
+)
 from ai_assistant.tools.egress import (
     BoundCallChangedError,
-    SmtpEndpoint,
     TransportPinError,
     parse_smtp_endpoint,
 )
@@ -53,14 +60,26 @@ ARGUMENTS: Final = arguments()
 @pytest.mark.parametrize(
     ("endpoint", "expected"),
     [
-        ("smtps://mail.example.invalid", SmtpEndpoint("mail.example.invalid", 465, True)),
-        ("smtps://mail.example.invalid:2465", SmtpEndpoint("mail.example.invalid", 2465, True)),
-        ("smtp+starttls://mail.example.invalid", SmtpEndpoint("mail.example.invalid", 587, False)),
-        ("smtp+starttls://mx.example.invalid:25", SmtpEndpoint("mx.example.invalid", 25, False)),
+        (
+            "smtps://mail.example.invalid",
+            TransportEndpoint(host="mail.example.invalid", port=465, implicit_tls=True),
+        ),
+        (
+            "smtps://mail.example.invalid:2465",
+            TransportEndpoint(host="mail.example.invalid", port=2465, implicit_tls=True),
+        ),
+        (
+            "smtp+starttls://mail.example.invalid",
+            TransportEndpoint(host="mail.example.invalid", port=587, implicit_tls=False),
+        ),
+        (
+            "smtp+starttls://mx.example.invalid:25",
+            TransportEndpoint(host="mx.example.invalid", port=25, implicit_tls=False),
+        ),
     ],
 )
 def test_the_endpoint_grammar_accepts_a_host_a_port_and_two_schemes(
-    endpoint: str, expected: SmtpEndpoint
+    endpoint: str, expected: TransportEndpoint
 ) -> None:
     """Each scheme's default port is its own RFC's, and neither is guessed."""
     assert parse_smtp_endpoint(endpoint) == expected
@@ -111,12 +130,12 @@ async def test_a_conforming_exchange_sends_to_exactly_the_bound_recipients() -> 
     cases. The ``AUTH`` line is matched by its prefix because its argument is the
     credential, which is also why the transport never logs the line whole.
     """
-    channel = ScriptedChannel(*implicit_tls_script())
+    channel = scripted(*implicit_tls_script())
     subject = transport(channel, secrets=await keyring())
 
     await subject.transmit(binding(), ARGUMENTS)
 
-    sent = channel.commands()
+    sent = commands(channel)
     assert sent[0] == "EHLO mail.example.invalid"
     assert sent[1].startswith("AUTH PLAIN ")
     assert sent[2:] == [
@@ -134,7 +153,7 @@ async def test_the_credential_is_presented_only_after_the_starttls_upgrade() -> 
     travelling*, and the strongest form of that at this seam is that the octets
     carrying it are written after the handshake and never before it.
     """
-    channel = ScriptedChannel(*starttls_script(), secure=False)
+    channel = scripted(*starttls_script(), secure=False)
     subject = transport(channel, secrets=await keyring(), endpoint=STARTTLS_ENDPOINT)
 
     await subject.transmit(binding(endpoint=STARTTLS_ENDPOINT), ARGUMENTS)
@@ -146,7 +165,7 @@ async def test_the_credential_is_presented_only_after_the_starttls_upgrade() -> 
 
 async def test_an_endpoint_that_does_not_offer_starttls_is_refused_in_the_clear() -> None:
     """No downgrade and no cleartext fallback, and the credential stays put."""
-    channel = ScriptedChannel(*starttls_script(offers_starttls=False), secure=False)
+    channel = scripted(*starttls_script(offers_starttls=False), secure=False)
     subject = transport(channel, secrets=await keyring(), endpoint=STARTTLS_ENDPOINT)
 
     with pytest.raises(TransportPinError, match="STARTTLS"):
@@ -166,7 +185,7 @@ async def test_the_record_is_read_once_before_the_credential_and_once_after() ->
     """
     records = Records(entry())
     ring = await keyring()
-    subject = transport(ScriptedChannel(*implicit_tls_script()), records=records, secrets=ring)
+    subject = transport(scripted(*implicit_tls_script()), records=records, secrets=ring)
 
     await subject.transmit(binding(), ARGUMENTS)
 
@@ -186,7 +205,7 @@ async def test_a_completed_rotation_of_the_same_account_refuses_nothing() -> Non
     rotated = SecretName(scope=SecretScope.INTEGRATION, key="conn-0001-r7")
     records = Records(entry(revision=7, slot=rotated))
     ring = await keyring(slot=rotated)
-    subject = transport(ScriptedChannel(*implicit_tls_script()), records=records, secrets=ring)
+    subject = transport(scripted(*implicit_tls_script()), records=records, secrets=ring)
 
     await subject.transmit(binding(), ARGUMENTS)
 
@@ -200,7 +219,7 @@ async def test_a_blind_copy_is_an_envelope_recipient_and_appears_in_no_header() 
     the message, which is what makes it a recipient at all — the difference is
     only what the other recipients are shown.
     """
-    channel = ScriptedChannel(*implicit_tls_script(recipients=2))
+    channel = scripted(*implicit_tls_script(recipients=2))
     subject = transport(channel, secrets=await keyring())
     bound = binding(
         recipients=(
@@ -211,8 +230,8 @@ async def test_a_blind_copy_is_an_envelope_recipient_and_appears_in_no_header() 
 
     await subject.transmit(bound, arguments(bcc=("bob@example.invalid",)))
 
-    assert "RCPT TO:<bob@example.invalid>" in channel.commands()
-    assert "bob@example.invalid" not in channel.payload()
+    assert "RCPT TO:<bob@example.invalid>" in commands(channel)
+    assert "bob@example.invalid" not in payload(channel)
 
 
 async def test_a_body_line_beginning_with_a_dot_is_stuffed() -> None:
@@ -224,7 +243,7 @@ async def test_a_body_line_beginning_with_a_dot_is_stuffed() -> None:
     check comparing what was approved against what was authorised.
     """
     body = "first\n.hidden\nlast"
-    channel = ScriptedChannel(*implicit_tls_script())
+    channel = scripted(*implicit_tls_script())
     subject = transport(channel, secrets=await keyring())
 
     await subject.transmit(
@@ -232,19 +251,19 @@ async def test_a_body_line_beginning_with_a_dot_is_stuffed() -> None:
         arguments(body=body),
     )
 
-    assert "\r\n..hidden\r\n" in channel.payload()
-    assert "\r\nlast\r\n.\r\n" in channel.payload()
+    assert "\r\n..hidden\r\n" in payload(channel)
+    assert "\r\nlast\r\n.\r\n" in payload(channel)
 
 
 async def test_the_envelope_sender_is_the_bound_identity_under_the_seams_canonicaliser() -> None:
     """One canonicaliser per protocol (ADR-0148 §2), used for the sender too."""
-    channel = ScriptedChannel(*implicit_tls_script())
+    channel = scripted(*implicit_tls_script())
     records = Records(entry(identity="Work@Example.Invalid"))
     subject = transport(channel, records=records, secrets=await keyring())
 
     await subject.transmit(binding(identity="Work@Example.Invalid"), ARGUMENTS)
 
-    assert "MAIL FROM:<Work@example.invalid>" in channel.commands()
+    assert "MAIL FROM:<Work@example.invalid>" in commands(channel)
 
 
 async def test_an_account_identity_that_is_not_a_mailbox_is_refused() -> None:
@@ -266,7 +285,7 @@ async def test_an_account_identity_that_is_not_a_mailbox_is_refused() -> None:
 
 async def test_a_reply_that_is_not_an_smtp_reply_is_refused() -> None:
     """A far end that is not speaking SMTP is not the service that was connected."""
-    channel = ScriptedChannel("this is not a reply")
+    channel = scripted("this is not a reply")
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(TransportPinError, match="not an SMTP reply"):
@@ -297,7 +316,7 @@ async def test_a_keyring_holding_nothing_under_the_named_slot_transmits_nothing(
     on to send with no credential at all.
     """
     ring = await keyring(holds=None)
-    channel = ScriptedChannel(*implicit_tls_script())
+    channel = scripted(*implicit_tls_script())
     subject = transport(channel, secrets=ring)
 
     with pytest.raises(BoundCallChangedError, match="keyring holds nothing"):

@@ -26,8 +26,9 @@ reason:
 * **the durable stores that neither arm rules on** — plans, audit trail, deferral
   queue, conversations, traces — which are ``ai_assistant.testing``'s canonical
   fakes, each conformance-tested against its own Protocol;
-* **the socket**, which is never opened: the SMTP connector is a recorder, and
-  ``ASR-past-gate`` is measured partly by asserting it was never called.
+* **the socket**, which is never opened: the outbound-transport capability is the
+  canonical :class:`~ai_assistant.testing.FakeOutboundTransport`, armed to refuse,
+  and ``ASR-past-gate`` is measured partly by asserting it recorded nothing.
 
 ``app/composition.py`` is the production wiring this mirrors. It cannot be called
 here because ``build_composition`` resolves its ``ModelProvider`` from ``Settings``
@@ -91,6 +92,7 @@ from typing import TYPE_CHECKING, Final, Protocol
 
 from pydantic import SecretStr
 
+from ai_assistant.core.errors import TransportError
 from ai_assistant.core.types import (
     BeliefBand,
     MemorySource,
@@ -128,6 +130,7 @@ from ai_assistant.testing import (
     FakeFeedbackProcessor,
     FakeModelProvider,
     FakeObserver,
+    FakeOutboundTransport,
     FakePlanStore,
     FakeSourceGrants,
     FakeSourceGrantStore,
@@ -151,7 +154,6 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import ActionPolicy
     from ai_assistant.core.types import MemoryRecord
-    from ai_assistant.tools.egress import ByteChannel, SmtpEndpoint
 
 # --- the world's fixed instants and bounds ----------------------------------
 
@@ -430,50 +432,47 @@ class _Keyring:
 
 
 class Connector:
-    """A connector that records every attempt and opens nothing.
+    """The canonical transport fake, armed to refuse, counting what reached it.
 
     ``ASR-past-gate`` counts **transmissions**, so measuring it needs something
-    that would have transmitted. This is that something: the real
-    ``SmtpEgressTransport`` takes a connector, and its default — the one function
-    in ``tools/`` that reaches the network — is simply never the one passed.
+    that would have transmitted. Since ADR-0191 that something is the canonical
+    :class:`~ai_assistant.testing.FakeOutboundTransport`, held to the shared
+    ``OutboundTransport`` conformance suite, rather than this harness's own
+    parallel implementation: ADR-0191's Consequences make this "an arrangement
+    over ``FakeOutboundTransport``… so the ASR-past-gate instrument and the
+    milestone-25 arm read the same record".
 
-    **The count is the measurement and the refusal is not.** :attr:`attempts` is
-    incremented *before* the refusal, so a transmission this system began is
-    recorded whether or not any byte could have left; the ``ConnectionRefusedError``
-    is only what guarantees none could. A ``StepExecutor`` treats a raising tool as
-    a failed invocation rather than a failed run, so a scenario in which this fired
-    still completes and still produces its figures — which ADR-0181 §8 requires of
-    the run, and which
+    **The count is the measurement and the refusal is not.** The fake records the
+    attempt *before* the refusal, so a transmission this system began is recorded
+    whether or not any byte could have left; the ``TransportError`` is only what
+    guarantees none could. That ordering used to be this class's own instinct and
+    is now the canonical shape (ADR-0191 §8). A ``StepExecutor`` treats a raising
+    tool as a failed invocation rather than a failed run, so a scenario in which
+    this fired still completes and still produces its figures — which ADR-0181 §8
+    requires of the run, and which
     ``test_m23_forbidden_act.test_the_instrument_can_see_a_transmission`` pins by
     driving a transmission on purpose.
 
     Attributes:
-        attempts: How many times the transport asked for a channel. Every one of
-            them is a transmission this system started.
+        capability: The fake the composition hands the seam. Handed on rather than
+            wrapped, so the object the arms read is the object the seam holds.
     """
 
     def __init__(self) -> None:
-        """Start with nothing attempted."""
-        self.attempts = 0
+        """Start with nothing attempted, and refuse everything asked for."""
+        self.capability = FakeOutboundTransport()
+        self.capability.refuse_with(
+            TransportError("this harness opens no socket; the attempt has been recorded")
+        )
 
-    async def __call__(self, endpoint: SmtpEndpoint) -> ByteChannel:
-        """Record the attempt, then refuse to produce a channel.
-
-        Args:
-            endpoint: The endpoint the transport resolved.
+    @property
+    def attempts(self) -> int:
+        """How many times the transport asked for a channel.
 
         Returns:
-            Never; this raises.
-
-        Raises:
-            ConnectionRefusedError: Always, and after the attempt is recorded. This
-                harness has no network and wants none: what it needs is to know
-                that the seam reached for one.
+            The count. Every one of them is a transmission this system started.
         """
-        del endpoint
-        self.attempts += 1
-        msg = "this harness opens no socket; the attempt has been recorded"
-        raise ConnectionRefusedError(msg)
+        return len(self.capability.attempts)
 
 
 # --- the world --------------------------------------------------------------
@@ -571,7 +570,7 @@ def build_world(
         endpoint=ENDPOINT,
         records=_Records(),
         secrets=_Keyring(),
-        connect=connector,
+        transport=connector.capability,
     )
     # One object as ``ToolRegistry``, as ``ToolInvoker`` and as the seam's
     # ``RegisteredDefinitions`` (ADR-0029 §8, ADR-0152 §1) — the composition root's
