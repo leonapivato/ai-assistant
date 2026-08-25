@@ -136,6 +136,37 @@ class HostileKey(str):
         return False
 
 
+class UnspeakableError(ValueError):
+    """A ``ValueError`` that cannot be described, which is the caller's to raise.
+
+    A container's own ``__iter__`` runs the caller's code, and what it raises is the
+    caller's value too. A refusal that interpolates the caught exception into its
+    message calls this ``__str__`` from inside the ``except`` block that exists to
+    report it, and leaves as whatever that threw — outside the classes ADR-0192 §2's
+    order admits. ``ValueError`` specifically, because that is the class an
+    implementation is most likely to let through untouched as "already the right
+    kind of refusal".
+    """
+
+    def __str__(self) -> str:
+        """Refuse to describe this exception."""
+        msg = "this exception refuses to describe itself"
+        raise RuntimeError(msg)
+
+    def __repr__(self) -> str:
+        """Refuse to describe this exception, the other way round too."""
+        msg = "this exception refuses to describe itself"
+        raise RuntimeError(msg)
+
+
+class Unspeakably(list[object]):
+    """A container whose iteration raises an exception that cannot be described."""
+
+    def __iter__(self) -> Iterator[object]:
+        """Refuse to be iterated, unspeakably."""
+        raise UnspeakableError
+
+
 class Undescribable:
     """A value that refuses to describe itself, and can still be a mapping key.
 
@@ -733,6 +764,7 @@ class InvocationCompleterContract:
             pytest.param("undeclared", id="undeclared-state-of-mixed-key-types"),
             pytest.param("hostile-key", id="a-key-that-refuses-to-be-compared"),
             pytest.param("cycle", id="a-container-that-contains-itself"),
+            pytest.param("unspeakable", id="a-container-raising-what-cannot-be-described"),
         ],
     )
     async def test_malformed_model_state_is_still_an_argument_fault(
@@ -770,6 +802,8 @@ class InvocationCompleterContract:
             cyclic: list[object] = []
             cyclic.append(cyclic)
             cost.__dict__["amount"] = cyclic
+        elif tamper == "unspeakable":
+            cost.__dict__["amount"] = Unspeakably([1])
         else:
             _undeclared(cost, {1: "one", "extra": "text"})
 
@@ -1792,6 +1826,33 @@ class InvocationLedgerContract(InvocationCompleterContract):
         assert await _rows(ledger) == []
         assert await ledger.get("d-1") == recorded, "the recorded decision is untouched"
 
+    async def test_a_decision_whose_schema_repeats_an_empty_array_is_ordinary(
+        self, ledger: LedgerSubject
+    ) -> None:
+        """The control the cycle refusal needs, and it is not a hypothetical.
+
+        :data:`~ai_assistant.core.types.FrozenJson` freezes a JSON array to a
+        ``tuple``, and the empty tuple is interned — so a ``parameters_schema``
+        carrying ``"required": []`` and ``"examples": []`` puts *one object* under two
+        keys of a perfectly ordinary declaration. An implementation that refuses every
+        container it reaches twice refuses this decision, which is valid, acyclic, and
+        the shape any tool with two empty arrays in its schema has. Reaching a
+        container twice is not a cycle; containing itself is.
+        """
+        schema: dict[str, object] = {
+            "type": "object",
+            "properties": {},
+            "required": [],
+            "examples": [],
+        }
+        authorisation = allowed("d-1", definition=spendable(parameters_schema=schema))
+        await ledger.record(authorisation)
+
+        claim = await ledger.claim_invocation(decision=authorisation)
+
+        assert claim.decision_id == "d-1"
+        assert await ledger.get("d-1") == authorisation
+
     @pytest.mark.parametrize(
         "tamper",
         [
@@ -1802,6 +1863,7 @@ class InvocationLedgerContract(InvocationCompleterContract):
             pytest.param("hidden-model", id="a-model-hidden-in-a-frozen-mapping"),
             pytest.param("unwalkable", id="a-container-that-refuses-to-be-iterated"),
             pytest.param("deep", id="a-model-under-two-thousand-containers"),
+            pytest.param("unspeakable", id="a-container-raising-what-cannot-be-described"),
         ],
     )
     async def test_a_malformed_decision_is_still_an_argument_fault(
@@ -1863,6 +1925,8 @@ class InvocationLedgerContract(InvocationCompleterContract):
                 cursor = inner
             cursor.append(ToolCost(basis=CostBasis.FREE))
             handed.__dict__["step_id"] = deep
+        elif tamper == "unspeakable":
+            handed.__dict__["step_id"] = Unspeakably([1])
         else:
             _undeclared(handed, {1: "one", "extra": "text"})
 
