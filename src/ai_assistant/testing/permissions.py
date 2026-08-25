@@ -25,7 +25,7 @@ import itertools
 import os
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, Final, Protocol, get_args, runtime_checkable
+from typing import TYPE_CHECKING, Any, Final, Protocol, cast, get_args, runtime_checkable
 from uuid import uuid4
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
@@ -1259,20 +1259,15 @@ def _models_within(value: object) -> Iterator[BaseModel]:
     raises here exactly as it would inside the serializer one call later, so this
     walk widens nothing that can leave.
 
-    **A container reached twice on the way down is refused**, which is what keeps an
-    iterative walk from being worse than a recursive one. ``spans[0] is spans`` is a
-    single ``__dict__`` write away, and a stack that simply re-expanded it would spin
-    for good — synchronously, before the first ``await``, so the event loop stops
-    being serviced and the ``AuditError`` §2 requires never arrives. Refusing is also
-    the only *correct* answer: the serializer below cannot render a cycle either, and
-    on ``main`` it leaves as an ``AttributeError``, which is outside the classes §2's
-    order admits. A value holding the same container twice over is refused with it —
-    a shape none of these models has, and the fail-closed direction to be wrong in.
-
-    ``Mapping`` and not ``dict``, because :data:`~ai_assistant.core.types.FrozenJson`
-    renders a mapping as a ``FrozenDict``, which is a ``Mapping`` and not a ``dict``
-    at all: a field declared :data:`~ai_assistant.core.types.FrozenJsonMapping` would
-    otherwise be walked past.
+    **A container that contains itself is refused**, which is what keeps an iterative
+    walk from being worse than a recursive one. ``spans[0] is spans`` is a single
+    ``__dict__`` write away, and a stack that simply re-expanded it would spin for
+    good — synchronously, before the first ``await``, so the event loop stops being
+    serviced and the ``AuditError`` §2 requires never arrives. Refusing is also the
+    only *correct* answer: the serializer below cannot render a cycle either, and on
+    ``main`` it leaves as an ``AttributeError``, which is outside the classes §2's
+    order admits. A container merely reached **twice** is not that and is not
+    refused; see the note on the two sets below.
 
     **The recognised containers are a list and not a universe, and what is outside it
     is safe by two other clauses rather than by this one.** A model hidden inside some
@@ -1283,26 +1278,74 @@ def _models_within(value: object) -> Iterator[BaseModel]:
     validated snapshot ADR-0021 §4 asks for rather than the caller's exact object,
     which is what that clause promises.
     """
-    pending: list[object] = [value]
-    expanded: set[int] = set()
-    while pending:
-        item = pending.pop()
-        if isinstance(item, BaseModel):
-            yield item
-            continue
-        if not isinstance(item, list | tuple | set | frozenset | Mapping):
-            continue
-        # `id` and never the container itself: a `set` of the containers would hash
-        # and compare two caller-supplied values, and on a cycle that comparison
-        # does not terminate either. A `set` of the *ids* hashes machine integers,
-        # whose hash and equality are the interpreter's, and answers in constant
-        # time however deep the nesting goes.
-        marker = id(item)
-        if marker in expanded:
-            msg = "the value holds a container reached twice on the way down: a cycle"
-            raise ValueError(msg)
-        expanded.add(marker)
-        pending.extend(item.values() if isinstance(item, Mapping) else item)
+    if isinstance(value, BaseModel):
+        yield value
+        return
+    if not _is_container(value):
+        return
+    # A depth-first walk with the path made explicit, because the two things that
+    # can go wrong here need different answers. `open` is what is being walked
+    # *right now*: a container that turns up inside itself is a cycle, and there is
+    # no rendering of one, so it is refused. `closed` is what has been walked
+    # already: the same container reached again from somewhere else is neither a
+    # cycle nor new, so it is skipped — which is what keeps a shared subtree from
+    # being re-walked once per route to it, and what makes two empty tuples in one
+    # schema the ordinary thing they are rather than a refusal. `()` is interned, so
+    # a walk that refused every repeated identity would refuse a valid decision.
+    #
+    # Identities and never the containers: a `set` of the containers themselves
+    # would hash and compare two caller-supplied values, and on a cycle that
+    # comparison does not terminate either. `id` yields machine integers, whose hash
+    # and equality are the interpreter's.
+    stack: list[tuple[int, Iterator[object]]] = [(id(value), _members(value))]
+    open_ids: set[int] = {id(value)}
+    closed_ids: set[int] = set()
+    while stack:
+        marker, cursor = stack[-1]
+        for item in cursor:
+            if isinstance(item, BaseModel):
+                yield item
+                continue
+            if not _is_container(item):
+                continue
+            below = id(item)
+            if below in open_ids:
+                msg = "the value holds a container that contains itself: a cycle"
+                raise ValueError(msg)
+            if below in closed_ids:
+                continue
+            open_ids.add(below)
+            stack.append((below, _members(item)))
+            break
+        else:
+            stack.pop()
+            open_ids.discard(marker)
+            closed_ids.add(marker)
+
+
+def _is_container(value: object) -> bool:
+    """Whether the walk descends into ``value``.
+
+    ``Mapping`` and not ``dict``, because :data:`~ai_assistant.core.types.FrozenJson`
+    renders a mapping as a ``FrozenDict``, which is a ``Mapping`` and not a ``dict``
+    at all: a field declared :data:`~ai_assistant.core.types.FrozenJsonMapping` would
+    otherwise be walked past. ``str`` and ``bytes`` are iterable and are deliberately
+    not here — they hold no model and iterating them would only yield themselves.
+    """
+    return isinstance(value, list | tuple | set | frozenset | Mapping)
+
+
+def _members(value: object) -> Iterator[object]:
+    """The members of a container this walk descends into.
+
+    A ``Mapping``'s *values*: a model can only be a value, and reading the keys would
+    be reading objects whose ``__hash__`` and ``__eq__`` the caller wrote
+    (:func:`_refuse_undeclared` states that hazard in full).
+    """
+    if isinstance(value, Mapping):
+        pairs: Mapping[object, object] = value
+        return iter(pairs.values())
+    return iter(cast("Iterable[object]", value))
 
 
 def _detached_cost(value: ToolCost) -> ToolCost:
@@ -1346,7 +1389,12 @@ def _revalidated_decision(decision: PermissionDecision) -> PermissionDecision:
             if isinstance(given, PermissionDecision)
             else "the given value"
         )
-        msg = f"decision {named} is not a valid record: {exc}"
+        # `describe_untrusted` on the cause as well as on the id. `_field_state`
+        # re-raises a `ValueError` the caller's own code raised, and a hostile
+        # `__str__` on it would replace this `AuditError` with whatever it threw —
+        # from inside the `except` block that exists to report it (ADR-0192 §2's
+        # order is exhaustive over the classes a refusal arrives in).
+        msg = f"decision {named} is not a valid record: {describe_untrusted(exc)}"
         raise AuditError(msg) from exc
 
 
@@ -1389,7 +1437,9 @@ def _checked_argument[T](name: str, build: Callable[[], T]) -> T:
     try:
         return build()
     except (ValidationError, ValueError) as exc:
-        msg = f"the audit trail was given a {name} it cannot record: {exc}"
+        # `describe_untrusted` on the cause, for :func:`_revalidated`'s reason: the
+        # value is the caller's, and so is any exception reading it raised.
+        msg = f"the audit trail was given a {name} it cannot record: {describe_untrusted(exc)}"
         raise AuditError(msg) from exc
 
 
