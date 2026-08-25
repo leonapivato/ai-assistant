@@ -114,6 +114,28 @@ provider's bill, which is ADR-0014 §7's deferral and stays there.
 > nor checked against the live register. This is `ToolCost.currency`'s rule
 > (ADR-0016 §4) and not a second one.
 
+> **Normative.** An amount is **countable** exactly where all three hold: it is
+> finite; its absolute value is **strictly less than** `Decimal("1E15")`; and its
+> **value** can be expressed with at most **nine** fractional digits — the test is
+> `value == value.quantize(Decimal("1E-9"))` computed exactly, so it is a test on
+> the number and not on its representation, and `Decimal("1.0000000000")` is
+> countable because its value is `1`. This predicate governs every amount this
+> mechanism reads: a configured ceiling, the allowance, a declared
+> `ToolCost.amount` and a reported one.
+
+> **Normative.** A **configured** amount that is not countable is refused at load
+> with `ConfigurationError`, naming the field. A **declared** amount that is not
+> countable refuses the call at admission with `SpendCeilingError` where a ceiling
+> is configured (§4). A **reported** amount that is not countable makes its
+> period's accounted total **indeterminate** (§2).
+
+> **Normative.** An amount that is not countable is **never** replaced by
+> `world_spend_unknown_allowance`. The allowance stands for a price nobody knows;
+> an out-of-range amount is a price somebody stated and this mechanism cannot add,
+> and substituting a small number for a large stated one would defeat both the
+> admission and the account. The allowance reaches an `UNKNOWN` basis and nothing
+> else.
+
 > **Normative.** Either ceiling, where set, is a `Decimal` that is **finite and
 > greater than or equal to zero**. A non-finite value is refused at load, as
 > `ToolCost.amount` refuses one, and for the same reason: `Decimal` admits
@@ -176,6 +198,19 @@ provider's bill, which is ADR-0014 §7's deferral and stays there.
 > whatever any total says. Where a reporting currency is nonetheless configured the
 > totals are still computed and still readable (§6). No default amount is minted,
 > here or by an implementation.
+
+**The two numbers are contract, and they are what makes §2's exact arithmetic
+computable rather than aspirational.** Without a bound, two amounts a validator
+would accept — `Decimal(f"1e{decimal.MAX_EMAX}")` and `Decimal("1")` — have an
+exact sum needing more coefficient digits than `decimal.MAX_PREC` admits, so the
+computation exhausts memory instead of trapping and the outcome depends on the
+machine. Bounded, the digits a sum needs are bounded too, the context §2 requires
+can always be sized, and the traps become a backstop against an implementation
+that failed to size it. The numbers themselves are stated so a reader can disagree
+with a number rather than with the principle: 10^15 in any real currency's major
+unit exceeds any plausible monthly ceiling by orders of magnitude, and nine
+fractional digits carry every currency's minor unit and every nano-unit price a
+metered API quotes.
 
 **Calendar rather than rolling, and the day ceiling is what pays for it.** A
 rolling window is the more precise instrument and the wrong one for this
@@ -258,7 +293,10 @@ trigger rather than pre-deciding it here.
 
 > **Normative.** A cost denominated in a currency other than `world_spend_currency`
 > is **never converted**. It is treated exactly as an `UNKNOWN` basis is by the
-> clause above. No implementation reads an exchange rate, and no lane adds one
+> clause above — the allowance where one is configured, and otherwise a
+> contribution greater than any ceiling. A cost whose *amount* is not countable is
+> **not** treated that way; §1's clause governs it, and the allowance never reaches
+> it. No implementation reads an exchange rate, and no lane adds one
 > without its own ratified decision (§8).
 
 > **Normative.** Every sum and comparison this mechanism performs is the
@@ -631,9 +669,10 @@ is where that lands.
 > this signature: `async def spend_totals(self) -> tuple[SpendTotal, ...]`. It
 > relays `SpendLedger.spend_totals` and returns what it returns. It raises
 > `SpendUndeterminedError`, and — as every member of that surface does —
-> `OversizedValueError` under ADR-0085 §8, which this ADR does not lift; §1's
-> countability bound makes it unreachable for a two-entry tuple rather than
-> inapplicable. No other `Exception` escapes it, and §4's `BaseException` exemption
+> `OversizedValueError` under ADR-0085 §8, which this ADR does not lift and makes
+> no claim about the reachability of: §1 bounds each amount and nothing bounds the
+> number of rows, so an accounted total is not bounded and the declaration is a
+> real one. No other `Exception` escapes it, and §4's `BaseException` exemption
 > binds. It is `async` because the member it relays is I/O-bound, which is
 > `CLAUDE.md`'s rule for one.
 
@@ -871,7 +910,8 @@ replacing them.
 > **Normative.** The `AssistantEngine` widening carries its own triad obligation in
 > that same change: the shared `AssistantEngine` conformance suite and the
 > canonical `FakeAssistantEngine` gain `spend_totals` alongside the Protocol
-> member. A Protocol change extends its triad in the change that makes it, and
+> member, and that suite drives an oversized result to `OversizedValueError` as it
+> does for every other member of the surface. A Protocol change extends its triad in the change that makes it, and
 > ADR-0137 §3 forbids splitting that.
 
 > **Normative.** Both lanes are sequenced **after** ADR-0192's implementation has
@@ -887,7 +927,9 @@ replacing them.
 > set to and whatever its decision declared, including the case where the
 > completion append itself failed; a foreign-currency cost taking the `UNKNOWN`
 > path; a period rollover clearing an indeterminate total; both ceilings configured
-> with the day ceiling binding first; a reporting currency configured with no
+> with **only the day ceiling** crossed, and again with **only the month ceiling**
+> crossed while the day total stays under its own — the second is what catches an
+> implementation that checks one ceiling and stops; a reporting currency configured with no
 > ceiling, where a total is stated and **nothing is refused even while the period
 > is indeterminate**; and no currency configured at all, where no total is stated.
 
@@ -920,9 +962,13 @@ replacing them.
 > one staying below it and admitted. The second is what pins the result rather than
 > a precision, and a suite carrying only the first does not discharge this clause.
 
-> **Normative.** The suite drives §1's countability bound from both sides: a
-> configured ceiling and an allowance outside it refused at load, and a declared or
-> reported amount outside it taking the `UNKNOWN` path rather than being summed.
+> **Normative.** The suite drives §1's countability predicate on every side: a
+> configured ceiling and an allowance outside it refused at load; a declared amount
+> outside it refusing the call; a reported one outside it making the period
+> indeterminate; and — the case the predicate's wording exists for — a value
+> written with ten fractional digits that is numerically equal to one with none,
+> accepted as countable. It asserts that in **none** of those cases is the
+> allowance substituted.
 
 > **Normative.** `SpendTotal` **validates its own invariants** rather than relying
 > on its annotations: `time_zone` is a zone `zoneinfo.ZoneInfo` resolves **and
@@ -999,12 +1045,13 @@ replacing them.
   what ADR-0021 §5's whole conformance argument rests on.
 - **Erasing the trail resets the ceiling.** Accepted, because the alternative is a
   spend record that outlives the user's own erasure.
-- **Two numbers are now contract.** An amount above 10^15, or with more than nine
-  fractional digits, is not countable: configured, it is refused at load;
-  reported, it takes the `UNKNOWN` path. That is what makes the exact arithmetic
-  computable rather than aspirational — without a bound, an exact sum of two valid
-  `Decimal`s can exhaust memory instead of trapping — and it is stated with its
-  number so a reader can disagree with the number rather than with the principle.
+- **Two numbers are now contract** (§1). An amount at or above 10^15, or whose
+  value needs more than nine fractional digits, is not countable: configured, it is
+  refused at load; declared, it refuses the call; reported, it makes the period
+  indeterminate. It is never swapped for the allowance — that stands for a price
+  nobody knows, not for one this mechanism cannot add. The bound is what makes the
+  exact arithmetic computable rather than aspirational, and the numbers are stated
+  so a reader can disagree with a number rather than with the principle.
 - **`core` grows by seven names** — `SpendGate`, `SpendLedger`, `SpendPeriod`,
   `SpendTotal`, `SpendError`, `SpendCeilingError`, `SpendUndeterminedError` — plus
   one engine member and four settings. That is the
