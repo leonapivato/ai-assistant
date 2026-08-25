@@ -39,6 +39,23 @@ at all, so the name shows up only at a call. Both sets are derived from the runn
 interpreter rather than hand-listed, because a hand list is exactly what the second
 review round found incomplete.
 
+**It reaches ``asyncio``'s connection surface too, since ADR-0191 §7 (#1545).** The
+same gap ran the other way for a year: ``asyncio`` is deliberately absent from the
+import contract's forbidden list, the source net did follow its attributes, and
+:data:`ASYNCIO_LAUNCHERS` carried only that package's *subprocess* surface — so a
+``tools/`` module calling ``asyncio.open_connection`` passed both nets and the whole
+gate, by the same route the seam's own opener uses. ``open_unix_connection`` is
+deliberately **not** added: a Unix domain socket stays on the device (ADR-0084 §1),
+and forbidding it would be a rule about local IPC rather than about egress
+(ADR-0191 §5, §7).
+
+**Neither net is retired because the capability exists, and ADR-0191 §7 says so in
+terms.** The capability catches the honest case — a subsystem that asks the system
+for a way to reach the world and is not given one; these nets catch the case it
+cannot see, a module that never asks and reaches for ``socket`` or
+``asyncio.open_connection`` directly. Retiring either would leave one of the two
+uncovered.
+
 **And the enumeration is checked against the dependency closure, not against itself.**
 ``test_every_runtime_dependency_is_classified`` walks the runtime requirement graph
 and fails on any package this file has not sorted into transport-bearing or not, so a
@@ -111,6 +128,17 @@ ASYNCIO_LAUNCHERS = frozenset(
     {"subprocess"} | {name for name in dir(asyncio) if name.startswith("create_subprocess")}
 )
 
+#: `asyncio`'s **connection** surface, which ADR-0191 §7 adds to this net (#1545).
+#: Hand-named rather than derived, and the asymmetry with the two sets above is the
+#: decision: `dir(asyncio)` has no prefix that separates opening a connection off the
+#: device from opening one to a path on it, and the derivation that would catch
+#: `open_connection` would catch `open_unix_connection` beside it — which ADR-0191 §5
+#: keeps out, because a Unix domain socket does not leave the device (ADR-0084 §1) and
+#: forbidding it would be a rule about local IPC. Two names is a list short enough to
+#: read against the module, and the day `asyncio` grows a third the seam's own opener
+#: is still the only place under `tools/` that may hold one.
+ASYNCIO_CONNECTORS = frozenset({"open_connection"})
+
 #: Dotted names no `tools/` module but the seam may reach for, matched against the
 #: name and every package containing it. `asyncio` and `os` are deliberately absent as
 #: *roots* — ADR-0029 §4's deadline runs on the first and the second is the standard
@@ -118,7 +146,7 @@ ASYNCIO_LAUNCHERS = frozenset(
 #: rather than a transport.
 FORBIDDEN_NAMES = frozenset(
     REQUIRED_STDLIB
-    | {f"asyncio.{name}" for name in ASYNCIO_LAUNCHERS}
+    | {f"asyncio.{name}" for name in ASYNCIO_LAUNCHERS | ASYNCIO_CONNECTORS}
     | {f"os.{name}" for name in OS_LAUNCHERS}
 )
 
@@ -399,18 +427,55 @@ def test_exactly_one_production_module_outside_the_seam_names_the_transport() ->
     ``BoundTransport`` Protocol instead. That is the difference between one
     construction site and one per integration.
 
+    """
+    assert _namers({"SmtpEgressTransport", "OutboundEmail", "parse_smtp_endpoint"}) == {
+        "src/ai_assistant/tools/builtin.py"
+    }, (
+        "more than one production module names the egress transport. Exactly one "
+        "does — the registry factory, which is the central construction site issue "
+        "#83's third bullet asks for — so a policy about how a client is built has "
+        "one place to live and a per-integration bypass has none."
+    )
+
+
+def test_exactly_one_module_constructs_the_transport_capability() -> None:
+    """**One holder, and it is the composition root** (ADR-0191 §3).
+
+    The second half of the same property, arriving one level down. ADR-0191 §3
+    makes ``app/composition.py`` "the only place in ``src/ai_assistant`` that
+    constructs the real implementation and the only place that hands it out", and
+    the clause matters because of what the tree used to be: the capability's
+    predecessor was a module-level coroutine in the seam, reachable by anything
+    that could import it, and ``SmtpEgressTransport`` took it as a *default
+    argument* — so production reached the world through a signature that said the
+    transport was supplied and a call site that supplied nothing.
+
+    Note that holding the capability does not make ``app`` an egress boundary: it
+    opens nothing, and no lane may read this test as designating one under
+    ADR-0017 §1 (ADR-0191 §3).
+    """
+    assert _namers({"StreamOutboundTransport"}) == {"src/ai_assistant/app/composition.py"}, (
+        "more than one production module names the transport capability's "
+        "implementation. Exactly one constructs it — the composition root — so a "
+        "subsystem that was handed none has no second place to obtain one "
+        "(ADR-0191 §3)."
+    )
+
+
+def _namers(named: set[str]) -> set[str]:
+    """Every production module outside the seam that mentions one of ``named``.
+
     The scan reads names, so it shares :func:`_reached_names`'s blind spots — a
     ``getattr``, a name assembled at runtime. That is ADR-0017 §4's "net, not a
-    proof" for the third time in this file, and it is stated rather than implied.
+    proof" again, and it is stated rather than implied.
+
+    Args:
+        named: The symbols to look for.
+
+    Returns:
+        The repository-relative paths that name at least one of them.
     """
-    named = {
-        "SmtpEgressTransport",
-        "SmtpEndpoint",
-        "OutboundEmail",
-        "open_smtp_channel",
-        "parse_smtp_endpoint",
-    }
-    namers: dict[str, set[str]] = {}
+    namers: set[str] = set()
     for path in sorted((_REPO_ROOT / "src" / "ai_assistant").rglob("*.py")):
         if path == _modules()[SEAM]:
             continue
@@ -426,14 +491,8 @@ def test_exactly_one_production_module_outside_the_seam_names_the_transport() ->
             for alias in node.names
         }
         if found & named:
-            namers[str(path.relative_to(_REPO_ROOT))] = found & named
-
-    assert set(namers) == {"src/ai_assistant/tools/builtin.py"}, (
-        f"{sorted(namers)} name the egress transport. Exactly one production module "
-        f"does — the registry factory, which is the central construction site issue "
-        f"#83's third bullet asks for — so a policy about how a client is built has "
-        f"one place to live and a per-integration bypass has none."
-    )
+            namers.add(str(path.relative_to(_REPO_ROOT)))
+    return namers
 
 
 def test_exactly_one_place_in_the_seam_opens_a_connection() -> None:
@@ -458,7 +517,7 @@ def test_exactly_one_place_in_the_seam_opens_a_connection() -> None:
         )
     }
 
-    assert opening == {"open_smtp_channel"}, (
+    assert opening == {"open_channel"}, (
         f"{sorted(opening)} open a connection. Exactly one function in the seam "
         f"does, so the pin has one place to live and a test has one place to "
         f"substitute (ADR-0147 §3, issue #83)."

@@ -38,12 +38,14 @@ from egress_transport_harness import (
     SLOT,
     TOOL_ID,
     Records,
-    ScriptedChannel,
     arguments,
     binding,
+    commands,
     entry,
     implicit_tls_script,
     keyring,
+    payload,
+    scripted,
     transport,
 )
 
@@ -203,7 +205,7 @@ async def test_a_cross_host_forward_path_is_refused_and_never_followed() -> None
     and that is what is asserted: no second connection is opened, no octet
     mentioning that host is ever written, and no ``DATA`` follows.
     """
-    channel = ScriptedChannel(
+    channel = scripted(
         "220 mail.example.invalid ESMTP ready",
         "250-mail.example.invalid\n250 AUTH PLAIN",
         "235 2.7.0 authentication succeeded",
@@ -230,7 +232,7 @@ async def test_the_other_forward_path_reply_is_refused_the_same_way() -> None:
     delivery to the approved recipient and record a disclosure that went
     elsewhere.
     """
-    channel = ScriptedChannel(
+    channel = scripted(
         "220 mail.example.invalid ESMTP ready",
         "250-mail.example.invalid\n250 AUTH PLAIN",
         "235 2.7.0 authentication succeeded",
@@ -300,13 +302,13 @@ async def test_the_wire_carries_the_canonical_form_and_the_record_keeps_the_supp
     still pass this — which is why the binding is asserted too, and why ADR-0148
     §14 states the reconstruction failure separately.
     """
-    channel = ScriptedChannel(*implicit_tls_script())
+    channel = scripted(*implicit_tls_script())
     subject = transport(channel, secrets=await keyring())
     bound = binding(recipients=(("Alice@Example.Invalid", "Alice@example.invalid"),))
 
     await subject.transmit(bound, arguments(to=("Alice@Example.Invalid",)))
 
-    assert "RCPT TO:<Alice@example.invalid>" in channel.commands()
+    assert "RCPT TO:<Alice@example.invalid>" in commands(channel)
     assert [span.destination.supplied for span in bound.spans if span.destination] == [
         "Alice@Example.Invalid"
     ]
@@ -431,12 +433,12 @@ async def test_the_payload_is_the_arguments_and_there_is_no_second_copy_to_subst
     reading what each put on the wire.
     """
     for body in ("attached, as promised", "aTTACHED, AS pROMISED"):
-        channel = ScriptedChannel(*implicit_tls_script())
+        channel = scripted(*implicit_tls_script())
         subject = transport(channel, secrets=await keyring())
 
         await subject.transmit(binding(body=body), arguments(body=body))
 
-        assert body in channel.payload()
+        assert body in payload(channel)
 
 
 @pytest.mark.parametrize(
@@ -486,13 +488,13 @@ async def test_a_string_valued_recipient_argument_transmits_to_exactly_that_reci
     on the octets, because "it did not raise" is satisfied by a transport that sent
     to nobody.
     """
-    channel = ScriptedChannel(*implicit_tls_script())
+    channel = scripted(*implicit_tls_script())
     subject = transport(channel, secrets=await keyring())
     string_valued: dict[str, object] = {**ARGUMENTS, "to": "Alice@Example.Invalid"}
 
     await subject.transmit(binding(indexed=False), string_valued)  # type: ignore[arg-type]  # a string `to` is the point
 
-    assert [line for line in channel.commands() if line.startswith("RCPT TO:")] == [
+    assert [line for line in commands(channel) if line.startswith("RCPT TO:")] == [
         "RCPT TO:<Alice@example.invalid>"
     ]
 
@@ -549,13 +551,13 @@ async def test_a_body_may_carry_line_breaks_because_a_body_is_not_a_header() -> 
     what holds it narrow.
     """
     body = "first line\nsecond line\n.third looks like a terminator"
-    channel = ScriptedChannel(*implicit_tls_script())
+    channel = scripted(*implicit_tls_script())
     subject = transport(channel, secrets=await keyring())
 
     await subject.transmit(binding(body=body), arguments(body=body))
 
-    assert "second line" in channel.payload()
-    assert "\r\n..third" in channel.payload()
+    assert "second line" in payload(channel)
+    assert "\r\n..third" in payload(channel)
 
 
 async def test_a_binding_naming_another_connection_is_refused_on_the_same_identity() -> None:
@@ -657,7 +659,7 @@ async def test_a_far_end_refusing_one_recipient_fails_the_whole_call() -> None:
     the first — already accepted — receives nothing, because the message is never
     sent at all.
     """
-    channel = ScriptedChannel(
+    channel = scripted(
         "220 mail.example.invalid ESMTP ready",
         "250-mail.example.invalid\n250 AUTH PLAIN",
         "235 2.7.0 authentication succeeded",
@@ -690,7 +692,7 @@ async def test_no_narrower_set_is_constructed_from_the_remainder() -> None:
     entirely" is a claim about what was *not* written and an implementation that
     raised after quietly sending would satisfy a type assertion.
     """
-    channel = ScriptedChannel(
+    channel = scripted(
         "220 mail.example.invalid ESMTP ready",
         "250-mail.example.invalid\n250 AUTH PLAIN",
         "235 2.7.0 authentication succeeded",
@@ -734,13 +736,13 @@ async def test_a_send_interrupted_after_the_payload_is_indeterminate() -> None:
     recovery scan is the reconciliation path for. A designated seam adds no
     reconciliation path of its own, which is why nothing here invents a store.
     """
-    channel = ScriptedChannel(*implicit_tls_script()[:-2])
+    channel = scripted(*implicit_tls_script()[:-2])
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(IndeterminateTransmissionError, match="unknown"):
         await subject.transmit(binding(), ARGUMENTS)
 
-    assert channel.payload().endswith("\r\n.\r\n")
+    assert payload(channel).endswith("\r\n.\r\n")
 
 
 async def test_indeterminate_is_not_a_refusal_and_cannot_be_caught_as_one() -> None:
@@ -766,7 +768,7 @@ async def test_a_refused_send_is_distinguishable_from_an_indeterminate_one() -> 
     implementation that reported both the same way would leave an auditor unable
     to tell a rejected message from a possibly-delivered one.
     """
-    refusing = ScriptedChannel(
+    refusing = scripted(
         "220 mail.example.invalid ESMTP ready",
         "250-mail.example.invalid\n250 AUTH PLAIN",
         "235 2.7.0 authentication succeeded",
@@ -779,7 +781,7 @@ async def test_a_refused_send_is_distinguishable_from_an_indeterminate_one() -> 
     with pytest.raises(BoundCallChangedError, match="nothing was sent"):
         await subject.transmit(binding(), ARGUMENTS)
 
-    assert refusing.payload() == ""
+    assert payload(refusing) == ""
 
 
 async def test_a_non_250_verdict_after_the_payload_is_also_indeterminate() -> None:
@@ -790,7 +792,7 @@ async def test_a_non_250_verdict_after_the_payload_is_also_indeterminate() -> No
     same way a missing verdict is — the conservative direction, and the one
     ADR-0029 §4 takes for a side-effecting call whose effect is unknown.
     """
-    channel = ScriptedChannel(*implicit_tls_script()[:-2], "451 4.3.0 try again later")
+    channel = scripted(*implicit_tls_script()[:-2], "451 4.3.0 try again later")
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(IndeterminateTransmissionError, match="unknown"):
@@ -822,13 +824,13 @@ async def test_a_read_that_raises_after_the_payload_is_indeterminate_too(
     that a later narrowing of the ``except`` clause fails here rather than in
     production.
     """
-    channel = ScriptedChannel(*implicit_tls_script()[:-2], on_exhausted=failure)
+    channel = scripted(*implicit_tls_script()[:-2], on_exhausted=failure)
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(IndeterminateTransmissionError, match="unknown"):
         await subject.transmit(binding(), ARGUMENTS)
 
-    assert channel.payload().endswith("\r\n.\r\n")
+    assert payload(channel).endswith("\r\n.\r\n")
 
 
 @pytest.mark.parametrize(
@@ -854,13 +856,13 @@ async def test_a_write_that_fails_while_sending_the_payload_is_indeterminate(
     So the conservative answer is the only honest one: the message reached the
     transport, and what the endpoint did with it is unknown.
     """
-    channel = ScriptedChannel(*implicit_tls_script(), on_payload_write=failure)
+    channel = scripted(*implicit_tls_script(), on_payload_write=failure)
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(IndeterminateTransmissionError, match="unknown"):
         await subject.transmit(binding(), ARGUMENTS)
 
-    assert channel.payload().endswith("\r\n.\r\n")
+    assert payload(channel).endswith("\r\n.\r\n")
 
 
 async def test_a_socket_error_before_the_payload_stays_a_failure() -> None:
@@ -871,13 +873,13 @@ async def test_a_socket_error_before_the_payload_stays_a_failure() -> None:
     Converting *that* into an indeterminate outcome would make every network blip
     an unresolvable step, which is the opposite error and is just as expensive.
     """
-    channel = ScriptedChannel(on_exhausted=ConnectionResetError("reset on the greeting"))
+    channel = scripted(on_exhausted=ConnectionResetError("reset on the greeting"))
     subject = transport(channel, secrets=await keyring())
 
     with pytest.raises(ConnectionResetError):
         await subject.transmit(binding(), ARGUMENTS)
 
-    assert channel.payload() == ""
+    assert payload(channel) == ""
 
 
 async def test_an_unterminated_multi_line_reply_is_refused_rather_than_buffered() -> None:
@@ -889,7 +891,7 @@ async def test_an_unterminated_multi_line_reply_is_refused_rather_than_buffered(
     that only limited line length would accumulate until the process died — while
     the credential sat in hand, one command away from being presented.
     """
-    channel = ScriptedChannel(
+    channel = scripted(
         "220 mail.example.invalid ESMTP ready",
         "\n".join(f"250-EXT{index}" for index in range(500)),
     )

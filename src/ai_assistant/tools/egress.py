@@ -44,8 +44,9 @@ sends through it names no transport at all — it holds a one-method
 :class:`~ai_assistant.tools.send_email.BoundTransport` Protocol — so a second
 integration wired later comes through that same factory or through nothing.
 ``tests/tools/test_egress_seam.py`` holds the tree to it: one production namer,
-exactly one function here that opens a connection (:func:`open_smtp_channel`), and
-no tool able to reach a transport in a deployment that configured none.
+exactly one function here that opens a connection
+(:meth:`StreamOutboundTransport.open_channel`), and no tool able to reach a
+transport in a deployment that configured none.
 
 **Why the pin is what it is, for SMTP, stated honestly.** #83 is written about an
 HTTP client — "a configurable API base URL, or … a cross-host redirect" — and SMTP
@@ -115,19 +116,24 @@ import ssl
 from dataclasses import dataclass
 from email.message import EmailMessage
 from email.policy import SMTP as SMTP_POLICY
-from typing import TYPE_CHECKING, Final, Protocol, final
+from typing import TYPE_CHECKING, Final, final
 
 import structlog
 
-from ai_assistant.core.errors import ConnectionStoreError, ToolError
-from ai_assistant.core.types import DestinationProtocol, ProvisioningState
+from ai_assistant.core.errors import ConnectionStoreError, ToolError, TransportError
+from ai_assistant.core.types import (
+    TRANSPORT_OCTET_CEILING,
+    DestinationProtocol,
+    ProvisioningState,
+    TransportEndpoint,
+)
 from ai_assistant.tools.destinations import DestinationCanonicalisationError, canonicalise
 from ai_assistant.tools.destinations import DestinationProtocol as SeamProtocol
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
-    from ai_assistant.core.protocols import Secrets
+    from ai_assistant.core.protocols import ByteChannel, OutboundTransport, Secrets
     from ai_assistant.core.types import EgressBinding, FrozenJson, SecretName
     from ai_assistant.tools.connection_store import ConnectionEntry, StoredEntry
     from ai_assistant.tools.egress_binder import ConnectionRecords, EgressRegistration
@@ -144,12 +150,6 @@ STARTTLS_SCHEME: Final = "smtp+starttls"
 #: 6409's submission port. A binding may state a port explicitly; where it does
 #: not, these are what is connected to, and neither is guessed from the other.
 _DEFAULT_PORTS: Final[dict[str, int]] = {IMPLICIT_TLS_SCHEME: 465, STARTTLS_SCHEME: 587}
-
-#: How many octets of a reply line this transport will read before refusing. A
-#: server that never sends a line terminator would otherwise buy unbounded memory
-#: from a client holding a credential; RFC 5321 §4.5.3.1.5 caps a reply line at
-#: 512, and this leaves room for a non-conforming but honest server.
-_MAX_REPLY_LINE_OCTETS: Final = 4096
 
 #: Message fields rendered into an RFC 5322 **header**, where a line break ends
 #: the header and begins another. The body is deliberately not among them: it is
@@ -266,25 +266,6 @@ class IndeterminateTransmissionError(ToolError):
 
 @final
 @dataclass(frozen=True, slots=True)
-class SmtpEndpoint:
-    """A submission endpoint this seam will pin a connection to.
-
-    Attributes:
-        host: The host the connection is opened to and the name the certificate
-            is verified against. Never derived from a recipient's domain.
-        port: The TCP port, explicit in the endpoint or this scheme's default.
-        implicit_tls: ``True`` where TLS is established before the greeting;
-            ``False`` where RFC 3207's ``STARTTLS`` upgrade is required. There is
-            no third value, and in particular no cleartext one.
-    """
-
-    host: str
-    port: int
-    implicit_tls: bool
-
-
-@final
-@dataclass(frozen=True, slots=True)
 class OutboundEmail:
     """The message an integration would have this transport send.
 
@@ -333,42 +314,9 @@ class OutboundEmail:
         return (self.subject, self.body)
 
 
-class ByteChannel(Protocol):
-    """A duplex byte stream to one pinned endpoint, with its own TLS state.
-
-    Narrow on purpose. The transport below drives SMTP over *this*, so the only
-    thing that has to open a socket is :func:`open_smtp_channel`, and a test
-    exercises every command, every reply and every refusal against a local double
-    without a network in reach. That is the shape ADR-0017 §8 wants generally — an
-    injected transport capability — applied at one boundary rather than ratified
-    across `core`, which is the move ADR-0147 §3 records itself making.
-    """
-
-    @property
-    def is_secure(self) -> bool:
-        """Whether a TLS handshake has completed on this channel."""
-        ...
-
-    async def read_line(self) -> bytes:
-        """Read one CRLF-terminated line, or empty bytes at end of stream."""
-        ...
-
-    async def write(self, data: bytes, /) -> None:
-        """Write ``data`` and flush it."""
-        ...
-
-    async def start_tls(self) -> None:
-        """Upgrade this channel to TLS, verifying the pinned host's certificate."""
-        ...
-
-    async def close(self) -> None:
-        """Release the channel, whatever state it is in."""
-        ...
-
-
 @final
 class _StreamChannel:
-    """The one :class:`ByteChannel` backed by a real socket.
+    """The one :class:`~ai_assistant.core.protocols.ByteChannel` backed by a socket.
 
     Thin by construction: it owns the streams, the TLS context and nothing else,
     so that everything a reviewer has to reason about — the pin, the ordering, the
@@ -410,15 +358,22 @@ class _StreamChannel:
         return self._secure
 
     async def read_line(self) -> bytes:
-        """Read one line, refusing one longer than this seam will hold.
+        """Read one line, refusing one longer than the contract will hold.
 
         Returns:
-            The line including its terminator, or empty bytes at end of stream.
+            The line including its terminator, or empty bytes at end of stream —
+            which is also what a tail with no terminator reports, the octets
+            being discarded in its place.
 
         Raises:
-            TransportPinError: If the far end sends a line without a terminator
-                inside the bound, which is a server buying memory from a client
-                that is holding a credential.
+            TransportError: If the far end sends more than
+                :data:`~ai_assistant.core.types.TRANSPORT_OCTET_CEILING` octets
+                without a terminator among them, which is a server buying memory
+                from a client that is holding a credential. The reader is opened
+                with that same ceiling as its ``limit``, and
+                ``StreamReader.readuntil`` applies it to the buffer **ahead of**
+                the separator — so the boundary the conformance suite pins is the
+                one this implementation has, rather than one restated here.
         """
         try:
             return await self._reader.readuntil(b"\n")
@@ -427,8 +382,36 @@ class _StreamChannel:
             # reporting end of stream is what makes the caller say so.
             return b""
         except asyncio.LimitOverrunError as exc:
-            msg = "the endpoint sent a reply line this seam will not buffer"
-            raise TransportPinError(msg) from exc
+            msg = "the endpoint sent a reply line this channel will not buffer"
+            raise TransportError(msg) from exc
+
+    async def read(self, limit: int, /) -> bytes:
+        """Read at most ``limit`` octets from the same cursor :meth:`read_line` uses.
+
+        Unused by the SMTP exchange above, which is line-oriented, and present
+        because the contract has it: a second protocol built on this channel reads
+        octets rather than lines, and a channel that answered only one of the two
+        would make that protocol reimplement buffering (ADR-0191 §2).
+
+        Args:
+            limit: How many octets at most, in
+                ``1..TRANSPORT_OCTET_CEILING`` inclusive.
+
+        Returns:
+            Between one and ``limit`` octets, or empty bytes at end of stream.
+
+        Raises:
+            ValueError: If ``limit`` is outside that range. **The refusal is the
+                point rather than an argument check**: ``StreamReader.read``
+                spells "until end of stream" as ``-1``, so a peer that streams
+                without closing would exhaust memory through a method whose name
+                says it is bounded. Refusing the whole domain outside
+                ``1..ceiling`` makes that spelling unrepresentable.
+        """
+        if not 1 <= limit <= TRANSPORT_OCTET_CEILING:
+            msg = f"read limit must be an integer in 1..{TRANSPORT_OCTET_CEILING}; got {limit}"
+            raise ValueError(msg)
+        return await self._reader.read(limit)
 
     async def write(self, data: bytes, /) -> None:
         """Write ``data`` and flush it.
@@ -445,7 +428,14 @@ class _StreamChannel:
         self._secure = True
 
     async def close(self) -> None:
-        """Close the writer, tolerating a far end that has already gone."""
+        """Close the writer, tolerating a far end that has already gone.
+
+        Idempotent, and an ordinary release failure is logged rather than raised
+        (ADR-0191 §1): a holder closes from a cleanup path, where Python would
+        replace the exception in flight with one raised here — turning an honest
+        ``IndeterminateTransmissionError`` into an internal failure, and recording
+        a possible disclosure as one that did not happen.
+        """
         self._writer.close()
         try:
             await self._writer.wait_closed()
@@ -470,38 +460,86 @@ def _tls_context() -> ssl.SSLContext:
     return context
 
 
-async def open_smtp_channel(endpoint: SmtpEndpoint) -> ByteChannel:
-    """Open a channel to ``endpoint``, and to nothing else.
+@final
+class StreamOutboundTransport:
+    """The one :class:`~ai_assistant.core.protocols.OutboundTransport` that connects.
 
-    **This is the only function in `tools/` that opens a socket**, which is issue
-    #83's third bullet answered by construction: the client is constructed
-    centrally at the seam, so no integration can build one whose policy differs.
-    It performs no name resolution of its own beyond the host it was handed —
-    there is no MX lookup here, so no recipient's domain selects the host a
-    credential is presented to.
+    ADR-0191 §3 puts the one production implementation that reaches the network in
+    this designated module and in no other module under ``src/ai_assistant``, and
+    ADR-0191 §1 makes the *opener* the capability because opening is the act being
+    governed: a subsystem that holds a channel already has a connection, so the
+    thing that must be scarce is the ability to obtain one at all.
 
-    Args:
-        endpoint: The pinned host, port and TLS mode.
+    **There is no module-level instance of this and no function that returns one.**
+    Its predecessor was ``open_smtp_channel``, a module-level coroutine that opened
+    a socket — which meant any module that could import it held a route to the
+    world, and which is exactly the accessor §3 forbids. The only way to hold this
+    capability is to have been handed it, and ``app/composition.py`` is the only
+    place in ``src/ai_assistant`` that constructs one (§3).
 
-    Returns:
-        A connected channel, already under TLS where the scheme is implicit-TLS.
+    **:meth:`open_channel` is the only place in this seam that opens a socket.**
+    That is issue #83's third bullet answered by construction — the client is
+    constructed centrally at the seam, so no integration can build one whose policy
+    differs — and ``tests/tools/test_egress_seam.py`` holds the tree to there being
+    exactly one such function to find.
 
-    Raises:
-        OSError: If the connection could not be made. Not converted: a network
-            that is down asserts nothing about the call's authorisation.
-        ssl.SSLError: If the certificate did not verify against ``endpoint.host``.
+    **It is stateless and holds no pool.** A pooled capability is a long-lived
+    connection owned by whoever opened it, and a subsystem keeping one across calls
+    has a route that outlives the authorisation that produced it (ADR-0191 §3).
     """
-    reader, writer = await asyncio.open_connection(
-        endpoint.host,
-        endpoint.port,
-        ssl=_tls_context() if endpoint.implicit_tls else None,
-        server_hostname=endpoint.host if endpoint.implicit_tls else None,
-        limit=_MAX_REPLY_LINE_OCTETS,
-    )
-    return _StreamChannel(reader, writer, host=endpoint.host, secure=endpoint.implicit_tls)
+
+    __slots__ = ()
+
+    async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
+        """Open a channel to ``endpoint``, and to nothing else.
+
+        It performs no name resolution of its own beyond the host it was handed —
+        there is no MX lookup here, so no recipient's domain selects the host a
+        credential is presented to — follows no redirect or referral, and offers no
+        way to reach a second host on one call (ADR-0191 §4).
+
+        Args:
+            endpoint: The host, port and TLS mode, already parsed. This method
+                parses no string of its own.
+
+        Returns:
+            A connected channel, already under TLS where the endpoint's mode is
+            the implicit one and verified against ``endpoint.host``.
+
+        Raises:
+            TransportError: If the connection could not be made, or was made and
+                could not be verified. Both are converted from the standard
+                library's own types so that every holder of the capability sees
+                one taxonomy — the shared refusal type the canonical fake raises
+                too — rather than a vendor's.
+            CancelledError: Re-raised after the release below, never absorbed.
+        """
+        try:
+            reader, writer = await asyncio.open_connection(
+                endpoint.host,
+                endpoint.port,
+                ssl=_tls_context() if endpoint.implicit_tls else None,
+                server_hostname=endpoint.host if endpoint.implicit_tls else None,
+                limit=TRANSPORT_OCTET_CEILING,
+            )
+        except (OSError, ssl.SSLError) as exc:
+            # Nothing reached this frame, so there is nothing to release: the
+            # standard library closes what it opened before raising.
+            msg = f"the endpoint {endpoint.host}:{endpoint.port} could not be connected"
+            raise TransportError(msg) from exc
+        try:
+            return _StreamChannel(reader, writer, host=endpoint.host, secure=endpoint.implicit_tls)
+        except BaseException:
+            # **The release obligation, and it is not theatre.** No channel
+            # reached the caller, so nothing else can ever release these streams
+            # (ADR-0191 §1). A cancellation delivered here is re-raised after the
+            # release rather than absorbed (ADR-0060 §1); an ordinary failure
+            # constructing the channel takes the same path.
+            writer.close()
+            raise
 
 
-def parse_smtp_endpoint(endpoint: str) -> SmtpEndpoint:
+def parse_smtp_endpoint(endpoint: str) -> TransportEndpoint:
     """Read an endpoint this seam will pin a connection to, or refuse it.
 
     The grammar is deliberately narrow and hand-read rather than handed to a
@@ -543,7 +581,9 @@ def parse_smtp_endpoint(endpoint: str) -> SmtpEndpoint:
     if not host or host.strip() != host:
         msg = "the bound transport endpoint names no host"
         raise TransportPinError(msg)
-    return SmtpEndpoint(host=host, port=_port(port_text, scheme), implicit_tls=scheme == "smtps")
+    return TransportEndpoint(
+        host=host, port=_port(port_text, scheme), implicit_tls=scheme == "smtps"
+    )
 
 
 def _port(port_text: str, scheme: str) -> int:
@@ -619,7 +659,7 @@ class SmtpEgressTransport:
     the callable and nowhere else.
     """
 
-    __slots__ = ("_connect", "_records", "_registration", "_secrets")
+    __slots__ = ("_records", "_registration", "_secrets", "_transport")
 
     def __init__(
         self,
@@ -627,7 +667,7 @@ class SmtpEgressTransport:
         registration: EgressRegistration,
         records: ConnectionRecords,
         secrets: Secrets,
-        connect: Callable[[SmtpEndpoint], Awaitable[ByteChannel]] = open_smtp_channel,
+        transport: OutboundTransport,
     ) -> None:
         """Bind a transport to one registered tool and one connected account.
 
@@ -642,14 +682,21 @@ class SmtpEgressTransport:
                 at the tool that needs one. Never a ``SecretStore``: provisioning
                 is not this object's, and a transport handed a writing face could
                 delete the credential it reads.
-            connect: How a channel is obtained. Defaults to the one function that
-                opens a socket; a test supplies a local double, which is the whole
-                reason this is a parameter.
+            transport: The injected capability of reaching the world (ADR-0191
+                §1). **Required, with no default and no ``None``-means-the-real-one
+                fallback**, which is ADR-0191 §3's load-bearing clause: this
+                argument used to default to the one function in ``tools`` that
+                opened a socket, so production reached the world through a default
+                argument and an object handed nothing had a route anyway. With the
+                default gone, an object that was handed no transport cannot be
+                constructed rather than being constructed with the real one — and
+                a test asserting that no attempt was made is asserting that the
+                route does not exist, rather than that a code path was not reached.
         """
         self._registration = registration
         self._records = records
         self._secrets = secrets
-        self._connect = connect
+        self._transport = transport
 
     async def transmit(self, binding: EgressBinding, parameters: Mapping[str, FrozenJson]) -> None:
         """Send the bound call, or refuse without transmitting.
@@ -727,7 +774,7 @@ class SmtpEgressTransport:
             message=message,
         )
 
-    def _pinned(self, binding: EgressBinding) -> SmtpEndpoint:
+    def _pinned(self, binding: EgressBinding) -> TransportEndpoint:
         """Refuse a binding this tool is not the registration for (ADR-0148 §6, #83).
 
         **Two of §6's four pre-transmission refusals, and the first is the one an
@@ -1018,7 +1065,7 @@ class SmtpEgressTransport:
 
     async def _send(
         self,
-        endpoint: SmtpEndpoint,
+        endpoint: TransportEndpoint,
         *,
         sender: str,
         recipients: Sequence[str],
@@ -1040,7 +1087,7 @@ class SmtpEgressTransport:
             IndeterminateTransmissionError: If the payload was written and the
                 verdict could not be read.
         """
-        channel = await self._connect(endpoint)
+        channel = await self._transport.open_channel(endpoint)
         try:
             session = _SmtpSession(channel, host=endpoint.host, tool_id=self._registration.tool_id)
             await session.open(implicit_tls=endpoint.implicit_tls)
@@ -1353,8 +1400,13 @@ class _SmtpSession:
                 as a failure, so ADR-0014 §4's recovery scan has something true to
                 reconcile.
 
-                **``OSError`` is caught here and nowhere else in this class, and
-                the asymmetry is the decision.** Everywhere before the payload is
+                **``OSError`` and ``TransportError`` are caught here and
+                nowhere else in this class, and the asymmetry is the decision.**
+                ADR-0191 §4 requires this catch to cover the capability's own
+                refusal type as well as the standard library's, for the identical
+                reason: a channel that stopped answering after the terminator was
+                written says nothing about what the far end did with the octets,
+                whichever type it says it in. Everywhere before the payload is
                 written, a reset or a timeout is a call that provably did nothing,
                 and ADR-0029 §4's classification of it as a failure is correct.
                 Once the terminator is on the wire the same exception says only
@@ -1378,7 +1430,7 @@ class _SmtpSession:
         try:
             await self._channel.write(_dot_stuffed(payload))
             code, _ = await self._reply()
-        except (EgressTransportError, OSError) as exc:
+        except (EgressTransportError, TransportError, OSError) as exc:
             msg = (
                 f"{self._tool_id}: the message reached the transport and the "
                 f"endpoint's verdict could not be read, so whether it was accepted "
@@ -1397,7 +1449,7 @@ class _SmtpSession:
         try:
             await self._command("QUIT")
             await self._reply()
-        except (EgressTransportError, OSError) as exc:
+        except (EgressTransportError, TransportError, OSError) as exc:
             _log.debug("egress_quit_failed", tool_id=self._tool_id, error_type=type(exc).__name__)
 
     async def _command(self, command: str, *, redacted: str | None = None) -> None:
@@ -1439,7 +1491,8 @@ class _SmtpSession:
 
         The line **count** is bounded as well as the line length, and the second
         bound is not implied by the first: every continuation line can sit under
-        :data:`_MAX_REPLY_LINE_OCTETS` while the reply never terminates, so a far
+        :data:`~ai_assistant.core.types.TRANSPORT_OCTET_CEILING` while the reply
+        never terminates, so a far
         end that answers ``EHLO`` with endless ``250-`` lines buys unbounded memory
         from a client that is about to present it a credential. Neither bound is a
         *deadline*, deliberately — ADR-0029 §4 puts the deadline on the invocation
@@ -1476,14 +1529,12 @@ __all__ = [
     "IMPLICIT_TLS_SCHEME",
     "STARTTLS_SCHEME",
     "BoundCallChangedError",
-    "ByteChannel",
     "EgressTransportError",
     "IndeterminateTransmissionError",
     "OutboundEmail",
     "SmtpEgressTransport",
-    "SmtpEndpoint",
+    "StreamOutboundTransport",
     "TransportPinError",
-    "open_smtp_channel",
     "parse_smtp_endpoint",
     "smtp_message",
 ]

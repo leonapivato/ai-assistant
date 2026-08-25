@@ -93,6 +93,7 @@ from ai_assistant.tools import (
     egress_registrations,
 )
 from ai_assistant.tools.connection_store import SqliteConnectionStore
+from ai_assistant.tools.egress import StreamOutboundTransport
 from ai_assistant.tools.egress_binder import EgressBindingSeam
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
 
@@ -104,6 +105,7 @@ if TYPE_CHECKING:
     from ai_assistant.core.protocols import (
         ConnectionPurger,
         Embedder,
+        OutboundTransport,
         Reader,
         Secrets,
         TraceSink,
@@ -306,7 +308,10 @@ def build_engine(settings: Settings, *, data_dir: Path | None = None) -> Engine:
 
 
 def build_composition(  # noqa: PLR0915 — one statement per resource this root opens or wires
-    settings: Settings, *, data_dir: Path | None = None
+    settings: Settings,
+    *,
+    data_dir: Path | None = None,
+    transport: OutboundTransport | None = None,
 ) -> Composition:
     """Wire the production subsystems into a ready :class:`Composition` (ADR-0042 §2).
 
@@ -412,6 +417,21 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
             every existing test uses, and the hub passes the directory it already
             resolved and locked in §3's step 2 so that one resolution is shared
             rather than performed twice. Created if absent.
+        transport: The outbound-transport capability this deployment reaches the
+            world with (ADR-0191 §1), or ``None`` for the production one this root
+            constructs below. **This is not the fallback ADR-0191 §3 forbids**, and
+            the distinction is by which party the clause is about: §3's ban on a
+            default is stated over "every constructor and factory that *needs* a
+            transport" — ``SmtpEgressTransport`` and
+            ``build_send_email_integration``, both of which now take it required —
+            while §3's fourth clause makes *this* function the only place in
+            ``src/ai_assistant`` that constructs the real implementation and the
+            only place that hands it out. Absence here therefore selects
+            production rather than letting a consumer past a missing injection.
+            The seam exists because ADR-0191 §9 requires milestone 25's exit arm to
+            build its composition *through this root* while handing it
+            :class:`~ai_assistant.testing.FakeOutboundTransport`, which is the
+            "same route" clause of §3 read from the test's side.
 
     **The ``grants`` parameter is gone** (ADR-0102 §7), and removing it rather than
     defaulting it is the point. It was a ``SourceGrants | None = None`` whose one
@@ -870,6 +890,15 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
         # The keyring face is the single `INTEGRATION`-scoped one (ADR-0149 §1),
         # narrowed here to `Secrets` by the parameter's own annotation — a transport
         # handed the writing face could delete the credential it reads.
+        #
+        # **The transport capability is constructed here and handed in** (ADR-0191
+        # §1, §3). Constructed *inside* the branch, so a deployment that configured
+        # no integration builds no transport at all and hands none out: absence of
+        # configuration never selects a default implementation, and the property
+        # "a subsystem handed no capability has no route to the world" is true of
+        # the whole tree rather than of one argument list. Holding it does not make
+        # `app` an egress boundary — it opens nothing, and no lane may read this
+        # line as designating one under ADR-0017 §1.
         egress = (
             None
             if settings.send_email_connection is None or settings.send_email_endpoint is None
@@ -878,6 +907,7 @@ def build_composition(  # noqa: PLR0915 — one statement per resource this root
                 endpoint=settings.send_email_endpoint,
                 records=connections,
                 secrets=integration_secrets,
+                transport=StreamOutboundTransport() if transport is None else transport,
             )
         )
 

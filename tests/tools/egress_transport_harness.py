@@ -4,23 +4,34 @@ Shared by :mod:`test_egress_transport` and :mod:`test_egress_failure_paths`, whi
 ask different questions of the same seam: the first that the SMTP exchange is the
 one the protocol specifies, the second that ADR-0017 §3's failure matrix holds.
 
-**Nothing here opens a socket, and that is a property of the design rather than of
-the arrangement.** :class:`~ai_assistant.tools.egress.SmtpEgressTransport` takes a
-connector, and its default — the one function in `tools/` that reaches the network
-— is simply never the one passed. So every command, every reply and every refusal
-below is exercised against :class:`ScriptedChannel`, and the only thing left
-untested is :func:`~ai_assistant.tools.egress.open_smtp_channel`'s own call into
-``asyncio``. Hosts are ``.invalid`` (RFC 6761 §6.4) throughout, so a case that
-somehow did reach a resolver would fail rather than connect.
+**Nothing here opens a socket, and since ADR-0191 that is a property of the design
+rather than of the arrangement.** :class:`~ai_assistant.tools.egress.
+SmtpEgressTransport` takes the outbound-transport capability as a **required**
+argument with no default, so an arrangement that forgot to pass one would not
+construct rather than quietly reaching the network. Every command, every reply and
+every refusal below is exercised against
+:class:`~ai_assistant.testing.FakeByteChannel` served by
+:class:`~ai_assistant.testing.FakeOutboundTransport`, and the only thing left
+untested is :meth:`~ai_assistant.tools.egress.StreamOutboundTransport.open_channel`'s
+own call into ``asyncio``. Hosts are ``.invalid`` (RFC 6761 §6.4) throughout, so a
+case that somehow did reach a resolver would fail rather than connect.
+
+**The two doubles this module used to declare are gone into the canonical fakes**
+(ADR-0191 §8, Consequences). ``ScriptedChannel`` was the seed of
+``FakeByteChannel``; what it lacked was a home ``ai_assistant.testing`` could hold
+and a conformance suite holding it to a contract. What is left here is arrangement
+— :func:`scripted` scripts an SMTP endpoint's replies onto the canonical fake, and
+:func:`commands` and :func:`payload` read its record back the way this seam's cases
+want it.
 """
 
 from __future__ import annotations
 
-from collections import deque
 from typing import TYPE_CHECKING, Final
 
 from pydantic import SecretStr
 
+from ai_assistant.core.errors import TransportError
 from ai_assistant.core.types import (
     BoundAccount,
     DestinationProtocol,
@@ -32,6 +43,7 @@ from ai_assistant.core.types import (
     SecretName,
     SecretScope,
 )
+from ai_assistant.testing import FakeByteChannel, FakeOutboundTransport
 from ai_assistant.testing.secrets import FakeSecretStore
 from ai_assistant.tools.connection_store import ConnectionEntry, StoredEntry
 from ai_assistant.tools.egress import SmtpEgressTransport
@@ -42,7 +54,6 @@ if TYPE_CHECKING:
 
     from ai_assistant.core.protocols import Secrets
     from ai_assistant.core.types import FrozenJson
-    from ai_assistant.tools.egress import ByteChannel, SmtpEndpoint
 
 #: The registered tool, its connection record and the account it is bound to.
 TOOL_ID: Final = "send_email@work"
@@ -192,143 +203,82 @@ async def keyring(*, holds: str | None = CREDENTIAL, slot: SecretName = SLOT) ->
     return ring
 
 
-class ScriptedChannel:
-    """A :class:`~ai_assistant.tools.egress.ByteChannel` that is not a socket.
+def scripted(
+    *replies: str,
+    secure: bool = True,
+    on_exhausted: Exception | None = None,
+    on_payload_write: Exception | None = None,
+) -> FakeByteChannel:
+    """An SMTP endpoint's scripted replies, on the canonical channel fake.
 
-    Serves reply lines from a script and records every octet written, so a case
-    can assert what reached the wire — including, crucially, that a credential did
-    **not**. ``.invalid`` hosts and an in-memory buffer mean there is no network
-    to fall back to if the transport ever tried to open one.
+    Arrangement over :class:`~ai_assistant.testing.FakeByteChannel` rather than a
+    second implementation of the contract (ADR-0191 §8): what varies per case is
+    which reply lines the far end sends and where it stops answering, and none of
+    that is a property of the channel.
 
-    Attributes:
-        written: Every octet the transport wrote, concatenated in order.
-        closed: Whether :meth:`close` ran. The transport closes in a ``finally``,
-            so a case that refuses mid-exchange still expects this true.
-        tls_upgrades: How many times ``STARTTLS`` succeeded on this channel.
+    Args:
+        replies: One reply per element, multi-line where the reply is. Each line
+            is delivered CRLF-terminated, as RFC 5321 §4.2 requires.
+        secure: Whether TLS was established before the greeting — ``True`` for an
+            implicit-TLS endpoint.
+        on_exhausted: Raised once the script runs out, instead of the empty bytes
+            that stand for a clean end of stream. A far end can stop answering
+            either way, and the two arrive at a caller as different types — which
+            is exactly the distinction one case is about.
+        on_payload_write: Raised by the write of the ``DATA`` block, after the
+            octets have been recorded. Armed against the block's ``CRLF.CRLF``
+            terminator rather than against a write *count*, because the count is
+            an artefact of how many commands the exchange happens to take and
+            would silently arm the wrong write the day one is added.
+
+    Returns:
+        The channel, ready to be served by :func:`transport`.
     """
+    subject = FakeByteChannel(secure=secure)
+    for reply in replies:
+        for line in reply.splitlines():
+            if line:
+                subject.deliver(line.encode("ascii") + b"\r\n")
+    if on_exhausted is not None:
+        subject.fail_when_exhausted(on_exhausted)
+    if on_payload_write is not None:
+        subject.fail_write_after(b"\r\n.\r\n", error=on_payload_write)
+    return subject
 
-    def __init__(
-        self,
-        *replies: str,
-        secure: bool = True,
-        on_exhausted: Exception | None = None,
-        on_payload_write: Exception | None = None,
-    ) -> None:
-        """Arrange the replies this endpoint gives, in order.
 
-        Args:
-            replies: One reply per element, multi-line where the reply is. Each
-                line is served CRLF-terminated, as RFC 5321 §4.2 requires.
-            secure: Whether TLS was established before the greeting — ``True``
-                for an implicit-TLS endpoint.
-            on_exhausted: Raised once the script runs out, instead of the empty
-                bytes that stand for a clean end of stream. A far end can stop
-                answering either way, and the two arrive at a caller as different
-                types — which is exactly the distinction one case is about.
-            on_payload_write: Raised by the write of the ``DATA`` block, after the
-                octets have been recorded. See :meth:`write`.
-        """
-        self._on_exhausted = on_exhausted
-        self._on_payload_write = on_payload_write
-        self._lines: deque[bytes] = deque(
-            line.encode("ascii") + b"\r\n"
-            for reply in replies
-            for line in reply.splitlines()
-            if line
-        )
-        self._secure = secure
-        self.written = bytearray()
-        self.closed = False
-        self.tls_upgrades = 0
+def commands(subject: FakeByteChannel) -> list[str]:
+    """Every command line the transport wrote, before the ``DATA`` payload.
 
-    @property
-    def is_secure(self) -> bool:
-        """Whether a TLS handshake has completed on this channel.
+    Args:
+        subject: The channel the exchange ran over.
 
-        Returns:
-            ``True`` once implicit TLS or an upgrade has established one.
-        """
-        return self._secure
+    Returns:
+        The lines, in order, up to and including ``DATA``. What follows a ``DATA``
+        is the message rather than a command, and :func:`payload` reads that.
+    """
+    sent: list[str] = []
+    for line in subject.written.decode("ascii", "replace").split("\r\n"):
+        if not line:
+            continue
+        sent.append(line)
+        if line == "DATA":
+            break
+    return sent
 
-    async def read_line(self) -> bytes:
-        """Serve the next scripted line.
 
-        Returns:
-            The line, or empty bytes once the script is exhausted — which is what
-            a far end closing the connection cleanly looks like.
+def payload(subject: FakeByteChannel) -> str:
+    """Everything written after ``DATA`` was accepted.
 
-        Raises:
-            Exception: ``on_exhausted``, where one was armed.
-        """
-        if self._lines:
-            return self._lines.popleft()
-        if self._on_exhausted is not None:
-            raise self._on_exhausted
-        return b""
+    Args:
+        subject: The channel the exchange ran over.
 
-    async def write(self, data: bytes, /) -> None:
-        """Record what the transport sent, failing the payload write if armed.
-
-        The failure is armed against the ``DATA`` block rather than against a
-        write *count*, because the count is an artefact of how many commands the
-        exchange happens to take and would silently arm the wrong write the day
-        one is added. The block is the only write that ends with the ``CRLF.CRLF``
-        terminator, so it identifies itself.
-
-        **The octets are recorded before the failure is raised**, which is the
-        whole point of the case: a stream writer hands data to the transport and
-        only then awaits the flush, so a failing flush leaves a payload that may
-        already be on the wire. A double that dropped the write would be modelling
-        a guarantee the real channel does not offer.
-
-        Args:
-            data: The octets written.
-
-        Raises:
-            Exception: ``on_payload_write``, where one was armed and this is the
-                ``DATA`` block.
-        """
-        self.written += data
-        if self._on_payload_write is not None and data.endswith(b"\r\n.\r\n"):
-            raise self._on_payload_write
-
-    async def start_tls(self) -> None:
-        """Mark the channel secure, as a completed handshake would."""
-        self._secure = True
-        self.tls_upgrades += 1
-
-    async def close(self) -> None:
-        """Record that the channel was released."""
-        self.closed = True
-
-    def commands(self) -> list[str]:
-        """Every command line the transport wrote, before the ``DATA`` payload.
-
-        Returns:
-            The lines, in order, up to and including ``DATA``. What follows a
-            ``DATA`` is the message rather than a command, and
-            :meth:`payload` is what reads that.
-        """
-        lines = self.written.decode("ascii", "replace").split("\r\n")
-        sent: list[str] = []
-        for line in lines:
-            if not line:
-                continue
-            sent.append(line)
-            if line == "DATA":
-                break
-        return sent
-
-    def payload(self) -> str:
-        """Everything written after ``DATA`` was accepted.
-
-        Returns:
-            The dot-stuffed message and its terminator, or the empty string where
-            no payload was ever written.
-        """
-        text = self.written.decode("ascii", "replace")
-        marker = "DATA\r\n"
-        return text.split(marker, 1)[1] if marker in text else ""
+    Returns:
+        The dot-stuffed message and its terminator, or the empty string where no
+        payload was ever written.
+    """
+    text = subject.written.decode("ascii", "replace")
+    marker = "DATA\r\n"
+    return text.split(marker, 1)[1] if marker in text else ""
 
 
 def implicit_tls_script(*, recipients: int = 1) -> tuple[str, ...]:
@@ -494,39 +444,42 @@ def binding(  # noqa: PLR0913 — one keyword per fact a ruling fixes; grouping 
 
 
 def transport(
-    channel: ByteChannel | None,
+    served: FakeByteChannel | None,
     *,
     records: Records | None = None,
     secrets: Secrets,
     endpoint: str = ENDPOINT,
     reference: str = REFERENCE,
 ) -> SmtpEgressTransport:
-    """Wire a transport over a scripted channel, a scripted store and a keyring.
+    """Wire the seam over a scripted channel, a scripted store and a keyring.
 
     Args:
-        channel: What the connector returns. ``None`` builds a connector that
-            fails the test if it is ever called, which is how "no network I/O"
-            is asserted rather than assumed.
+        served: The channel the capability hands out. ``None`` arms the capability
+            to refuse, which is how "no network I/O" is asserted rather than
+            assumed: the attempt is still recorded, so a case that wanted the
+            distinction between "never asked" and "asked and refused" could read
+            it (ADR-0191 §8).
         records: The connection store; defaults to one active record.
         secrets: The ``INTEGRATION``-scoped reading face.
         endpoint: The endpoint the registration configures.
         reference: The connection reference the registration carries.
 
     Returns:
-        The transport, whose default connector is deliberately never used.
+        The seam's transport, holding the capability and nothing else that could
+        reach the world.
     """
-
-    async def connect(_: SmtpEndpoint) -> ByteChannel:
-        if channel is None:
-            msg = "the transport opened a connection on a path that must open none"
-            raise AssertionError(msg)
-        return channel
-
+    capability = FakeOutboundTransport()
+    if served is None:
+        capability.refuse_with(
+            TransportError("this harness opens nothing; the attempt has been recorded")
+        )
+    else:
+        capability.serve(served)
     return SmtpEgressTransport(
         registration=EgressRegistration(
             tool_id=TOOL_ID, reference=reference, transport_endpoint=endpoint
         ),
         records=Records(entry()) if records is None else records,
         secrets=secrets,
-        connect=connect,
+        transport=capability,
     )
