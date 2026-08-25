@@ -396,9 +396,9 @@ one: nothing outside the store can name a row that does not exist yet, so no cal
 ever supplies the `id` a row is stored under and none of §1's three named refusals
 is about a duplicate one. What it does not take away is the collaborator's own obligation, and §2 marks
 it rather than assuming it — the factory repeats no value for the life of the
-process, and an append under an id the store already holds is refused as a store
-fault. That is the store declining to hold one id twice, not a refusal the contract
-offers anybody.
+process, and an append that meets an id the store already holds is drawn again and
+refused only where the redraw is exhausted. That is the store declining to hold one
+id twice, not a refusal the contract offers anybody.
 
 **The discriminator in the spendability clause is ADR-0029 §5's own.** Its retry
 rule permits a repeat when "the tool is not `side_effecting`; or its `idempotency`
@@ -530,10 +530,11 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > obligation** to `ToolInvoker` — no quiescence rule, no drain hook — so a second
 > instance can be constructed while an `invoke` call still holds a claim's `id`.
 > Under instance scope that second instance may legally reissue that `id` once
-> `clear()` has erased the row it first named, and the refusal below **cannot see
-> it**: the store holds no row under that id, so there is no collision to refuse, and
-> the stale completion lands on the **new** claim and is recorded as that call's
-> outcome and cost — precisely the failure the clause above exists to prevent. The
+> `clear()` has erased the row it first named, and the ledger's redraw below
+> **cannot see it**: the store holds no row under that id, so there is no collision
+> to draw away from, the reissued id is admitted, and the stale completion lands on
+> the **new** claim and is recorded as that call's outcome and cost — precisely the
+> failure the clause above exists to prevent. The
 > process is the scope because it is the lifetime of every possible holder of a claim
 > id, and the obligation is measured against the holders.
 
@@ -563,18 +564,48 @@ available response; that response is ADR-0034 §1's and it is already specified.
 > epoch or high-water mark would have had to in order to do the job §6 refuses to
 > give it.
 
-> **Normative.** Where a factory breaks that obligation the append is **refused**
-> rather than admitted. The store holds each `id` once (§6), so a minted id naming a
-> row the store already holds is a store fault — an `AuditError`, not one of §1's
-> three named refusals, which are statements about the authorisation and say nothing
-> about the store — and the row already there is left unchanged in every field. No
-> row is appended, no completion is redirected, and a completion naming that id
-> still completes the row that was already there. At the seam it is an `AuditError`
-> like any other store-side fault, so §1's pre-callable clause governs it unchanged:
-> the callable is not entered and the step is `FAILED`. This is defence against a
+> **Normative.** Where a minted id names a row the store **currently holds**, the
+> ledger **draws again** rather than refusing. The store holds each `id` once (§6),
+> so such an id cannot be appended — but a collision is not by itself evidence of a
+> broken collaborator, and the append that meets one is not thereby doomed. The
+> ledger mints again, inside the same atomic operation as the append, and repeats
+> that at most **as many times as the store holds rows, plus one** — a bound the
+> store's own contents fix, so any draw sequence that can clear does clear within it.
+> Where a draw clears, the append proceeds normally under the id that cleared, and
+> nothing about the collision reaches the caller, the trail or the diagnostic: no row
+> was appended under a colliding id, so there is nothing to report.
+
+> **Normative.** That bound reads the rows the store holds **now** and holds nothing
+> across an erasure, which is what makes it available here at all. It consults no
+> generation, no epoch, no high-water mark and no record of an id the store used to
+> hold; after `clear()` the store holds no rows, so the bound is one and the first
+> draw clears trivially. §6's refusal is untouched: this is the id space read for
+> what it **currently contains** — a fact the store already answers, and the same one
+> §1's admission is decided against — and never a memory of an act the user erased.
+
+> **Normative.** **Only an exhausted bound is a refusal.** A factory that returns a
+> colliding id every time it is asked, until the bound is spent, is a non-conforming
+> collaborator, and the append is then an `AuditError` — not one of §1's three named
+> refusals, which are statements about the authorisation and say nothing about the
+> store. No row is appended, no completion is redirected, every row already there is
+> left unchanged in every field, and a completion naming any of those ids still
+> completes the row that was already there. At the seam it is an `AuditError` like
+> any other store-side fault, so §1's pre-callable clause governs it unchanged: the
+> callable is not entered and the step is `FAILED`. It remains defence against a
 > non-conforming collaborator, not a refusal the contract offers a caller — no
 > caller supplies the `id` a row is stored under, and a completion's `claim_id` is a
 > pointer at a row already written and never the new row's own id.
+
+> **Normative.** **The two obligations cover different lifetimes, and neither
+> subsumes the other.** The factory's is the **process**, and it is what keeps a
+> pointer unambiguous for every holder of a claim id, an erasure included — a redraw
+> could never do that job, because it cannot see an id the store no longer holds. The
+> ledger's redraw is about the **store**, which outlives every process that ever
+> wrote to it, and it is what stops a conforming factory in a *new* process from
+> being defeated by rows a previous one left behind — which the factory could never
+> do either, because it cannot see a row it did not mint. The first is a property of
+> the id space; the second is a property of a durable store meeting a memory that
+> resets.
 
 > **Normative.** A `ToolInvoker` implementation holds an `InvocationLedger` and
 > **never** an `AuditTrail`. The ledger can neither record a `PermissionDecision`,
@@ -1652,7 +1683,8 @@ here; they are what the surveyed projects' own code and documentation say, and
 > mints fresh at the append (§2), so no caller can name a row in order to overwrite
 > it, and there is no `update` and no selective delete. The **ledger** cannot
 > overwrite one either: an id its factory mints under a row the store already holds
-> is refused (§2), never a second row under one id.
+> is drawn again and, where that is exhausted, refused (§2) — never a second row
+> under one id.
 
 > **Normative.** `AuditTrail.clear()` erases **both** row kinds and returns the
 > count of every row it removed, of either kind. No operation erases one kind and
@@ -2208,26 +2240,46 @@ ADR-0148 recorded on ADR-0021 in its own `Proposed` PR, citing ADR-0044's note
 > written against; the canonical fake passes it because its nonce is drawn once per
 > process and not once per instance.
 
-> **Normative.** The **ledger's** refusal is pinned beside it, because the two
-> obligations fail apart and the suite that tested only distinct factory outputs saw
-> neither: a factory forced to return the `id` of a claim the store **currently
-> holds open** leaves `claim_invocation` refused as an `AuditError` — not as one of
-> the three named refusals — with **no row appended** and the live claim asserted
-> unchanged field by field, its `decision_id`, its `recorded_at` and its openness
-> among them, and a subsequent completion naming that id completing **that** claim
-> and no other.
+> **Normative.** The **ledger's** behaviour on a collision is pinned beside it,
+> because the two obligations fail apart and the suite that tested only distinct
+> factory outputs saw neither. It has **two arms and both are owed**. A factory forced
+> to return the `id` of a claim the store **currently holds open** for **one** draw
+> and a fresh id thereafter leaves `claim_invocation` **succeeding** — under the id
+> that cleared and never the colliding one — with the live claim asserted unchanged
+> field by field, its `decision_id`, its `recorded_at` and its openness among them, a
+> subsequent completion naming that live id completing **that** claim and no other,
+> and **nothing** about the collision reaching the caller, the trail or the
+> diagnostic. A factory forced to return that same `id` **every** time, until the
+> bound is spent, leaves the call refused as an `AuditError` — not one of the three
+> named refusals — with **no row appended** and the live claim again unchanged field
+> by field. A suite carrying only the second arm passes an implementation that never
+> redraws at all, which is the arm the recovery case below depends on.
 
-> **Normative.** That case is **parameterised over both members**, because §2 writes
-> the refusal over *the append* and not over the claim path, and a suite testing only
+> **Normative.** Both arms are **parameterised over both members**, because §2 writes
+> them over *the append* and not over the claim path, and a suite testing only
 > `claim_invocation` leaves the completion's write-once guarantee unpinned.
 > `complete_invocation` is driven the same way: against a valid open claim, with the
-> factory forced to mint that claim's own `id` for the **completion row**, the call
-> is refused as an `AuditError` — again not one of the three named refusals — with no
-> row appended and the claim asserted unchanged field by field and still open.
-> Without it an implementation may validate the claim and then upsert a completion
-> under the claim's id, replacing the claim with a row pointing at itself, and still
-> produce one completion and one refusal under the concurrent-completion case above —
-> so every specified race passes over a corrupted history.
+> factory forced to mint that claim's own `id` for the **completion row**, once and
+> then always. Without it an implementation may validate the claim and then upsert a
+> completion under the claim's id, replacing the claim with a row pointing at itself,
+> and still produce one completion and one refusal under the concurrent-completion
+> case above — so every specified race passes over a corrupted history.
+
+> **Normative.** The redraw's **reason for existing** is pinned as its own case,
+> because every case above can be passed by an implementation that refuses on the
+> first collision, and the cost of that is paid only after a **restart**. The store is
+> opened holding an **open claim under `x`** with no live process that minted it —
+> the state §3's recovery scan reads at startup — and the factory is constructed so
+> that its **first draw is `x`**, which is exactly what a conforming, process-scoped
+> factory in a *new* process may legally return. Two things are then asserted. A
+> fresh `claim_invocation` lands **under an id that is not `x`**, leaving the open
+> claim untouched. And the recovery scan's `INDETERMINATE` **completion of `x` is
+> accepted**: it names `x` as its `claim_id`, mints its own row under an id that is
+> not `x`, leaves no claim open under that decision, and so lets §3's ordering commit
+> the step's transition out of `RUNNING`. An implementation that refuses on the first
+> collision fails here with the step still `RUNNING` and the claim still open — and
+> fails the same way on every subsequent restart, which is the deadlock this clause
+> exists to remove.
 
 > **Normative.** The factory's own **faults** are pinned at that same boundary, by
 > ADR-0026 §2's split and for the same reason the clock's two arms are named apart
@@ -2549,6 +2601,17 @@ row kinds, and the annotation belongs to the kind that was already there.
   own result stands, leaving a terminal step over an open claim. Closing either
   would take a transaction across two stores or a scan writing plan state from an
   audit row, neither of which this ADR takes.
+- **An append may now mint more than once, and the ledger reads its own live rows
+  to know when to stop.** A minted id naming a row the store currently holds is
+  drawn again rather than refused, bounded by the rows held plus one, with an
+  `AuditError` only where that bound is spent (§2). The cost is a read of the id
+  space on the collision path and a loop the store's own contents bound; what it
+  buys is the case a durable store and a resetting factory make unavoidable — a
+  conforming factory in a **new** process whose first draw names a row an earlier
+  process left open. Without it §3's recovery scan could not complete that claim,
+  the step would stay `RUNNING`, and every restart would repeat the failure. The
+  bound holds nothing across an erasure, so §6 is untouched, and the answer is
+  certain rather than probable, which is what ADR-0045 §4 requires of this corpus.
 - **A `ToolInvoker` implementation now holds an `InvocationLedger`.** That is a new
   collaborator on a seam whose whole design was that it holds a registry binding and
   nothing else — the cost #259 priced when it described closing the same hole one
