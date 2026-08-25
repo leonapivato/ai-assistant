@@ -2,6 +2,59 @@
 
 - Status: Accepted
 - Date: 2026-08-12
+- **Note (2026-08-25): §10's second clause conditions on a seam ADR-0106 did not
+  supply, and the body gate has not lifted.** #1432 reports that the clause —
+  "Until ADR-0098 §12's externality-recoverable seam is ratified and implemented,
+  the email source contributes to memory only through §5's envelope field set" —
+  names a deferral whose own title ADR-0106 claims ("Consolidation inherits taint,
+  lands in the derived band, and **is the seam that makes externality
+  recoverable**", `Accepted` 2026-08-05, its field and predicate in
+  `core/types.py`), and that two readings of §10 are then available: the condition
+  is met and the gate lifted when ADR-0106 was ratified, or "the seam" means
+  something ADR-0106 did not provide. **The second is what §10 says**, and this
+  note records it so that no lane reaches the first by inference.
+  **The ground is what §10's own prose conditions on, read against what ADR-0106
+  says it does not do.** §10 states the residual it is bounding: ADR-0098 §5's,
+  where "on the live chain of the Context, externality is not recoverable at all"
+  — an attacker's sentence reaches a durable belief through a plan rationale our
+  own model authored and the engine recorded truthfully, and "there is no field to
+  read" — and it adds that "**Nothing about email makes that field obtainable**".
+  ADR-0106 did not make it obtainable either, and says so twice in marked text.
+  §1's second clause: the predicate "is not a claim that a record carrying `False`
+  was uninfluenced by external content … no ADR, lane, or surface may state or
+  imply that this marker detects external content embedded in text whose recorded
+  origin is not external." §8's `#301` paragraph: "This ADR marks a *record's
+  warrant* on the memory write path; it **says nothing about a taint that survives
+  a planning step**, and ADR-0098 §3 and §5 are explicit that the link between a
+  model's output and the span that produced it is not recoverable." What ADR-0106
+  landed is the `DERIVED`-band half — a producer-declared marker on the write path
+  and §6's ceiling over it — and §1's first bullet is explicit that it adds nothing
+  in the `ATTESTED` band, which is the band every proposal from this reader is in
+  (§5). A body reaching a prompt and steering what a model then writes is the path
+  §10 is bounding, and it is the path ADR-0106 §8 disclaims.
+  **Two further readings of the record point the same way.** This ADR is dated
+  2026-08-12, a week after ADR-0106 merged, and wrote the condition as unmet; and
+  the wider reading would have a marked normative gate lift silently on an earlier
+  ADR's ratification with nobody deciding it should — the fired-but-untracked shape
+  #663 records and the failure #1432 is filed to prevent.
+  **The two readings are not symmetric under ADR-0070 §1, which is the other half
+  of why this note can record one of them.** Recording that the gate stands changes
+  no decision: it has stood since ratification and no lane has lifted it. Recording
+  that it lifted would change what §10 decided about what may reach memory, and
+  that is a supersession requiring its own ADR — which is exactly what a lane
+  wanting bodies still owes. Nothing here relieves it of that argument; what the
+  note removes is the route to bodies by inference from a title.
+  **This note re-rules nothing.** §5's envelope field set, §10's three clauses and
+  §14's body deferral stand exactly as ratified; the firing condition is not
+  narrowed, widened or replaced, and no new trigger is added. Under ADR-0070 §1
+  that is "a paragraph that only restates the existing decision more clearly" — a
+  reader who read §10 and §14 whole was held by the gate before this note and is
+  held by it after, so nothing decided changes and no reader acts differently as to
+  the decision. The defect is an ambiguous reference in this ADR's own words, and
+  ADR-0106 — which predates it and amends no clause of it — is not its cause, so
+  this appended dated note is the whole record and no `Status` edit is owed
+  (ADR-0082 §1). ADR-0098 §12's first deferral stays open and is tracked there.
+  Refs #1432, ADR-0098 §5, ADR-0098 §12, ADR-0106 §1, ADR-0106 §8.
 
 ## Context
 
