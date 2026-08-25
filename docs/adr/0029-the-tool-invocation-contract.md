@@ -36,12 +36,20 @@
   such a tool gets exactly one invocation per authorisation. §§1–2, §4 and §§6–8 are
   untouched by **this** scope, as is §3 apart from its cost sentence, which the note
   below supersedes on its own scope and for its own reason. This ADR's Decision text
-  below is not rewritten (ADR-0070 §1). **The three amendment qualifiers this `Status` line carried have
+  below is not rewritten (ADR-0070 §1). **The four amendment qualifiers this `Status` line carried have
   moved off it** under ADR-0082 §2, which takes them off a line that gains the
   leading token and leaves each record whole in the dated note that already
   carries it: §§1, 3–4 and Consequences amended by ADR-0031; §§3–4 and
-  Consequences amended by ADR-0032; §8 amended by ADR-0034 and by ADR-0039 — the
-  four `Amended:` notes below, none of which is altered. Refs #1503, #1544.
+  Consequences amended by ADR-0032; §8 amended by ADR-0034 and by ADR-0039; and
+  §7's spend-accumulation deferral discharged by ADR-0194 — the five `Amended:`
+  notes below, none of which is altered. **ADR-0194's is the one written after
+  this line already carried the leading token**, and it moves off for the same
+  reason and by the same rule its own note applies to ADR-0021's line
+  ("no qualifier for it is written on the `Status` line … ADR-0082 §2 puts an
+  amendment's record in the dated note rather than on such a line"); the merge
+  order simply put ADR-0194's line-edit first. Nothing that note records is
+  changed or narrowed by moving it, and nothing ADR-0194 decided is touched by
+  this ADR. Refs #1503, #1544.
 - Partially superseded: 2026-08-25 by ADR-0192 — **§4's "the seam stops waiting",
   over the two audit writes and nothing else.** §4 rules that "Every invocation
   carries a deadline" and that what it buys is "that the seam stops waiting, not that
