@@ -56,8 +56,18 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
         assert await creators.calibrate() == sorted(m25.OFF_DEVICE_CREATORS)
         assert creators.calls == []
 
+        # The connected account, minted by the shipped provisioning act through
+        # the objects the composition root wires (ADR-0151 §5). It runs first
+        # because a reference cannot be named in configuration before the act that
+        # mints it has run, and it leaves the credential where the *measured*
+        # deployment's own keyring face will read it.
+        backing = m25.Backing()
+        reference = await m25.provision(tmp_path, backing)
+
         capability = FakeOutboundTransport().serve(m25.channel())
-        composition = m25.build(tmp_path, capability=capability)
+        composition = m25.build(
+            tmp_path, capability=capability, connection=reference, backing=backing
+        )
         try:
             # 2. The handout, established rather than assumed: the transport the
             #    production root gave the designated seam **is** this fake, and it
@@ -88,8 +98,7 @@ async def test_the_exit_arm_an_undesignated_tool_has_no_route(tmp_path: Path) ->
             #    same composition and through that composition's **own**
             #    registered seam. Without it the zero above is satisfied by a
             #    recorder nothing could ever reach.
-            await m25.arrange_the_seams_collaborators(composition)
-            await m25.drive_a_bound_call(composition)
+            await m25.drive_a_bound_call(composition, reference)
 
             assert list(capability.attempts) == [TransportAttempt(endpoint=CONFIGURED, served=True)]
             # The control moves the connection instrument by nothing, because the
@@ -134,38 +143,26 @@ async def test_every_creator_the_running_loop_exposes_is_classified() -> None:
     )
 
 
-async def test_a_deployment_that_configures_no_integration_is_handed_no_transport(
+async def test_a_deployment_that_configures_no_integration_registers_no_egress_tool(
     tmp_path: Path,
 ) -> None:
-    """§3: absence of configuration never selects a default implementation.
+    """§3: an unconfigured deployment registers no tool that could reach the world.
 
-    The clause is easy to satisfy by accident and easy to lose by accident, and it
-    is what makes "a subsystem handed no capability has no route to the world" true
-    of the whole tree rather than of one argument list: the composition root builds
-    the transport **inside** the branch that builds the integration, so a
-    deployment that named no connected account and no endpoint constructs none,
-    registers no tool that could reach one, and hands nothing out.
-
-    Asserted through the registry, which is the surface a plan actually reaches.
+    **Read through the registry, which is the surface a plan actually reaches**,
+    and claiming no more than that. An earlier draft of this case also asserted the
+    fake's empty attempt list and a zero from the loop instruments, which
+    adversarial review pointed out establish nothing here: a regression that
+    constructed a transport and handed it to something inert leaves all three
+    readings unchanged. What *does* measure the construction is a direct instrument
+    on the composition root, and it lives beside the root it instruments —
+    ``tests/app/test_composition.py``'s
+    ``test_a_deployment_with_no_integration_constructs_no_transport``.
     """
-    creators = m25.LoopCreators()
+    composition = m25.build(tmp_path, capability=FakeOutboundTransport())
     try:
-        # Calibrated here too, and not borrowed from the arm above: those are a
-        # different instance over a different composition, and a zero read from an
-        # instrument this test never saw fire is the vacuous zero ADR-0191 §9's
-        # general clause refuses. Adversarial review found it on round 2.
-        assert await creators.calibrate() == sorted(m25.OFF_DEVICE_CREATORS)
-
-        capability = FakeOutboundTransport()
-        composition = m25.build(tmp_path, capability=capability, integration=False)
-        try:
-            assert await m25.registry(composition).get("send_email") is None
-            assert list(capability.attempts) == []
-            assert creators.calls == []
-        finally:
-            await composition.engine.aclose()
+        assert await m25.registry(composition).get("send_email") is None
     finally:
-        creators.remove()
+        await composition.engine.aclose()
 
 
 def _report(

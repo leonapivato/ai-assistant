@@ -324,16 +324,26 @@ class TestStreamChannelContract(ByteChannelContract):
 class TestStreamOutboundTransportContract(OutboundTransportContract):
     """The production opener, run through the opener contract.
 
-    **The cancellation case is armed inside the substituted opener, not inside
-    ``open_channel``'s own frame.** An earlier draft opted out of it on the ground
-    that production performs no ``await`` after the acquisition returns; both
-    review lenses rejected that on round 2, and correctly — the window is the one
-    inside ``open_connection``, which suspends while a socket already exists. So
-    the suspension goes where the window is, and the case still measures something
-    of production rather than of the substitute: that a cancellation delivered
-    there is neither absorbed nor converted, and that nothing this implementation
-    obtained is left held.
+    **It opts out of the suite's cancellation-release case, and the ground is
+    ADR-0060 §1's own second limb.** ``open_channel`` holds nothing across an
+    ``await`` of its own: the provisional socket exists only inside
+    ``asyncio.open_connection``, which is work this method started and can observe
+    finishing, and which closes that socket itself if it is cancelled there
+    (CPython's ``_connect_sock`` has a bare ``except:`` that does exactly that).
+    Between that call returning and the channel being constructed there is no
+    suspension point at all. So there is no production-owned release for the case
+    to observe — and arming one inside the substituted opener, which an earlier
+    draft did, made the substitute's own cleanup the thing being measured. Round 2
+    of review rejected the first shape and round 3 the second; what the reduction
+    keeps is the half that is genuinely this implementation's, asserted below:
+    **a cancellation delivered during the open is neither absorbed nor converted.**
+
+    The *release* obligation is not vacuous where production does own it — a
+    channel that could not be constructed after the streams existed — and the
+    suite exercises that unskipped through :meth:`arm_failure_after_acquiring`.
     """
+
+    holds_a_resource_across_an_await = False
 
     @pytest.fixture(autouse=True)
     def _sockets(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -452,7 +462,13 @@ async def test_an_upgrade_endpoint_is_connected_in_the_clear(
 
 @pytest.mark.parametrize(
     "raised",
-    [ConnectionRefusedError("nothing is listening"), ssl.SSLError("the certificate is not valid")],
+    [
+        pytest.param(ConnectionRefusedError("nothing is listening"), id="refused"),
+        pytest.param(ssl.SSLError("the certificate is not valid"), id="unverified"),
+        pytest.param(
+            UnicodeEncodeError("idna", "\u200d.invalid", 0, 1, "label empty"), id="unresolvable"
+        ),
+    ],
 )
 async def test_the_opener_names_the_endpoint_and_no_octet_in_its_refusal(
     monkeypatch: pytest.MonkeyPatch, raised: Exception
@@ -462,6 +478,12 @@ async def test_the_opener_names_the_endpoint_and_no_octet_in_its_refusal(
     ``ssl.SSLError`` is an ``OSError``, so a certificate that did not verify and a
     connection that was refused arrive by one path and leave as one type — which is
     the point of the taxonomy and is why there is no second clause for it.
+
+    **A ``UnicodeError`` is not an ``OSError`` and needed one.** ``getaddrinfo``
+    raises one for a host whose IDNA encoding fails — an empty or over-long label,
+    a zero-width joiner — and ``parse_smtp_endpoint`` validates the authority no
+    further than its punctuation (#1147, #1158), so such a host is one an operator
+    can actually configure. Adversarial review found it escaping raw on round 3.
     """
 
     async def refuses(*args: object, **kwargs: object) -> object:
@@ -477,6 +499,23 @@ async def test_the_opener_names_the_endpoint_and_no_octet_in_its_refusal(
     assert str(failure.value) == (
         f"the endpoint {ENDPOINT.host}:{ENDPOINT.port} could not be connected"
     )
+
+
+async def test_a_host_the_resolver_refuses_is_a_transport_error_not_a_unicode_one() -> None:
+    """The same clause against the real resolver rather than a substitute.
+
+    ``TransportEndpoint`` accepts this host — it is neither blank nor whitespace —
+    and the endpoint grammar would too, so nothing upstream of ``open_channel``
+    stops it. The case runs against the standard library's own ``getaddrinfo``
+    because the point is that its exception type is not the one the ``except``
+    clause obviously wants; a substitute would be asserting the arrangement.
+    """
+    unresolvable = TransportEndpoint(host="\u200d.invalid", port=465, implicit_tls=True)
+
+    with pytest.raises(TransportError) as failure:
+        await StreamOutboundTransport().open_channel(unresolvable)
+
+    assert isinstance(failure.value.__cause__, UnicodeError)
 
 
 async def test_the_channel_upgrades_against_the_pinned_host_and_never_a_reply() -> None:
@@ -495,6 +534,32 @@ async def test_the_channel_upgrades_against_the_pinned_host_and_never_a_reply() 
     assert _writer_of(channel).tls == ENDPOINT.host
     assert _writer_of(channel).written == b"STARTTLS\r\n"
     assert _writer_of(channel).drains == 1
+
+
+async def test_a_cancellation_during_the_open_is_neither_absorbed_nor_converted(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """ADR-0060 §1: the caller's own control flow arriving, delivered onward.
+
+    The half of the cancellation clause this implementation genuinely owns, and
+    the one an over-broad ``except`` would break: ``open_channel`` catches
+    ``OSError`` and ``UnicodeError`` to convert them, and a ``CancelledError`` is
+    a ``BaseException`` that must pass through both untouched rather than coming
+    back as a refusal the caller would treat as an unreachable endpoint.
+    """
+    sockets = _Sockets()
+    gate = LoopSuspension()
+    sockets.gate = gate
+    monkeypatch.setattr(asyncio, "open_connection", sockets)
+    opening = asyncio.ensure_future(StreamOutboundTransport().open_channel(ENDPOINT))
+    await gate.reached()
+
+    opening.cancel()
+    gate.release()
+
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+    assert sockets.open == 0
 
 
 def test_the_capability_holds_no_state_between_calls() -> None:

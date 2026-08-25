@@ -27,6 +27,7 @@ from transport_contract import (
 from ai_assistant.core.errors import TransportError
 from ai_assistant.core.types import TRANSPORT_OCTET_CEILING, TransportEndpoint
 from ai_assistant.testing import FakeByteChannel, FakeOutboundTransport, TransportAttempt
+from ai_assistant.testing.cancellation import settle
 
 if TYPE_CHECKING:
     from ai_assistant.core.protocols import ByteChannel, OutboundTransport
@@ -244,6 +245,79 @@ async def test_queued_channels_are_served_in_order() -> None:
     assert await transport.open_channel(ENDPOINT) is first
     assert await transport.open_channel(ENDPOINT) is second
     assert transport.channels == (first, second)
+
+
+async def test_two_opens_in_flight_take_their_channels_in_call_order() -> None:
+    """One open, one channel, and the queue is read at the attempt.
+
+    Adversarial review found the earlier shape on round 3: the queue was read
+    *after* the suspension, so a second open started while the first was held
+    walked off with the first's scripted replies. With matching TLS modes the two
+    silently swapped exchanges; with differing ones both raised an arrangement
+    error over channels queued in exactly the right order.
+    """
+    first, second = FakeByteChannel(secure=True), FakeByteChannel(secure=True)
+    transport = FakeOutboundTransport().serve(first, second)
+    gate = transport.suspend_next_open()
+
+    held = asyncio.ensure_future(transport.open_channel(ENDPOINT))
+    await gate.reached()
+    following = asyncio.ensure_future(transport.open_channel(ENDPOINT))
+    await settle()
+    gate.release()
+
+    assert await held is first
+    assert await following is second
+
+
+async def test_a_cancelled_open_puts_its_queued_channel_back() -> None:
+    """The open that reserved it never handed it to anybody.
+
+    So the next open is the one it was queued for, rather than the arrangement
+    silently losing an exchange a later case was counting on.
+    """
+    first, second = FakeByteChannel(secure=True), FakeByteChannel(secure=True)
+    transport = FakeOutboundTransport().serve(first, second)
+    gate = transport.suspend_next_open()
+    opening = asyncio.ensure_future(transport.open_channel(ENDPOINT))
+    await gate.reached()
+
+    opening.cancel()
+    gate.release()
+    with pytest.raises(asyncio.CancelledError):
+        await opening
+
+    assert await transport.open_channel(ENDPOINT) is first
+
+
+async def test_a_closed_channel_is_never_served() -> None:
+    """§1: what an open returns is an *open* duplex channel.
+
+    A holder handed a closed one would be testing against something no opener
+    returns — the canonical fake certifying behaviour that does not exist, which
+    is the one failure a canonical fake must not have.
+    """
+    closed = FakeByteChannel(secure=True)
+    await closed.close()
+    transport = FakeOutboundTransport().serve(closed)
+
+    with pytest.raises(ValueError, match="closed channel"):
+        await transport.open_channel(ENDPOINT)
+
+
+async def test_a_channel_already_served_is_never_served_again() -> None:
+    """§3: one open, one channel; this contract carries no pool.
+
+    Queuing the same object twice would otherwise model a transport that hands two
+    callers the same connection — and after the first holder closed it, an open
+    that reported ``served=True`` for a channel that was already shut.
+    """
+    channel = FakeByteChannel(secure=True)
+    transport = FakeOutboundTransport().serve(channel, channel)
+
+    assert await transport.open_channel(ENDPOINT) is channel
+    with pytest.raises(ValueError, match="already served"):
+        await transport.open_channel(ENDPOINT)
 
 
 @pytest.mark.parametrize(

@@ -474,9 +474,10 @@ class FakeOutboundTransport:
         endpoint's TLS is the implicit kind, which is the contract's own clause
         rather than a convenience.
 
-        **A queued channel's TLS state has to agree with the endpoint it is served
-        for**, and a handout that would not raises rather than proceeding: see
-        :meth:`_served_for`.
+        **A queued channel has to be one a conforming transport could return for
+        the endpoint it is served for** — open, unserved, and in that endpoint's
+        TLS state — and a handout that would not raises rather than proceeding:
+        see :meth:`_reserved_for`.
 
         Args:
             channels: The channels to hand out.
@@ -585,29 +586,43 @@ class FakeOutboundTransport:
 
     # --- the contract -------------------------------------------------------
 
-    def _served_for(self, endpoint: TransportEndpoint) -> FakeByteChannel:
-        """The channel this open hands out, or a refusal of the arrangement.
+    def _reserved_for(self, endpoint: TransportEndpoint) -> tuple[FakeByteChannel, bool]:
+        """Take the channel this open will hand out, before it can suspend.
+
+        **Reserved at the attempt rather than at the completion**, so two opens in
+        flight at once take the queued channels in the order they were *called*
+        rather than in the order they happen to finish. Dequeuing after the
+        suspension let a second open walk off with the first's scripted replies,
+        which adversarial review found on round 3.
 
         Args:
             endpoint: The endpoint asked for.
 
         Returns:
-            The next queued channel, or a fresh one already in the endpoint's TLS
-            state.
+            The channel and whether it came off the queue, so a failed open can
+            put a queued one back.
 
         Raises:
-            ValueError: If a queued channel's TLS state contradicts ``endpoint``.
-                ADR-0191 §1 has an implicit-TLS open return a channel *already*
-                under TLS and an upgrade open return one in the clear, so a fake
-                that served either for the other would let a consumer be tested
-                against a state the production capability can never produce — the
-                canonical fake certifying behaviour that does not exist. It is the
-                arranger's error rather than a connection's, so it is a
-                ``ValueError`` and not a ``TransportError``.
+            ValueError: If the queued channel is not one a conforming transport
+                could return for ``endpoint``. Three ways, all of them the
+                arranger's error rather than a connection's — hence ``ValueError``
+                and never ``TransportError``:
+
+                * **its TLS state contradicts the endpoint.** ADR-0191 §1 has an
+                  implicit-TLS open return a channel *already* under TLS and an
+                  upgrade open return one in the clear, so serving either for the
+                  other would let a consumer be tested against a state the
+                  production capability can never produce;
+                * **it is closed.** ``open_channel`` promises an *open* duplex
+                  channel, and a holder handed a closed one would be testing
+                  against something no opener returns;
+                * **it has already been served.** One open, one channel: handing
+                  the same object to two callers models a pool this contract
+                  deliberately does not have (ADR-0191 §3).
         """
         if not self._queued:
-            return FakeByteChannel(secure=endpoint.implicit_tls)
-        channel = self._queued.popleft()
+            return FakeByteChannel(secure=endpoint.implicit_tls), False
+        channel = self._queued[0]
         if channel.is_secure is not endpoint.implicit_tls:
             state = "already under TLS" if channel.is_secure else "in the clear"
             mode = "implicit TLS" if endpoint.implicit_tls else "an upgrade"
@@ -617,7 +632,20 @@ class FakeOutboundTransport:
                 f"implicit-TLS endpoint and a cleartext one otherwise (ADR-0191 §1)"
             )
             raise ValueError(msg)
-        return channel
+        if channel.closed:
+            msg = (
+                "a closed channel was queued; a conforming transport returns an open "
+                "duplex channel or raises (ADR-0191 §1)"
+            )
+            raise ValueError(msg)
+        if any(served is channel for served in self._served):
+            msg = (
+                "a channel already served was queued again; one open yields one "
+                "channel, and this contract carries no pool (ADR-0191 §3)"
+            )
+            raise ValueError(msg)
+        self._queued.popleft()
+        return channel, True
 
     async def open_channel(self, endpoint: TransportEndpoint) -> ByteChannel:
         """Record the attempt, then serve a channel or refuse.
@@ -635,8 +663,9 @@ class FakeOutboundTransport:
                 production implementation raises too (ADR-0191 §1). In the second
                 case the modelled socket is released before the failure leaves, so
                 :attr:`open_sockets` reads what it did before the call.
-            ValueError: If a queued channel's TLS state contradicts the endpoint
-                asked for; see :meth:`serve`.
+            ValueError: If the queued channel is not one a conforming transport
+                could return for ``endpoint``; see :meth:`_reserved_for`. Raised
+                before anything is acquired, so nothing is left held.
             CancelledError: Re-raised after that same release, never absorbed
                 (ADR-0060 §1).
         """
@@ -644,6 +673,9 @@ class FakeOutboundTransport:
         self._attempts.append(pending)
         if self._refusal is not None:
             raise self._refusal
+        # Reserved before the modelled socket exists and before anything can
+        # suspend, so an arrangement error is raised having acquired nothing.
+        channel, queued = self._reserved_for(endpoint)
         self._in_flight += 1
         try:
             gate, self._gate = self._gate, None
@@ -652,9 +684,12 @@ class FakeOutboundTransport:
             if self._failure is not None:
                 failure, self._failure = self._failure, None
                 raise failure
-            channel = self._served_for(endpoint)
         except BaseException:
             self._in_flight -= 1
+            if queued:
+                # Put it back at the head: the open that reserved it never handed
+                # it to anybody, so the next open is the one it was queued for.
+                self._queued.appendleft(channel)
             raise
         self._served.append(channel)
         self._in_flight -= 1

@@ -1517,18 +1517,53 @@ async def test_the_root_constructs_the_transport_capability_and_hands_it_in(
         await engine.aclose()
 
 
-async def test_a_deployment_with_no_integration_constructs_no_transport(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    ("configured", "expected"),
+    [
+        pytest.param(False, 0, id="unconfigured"),
+        pytest.param(True, 1, id="configured"),
+    ],
+)
+async def test_the_transport_is_constructed_only_where_an_integration_is(
+    tmp_path: Path, *, configured: bool, expected: int
 ) -> None:
     """ADR-0191 §3: absence of configuration never selects a default implementation.
 
-    The root builds the capability *inside* the branch that builds the integration,
-    so an unconfigured deployment registers no tool that could reach one and hands
-    nothing out. Read through the registry, which is the surface a plan reaches.
+    **Instrumented at the construction rather than inferred from an absence.** The
+    registry being empty is a weaker fact: a root that built a transport and then
+    handed it to something inert would leave the registry empty, the capability
+    unused and every downstream reading unchanged, while "a deployment that
+    configures no integration builds no transport and hands out none" was false.
+    Counting the constructions is the claim itself, and adversarial review of
+    ADR-0191's implementation asked for exactly that.
+
+    The configured row is what keeps the unconfigured one from passing vacuously:
+    an instrument that could never fire reads zero for the same reason a live one
+    does.
     """
-    engine = build_engine(Settings(embedder=EmbedderKind.HASHING), data_dir=tmp_path)
+    built = 0
+
+    def counted() -> StreamOutboundTransport:
+        nonlocal built
+        built += 1
+        return StreamOutboundTransport()
+
+    settings = (
+        Settings(
+            embedder=EmbedderKind.HASHING,
+            send_email_connection="conn-0001",
+            send_email_endpoint="smtps://mail.example.invalid:465",
+        )
+        if configured
+        else Settings(embedder=EmbedderKind.HASHING)
+    )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(composition_module, "StreamOutboundTransport", counted)
+        engine = build_engine(settings, data_dir=tmp_path)
+
     try:
-        assert await engine._runner._registry.get(SEND_EMAIL.id) is None
+        assert built == expected
+        assert (await engine._runner._registry.get(SEND_EMAIL.id) is None) is not configured
     finally:
         await engine.aclose()
 
