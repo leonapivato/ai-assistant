@@ -1,23 +1,33 @@
 # 87. The canonical wire encoding, and the vectors that make it testable
 
-- Status: Accepted, §2c's scalar table amended by ADR-0194 (one added row, `Decimal`)
+- Status: Partially superseded by ADR-0194 (§2c's enumeration of the types this encoding carries, which gains a `Decimal` row)
 - Date: 2026-08-01
-- Amended: 2026-08-25 (§2c — the scalar table gains a `Decimal` row, decided by
-  ADR-0194 §5). The table enumerates the types this encoding carries and
-  `wire/codec.py` refuses one it does not list, so a reader holding only this ADR
-  would read the enumeration as complete and refuse to encode a value ADR-0194's
-  own promoted member returns — which is why the record is owed (ADR-0082 §1). The
-  form ADR-0194 fixes is a **JSON string** built from the value's own
-  `as_tuple()`, carrying the scale rather than normalising it, with a non-finite
-  `Decimal` refused as a non-finite `float` already is; §4's normalises-nothing
-  rule is what dictates that shape rather than being bent by it. It is an
-  **amendment** and not a supersession: no existing row changes, no ratified
-  vector's spelling moves, and no conforming encoder emitted any bytes for a
-  `Decimal` before — it raised — so §8's first case does not apply and this ADR
-  owes no protocol version bump on this ground. §2a, §2b, §2d, §2e, §3, §4, §5's
-  existing vectors, §7 and §8 are untouched. This ADR's ratified text below is
-  **not** rewritten; the `Status` line above and this note are the whole of the
-  record (ADR-0070 §1, ADR-0082 §1 and §2). Refs #1559, ADR-0194 §5, §9, §10.
+- **Partially superseded: 2026-08-25 by ADR-0194 — §2c's enumeration, and nothing
+  else.** The scalar table names the types this encoding carries and
+  `wire/codec.py` refuses one it does not list ("a type nobody has spelled a form
+  for has no canonical bytes"), so a reader holding only this ADR refuses to encode
+  a `Decimal`. ADR-0194 §5 promotes a member that returns one and states its form:
+  a **JSON string** built from the value's own `as_tuple()` — sign, digits, `E`,
+  signed exponent — carrying the scale rather than normalising it, with a
+  non-finite `Decimal` refused exactly as a non-finite `float` is here.
+
+  **Replaced — §2c's enumeration only.** A reader now acts differently, which is
+  ADR-0070 §1's test, so this is a supersession rather than an amendment; it is
+  **partial** in ADR-0070 §3's sense, and the scope is the enumeration alone.
+
+  **Not replaced — every other clause, and §4 most of all.** No existing row's
+  spelling moves, and §4's normalises-nothing rule is what *dictates* the new
+  row's shape: `Decimal("1.0")` and `Decimal("1")` are distinguishable by
+  `as_tuple()`, so §4 makes them two values and the encoding keeps them apart.
+  §2a, §2b, §2d, §2e, §3, §4, §5's existing vectors, §6, §7, §8 and §9 stand as
+  ratified.
+
+  **What this did not change.** §8's first case does not apply — no conforming
+  encoder emitted any bytes for a `Decimal` before, it raised — so no protocol
+  version bump is owed on this ground, though ADR-0194's consumer group bumps
+  anyway for the promoted method it adds. This ADR's ratified text below is **not**
+  rewritten; the `Status` line above and this note are the whole of the record
+  (ADR-0070 §1 and §4, ADR-0082 §2). Refs #1559, ADR-0194 §5, §9, §10.
 - **This is a fifth change inserted into ADR-0084 §5's four, and its position is
   *before the triad*.** That is the load-bearing claim and §6 argues it from
   ADR-0084 alone: §5's own item 3 says the triad ships a **canonical fake** and a

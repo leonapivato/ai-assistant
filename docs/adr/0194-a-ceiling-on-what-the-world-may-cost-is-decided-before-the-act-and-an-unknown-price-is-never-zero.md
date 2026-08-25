@@ -3,16 +3,19 @@
 - Status: Proposed
 - Date: 2026-08-25
 - **Decides `core` contract surface and implements none of it (golden rule 5).**
-  It adds **two** Protocols, two `core/types.py` models and three
+  It adds **two** Protocols, three `core/types.py` models and three
   `core/errors.py` classes, and it lands none of them: the triad and its primary
   implementation are separate lanes, sequenced behind ADR-0192's (§11). **Because this ADR decides a
   contract surface, its required review set is adversarial *and* architecture**,
   even though the PR carrying it is prose only — `CONTRIBUTING.md` → "Stop when
   the required reviews are green" and ADR-0015 §1.
-- Amends: ADR-0021 §6's **Spend accumulation** deferral, ADR-0029 §7's
-  spend-accumulation half, and ADR-0087 §2c's scalar table (one added row,
-  `Decimal`, because §5 promotes a member carrying one and the table is
-  exhaustive by construction); §10 applies ADR-0070 §1 and ADR-0082 §1 to each.
+- Amends: ADR-0021 §6's **Spend accumulation** deferral and ADR-0029 §7's
+  spend-accumulation half.
+- **Partially supersedes ADR-0087** — §2c's enumeration of the types the wire
+  encoding carries, which gains a `Decimal` row because §5 promotes a member
+  carrying one and the table is exhaustive by construction (the codec raises on a
+  type it does not list). No existing row's spelling moves. §10 applies ADR-0070
+  §1 and ADR-0082 §1 to each of the three.
 - **Depends on ADR-0192 by number, and on no field of it.** This ADR cites that
   decision as the thing that records what an invocation cost — a completion row
   carrying a reported figure, and a claim that may stand open — and reshapes
@@ -428,20 +431,46 @@ the two properties it has rather than letting a reader assume the stronger one.
 > reservations already taken and cannot project a total that omits a call already
 > admitted.
 
+> **Normative.** Outstanding handles are **distinct**. No two reservations this
+> holder is holding at one instant carry the same handle, whatever an injected id
+> factory does — a repeated value is disambiguated rather than trusted, which is
+> the rule `Engine._mint_handle` already states for the continuation table and for
+> the same reason: two reservations sharing a handle are one reservation, so the
+> other's amount silently leaves the projection and a later call is admitted
+> against a total that omits an admitted one.
+
+> **Normative.** A reservation stands **until its handle is released**, and is
+> counted into the projected total of every later admission until then —
+> **whatever period either falls in**. It is not scoped to the period it was taken
+> in and does not expire at a boundary. The completion it stands for is recorded at
+> its own instant (§2) and a call admitted before midnight can complete after it,
+> so a reservation that lapsed at the boundary would leave that call counted in
+> neither period while it ran; carrying it counts the call in one period too many
+> for as long as it is in flight, which is the fail-closed direction and is bounded
+> by the call.
+
 > **Normative.** `ToolInvoker.invoke` releases the handle in a `finally`, after
 > ADR-0192's completion has been appended or after the failure that prevented it.
-> A release is **idempotent** and raises no `Exception`: an unknown handle, a
-> handle already released, and a release after the reservation's period ended are
-> each a no-op. A `finally` that raised would replace the call's own outcome with
-> a book-keeping failure, which is the one thing this clause must not do.
+> A release is **idempotent** and raises no `Exception`: an unknown handle and a
+> handle already released are each a no-op. A `finally` that raised would replace
+> the call's own outcome with a book-keeping failure, which is the one thing this
+> clause must not do.
+
+> **Normative.** Neither member leaves a reservation nobody can release. Where
+> `admit_invocation` has recorded a reservation and does not deliver its handle —
+> a `CancelledError` between the two is the reachable case — it **removes that
+> reservation before the exception leaves the member**. Where
+> `release_admission` is cancelled, it completes its own state change first and
+> re-raises afterwards. Both are the same rule: a `BaseException` propagates
+> unchanged (§4), and it does not take a reservation's only key with it.
 
 > **Normative.** A reservation is **in-memory state of the holder** — never a row,
-> never durable, and never a `PermissionDecision`. It is discarded when its period
-> ends and when the process restarts; §7's accounted total is rebuilt from
-> ADR-0192's rows and loses nothing with it. Between the completion append and the
-> release the same call is counted twice, once accounted and once reserved, and
-> that direction is deliberate: the mechanism over-counts for one operation rather
-> than under-counting for one.
+> never durable, and never a `PermissionDecision`. It is discarded when the process
+> restarts, which is the one way an unreleased reservation ever ends; §7's
+> accounted total is rebuilt from ADR-0192's rows and loses nothing with it.
+> Between the completion append and the release the same call is counted twice,
+> once accounted and once reserved, and that direction is deliberate: the mechanism
+> over-counts for one operation rather than under-counting for one.
 
 > **Normative.** Where **neither ceiling is configured** no reservation is taken
 > and the handle is a value the release accepts and ignores. The short-circuit
@@ -634,21 +663,32 @@ whole explanation.
 ### 5. `SpendGate` and `SpendLedger`: two `core` Protocols, two `core` types, one holder
 
 > **Normative.** `core/protocols.py` gains **two** Protocols. `SpendGate` has
-> **two** `async` members: `admit_invocation(*, estimate: ToolCost) -> str`, which
+> **two** `async` members:
+> `admit_invocation(*, estimate: ToolCost) -> SpendAdmissionHandle`, which
 > evaluates §3's admission, raises under §4 where it refuses, and where it admits
-> takes §3's reservation and returns its opaque handle; and
-> `release_admission(handle: str) -> None`, which drops that reservation and is the
-> idempotent no-raising member §3 requires. Neither appends a row and neither
+> takes §3's reservation and returns its handle; and
+> `release_admission(handle: SpendAdmissionHandle) -> None`, which drops that
+> reservation and is the idempotent no-raising member §3 requires. Neither appends a row and neither
 > writes durable state. `SpendLedger` has one member,
 > `spend_totals() -> tuple[SpendTotal, ...]`, which returns one `SpendTotal` per
 > period this ADR defines, in a fixed order — `CALENDAR_DAY` then
 > `CALENDAR_MONTH` — and returns both entries whatever is configured.
 
+> **Normative.** `core/types.py` gains `SpendAdmissionHandle`, frozen with
+> `extra="forbid"`, carrying exactly `handle: Identifier` and nothing else. It is a
+> model and not a bare `str` because it crosses a subsystem boundary — `tools/`
+> holds it, `permissions/` mints and resolves it — which is `CLAUDE.md`'s rule for
+> boundary-crossing data, and because `Identifier` refuses the blank string that
+> would satisfy "a handle is present" while naming nothing. `ContinuationToken` is
+> the same shape for the same reasons one seam over, and this ADR copies it rather
+> than inventing a second convention.
+
 > **Normative.** The handle is **opaque**: a caller neither parses it, orders it,
 > nor derives a period, an amount or a tool from it, and no implementation encodes
 > one in it. It reaches no record, no surface and no wire frame — it lives between
 > the invoker and the gate for the duration of one call — so nothing here promotes
-> a new value onto ADR-0085's surface.
+> a new value onto ADR-0085's surface, and no adapter, engine or client ever holds
+> one.
 
 > **Normative.** They are two Protocols because they have two consumers and
 > neither needs the other's face: the invoker holds a `SpendGate` and **never** a
@@ -667,6 +707,14 @@ whole explanation.
 > substitute a book-keeping failure for the outcome the caller was about to
 > report.
 
+> **Normative.** `spend_totals` derives **both** entries from **one** reading of
+> the injected clock and **one** snapshot of the rows. A conforming implementation
+> does not read the clock twice, and does not compute one period's total, let a
+> completion append, and then compute the other's: a day total of 10 returned
+> beside a month total of 0 states two facts that cannot both be true of one
+> instant, and a clock read either side of a calendar boundary pairs periods that
+> do not contain each other. The two entries are one observation of one moment.
+
 > **Normative.** `spend_totals` **returns** an indeterminate period rather than
 > raising on one — that state is `accounted=None` with `currency` present (below).
 > It raises exactly `SpendUndeterminedError` among `Exception`s, and only where it
@@ -675,7 +723,9 @@ whole explanation.
 > `BaseException` exemption binds here too.
 
 > **Normative.** `core/types.py` gains `SpendPeriod`, a `StrEnum` with exactly two
-> members, `CALENDAR_DAY` and `CALENDAR_MONTH`, and no ordering semantics.
+> members, `CALENDAR_DAY` and `CALENDAR_MONTH`, and no ordering semantics. With
+> `SpendTotal` and `SpendAdmissionHandle` below, that is three names in that module
+> and no more.
 
 > **Normative.** `core/types.py` gains `SpendTotal`, frozen with
 > `extra="forbid"`, carrying exactly: `period: SpendPeriod`;
@@ -999,15 +1049,18 @@ Consequence.** Both are ADR-0192's to address and neither is addressed here. Thi
 ADR adds no field to `ToolResult`, changes no sentence of ADR-0016, and edits
 neither document. It consumes what ADR-0192 lands and cites it by number.
 
-**ADR-0087 §2c's scalar table.** §5 adds a `Decimal` row to it and states the
-form, the vectors and the non-finite refusal. A reader holding only ADR-0087 would
-read the table as complete and would refuse to encode a value this ADR's own
-promoted member returns, so a record is owed (§10). ADR-0087 §8 is what says which
-of its three cases this is: not "changing the bytes a ratified vector fixes",
-because no conforming encoder emitted any bytes for a `Decimal` — it raised — and
-so no protocol version bump is owed **on this ground**, though the consumer group
-bumps anyway for its promoted method. §2c's other rows, §2a, §2b, §2d, §2e, §3,
-§4, §5's existing vectors and §7's boundary are untouched.
+**ADR-0087 §2c's scalar table — partially superseded.** §5 adds a `Decimal` row to
+it and states the form, the vectors and the non-finite refusal. A reader holding
+only ADR-0087 refuses to encode a `Decimal`; a reader holding this ADR encodes
+one, which is ADR-0070 §1's test — "a change to what was decided is anything a
+reader would act on differently" — coming out on the supersession side, so this is
+a **partial supersession** and not an amendment (§10). The scope replaced is
+exactly §2c's enumeration of the types this encoding carries; **no existing row's
+spelling moves**, and ADR-0087 §8's first case therefore does not apply: no
+conforming encoder emitted any bytes for a `Decimal` — it raised — so no protocol
+version bump is owed **on this ground**, though the consumer group bumps anyway for
+its promoted method. §2a, §2b, §2d, §2e, §3, §4, §5's existing vectors, §7's
+boundary and §8 itself are untouched and stay accepted.
 
 **ADR-0029 §7's "one executor runs at a time".** Not changed by this ADR and not
 relied on by it. §3 records that the sentence decides the *plan executor* ADR-0014
@@ -1052,15 +1105,21 @@ defers spend accumulation and gives a precondition ADR-0192 satisfies. Same test
 same answer, same form: a `Status` qualifier and an appended dated note, or the
 note alone where §2 excludes the qualifier.
 
-**ADR-0087 §2c — a record is owed, and it is an amendment.** The table enumerates
-the types the encoding carries, and `wire/codec.py` refuses one it does not list;
-after this ADR it carries one more. A reader holding only ADR-0087 would read the
-enumeration more widely than it now holds, which is ADR-0082 §1's test coming out
-on the record side. It is an **amendment** rather than a supersession because
-nothing §2c decided is reversed: no row changes, no spelling moves, and §4's
-normalises-nothing rule is what *dictates* the new row's shape rather than being
-bent by it. The form is a `Status` qualifier naming this ADR and an appended dated
-note, per ADR-0082 §2.
+**ADR-0087 §2c — a partial supersession, and not an amendment.** The table
+enumerates the types the encoding carries, and `wire/codec.py` refuses one it does
+not list; after this ADR it carries one more. ADR-0070 §1 admits an in-place
+amendment "only when the amendment changes no decision" — a reader would act
+**identically** before and after — and that is not this: before, a reader refuses
+to encode a `Decimal`; after, they encode it by a rule stated here. That the
+existing rows are untouched does not make the enlarged domain an amendment, and
+the argument that "nothing §2c decided is reversed" was the wrong test — §1's is
+whether a reader acts differently, not whether an old sentence became false. So
+this ADR **partially supersedes** ADR-0087, in ADR-0070 §3's first-class form:
+the named scope is §2c's enumeration of the types the encoding carries, and every
+other clause of ADR-0087 stays accepted. The record is ADR-0070 §4's status form
+on ADR-0087 — a leading `Partially superseded by` naming this ADR and the exact
+scope — plus an appended dated note, and ADR-0087's ratified text is not
+rewritten.
 
 **Everything else in §9 is a stacked addition and no record is owed.** ADR-0021
 §5, ADR-0016 §§3–4, ADR-0029 §§1–5, ADR-0034 §1, ADR-0177 §1, ADR-0186 §6 and §8:
@@ -1069,16 +1128,18 @@ here. ADR-0082 §1 is explicit that a record demanded on book-keeping grounds
 alone — that a list "should mention" a change — is not owed, and none is taken
 here.
 
-**This ADR supersedes nothing and withdraws nothing.** It adds `core` surface, it
-discharges two deferrals, and it names the ADRs it depends on rather than
-replacing them.
+**This ADR supersedes one clause and withdraws nothing.** It partially supersedes
+ADR-0087 §2c's enumeration — the one place where carrying its own decision means a
+reader of an earlier ADR must now act differently — adds `core` surface,
+discharges two deferrals, and names the ADRs it depends on rather than replacing
+them.
 
 ### 11. Two lanes, what each owes, and what both are sequenced behind
 
 > **Normative.** The **paired lane** lands `SpendGate` and `SpendLedger` as a
 > triad — both Protocols, a shared conformance suite for each, and canonical fakes
-> in `ai_assistant.testing` — together with the `SpendTotal` and `SpendPeriod`
-> types, §4's three error classes, §1's four settings, and the **primary
+> in `ai_assistant.testing` — together with the `SpendTotal`, `SpendPeriod` and
+> `SpendAdmissionHandle` types, §4's three error classes, §1's four settings, and the **primary
 > production implementation**, which is the `permissions` store that also satisfies
 > ADR-0192's ledger. That is the whole of it: it lands under ADR-0137 §2's pairing
 > and under §3's rule that a triad is never split.
@@ -1183,10 +1244,41 @@ replacing them.
 > clause.
 
 > **Normative.** The suite drives `release_admission` as the no-raising member §5
-> requires: an unknown handle, a handle already released, a handle whose period has
-> rolled over and a handle taken while no ceiling was configured are each a no-op
-> that raises nothing; a `CancelledError` delivered during it propagates unchanged;
-> and a release does **not** lower any accounted total, which is read from rows.
+> requires: an unknown handle, a handle already released and a handle taken while
+> no ceiling was configured each raise nothing and leave the projection where it
+> was; a live handle released **after** its period rolled over still drops its
+> reservation, because §3 does not expire one at a boundary; and a release does
+> **not** lower any accounted total, which is read from rows.
+
+> **Normative.** The suite drives handle **distinctness** with an id factory that
+> returns one value repeatedly: two admissions granted against an accounted total
+> of 70 and a ceiling of 100 at estimates of 10 each receive handles that are not
+> equal, releasing one leaves the other counted, and a third estimate of 20 is
+> refused while both stand. A suite driving only the single-admission race passes
+> against an implementation whose second reservation overwrote its first.
+
+> **Normative.** The suite drives §3's cancellation rule at **both** boundaries and
+> asserts on the projection rather than on the exception alone: a `CancelledError`
+> delivered inside `admit_invocation` after it would have reserved leaves the later
+> projection unchanged — no reservation nobody holds a handle for — and one
+> delivered inside `release_admission` still drops the reservation. In both the
+> `CancelledError` propagates unchanged, which is the assertion that is *not*
+> sufficient on its own.
+
+> **Normative.** The suite drives a reservation **across a period boundary** with
+> the invocation still outstanding: a call admitted late in a day, the clock
+> advanced past midnight, and the reservation still counted in the next admission's
+> projection whichever period it falls in; then released, and no longer counted.
+> It drives the same with a clock that steps **backward** across the boundary,
+> since §7 permits one, and asserts that no combination of rollover and step
+> admits a pair of calls whose declarations together cross a ceiling.
+
+> **Normative.** The suite drives `spend_totals`' coherence: with a clock that
+> steps between reads, both returned entries carry bounds selected from **one**
+> instant; and with a completion appended between the two aggregations an
+> implementation would perform, the day total is never larger than the month total
+> that contains it. A suite reading the two entries without moving anything between
+> them does not discharge this clause.
 
 > **Normative.** The suite drives the double-count window §3 states rather than
 > leaving it to be discovered: with a reservation outstanding **and** its completion
@@ -1380,11 +1472,11 @@ replacing them.
   nobody knows, not for one this mechanism cannot add. The bound is what makes the
   exact arithmetic computable rather than aspirational, and the numbers are stated
   so a reader can disagree with a number rather than with the principle.
-- **`core` grows by seven names** — `SpendGate`, `SpendLedger`, `SpendPeriod`,
-  `SpendTotal`, `SpendError`, `SpendCeilingError`, `SpendUndeterminedError` — plus
-  two members on the first, one on the second, one engine member, four settings and
-  one row on ADR-0087 §2c's table. That is the breaking-change surface golden rule 5
-  asks be flagged, and none of it lands here.
+- **`core` grows by eight names** — `SpendGate`, `SpendLedger`, `SpendPeriod`,
+  `SpendTotal`, `SpendAdmissionHandle`, `SpendError`, `SpendCeilingError`,
+  `SpendUndeterminedError` — plus two members on the first, one on the second, one
+  engine member, four settings and one row on ADR-0087 §2c's table. That is the
+  breaking-change surface golden rule 5 asks be flagged, and none of it lands here.
 - **Two deferrals close and one scope-out is narrowed.** ADR-0021 §6's and
   ADR-0029 §7's spend-accumulation halves are discharged. The concurrency residue
   an earlier draft deferred is **closed here** by §3's reservation, on the finding
