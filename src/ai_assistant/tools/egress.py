@@ -552,11 +552,11 @@ class StreamOutboundTransport:
             the implicit one and verified against ``endpoint.host``.
 
         Raises:
-            TransportError: If the connection could not be made, or was made and
-                could not be verified. Both are converted from the standard
-                library's own types so that every holder of the capability sees
-                one taxonomy — the shared refusal type the canonical fake raises
-                too — rather than a vendor's.
+            TransportError: If the endpoint could not be resolved or connected, or
+                was connected and could not be verified. All three are converted
+                from the standard library's own types so that every holder of the
+                capability sees one taxonomy — the shared refusal type the
+                canonical fake raises too — rather than ``asyncio``'s.
             CancelledError: Re-raised after the release below, never absorbed.
         """
         try:
@@ -567,11 +567,17 @@ class StreamOutboundTransport:
                 server_hostname=endpoint.host if endpoint.implicit_tls else None,
                 limit=TRANSPORT_OCTET_CEILING,
             )
-        except OSError as exc:
+        except (OSError, UnicodeError) as exc:
             # ``ssl.SSLError`` is an ``OSError``, so a certificate that did not
-            # verify arrives here too. Nothing reached this frame, so there is
-            # nothing to release: the standard library closes what it opened
-            # before raising.
+            # verify arrives here too. ``UnicodeError`` is **not** — resolving a
+            # host whose IDNA encoding fails (an empty or over-long label, a
+            # zero-width joiner) raises one out of ``getaddrinfo``, and
+            # ``parse_smtp_endpoint`` validates the authority no further than its
+            # punctuation (#1147, #1158). Leaving that one through would break the
+            # shared taxonomy for a host an operator can actually configure.
+            #
+            # Nothing reached this frame either way, so there is nothing to
+            # release: the standard library closes what it opened before raising.
             msg = f"the endpoint {endpoint.host}:{endpoint.port} could not be connected"
             raise TransportError(msg) from exc
         try:

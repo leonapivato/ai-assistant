@@ -60,6 +60,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Final, final
 
+from keyring.errors import PasswordDeleteError
 from pydantic import SecretStr
 
 from ai_assistant.app import build_composition
@@ -78,17 +79,14 @@ from ai_assistant.core.types import (
     PermissionDecision,
     PermissionOutcome,
     PermissionRuling,
-    ProvisioningState,
     Reversibility,
     RiskLevel,
-    SecretName,
-    SecretScope,
     ToolCall,
     ToolCost,
     ToolDefinition,
 )
+from ai_assistant.secret_store import KeyringSecretStore
 from ai_assistant.testing import FakeByteChannel, FakeOutboundTransport
-from ai_assistant.tools.connection_store import ConnectionEntry
 from ai_assistant.tools.egress import SmtpEgressTransport
 from ai_assistant.tools.provisioning import KeyringConnectionProvisioner
 from ai_assistant.tools.registry import InMemoryToolRegistry
@@ -104,15 +102,15 @@ if TYPE_CHECKING:
 
 # --- the deployment this arm builds -----------------------------------------
 
-#: The connected account the deployment configures, and the endpoint it is
-#: configured to reach. ``.invalid`` (RFC 6761 §6.4), so a case that somehow got
-#: past every instrument here would fail at a resolver rather than connect.
-REFERENCE: Final = "conn-m25"
+#: The account the deployment connects, and the endpoint it is configured to
+#: reach. ``.invalid`` (RFC 6761 §6.4), so a case that somehow got past every
+#: instrument here would fail at a resolver rather than connect. The connection
+#: *reference* is not a constant: ADR-0151 §3 has the provisioning act mint it, so
+#: it is whatever :func:`provision` returns.
 IDENTITY: Final = "owner@example.invalid"
 HOST: Final = "mail.example.invalid"
 PORT: Final = 465
 ENDPOINT: Final = f"smtps://{HOST}:{PORT}"
-SLOT: Final = SecretName(scope=SecretScope.INTEGRATION, key="conn-m25-r1")
 CREDENTIAL: Final = "an-app-password"
 
 #: The recipient the bound call names, in the supplied form a user would type and
@@ -129,20 +127,21 @@ TIMEOUT: Final = timedelta(seconds=30)
 DECIDED_AT: Final = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
 
 
-def settings(*, integration: bool = True) -> Settings:
+def settings(*, connection: str | None = None) -> Settings:
     """The deployment's configuration, as an operator would have written it.
 
     Args:
-        integration: Whether to configure the one egress integration. ``False`` is
-            ADR-0191 §3's last clause — a deployment that configures no integration
-            builds no transport and hands out none — which the arm reads as the
-            absence of a handout rather than as an empty one.
+        connection: The connected account's reference, or ``None`` to configure no
+            integration at all — ADR-0191 §3's last clause, under which a
+            deployment builds no transport and hands out none.
 
     Returns:
         The settings :func:`build` hands the production composition root.
     """
     configured = (
-        {"send_email_connection": REFERENCE, "send_email_endpoint": ENDPOINT} if integration else {}
+        {"send_email_connection": connection, "send_email_endpoint": ENDPOINT}
+        if connection is not None
+        else {}
     )
     # The hashing embedder rather than the vendored on-device one: this arm asserts
     # over sockets, and loading an ONNX runtime to do it would buy nothing. It is
@@ -151,7 +150,11 @@ def settings(*, integration: bool = True) -> Settings:
 
 
 def build(
-    tmp_path: Path, *, capability: FakeOutboundTransport, integration: bool = True
+    tmp_path: Path,
+    *,
+    capability: FakeOutboundTransport,
+    connection: str | None = None,
+    backing: Backing | None = None,
 ) -> Composition:
     """Build one deployment through the production composition root.
 
@@ -167,14 +170,115 @@ def build(
         tmp_path: Where the deployment's stores live.
         capability: The one transport in this composition, handed by the same route
             the root hands the production implementation (ADR-0191 §3).
-        integration: Whether the deployment configures the egress integration.
+        connection: The connected account this deployment registers ``send_email``
+            against, or ``None`` for a deployment that configures no integration.
+        backing: Where the root-wired keyring store reads and writes, or ``None``
+            to leave it on the operating system's own. See :func:`point_the_keyring_at`.
 
     Returns:
         The built composition. The caller closes its engine.
     """
-    return build_composition(
-        settings(integration=integration), data_dir=tmp_path, transport=capability
+    composition = build_composition(
+        settings(connection=connection), data_dir=tmp_path, transport=capability
     )
+    if backing is not None:
+        point_the_keyring_at(composition, backing)
+    return composition
+
+
+@final
+class Backing:
+    """An in-memory keyring, as ADR-0125 §11's own seam admits one.
+
+    ``KeyringSecretStore`` takes a ``select`` "for the reason that a caller
+    supplying another is how this class is driven against a backend a test
+    controls (ADR-0125 §11)", and ``core``'s ``KeyringBackend`` Protocol is
+    declared in this repository rather than taken from the library for exactly
+    that purpose. So this is the sanctioned lever and not a way past ADR-0125 §7's
+    refusal to fall back: the *selection* is replaced by a test, which §11
+    provides for, rather than the refusal being defeated by a backend pretending
+    to be a platform one.
+
+    Attributes:
+        entries: What is stored, by service and username.
+    """
+
+    def __init__(self) -> None:
+        """Start holding nothing."""
+        self.entries: dict[tuple[str, str], str] = {}
+
+    def get_password(self, service_name: str, username: str) -> str | None:
+        """Return what is stored at a coordinate, or ``None``."""
+        return self.entries.get((service_name, username))
+
+    def set_password(self, service_name: str, username: str, password: str) -> None:
+        """Store a value at a coordinate, replacing whatever was there."""
+        self.entries[service_name, username] = password
+
+    def delete_password(self, service_name: str, username: str) -> None:
+        """Remove the entry at a coordinate.
+
+        Raises:
+            PasswordDeleteError: If there is none, as the library's own do.
+        """
+        if self.entries.pop((service_name, username), None) is None:
+            msg = "no entry under that coordinate"
+            raise PasswordDeleteError(msg)
+
+
+def point_the_keyring_at(composition: Composition, backing: Backing) -> None:
+    """Give the deployment's own keyring store an in-memory backing.
+
+    **The store is the root-wired one and stays the root-wired one**; what is
+    replaced is its backend *selection*, which is the lever ADR-0125 §11 put on
+    that class for a test to use. That matters for what the arm may claim: the
+    credential the seam reads is the one the production provisioning act wrote,
+    through the production store, under the production slot — nothing on the path
+    between the composition root and ``open_channel`` is displaced.
+
+    An earlier draft replaced the seam's ``Secrets`` face outright, which
+    architecture review rightly called a different object graph.
+
+    Args:
+        composition: The built deployment.
+        backing: Where its keyring reads and writes.
+    """
+    provisioner = composition.engine._connections._provisioner
+    assert isinstance(provisioner, KeyringConnectionProvisioner)
+    store = provisioner._secrets
+    # Narrowed to the concrete store, which is part of the claim: the lever below
+    # is that class's own (ADR-0125 §11), and a root that had wired something else
+    # would fail here rather than silently accept an attribute nobody reads.
+    assert isinstance(store, KeyringSecretStore)
+    store._select = lambda: backing
+
+
+async def provision(tmp_path: Path, backing: Backing) -> str:
+    """Connect one account through the production surface, and say what it minted.
+
+    ``Engine.connect_account`` is the shipped act (ADR-0151 §5): it mints the
+    reference, writes the connection record and puts the credential in the keyring,
+    all through the objects the composition root wired. The deployment it runs
+    against configures no integration, because the reference it is about to mint is
+    the one the *measured* deployment will be configured with — a reference cannot
+    be named in configuration before the act that mints it has run (ADR-0151 §3).
+
+    Args:
+        tmp_path: The data directory both deployments share.
+        backing: The in-memory keyring both deployments read.
+
+    Returns:
+        The minted connection reference.
+    """
+    composition = build_composition(settings(), data_dir=tmp_path, transport=None)
+    point_the_keyring_at(composition, backing)
+    try:
+        account = await composition.engine.connect_account(
+            identity=IDENTITY, credential=SecretStr(CREDENTIAL)
+        )
+    finally:
+        await composition.engine.aclose()
+    return account.reference
 
 
 # --- instrument 1: the fake, and what the root handed it to -----------------
@@ -238,7 +342,7 @@ def _seam(composition: Composition) -> SmtpEgressTransport:
     return transport
 
 
-async def drive_a_bound_call(composition: Composition) -> None:
+async def drive_a_bound_call(composition: Composition, reference: str) -> None:
     """Drive **the composition's own registered seam** to one bound call.
 
     The positive control for the fake (ADR-0191 §9). The object driven is the
@@ -246,66 +350,19 @@ async def drive_a_bound_call(composition: Composition) -> None:
     second one arranged beside it — so the registration it pins against, the
     endpoint it parses and the capability it opens with are all this deployment's.
 
-    What this displaces first, and only this, is the pair of collaborators an
-    offline gate cannot supply: the connection record and the ``INTEGRATION``
-    keyring face. See :func:`arrange_the_seams_collaborators`, which asserts what
-    was there before displacing it, so the wiring is still measured rather than
-    merely assumed.
+    **Nothing on the path is displaced.** The connection record was written by
+    ``Engine.connect_account`` through the store the root wired, the credential
+    was written to the keyring face the root wired, and both are read here by the
+    production edges. What an offline gate supplies is only the keyring's
+    *backing* — the lever ADR-0125 §11 put on ``KeyringSecretStore`` for exactly
+    this — see :func:`point_the_keyring_at`.
 
     Args:
         composition: The built deployment.
+        reference: The connected account the provisioning act minted, which the
+            binding names and the seam compares against its registration.
     """
-    await _seam(composition).transmit(binding(), arguments())
-
-
-async def arrange_the_seams_collaborators(composition: Composition) -> None:
-    """Give the registered seam a connection record and a credential to read.
-
-    **The record goes into the deployment's own store, through the store's own
-    write.** ``SqliteConnectionStore.append`` is the primitive every provisioning
-    act commits through (ADR-0148 §6's compare-and-swap), and the store is the one
-    object the root wired to both the seam and the provisioner — so the bound call
-    below reads its record by the production edge rather than past it. An earlier
-    draft displaced that edge too, and architecture review was right to call it a
-    different object graph.
-
-    **The credential face is the one thing an offline gate cannot supply, and it
-    is displaced.** The root wires
-    :class:`~ai_assistant.secret_store.KeyringSecretStore`, and ADR-0125 §7 is
-    categorical that this seam "never falls back to a file, an environment variable
-    or an in-memory map" — so provisioning here would either write the developer's
-    real OS keyring or need exactly the escape hatch that ADR refuses. What the
-    displacement buys is that the seam reaches ``open_channel`` at all; what it
-    costs is disclosed here, in the arm, in PR #1555 and in issue #1560.
-
-    **The wiring it displaces is asserted before it displaces it**, so this cannot
-    hide the thing it touches.
-
-    Args:
-        composition: The built deployment.
-    """
-    seam = _seam(composition)
-    provisioner = composition.engine._connections._provisioner
-    # Narrowed to the concrete provisioner, which is itself part of the claim:
-    # ADR-0151 §10 says the root wires "the one implementation", and it is reached
-    # through a Protocol everywhere else.
-    assert isinstance(provisioner, KeyringConnectionProvisioner)
-    store = provisioner._store
-    assert seam._records is store
-
-    filed = await store.append(
-        ConnectionEntry(
-            reference=REFERENCE,
-            revision=1,
-            identity=IDENTITY,
-            state=ProvisioningState.ACTIVE,
-            slot=SLOT,
-        ),
-        expected_latest=None,
-    )
-    assert filed is not None
-
-    seam._secrets = _Keyring()
+    await _seam(composition).transmit(binding(reference), arguments())
 
 
 def channel() -> FakeByteChannel:
@@ -345,8 +402,11 @@ def arguments() -> Mapping[str, FrozenJson]:
     }
 
 
-def binding() -> EgressBinding:
+def binding(reference: str) -> EgressBinding:
     """The binding the ruling fixed for that call.
+
+    Args:
+        reference: The connected account the provisioning act minted.
 
     Returns:
         One destination span for the recipient and one non-destination span for
@@ -376,26 +436,10 @@ def binding() -> EgressBinding:
                 ),
             ),
         ),
-        account=BoundAccount(identity=IDENTITY, reference=REFERENCE),
+        account=BoundAccount(identity=IDENTITY, reference=reference),
         transport_endpoint=ENDPOINT,
         planned_with_external_content=False,
     )
-
-
-@final
-class _Keyring:
-    """A ``Secrets`` face holding the one credential the connection record names."""
-
-    async def get(self, name: SecretName) -> SecretStr | None:
-        """The credential under ``name``.
-
-        Args:
-            name: The slot to read.
-
-        Returns:
-            The credential, or ``None`` for any other slot.
-        """
-        return SecretStr(CREDENTIAL) if name == SLOT else None
 
 
 # --- instrument 2: every off-device creator the running loop exposes --------
