@@ -26,7 +26,7 @@ from ai_assistant.testing import FakeAuditTrail
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from ai_assistant.testing.cancellation import SuspendedCall
+    from ai_assistant.testing.cancellation import ResourceLog, SuspendedCall
 
 
 class FakeLedgerHarness:
@@ -58,6 +58,12 @@ class FakeLedgerHarness:
         """A dict store cannot be opened twice."""
         del subject
         return None
+
+    def log_of(self, subject: LedgerSubject) -> ResourceLog:
+        """The fake's own record of when each call was inside its one resource."""
+        trail = subject
+        assert isinstance(trail, FakeAuditTrail)
+        return trail.resource_log
 
     def arm(self, subject: LedgerSubject, operation: str) -> SuspendedCall:
         """Suspend the next entry into the one modelled resource.

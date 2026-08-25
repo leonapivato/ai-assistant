@@ -13,8 +13,8 @@ The on-disk schema carries a ``meta("schema_version")`` marker, the same shape
 shared; the *mechanism* is not — evolution here stays the additive,
 column-presence ``ALTER`` of :meth:`SqliteAuditTrail._migrate`, which is what an
 append-only trail with existing rows can afford. A database predating the marker
-is stamped once this code has migrated it, never refused; see
-:meth:`SqliteAuditTrail._check_schema_version`.
+is stamped once this code has migrated it, and a version-1 one is restamped, never
+refused; see :meth:`SqliteAuditTrail._check_schema_version`.
 
 Local-first (ADR-0002), and **locally only**: ADR-0021 §4 applies ADR-0004 §2's
 residency clause to this store by name, so nothing here may reach a remote
@@ -149,13 +149,29 @@ async def _run_to_completion[T](fn: Callable[..., T], /, *args: object) -> T:
 #: unbounded, so ``recent`` clamps to this before binding ``LIMIT``.
 _MAX_SQLITE_INT = 2**63 - 1
 
-#: The only on-disk schema this code understands, recorded in ``meta`` so a
-#: future schema change has a marker to migrate *from* — the seam ADR-0049 §1
-#: describes and the ``SqlitePlanStore`` pattern this follows. Version 1 is the
-#: additive-column shape :meth:`SqliteAuditTrail._migrate` brings any earlier,
-#: unmarked file up to, so an unmarked database is stamped 1 rather than refused
-#: (see :meth:`SqliteAuditTrail._check_schema_version`).
-_SCHEMA_VERSION = 1
+#: The on-disk schema this code writes and maintains, recorded in ``meta`` so a
+#: reader has a marker to judge the file by — the seam ADR-0049 §1 describes and
+#: the ``SqlitePlanStore`` pattern this follows.
+#:
+#: **Version 2 is the invocation shape** (ADR-0192 §2): the ``invocations`` table
+#: beside ``decisions``, one identifier space over both, and a ``clear()`` that
+#: erases both. Version 1 is the decisions-only shape, and the bump is not
+#: bookkeeping. Version-1 code opening a version-1 file it has since grown
+#: invocation rows in **cannot maintain either invariant**: its ``clear()`` deletes
+#: decisions and leaves the invocation rows behind — an erasure ADR-0192 §6
+#: requires to be total, silently partial — and its uniqueness check sees only
+#: ``decisions``, so it can record a decision under an id an invocation already
+#: holds, which the joined reads then resolve to two rows under one identifier.
+#: ADR-0049 §1 already rules that "a downgrade is a fault to report"; leaving the
+#: marker at 1 is what would make it unreportable.
+_SCHEMA_VERSION = 2
+
+#: The versions this code can *open*. Anything else is refused, newer or older
+#: (ADR-0049 §1). A version-1 file is opened and brought to :data:`_SCHEMA_VERSION`
+#: by the same additive create-and-migrate every open runs, then restamped — so no
+#: trail already on disk becomes unopenable, which is the failure
+#: :meth:`SqliteAuditTrail._check_schema_version` exists to avoid.
+_OPENABLE_VERSIONS: Final[frozenset[int]] = frozenset({1, _SCHEMA_VERSION})
 
 #: Created first and on its own, so a database labelled with a schema this code
 #: cannot read is refused *before* the ``decisions`` table is created, migrated or
@@ -166,6 +182,10 @@ _META_SCHEMA = "CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT
 _READ_SCHEMA_VERSION = "SELECT value FROM meta WHERE key = 'schema_version'"
 
 _WRITE_SCHEMA_VERSION = "INSERT INTO meta(key, value) VALUES ('schema_version', ?)"
+
+#: Move an openable older marker up to :data:`_SCHEMA_VERSION`, in the same
+#: transaction as the create-and-migrate that earned it.
+_RESTAMP_SCHEMA_VERSION = "UPDATE meta SET value = ? WHERE key = 'schema_version'"
 
 #: The epoch the sort key counts from. Any fixed instant would do; this one is
 #: conventional.
@@ -220,12 +240,15 @@ _ORDERED = "SELECT data FROM decisions ORDER BY decided_at_us DESC, id ASC"
 # completed act stop being the most recent one. Allocated inside the same
 # transaction as the insert, from the table's own maximum.
 #
-# **No schema-version bump.** :data:`_SCHEMA_VERSION` marks the *shape this code
-# can read*, and ``CREATE TABLE IF NOT EXISTS`` is additive and idempotent exactly
-# as :meth:`SqliteAuditTrail._migrate`'s ``ALTER``s are — so a version-1 file
-# written before this table existed opens, gains it, and is still version 1. A bump
-# would refuse every trail already on disk (:meth:`_check_schema_version`), which is
-# the failure that method exists to avoid.
+# **This table is what version 2 is** (:data:`_SCHEMA_VERSION`). ``CREATE TABLE IF
+# NOT EXISTS`` is additive and idempotent exactly as
+# :meth:`SqliteAuditTrail._migrate`'s ``ALTER``s are, so a version-1 file opens and
+# gains it — and is then *restamped* 2 rather than left at 1. Leaving the marker
+# alone would cost nothing here and everything to the next reader: version-1 code
+# accepts a version-1 marker, and its ``clear()`` and its id-uniqueness check both
+# know only ``decisions``, so it erases half of what ADR-0192 §6 says is one record
+# and can mint a decision over an invocation's id. The restamp is what makes that
+# downgrade the reported fault ADR-0049 §1 already calls for.
 _CREATE_INVOCATIONS = (
     "CREATE TABLE IF NOT EXISTS invocations("
     "id TEXT PRIMARY KEY, seq INTEGER NOT NULL, decision_id TEXT NOT NULL, "
@@ -244,12 +267,26 @@ _INVOCATION_INDEXES = (
     "CREATE INDEX IF NOT EXISTS invocations_order ON invocations(recorded_at_us DESC, id ASC)",
 )
 
+#: **Every column the blob also carries**, selected beside it on every read so
+#: :func:`_as_projected` can hold one to the other. The columns are a filter and an
+#: order, never the record: an admission decided on ``decision_id`` or ``completes``
+#: alone would be decided on a value nothing revalidates, and a claim whose
+#: ``decision_id`` column was altered would then drop out of the set §1's consume is
+#: read over and let a second act be authorised by a spent authorisation. The
+#: decision rows are already handled this way where the read is *acted* on
+#: (:meth:`SqliteAuditTrail.resolution_of`); every read below acts.
+#:
+#: Spelled out in each statement below rather than interpolated from one constant:
+#: an f-string here is a linted SQL-injection shape (``S608``), and four literals a
+#: reader can check against :func:`_as_projected`'s tuple beat one suppression.
+
 #: The two joined listings, in ``recent``'s own total order. A **LEFT** join, so an
 #: invocation row whose decision is missing comes back with a NULL rather than
 #: silently vanishing: ADR-0192 §2 requires that no implementation return a row it
 #: could not pair, and an inner join would meet that by dropping the evidence.
 _JOINED_INVOCATIONS = (
-    "SELECT i.data, d.data FROM invocations i "
+    "SELECT i.data, i.id, i.decision_id, i.recorded_at_us, i.completes, i.outcome, d.data "
+    "FROM invocations i "
     "LEFT JOIN decisions d ON d.id = i.decision_id "
     "ORDER BY i.recorded_at_us DESC, i.id ASC"
 )
@@ -257,20 +294,33 @@ _JOINED_INVOCATIONS = (
 #: Every claim under one decision, in append order — the set ADR-0192 §1's
 #: conjunction is decided over.
 _CLAIMS_UNDER = (
-    "SELECT data FROM invocations WHERE decision_id = ? AND completes IS NULL ORDER BY seq ASC"
+    "SELECT data, id, decision_id, recorded_at_us, completes, outcome "
+    "FROM invocations "
+    "WHERE decision_id = ? AND completes IS NULL ORDER BY seq ASC"
 )
 
 #: Every completion under one decision. Read whole rather than by claim, because
 #: the conjunction asks three questions of the set at once.
-_COMPLETIONS_UNDER = "SELECT data FROM invocations WHERE decision_id = ? AND completes IS NOT NULL"
+_COMPLETIONS_UNDER = (
+    "SELECT data, id, decision_id, recorded_at_us, completes, outcome "
+    "FROM invocations "
+    "WHERE decision_id = ? AND completes IS NOT NULL"
+)
 
 #: The claims under one decision that no completion names, in append order — the
 #: exact set ADR-0192 §3's recovery rule is written against.
 _OPEN_UNDER = (
-    "SELECT id, data FROM invocations "
+    "SELECT data, id, decision_id, recorded_at_us, completes, outcome "
+    "FROM invocations "
     "WHERE decision_id = ? AND completes IS NULL "
     "AND id NOT IN (SELECT completes FROM invocations WHERE completes IS NOT NULL) "
     "ORDER BY seq ASC"
+)
+
+#: One claim by id, for the completion path to check and read its decision from.
+_OPEN_CLAIM = (
+    "SELECT data, id, decision_id, recorded_at_us, completes, outcome "
+    "FROM invocations WHERE id = ? AND completes IS NULL"
 )
 
 #: Whether an identifier is already taken, over **one id space and it is every row
@@ -445,20 +495,26 @@ class SqliteAuditTrail:
             with conn:  # commits on success, rolls back on any exception
                 conn.execute("BEGIN IMMEDIATE")
                 conn.execute(_META_SCHEMA)
-                labelled = self._check_schema_version(conn)
+                stored = self._check_schema_version(conn)
                 conn.execute(_CREATE_TABLE)
                 self._migrate(conn)
                 conn.execute(_CREATE_INVOCATIONS)
                 for statement in (*_INDEXES, *_INVOCATION_INDEXES):
                     conn.execute(statement)
-                if not labelled:
+                if stored is None:
                     # Stamped *after* the create/migrate above, so the marker is
                     # only written for a file this open has actually brought to
-                    # version 1. Both are in the one transaction, so a migration
-                    # that raises rolls the marker — and the `meta` table itself —
-                    # back with it, leaving an untouched legacy database rather
-                    # than one falsely labelled current.
+                    # `_SCHEMA_VERSION`. Both are in the one transaction, so a
+                    # migration that raises rolls the marker — and the `meta` table
+                    # itself — back with it, leaving an untouched legacy database
+                    # rather than one falsely labelled current.
                     conn.execute(_WRITE_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
+                elif stored != _SCHEMA_VERSION:
+                    # An openable older marker, moved up by the same rule and in
+                    # the same transaction: the file now *has* the invocation
+                    # shape, so it says so. Restamping before the create would
+                    # label a file this open had not yet brought up.
+                    conn.execute(_RESTAMP_SCHEMA_VERSION, (str(_SCHEMA_VERSION),))
         except AuditError:
             # A migration reporting a corrupt legacy row is already this layer's
             # error; it still leaves a connection to close before it propagates.
@@ -507,44 +563,52 @@ class SqliteAuditTrail:
             with contextlib.suppress(FileNotFoundError):
                 sidecar.chmod(_OWNER_ONLY)
 
-    def _check_schema_version(self, conn: sqlite3.Connection) -> bool:
-        """Refuse a labelled schema this code cannot read; say whether one is labelled.
+    def _check_schema_version(self, conn: sqlite3.Connection) -> int | None:
+        """Refuse a labelled schema this code cannot open; say which one is labelled.
 
         Runs inside the setup transaction, after ``meta`` exists and **before** the
         ``decisions`` table is created, migrated or read.
 
         Returns:
-            Whether the database already carries a ``schema_version``. ``False``
-            means it does not, and :meth:`_setup` stamps one once the migration
-            below has brought the file to :data:`_SCHEMA_VERSION`.
+            The stored ``schema_version``, or ``None`` where the database carries
+            none. :meth:`_setup` stamps an unmarked file and restamps an openable
+            older one, in both cases *after* the create-and-migrate has brought it
+            to :data:`_SCHEMA_VERSION`.
 
         **An unmarked database is backfilled, not refused.** The marker arrives
-        after this store already had users, so every existing audit trail on disk
-        carries none — refusing them would make a Tier 1 record the user is
+        after this store already had users, so the oldest audit trails on disk
+        carry none — refusing them would make a Tier 1 record the user is
         entitled to keep (ADR-0004 §7) unopenable by the code that wrote it, which
         is a far worse failure than the one a marker exists to prevent. It is also
         sound rather than merely lenient: :meth:`_migrate` is additive and
         idempotent, keyed on column presence, so it brings *any* pre-marker file to
-        exactly the version-1 shape. The stamp records what this open has just
-        established, not an assumption about what was there before.
+        exactly the shape this code maintains. The stamp records what this open has
+        just established, not an assumption about what was there before.
+
+        **A version-1 database is opened and restamped, for the same reason.** The
+        step from 1 to 2 is the ``invocations`` table, which
+        ``CREATE TABLE IF NOT EXISTS`` adds to any file at all, so the migration is
+        the open — and refusing here would strand every trail written before
+        ADR-0192 landed. The restamp is not decoration: it is what stops the
+        *previous* version of this code from opening the file afterwards and
+        maintaining neither ADR-0192 §6's total erasure nor §2's single identifier
+        space over both row kinds.
 
         **Any other stored version is refused**, newer or older, matching
-        ``SqlitePlanStore`` (ADR-0049 §1). Version 1 is the first marker this store
-        has ever written, so absent is the only legacy state and a stored value
-        that is not 1 is either a database written by code that knows a schema this
-        one does not, or a corrupt/tampered marker. Reading it blindly would let a
-        downgrade construct successfully and fail later with a raw SQLite error —
-        a fault to report at open, matching how the trail treats a row that no
-        longer validates. When a version 2 does exist, the *older* branch becomes a
-        migrate-and-restamp; nothing here presumes it stays a refusal.
+        ``SqlitePlanStore`` (ADR-0049 §1). A stored value outside
+        :data:`_OPENABLE_VERSIONS` is either a database written by code that knows a
+        schema this one does not, or a corrupt/tampered marker. Reading it blindly
+        would let a downgrade construct successfully and fail later with a raw
+        SQLite error — a fault to report at open, matching how the trail treats a
+        row that no longer validates.
 
         Raises:
-            AuditError: If the stored version is not one this code understands, is
+            AuditError: If the stored version is not one this code can open, is
                 not an integer at all, or is not a single unambiguous value.
         """
         rows = conn.execute(_READ_SCHEMA_VERSION).fetchall()
         if not rows:
-            return False
+            return None
         if len(rows) > 1:
             # `meta`'s primary key makes this unreachable for a table *this* code
             # created — but `CREATE TABLE IF NOT EXISTS` accepts a pre-existing
@@ -576,14 +640,15 @@ class SqliteAuditTrail:
             # A non-numeric marker is a corrupt or tampered store, not a bare
             # `ValueError` to leak past this layer's initialisation boundary.
             raise AuditError(msg) from exc
-        if stored != _SCHEMA_VERSION:
+        if stored not in _OPENABLE_VERSIONS:
+            supported = ", ".join(str(version) for version in sorted(_OPENABLE_VERSIONS))
             msg = (
                 f"the audit trail at {self._path!r} has schema_version={stored}, but this "
-                f"code supports only version {_SCHEMA_VERSION}; refusing to open it rather "
+                f"code can open only version {supported}; refusing to open it rather "
                 f"than read it blindly"
             )
             raise AuditError(msg)
-        return True
+        return stored
 
     @staticmethod
     def _migrate(conn: sqlite3.Connection) -> None:
@@ -1144,9 +1209,7 @@ class SqliteAuditTrail:
         """
         named = _checked_argument("claim_id", lambda: _IDENTIFIER.validate_python(claim_id))
         settled = _checked_argument("outcome", lambda: ToolOutcome(outcome))
-        cost = _checked_argument(
-            "incurred_cost", lambda: ToolCost.model_validate_json(incurred_cost.model_dump_json())
-        )
+        cost = _checked_argument("incurred_cost", lambda: _detached_cost(incurred_cost))
         kind = (
             None
             if failure_kind is None
@@ -1168,13 +1231,11 @@ class SqliteAuditTrail:
     ) -> str:
         """Check the claim and append the completion, as one transaction."""
         with self._transaction(f"complete the invocation claimed as {claim_id!r}") as conn:
-            row = conn.execute(
-                "SELECT data FROM invocations WHERE id = ? AND completes IS NULL", (claim_id,)
-            ).fetchone()
+            row = conn.execute(_OPEN_CLAIM, (claim_id,)).fetchone()
             if row is None:
                 msg = f"the trail holds no open claim {claim_id!r} to complete"
                 raise InvalidCompletionError(msg)
-            claim = _decode_invocation(row[0])
+            claim = _as_projected(row)
             if conn.execute(
                 "SELECT 1 FROM invocations WHERE completes = ? LIMIT 1", (claim_id,)
             ).fetchone():
@@ -1286,14 +1347,13 @@ class SqliteAuditTrail:
         )
         if not spendable:
             return
-        claims = [_decode_invocation(row[0]) for row in conn.execute(_CLAIMS_UNDER, (decision.id,))]
+        claims = [_as_projected(row) for row in conn.execute(_CLAIMS_UNDER, (decision.id,))]
         if not claims:
             return
         completions = {
             completion.completes: completion
             for completion in (
-                _decode_invocation(row[0])
-                for row in conn.execute(_COMPLETIONS_UNDER, (decision.id,))
+                _as_projected(row) for row in conn.execute(_COMPLETIONS_UNDER, (decision.id,))
             )
         }
         _refuse = _spend_refusal(decision.id)
@@ -1359,7 +1419,7 @@ class SqliteAuditTrail:
             rows = await _run_to_completion(self._joined_sync, None)
         return [_join(invocation, decision) for invocation, decision in rows]
 
-    def _joined_sync(self, limit: int | None) -> Sequence[tuple[str, str | None]]:
+    def _joined_sync(self, limit: int | None) -> Sequence[tuple[ToolInvocation, str | None]]:
         """Read rows and their decisions in **one** statement, optionally bounded.
 
         One operation is what makes the join safe: an implementation reading rows
@@ -1377,7 +1437,12 @@ class SqliteAuditTrail:
         except sqlite3.Error as exc:
             msg = f"failed to read the audit trail's invocations: {exc}"
             raise AuditError(msg) from exc
-        return [(str(row[0]), None if row[1] is None else str(row[1])) for row in rows]
+        # Decoded and held to its projection here, inside the connection's turn:
+        # the check belongs to the read, and a row is never handed out of this
+        # method unvalidated.
+        return [
+            (_as_projected(row[:-1]), None if row[-1] is None else str(row[-1])) for row in rows
+        ]
 
     async def open_invocations(self, *, decision_id: DurableIdentifier) -> list[ToolInvocation]:
         """Every claim under ``decision_id`` that no completion names, in append order.
@@ -1386,10 +1451,9 @@ class SqliteAuditTrail:
             AuditError: If the trail cannot be read.
         """
         async with self._lock:
-            rows = await _run_to_completion(self._open_invocations_sync, decision_id)
-        return [_decode_invocation(row) for row in rows]
+            return list(await _run_to_completion(self._open_invocations_sync, decision_id))
 
-    def _open_invocations_sync(self, decision_id: str) -> Sequence[str]:
+    def _open_invocations_sync(self, decision_id: str) -> Sequence[ToolInvocation]:
         """Read the open claims and reserve their ids, as **one** operation.
 
         The transaction is ``IMMEDIATE`` although this reads: the reservation joins
@@ -1401,9 +1465,12 @@ class SqliteAuditTrail:
         names the **new** claim (ADR-0192 §2).
         """
         with self._transaction(f"read the open invocations under {decision_id!r}") as conn:
-            rows = conn.execute(_OPEN_UNDER, (decision_id,)).fetchall()
-            self._identifiers.reserve([str(row[0]) for row in rows])
-            return [str(row[1]) for row in rows]
+            # Reserved by the id the *record* carries, never by the column it was
+            # found by: reserving a projected id a blob does not name would leave
+            # the row's real id free for the factory to mint over.
+            claims = [_as_projected(row) for row in conn.execute(_OPEN_UNDER, (decision_id,))]
+            self._identifiers.reserve([claim.id for claim in claims])
+            return claims
 
     # --- erasure ----------------------------------------------------------
 
@@ -1488,14 +1555,26 @@ def _revalidated(decision: PermissionDecision) -> PermissionDecision:
     rather than the one a caller took, which is the same reason ADR-0021 §4 asks for
     a *validated* snapshot rather than a copied one.
 
+    **A raw, non-model value is handed to ``model_validate`` rather than
+    dereferenced**, which is ``FakeToolInvoker._revalidated``'s ordering (ADR-0152
+    §1, "before reading any field of it") applied to this argument.
+    ``model_dump()`` is a field read, so calling it first would let such a value
+    escape as an ``AttributeError``. ADR-0192 §2's refusal order puts
+    ``AuditError`` first "where an argument is not valid" and is exhaustive over
+    the classes a refusal arrives in, so the ``AttributeError`` would leave through
+    a hole in it. ``record`` reaches this helper too and gains the same guard.
+
     Raises:
-        AuditError: If the decision does not satisfy its own model, or rebuilds
-            carrying an ``OriginUnrecordedBinding``.
+        AuditError: If the value is not a valid record at all, does not satisfy the
+            model, or rebuilds carrying an ``OriginUnrecordedBinding``.
     """
+    given: object = decision
     try:
-        snapshot = PermissionDecision.model_validate(decision.model_dump())
+        raw = given.model_dump() if isinstance(given, PermissionDecision) else given
+        snapshot = PermissionDecision.model_validate(raw)
     except ValidationError as exc:
-        msg = f"decision {decision.id!r} is not a valid record: {exc}"
+        named = repr(given.id) if isinstance(given, PermissionDecision) else "the given value"
+        msg = f"decision {named} is not a valid record: {exc}"
         raise AuditError(msg) from exc
     if isinstance(snapshot.egress_binding, OriginUnrecordedBinding):
         msg = (
@@ -1505,6 +1584,27 @@ def _revalidated(decision: PermissionDecision) -> PermissionDecision:
         )
         raise AuditError(msg)
     return snapshot
+
+
+def _detached_cost(value: ToolCost) -> ToolCost:
+    """Rebuild ``value`` as a validated, detached :class:`ToolCost`.
+
+    A raw, non-model value is validated rather than dereferenced, on
+    :func:`_revalidated`'s ordering and for its reason: ``value.model_dump_json()``
+    on something that is not a cost raises ``AttributeError``, which is neither
+    ``AuditError`` nor any class ADR-0192 §2's refusal order admits.
+
+    The round trip through JSON is then the detachment ADR-0021 §4 asks for —
+    ``incurred_cost`` is the live object at the end of the chain that clause names,
+    so a store retaining it would let ``cost.__dict__["amount"] = ...`` rewrite an
+    appended row.
+
+    Raises:
+        ValidationError: If it is not a cost this store can record.
+    """
+    given: object = value
+    checked = ToolCost.model_validate(given.model_dump() if isinstance(given, ToolCost) else given)
+    return ToolCost.model_validate_json(checked.model_dump_json())
 
 
 def _decode(data: str) -> PermissionDecision:
@@ -1557,23 +1657,83 @@ def _decode_invocation(data: str) -> ToolInvocation:
         raise AuditError(msg) from exc
 
 
-def _join(invocation: str, decision: str | None) -> RecordedInvocation:
+def _as_projected(row: Sequence[Any]) -> ToolInvocation:
+    """Decode an invocation row and refuse one its own columns misdescribe.
+
+    ``row`` is ``(data, id, decision_id, recorded_at_us, completes, outcome)`` —
+    the blob followed by the projection columns, which every invocation read
+    selects in that order.
+
+    **The decoded blob is authoritative, not the projection columns**, exactly as
+    it is for a decision found by its binding
+    (:meth:`SqliteAuditTrail.resolution_of`). The columns beside ``data`` are the
+    fast filter :meth:`SqliteAuditTrail._append` maintains, and every read that
+    selects by one *acts* on the answer: ``decision_id`` decides which claims
+    ADR-0192 §1's consume is read over, ``completes`` decides whether a claim is
+    open — to the completion path and to the recovery scan alike — and the join
+    pairs a row with the authorisation a listing then attributes it to. A row
+    whose column was altered while its blob stayed intact would silently drop out
+    of the set that refuses a second act, or be attributed to a decision it does
+    not name. That is a corrupt store, reported rather than acted on.
+
+    **What it does not close, and cannot.** A column altered so the row falls out
+    of an index's range *hides* it, and no read narrowed by that column can see
+    what the narrowing removed — a property every projected column in this store
+    has, the decision rows' ``resolves`` and binding columns included, and issue
+    #1574 holds the structural answer (a generated column cannot disagree with the
+    blob because it is the blob). Every whole-table listing does surface it, since
+    it narrows by nothing.
+
+    Raises:
+        AuditError: If the stored row no longer validates, or if any projected
+            column disagrees with the record it is supposed to describe.
+    """
+    invocation = _decode_invocation(str(row[0]))
+    recorded = (
+        invocation.id,
+        invocation.decision_id,
+        _sort_key(invocation.recorded_at),
+        invocation.completes,
+        None if invocation.outcome is None else invocation.outcome.value,
+    )
+    projected = tuple(row[1:])
+    if recorded != projected:
+        msg = (
+            f"the audit trail holds an invocation whose record {recorded!r} disagrees "
+            f"with the projection it was found by {projected!r}; the store is corrupt"
+        )
+        raise AuditError(msg)
+    return invocation
+
+
+def _join(invocation: ToolInvocation, decision: str | None) -> RecordedInvocation:
     """Pair a stored row with the decision it names (ADR-0192 §2).
 
     Raises:
-        AuditError: If the decision is absent — a row the store could not pair,
-            which is a corrupt trail and reported rather than silently dropped.
+        AuditError: If the decision is absent, or is not the one the row names —
+            a row the store could not pair, which is a corrupt trail and reported
+            rather than silently dropped.
     """
-    row = _decode_invocation(invocation)
     if decision is None:
         msg = (
-            f"the audit trail holds invocation {row.id!r} naming decision "
-            f"{row.decision_id!r}, which it does not hold; the store is corrupt"
+            f"the audit trail holds invocation {invocation.id!r} naming decision "
+            f"{invocation.decision_id!r}, which it does not hold; the store is corrupt"
         )
         raise AuditError(msg)
     named = _decode(decision)
+    if named.id != invocation.decision_id:
+        # The join matched `d.id` against `i.decision_id`, both columns; this holds
+        # the pairing to the two *records*. Without it a tampered `decisions.id`
+        # column attributes an act to an authorisation that never covered it, which
+        # is precisely the misreport ADR-0021 §5's disclosure floor is about.
+        msg = (
+            f"the audit trail paired invocation {invocation.id!r}, which names decision "
+            f"{invocation.decision_id!r}, with a record of decision {named.id!r}; "
+            f"the store is corrupt"
+        )
+        raise AuditError(msg)
     return RecordedInvocation(
-        invocation=row,
+        invocation=invocation,
         tool=named.tool.id,
         capability=named.tool.capability,
         egress_call=named.egress_binding is not None,
